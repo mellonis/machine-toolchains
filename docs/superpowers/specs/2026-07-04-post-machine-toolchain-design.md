@@ -25,7 +25,7 @@ hello.pmc ──pmt compile──▶ hello.pmo         (default; -S emits hello.
 lib.pma   ──pmt asm──────▶ lib.pmo
 *.pmo     ──pmt link─────▶ app.pmx           (needs main; dead functions dropped)
 app.pmx   ──pmt dis──────▶ text asm          (also accepts .pmo)
-app.pmx   ──pmt run──────▶ execution on a belt
+app.pmx   ──pmt run──────▶ execution on a tape
 ```
 
 | Extension | Role |
@@ -128,13 +128,13 @@ return.
 **Hardware realizability is a design requirement:** every v1 concept must
 map to synchronous digital logic plus a physical tape transport — the VM
 is the reference implementation of a machine that could be built (FPGA,
-discrete logic, a mechanical belt). Concretely: fixed-width architectural
+discrete logic, a mechanical tape). Concretely: fixed-width architectural
 state only (IP/SP u32, FLAGS, MR bounded by table size); stack = SRAM +
 SP register; code = ROM; symbols = indices (hardware never sees glyphs);
 traps = a fault-code register latched on trap + a HALT line (the API's
 structured fault is its software rendering); CRC is the flasher's job, not
-the device's; and nothing in the core assumes an unbounded belt — physical
-belts are bounded/annular, which the belt profiles already model. Future
+the device's; and nothing in the core assumes an unbounded tape — physical
+tapes are bounded/annular, which the tape profiles already model. Future
 features must pass the same test.
 
 Harvard core with **every memory behind a bus** — the 2007
@@ -149,7 +149,7 @@ tape are external components reached through narrow interfaces:
 └──┬──────────┬──────────┬────┘
    │ code bus │ stack bus│ device bus
    ▼          ▼          ▼
- code ROM   stack RAM   belt (device 0)
+ code ROM   stack RAM   tape (device 0)
  fetch(a)   push/pop,   left/right/
  → byte     depth       read/write
 ```
@@ -164,15 +164,15 @@ is a thin future shell requiring no change to the core, ISA semantics, or
 timing model. The core alone is testable with no devices at all: feed
 responses, assert requests.
 
-A real-world build (FPGA, relay logic, a physical belt) implements the same
+A real-world build (FPGA, relay logic, a physical tape) implements the same
 buses in hardware; the Rust VM wires the same core to in-memory
 implementations: code ROM is a `Box<[u8]>` sized exactly to the `.pmx`
 code section (operands read via `u32::from_le_bytes` etc.); the return
 stack is a fixed `Vec<u32>` of code offsets with configurable depth
 (default 1024), `SP` counting entries — full on `call` traps overflow,
-empty on `ret` traps underflow; the belt is the paged structure of §4.2,
+empty on `ret` traps underflow; the tape is the paged structure of §4.2,
 not a flat array. v1 buses are synchronous; an asynchronous bus variant (real
-hardware takes time to move a belt) is a designed-for additive extension —
+hardware takes time to move a tape) is a designed-for additive extension —
 the same pattern as `turing-machine-js` #219's hardware tape block. TM-1
 adds a fourth bus for the read-only table section (Appendix A).
 
@@ -185,7 +185,7 @@ adds a fourth bus for the read-only table section (Appendix A).
   `ret` pops; overflow and underflow are traps.
 - **FLAGS** — bit 0 is **MF** (match flag). In PM-1 every tape instruction
   (`lft`, `rgt`, `wr`) performs an implicit match against the mark
-  index: `MF := (belt.read() === 1)`, also latched once before the first
+  index: `MF := (tape.read() === 1)`, also latched once before the first
   instruction. `jm`/`jnm` (jump if match / no match) test MF, never the tape
   directly. MF is formally the 1-bit view of the **match register MR**
   (`MF = MR ≠ 0`) — wider architectures give MR more values (index of the
@@ -201,11 +201,11 @@ latch; matches compare against the latch, making the read tuple an atomic
 snapshot). The debug API may display them; the programming model never
 depends on them.
 
-### 4.2 Belt interface and device bus
+### 4.2 Tape interface and device bus
 
 The processor never knows the head position. It drives peripherals through a
 **device bus**: an array of tape devices, of which architecture v1 (PM-1)
-addresses only device 0 — the belt. Future architectures address more
+addresses only device 0 — the tape. Future architectures address more
 devices (see Appendix A). Devices operate on **symbol indices, not
 symbols** — the processor is alphabet-agnostic (the `Alphabet`
 index-encoding idea from `@turing-machine-js`, applied at the hardware
@@ -220,7 +220,7 @@ trait Tape {
     fn read(&self) -> u32;            // index of the symbol under the head
     fn write(&mut self, index: u32);
 }
-// a Belt is any Tape with alphabet_size() == 2: 0 = blank, 1 = marked
+// PM-1's tape is the 2-symbol case: alphabet_size() == 2, 0 = blank, 1 = marked
 ```
 
 For PM-1: the language's `mark`/`unmark` compile to `wr 1`/`wr 0`;
@@ -228,7 +228,7 @@ For PM-1: the language's `mark`/`unmark` compile to `wr 1`/`wr 0`;
 
 Shipped implementations:
 
-- **InfiniteBelt** (default) — unbounded in both directions; head coordinate
+- **InfiniteTape** (default) — unbounded in both directions; head coordinate
   exposed for inspection/UI. **Paged sparse storage** (the `TBelt` packed
   bit array, generalized): a `HashMap` of fixed-size pages, each page a
   `u64` bitmask (wider cells per page for bigger alphabets), with the
@@ -239,9 +239,9 @@ Shipped implementations:
   frees the page — memory stays `O(pages containing non-blank cells)`,
   never `O(touched cells)`. (Deliberately unlike growable-array tapes such
   as `turing-machine-js`'s, which allocate the walked distance.)
-- **AnnularBelt(size = 2048)** — ring-shaped bounded belt, the historical
+- **AnnularTape(size = 2048)** — ring-shaped bounded tape, the historical
   `TBelt` (−1024…1023, wrap-around).
-- **StrictBelt decorator** — wraps any belt; `mark` on a marked cell or
+- **StrictTape decorator** — wraps any tape; `mark` on a marked cell or
   `unmark` on a blank one throws (2006/2007 semantics). Default semantics are
   idempotent — required for the mark/unmark optimizations to be legal;
   compiling with `--strict-cells` disables those optimizations.
@@ -256,10 +256,10 @@ carries no symbol table — at run time "main" is just that number (like ELF's
 1. validates magic, crc32, format version, and arch byte; selects the
    architecture module;
 2. copies the code section into read-only code memory;
-3. attaches the belt (device 0) supplied by the caller (default
-   `InfiniteBelt`);
+3. attaches the tape (device 0) supplied by the caller (default
+   `InfiniteTape`);
 4. initializes `IP := entry offset`, `SP := 0`, latches
-   `MF := (belt.read() === 1)`;
+   `MF := (tape.read() === 1)`;
 5. verifies `code[IP]` is `ent` (corrupt entry point traps before the first
    step);
 6. runs.
@@ -268,9 +268,9 @@ carries no symbol table — at run time "main" is just that number (like ELF's
 
 Deterministic cycle accounting over the buses: each code-bus byte fetched =
 1 tact; execute base = 1 tact per instruction; each stack word pushed/popped
-= 1 tact; device commands cost what the **belt profile** says — electronic
+= 1 tact; device commands cost what the **tape profile** says — electronic
 default `move/read/write = 1`, a configurable `mechanical` profile (e.g.
-`move 50, write 10, read 5`) models a physical belt. The MF latch is honest:
+`move 50, write 10, read 5`) models a physical tape. The MF latch is honest:
 every tape instruction pays its trailing `read()`. Examples (electronic):
 `rgt` = 4 tacts; `jm` = 6 vs `jm.s` = 3 (relaxation is a speed win, not
 just size); `call` = 8 vs `call.s` = 5 (the `ent` verification is a real
@@ -296,7 +296,7 @@ Program starts at the `.pmx` entry point (main's `ent`). Normal termination:
 `stp`. Abnormal: `hlt`. A **trap** is the processor's controlled stop on an
 execution error (a CPU-exception analogue; the Delphi generations' `raise
 EPMException`): the machine halts on the faulting instruction and reports the
-fault kind plus a full state snapshot (IP, SP, FLAGS, stack, belt). Trap
+fault kind plus a full state snapshot (IP, SP, FLAGS, stack, tape). Trap
 causes in PM-1: invalid opcode (`0x00` or undefined), jump/IP outside the
 code image, `call` to a byte that is not `ent`, return-stack
 overflow/underflow, step-limit exceeded (configurable runaway guard, the
@@ -306,7 +306,7 @@ structured fault result; under the debug API it pauses on the faulting
 instruction instead.
 
 VM API: `run()`, generator-based `step()`, full state inspection (IP, SP,
-FLAGS, stack contents, belt), address breakpoints, and the `brk` opcode which
+FLAGS, stack contents, tape), address breakpoints, and the `brk` opcode which
 pauses under the debug API and is a no-op otherwise.
 
 The interactive debugger is a **`DebugSession`** with the same surface shape
@@ -392,12 +392,12 @@ architecture module (opcode table + semantics); `arch` selects the module.
 v1 defines only `0x01` (PM-1); a future Turing-oriented `0x02` (TM-1,
 Appendix A) reuses the core, formats, assembler framework, linker, and CLI.
 
-The initial belt contents are **not** embedded — they are supplied to the VM
+The initial tape contents are **not** embedded — they are supplied to the VM
 at run time (`pmt run app.pmx --tape "..*..***" --head 2` or via API),
-matching the Delphi processors' separate belt/code loading. `--tape` maps
+matching the Delphi processors' separate tape/code loading. `--tape` maps
 its first character to cell 0 rightward (`.`/space = blank, `*` = mark);
 `--head <int>` (default 0) sets the initial head coordinate — negative is
-legal on an infinite belt. The API form constructs the belt from symbols +
+legal on an infinite tape. The API form constructs the tape from symbols +
 head position directly.
 
 ### 6.2 `.pmo` — object file
@@ -501,7 +501,7 @@ programs compile to `.pmx`.
 
 ## 8. Optimizer
 
-**Equivalence contract** — every pass must preserve: final belt contents,
+**Equivalence contract** — every pass must preserve: final tape contents,
 termination kind (`stp` / `hlt` / which trap), and every MF-dependent branch
 decision. Explicitly *not* observable: step count and intermediate states —
 except at un-stripped `brk` instructions, which are observability barriers
@@ -592,7 +592,7 @@ against the old notes during implementation.
   in-repo (it's ~20 lines). A `wasm32` build of `core` (for a future
   browser demo) is a designed-for target, not a v1 deliverable.
 - **Crates:** the shared/arch boundary is enforced by the crate split:
-  - `crates/core` (lib) — VM core + buses, tape devices (belts, `.pmb`),
+  - `crates/core` (lib) — VM core + buses, tape devices (tapes, `.pmb`),
     `MO`/`MX`/`MT` container formats, linker, assembler/disassembler
     frameworks, `DebugSession`. **Arch-agnostic by contract**: core
     contains no opcode; arch modules supply decode tables, instruction
@@ -615,7 +615,7 @@ against the old notes during implementation.
   `run`, `tape` (§6.3), `ir` (§7.1). Library-first: the bin is a thin
   wrapper over public library functions (`compile(source)`,
   `assemble(asm_text)`, `link(objects)`, `disassemble(bytes)`, `Processor`,
-  belts), so tests — and a future WASM browser demo — consume the API
+  tapes), so tests — and a future WASM browser demo — consume the API
   directly.
 - **Source layout:** `crates/core/src/` — `vm/`, `devices/`, `formats/`,
   `linker/`, `asm/`, `disasm/`; `crates/post-machine/src/` — `lexer/`,
@@ -628,11 +628,11 @@ against the old notes during implementation.
   cross-module integration), plus property tests (`proptest`, dev-dep)
   for format round-trips and relaxation fixpoints.
 - **Golden end-to-end:** ports of the historical programs (`Sum.pms`,
-  `Ty.pms` → `.pmc`) through compile → link → run, asserting final belt
+  `Ty.pms` → `.pmc`) through compile → link → run, asserting final tape
   state (diffed as `.pmb` snapshots, §6.3).
 - **Round-trip:** `asm(dis(x)) == x` for `.pmo` and `.pmx`.
 - **Equivalence:** every optimizer pass is tested by running optimized vs
-  unoptimized builds on the same belts and comparing final state (plus
+  unoptimized builds on the same tapes and comparing final state (plus
   asserting the size actually shrank where expected).
 - Relaxation edge cases: jumps at exactly ±127/±128, chains that only
   stabilize after several iterations.
@@ -649,7 +649,7 @@ call stack lacked, the PMProcessor's disassembler-first mindset).
 
 - Cross-module (link-time) inlining — extension point only.
 - Multi-byte opcode encodings (`≥ 0x80` reserved).
-- Embedding initial belt data in `.pmx`.
+- Embedding initial tape data in `.pmx`.
 - npm publication, browser demo integration — later decisions.
 - Converters from the legacy Delphi formats (`.pme`, `.tpme`, 32-bit-word) —
   possible future utilities, not v1.
@@ -678,7 +678,7 @@ the Turing-machine source language that will target it.
   extension-vs-magic rule),
   the linker (relaxation queries the arch module for short forms), the
   assembler/disassembler frameworks (mnemonic tables come from the arch
-  module), and the belt/tape devices — i.e., everything in
+  module), and the tape/tape devices — i.e., everything in
   `packages/core`. Decided: `tmt` becomes `packages/turing-machine` in the
   same monorepo (§10), importing `core` exactly as `post-machine` does.
 - **Batched I/O:** reads and writes are whole-tuple operations — one

@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** The arch-agnostic half of the VM in `mtc-core`: tape devices (`InfiniteBelt`, `AnnularBelt`, `StrictBelt`) and the pure sans-I/O processor core (fetch/decode/execute automaton speaking a bus request/response protocol), fully unit-tested with a fake test arch. No PM-1 knowledge anywhere in this plan — that's Plan 2b (`mtc-post-machine`), along with the sync driver, loader, and end-to-end runs.
+**Goal:** The arch-agnostic half of the VM in `mtc-core`: tape devices (`InfiniteTape`, `AnnularTape`, `StrictTape`) and the pure sans-I/O processor core (fetch/decode/execute automaton speaking a bus request/response protocol), fully unit-tested with a fake test arch. No PM-1 knowledge anywhere in this plan — that's Plan 2b (`mtc-post-machine`), along with the sync driver, loader, and end-to-end runs.
 
 **Architecture:** Spec §4 — the core is a pure transition function: `resume(BusResponse) -> CoreEvent` emitting `BusRequest`s; it owns only registers (IP, MF) and the in-flight instruction. Devices are index-based `Tape` implementors behind the (future) driver. The `Arch` trait supplies operand shapes and lowers instructions to `MicroOp`s; core tests script bus responses and assert emitted requests — no devices, no I/O.
 
 **Tech Stack:** Rust stable, edition 2024, existing `mtc-core` crate. No new dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-07-04-post-machine-toolchain-design.md` §4 (processor architecture, buses, sans-I/O, belts, timing roles), §5 (operand encodings the fetcher must handle).
+**Spec:** `docs/superpowers/specs/2026-07-04-post-machine-toolchain-design.md` §4 (processor architecture, buses, sans-I/O, tapes, timing roles), §5 (operand encodings the fetcher must handle).
 
 ## Global Constraints
 
@@ -17,8 +17,8 @@
 - Symbol-vector operands are **self-delimiting**: each byte = 7-bit payload, high bit set on the LAST element (spec Appendix A / §5 `wr`).
 - MF is the **match flag**: `LatchMatch(idx)` micro-op sets `MF := (device0.read() == idx)` (spec §4.1); jumps test MF, never the tape.
 - `call` semantics: verify target byte is the arch's entry marker BEFORE pushing/jumping; failure = `Trap::CallTargetNotEntry` (spec §5).
-- `InfiniteBelt` guarantees (spec §4.2): paged `u64` bitmask storage in a `HashMap`, current-page cache, reads never allocate, zeroed pages are freed — memory `O(pages containing non-blank cells)`.
-- `StrictBelt`: writing the value a cell already holds is a `DeviceFault` (2006/2007 semantics); default belts are idempotent.
+- `InfiniteTape` guarantees (spec §4.2): paged `u64` bitmask storage in a `HashMap`, current-page cache, reads never allocate, zeroed pages are freed — memory `O(pages containing non-blank cells)`.
+- `StrictTape`: writing the value a cell already holds is a `DeviceFault` (2006/2007 semantics); default tapes are idempotent.
 - Quality gates on every commit: `cargo test --workspace` green, `cargo clippy --workspace --all-targets -- -D warnings` clean, `cargo fmt --check` clean; no attribution footers.
 - Commit policy: per-task commits pre-approved in this repo; never push.
 
@@ -89,9 +89,9 @@ pub trait Tape {
     fn read(&self) -> u32;
     fn write(&mut self, index: u32) -> Result<(), DeviceFault>;
 }
-pub struct InfiniteBelt; // ::new(), ::from_cells(iter of bool, head: i64), .head() -> i64, .page_count() -> usize, .marked_cells() -> Vec<i64> (sorted)
-pub struct AnnularBelt;  // ::new(size: u32), .head() -> u32; wraps
-pub struct StrictBelt<T: Tape>; // ::new(inner: T), Deref-free wrapper implementing Tape
+pub struct InfiniteTape; // ::new(), ::from_cells(iter of bool, head: i64), .head() -> i64, .page_count() -> usize, .marked_cells() -> Vec<i64> (sorted)
+pub struct AnnularTape;  // ::new(size: u32), .head() -> u32; wraps
+pub struct StrictTape<T: Tape>; // ::new(inner: T), Deref-free wrapper implementing Tape
 
 // mtc_core::vm::core
 pub struct Core<'a> { /* arch: &'a dyn Arch, ip, mf, phase */ }
@@ -120,7 +120,7 @@ Protocol rules (the contract Plan 2b's driver will obey):
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: every type in the "Interfaces Established" block above except `Tape`/belts/`Core`; plus the test-only `TestArch` (in `arch.rs`'s test module, `pub(crate)` re-exported for sibling test modules via `#[cfg(test)] pub(crate) mod test_arch`).
+- Produces: every type in the "Interfaces Established" block above except `Tape`/tapes/`Core`; plus the test-only `TestArch` (in `arch.rs`'s test module, `pub(crate)` re-exported for sibling test modules via `#[cfg(test)] pub(crate) mod test_arch`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -383,11 +383,11 @@ git commit -m "feat(core): vm bus protocol, trap taxonomy, Arch trait with test 
 
 ---
 
-### Task 2: `InfiniteBelt` — paged sparse tape
+### Task 2: `InfiniteTape` — paged sparse tape
 
 **Files:**
 - Create: `crates/core/src/vm/devices/mod.rs`
-- Create: `crates/core/src/vm/devices/infinite_belt.rs`
+- Create: `crates/core/src/vm/devices/infinite_tape.rs`
 - Modify: `crates/core/src/vm/mod.rs` (add `pub mod devices;`)
 
 **Interfaces:**
@@ -401,8 +401,8 @@ git commit -m "feat(core): vm bus protocol, trap taxonomy, Arch trait with test 
       fn read(&self) -> u32;
       fn write(&mut self, index: u32) -> Result<(), DeviceFault>;
   }
-  pub struct InfiniteBelt { /* pages: HashMap<i64, u64>, head: i64, cached page key+value */ }
-  impl InfiniteBelt {
+  pub struct InfiniteTape { /* pages: HashMap<i64, u64>, head: i64, cached page key+value */ }
+  impl InfiniteTape {
       pub fn new() -> Self;                                          // blank tape, head 0
       pub fn from_cells(cells: impl IntoIterator<Item = bool>, first_cell_at: i64, head: i64) -> Self;
       pub fn head(&self) -> i64;
@@ -414,7 +414,7 @@ git commit -m "feat(core): vm bus protocol, trap taxonomy, Arch trait with test 
 
 - [ ] **Step 1: Write the failing tests**
 
-Test module at the bottom of `infinite_belt.rs`:
+Test module at the bottom of `infinite_tape.rs`:
 
 ```rust
 #[cfg(test)]
@@ -423,78 +423,78 @@ mod tests {
 
     #[test]
     fn blank_tape_reads_zero_everywhere_without_allocating() {
-        let mut belt = InfiniteBelt::new();
+        let mut tape = InfiniteTape::new();
         for _ in 0..10_000 {
-            belt.right();
-            assert_eq!(belt.read(), 0);
+            tape.right();
+            assert_eq!(tape.read(), 0);
         }
         for _ in 0..20_000 {
-            belt.left();
-            assert_eq!(belt.read(), 0);
+            tape.left();
+            assert_eq!(tape.read(), 0);
         }
-        assert_eq!(belt.page_count(), 0); // reads never allocate
-        assert_eq!(belt.head(), -10_000);
+        assert_eq!(tape.page_count(), 0); // reads never allocate
+        assert_eq!(tape.head(), -10_000);
     }
 
     #[test]
     fn write_read_round_trip_across_page_boundaries() {
-        let mut belt = InfiniteBelt::new();
+        let mut tape = InfiniteTape::new();
         // mark cells -1, 0, 63, 64 (spans three pages: -1, 0, 1)
         for target in [-1i64, 0, 63, 64] {
-            while belt.head() < target {
-                belt.right();
+            while tape.head() < target {
+                tape.right();
             }
-            while belt.head() > target {
-                belt.left();
+            while tape.head() > target {
+                tape.left();
             }
-            belt.write(1).unwrap();
+            tape.write(1).unwrap();
         }
-        assert_eq!(belt.marked_cells(), vec![-1, 0, 63, 64]);
-        assert_eq!(belt.page_count(), 3);
+        assert_eq!(tape.marked_cells(), vec![-1, 0, 63, 64]);
+        assert_eq!(tape.page_count(), 3);
     }
 
     #[test]
     fn erasing_last_mark_frees_the_page() {
-        let mut belt = InfiniteBelt::new();
-        belt.write(1).unwrap();
-        assert_eq!(belt.page_count(), 1);
-        belt.write(0).unwrap();
-        assert_eq!(belt.page_count(), 0);
+        let mut tape = InfiniteTape::new();
+        tape.write(1).unwrap();
+        assert_eq!(tape.page_count(), 1);
+        tape.write(0).unwrap();
+        assert_eq!(tape.page_count(), 0);
     }
 
     #[test]
     fn idempotent_writes_are_ok() {
-        let mut belt = InfiniteBelt::new();
-        belt.write(1).unwrap();
-        belt.write(1).unwrap(); // marking a marked cell: fine on a default belt
-        assert_eq!(belt.read(), 1);
-        belt.write(0).unwrap();
-        belt.write(0).unwrap();
-        assert_eq!(belt.read(), 0);
+        let mut tape = InfiniteTape::new();
+        tape.write(1).unwrap();
+        tape.write(1).unwrap(); // marking a marked cell: fine on a default tape
+        assert_eq!(tape.read(), 1);
+        tape.write(0).unwrap();
+        tape.write(0).unwrap();
+        assert_eq!(tape.read(), 0);
     }
 
     #[test]
     fn out_of_alphabet_write_faults() {
-        let mut belt = InfiniteBelt::new();
+        let mut tape = InfiniteTape::new();
         assert_eq!(
-            belt.write(2),
+            tape.write(2),
             Err(DeviceFault::IndexOutsideAlphabet { index: 2 })
         );
     }
 
     #[test]
     fn from_cells_places_data_and_head() {
-        let belt = InfiniteBelt::from_cells([false, true, true, false, true], 0, 2);
-        assert_eq!(belt.marked_cells(), vec![1, 2, 4]);
-        assert_eq!(belt.head(), 2);
-        assert_eq!(belt.read(), 1);
+        let tape = InfiniteTape::from_cells([false, true, true, false, true], 0, 2);
+        assert_eq!(tape.marked_cells(), vec![1, 2, 4]);
+        assert_eq!(tape.head(), 2);
+        assert_eq!(tape.read(), 1);
     }
 }
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cargo test -p mtc-core infinite_belt`
+Run: `cargo test -p mtc-core infinite_tape`
 Expected: compile error.
 
 - [ ] **Step 3: Implement**
@@ -504,9 +504,9 @@ Expected: compile error.
 //! Tape devices behind the device bus (spec §4.2). Index-based; the
 //! processor never sees glyphs and never knows the head position.
 
-mod infinite_belt;
+mod infinite_tape;
 
-pub use infinite_belt::InfiniteBelt;
+pub use infinite_tape::InfiniteTape;
 
 use super::trap::DeviceFault;
 
@@ -519,9 +519,9 @@ pub trait Tape {
 }
 ```
 
-`crates/core/src/vm/devices/infinite_belt.rs`:
+`crates/core/src/vm/devices/infinite_tape.rs`:
 ```rust
-//! Unbounded two-symbol belt with paged sparse storage (spec §4.2):
+//! Unbounded two-symbol tape with paged sparse storage (spec §4.2):
 //! `TBelt`'s packed bit array, generalized to an infinite tape.
 
 use std::collections::HashMap;
@@ -532,12 +532,12 @@ use crate::vm::trap::DeviceFault;
 const PAGE_BITS: i64 = 64;
 
 #[derive(Debug, Default)]
-pub struct InfiniteBelt {
+pub struct InfiniteTape {
     pages: HashMap<i64, u64>,
     head: i64,
 }
 
-impl InfiniteBelt {
+impl InfiniteTape {
     pub fn new() -> Self {
         Self::default()
     }
@@ -547,13 +547,13 @@ impl InfiniteBelt {
         first_cell_at: i64,
         head: i64,
     ) -> Self {
-        let mut belt = Self { pages: HashMap::new(), head };
+        let mut tape = Self { pages: HashMap::new(), head };
         for (i, marked) in cells.into_iter().enumerate() {
             if marked {
-                belt.set(first_cell_at + i as i64, true);
+                tape.set(first_cell_at + i as i64, true);
             }
         }
-        belt
+        tape
     }
 
     pub fn head(&self) -> i64 {
@@ -599,7 +599,7 @@ impl InfiniteBelt {
     }
 }
 
-impl Tape for InfiniteBelt {
+impl Tape for InfiniteTape {
     fn alphabet_size(&self) -> u32 {
         2
     }
@@ -640,33 +640,33 @@ Expected: all pass.
 Run: `cargo clippy --workspace --all-targets -- -D warnings && cargo fmt`
 ```bash
 git add -A
-git commit -m "feat(core): Tape trait and paged-sparse InfiniteBelt"
+git commit -m "feat(core): Tape trait and paged-sparse InfiniteTape"
 ```
 
 ---
 
-### Task 3: `AnnularBelt` + `StrictBelt`
+### Task 3: `AnnularTape` + `StrictTape`
 
 **Files:**
-- Create: `crates/core/src/vm/devices/annular_belt.rs`
-- Create: `crates/core/src/vm/devices/strict_belt.rs`
+- Create: `crates/core/src/vm/devices/annular_tape.rs`
+- Create: `crates/core/src/vm/devices/strict_tape.rs`
 - Modify: `crates/core/src/vm/devices/mod.rs`
 
 **Interfaces:**
 - Consumes: `Tape`, `DeviceFault`.
 - Produces:
   ```rust
-  pub struct AnnularBelt { /* words: Vec<u64>, size: u32, head: u32 */ }
-  impl AnnularBelt { pub fn new(size: u32) -> Self /* panics if size == 0 */; pub fn head(&self) -> u32; }
-  pub struct StrictBelt<T: Tape>(/* inner */);
-  impl<T: Tape> StrictBelt<T> { pub fn new(inner: T) -> Self; pub fn into_inner(self) -> T; }
+  pub struct AnnularTape { /* words: Vec<u64>, size: u32, head: u32 */ }
+  impl AnnularTape { pub fn new(size: u32) -> Self /* panics if size == 0 */; pub fn head(&self) -> u32; }
+  pub struct StrictTape<T: Tape>(/* inner */);
+  impl<T: Tape> StrictTape<T> { pub fn new(inner: T) -> Self; pub fn into_inner(self) -> T; }
   ```
-- `AnnularBelt` is the historical ring (`TBelt`, default construction size 2048 is the caller's choice — no default constant here); head wraps: `left` from 0 → `size-1`, `right` from `size-1` → 0.
-- `StrictBelt` implements 2006/2007 semantics: `write(i)` when the cell already holds `i` → `Err(DeviceFault::StrictCellViolation)`; everything else delegates.
+- `AnnularTape` is the historical ring (`TBelt`, default construction size 2048 is the caller's choice — no default constant here); head wraps: `left` from 0 → `size-1`, `right` from `size-1` → 0.
+- `StrictTape` implements 2006/2007 semantics: `write(i)` when the cell already holds `i` → `Err(DeviceFault::StrictCellViolation)`; everything else delegates.
 
 - [ ] **Step 1: Write the failing tests**
 
-In `annular_belt.rs`:
+In `annular_tape.rs`:
 ```rust
 #[cfg(test)]
 mod tests {
@@ -676,75 +676,75 @@ mod tests {
 
     #[test]
     fn wraps_both_directions() {
-        let mut belt = AnnularBelt::new(4);
-        assert_eq!(belt.head(), 0);
-        belt.left();
-        assert_eq!(belt.head(), 3);
-        belt.right();
-        belt.right();
-        belt.right();
-        belt.right();
-        belt.right();
-        assert_eq!(belt.head(), 1);
+        let mut tape = AnnularTape::new(4);
+        assert_eq!(tape.head(), 0);
+        tape.left();
+        assert_eq!(tape.head(), 3);
+        tape.right();
+        tape.right();
+        tape.right();
+        tape.right();
+        tape.right();
+        assert_eq!(tape.head(), 1);
     }
 
     #[test]
     fn a_full_lap_returns_to_written_cell() {
-        let mut belt = AnnularBelt::new(100);
-        belt.write(1).unwrap();
+        let mut tape = AnnularTape::new(100);
+        tape.write(1).unwrap();
         for _ in 0..100 {
-            belt.right();
+            tape.right();
         }
-        assert_eq!(belt.read(), 1); // the wrap detector's mark, found again
+        assert_eq!(tape.read(), 1); // the wrap detector's mark, found again
     }
 
     #[test]
     fn spans_multiple_words() {
-        let mut belt = AnnularBelt::new(130); // 3 u64 words
+        let mut tape = AnnularTape::new(130); // 3 u64 words
         for _ in 0..129 {
-            belt.right();
+            tape.right();
         }
-        belt.write(1).unwrap();
-        assert_eq!(belt.head(), 129);
-        assert_eq!(belt.read(), 1);
-        belt.right(); // wraps to 0
-        assert_eq!(belt.read(), 0);
+        tape.write(1).unwrap();
+        assert_eq!(tape.head(), 129);
+        assert_eq!(tape.read(), 1);
+        tape.right(); // wraps to 0
+        assert_eq!(tape.read(), 0);
     }
 
     #[test]
     fn out_of_alphabet_faults() {
-        let mut belt = AnnularBelt::new(8);
-        assert_eq!(belt.write(7), Err(DeviceFault::IndexOutsideAlphabet { index: 7 }));
+        let mut tape = AnnularTape::new(8);
+        assert_eq!(tape.write(7), Err(DeviceFault::IndexOutsideAlphabet { index: 7 }));
     }
 }
 ```
 
-In `strict_belt.rs`:
+In `strict_tape.rs`:
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::devices::{InfiniteBelt, Tape};
+    use crate::vm::devices::{InfiniteTape, Tape};
     use crate::vm::trap::DeviceFault;
 
     #[test]
     fn double_mark_and_double_erase_fault() {
-        let mut belt = StrictBelt::new(InfiniteBelt::new());
-        assert_eq!(belt.write(0), Err(DeviceFault::StrictCellViolation)); // erase blank
-        belt.write(1).unwrap();
-        assert_eq!(belt.write(1), Err(DeviceFault::StrictCellViolation)); // mark marked
-        belt.write(0).unwrap();
+        let mut tape = StrictTape::new(InfiniteTape::new());
+        assert_eq!(tape.write(0), Err(DeviceFault::StrictCellViolation)); // erase blank
+        tape.write(1).unwrap();
+        assert_eq!(tape.write(1), Err(DeviceFault::StrictCellViolation)); // mark marked
+        tape.write(0).unwrap();
     }
 
     #[test]
     fn moves_and_reads_delegate() {
-        let mut belt = StrictBelt::new(InfiniteBelt::new());
-        belt.write(1).unwrap();
-        belt.right();
-        assert_eq!(belt.read(), 0);
-        belt.left();
-        assert_eq!(belt.read(), 1);
-        assert_eq!(belt.alphabet_size(), 2);
+        let mut tape = StrictTape::new(InfiniteTape::new());
+        tape.write(1).unwrap();
+        tape.right();
+        assert_eq!(tape.read(), 0);
+        tape.left();
+        assert_eq!(tape.read(), 1);
+        assert_eq!(tape.alphabet_size(), 2);
     }
 }
 ```
@@ -755,23 +755,23 @@ Run: `cargo test -p mtc-core annular` — expected: compile error.
 
 - [ ] **Step 3: Implement**
 
-`crates/core/src/vm/devices/annular_belt.rs`:
+`crates/core/src/vm/devices/annular_tape.rs`:
 ```rust
-//! Ring-shaped bounded belt — the historical `TBelt` (spec §4.2).
+//! Ring-shaped bounded tape — the historical `TBelt` (spec §4.2).
 
 use super::Tape;
 use crate::vm::trap::DeviceFault;
 
 #[derive(Debug)]
-pub struct AnnularBelt {
+pub struct AnnularTape {
     words: Vec<u64>,
     size: u32,
     head: u32,
 }
 
-impl AnnularBelt {
+impl AnnularTape {
     pub fn new(size: u32) -> Self {
-        assert!(size > 0, "annular belt needs at least one cell");
+        assert!(size > 0, "annular tape needs at least one cell");
         Self {
             words: vec![0; size.div_ceil(64) as usize],
             size,
@@ -788,7 +788,7 @@ impl AnnularBelt {
     }
 }
 
-impl Tape for AnnularBelt {
+impl Tape for AnnularTape {
     fn alphabet_size(&self) -> u32 {
         2
     }
@@ -821,7 +821,7 @@ impl Tape for AnnularBelt {
 }
 ```
 
-`crates/core/src/vm/devices/strict_belt.rs`:
+`crates/core/src/vm/devices/strict_tape.rs`:
 ```rust
 //! Strict-cells decorator: 2006/2007 semantics — writing the value a
 //! cell already holds is an error (spec §4.2).
@@ -830,11 +830,11 @@ use super::Tape;
 use crate::vm::trap::DeviceFault;
 
 #[derive(Debug)]
-pub struct StrictBelt<T: Tape> {
+pub struct StrictTape<T: Tape> {
     inner: T,
 }
 
-impl<T: Tape> StrictBelt<T> {
+impl<T: Tape> StrictTape<T> {
     pub fn new(inner: T) -> Self {
         Self { inner }
     }
@@ -844,7 +844,7 @@ impl<T: Tape> StrictBelt<T> {
     }
 }
 
-impl<T: Tape> Tape for StrictBelt<T> {
+impl<T: Tape> Tape for StrictTape<T> {
     fn alphabet_size(&self) -> u32 {
         self.inner.alphabet_size()
     }
@@ -872,11 +872,11 @@ impl<T: Tape> Tape for StrictBelt<T> {
 
 In `devices/mod.rs` add the modules and re-exports:
 ```rust
-mod annular_belt;
-mod strict_belt;
+mod annular_tape;
+mod strict_tape;
 
-pub use annular_belt::AnnularBelt;
-pub use strict_belt::StrictBelt;
+pub use annular_tape::AnnularTape;
+pub use strict_tape::StrictTape;
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -889,7 +889,7 @@ Expected: all pass.
 Run: `cargo clippy --workspace --all-targets -- -D warnings && cargo fmt`
 ```bash
 git add -A
-git commit -m "feat(core): AnnularBelt ring tape and StrictBelt decorator"
+git commit -m "feat(core): AnnularTape ring tape and StrictTape decorator"
 ```
 
 ---
@@ -1062,7 +1062,7 @@ impl<'a> Core<'a> {
         self.mf
     }
 
-    /// The driver latches initial MF from the belt before the first resume.
+    /// The driver latches initial MF from the tape before the first resume.
     pub fn set_mf(&mut self, mf: bool) {
         self.mf = mf;
     }
@@ -1551,6 +1551,6 @@ git commit -m "feat(core): sans-io core execute phase (micro-ops, MF, jumps, cal
 
 ## Self-Review Notes
 
-- **Spec coverage (this plan's slice):** §4 registers (IP, MF here; SP lives with the driver's stack — Plan 2b), §4 buses + sans-I/O contract ✓, §4.1 MF-as-match + LatchMatch ✓, §4.2 Tape trait (index-based, write faults) + InfiniteBelt guarantees + AnnularBelt + StrictBelt ✓, §5 operand encodings (rel-to-end i8/i32, self-delimiting vectors) + ent verification ✓. Deliberately Plan 2b: PM-1 opcode table, sync driver + tact/wait-state accounting + `Step` bookkeeping, loader/registry/Machine, FLAGS-beyond-MF presentation, `.pmb` integration, end-to-end programs.
+- **Spec coverage (this plan's slice):** §4 registers (IP, MF here; SP lives with the driver's stack — Plan 2b), §4 buses + sans-I/O contract ✓, §4.1 MF-as-match + LatchMatch ✓, §4.2 Tape trait (index-based, write faults) + InfiniteTape guarantees + AnnularTape + StrictTape ✓, §5 operand encodings (rel-to-end i8/i32, self-delimiting vectors) + ent verification ✓. Deliberately Plan 2b: PM-1 opcode table, sync driver + tact/wait-state accounting + `Step` bookkeeping, loader/registry/Machine, FLAGS-beyond-MF presentation, `.pmb` integration, end-to-end programs.
 - **Type consistency:** `Trap`/`DeviceFault`/`BusRequest`/`BusResponse`/`CoreEvent`/`OperandKind`/`Operand`/`MicroOp`/`Arch` names match between the header block, Task 1 code, and Tasks 4–5 usage. `TestArch` opcodes used in Tasks 4–5 tests match its Task 1 table.
-- **Known simplifications, on record:** no current-page cache in `InfiniteBelt` (guarantees hold without it; noted in Task 2); `dev` is always 0 in v1 micro-ops (multi-device is TM-1); initial-MF latch is the driver's job (Plan 2b) — core starts `mf = false` and exposes `set_mf`.
+- **Known simplifications, on record:** no current-page cache in `InfiniteTape` (guarantees hold without it; noted in Task 2); `dev` is always 0 in v1 micro-ops (multi-device is TM-1); initial-MF latch is the driver's job (Plan 2b) — core starts `mf = false` and exposes `set_mf`.
