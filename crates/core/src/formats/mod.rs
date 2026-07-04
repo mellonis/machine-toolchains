@@ -2,6 +2,7 @@
 //! Pure byte codecs: no I/O, no architecture knowledge.
 
 pub mod crc32;
+pub(crate) mod io;
 
 /// Format version written into every v1 container.
 pub const FORMAT_VERSION: u16 = 1;
