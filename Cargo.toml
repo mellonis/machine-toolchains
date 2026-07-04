@@ -4,5 +4,5 @@ members = ["crates/core", "crates/post-machine"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/mellonis/machine-toolchains"
