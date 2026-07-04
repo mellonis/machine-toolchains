@@ -181,9 +181,7 @@ mod tests {
     fn initial_mf_is_latched_from_device_tact_free() {
         let arch = TestArch;
         // jm rel32 +1 (instr_end 5, target 6): taken only if MF was latched true
-        // [0]=0x0E entry? — entry must be entry marker; but we start at entry 1
         // layout: [0]=0x0E, [1..6]=jm +1, [6]=halt (skipped if taken), [7]=stop
-        // Wait: taken jump target = 6+1=7? instr_end of jm at 1 is 6; off +1 → 7.
         let code = vec![0x0E, 0x09, 0x01, 0x00, 0x00, 0x00, 0x03, 0x02];
         let machine = Machine::with_arch(&arch, code, 0).unwrap();
 

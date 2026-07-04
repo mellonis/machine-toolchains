@@ -199,8 +199,7 @@ mod tests {
         let mut tape = InfiniteTape::from_cells([true, true, false, true], -3, 2);
         tape.write(1).unwrap();
         let back = InfiniteTape::from_snapshot(&tape.to_snapshot()).unwrap();
-        assert_eq!(back.marked_cells(), tape.marked_cells());
-        assert_eq!(back.head(), tape.head());
+        assert_eq!(back, tape); // exercises the manual PartialEq (marks + head)
     }
 
     #[test]
