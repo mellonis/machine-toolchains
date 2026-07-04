@@ -2,3 +2,4 @@
 //! linker, assembler/disassembler frameworks, tape devices.
 
 pub mod formats;
+pub mod vm;
