@@ -12,6 +12,7 @@ pub const FORMAT_VERSION: u16 = 1;
 pub const ARCH_PM1: u8 = 0x01;
 
 pub mod executable;
+pub mod object;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FormatError {
