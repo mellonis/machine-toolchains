@@ -69,4 +69,13 @@ mod tests {
         assert_eq!(tape.read(), 1);
         assert_eq!(tape.alphabet_size(), 2);
     }
+
+    #[test]
+    fn out_of_alphabet_write_reports_inner_fault_not_strict_violation() {
+        let mut tape = StrictTape::new(InfiniteTape::new());
+        assert_eq!(
+            tape.write(9),
+            Err(DeviceFault::IndexOutsideAlphabet { index: 9 })
+        );
+    }
 }

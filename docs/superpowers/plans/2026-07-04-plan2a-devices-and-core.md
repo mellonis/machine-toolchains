@@ -104,7 +104,7 @@ pub struct Core<'a> { /* arch: &'a dyn Arch, ip, mf, phase */ }
 Protocol rules (the contract Plan 2b's driver will obey):
 - Core issues one `Request` at a time; the driver answers with exactly one `BusResponse` via `resume`.
 - After an instruction's last micro-op, core returns `CoreEvent::Step`; the driver resumes with `BusResponse::Ok` to begin the next fetch.
-- `OutOfCode` in response to any `CodeRead` → `Trapped(CodeOutOfBounds)`. `StackFull`/`StackEmpty` → the stack traps. `Fault(f)` → `Trapped(Device { fault: f })`.
+- `OutOfCode` in response to a fetch `CodeRead` → `Trapped(CodeOutOfBounds)`; on the ent-verification `CodeRead` of a call it is `Trapped(CallTargetNotEntry)` instead (a nonexistent byte is not an entry marker). `StackFull`/`StackEmpty` → the stack traps. `Fault(f)` → `Trapped(Device { fault: f })`.
 - A jump/call whose computed target is negative or exceeds `u32::MAX` traps `CodeOutOfBounds` immediately (core-side arithmetic); in-range-but-past-the-image targets surface on the next `CodeRead` as `OutOfCode`.
 
 ---

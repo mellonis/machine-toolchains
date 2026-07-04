@@ -46,7 +46,7 @@ pub trait Arch {
 /// Fake architecture for core tests — proves core is arch-agnostic.
 /// 0x01 nop | 0x02 stop | 0x03 halt | 0x04 brk | 0x05 left+latch |
 /// 0x06 right+latch | 0x07 wr(vec)+latch | 0x08 jmp rel8 | 0x09 jm rel32 |
-/// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to nothing)
+/// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to Nop)
 #[cfg(test)]
 pub(crate) mod test_arch {
     use super::*;

@@ -176,6 +176,7 @@ impl<'a> Core<'a> {
         };
 
         // 1. Settle the in-flight request, if any.
+        // A response of the wrong type is a driver protocol violation; it is rendered as CodeOutOfBounds — drivers must conform.
         match pending {
             Pending::None => {}
             Pending::Move | Pending::Write => match resp {
@@ -285,9 +286,10 @@ mod tests {
     use crate::vm::bus::{BusRequest as Rq, BusResponse as Rs, CoreEvent as Ev};
     use crate::vm::trap::Trap;
 
-    /// Drive the core with a scripted byte image; panics if the core asks
-    /// for anything but code during fetch. Returns the first non-Request
-    /// event and the addresses the core fetched.
+    /// Drive the core with a scripted byte image, servicing `CodeRead`
+    /// requests only. Returns the first non-`CodeRead` event (it does not
+    /// panic — a request for anything else during fetch is simply handed
+    /// back to the caller) and the addresses the core fetched.
     fn run_fetch(code: &[u8], entry: u32) -> (Ev, Vec<u32>) {
         let arch = TestArch;
         let mut core = Core::new(&arch, entry);
@@ -472,7 +474,7 @@ mod tests {
         let (ev2, log2, _) = run_full(&taken, 0, 4, &[1], 100);
         assert_eq!(ev2, Ev::Stopped); // jumped over the halt at 6 to stop at 7
         assert!(log2.contains(&Rq::CodeRead { addr: 7 }));
-        assert!(!log2.contains(&Rq::CodeRead { addr: 6 }) || matches!(ev2, Ev::Stopped));
+        assert!(!log2.contains(&Rq::CodeRead { addr: 6 })); // the halt at 6 was skipped
     }
 
     #[test]
@@ -517,6 +519,14 @@ mod tests {
         let code = [0x0A, 0x01, 0x00, 0x00, 0x00, 0x02, 0x01]; // target 6 = nop, not entry
         let (ev, _, _) = run_full(&code, 0, 4, &[], 100);
         assert_eq!(ev, Ev::Trapped(Trap::CallTargetNotEntry { target: 6 }));
+    }
+
+    #[test]
+    fn call_past_image_is_not_entry() {
+        // call +10 from instr_end 5 → target 15, beyond the 7-byte image
+        let code = [0x0A, 0x0A, 0x00, 0x00, 0x00, 0x02, 0x0E];
+        let (ev, _, _) = run_full(&code, 0, 4, &[], 100);
+        assert_eq!(ev, Ev::Trapped(Trap::CallTargetNotEntry { target: 15 }));
     }
 
     #[test]
