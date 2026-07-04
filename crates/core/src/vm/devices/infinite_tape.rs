@@ -77,6 +77,41 @@ impl InfiniteTape {
             }
         }
     }
+
+    /// Build from a `TapeSnapshot` (spec §6.3). Cells must be 0/1 —
+    /// a wider index is the snapshot's problem, not this tape's.
+    pub fn from_snapshot(s: &crate::formats::tapeblock::TapeSnapshot) -> Result<Self, DeviceFault> {
+        if let Some(&bad) = s.cells.iter().find(|&&c| c > 1) {
+            return Err(DeviceFault::IndexOutsideAlphabet {
+                index: u32::from(bad),
+            });
+        }
+        Ok(Self::from_cells(
+            s.cells.iter().map(|&c| c == 1),
+            s.origin,
+            s.head,
+        ))
+    }
+
+    /// Dense snapshot spanning marked cells ∪ head (blank tape → one
+    /// blank cell at the head).
+    pub fn to_snapshot(&self) -> crate::formats::tapeblock::TapeSnapshot {
+        let marks = self.marked_cells();
+        let lo = marks.first().copied().unwrap_or(self.head).min(self.head);
+        let hi = marks.last().copied().unwrap_or(self.head).max(self.head);
+        let cells = (lo..=hi).map(|c| u8::from(self.get(c))).collect();
+        crate::formats::tapeblock::TapeSnapshot {
+            origin: lo,
+            cells,
+            head: self.head,
+        }
+    }
+}
+
+impl PartialEq for InfiniteTape {
+    fn eq(&self, other: &Self) -> bool {
+        self.marked_cells() == other.marked_cells() && self.head() == other.head()
+    }
 }
 
 impl Tape for InfiniteTape {
@@ -108,6 +143,65 @@ impl Tape for InfiniteTape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formats::tapeblock::TapeSnapshot;
+
+    #[test]
+    fn from_snapshot_places_cells_and_head() {
+        let snap = TapeSnapshot {
+            origin: -2,
+            cells: vec![1, 0, 1, 1, 0],
+            head: 1,
+        };
+        let tape = InfiniteTape::from_snapshot(&snap).unwrap();
+        assert_eq!(tape.marked_cells(), vec![-2, 0, 1]);
+        assert_eq!(tape.head(), 1);
+        assert_eq!(tape.read(), 1);
+    }
+
+    #[test]
+    fn from_snapshot_rejects_wide_alphabet_cells() {
+        let snap = TapeSnapshot {
+            origin: 0,
+            cells: vec![0, 2],
+            head: 0,
+        };
+        assert_eq!(
+            InfiniteTape::from_snapshot(&snap),
+            Err(DeviceFault::IndexOutsideAlphabet { index: 2 })
+        );
+    }
+
+    #[test]
+    fn to_snapshot_covers_marks_and_head() {
+        let mut tape = InfiniteTape::from_cells([true, false, true], 0, 0);
+        for _ in 0..5 {
+            tape.right(); // head 5, past the data
+        }
+        let snap = tape.to_snapshot();
+        assert_eq!(snap.origin, 0);
+        assert_eq!(snap.cells, vec![1, 0, 1, 0, 0, 0]); // span 0..=5 (marks ∪ head)
+        assert_eq!(snap.head, 5);
+    }
+
+    #[test]
+    fn blank_tape_snapshot_is_single_cell_at_head() {
+        let mut tape = InfiniteTape::new();
+        tape.left();
+        tape.left();
+        let snap = tape.to_snapshot();
+        assert_eq!(snap.origin, -2);
+        assert_eq!(snap.cells, vec![0]);
+        assert_eq!(snap.head, -2);
+    }
+
+    #[test]
+    fn snapshot_round_trip_law() {
+        let mut tape = InfiniteTape::from_cells([true, true, false, true], -3, 2);
+        tape.write(1).unwrap();
+        let back = InfiniteTape::from_snapshot(&tape.to_snapshot()).unwrap();
+        assert_eq!(back.marked_cells(), tape.marked_cells());
+        assert_eq!(back.head(), tape.head());
+    }
 
     #[test]
     fn blank_tape_reads_zero_everywhere_without_allocating() {
