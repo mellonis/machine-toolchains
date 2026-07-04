@@ -28,16 +28,22 @@ impl TapeBlockFile {
         out.push(0); // flags
         put_u32(&mut out, 0); // crc placeholder
 
-        out.push(self.alphabet.len() as u8);
+        out.push(u8::try_from(self.alphabet.len()).expect("alphabet fits u8"));
         for glyph in &self.alphabet {
-            put_u16(&mut out, glyph.len() as u16);
+            put_u16(
+                &mut out,
+                u16::try_from(glyph.len()).expect("glyph fits u16"),
+            );
             out.extend_from_slice(glyph.as_bytes());
         }
 
-        out.push(self.tapes.len() as u8);
+        out.push(u8::try_from(self.tapes.len()).expect("tape count fits u8"));
         for tape in &self.tapes {
             put_i64(&mut out, tape.origin);
-            put_u32(&mut out, tape.cells.len() as u32);
+            put_u32(
+                &mut out,
+                u32::try_from(tape.cells.len()).expect("cells fit u32"),
+            );
             out.extend_from_slice(&tape.cells);
             put_i64(&mut out, tape.head);
         }

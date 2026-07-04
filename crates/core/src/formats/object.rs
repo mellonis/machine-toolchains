@@ -87,13 +87,19 @@ impl ObjectFile {
         });
         put_u32(&mut out, 0); // crc placeholder
 
-        put_u32(&mut out, pool.strings.len() as u32);
+        put_u32(
+            &mut out,
+            u32::try_from(pool.strings.len()).expect("string pool fits u32"),
+        );
         for s in &pool.strings {
-            put_u16(&mut out, s.len() as u16);
+            put_u16(&mut out, u16::try_from(s.len()).expect("string fits u16"));
             out.extend_from_slice(s.as_bytes());
         }
 
-        put_u32(&mut out, self.symbols.len() as u32);
+        put_u32(
+            &mut out,
+            u32::try_from(self.symbols.len()).expect("symbol count fits u32"),
+        );
         for (sym, &name_idx) in self.symbols.iter().zip(&symbol_names) {
             put_u32(&mut out, name_idx);
             match sym.def {
@@ -108,13 +114,19 @@ impl ObjectFile {
             }
         }
 
-        put_u32(&mut out, self.blobs.len() as u32);
+        put_u32(
+            &mut out,
+            u32::try_from(self.blobs.len()).expect("blob count fits u32"),
+        );
         for blob in &self.blobs {
-            put_u32(&mut out, blob.len() as u32);
+            put_u32(&mut out, u32::try_from(blob.len()).expect("blob fits u32"));
             out.extend_from_slice(blob);
         }
 
-        put_u32(&mut out, self.relocations.len() as u32);
+        put_u32(
+            &mut out,
+            u32::try_from(self.relocations.len()).expect("relocation count fits u32"),
+        );
         for reloc in &self.relocations {
             put_u32(&mut out, reloc.blob);
             put_u32(&mut out, reloc.offset);
@@ -122,13 +134,24 @@ impl ObjectFile {
         }
 
         if let Some(per_blob) = &self.debug {
+            debug_assert_eq!(
+                per_blob.len(),
+                self.blobs.len(),
+                "debug section must parallel blobs"
+            );
             for (d, names) in per_blob.iter().zip(&debug_label_names) {
-                put_u32(&mut out, d.labels.len() as u32);
+                put_u32(
+                    &mut out,
+                    u32::try_from(d.labels.len()).expect("label count fits u32"),
+                );
                 for ((_, offset), &name_idx) in d.labels.iter().zip(names) {
                     put_u32(&mut out, name_idx);
                     put_u32(&mut out, *offset);
                 }
-                put_u32(&mut out, d.lines.len() as u32);
+                put_u32(
+                    &mut out,
+                    u32::try_from(d.lines.len()).expect("line count fits u32"),
+                );
                 for (code_offset, line) in &d.lines {
                     put_u32(&mut out, *code_offset);
                     put_u32(&mut out, *line);
@@ -254,7 +277,7 @@ impl ObjectFile {
                     "relocation symbol index out of range",
                 ));
             }
-            if reloc.offset as usize + 4 > blob.len() {
+            if u64::from(reloc.offset) + 4 > blob.len() as u64 {
                 return Err(FormatError::Malformed("relocation outside blob"));
             }
         }
