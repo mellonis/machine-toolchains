@@ -13,6 +13,7 @@ pub const ARCH_PM1: u8 = 0x01;
 
 pub mod executable;
 pub mod object;
+pub mod tapeblock;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FormatError {

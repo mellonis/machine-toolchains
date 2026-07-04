@@ -34,7 +34,6 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(self.bytes(4)?.try_into().unwrap()))
     }
 
-    #[allow(dead_code)]
     pub(crate) fn i64(&mut self) -> Result<i64, FormatError> {
         Ok(i64::from_le_bytes(self.bytes(8)?.try_into().unwrap()))
     }
@@ -56,7 +55,6 @@ pub(crate) fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
-#[allow(dead_code)]
 pub(crate) fn put_i64(out: &mut Vec<u8>, v: i64) {
     out.extend_from_slice(&v.to_le_bytes());
 }
