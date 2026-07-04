@@ -6,3 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+proptest = "1"
