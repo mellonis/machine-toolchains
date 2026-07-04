@@ -159,7 +159,7 @@ impl ObjectFile {
         let _crc = r.u32()?;
 
         let string_count = r.u32()? as usize;
-        let mut strings = Vec::with_capacity(string_count);
+        let mut strings = Vec::new();
         for _ in 0..string_count {
             let len = r.u16()? as usize;
             let raw = r.bytes(len)?;
@@ -175,7 +175,7 @@ impl ObjectFile {
         };
 
         let symbol_count = r.u32()? as usize;
-        let mut raw_symbols = Vec::with_capacity(symbol_count);
+        let mut raw_symbols = Vec::new();
         for _ in 0..symbol_count {
             let name_idx = r.u32()?;
             let kind = r.u8()?;
@@ -184,14 +184,14 @@ impl ObjectFile {
         }
 
         let blob_count = r.u32()? as usize;
-        let mut blobs = Vec::with_capacity(blob_count);
+        let mut blobs = Vec::new();
         for _ in 0..blob_count {
             let len = r.u32()? as usize;
             blobs.push(r.bytes(len)?.to_vec());
         }
 
         let reloc_count = r.u32()? as usize;
-        let mut relocations = Vec::with_capacity(reloc_count);
+        let mut relocations = Vec::new();
         for _ in 0..reloc_count {
             relocations.push(Relocation {
                 blob: r.u32()?,
@@ -201,17 +201,17 @@ impl ObjectFile {
         }
 
         let debug = if flags & FLAG_HAS_DEBUG != 0 {
-            let mut per_blob = Vec::with_capacity(blob_count);
+            let mut per_blob = Vec::new();
             for _ in 0..blob_count {
                 let label_count = r.u32()? as usize;
-                let mut labels = Vec::with_capacity(label_count);
+                let mut labels = Vec::new();
                 for _ in 0..label_count {
                     let name = name_of(r.u32()?)?;
                     let offset = r.u32()?;
                     labels.push((name, offset));
                 }
                 let line_count = r.u32()? as usize;
-                let mut lines = Vec::with_capacity(line_count);
+                let mut lines = Vec::new();
                 for _ in 0..line_count {
                     lines.push((r.u32()?, r.u32()?));
                 }
@@ -224,7 +224,7 @@ impl ObjectFile {
 
         r.finish()?;
 
-        let mut symbols = Vec::with_capacity(symbol_count);
+        let mut symbols = Vec::new();
         for (name_idx, kind, blob) in raw_symbols {
             let name = name_of(name_idx)?;
             let def = match kind {
@@ -349,6 +349,16 @@ mod tests {
             ObjectFile::from_bytes(&bytes),
             Err(FormatError::Malformed("symbol blob index out of range"))
         ));
+    }
+
+    #[test]
+    fn huge_wire_count_is_rejected_without_allocating() {
+        let mut bytes = sample().to_bytes();
+        // string count is the first u32 after the 11-byte header
+        // (magic 3 + version 2 + arch 1 + flags 1 + crc 4)
+        bytes[11..15].copy_from_slice(&u32::MAX.to_le_bytes());
+        crate::formats::crc32::stamp_crc(&mut bytes, 7);
+        assert!(ObjectFile::from_bytes(&bytes).is_err());
     }
 
     #[test]
