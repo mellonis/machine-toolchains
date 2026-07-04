@@ -1,0 +1,210 @@
+; =============================================================================
+; brainfuck UTM in TM-1 assembly — SPECULATIVE (arch 0x02 is not implemented;
+; this file validates the Appendix A design of the toolchain spec).
+;
+; Source algorithm: mellonis/machines-demo#64 — a ~20-state universal Turing
+; machine interpreting any brainfuck program from its program tape.
+;
+; 4 tapes:  [0] prog   bf source + 'H' sentinel; head = instruction pointer
+;           [1] data   bf cells; head = data pointer
+;           [2] out    cells written by '.'
+;           [3] cnt    unary stack of bracket-nesting levels
+;
+; Alphabets (symbol indices; glyphs are presentation metadata):
+;   prog: 0=' '  1='+'  2='-'  3='<'  4='>'  5='.'  6='['  7=']'  8='H'
+;   data, out: byte values 0..126  (127 capped: index 0x7F is the match
+;              wildcard in the compact symbol family — see spec Appendix A)
+;   cnt:  0=' '  1='*'
+;
+; Vector notation, one element per tape [prog, data, out, cnt]:
+;   match rows (.row):  index — exact;  * — any symbol (ifOtherSymbol)
+;   write vectors (wr): index — write;  - — keep (no write on that tape)
+;   move vectors (mov): > right;  < left;  . stay
+;
+; Each conditional TM state compiles to:   rd; mtc <table>; djmp <targets>
+; Unconditional TM states (single ifOtherSymbol rule) need no match at all —
+; they compile to straight-line code.  TapeCommand's "write-then-move" is
+; naturally wr-then-mov here, since TM-1 separates the two instructions.
+; =============================================================================
+
+.section tables
+
+; ---- fetch: dispatch on the program symbol under the IP -----------------
+Tfetch: .row    [1,*,*,*]               ; '+'
+        .row    [2,*,*,*]               ; '-'
+        .row    [3,*,*,*]               ; '<'
+        .row    [4,*,*,*]               ; '>'
+        .row    [5,*,*,*]               ; '.'
+        .row    [6,*,*,*]               ; '['
+        .row    [7,*,*,*]               ; ']'
+        .row    [8,*,*,*]               ; 'H'
+                                        ; no catch-all: an unknown program
+                                        ; symbol leaves MR=0 and djmp traps —
+                                        ; the UTM gets an "invalid opcode"
+                                        ; fault for free
+Dfetch: .targets L_plus, L_minus, L_left, L_right, L_dot, L_lbr, L_rbr, L_halt
+
+; ---- '+' / '-' : the 127-way increment/decrement tables ------------------
+; A real TM pays for arithmetic with one rule per value; .rept keeps the
+; SOURCE compact while the TABLE stays what it must be.
+.rept v, 0, 126
+Tinc:   .row    [*,{v},*,*]
+.endr
+Dinc:   .rept v, 0, 126
+        .target Linc{v}
+        .endr
+
+.rept v, 0, 126
+Tdec:   .row    [*,{v},*,*]
+.endr
+Ddec:   .rept v, 0, 126
+        .target Ldec{v}
+        .endr
+
+; ---- '.' : copy current data cell to the output tape ---------------------
+.rept v, 0, 126
+Tdot:   .row    [*,{v},*,*]
+.endr
+Ddot:   .rept v, 0, 126
+        .target Ldot{v}
+        .endr
+
+; ---- '[' / ']' : zero-test on the data cell ------------------------------
+Tzero:  .row    [*,0,*,*]               ; MR=1 : data cell is zero
+        .row    [*,*,*,*]               ; MR=2 : anything else (catch-all)
+Dlbr:   .targets L_lbr_z, L_lbr_nz
+Drbr:   .targets L_rbr_z, L_rbr_nz
+
+; ---- skip-forward scanner (after '[' with data==0) ------------------------
+Tsf:    .row    [6,*,*,*]               ; '[' : push a nesting level
+        .row    [7,*,*,*]               ; ']' : pop one
+        .row    [*,*,*,*]               ; anything else: keep scanning
+Dsf:    .targets L_sf_push, L_sf_pop, L_sf_scan
+
+; pop-check: did the counter stack just underflow to empty?
+Tcnt:   .row    [*,*,*,0]               ; MR=1 : stack empty (' ')
+        .row    [*,*,*,1]               ; MR=2 : still levels ('*')
+Dsfp:   .targets L_fetch, L_sf          ; empty → resume fetch; else scan on
+
+; ---- skip-backward scanner (after ']' with data!=0), mirror image ---------
+Tsb:    .row    [7,*,*,*]               ; ']' : push
+        .row    [6,*,*,*]               ; '[' : pop
+        .row    [*,*,*,*]               ; scan
+Dsb:    .targets L_sb_push, L_sb_pop, L_sb_scan
+Dsbp:   .targets L_sb_done, L_sb        ; empty → step right, fetch; else scan
+
+.section code
+.func main
+
+; ==== fetch ================================================================
+L_fetch:
+        rd                              ; strobe all 4 heads into the latch
+        mtc     Tfetch
+        djmp    Dfetch
+
+; ==== '+' ==================================================================
+L_plus: rd
+        mtc     Tinc
+        djmp    Dinc
+.rept v, 0, 126
+Linc{v}:
+        wr      [-,{(v+1)%127},-,-]     ; bump data cell (wrap 126→0)
+        mov     [>,.,.,.]               ; IP++
+        jmp     L_fetch
+.endr
+
+; ==== '-' ==================================================================
+L_minus:
+        rd
+        mtc     Tdec
+        djmp    Ddec
+.rept v, 0, 126
+Ldec{v}:
+        wr      [-,{(v+126)%127},-,-]   ; decrement with wrap 0→126
+        mov     [>,.,.,.]
+        jmp     L_fetch
+.endr
+
+; ==== '>' / '<' : unconditional — no match needed ==========================
+L_right:
+        mov     [>,>,.,.]               ; IP++, data head right
+        jmp     L_fetch
+L_left: mov     [>,<,.,.]               ; IP++, data head left
+        jmp     L_fetch
+
+; ==== '.' : copy data cell to output, advance output head ==================
+L_dot:  rd
+        mtc     Tdot
+        djmp    Ddot
+.rept v, 0, 126
+Ldot{v}:
+        wr      [-,-,{v},-]             ; write the byte to the output tape
+        mov     [>,.,>,.]               ; IP++, output head right
+        jmp     L_fetch
+.endr
+
+; ==== '[' ==================================================================
+L_lbr:  rd
+        mtc     Tzero
+        djmp    Dlbr
+L_lbr_z:                                ; data==0 : push one level, skip fwd
+        mov     [>,.,.,>]               ; IP++, cnt head right...
+        wr      [-,-,-,1]               ; ...then write '*'  (push = mov;wr)
+        jmp     L_sf
+L_lbr_nz:                               ; data!=0 : enter the loop body
+        mov     [>,.,.,.]
+        jmp     L_fetch
+
+; ==== ']' ==================================================================
+L_rbr:  rd
+        mtc     Tzero
+        djmp    Drbr
+L_rbr_z:                                ; data==0 : leave the loop
+        mov     [>,.,.,.]
+        jmp     L_fetch
+L_rbr_nz:                               ; data!=0 : push level, skip backward
+        mov     [<,.,.,>]               ; IP--, cnt head right...
+        wr      [-,-,-,1]               ; ...write '*'
+        jmp     L_sb
+
+; ==== skip-forward =========================================================
+L_sf:   rd
+        mtc     Tsf
+        djmp    Dsf
+L_sf_push:
+        mov     [>,.,.,>]
+        wr      [-,-,-,1]
+        jmp     L_sf
+L_sf_pop:
+        wr      [-,-,-,0]               ; pop = wr ' ' then mov left
+        mov     [>,.,.,<]
+        rd                              ; underflow check on the new top
+        mtc     Tcnt
+        djmp    Dsfp                    ; empty → L_fetch, else → L_sf
+L_sf_scan:
+        mov     [>,.,.,.]
+        jmp     L_sf
+
+; ==== skip-backward ========================================================
+L_sb:   rd
+        mtc     Tsb
+        djmp    Dsb
+L_sb_push:
+        mov     [<,.,.,>]
+        wr      [-,-,-,1]
+        jmp     L_sb
+L_sb_pop:
+        wr      [-,-,-,0]
+        mov     [<,.,.,<]
+        rd
+        mtc     Tcnt
+        djmp    Dsbp                    ; empty → L_sb_done, else → L_sb
+L_sb_scan:
+        mov     [<,.,.,.]
+        jmp     L_sb
+L_sb_done:
+        mov     [>,.,.,.]               ; step back onto the '[' for fetch
+        jmp     L_fetch
+
+; ==== 'H' ==================================================================
+L_halt: stp
