@@ -685,7 +685,7 @@ mod tests {
         tape.right();
         tape.right();
         tape.right();
-        assert_eq!(tape.head(), 1);
+        assert_eq!(tape.head(), 0); // (3 + 5) mod 4
     }
 
     #[test]
