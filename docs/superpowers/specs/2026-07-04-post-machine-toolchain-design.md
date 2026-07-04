@@ -403,7 +403,7 @@ head position directly.
 ### 6.2 `.pmo` — object file
 
 ```
-magic "MO" + u8 epoch (0x01) | u16 format version | u8 arch (0x01 = PM-1) | u8 flags (0)
+magic "MO" + u8 epoch (0x01) | u16 format version | u8 arch (0x01 = PM-1) | u8 flags (bit0 = has debug section; other bits 0)
 u32 crc32 (same scheme as .pmx)
 string table
 symbol table:  name → { defined: blob index | external }
