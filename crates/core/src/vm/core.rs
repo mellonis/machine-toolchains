@@ -13,13 +13,23 @@ enum Phase {
         kind: OperandKind,
         buf: Vec<u8>,
     },
-    /// Task 4 stub: lowering is stored, then Step is emitted without
-    /// executing. Task 5 replaces this with real micro-op execution.
-    Retire {
-        #[allow(dead_code)] // consumed starting Task 5
-        ops: Vec<MicroOp>,
+    Execute {
+        ops: std::collections::VecDeque<MicroOp>,
+        pending: Pending,
     },
+    StepAck,
     Done,
+}
+
+/// What the in-flight bus request was for.
+enum Pending {
+    None,
+    Move,
+    Write,
+    Latch { match_index: u32 },
+    EntCheck { target: u32 },
+    Push { target: u32 },
+    Pop,
 }
 
 pub struct Core<'a> {
@@ -75,10 +85,11 @@ impl<'a> Core<'a> {
             Phase::FetchOperand { opcode, kind, buf } => {
                 self.on_operand_byte(opcode, kind, buf, resp)
             }
-            Phase::Retire { .. } => {
-                // Task 4 stub: driver acknowledged Step with Ok — fetch next.
-                self.start()
+            Phase::Execute { ops, pending } => {
+                self.phase = Phase::Execute { ops, pending };
+                self.step_execute(resp)
             }
+            Phase::StepAck => self.start(),
             Phase::Done => self.trap(Trap::CodeOutOfBounds { at: self.ip }),
         }
     }
@@ -146,14 +157,124 @@ impl<'a> Core<'a> {
     fn finish_fetch(&mut self, opcode: u8, operand: Operand) -> CoreEvent {
         match self.arch.lower(opcode, &operand) {
             Ok(ops) => {
-                // Task 4 stub: store lowering, retire immediately.
-                self.phase = Phase::Retire { ops };
-                CoreEvent::Step
+                self.phase = Phase::Execute {
+                    ops: ops.into(),
+                    pending: Pending::None,
+                };
+                self.step_execute(BusResponse::Ok)
             }
             Err(_) => self.trap(Trap::BadOperand {
                 at: self.instr_start,
             }),
         }
+    }
+
+    fn step_execute(&mut self, resp: BusResponse) -> CoreEvent {
+        let Phase::Execute { mut ops, pending } = std::mem::replace(&mut self.phase, Phase::Done)
+        else {
+            unreachable!("step_execute outside Execute phase");
+        };
+
+        // 1. Settle the in-flight request, if any.
+        match pending {
+            Pending::None => {}
+            Pending::Move | Pending::Write => match resp {
+                BusResponse::Ok => {}
+                BusResponse::Fault(fault) => return self.trap(Trap::Device { fault }),
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+            Pending::Latch { match_index } => match resp {
+                BusResponse::Symbol(s) => self.mf = s == match_index,
+                BusResponse::Fault(fault) => return self.trap(Trap::Device { fault }),
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+            Pending::EntCheck { target } => match resp {
+                BusResponse::Byte(b) if self.arch.is_entry_marker(b) => {
+                    self.phase = Phase::Execute {
+                        ops,
+                        pending: Pending::Push { target },
+                    };
+                    return CoreEvent::Request(BusRequest::StackPush { value: self.ip });
+                }
+                BusResponse::Byte(_) | BusResponse::OutOfCode => {
+                    return self.trap(Trap::CallTargetNotEntry { target });
+                }
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+            Pending::Push { target } => match resp {
+                BusResponse::Ok => self.ip = target,
+                BusResponse::StackFull => return self.trap(Trap::StackOverflow),
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+            Pending::Pop => match resp {
+                BusResponse::Value(v) => self.ip = v,
+                BusResponse::StackEmpty => return self.trap(Trap::StackUnderflow),
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+        }
+
+        // 2. Issue the next micro-op.
+        while let Some(op) = ops.pop_front() {
+            let (request, pending) = match op {
+                MicroOp::Nop | MicroOp::Brk => continue,
+                MicroOp::Stop => {
+                    self.phase = Phase::Done;
+                    return CoreEvent::Stopped;
+                }
+                MicroOp::Halt => {
+                    self.phase = Phase::Done;
+                    return CoreEvent::Halted;
+                }
+                MicroOp::MoveLeft => (BusRequest::DeviceMoveLeft { dev: 0 }, Pending::Move),
+                MicroOp::MoveRight => (BusRequest::DeviceMoveRight { dev: 0 }, Pending::Move),
+                MicroOp::Write(index) => {
+                    (BusRequest::DeviceWrite { dev: 0, index }, Pending::Write)
+                }
+                MicroOp::LatchMatch(match_index) => (
+                    BusRequest::DeviceRead { dev: 0 },
+                    Pending::Latch { match_index },
+                ),
+                MicroOp::JumpRel(off) => {
+                    match self.jump_target(off) {
+                        Ok(t) => self.ip = t,
+                        Err(trap) => return self.trap(trap),
+                    }
+                    continue;
+                }
+                MicroOp::JumpRelIf { off, when_match } => {
+                    if self.mf == when_match {
+                        match self.jump_target(off) {
+                            Ok(t) => self.ip = t,
+                            Err(trap) => return self.trap(trap),
+                        }
+                    }
+                    continue;
+                }
+                MicroOp::Call(off) => match self.jump_target(off) {
+                    Ok(target) => (
+                        BusRequest::CodeRead { addr: target },
+                        Pending::EntCheck { target },
+                    ),
+                    Err(trap) => return self.trap(trap),
+                },
+                MicroOp::Ret => (BusRequest::StackPop, Pending::Pop),
+            };
+            self.phase = Phase::Execute { ops, pending };
+            return CoreEvent::Request(request);
+        }
+
+        // 3. Instruction retired.
+        self.phase = Phase::StepAck;
+        CoreEvent::Step
+    }
+
+    /// Operands are relative to the END of the instruction (spec §5);
+    /// at execute time `self.ip` == instr_end (fetch advanced it).
+    fn jump_target(&self, off: i32) -> Result<u32, Trap> {
+        let target = i64::from(self.ip) + i64::from(off);
+        u32::try_from(target).map_err(|_| Trap::CodeOutOfBounds {
+            at: self.instr_start,
+        })
     }
 }
 
@@ -213,9 +334,12 @@ mod tests {
     #[test]
     fn fetches_symbol_vec_until_high_bit() {
         // 0x07 = wr(vec); TestArch requires exactly one element;
-        // 0x81 = payload 1 with high bit (last element)
+        // 0x81 = payload 1 with high bit (last element).
+        // Task 5: fetch completes and execution begins immediately, so the
+        // observable outcome is the Write micro-op's device request (index 1,
+        // pinning the 7-bit payload decode) rather than a bare Step.
         let (ev, fetched) = run_fetch(&[0x07, 0x81], 0);
-        assert_eq!(ev, Ev::Step);
+        assert_eq!(ev, Ev::Request(Rq::DeviceWrite { dev: 0, index: 1 }));
         assert_eq!(fetched, vec![0, 1]);
     }
 
@@ -253,5 +377,186 @@ mod tests {
     fn entry_offset_is_respected() {
         let (_, fetched) = run_fetch(&[0x00, 0x00, 0x01], 2);
         assert_eq!(fetched, vec![2]);
+    }
+
+    /// Full scripted driver: code image + tiny stack + fake device log.
+    /// Returns (final event, request log, mf).
+    fn run_full(
+        code: &[u8],
+        entry: u32,
+        stack_cap: usize,
+        device_symbols: &[u32], // successive DeviceRead answers
+        max_steps: usize,
+    ) -> (Ev, Vec<Rq>, bool) {
+        let arch = TestArch;
+        let mut core = Core::new(&arch, entry);
+        let mut log = Vec::new();
+        let mut stack: Vec<u32> = Vec::new();
+        let mut reads = device_symbols.iter().copied();
+        let mut steps = 0;
+        let mut ev = core.start();
+        loop {
+            match ev {
+                Ev::Request(rq) => {
+                    log.push(rq);
+                    let resp = match rq {
+                        Rq::CodeRead { addr } => match code.get(addr as usize) {
+                            Some(&b) => Rs::Byte(b),
+                            None => Rs::OutOfCode,
+                        },
+                        Rq::StackPush { value } => {
+                            if stack.len() == stack_cap {
+                                Rs::StackFull
+                            } else {
+                                stack.push(value);
+                                Rs::Ok
+                            }
+                        }
+                        Rq::StackPop => match stack.pop() {
+                            Some(v) => Rs::Value(v),
+                            None => Rs::StackEmpty,
+                        },
+                        Rq::DeviceRead { .. } => Rs::Symbol(reads.next().unwrap_or(0)),
+                        Rq::DeviceMoveLeft { .. }
+                        | Rq::DeviceMoveRight { .. }
+                        | Rq::DeviceWrite { .. } => Rs::Ok,
+                    };
+                    ev = core.resume(resp);
+                }
+                Ev::Step => {
+                    steps += 1;
+                    if steps >= max_steps {
+                        return (Ev::Step, log, core.mf());
+                    }
+                    ev = core.resume(Rs::Ok);
+                }
+                terminal => return (terminal, log, core.mf()),
+            }
+        }
+    }
+
+    #[test]
+    fn move_write_latch_sequence_and_mf() {
+        // right (move+latch reads 1 → mf=true), wr 0 (+latch reads 0 → mf=false), stop
+        let code = [0x06, 0x07, 0x80, 0x02];
+        let (ev, log, mf) = run_full(&code, 0, 4, &[1, 0], 100);
+        assert_eq!(ev, Ev::Stopped);
+        assert!(!mf);
+        assert_eq!(
+            log,
+            vec![
+                Rq::CodeRead { addr: 0 },
+                Rq::DeviceMoveRight { dev: 0 },
+                Rq::DeviceRead { dev: 0 },
+                Rq::CodeRead { addr: 1 },
+                Rq::CodeRead { addr: 2 },
+                Rq::DeviceWrite { dev: 0, index: 0 },
+                Rq::DeviceRead { dev: 0 },
+                Rq::CodeRead { addr: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn conditional_jump_taken_and_untaken() {
+        // 0x09 jm rel32: at entry mf=false → falls through to stop at 5;
+        // then with initial mf=true → jumps back? Simpler: two programs.
+        let fall = [0x09, 0x01, 0x00, 0x00, 0x00, 0x02, 0x02];
+        let (ev, log, _) = run_full(&fall, 0, 4, &[], 100);
+        assert_eq!(ev, Ev::Stopped);
+        assert_eq!(*log.last().unwrap(), Rq::CodeRead { addr: 5 }); // fell through
+
+        // taken: set mf via a latch first — right reads 1 → mf=true, then jm +1
+        // layout: [0]=0x06 right, [1..6]=jm +1, [6]=halt (skipped), [7]=stop
+        let taken = [0x06, 0x09, 0x01, 0x00, 0x00, 0x00, 0x03, 0x02];
+        let (ev2, log2, _) = run_full(&taken, 0, 4, &[1], 100);
+        assert_eq!(ev2, Ev::Stopped); // jumped over the halt at 6 to stop at 7
+        assert!(log2.contains(&Rq::CodeRead { addr: 7 }));
+        assert!(!log2.contains(&Rq::CodeRead { addr: 6 }) || matches!(ev2, Ev::Stopped));
+    }
+
+    #[test]
+    fn unconditional_jump_targets_end_relative() {
+        // jmp rel8 at 0: instr_end = 2; off = +1 → target 3 (skip halt at 2)
+        let code = [0x08, 0x01, 0x03, 0x02];
+        let (ev, log, _) = run_full(&code, 0, 4, &[], 100);
+        assert_eq!(ev, Ev::Stopped);
+        assert!(log.contains(&Rq::CodeRead { addr: 3 }));
+    }
+
+    #[test]
+    fn negative_jump_target_traps() {
+        let code = [0x08, 0x80]; // jmp rel8 -128 from instr_end 2 → -126
+        let (ev, _, _) = run_full(&code, 0, 4, &[], 100);
+        // Pinned to `at: 0` (instr_start): this is only reachable if the
+        // operand byte 0x80 was actually sign-extended to -128 and the jump
+        // trapped immediately at the Call/JumpRel site. A u8 misread (off =
+        // +128) would instead land ip at 130 and only trap later, off-the-end,
+        // at a different address — `matches!(.., { .. })` would miss that bug.
+        assert_eq!(ev, Ev::Trapped(Trap::CodeOutOfBounds { at: 0 }));
+    }
+
+    #[test]
+    fn call_checks_entry_pushes_and_jumps_ret_returns() {
+        // [0..5] call +1 → target 6 must hold 0x0E (entry) — instr_end 5, off 1
+        // [5] stop  [6] 0x0E entry  [7] ret
+        let code = [0x0A, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
+        let (ev, log, _) = run_full(&code, 0, 4, &[], 100);
+        assert_eq!(ev, Ev::Stopped);
+        let call_check = Rq::CodeRead { addr: 6 }; // ent verification read
+        let push = Rq::StackPush { value: 5 };
+        let pos_check = log.iter().position(|r| *r == call_check).unwrap();
+        let pos_push = log.iter().position(|r| *r == push).unwrap();
+        assert!(pos_check < pos_push, "ent verified before push");
+        assert!(log.contains(&Rq::StackPop));
+        assert!(log.contains(&Rq::CodeRead { addr: 5 })); // returned to stop
+    }
+
+    #[test]
+    fn call_to_non_entry_traps() {
+        let code = [0x0A, 0x01, 0x00, 0x00, 0x00, 0x02, 0x01]; // target 6 = nop, not entry
+        let (ev, _, _) = run_full(&code, 0, 4, &[], 100);
+        assert_eq!(ev, Ev::Trapped(Trap::CallTargetNotEntry { target: 6 }));
+    }
+
+    #[test]
+    fn stack_overflow_and_underflow_trap() {
+        // capacity 0 stack: call overflows
+        let code = [0x0A, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
+        let (ev, _, _) = run_full(&code, 0, 0, &[], 100);
+        assert_eq!(ev, Ev::Trapped(Trap::StackOverflow));
+        // bare ret underflows
+        let (ev2, _, _) = run_full(&[0x0B], 0, 4, &[], 100);
+        assert_eq!(ev2, Ev::Trapped(Trap::StackUnderflow));
+    }
+
+    #[test]
+    fn device_fault_becomes_trap() {
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0);
+        core.start();
+        // feed: opcode 0x07 (wr), operand 0x82 → Write(2) request → Fault
+        core.resume(Rs::Byte(0x07));
+        let ev = core.resume(Rs::Byte(0x82));
+        let Ev::Request(Rq::DeviceWrite { index: 2, .. }) = ev else {
+            panic!("expected write request, got {ev:?}");
+        };
+        let ev = core.resume(Rs::Fault(
+            crate::vm::trap::DeviceFault::IndexOutsideAlphabet { index: 2 },
+        ));
+        assert!(matches!(
+            ev,
+            Ev::Trapped(Trap::Device {
+                fault: crate::vm::trap::DeviceFault::IndexOutsideAlphabet { index: 2 }
+            })
+        ));
+    }
+
+    #[test]
+    fn halt_and_brk_nop() {
+        let (ev, _, _) = run_full(&[0x03], 0, 4, &[], 100);
+        assert_eq!(ev, Ev::Halted);
+        let (ev2, _, _) = run_full(&[0x04, 0x01, 0x02], 0, 4, &[], 100);
+        assert_eq!(ev2, Ev::Stopped); // brk and nop are no-ops without a debugger
     }
 }
