@@ -28,6 +28,7 @@
 **Files:**
 - Create: `Cargo.toml` (workspace root)
 - Create: `rust-toolchain.toml`
+- Create: `LICENSE` (GPL-3.0 text — copy verbatim from `../turing-machine-js/LICENSE`)
 - Create: `.gitignore`
 - Create: `crates/core/Cargo.toml`, `crates/core/src/lib.rs`
 - Create: `crates/post-machine/Cargo.toml`, `crates/post-machine/src/lib.rs`
@@ -47,7 +48,7 @@ members = ["crates/core", "crates/post-machine"]
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/mellonis/machine-toolchains"
 ```
 
