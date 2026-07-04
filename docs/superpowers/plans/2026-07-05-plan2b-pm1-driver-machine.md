@@ -394,8 +394,8 @@ mod tests {
 
     #[test]
     fn stack_overflow_surfaces_as_trap() {
-        // call rel32 -6 → target 0 (this instruction) = infinite recursion
-        let code = [0x0E, 0x0B, 0xFA, 0xFF, 0xFF, 0xFF, 0x02];
+        // call rel32 -6 → target 0 (the ent) = infinite recursion
+        let code = [0x0E, 0x0A, 0xFA, 0xFF, 0xFF, 0xFF, 0x02];
         // entry at 0 is 0x0E (TestArch entry marker), call at 1, instr_end 6, off -6 → 0
         let (r, _) = drive(&code, RunLimits::default(), TactProfile::ELECTRONIC);
         assert_eq!(r.outcome, Outcome::Trapped(Trap::StackOverflow)); // capacity 4
