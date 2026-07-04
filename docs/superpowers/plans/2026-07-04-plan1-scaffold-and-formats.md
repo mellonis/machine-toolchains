@@ -1146,6 +1146,29 @@ mod tests {
             Err(FormatError::BadCrc { .. })
         ));
     }
+
+    #[test]
+    fn no_tapes_rejected() {
+        let block = TapeBlockFile { alphabet: vec![" ".into(), "*".into()], tapes: vec![] };
+        let bytes = block.to_bytes();
+        assert!(matches!(
+            TapeBlockFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("no tapes"))
+        ));
+    }
+
+    #[test]
+    fn non_utf8_glyph_rejected() {
+        let mut bytes = sample().to_bytes();
+        // header is 10 bytes (magic 3 + version 2 + flags 1 + crc 4); then
+        // u8 alphabet count @10, u16 glyph len @11..13, glyph bytes @13.
+        bytes[13] = 0xFF; // invalidate the single-byte " " glyph
+        crate::formats::crc32::stamp_crc(&mut bytes, 6);
+        assert!(matches!(
+            TapeBlockFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("glyph not utf-8"))
+        ));
+    }
 }
 ```
 
