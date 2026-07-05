@@ -755,6 +755,12 @@ requires a `grep -rn "spec §" crates/` sweep in the same commit. This
 spec is the build-time design authority; the user-facing references in
 `docs/` (Plan 7) derive from it and never fork it.
 
+**Forge agnosticism:** repo content never hard-links the hosting provider.
+Cross-repo references use plain text — repo name + issue number
+(`turing-machine-js #219`) — never URLs; the canonical repository URL
+lives ONLY in `Cargo.toml`'s `repository` metadata field (one line to
+update on migration).
+
 ## 13. Out of scope (v1)
 
 - Cross-module (link-time) inlining — extension point only.
