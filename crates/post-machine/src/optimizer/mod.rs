@@ -12,6 +12,7 @@ pub mod cell_state;
 pub mod check_fold;
 pub mod dataflow;
 pub mod dce;
+pub mod inline;
 pub mod jump_threading;
 pub mod tail_call;
 
@@ -57,6 +58,11 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("tail-call", tail_call::run),
 ];
 
+type ProgramPassFn = fn(&mut IrProgram) -> u32;
+
+/// Program-level passes (cross-function), run at round start.
+const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[("inline", inline::run)];
+
 const MAX_ROUNDS: u32 = 10;
 
 /// Run the enabled pipeline to a change-fixpoint (round-capped). `-O0`
@@ -73,6 +79,29 @@ pub fn optimize(
     loop {
         report.rounds += 1;
         let mut round_changes = 0u32;
+        for (name, pass) in PROGRAM_PIPELINE {
+            if options.disabled.contains(*name) {
+                continue;
+            }
+            let n = pass(ir);
+            #[cfg(debug_assertions)]
+            for f in &ir.functions {
+                if let Err(e) = crate::ir::validate_function(f) {
+                    panic!("pass `{name}` broke IR invariants: {e}");
+                }
+            }
+            if n > 0 {
+                report.changes.push(PassChange {
+                    pass: name,
+                    function: "(module)".to_string(),
+                    changes: n,
+                });
+                if options.capture {
+                    snapshots.push((format!("after:{name}"), ir.clone()));
+                }
+            }
+            round_changes += n;
+        }
         for (name, pass) in PIPELINE {
             if options.disabled.contains(*name) {
                 continue;

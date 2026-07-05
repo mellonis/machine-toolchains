@@ -250,13 +250,50 @@ fn capture_ir_records_the_pass_stages() {
 }
 
 #[test]
-fn spec_sample_is_already_optimal() {
-    // goToEnd / main from spec §3: nothing for 6a passes to do —
-    // goToEnd's loop head re-merges to Uncoupled; in main, `right`
-    // after the call leaves Coupled(None) (the call itself changes
-    // nothing that matters), and the arm writes are genuine value
-    // flips no fact could license dropping. -O1 must be byte-identical
-    // to -O0: the optimizer's do-no-harm floor.
+fn spec_sample_inlines_at_o1() {
+    // 6a's "already optimal" golden is obsolete BY DESIGN: with inline,
+    // main absorbs goToEnd (leaf, 2 ops) and the linker then drops the
+    // now-uncalled goToEnd. Derivation of the 14-byte -O1 executable:
+    // main after splice: B[](goto g0'), g0'[rgt](check{g0',g1'}),
+    // g1'[lft](goto C), C[rgt](check{b1,b2}), b1[wr0](ret), b2[wr1](ret)
+    // → ent, rgt, jm.s -3, lft, rgt, jnm.s +3, wr 0, stp, wr 1, stp
+    // = 1+1+2+1+1+2+2+1+2+1 = 14. -O0 linked = 18 (Plan 5 golden).
+    let src = "\
+goToEnd() {
+1:  right;
+    check(1, 2);
+2:  left;
+}
+
+main() {
+    @goToEnd();
+    right;
+    check(3, 4);
+3:  unmark(!);
+4:  mark;
+}
+";
+    let (o0, o1) = assert_equivalent(src, TAPES);
+    assert_eq!((o0, o1), (18, 14));
+
+    // And the linker confirms the callee died:
+    let out = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
+    assert_eq!(linked.report.dropped, vec!["goToEnd".to_string()]);
+}
+
+#[test]
+fn fno_inline_restores_the_do_no_harm_floor() {
+    // With inline off, nothing in the 6b pipeline fires on the spec
+    // sample (no tail position, no duplicate blocks, no empty-return
+    // adjacency) — the old 6a byte-stability golden, behind the flag.
     let src = "\
 goToEnd() {
 1:  right;
@@ -277,6 +314,7 @@ main() {
         src,
         CompileOptions {
             opt_level: OptLevel::O1,
+            disabled_passes: vec!["inline".to_string()],
             ..Default::default()
         },
     )
