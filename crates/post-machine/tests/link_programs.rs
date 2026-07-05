@@ -106,7 +106,6 @@ fn linked_executable_disassembly_reassembles_and_relinks_identically() {
 fn map_names_the_functions() {
     let obj = assemble(SPEC_SAMPLE, true).unwrap();
     let out = link(&[obj], &[], LinkOptions::default()).unwrap();
-    assert_eq!(out.map.alphabet, vec![" ".to_string(), "*".to_string()]);
     let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, vec!["main", "goToEnd"]);
     assert_eq!(out.map.functions[1].labels, vec![("L1".to_string(), 8)]); // ent at 7, L1 at 8

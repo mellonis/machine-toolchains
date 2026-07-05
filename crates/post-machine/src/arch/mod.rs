@@ -29,6 +29,10 @@ use opcodes::*;
 /// PM-1 matches against the mark index (spec §4.1).
 const MARK: u32 = 1;
 
+/// Default rendering glyphs (index 0 = blank, 1 = mark) for tooling with
+/// no tape at hand; a loaded `.pmt`'s own alphabet always wins (spec §6.3).
+pub const DEFAULT_GLYPHS: [&str; 2] = [" ", "*"];
+
 pub struct Pm1;
 
 impl Arch for Pm1 {
@@ -202,5 +206,10 @@ mod tests {
         assert_eq!(a.arch_id(), mtc_core::formats::ARCH_PM1);
         assert!(a.is_entry_marker(ENT));
         assert!(!a.is_entry_marker(NOP));
+    }
+
+    #[test]
+    fn default_glyphs_are_blank_then_mark() {
+        assert_eq!(DEFAULT_GLYPHS, [" ", "*"]);
     }
 }

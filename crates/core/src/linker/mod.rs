@@ -81,8 +81,6 @@ pub struct MapFunction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapFile {
     pub arch: u8,
-    /// Presentation glyphs; empty if unknown to the generic core linker.
-    pub alphabet: Vec<String>,
     pub functions: Vec<MapFunction>,
 }
 
@@ -139,7 +137,6 @@ pub fn link(
         },
         map: MapFile {
             arch,
-            alphabet: Vec::new(),
             functions: built.functions,
         },
         report: LinkReport {
@@ -158,7 +155,6 @@ mod tests {
     fn map_json_round_trips() {
         let map = MapFile {
             arch: 1,
-            alphabet: vec![" ".into(), "*".into()],
             functions: vec![MapFunction {
                 name: "main".into(),
                 start: 0,
@@ -169,7 +165,7 @@ mod tests {
         };
         let json = map.to_json();
         assert!(json.contains("\"main\""));
-        assert!(json.contains("\"alphabet\""));
+        assert!(!json.contains("\"alphabet\""));
         let back = MapFile::from_json(&json).unwrap();
         assert_eq!(back, map);
         assert!(MapFile::from_json("{not json").is_err());

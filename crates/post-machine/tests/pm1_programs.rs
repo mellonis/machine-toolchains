@@ -205,7 +205,7 @@ fn loader_rejects_bad_entry_and_unknown_arch() {
 }
 
 #[test]
-fn pmb_in_run_pmb_out() {
+fn pmt_in_run_pmt_out() {
     // Input tape-block file: marks at 0,1,2 and 4, head 0. Run goToEnd.
     let input = TapeBlockFile {
         alphabet: vec![" ".into(), "*".into()],
@@ -226,7 +226,7 @@ fn pmb_in_run_pmb_out() {
     assert_eq!(r.outcome, Outcome::Stopped);
     assert_eq!(tape.head(), 3);
 
-    // Snapshot the result back into a .pmb and round-trip it.
+    // Snapshot the result back into a .pmt and round-trip it.
     let output = TapeBlockFile {
         alphabet: parsed.alphabet.clone(),
         tapes: vec![tape.to_snapshot()],

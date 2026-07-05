@@ -159,7 +159,5 @@ pub fn link(
     libraries: &[ObjectFile],
     options: mtc_core::linker::LinkOptions,
 ) -> Result<mtc_core::linker::LinkOutput, mtc_core::linker::LinkError> {
-    let mut out = mtc_core::linker::link(&pm1_syntax(), objects, libraries, options)?;
-    out.map.alphabet = vec![" ".into(), "*".into()];
-    Ok(out)
+    mtc_core::linker::link(&pm1_syntax(), objects, libraries, options)
 }

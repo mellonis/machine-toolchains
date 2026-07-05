@@ -32,6 +32,7 @@ fn main() {
         CompileOptions {
             debug_info: false, // -g: pmc line numbers in the map
             strip_debugger: false,
+            ..Default::default()
         },
     )
     .expect("source compiles");

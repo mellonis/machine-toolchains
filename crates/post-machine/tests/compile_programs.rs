@@ -111,6 +111,7 @@ fn debug_build_maps_executable_offsets_to_pmc_lines() {
         CompileOptions {
             debug_info: true,
             strip_debugger: false,
+            ..Default::default()
         },
     )
     .unwrap();

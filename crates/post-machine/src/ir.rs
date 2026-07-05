@@ -303,6 +303,44 @@ fn lower_function(
     })
 }
 
+/// Structural invariants every optimizer pass must preserve (the Plan 5
+/// final-review acceptance item): non-empty function, unique block ids,
+/// every terminator target resolvable. `blocks[0]` remains the entry by
+/// position; passes may delete or retarget but never leave a dangling
+/// terminator.
+pub fn validate_function(f: &IrFunction) -> Result<(), String> {
+    if f.blocks.is_empty() {
+        return Err(format!("{}: function has no blocks", f.name));
+    }
+    let mut ids = HashSet::new();
+    for b in &f.blocks {
+        if !ids.insert(b.id) {
+            return Err(format!("{}: duplicate block id {}", f.name, b.id));
+        }
+    }
+    for b in &f.blocks {
+        let check = |t: u32| -> Result<(), String> {
+            if ids.contains(&t) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{}: block {} terminator targets missing block {}",
+                    f.name, b.id, t
+                ))
+            }
+        };
+        match b.term {
+            IrTerm::FallThrough { to } | IrTerm::Goto { to } => check(to)?,
+            IrTerm::Check { marked, blank } => {
+                check(marked)?;
+                check(blank)?;
+            }
+            IrTerm::Return | IrTerm::Halt => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,5 +483,16 @@ mod tests {
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
         assert!(json.contains("\"version\": 1"));
+    }
+
+    #[test]
+    fn validate_function_accepts_lowered_ir_and_rejects_dangling_targets() {
+        let (ir, _) = ir_of("f() { 1: right; check(1, !); }");
+        for f in &ir.functions {
+            validate_function(f).unwrap();
+        }
+        let mut broken = ir.functions[0].clone();
+        broken.blocks[0].term = IrTerm::Goto { to: 99 };
+        assert!(validate_function(&broken).is_err());
     }
 }
