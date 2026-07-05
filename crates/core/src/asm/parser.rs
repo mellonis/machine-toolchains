@@ -59,14 +59,18 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
             continue;
         }
 
-        if let Some(name) = text.strip_prefix(".func") {
+        // `.func` must match as an exact token: `.function x` is NOT a
+        // function directive — it falls through to mnemonic handling below
+        // (and errors there; never silently accepted).
+        let mut directive = text.splitn(2, char::is_whitespace);
+        if directive.next() == Some(".func") {
             if !pending_labels.is_empty() {
                 return Err(err(
                     line_no,
                     AsmErrorKind::Syntax("label at end of function"),
                 ));
             }
-            let name = name.trim();
+            let name = directive.next().unwrap_or("").trim();
             if !is_ident(name) {
                 return Err(err(line_no, AsmErrorKind::Syntax("bad function name")));
             }
@@ -257,6 +261,20 @@ L1:     nop
             funcs[0].items[0],
             SourceItem::RawByte { value: 255, .. }
         ));
+    }
+
+    #[test]
+    fn func_directive_requires_exact_token() {
+        // `.function` must never be silently accepted as `.func`. With no
+        // function open, the open-function check fires first, so the error
+        // is OutsideFunction (still line-accurate). Inside a function, the
+        // word reaches mnemonic lookup and reports UnknownMnemonic.
+        let e = parse(&test_syntax(), ".function f\n").unwrap_err();
+        assert_eq!((e.line, &e.kind), (1, &AsmErrorKind::OutsideFunction));
+
+        let e = parse(&test_syntax(), ".func f\n.function g\n").unwrap_err();
+        assert_eq!(e.line, 2);
+        assert!(matches!(e.kind, AsmErrorKind::UnknownMnemonic(ref m) if m == ".function"));
     }
 
     #[test]
