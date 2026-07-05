@@ -111,7 +111,8 @@ return.
 ### 3.3 Rules
 
 - **Reserved words** (cannot name a function): `goto`, `check`, `left`,
-  `right`, `mark`, `unmark`, `halt`, `debugger`.
+  `right`, `mark`, `unmark`, `halt`, `debugger`. (`export`, `use`,
+  `namespace`, `as` are CONTEXTUAL keywords, not reserved — §3.4.)
 - Builtins may omit `()`. User calls are written `@name();` — `@` prefix
   and parens required. A bare identifier statement (with or without parens,
   no `@`) is an error unless it is a builtin; `@` on a builtin name is an
@@ -122,9 +123,45 @@ return.
 - Falling off the end of a function body = implicit return (the last
   command's `(!)` may always be omitted).
 - Calling an undefined function is not an error at compile time: it becomes an
-  external symbol resolved by the linker (no `extern` boilerplate).
+  external symbol resolved by the linker (no `extern` boilerplate) — but the
+  compiler warns unless the name is declared with `use` or called fully
+  qualified (§3.4).
 - Duplicate function definitions in one file are an error; across objects,
   a link-time error.
+
+### 3.4 Visibility, nesting, namespaces, imports
+
+- **Hidden by default:** top-level functions are module-local unless
+  prefixed `export`; the un-namespaced top-level `main` always exports.
+  Local functions become `local` symbols (§6.2): bound directly within
+  their object, invisible to cross-object resolution — they can neither
+  shadow nor be shadowed.
+- **Nested definitions** (`outer() { inner() { … } … @inner(); }`):
+  flat code, scoped callability — an inner function is callable from its
+  parent's body and deeper only; always local; hoisted (visible anywhere
+  in the body); resolution is innermost-scope-outward. Flattened with
+  dot-mangled names (`outer.inner`) — unnameable from source (`.pmc`
+  identifiers cannot contain `.` or `:`).
+- **Namespaces:** `namespace ns { … }` blocks — a naming/scope construct
+  only: multiple per file, nestable, OPEN (reopening merges — scopes key
+  by path; any object may define `ns::*` symbols; no sealing in v1).
+  Exports inside become `ns::path::name` symbols (namespaces join with
+  `::`, nesting keeps `.` — symbols self-decompose at the last `::`).
+  Namespace names share the name pool with functions per scope. Only the
+  un-namespaced top-level `main` is the entry.
+- **Imports:** `use PATH [as alias][, PATH…];` declares an external
+  symbol by its full name and binds ONE bare name (alias, else path
+  tail) into the declaring scope — legal at file level and inside
+  namespace blocks (scoped; inner shadows outer). Binding collisions
+  within one scope (keyed on the post-alias name) are errors; definitions
+  outrank bindings. Bare `use name;` is the path-length-1 case.
+- **Qualified calls:** `@ns::path::name()` — absolute (scope chain
+  skipped), `::` segments only (nested functions stay unnameable),
+  self-declaring (exempt from the undeclared-external warning).
+- **Warnings** (report-carried, never printed; CLI strictness later):
+  bare calls to undeclared externals (once per name); unused imports;
+  unused functions (unexported + unreached from `main`/exports — sound
+  because locals are invisible outside the module).
 
 ## 4. Processor architecture
 
@@ -409,7 +446,10 @@ head position directly.
 magic "MO" + u8 epoch (0x01) | u16 format version | u8 arch (0x01 = PM-1) | u8 flags (bit0 = has debug section; other bits 0)
 u32 crc32 (same scheme as .pmx)
 string table
-symbol table:  name → { defined: blob index | external }
+symbol table:  name → { defined: blob index | local: blob index | external }
+               (wire kinds: external 0, defined 1, local 2 — local =
+               defined-but-not-exported; object format version 2, readers
+               accept 1–2; MX/MT keep version 1)
 code blobs:    one per defined function (intra-function jumps resolved,
                starts with ent)
 relocations:   { blob, offset, symbol } for each call site (4-byte hole)
@@ -486,6 +526,13 @@ table) and jumps landing on function roots (from executables, via
 discovery) in the `jmp @name` form; a jump into another function's middle
 that targets no root still falls back to `.byte`.
 
+**Visibility and names:** `.func name local` declares a local (unexported)
+function; plain `.func name` exports. Symbol names in `.func` lines and
+call/jump operands accept `::`-separated segments of dotted identifiers
+(`std::api.helper` — namespace part before the last `::`, function-nesting
+part after; every symbol self-decomposes). LABELS remain colon-free — the
+label grammar depends on it.
+
 ## 7. Compiler
 
 Modules, all pure and individually testable:
@@ -500,7 +547,8 @@ Modules, all pure and individually testable:
    `halt` is a terminator, not a block op (a block after `halt` can never
    execute; a false fall-through edge would poison the optimizer's
    dataflow); `tailcall(name)` is produced only by the optimizer (§8 pass
-   8), never by lowering, and bumped the IR JSON version to 2. `!`
+   8), never by lowering (IR JSON v2); v3 adds per-function `local`
+   visibility flags and pre-mangled nested/namespaced names (§3.4). `!`
    check arms target a shared synthetic return block per function.
    Statement successors (`(5)`, `(!)`, fall-through, end-of-body) all
    lower to these block edges — the old IR's `-1` stop / `-2` auto-link
@@ -597,9 +645,16 @@ The list is open: further candidates from the old notes slot in as passes.
 written in `.pmc` (dogfooding; its golden tests double as compiler tests).
 After user objects are collected, remaining unresolved symbols are matched
 against it — `libc` semantics: only reachable routines link in (free via
-dead-function elimination), user definitions shadow stdlib ones naturally
-(stdlib is consulted only for still-unresolved names), `--nostdlib` opts
-out. Additional libraries via the `cc` convention: `-l <name>` resolves
+dead-function elimination), `--nostdlib` opts out. Local symbols never
+enter the resolution namespace — bound directly within their object; a
+local name may repeat across objects freely; calling another object's
+local is an unresolved-symbol error; unreached locals are silently
+omitted (not reported as dropped). Shadowing/interposition is an OPT-IN
+property of exported names: overriding a namespaced export means
+declaring inside the same namespace (`namespace std { export goToEnd()
+{…} }` — same symbol, user-beats-library arbitration). Accidental
+collision impossible, deliberate override explicit; this supersedes the
+earlier "user definitions shadow stdlib naturally" rule. Additional libraries via the `cc` convention: `-l <name>` resolves
 `<name>.pmo` on the library search path — `-L <dir>` entries in order, then
 the toolchain's own `lib/` directory (where `std.pmo` lives; std stays
 implicit rather than requiring `-l std`).
