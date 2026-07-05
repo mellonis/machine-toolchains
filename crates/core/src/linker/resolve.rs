@@ -125,17 +125,14 @@ pub(crate) fn resolve<'a>(
         return Err(LinkError::Unresolved(unresolved.into_iter().collect()));
     }
 
-    // Defined-but-unreached functions, across user objects and libraries;
-    // a shadowed library definition is dropped even if a same-named user
-    // definition was reached.
+    // Dropped names, post-shadowing: the namespace already resolved every
+    // name to the ONE site that would have been linked, so a name is
+    // dropped exactly when that winning site went unreached. Shadowed
+    // library copies were never candidates and are not reported.
     let mut dropped: BTreeSet<String> = BTreeSet::new();
-    for (oi, object) in all.iter().enumerate() {
-        for symbol in &object.symbols {
-            if let SymbolDef::Defined { blob } = symbol.def
-                && !index_of.contains_key(&(oi, blob))
-            {
-                dropped.insert(symbol.name.clone());
-            }
+    for (&name, site) in &namespace {
+        if !index_of.contains_key(site) {
+            dropped.insert(name.to_string());
         }
     }
 
@@ -258,12 +255,10 @@ mod tests {
         let r = resolve(std::slice::from_ref(&user), std::slice::from_ref(&lib)).unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
         assert_eq!(names, vec!["main", "go"]);
-        // the library's `go` is shadowed (never reached) and its own
-        // `unused_pulls_nothing` is never called from anywhere reachable.
-        assert_eq!(
-            r.dropped,
-            vec!["go".to_string(), "unused_pulls_nothing".to_string()]
-        );
+        // dropped is name-level, post-shadowing: the library's `go` was
+        // never a candidate (user's `go` won and IS in the binary), so it
+        // must not be reported; only `unused_pulls_nothing` is dropped.
+        assert_eq!(r.dropped, vec!["unused_pulls_nothing".to_string()]);
 
         let needy = obj(0x7E, &[("main", &["go"])]);
         let r2 = resolve(std::slice::from_ref(&needy), std::slice::from_ref(&lib)).unwrap();
