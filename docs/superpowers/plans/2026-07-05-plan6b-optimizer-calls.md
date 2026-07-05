@@ -1156,7 +1156,28 @@ git commit -m "feat(post-machine): tail-merge pass — block dedup and shared ad
 ### Task 6: Combined `-O1` goldens
 
 **Files:**
-- Modify: `crates/post-machine/tests/opt_equivalence.rs`
+- Modify: `crates/post-machine/tests/opt_equivalence.rs`, `crates/core/src/asm/disassembler.rs` (one test — Task-2 review follow-up, controller-ratified)
+
+- [ ] **Step 0 (Task-2 review follow-up): pin the self-recursive tail jump.** Append to `crates/core/src/asm/disassembler.rs` tests:
+
+```rust
+    #[test]
+    fn self_recursive_tail_jump_round_trips() {
+        // A jump to one's OWN root prints in symbol form and survives
+        // the round trip (Task-2 behavior expansion, empirically pinned).
+        let syntax = test_syntax();
+        let src = ".func main\n        jmp @main\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let out = crate::linker::link(&syntax, &[obj], &[], crate::linker::LinkOptions::default())
+            .unwrap();
+        let text = disassemble_executable(&syntax, &out.executable);
+        assert!(text.contains("jmp     @main"), "{text}");
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        let out2 = crate::linker::link(&syntax, &[obj2], &[], crate::linker::LinkOptions::default())
+            .unwrap();
+        assert_eq!(out2.executable.code, out.executable.code);
+    }
+```
 
 - [ ] **Step 1: Append:**
 
@@ -1239,8 +1260,8 @@ Note on `inline_then_tail_call_compose`: `walk`'s equivalence run — on tapes w
 - [ ] **Step 2: Full gates, then commit.**
 
 ```bash
-git add crates/post-machine/tests/opt_equivalence.rs
-git commit -m "test(post-machine): 6b combined goldens — flagship untouched, inline+tail-call composition, opt-outs"
+git add crates/post-machine/tests/opt_equivalence.rs crates/core/src/asm/disassembler.rs
+git commit -m "test: 6b combined goldens — flagship untouched, inline+tail-call composition, opt-outs, self-jump pin"
 ```
 
 ---
