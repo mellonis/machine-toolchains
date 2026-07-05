@@ -602,8 +602,17 @@ dead-function elimination), user definitions shadow stdlib ones naturally
 out. Additional libraries via the `cc` convention: `-l <name>` resolves
 `<name>.pmo` on the library search path — `-L <dir>` entries in order, then
 the toolchain's own `lib/` directory (where `std.pmo` lives; std stays
-implicit rather than requiring `-l std`). Starter roster, each with a
-documented head pre/postcondition:
+implicit rather than requiring `-l std`).
+
+**Interposition vs optimization:** `-O1`'s inline binds intra-module calls
+at compile time, so shadowing a library's *internal* callees affects only
+the symbolic call sites that survive optimization — the linker guarantees
+interposition only for relocations it actually sees (the semantic-binding
+default of mainstream compilers). A library that must stay fully
+interposable is built with `--fno-inline`; whether `std.pmo` is built that
+way is settled with the Plan 7 build.
+
+Starter roster, each with a documented head pre/postcondition:
 `goToEnd` / `goToBegin` (the historic pair: from inside a marked section to
 the first blank after/before it), `goToMarkRight` / `goToMarkLeft`,
 `goToBlankRight` / `goToBlankLeft`, `eraseSection`, and the section-edge
