@@ -14,8 +14,19 @@ pub enum LinkError {
     DuplicateSymbol(String),
     Unresolved(Vec<String>),
     NoEntrySymbol,
-    ArchMismatch { expected: u8, found: u8 },
-    MalformedBlob { symbol: String, at: u32 },
+    ArchMismatch {
+        expected: u8,
+        found: u8,
+    },
+    /// A blob failed decode, had a relocation hole that no call
+    /// instruction consumes (or a call instruction with no matching
+    /// hole). Also raised when a blob lacks its entry-opcode prologue,
+    /// when a jump targets a non-boundary offset, or when a debug
+    /// label/line offset falls off instruction boundaries.
+    MalformedBlob {
+        symbol: String,
+        at: u32,
+    },
 }
 
 impl std::fmt::Display for LinkError {

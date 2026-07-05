@@ -9,6 +9,21 @@ const CRC_OFFSET: usize = 7;
 const EXTERNAL_BLOB: u32 = 0xFFFF_FFFF;
 const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
 
+/// In-memory object: symbols + code blobs + call relocations (+ optional
+/// per-blob debug info).
+///
+/// Invariants — enforced by `from_bytes`, and REQUIRED of any
+/// hand-constructed value handed to the linker:
+/// - every `SymbolDef::Defined { blob }` indexes into `blobs`;
+/// - every relocation's `blob` indexes into `blobs`, its `symbol` into
+///   `symbols`, and `offset..offset + 4` lies inside that blob;
+/// - each relocation hole is the operand of a far-call instruction at
+///   `offset - 1` (the linker re-decodes blobs and rejects holes that
+///   land anywhere else);
+/// - each blob's first byte is the arch's entry opcode — function bodies
+///   begin with their `ent` prologue;
+/// - `debug`, when present, parallels `blobs` one-to-one, with label and
+///   line offsets on instruction boundaries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectFile {
     pub arch: u8,

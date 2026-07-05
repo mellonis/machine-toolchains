@@ -20,6 +20,19 @@ fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
     line
 }
 
+/// `.byte` fallback: one directive per byte, the label (if any) attached
+/// to the first line.
+fn push_byte_lines(out: &mut String, label: Option<&str>, bytes: &[u8]) {
+    for (k, b) in bytes.iter().enumerate() {
+        out.push_str(&grid_line(
+            if k == 0 { label } else { None },
+            ".byte",
+            &b.to_string(),
+        ));
+        out.push('\n');
+    }
+}
+
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     let mut out = String::new();
     // reloc lookup: (blob, hole offset) -> symbol name
@@ -70,8 +83,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                 .then(|| format!("L{:04X}", d.addr));
             match &d.body {
                 Body::Raw(b) => {
-                    out.push_str(&grid_line(label_name.as_deref(), ".byte", &b.to_string()));
-                    out.push('\n');
+                    push_byte_lines(&mut out, label_name.as_deref(), &[*b]);
                 }
                 Body::Instr { mnemonic, operand } => {
                     let entry = syntax.by_mnemonic(mnemonic).unwrap();
@@ -102,14 +114,11 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                             out.push('\n');
                         }
                         None => {
-                            for k in 0..d.len {
-                                out.push_str(&grid_line(
-                                    if k == 0 { label_name.as_deref() } else { None },
-                                    ".byte",
-                                    &code[(d.addr + k) as usize].to_string(),
-                                ));
-                                out.push('\n');
-                            }
+                            push_byte_lines(
+                                &mut out,
+                                label_name.as_deref(),
+                                &code[d.addr as usize..(d.addr + d.len) as usize],
+                            );
                         }
                     }
                 }
@@ -216,12 +225,11 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
             let label_name = targets.contains(&addr).then(|| format!("L{addr:04X}"));
             match instrs.get(&addr) {
                 None => {
-                    out.push_str(&grid_line(
+                    push_byte_lines(
+                        &mut out,
                         label_name.as_deref(),
-                        ".byte",
-                        &code[addr as usize].to_string(),
-                    ));
-                    out.push('\n');
+                        &code[addr as usize..addr as usize + 1],
+                    );
                     addr += 1;
                 }
                 Some(d) => {
@@ -261,14 +269,11 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
                             out.push('\n');
                         }
                         None => {
-                            for k in 0..d.len {
-                                out.push_str(&grid_line(
-                                    if k == 0 { label_name.as_deref() } else { None },
-                                    ".byte",
-                                    &code[(addr + k) as usize].to_string(),
-                                ));
-                                out.push('\n');
-                            }
+                            push_byte_lines(
+                                &mut out,
+                                label_name.as_deref(),
+                                &code[addr as usize..(addr + d.len) as usize],
+                            );
                         }
                     }
                     addr += d.len;

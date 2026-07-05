@@ -61,9 +61,21 @@ pub(super) struct Built {
 /// inside a non-call piece (raw bytes, or the middle of some other
 /// decoded instruction) would otherwise be copied verbatim — emitting the
 /// relocation's zeroed operand as silent garbage in an otherwise
-/// CRC-valid, plausible-looking executable.
+/// CRC-valid, plausible-looking executable. Also raised when a blob's
+/// first byte is not the entry opcode.
 fn classify(syntax: &ArchSyntax, f: &FuncRef) -> Result<Vec<Piece>, LinkError> {
     let blob = f.blob;
+
+    // Every linked function must begin with its `ent` prologue (the ABI
+    // `.func` guarantees). A blob that doesn't would trap at its first
+    // call landing anyway — fail at link time instead.
+    if f.blob.first() != Some(&syntax.entry_opcode) {
+        return Err(LinkError::MalformedBlob {
+            symbol: f.name.to_string(),
+            at: 0,
+        });
+    }
+
     let call_holes: HashMap<u32, usize> = f.calls.iter().copied().collect();
     let mut consumed_holes: HashSet<u32> = HashSet::new();
     let decoded = decode::decode_stream(syntax, blob, 0, blob.len() as u32);
@@ -251,22 +263,29 @@ pub(super) fn build(
             match piece {
                 Piece::Verbatim { bytes, .. } => code.extend_from_slice(bytes),
                 Piece::Jump {
+                    orig,
                     opcode,
                     width,
                     orig_target,
-                    ..
                 } => {
-                    let new_target = base + orig_to_new[orig_target];
+                    let Some(&target_new) = orig_to_new.get(orig_target) else {
+                        // Not an instruction boundary of this function —
+                        // a malformed blob, not a layout bug.
+                        return Err(LinkError::MalformedBlob {
+                            symbol: f.name.to_string(),
+                            at: *orig,
+                        });
+                    };
+                    let new_target = base + target_new;
                     let new_end = base + piece_offsets[pi] + 1 + u32::from(*width);
                     let off = i64::from(new_target) - i64::from(new_end);
                     code.push(*opcode);
                     match *width {
                         1 => {
-                            debug_assert!(
-                                i8::try_from(off).is_ok(),
-                                "shrink-only invariant: jump no longer fits its original width"
+                            let off8 = i8::try_from(off).expect(
+                                "shrink-only invariant: jump still fits its original width",
                             );
-                            code.push((off as i8) as u8);
+                            code.push(off8 as u8);
                         }
                         4 => {
                             let off32 = i32::try_from(off).expect("jump offset fits i32");
@@ -305,16 +324,26 @@ pub(super) fn build(
 
         let (labels, lines) = match f.debug {
             Some(debug) => {
-                let labels = debug
-                    .labels
-                    .iter()
-                    .map(|(name, off)| (name.clone(), base + orig_to_new[off]))
-                    .collect();
-                let lines = debug
-                    .lines
-                    .iter()
-                    .map(|(off, line)| (base + orig_to_new[off], *line))
-                    .collect();
+                let mut labels = Vec::with_capacity(debug.labels.len());
+                for (name, off) in &debug.labels {
+                    let Some(&new) = orig_to_new.get(off) else {
+                        return Err(LinkError::MalformedBlob {
+                            symbol: f.name.to_string(),
+                            at: *off,
+                        });
+                    };
+                    labels.push((name.clone(), base + new));
+                }
+                let mut lines = Vec::with_capacity(debug.lines.len());
+                for (off, line) in &debug.lines {
+                    let Some(&new) = orig_to_new.get(off) else {
+                        return Err(LinkError::MalformedBlob {
+                            symbol: f.name.to_string(),
+                            at: *off,
+                        });
+                    };
+                    lines.push((base + new, *line));
+                }
                 (labels, lines)
             }
             None => (Vec::new(), Vec::new()),
@@ -505,6 +534,85 @@ X:      stop
             assemble(&syntax, 0x7E, s, false).unwrap()
         };
         let e = link(&syntax, &[obj], &[lib], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::MalformedBlob {
+                symbol: "main".into(),
+                at: 2
+            }
+        );
+    }
+
+    #[test]
+    fn blob_without_ent_prologue_is_malformed() {
+        use crate::formats::object::{ObjectFile, Symbol, SymbolDef};
+        let syntax = syntax_with_short_call();
+        let obj = ObjectFile {
+            arch: 0x7E,
+            symbols: vec![Symbol {
+                name: "main".into(),
+                def: SymbolDef::Defined { blob: 0 },
+            }],
+            blobs: vec![vec![0x01, 0x02]], // nop, stop — no leading ent
+            relocations: vec![],
+            debug: None,
+        };
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::MalformedBlob {
+                symbol: "main".into(),
+                at: 0
+            }
+        );
+    }
+
+    #[test]
+    fn jump_to_mid_instruction_is_malformed() {
+        use crate::formats::object::{ObjectFile, Symbol, SymbolDef};
+        let syntax = syntax_with_short_call();
+        // [0E][30 FF][02]: jmp.s at 1 ends at 3, offset −1 → target 2 = the
+        // middle of the jmp.s itself; boundaries are 0, 1, 3.
+        let obj = ObjectFile {
+            arch: 0x7E,
+            symbols: vec![Symbol {
+                name: "main".into(),
+                def: SymbolDef::Defined { blob: 0 },
+            }],
+            blobs: vec![vec![0x0E, 0x30, 0xFF, 0x02]],
+            relocations: vec![],
+            debug: None,
+        };
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::MalformedBlob {
+                symbol: "main".into(),
+                at: 1
+            }
+        );
+    }
+
+    #[test]
+    fn debug_label_off_instruction_boundary_is_malformed() {
+        use crate::formats::object::{BlobDebug, ObjectFile, Symbol, SymbolDef};
+        let syntax = syntax_with_short_call();
+        // [0E][30 00][02]: a VALID jump (target 3 = the stop) so layout
+        // succeeds — but the debug label at 2 points into the jmp.s.
+        let obj = ObjectFile {
+            arch: 0x7E,
+            symbols: vec![Symbol {
+                name: "main".into(),
+                def: SymbolDef::Defined { blob: 0 },
+            }],
+            blobs: vec![vec![0x0E, 0x30, 0x00, 0x02]],
+            relocations: vec![],
+            debug: Some(vec![BlobDebug {
+                labels: vec![("X".into(), 2)],
+                lines: vec![],
+            }]),
+        };
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
         assert_eq!(
             e,
             crate::linker::LinkError::MalformedBlob {
