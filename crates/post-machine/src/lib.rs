@@ -3,5 +3,6 @@
 pub mod arch;
 pub mod asm;
 pub mod compiler;
+pub mod ir;
 pub mod lexer;
 pub mod parser;

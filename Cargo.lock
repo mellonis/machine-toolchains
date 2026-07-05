@@ -118,6 +118,8 @@ name = "mtc-post-machine"
 version = "0.1.0"
 dependencies = [
  "mtc-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
