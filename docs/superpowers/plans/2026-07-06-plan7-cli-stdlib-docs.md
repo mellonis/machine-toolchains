@@ -758,15 +758,15 @@ Update pm1 `asm/mod.rs`:
 
 ```rust
 pub fn disassemble_executable(exe: &Executable) -> String {
-    mtc_core::asm::disassembler::disassemble_executable(&pm1_syntax(), exe, None)
+    mtc_core::asm::disassemble_executable(&pm1_syntax(), exe, None)
 }
 
 pub fn disassemble_executable_with_map(exe: &Executable, map: &MapFile) -> String {
-    mtc_core::asm::disassembler::disassemble_executable(&pm1_syntax(), exe, Some(map))
+    mtc_core::asm::disassemble_executable(&pm1_syntax(), exe, Some(map))
 }
 
 pub fn listing_executable(exe: &Executable, map: Option<&MapFile>) -> String {
-    mtc_core::asm::disassembler::listing_executable(&pm1_syntax(), exe, map)
+    mtc_core::asm::listing_executable(&pm1_syntax(), exe, map)
 }
 ```
 
@@ -2471,7 +2471,7 @@ fn drive(
         let ip = session.ip();
         let event = session.step_in(tape);
         let (line, _) =
-            mtc_core::asm::disassembler::listing_line(&syntax, &exe.code, ip, &resolve);
+            mtc_core::asm::listing_line(&syntax, &exe.code, ip, &resolve);
         let _ = writeln!(
             w,
             "{line}  ; MF={} head={}",
