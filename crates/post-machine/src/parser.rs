@@ -167,9 +167,45 @@ impl Parser<'_> {
     }
 
     fn program(mut self) -> Result<Program, CompileError> {
-        let imports = Vec::new(); // populated in Task 4; declared now
+        let mut imports = Vec::new(); // populated in Task 4; declared now
         let mut functions: Vec<Function> = Vec::new();
         while !matches!(self.peek().kind, TokenKind::Eof) {
+            // Contextual keyword: `use` + identifier = import declaration;
+            // `use` + `(` is a function NAMED use.
+            if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "use")
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(_))
+                )
+            {
+                self.bump();
+                loop {
+                    let t = self.peek().clone();
+                    let TokenKind::Ident(name) = &t.kind else {
+                        return Err(Self::expected(&t, "an imported function name"));
+                    };
+                    if RESERVED.contains(&name.as_str()) {
+                        return Err(Self::expected(&t, "an imported function name"));
+                    }
+                    imports.push(Import {
+                        name: name.clone(),
+                        line: t.line,
+                    });
+                    self.bump();
+                    let sep = self.peek().clone();
+                    match sep.kind {
+                        TokenKind::Comma => {
+                            self.bump();
+                        }
+                        TokenKind::Semi => {
+                            self.bump();
+                            break;
+                        }
+                        _ => return Err(Self::expected(&sep, "`,` or `;`")),
+                    }
+                }
+                continue;
+            }
             // Contextual keyword: `export` + identifier = exported def;
             // `export` + `(` is a function NAMED export.
             let exported = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")

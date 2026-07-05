@@ -151,7 +151,8 @@ pub struct CompileOutput {
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
     let tokens = crate::lexer::lex(source)?;
     let program = flatten(crate::parser::parse(&tokens)?);
-    let (mut ir, warnings) = crate::ir::lower(&program)?;
+    let (mut ir, mut warnings) = crate::ir::lower(&program)?;
+    warnings.extend(visibility_warnings(&program));
     let mut ir_snapshots = Vec::new();
     if options.capture_ir {
         ir_snapshots.push(("lowered".to_string(), ir.clone()));
@@ -277,6 +278,86 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
     }
 }
 
+/// Import & liveness warnings (spec §3.3 as amended): undeclared
+/// externals (once per name), unused imports, and unused functions —
+/// reachability from `main` + exports; sound because unexported
+/// functions are invisible outside this module.
+fn visibility_warnings(program: &crate::parser::Program) -> Vec<Warning> {
+    use crate::parser::Item;
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let defined: HashSet<&str> = program.functions.iter().map(|f| f.name.as_str()).collect();
+    let imported: HashSet<&str> = program.imports.iter().map(|i| i.name.as_str()).collect();
+
+    let mut warnings = Vec::new();
+    let mut external_called: HashSet<&str> = HashSet::new();
+    let mut warned_undeclared: HashSet<&str> = HashSet::new();
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for f in &program.functions {
+        let mut callees = Vec::new();
+        for stmt in &f.body {
+            for item in &stmt.items {
+                if let Item::Call { name, line, .. } = item {
+                    if defined.contains(name.as_str()) {
+                        callees.push(name.as_str());
+                    } else {
+                        external_called.insert(name.as_str());
+                        if !imported.contains(name.as_str())
+                            && warned_undeclared.insert(name.as_str())
+                        {
+                            warnings.push(Warning {
+                                line: *line,
+                                message: format!(
+                                    "call to undeclared external `{name}` — declare it with `use {name};`"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        edges.insert(f.name.as_str(), callees);
+    }
+
+    for import in &program.imports {
+        if !external_called.contains(import.name.as_str()) {
+            warnings.push(Warning {
+                line: import.line,
+                message: format!("unused import `{}`", import.name),
+            });
+        }
+    }
+
+    // Unused functions: reachability from main + exports.
+    let mut reached: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = program
+        .functions
+        .iter()
+        .filter(|f| f.exported || f.name == "main")
+        .map(|f| f.name.as_str())
+        .collect();
+    while let Some(name) = queue.pop_front() {
+        if !reached.insert(name) {
+            continue;
+        }
+        if let Some(callees) = edges.get(name) {
+            for c in callees {
+                queue.push_back(c);
+            }
+        }
+    }
+    for f in &program.functions {
+        if !reached.contains(f.name.as_str()) {
+            warnings.push(Warning {
+                line: f.line,
+                message: format!("unused function `{}` (not exported, never called)", f.name),
+            });
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,7 +365,11 @@ mod tests {
 
     #[test]
     fn compiles_to_an_object_with_symbols_and_relocations() {
-        let out = compile("main() { @goToEnd(); mark; }", CompileOptions::default()).unwrap();
+        let out = compile(
+            "use goToEnd; main() { @goToEnd(); mark; }",
+            CompileOptions::default(),
+        )
+        .unwrap();
         assert!(
             out.object
                 .symbols
@@ -331,7 +416,11 @@ mod tests {
 
     #[test]
     fn warnings_flow_into_the_report() {
-        let out = compile("f() { goto 1; right; 1: left; }", CompileOptions::default()).unwrap();
+        let out = compile(
+            "f() { goto 1; right; 1: left; } main() { @f(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
         assert_eq!(out.report.warnings.len(), 1);
     }
 
@@ -416,5 +505,85 @@ mod tests {
         .unwrap();
         assert!(out.pma.contains(".func helper local"), "{}", out.pma);
         assert!(out.pma.contains(".func main\n"), "{}", out.pma);
+    }
+
+    #[test]
+    fn undeclared_external_warns_once_and_use_silences() {
+        let out = compile("main() { @go(); right; @go(); }", CompileOptions::default()).unwrap();
+        let n = out
+            .report
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("undeclared"))
+            .count();
+        assert_eq!(n, 1);
+        let out = compile("use go; main() { @go(); }", CompileOptions::default()).unwrap();
+        assert!(
+            out.report
+                .warnings
+                .iter()
+                .all(|w| !w.message.contains("undeclared"))
+        );
+    }
+
+    #[test]
+    fn unused_imports_and_unused_functions_warn() {
+        let out = compile("use ghost; main() { mark; }", CompileOptions::default()).unwrap();
+        assert!(
+            out.report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("unused import `ghost`"))
+        );
+
+        let out = compile(
+            "dead() { left; } main() { mark; }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            out.report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("unused function `dead`"))
+        );
+
+        // Transitively dead: a called only by dead — both warn.
+        let out = compile(
+            "a() { left; } dead() { @a(); } main() { mark; }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        let n = out
+            .report
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("unused function"))
+            .count();
+        assert_eq!(n, 2);
+
+        // Exported functions never warn (outside callers unknowable).
+        let out = compile(
+            "export api() { left; } main() { mark; }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            out.report
+                .warnings
+                .iter()
+                .all(|w| !w.message.contains("unused function"))
+        );
+    }
+
+    #[test]
+    fn use_named_function_still_parses() {
+        assert!(
+            compile(
+                "use() { left; } main() { @use(); }",
+                CompileOptions::default()
+            )
+            .is_ok()
+        );
     }
 }
