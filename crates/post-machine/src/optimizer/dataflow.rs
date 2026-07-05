@@ -96,17 +96,17 @@ pub fn block_entry_facts(f: &IrFunction) -> HashMap<u32, Fact> {
                 work.push(target);
             }
         };
-        match b.term {
-            IrTerm::FallThrough { to } | IrTerm::Goto { to } => push(to, fact, &mut work),
+        match &b.term {
+            IrTerm::FallThrough { to } | IrTerm::Goto { to } => push(*to, fact, &mut work),
             IrTerm::Check { marked, blank } => {
                 let (m, bl) = match fact {
                     Fact::Coupled(_) => (Fact::Coupled(Some(1)), Fact::Coupled(Some(0))),
                     Fact::Uncoupled => (Fact::Uncoupled, Fact::Uncoupled),
                 };
-                push(marked, m, &mut work);
-                push(blank, bl, &mut work);
+                push(*marked, m, &mut work);
+                push(*blank, bl, &mut work);
             }
-            IrTerm::Return | IrTerm::Halt => {}
+            IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
         }
     }
     entry

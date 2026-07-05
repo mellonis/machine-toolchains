@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::compiler::{CompileError, CompileErrorKind, Warning};
 use crate::parser::{Builtin, CheckArm, Item, Program, Successor};
 
-pub const IR_VERSION: u32 = 1;
+pub const IR_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrProgram {
@@ -52,14 +52,26 @@ pub enum IrOp {
     Call { name: String, line: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IrTerm {
-    FallThrough { to: u32 },
-    Goto { to: u32 },
-    Check { marked: u32, blank: u32 },
+    FallThrough {
+        to: u32,
+    },
+    Goto {
+        to: u32,
+    },
+    Check {
+        marked: u32,
+        blank: u32,
+    },
     Return,
     Halt,
+    /// Optimizer-produced (spec §8 pass 8): jump to the callee's `ent`
+    /// instead of `call` + `ret`. Never emitted by lowering.
+    TailCall {
+        name: String,
+    },
 }
 
 impl IrProgram {
@@ -278,13 +290,13 @@ fn lower_function(
         if !seen.insert(id) {
             continue;
         }
-        match blocks[index_of[&id]].term {
-            IrTerm::FallThrough { to } | IrTerm::Goto { to } => work.push(to),
+        match &blocks[index_of[&id]].term {
+            IrTerm::FallThrough { to } | IrTerm::Goto { to } => work.push(*to),
             IrTerm::Check { marked, blank } => {
-                work.push(marked);
-                work.push(blank);
+                work.push(*marked);
+                work.push(*blank);
             }
-            IrTerm::Return | IrTerm::Halt => {}
+            IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
         }
     }
     for b in &blocks {
@@ -329,13 +341,13 @@ pub fn validate_function(f: &IrFunction) -> Result<(), String> {
                 ))
             }
         };
-        match b.term {
-            IrTerm::FallThrough { to } | IrTerm::Goto { to } => check(to)?,
+        match &b.term {
+            IrTerm::FallThrough { to } | IrTerm::Goto { to } => check(*to)?,
             IrTerm::Check { marked, blank } => {
-                check(marked)?;
-                check(blank)?;
+                check(*marked)?;
+                check(*blank)?;
             }
-            IrTerm::Return | IrTerm::Halt => {}
+            IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
         }
     }
     Ok(())
@@ -482,7 +494,15 @@ mod tests {
         let (ir, _) = ir_of("main() { @go(); check(1, !); 1: mark(!); }");
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 1"));
+        assert!(json.contains("\"version\": 2"));
+    }
+
+    #[test]
+    fn tail_call_serializes_with_its_own_tag() {
+        let term = IrTerm::TailCall { name: "f".into() };
+        let json = serde_json::to_string(&term).unwrap();
+        assert!(json.contains("\"kind\":\"tail_call\""), "{json}");
+        assert_eq!(serde_json::from_str::<IrTerm>(&json).unwrap(), term);
     }
 
     #[test]

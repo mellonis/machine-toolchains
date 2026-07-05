@@ -79,23 +79,23 @@ fn emit_function(f: &IrFunction, options: CodegenOptions, e: &mut Emitter) {
     let mut referenced: HashSet<u32> = HashSet::new();
     for (i, b) in f.blocks.iter().enumerate() {
         let next = next_id(i);
-        match b.term {
+        match &b.term {
             IrTerm::FallThrough { to } | IrTerm::Goto { to } => {
-                if next != Some(to) {
-                    referenced.insert(to);
+                if next != Some(*to) {
+                    referenced.insert(*to);
                 }
             }
             IrTerm::Check { marked, blank } => {
-                if next == Some(blank) {
-                    referenced.insert(marked);
-                } else if next == Some(marked) {
-                    referenced.insert(blank);
+                if next == Some(*blank) {
+                    referenced.insert(*marked);
+                } else if next == Some(*marked) {
+                    referenced.insert(*blank);
                 } else {
-                    referenced.insert(marked);
-                    referenced.insert(blank);
+                    referenced.insert(*marked);
+                    referenced.insert(*blank);
                 }
             }
-            IrTerm::Return | IrTerm::Halt => {}
+            IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
         }
     }
 
@@ -133,20 +133,20 @@ fn emit_function(f: &IrFunction, options: CodegenOptions, e: &mut Emitter) {
                 .expect("terminator targets an existing block")
                 .clone()
         };
-        match b.term {
+        match &b.term {
             IrTerm::FallThrough { to } | IrTerm::Goto { to } => {
-                if next != Some(to) {
-                    e.push(grid(None, "jmp", &target(to)), b.term_line);
+                if next != Some(*to) {
+                    e.push(grid(None, "jmp", &target(*to)), b.term_line);
                 }
             }
             IrTerm::Check { marked, blank } => {
-                if next == Some(blank) {
-                    e.push(grid(None, "jm", &target(marked)), b.term_line);
-                } else if next == Some(marked) {
-                    e.push(grid(None, "jnm", &target(blank)), b.term_line);
+                if next == Some(*blank) {
+                    e.push(grid(None, "jm", &target(*marked)), b.term_line);
+                } else if next == Some(*marked) {
+                    e.push(grid(None, "jnm", &target(*blank)), b.term_line);
                 } else {
-                    e.push(grid(None, "jm", &target(marked)), b.term_line);
-                    e.push(grid(None, "jmp", &target(blank)), b.term_line);
+                    e.push(grid(None, "jm", &target(*marked)), b.term_line);
+                    e.push(grid(None, "jmp", &target(*blank)), b.term_line);
                 }
             }
             IrTerm::Return => {
@@ -155,6 +155,9 @@ fn emit_function(f: &IrFunction, options: CodegenOptions, e: &mut Emitter) {
                 e.push(grid(None, mnemonic, ""), b.term_line);
             }
             IrTerm::Halt => e.push(grid(None, "hlt", ""), b.term_line),
+            IrTerm::TailCall { name } => {
+                e.push(grid(None, "jmp", &format!("@{name}")), b.term_line)
+            }
         }
     }
 }

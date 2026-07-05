@@ -19,13 +19,13 @@ pub fn run(f: &mut IrFunction) -> u32 {
         if !seen.insert(id) {
             continue;
         }
-        match f.blocks[index[&id]].term {
-            IrTerm::FallThrough { to } | IrTerm::Goto { to } => work.push(to),
+        match &f.blocks[index[&id]].term {
+            IrTerm::FallThrough { to } | IrTerm::Goto { to } => work.push(*to),
             IrTerm::Check { marked, blank } => {
-                work.push(marked);
-                work.push(blank);
+                work.push(*marked);
+                work.push(*blank);
             }
-            IrTerm::Return | IrTerm::Halt => {}
+            IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
         }
     }
     let before = f.blocks.len();

@@ -283,3 +283,90 @@ main() {
     .unwrap();
     assert_eq!(o0.object, o1.object);
 }
+
+#[test]
+fn tail_call_preserves_behavior_and_shrinks() {
+    // g tail-calls f; inline would dissolve the call first, so pin the
+    // tail-call transform in isolation via --fno-inline (Task 4 adds
+    // inline; this test is written to be correct both before and after).
+    let src = "f() { right(!); } g() { left, @f(!); } main() { @g(); mark; }";
+    let o0 = build(src, OptLevel::O0);
+    let out1 = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            disabled_passes: vec!["inline".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let o1 = link(&[out1.object], &[], LinkOptions::default())
+        .unwrap()
+        .executable;
+    for (cells, head) in TAPES {
+        let r0 = run_tape(&o0, cells, *head);
+        let r1 = run_tape(&o1, cells, *head);
+        assert_eq!(r0, r1, "tape {cells:?}/{head}");
+    }
+    assert!(
+        o1.code.len() < o0.code.len(),
+        "{} -> {}",
+        o0.code.len(),
+        o1.code.len()
+    );
+}
+
+#[test]
+fn self_recursive_tail_call_becomes_an_in_place_loop() {
+    // THE documented resource exception (spec §8 as amended): at -O0 the
+    // recursion overflows the return stack; at -O1 the tail call is a
+    // self-jump — an infinite loop that hits the step limit instead.
+    // Termination KIND changes; that is sanctioned for resource traps.
+    let src = "spin() { @spin(!); } main() { @spin(); }";
+    let o0 = build(src, OptLevel::O0);
+    let o1 = build(src, OptLevel::O1);
+    let (outcome0, _, _) = run_tape(&o0, &[true], 0);
+    let (outcome1, _, _) = run_tape(&o1, &[true], 0);
+    assert!(
+        matches!(
+            outcome0,
+            mtc_core::vm::Outcome::Trapped(mtc_core::vm::Trap::StackOverflow)
+        ),
+        "{outcome0:?}"
+    );
+    assert!(
+        matches!(
+            outcome1,
+            mtc_core::vm::Outcome::Trapped(mtc_core::vm::Trap::StepLimit)
+        ),
+        "{outcome1:?}"
+    );
+}
+
+#[test]
+fn tail_call_emits_a_relaxed_jump() {
+    use mtc_post_machine::arch::opcodes::*;
+    let src = "f() { right(!); } g() { left, @f(!); } main() { @g(); mark; }";
+    let out = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            disabled_passes: vec!["inline".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
+    // Layout (BFS from main): main, g, f.
+    // main: ent0, call.s g +? , wr 1, stp | g: ent, lft, jmp.s @f | f: ent, rgt, ret.
+    // main = [0D][1B off][06 81][02] = 6 bytes → g at 6: [0D][04][18 off] = 4 → f at 10: [0D][05][0C].
+    // call.s: end 3, g at 6 → +3. jmp.s: at 8, end 10, f at 10 → 0.
+    assert_eq!(
+        linked.executable.code,
+        vec![
+            ENT, CALL_S, 0x03, WR, 0x81, STP, // main
+            ENT, LFT, JMP_S, 0x00, // g
+            ENT, RGT, RET, // f
+        ]
+    );
+}

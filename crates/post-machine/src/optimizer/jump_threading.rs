@@ -9,9 +9,9 @@ use crate::ir::{IrBlock, IrFunction, IrTerm};
 
 fn forwards_to(b: &IrBlock) -> Option<u32> {
     if b.ops.is_empty()
-        && let IrTerm::Goto { to } | IrTerm::FallThrough { to } = b.term
+        && let IrTerm::Goto { to } | IrTerm::FallThrough { to } = &b.term
     {
-        Some(to)
+        Some(*to)
     } else {
         None
     }
@@ -50,7 +50,7 @@ pub fn run(f: &mut IrFunction) -> u32 {
                 retarget(marked);
                 retarget(blank);
             }
-            IrTerm::Return | IrTerm::Halt => {}
+            IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
         }
     }
     changes

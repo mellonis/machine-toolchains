@@ -13,6 +13,7 @@ pub mod check_fold;
 pub mod dataflow;
 pub mod dce;
 pub mod jump_threading;
+pub mod tail_call;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
@@ -53,6 +54,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("cell-state", cell_state::run),
     ("branch-fold", branch_fold::run),
     ("dce", dce::run),
+    ("tail-call", tail_call::run),
 ];
 
 const MAX_ROUNDS: u32 = 10;
