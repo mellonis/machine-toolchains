@@ -75,10 +75,15 @@ fn check_fold_shrinks_and_preserves() {
 
 #[test]
 fn jump_threading_shrinks_and_preserves() {
-    let src = "main() { goto 1; 1: goto 2; 2: goto 3; 3: mark; }";
-    // Verify equivalence (observables match on all tapes)
-    let _ = assert_equivalent(src, TAPES);
-    // NOTE: The shrink assertion is blocked; see task-2-report.md
+    // NOT a forward-adjacent chain (codegen's fall-through layout already
+    // eats those at -O0 — Task-2 BLOCKED finding, controller-ratified).
+    // Here the hop is backward: -O0 emits `jmp L2; wr 1; stp; L2: jmp L1`
+    // (8 bytes); -O1 threads goto-2 through the empty forwarder to the
+    // mark block, dce deletes the forwarder, fall-through absorbs the
+    // rest: `ent, wr 1, stp` (4 bytes).
+    let src = "main() { goto 2; 1: mark(!); 2: goto 1; }";
+    let (o0, o1) = assert_equivalent(src, TAPES);
+    assert_eq!((o0, o1), (8, 4));
 }
 
 #[test]
