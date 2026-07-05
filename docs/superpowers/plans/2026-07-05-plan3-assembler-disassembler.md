@@ -35,7 +35,21 @@ pub enum ContainerKind { Object, Executable, TapeBlock }
 pub fn sniff(bytes: &[u8]) -> Option<ContainerKind>;   // 3-byte magic match
 
 // mtc_core::asm (new module: asm/{mod,syntax,parser,assembler,disassembler}.rs)
-pub struct SyntaxEntry { pub opcode: u8, pub mnemonic: &'static str, pub operand: OperandKind }
+/// Control-flow class of an instruction — drives both assembly (call =
+/// symbol operand + relocation) and recursive-descent disassembly.
+pub enum Flow {
+    FallThrough,     // nop, tape ops, ent, brk
+    Stop,            // stp, hlt, ret — no successors
+    Jump,            // unconditional: successor = target only
+    Branch,          // conditional: successors = target + fall-through
+    Call,            // successors = fall-through; target = NEW FUNCTION root
+}
+pub struct SyntaxEntry {
+    pub opcode: u8,
+    pub mnemonic: &'static str,
+    pub operand: OperandKind,
+    pub flow: Flow,
+}
 pub struct RelaxPair { pub far: u8, pub short: u8 }
 pub struct ArchSyntax {
     pub entries: Vec<SyntaxEntry>,
@@ -46,6 +60,7 @@ impl ArchSyntax {
     pub fn by_mnemonic(&self, m: &str) -> Option<&SyntaxEntry>;
     pub fn by_opcode(&self, op: u8) -> Option<&SyntaxEntry>;
     pub fn short_of(&self, far: u8) -> Option<u8>;
+    pub fn is_call(&self, op: u8) -> bool;  // flow == Flow::Call
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,10 +81,17 @@ pub fn assemble(syntax: &ArchSyntax, arch_id: u8, source: &str, with_debug: bool
     -> Result<ObjectFile, AsmError>;
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String;
 pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String;
-// exe form object-ifies: `.func func_XXXX` at each entry-opcode byte; calls
-// print their target's synthesized name; a jump whose target lies outside
-// its own function is emitted as `.byte` fallback lines (documented v1
-// limitation — revisit when Plan 6's tail-call pass creates such jumps).
+// exe form uses RECURSIVE-DESCENT discovery, not byte scanning (function
+// discovery from raw bytes is heuristic in general; with no indirect
+// control flow in v1, traversal is exact): worklist from `entry`,
+// following Flow edges; every Call target becomes a function root.
+// Regions = sorted roots partition; visited instructions print normally
+// (`.func func_XXXX` per root, root's leading ent implied); bytes never
+// reached by traversal print as `.byte` lines. This is immune to
+// ent-valued bytes inside operands. Calls print their target root's
+// synthesized name; a jump whose target lies outside its own region is
+// emitted as `.byte` fallback lines (v1 — revisit with Plan 6 tail calls,
+// which will also need jump-targets-that-are-roots added to discovery).
 
 // mtc_post_machine::asm (new module)
 pub fn pm1_syntax() -> ArchSyntax;   // spec §5 mnemonics; relax pairs jmp/jm/jnm; entry ENT
@@ -78,9 +100,7 @@ pub fn disassemble_object(obj: &ObjectFile) -> String;
 pub fn disassemble_executable(exe: &Executable) -> String;
 ```
 
-Parsing rules (the `.pma` grammar, spec §6.4): per line — strip from first `;`, trim; empty → skip; `.func NAME`; `.byte N`; `[LABEL:] [mnemonic [operand{,operand}*]]`; label-only lines bind the label to the next instruction in the same function. Operands: integers (decimal, optional `-`) or identifiers. By operand kind: `RelI8`/`RelI32` take ONE identifier — a local label for jumps, a symbol name for the call opcode (the call opcode is identified as "the far half of no relax pair whose entry mnemonic is `call`"? NO — simpler and explicit: `ArchSyntax` marks calls: add field `pub call_opcodes: Vec<u8>` listing opcodes whose identifier operand is a SYMBOL (relocation) rather than a local label). `SymbolVec` takes one-or-more integers. `None` takes nothing.
-
-**Amendment to the interface block above:** `ArchSyntax` carries `pub call_opcodes: Vec<u8>` (PM-1: `[CALL, CALL_S]`; the fixture: its call opcode). Keep it in every construction site.
+Parsing rules (the `.pma` grammar, spec §6.4): per line — strip from first `;`, trim; empty → skip; `.func NAME`; `.byte N`; `[LABEL:] [mnemonic [operand{,operand}*]]`; label-only lines bind the label to the next instruction in the same function. Operands: integers (decimal, optional `-`) or identifiers. By operand kind: `RelI8`/`RelI32` take ONE identifier — a local label when `flow` is `Jump`/`Branch`, a symbol name (→ relocation) when `flow` is `Call`. `SymbolVec` takes one-or-more integers. `None` takes nothing.
 
 ---
 
@@ -304,7 +324,7 @@ git commit -m "feat(core): operand encoders property-tested against live decode;
 
 **Interfaces:**
 - Consumes: `OperandKind`.
-- Produces: `SyntaxEntry`, `RelaxPair`, `ArchSyntax` (incl. `call_opcodes`), `AsmError`, `AsmErrorKind` (public); crate-internal parser output consumed by Task 3:
+- Produces: `Flow`, `SyntaxEntry`, `RelaxPair`, `ArchSyntax`, `AsmError`, `AsmErrorKind` (public); crate-internal parser output consumed by Task 3:
   ```rust
   pub(crate) struct SourceFunction { pub name: String, pub line: usize, pub items: Vec<SourceItem> }
   pub(crate) enum SourceItem {
@@ -332,19 +352,19 @@ pub(crate) mod fixture {
     /// nop 0x01 | stop 0x02 | wr 0x07 (SymbolVec) | jmp 0x20 far / 0x30 short |
     /// call 0x21 (far, symbol operand) | ret 0x0B | entry marker 0x0E
     pub(crate) fn test_syntax() -> ArchSyntax {
+        use Flow::{Call, FallThrough as FT, Jump, Stop};
         ArchSyntax {
             entries: vec![
-                SyntaxEntry { opcode: 0x01, mnemonic: "nop", operand: OperandKind::None },
-                SyntaxEntry { opcode: 0x02, mnemonic: "stop", operand: OperandKind::None },
-                SyntaxEntry { opcode: 0x07, mnemonic: "wr", operand: OperandKind::SymbolVec },
-                SyntaxEntry { opcode: 0x20, mnemonic: "jmp", operand: OperandKind::RelI32 },
-                SyntaxEntry { opcode: 0x30, mnemonic: "jmp.s", operand: OperandKind::RelI8 },
-                SyntaxEntry { opcode: 0x21, mnemonic: "call", operand: OperandKind::RelI32 },
-                SyntaxEntry { opcode: 0x0B, mnemonic: "ret", operand: OperandKind::None },
-                SyntaxEntry { opcode: 0x0E, mnemonic: "ent", operand: OperandKind::None },
+                SyntaxEntry { opcode: 0x01, mnemonic: "nop", operand: OperandKind::None, flow: FT },
+                SyntaxEntry { opcode: 0x02, mnemonic: "stop", operand: OperandKind::None, flow: Stop },
+                SyntaxEntry { opcode: 0x07, mnemonic: "wr", operand: OperandKind::SymbolVec, flow: FT },
+                SyntaxEntry { opcode: 0x20, mnemonic: "jmp", operand: OperandKind::RelI32, flow: Jump },
+                SyntaxEntry { opcode: 0x30, mnemonic: "jmp.s", operand: OperandKind::RelI8, flow: Jump },
+                SyntaxEntry { opcode: 0x21, mnemonic: "call", operand: OperandKind::RelI32, flow: Call },
+                SyntaxEntry { opcode: 0x0B, mnemonic: "ret", operand: OperandKind::None, flow: Stop },
+                SyntaxEntry { opcode: 0x0E, mnemonic: "ent", operand: OperandKind::None, flow: FT },
             ],
             relax_pairs: vec![RelaxPair { far: 0x20, short: 0x30 }],
-            call_opcodes: vec![0x21],
             entry_opcode: 0x0E,
         }
     }
@@ -458,7 +478,7 @@ Run: `cargo test -p mtc-core asm` — expected: compile error.
 mod parser;
 mod syntax;
 
-pub use syntax::{ArchSyntax, RelaxPair, SyntaxEntry};
+pub use syntax::{ArchSyntax, Flow, RelaxPair, SyntaxEntry};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct AsmError {
@@ -494,10 +514,22 @@ impl std::error::Error for AsmError {}
 
 use crate::vm::OperandKind;
 
+/// Control-flow class — drives assembly operand rules and
+/// recursive-descent disassembly (successor edges).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    FallThrough,
+    Stop,
+    Jump,
+    Branch,
+    Call,
+}
+
 pub struct SyntaxEntry {
     pub opcode: u8,
     pub mnemonic: &'static str,
     pub operand: OperandKind,
+    pub flow: Flow,
 }
 
 pub struct RelaxPair {
@@ -508,9 +540,6 @@ pub struct RelaxPair {
 pub struct ArchSyntax {
     pub entries: Vec<SyntaxEntry>,
     pub relax_pairs: Vec<RelaxPair>,
-    /// Opcodes whose identifier operand names a SYMBOL (→ relocation),
-    /// not a local label.
-    pub call_opcodes: Vec<u8>,
     pub entry_opcode: u8,
 }
 
@@ -528,7 +557,7 @@ impl ArchSyntax {
     }
 
     pub fn is_call(&self, op: u8) -> bool {
-        self.call_opcodes.contains(&op)
+        self.by_opcode(op).is_some_and(|e| e.flow == Flow::Call)
     }
 }
 
@@ -1207,12 +1236,10 @@ START:  nop
     }
 
     #[test]
-    fn executable_disassembly_objectifies() {
+    fn executable_disassembly_discovers_functions_by_traversal() {
         let syntax = test_syntax();
-        // Two functions laid out flat: f at 0 calls g at 8.
-        // f: [0E][21 off=+2 -> 8][02]   (call instr at 1, end 6; 8-6 = +2)
-        // pad: none; g at 7? Compute: f blob = 0..7 ([0E][21 xx xx xx xx][02]) len 7,
-        // g starts at 7: [0E][0B]. call target = 7 → off = 7 - 6 = 1.
+        // f at 0 calls g at 7: f = [0E][21 off=+1][02] (call end 6; 7-6=1),
+        // g = [0E][0B].
         let code = vec![0x0E, 0x21, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
         let exe = Executable { arch: 0x7E, entry: 0, code };
         let text = disassemble_executable(&syntax, &exe);
@@ -1220,6 +1247,25 @@ START:  nop
         assert!(text.contains(".func func_0007"));
         assert!(text.contains("call    func_0007"));
         assert!(text.contains("ret"));
+    }
+
+    #[test]
+    fn entry_valued_operand_byte_does_not_split_functions() {
+        let syntax = test_syntax();
+        // f calls g at 20 (0x14): call offset = 20 - 6 = 14 = 0x0E — the
+        // operand's first LE byte EQUALS the entry opcode. A byte-scanning
+        // discoverer would invent a bogus function at addr 2; traversal
+        // must not. Bytes 7..20 are unreachable padding → .byte lines.
+        let mut code = vec![0x0E, 0x21, 0x0E, 0x00, 0x00, 0x00, 0x02];
+        code.extend(std::iter::repeat_n(0x01, 13)); // unreachable nops
+        code.extend([0x0E, 0x0B]); // g at 20
+        let exe = Executable { arch: 0x7E, entry: 0, code };
+        let text = disassemble_executable(&syntax, &exe);
+        assert!(text.contains(".func func_0000"));
+        assert!(text.contains(".func func_0014"));
+        assert!(!text.contains("func_0002"), "operand byte must not become a function");
+        assert!(text.contains("call    func_0014"));
+        assert!(text.contains(".byte   1"), "unreachable padding dumps as bytes");
     }
 }
 ```
@@ -1398,77 +1444,129 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     out
 }
 
-pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
-    let code = &exe.code;
-    // Function starts: every entry-opcode byte position.
-    let func_starts: Vec<u32> = code
-        .iter()
-        .enumerate()
-        .filter(|&(_, &b)| b == syntax.entry_opcode)
-        .map(|(i, _)| i as u32)
-        .collect();
-    // NOTE: an entry byte inside another instruction's operand would split
-    // functions wrongly; acceptable for v1 display (assembler-produced
-    // executables put ent only at function starts).
-    let mut out = String::new();
-    let ends: Vec<u32> = func_starts
-        .iter()
-        .skip(1)
-        .copied()
-        .chain([code.len() as u32])
-        .collect();
-    let func_name = |addr: u32| format!("func_{addr:04X}");
+/// Decode ONE instruction at `addr` (None = unknown opcode / truncated).
+fn decode_one(syntax: &ArchSyntax, code: &[u8], addr: u32) -> Option<Decoded> {
+    let mut v = decode_stream(syntax, code, addr, code.len() as u32);
+    match v.drain(..).next() {
+        Some(d @ Decoded { body: Body::Instr { .. }, .. }) => Some(d),
+        _ => None,
+    }
+}
 
-    for (i, &start) in func_starts.iter().enumerate() {
-        let end = ends[i];
-        out.push_str(&format!(".func {}\n", func_name(start)));
-        let decoded = decode_stream(syntax, code, start + 1, end);
+pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
+    use crate::asm::syntax::Flow;
+    let code = &exe.code;
+    let len = code.len() as u32;
+
+    // Recursive-descent discovery (exact in v1: no indirect control flow).
+    // instrs: every reachable instruction; roots: entry + all call targets.
+    let mut instrs: BTreeMap<u32, Decoded> = BTreeMap::new();
+    let mut roots: BTreeSet<u32> = BTreeSet::from([exe.entry]);
+    let mut work: Vec<u32> = vec![exe.entry];
+    while let Some(addr) = work.pop() {
+        if addr >= len || instrs.contains_key(&addr) {
+            continue;
+        }
+        let Some(d) = decode_one(syntax, code, addr) else {
+            continue; // unknown byte ends this path; gap pass will .byte it
+        };
+        let Body::Instr { mnemonic, operand } = &d.body else { unreachable!() };
+        let entry = syntax.by_mnemonic(mnemonic).unwrap();
+        let next = addr + d.len;
+        match (entry.flow, operand) {
+            (Flow::FallThrough, _) => work.push(next),
+            (Flow::Stop, _) => {}
+            (Flow::Jump, DecodedOperand::RelTarget(t)) => work.push(*t),
+            (Flow::Branch, DecodedOperand::RelTarget(t)) => {
+                work.push(*t);
+                work.push(next);
+            }
+            (Flow::Call, DecodedOperand::RelTarget(t)) => {
+                roots.insert(*t);
+                work.push(*t);
+                work.push(next);
+            }
+            _ => work.push(next), // malformed flow/operand combo: keep walking
+        }
+        instrs.insert(addr, d);
+    }
+
+    let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();
+    let func_name = |addr: u32| format!("func_{addr:04X}");
+    let region_end = |i: usize| roots.get(i + 1).copied().unwrap_or(len);
+
+    let mut out = String::new();
+    for (i, &root) in roots.iter().enumerate() {
+        let end = region_end(i);
+        out.push_str(&format!(".func {}\n", func_name(root)));
+
+        // Jump-target labels within this region.
         let mut targets = BTreeSet::new();
-        for d in &decoded {
-            if let Body::Instr { operand: DecodedOperand::RelTarget(t), mnemonic } = &d.body {
-                let entry = syntax.by_mnemonic(mnemonic).unwrap();
-                if !syntax.is_call(entry.opcode) && *t > start && *t < end {
+        for (_, d) in instrs.range(root..end) {
+            if let Body::Instr { mnemonic, operand: DecodedOperand::RelTarget(t) } = &d.body {
+                let e = syntax.by_mnemonic(mnemonic).unwrap();
+                if e.flow != Flow::Call && *t > root && *t < end {
                     targets.insert(*t);
                 }
             }
         }
-        for d in &decoded {
-            let label_name = targets.contains(&d.addr).then(|| format!("L{:04X}", d.addr));
-            match &d.body {
-                Body::Raw(b) => {
-                    out.push_str(&grid_line(label_name.as_deref(), ".byte", &b.to_string()));
+
+        let mut addr = root;
+        let mut first = true;
+        while addr < end {
+            let label_name = targets.contains(&addr).then(|| format!("L{addr:04X}"));
+            match instrs.get(&addr) {
+                None => {
+                    out.push_str(&grid_line(
+                        label_name.as_deref(),
+                        ".byte",
+                        &code[addr as usize].to_string(),
+                    ));
                     out.push('\n');
+                    addr += 1;
                 }
-                Body::Instr { mnemonic, operand } => {
+                Some(d) => {
+                    let Body::Instr { mnemonic, operand } = &d.body else { unreachable!() };
                     let entry = syntax.by_mnemonic(mnemonic).unwrap();
+                    // The root's leading entry instruction is implied by .func.
+                    if first && entry.opcode == syntax.entry_opcode {
+                        first = false;
+                        addr += d.len;
+                        continue;
+                    }
+                    first = false;
                     let text = match operand {
-                        DecodedOperand::None => String::new(),
-                        DecodedOperand::Ints(v) => {
-                            v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
-                        }
+                        DecodedOperand::None => Some(String::new()),
+                        DecodedOperand::Ints(v) => Some(
+                            v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "),
+                        ),
                         DecodedOperand::RelTarget(t) => {
-                            if syntax.is_call(entry.opcode) && func_starts.contains(t) {
-                                func_name(*t)
-                            } else if !syntax.is_call(entry.opcode) && *t > start && *t < end {
-                                format!("L{t:04X}")
+                            if entry.flow == Flow::Call && roots.contains(t) {
+                                Some(func_name(*t))
+                            } else if entry.flow != Flow::Call && *t > root && *t < end {
+                                Some(format!("L{t:04X}"))
                             } else {
-                                // Cross-function jump or unresolvable call:
-                                // .byte fallback for the whole instruction.
-                                for k in 0..d.len {
-                                    let b = code[(d.addr + k) as usize];
-                                    out.push_str(&grid_line(
-                                        if k == 0 { label_name.as_deref() } else { None },
-                                        ".byte",
-                                        &b.to_string(),
-                                    ));
-                                    out.push('\n');
-                                }
-                                continue;
+                                None // cross-region jump: .byte fallback
                             }
                         }
                     };
-                    out.push_str(&grid_line(label_name.as_deref(), mnemonic, &text));
-                    out.push('\n');
+                    match text {
+                        Some(operand_text) => {
+                            out.push_str(&grid_line(label_name.as_deref(), mnemonic, &operand_text));
+                            out.push('\n');
+                        }
+                        None => {
+                            for k in 0..d.len {
+                                out.push_str(&grid_line(
+                                    if k == 0 { label_name.as_deref() } else { None },
+                                    ".byte",
+                                    &code[(addr + k) as usize].to_string(),
+                                ));
+                                out.push('\n');
+                            }
+                        }
+                    }
+                    addr += d.len;
                 }
             }
         }
@@ -1510,7 +1608,7 @@ git commit -m "feat(core): disassembler with canonical grid and object round-tri
 ```rust
 //! PM-1 assembly: the spec §5 mnemonic table bound to the core framework.
 
-use mtc_core::asm::{ArchSyntax, AsmError, RelaxPair, SyntaxEntry};
+use mtc_core::asm::{ArchSyntax, AsmError, Flow, RelaxPair, SyntaxEntry};
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::ARCH_PM1;
@@ -1519,33 +1617,33 @@ use mtc_core::vm::OperandKind;
 use crate::arch::opcodes::*;
 
 pub fn pm1_syntax() -> ArchSyntax {
+    use Flow::{Branch, Call as CallF, FallThrough as FT, Jump, Stop};
     use OperandKind::{None as N, RelI32, RelI8, SymbolVec};
     ArchSyntax {
         entries: vec![
-            SyntaxEntry { opcode: NOP, mnemonic: "nop", operand: N },
-            SyntaxEntry { opcode: STP, mnemonic: "stp", operand: N },
-            SyntaxEntry { opcode: HLT, mnemonic: "hlt", operand: N },
-            SyntaxEntry { opcode: LFT, mnemonic: "lft", operand: N },
-            SyntaxEntry { opcode: RGT, mnemonic: "rgt", operand: N },
-            SyntaxEntry { opcode: WR, mnemonic: "wr", operand: SymbolVec },
-            SyntaxEntry { opcode: JMP, mnemonic: "jmp", operand: RelI32 },
-            SyntaxEntry { opcode: JM, mnemonic: "jm", operand: RelI32 },
-            SyntaxEntry { opcode: JNM, mnemonic: "jnm", operand: RelI32 },
-            SyntaxEntry { opcode: CALL, mnemonic: "call", operand: RelI32 },
-            SyntaxEntry { opcode: RET, mnemonic: "ret", operand: N },
-            SyntaxEntry { opcode: ENT, mnemonic: "ent", operand: N },
-            SyntaxEntry { opcode: BRK, mnemonic: "brk", operand: N },
-            SyntaxEntry { opcode: JMP_S, mnemonic: "jmp.s", operand: RelI8 },
-            SyntaxEntry { opcode: JM_S, mnemonic: "jm.s", operand: RelI8 },
-            SyntaxEntry { opcode: JNM_S, mnemonic: "jnm.s", operand: RelI8 },
-            SyntaxEntry { opcode: CALL_S, mnemonic: "call.s", operand: RelI8 },
+            SyntaxEntry { opcode: NOP, mnemonic: "nop", operand: N, flow: FT },
+            SyntaxEntry { opcode: STP, mnemonic: "stp", operand: N, flow: Stop },
+            SyntaxEntry { opcode: HLT, mnemonic: "hlt", operand: N, flow: Stop },
+            SyntaxEntry { opcode: LFT, mnemonic: "lft", operand: N, flow: FT },
+            SyntaxEntry { opcode: RGT, mnemonic: "rgt", operand: N, flow: FT },
+            SyntaxEntry { opcode: WR, mnemonic: "wr", operand: SymbolVec, flow: FT },
+            SyntaxEntry { opcode: JMP, mnemonic: "jmp", operand: RelI32, flow: Jump },
+            SyntaxEntry { opcode: JM, mnemonic: "jm", operand: RelI32, flow: Branch },
+            SyntaxEntry { opcode: JNM, mnemonic: "jnm", operand: RelI32, flow: Branch },
+            SyntaxEntry { opcode: CALL, mnemonic: "call", operand: RelI32, flow: CallF },
+            SyntaxEntry { opcode: RET, mnemonic: "ret", operand: N, flow: Stop },
+            SyntaxEntry { opcode: ENT, mnemonic: "ent", operand: N, flow: FT },
+            SyntaxEntry { opcode: BRK, mnemonic: "brk", operand: N, flow: FT },
+            SyntaxEntry { opcode: JMP_S, mnemonic: "jmp.s", operand: RelI8, flow: Jump },
+            SyntaxEntry { opcode: JM_S, mnemonic: "jm.s", operand: RelI8, flow: Branch },
+            SyntaxEntry { opcode: JNM_S, mnemonic: "jnm.s", operand: RelI8, flow: Branch },
+            SyntaxEntry { opcode: CALL_S, mnemonic: "call.s", operand: RelI8, flow: CallF },
         ],
         relax_pairs: vec![
             RelaxPair { far: JMP, short: JMP_S },
             RelaxPair { far: JM, short: JM_S },
             RelaxPair { far: JNM, short: JNM_S },
         ],
-        call_opcodes: vec![CALL, CALL_S],
         entry_opcode: ENT,
     }
 }
@@ -1671,6 +1769,6 @@ git commit -m "feat(post-machine): PM-1 assembly syntax, public asm API, spec sa
 ## Self-Review Notes
 
 - **Spec coverage:** §6.4 grammar + canonical grid + dis-of-both-binaries + round-trip ✓ (Tasks 2–5); §5 encodings via shared `encode_operand` property-tested against the live core ✓ (Task 1, the Plan 2b deferral); §6.2 blob/symbol/reloc/debug emission ✓ (Task 3); relaxation incl. boundary and cascade tests ✓ (Task 3, spec §11); `formats::sniff` ✓ (Plan 1 deferral). NOT here: linker (Plan 4) — `call` holes stay zero and `.pmx` disassembly of *linked* calls prints `L`-style targets or synthesized function names; CLI (`pmt asm/dis`, Plan 7).
-- **Type consistency:** `ArchSyntax` carries `call_opcodes` everywhere it's constructed (fixture, PM-1); `AsmErrorKind` variants match between interface block, parser, and assembler; the fixture's opcodes deliberately differ from both TestArch and PM-1 (framework must not care).
-- **Known limitations, on record:** executable disassembly splits functions at every entry-opcode byte (correct for toolchain-produced code; a raw data byte equal to `ent` would confuse it — no data sections exist in v1); cross-function jumps in executables fall back to `.byte` (revisit with Plan 6's tail-call); explicit far mnemonics don't exist (bare = relaxable, `.s` = forced short) — matching "assembler picks the width" (spec §6.4).
+- **Type consistency:** every `SyntaxEntry` construction site (fixture, PM-1) carries a `flow`; `ArchSyntax::is_call` derives from `Flow::Call`; `AsmErrorKind` variants match between interface block, parser, and assembler; the fixture's opcodes deliberately differ from both TestArch and PM-1 (framework must not care).
+- **Known limitations, on record:** executable function discovery is recursive descent from `entry` + call targets — exact for v1 (no indirect control flow, no data-in-code); unreachable bytes dump as `.byte`; cross-region jumps fall back to `.byte` and jump-targets-that-are-roots joins discovery when Plan 6's tail-call lands; explicit far mnemonics don't exist (bare = relaxable, `.s` = forced short) — matching "assembler picks the width" (spec §6.4).
 - **Arithmetic spot-checks:** fixture jmp far=5 bytes/short=2; `L: nop / jmp L` → off `1−4=−3`; forward 130 nops → far off `130`; spec sample `jm.s` off `0xFD`; call hole at blob offset 2. All hand-derived twice.
