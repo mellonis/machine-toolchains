@@ -42,6 +42,10 @@ impl<T: Tape> Tape for StrictTape<T> {
         }
         self.inner.write(index)
     }
+
+    fn head(&self) -> i64 {
+        self.inner.head()
+    }
 }
 
 #[cfg(test)]

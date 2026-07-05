@@ -138,6 +138,10 @@ impl Tape for InfiniteTape {
         self.set(self.head, index == 1);
         Ok(())
     }
+
+    fn head(&self) -> i64 {
+        self.head()
+    }
 }
 
 #[cfg(test)]

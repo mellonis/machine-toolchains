@@ -29,6 +29,10 @@ pub enum BusResponse {
 pub enum CoreEvent {
     Request(BusRequest),
     Step,
+    /// An instruction containing `MicroOp::Brk` retired. Drivers without
+    /// a debugger treat this exactly like `Step` (brk is a no-op); a
+    /// debug session pauses on it (spec-lineage: §4.5 brk semantics).
+    Break,
     Stopped,
     Halted,
     Trapped(Trap),

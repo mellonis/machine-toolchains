@@ -82,28 +82,51 @@ pub enum Outcome {
     Trapped(Trap),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
     pub outcome: Outcome,
     pub stats: RunStats,
+    /// Address of the last instruction the core worked on: the faulting
+    /// instruction for traps, the terminating `stp`/`hlt` otherwise.
+    pub ip: u32,
+    /// Return stack at termination (deepest frame first).
+    pub stack: Vec<u32>,
 }
 
-pub fn run(
+/// One instruction boundary of the sync driver (spec-lineage §4.4
+/// accounting). `started` is the fresh/resume flag: `false` before the
+/// first call. Callers must not call again after `Finished` (the core is
+/// in its terminal phase).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StepEvent {
+    Retired,
+    Break,
+    Finished(Outcome),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn step_instruction(
     core: &mut Core,
     code: &[u8],
     stack: &mut ReturnStack,
     device: &mut dyn Tape,
     profile: TactProfile,
     limits: RunLimits,
-) -> RunResult {
-    let mut stats = RunStats::default();
+    stats: &mut RunStats,
+    started: &mut bool,
+) -> StepEvent {
     let over_tacts = |stats: &RunStats| {
         limits
             .max_tacts
             .is_some_and(|max| stats.total_tacts() >= max)
     };
 
-    let mut event = core.start();
+    let mut event = if *started {
+        core.resume(BusResponse::Ok) // ack the StepAck phase
+    } else {
+        *started = true;
+        core.start()
+    };
     loop {
         match event {
             CoreEvent::Request(request) => {
@@ -152,47 +175,61 @@ pub fn run(
                         Err(fault) => BusResponse::Fault(fault),
                     },
                 };
-                if over_tacts(&stats) {
-                    return RunResult {
-                        outcome: Outcome::Trapped(Trap::TactLimit),
-                        stats,
-                    };
+                if over_tacts(stats) {
+                    return StepEvent::Finished(Outcome::Trapped(Trap::TactLimit));
                 }
                 event = core.resume(response);
             }
-            CoreEvent::Step => {
+            CoreEvent::Step | CoreEvent::Break => {
                 stats.steps += 1;
-                stats.core_tacts += 1; // execute base (spec §4.4)
+                stats.core_tacts += 1; // execute base (spec-lineage §4.4)
                 if limits.max_steps.is_some_and(|max| stats.steps >= max) {
-                    return RunResult {
-                        outcome: Outcome::Trapped(Trap::StepLimit),
-                        stats,
-                    };
+                    return StepEvent::Finished(Outcome::Trapped(Trap::StepLimit));
                 }
-                if over_tacts(&stats) {
-                    return RunResult {
-                        outcome: Outcome::Trapped(Trap::TactLimit),
-                        stats,
-                    };
+                if over_tacts(stats) {
+                    return StepEvent::Finished(Outcome::Trapped(Trap::TactLimit));
                 }
-                event = core.resume(BusResponse::Ok);
-            }
-            CoreEvent::Stopped => {
-                return RunResult {
-                    outcome: Outcome::Stopped,
-                    stats,
+                return if matches!(event, CoreEvent::Break) {
+                    StepEvent::Break
+                } else {
+                    StepEvent::Retired
                 };
             }
-            CoreEvent::Halted => {
+            CoreEvent::Stopped => return StepEvent::Finished(Outcome::Stopped),
+            CoreEvent::Halted => return StepEvent::Finished(Outcome::Halted),
+            CoreEvent::Trapped(trap) => return StepEvent::Finished(Outcome::Trapped(trap)),
+        }
+    }
+}
+
+pub fn run(
+    core: &mut Core,
+    code: &[u8],
+    stack: &mut ReturnStack,
+    device: &mut dyn Tape,
+    profile: TactProfile,
+    limits: RunLimits,
+) -> RunResult {
+    let mut stats = RunStats::default();
+    let mut started = false;
+    loop {
+        match step_instruction(
+            core,
+            code,
+            stack,
+            device,
+            profile,
+            limits,
+            &mut stats,
+            &mut started,
+        ) {
+            StepEvent::Retired | StepEvent::Break => {}
+            StepEvent::Finished(outcome) => {
                 return RunResult {
-                    outcome: Outcome::Halted,
+                    outcome,
                     stats,
-                };
-            }
-            CoreEvent::Trapped(trap) => {
-                return RunResult {
-                    outcome: Outcome::Trapped(trap),
-                    stats,
+                    ip: core.instr_start(),
+                    stack: stack.entries().to_vec(),
                 };
             }
         }

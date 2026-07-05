@@ -38,6 +38,7 @@ pub struct Core<'a> {
     instr_start: u32,
     mf: bool,
     phase: Phase,
+    brk_pending: bool,
 }
 
 impl<'a> Core<'a> {
@@ -48,11 +49,19 @@ impl<'a> Core<'a> {
             instr_start: entry,
             mf: false,
             phase: Phase::FetchOpcode,
+            brk_pending: false,
         }
     }
 
     pub fn ip(&self) -> u32 {
         self.ip
+    }
+
+    /// Address of the instruction the core is executing (or last worked
+    /// on) — the faulting address on traps, unlike `ip()` which has
+    /// advanced past fetched bytes.
+    pub fn instr_start(&self) -> u32 {
+        self.instr_start
     }
 
     pub fn mf(&self) -> bool {
@@ -217,7 +226,11 @@ impl<'a> Core<'a> {
         // 2. Issue the next micro-op.
         while let Some(op) = ops.pop_front() {
             let (request, pending) = match op {
-                MicroOp::Nop | MicroOp::Brk => continue,
+                MicroOp::Nop => continue,
+                MicroOp::Brk => {
+                    self.brk_pending = true;
+                    continue;
+                }
                 MicroOp::Stop => {
                     self.phase = Phase::Done;
                     return CoreEvent::Stopped;
@@ -266,7 +279,11 @@ impl<'a> Core<'a> {
 
         // 3. Instruction retired.
         self.phase = Phase::StepAck;
-        CoreEvent::Step
+        if std::mem::take(&mut self.brk_pending) {
+            CoreEvent::Break
+        } else {
+            CoreEvent::Step
+        }
     }
 
     /// Operands are relative to the END of the instruction (spec §5);
@@ -425,10 +442,10 @@ mod tests {
                     };
                     ev = core.resume(resp);
                 }
-                Ev::Step => {
+                Ev::Step | Ev::Break => {
                     steps += 1;
                     if steps >= max_steps {
-                        return (Ev::Step, log, core.mf());
+                        return (ev, log, core.mf());
                     }
                     ev = core.resume(Rs::Ok);
                 }
@@ -568,5 +585,16 @@ mod tests {
         assert_eq!(ev, Ev::Halted);
         let (ev2, _, _) = run_full(&[0x04, 0x01, 0x02], 0, 4, &[], 100);
         assert_eq!(ev2, Ev::Stopped); // brk and nop are no-ops without a debugger
+    }
+
+    #[test]
+    fn brk_retires_as_break_event_and_resume_continues_normally() {
+        // brk; nop; stop — cap the step budget at exactly the brk's
+        // retirement to observe its own event distinctly from Step.
+        let (ev, _, _) = run_full(&[0x04, 0x01, 0x02], 0, 4, &[], 1);
+        assert_eq!(ev, Ev::Break); // not Ev::Step
+        // Resuming past it (as `halt_and_brk_nop` does with a larger
+        // budget) reaches Stopped normally — the ack path doesn't care
+        // which retirement event preceded it.
     }
 }

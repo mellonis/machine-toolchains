@@ -4,6 +4,7 @@ use crate::formats::executable::Executable;
 
 use super::arch::Arch;
 use super::core::Core;
+use super::debug::DebugSession;
 use super::devices::Tape;
 use super::driver::{ReturnStack, RunLimits, RunResult, TactProfile, run};
 
@@ -125,6 +126,18 @@ impl<'a> Machine<'a> {
             opts.limits,
         )
     }
+
+    /// A debug session over this machine's image (spec-lineage §4.5).
+    /// The session owns its core/stack; the device arrives per call.
+    pub fn debug(&self, opts: RunOptions) -> DebugSession<'a> {
+        DebugSession::new(
+            Core::new(self.arch, self.entry),
+            self.code.clone(),
+            ReturnStack::new(opts.stack_depth),
+            opts.profile,
+            opts.limits,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -205,5 +218,41 @@ mod tests {
         let machine = Machine::with_arch(&arch, vec![0x02, 0x0E, 0x02], 1).unwrap();
         assert_eq!(machine.entry(), 1);
         assert_eq!(machine.code(), &[0x02, 0x0E, 0x02]);
+    }
+
+    #[test]
+    fn run_reports_faulting_ip_and_empty_stack_on_trap() {
+        // entry at 2 (ent); [3]=jmp +... targets 0, where [0]=jmp with an
+        // offset so far negative the target computation itself traps.
+        // [0]=jmp rel8 0x80 (-128); [2]=ent (entry); [3]=jmp rel8 to 0.
+        // jmp at 3: instr_end 5, off -5 -> target 0.
+        let arch = TestArch;
+        let code = vec![0x08, 0x80, 0x0E, 0x08, 0xFB];
+        let machine = Machine::with_arch(&arch, code, 2).unwrap();
+        let mut tape = InfiniteTape::new();
+        let result = machine.run(&mut tape, RunOptions::default());
+        assert_eq!(
+            result.outcome,
+            Outcome::Trapped(crate::vm::trap::Trap::CodeOutOfBounds { at: 0 })
+        );
+        assert_eq!(result.ip, 0); // the jmp at address 0, not the entry
+        assert!(result.stack.is_empty());
+    }
+
+    #[test]
+    fn run_reports_return_stack_on_trap_inside_a_call() {
+        // [0]=ent (entry); [1]=call +1 -> target 7; [6]=stp (never reached);
+        // [7]=ent (callee); [8]=invalid opcode -> traps with the call
+        // frame still on the stack (no ret ever pops it).
+        let arch = TestArch;
+        let code = vec![0x0E, 0x0A, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x55];
+        let machine = Machine::with_arch(&arch, code, 0).unwrap();
+        let mut tape = InfiniteTape::new();
+        let result = machine.run(&mut tape, RunOptions::default());
+        assert!(matches!(
+            result.outcome,
+            Outcome::Trapped(crate::vm::trap::Trap::InvalidOpcode { opcode: 0x55, .. })
+        ));
+        assert_eq!(result.stack, vec![6]); // return address pushed by the call
     }
 }

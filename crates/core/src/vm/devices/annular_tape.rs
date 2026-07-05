@@ -67,6 +67,10 @@ impl Tape for AnnularTape {
         }
         Ok(())
     }
+
+    fn head(&self) -> i64 {
+        i64::from(self.head)
+    }
 }
 
 #[cfg(test)]

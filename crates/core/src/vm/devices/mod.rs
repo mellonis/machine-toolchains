@@ -17,4 +17,6 @@ pub trait Tape {
     fn right(&mut self);
     fn read(&self) -> u32;
     fn write(&mut self, index: u32) -> Result<(), DeviceFault>;
+    /// Current head position (annular tapes: the current index).
+    fn head(&self) -> i64;
 }
