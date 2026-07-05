@@ -1,7 +1,9 @@
-//! `-O1` pass driver (spec §8). One module per pass; each pass is
-//! `fn(&mut IrFunction) -> u32` returning its change count and MUST
-//! preserve the equivalence contract and the closed-terminator-targets
-//! invariant (checked in debug builds after every application).
+//! `-O1` pass driver (spec §8). One module per pass; a pass is either
+//! per-function, `fn(&mut IrFunction) -> u32` (PIPELINE), or program-level,
+//! `fn(&mut IrProgram) -> u32` (PROGRAM_PIPELINE — currently `inline`).
+//! Every pass returns its change count and MUST preserve the equivalence
+//! contract and the closed-terminator-targets invariant (checked in debug
+//! builds after every application).
 
 use std::collections::HashSet;
 
@@ -52,8 +54,10 @@ type PassFn = fn(&mut IrFunction) -> u32;
 /// Fixed pipeline, in per-round application order. tail-call runs BEFORE
 /// tail-merge: return-chaining rewrites `Return` into `FallThrough` and
 /// would otherwise destroy the tail-call precondition (Task-6 finding) —
-/// and a tail call (call + ret + stack slot) beats return-chaining
-/// (1 byte) whenever both apply to the same block.
+/// this ordering constraint is load-bearing, not a mere preference.
+/// Statically the two are a tie (each drops one terminal byte); tail-call's
+/// decisive win is at RUNTIME — no stack-slot growth and no return trip —
+/// whenever both apply to the same block.
 const PIPELINE: &[(&str, PassFn)] = &[
     ("check-fold", check_fold::run),
     ("jump-threading", jump_threading::run),

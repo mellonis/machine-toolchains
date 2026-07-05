@@ -42,7 +42,9 @@ pub fn run(ir: &mut IrProgram) -> u32 {
         .functions
         .iter()
         .filter(|f| {
-            is_leaf_without_brk(f)
+            // main's Return means stp — splicing it would erase the machine stop.
+            f.name != "main"
+                && is_leaf_without_brk(f)
                 && (op_count(f) <= INLINE_MAX_OPS
                     || call_counts.get(f.name.as_str()).copied().unwrap_or(0) == 1)
         })
@@ -230,6 +232,20 @@ mod tests {
             main.blocks
                 .iter()
                 .any(|b| matches!(b.term, IrTerm::Check { .. }))
+        );
+    }
+
+    #[test]
+    fn main_is_never_an_inline_candidate() {
+        // Splicing main would rewrite its stp-Return into a Goto (final
+        // review I2): "stop the machine" must not become "keep running".
+        let ir = inlined("main() { right; } f() { @main(); left; }");
+        let f = ir.functions.iter().find(|f| f.name == "f").unwrap();
+        assert!(
+            f.blocks[0]
+                .ops
+                .iter()
+                .any(|op| matches!(op, IrOp::Call { name, .. } if name == "main"))
         );
     }
 }
