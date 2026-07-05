@@ -129,6 +129,14 @@ pub fn pm1_syntax() -> ArchSyntax {
                 far: JNM,
                 short: JNM_S,
             },
+            // The call pair feeds LINKER relaxation and disassembly display
+            // (short call prints as far `call`) — never assembler behavior:
+            // the assembler always emits far `call` and rejects `call.s` by
+            // name; only the linker's fixpoint selects the short form.
+            RelaxPair {
+                far: CALL,
+                short: CALL_S,
+            },
         ],
         entry_opcode: ENT,
     }
@@ -144,4 +152,14 @@ pub fn disassemble_object(obj: &ObjectFile) -> String {
 
 pub fn disassemble_executable(exe: &Executable) -> String {
     mtc_core::asm::disassemble_executable(&pm1_syntax(), exe)
+}
+
+pub fn link(
+    objects: &[ObjectFile],
+    libraries: &[ObjectFile],
+    options: mtc_core::linker::LinkOptions,
+) -> Result<mtc_core::linker::LinkOutput, mtc_core::linker::LinkError> {
+    let mut out = mtc_core::linker::link(&pm1_syntax(), objects, libraries, options)?;
+    out.map.alphabet = vec![" ".into(), "*".into()];
+    Ok(out)
 }
