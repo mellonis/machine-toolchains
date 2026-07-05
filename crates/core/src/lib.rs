@@ -3,4 +3,5 @@
 
 pub mod asm;
 pub mod formats;
+pub mod linker;
 pub mod vm;
