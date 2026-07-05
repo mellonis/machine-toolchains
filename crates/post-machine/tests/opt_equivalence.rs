@@ -106,3 +106,15 @@ fn empty_infinite_loop_still_loops_at_o1() {
         "the loop must survive optimization: {outcome:?}"
     );
 }
+
+#[test]
+fn cell_state_shrinks_and_preserves() {
+    let (o0, o1) = assert_equivalent("main() { mark; mark; right; mark, unmark; }", TAPES);
+    assert!(o1 < o0);
+}
+
+#[test]
+fn brk_barrier_blocks_elimination() {
+    let (o0, o1) = assert_equivalent("main() { mark; debugger; mark; }", TAPES);
+    assert_eq!(o0, o1, "no elimination across an observability barrier");
+}

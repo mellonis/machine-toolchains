@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use crate::ir::{IrFunction, IrProgram};
 
+pub mod cell_state;
 pub mod check_fold;
 pub mod dataflow;
 pub mod dce;
@@ -48,6 +49,7 @@ type PassFn = fn(&mut IrFunction) -> u32;
 const PIPELINE: &[(&str, PassFn)] = &[
     ("check-fold", check_fold::run),
     ("jump-threading", jump_threading::run),
+    ("cell-state", cell_state::run),
     ("dce", dce::run),
 ];
 
