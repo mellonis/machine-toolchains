@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::parser::{SourceFunction, SourceItem, SourceOperand, parse};
-use super::syntax::ArchSyntax;
+use super::syntax::{ArchSyntax, Flow};
 use super::{AsmError, AsmErrorKind};
 use crate::formats::object::{BlobDebug, ObjectFile, Relocation, Symbol, SymbolDef};
 use crate::vm::{Operand, OperandKind, encode_operand};
@@ -25,6 +25,7 @@ enum Slot {
         forced_short: bool,
         target: String,
     },
+    /// A symbol site — call or `jmp @name`: far opcode + 4-byte hole + relocation.
     Call {
         line: usize,
         opcode: u8,
@@ -153,6 +154,41 @@ fn assemble_function(
                         let mut bytes = vec![*opcode];
                         bytes.extend(encoded);
                         slots.push(Slot::Fixed { line: *line, bytes });
+                    }
+                    (OperandKind::RelI8 | OperandKind::RelI32, SourceOperand::SymbolName(name)) => {
+                        match entry.flow {
+                            Flow::Call => {
+                                return Err(err(
+                                    *line,
+                                    AsmErrorKind::BadOperand(
+                                        "call operands are already symbols; drop the `@`",
+                                    ),
+                                ));
+                            }
+                            Flow::Jump => {
+                                if entry.operand == OperandKind::RelI8 {
+                                    return Err(err(
+                                        *line,
+                                        AsmErrorKind::BadOperand(
+                                            "jmp.s width is linker-selected; write jmp @name",
+                                        ),
+                                    ));
+                                }
+                                slots.push(Slot::Call {
+                                    line: *line,
+                                    opcode: *opcode,
+                                    symbol: name.clone(),
+                                });
+                            }
+                            _ => {
+                                return Err(err(
+                                    *line,
+                                    AsmErrorKind::BadOperand(
+                                        "conditional jumps take labels, not symbols",
+                                    ),
+                                ));
+                            }
+                        }
                     }
                     (OperandKind::RelI8 | OperandKind::RelI32, SourceOperand::Name(name)) => {
                         if syntax.is_call(*opcode) {
@@ -496,5 +532,32 @@ mod tests {
             dbg[0].labels,
             vec![("A".to_string(), 1), ("B".to_string(), 1)]
         );
+    }
+
+    #[test]
+    fn symbol_jump_emits_hole_and_relocation() {
+        // fixture: jmp far = 0x20; g defined → blob 1.
+        let obj = asm(".func f\n        jmp @g\n.func g\n        ret\n");
+        assert_eq!(obj.blobs[0], vec![0x0E, 0x20, 0, 0, 0, 0]);
+        assert_eq!(obj.relocations.len(), 1);
+        assert_eq!(obj.relocations[0].offset, 2);
+        assert_eq!(obj.symbols[obj.relocations[0].symbol as usize].name, "g");
+        // External symbol jump works the same way:
+        let ext = asm(".func f\n        jmp @missing\n");
+        assert!(
+            ext.symbols
+                .iter()
+                .any(|s| s.name == "missing" && s.def == SymbolDef::External)
+        );
+    }
+
+    #[test]
+    fn symbol_operand_restrictions() {
+        let e = assemble(&test_syntax(), 0x7E, ".func f\n        jmp.s @g\n", false).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("linker-selected")));
+        let e = assemble(&test_syntax(), 0x7E, ".func f\n        br @g\n", false).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("labels")));
+        let e = assemble(&test_syntax(), 0x7E, ".func f\n        call @g\n", false).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("drop the `@`")));
     }
 }

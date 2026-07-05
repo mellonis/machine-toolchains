@@ -72,7 +72,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                 let is_call = syntax
                     .by_mnemonic(mnemonic)
                     .is_some_and(|e| syntax.is_call(e.opcode));
-                if !is_call {
+                if !is_call && !reloc_at.contains_key(&(blob, d.addr + 1)) {
                     targets.insert(*t);
                 }
             }
@@ -100,6 +100,9 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                                     .get(&(blob, d.addr + 1))
                                     .map(|name| (*name).to_string())
                                 // None: reloc-less call site -> .byte fallback below.
+                            } else if let Some(name) = reloc_at.get(&(blob, d.addr + 1)) {
+                                // Relocated symbol jump — always far in objects.
+                                Some(format!("@{name}"))
                             } else {
                                 Some(format!("L{t:04X}"))
                             }
@@ -495,5 +498,20 @@ START:  nop
         // Round-trip still holds through the fallback:
         let back = crate::asm::assembler::assemble(&syntax, 0x7E, &text, false).unwrap();
         assert_eq!(back.blobs, obj.blobs);
+    }
+
+    #[test]
+    fn object_symbol_jump_prints_at_form_and_round_trips() {
+        let syntax = test_syntax();
+        let src = ".func f\n        jmp @g\n        stop\n.func g\n        ret\n";
+        let obj1 = assemble(&syntax, 0x7E, src, false).unwrap();
+        let text = disassemble_object(&syntax, &obj1);
+        assert!(text.contains("jmp     @g"), "{text}");
+        assert!(
+            !text.contains("L0"),
+            "no phantom label for the reloc'd jump: {text}"
+        );
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        assert_eq!(obj1, obj2);
     }
 }

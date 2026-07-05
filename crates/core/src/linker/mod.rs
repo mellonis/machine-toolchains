@@ -100,7 +100,9 @@ impl MapFile {
 pub struct LinkReport {
     /// Defined but unreachable, sorted (see `resolve::Resolved::dropped`).
     pub dropped: Vec<String>,
+    /// Count of symbol sites (calls and tail jumps) relaxed to their short form.
     pub relaxed_calls: u32,
+    /// Count of symbol sites (calls and tail jumps) that stayed far.
     pub far_calls: u32,
 }
 

@@ -30,6 +30,8 @@ pub(crate) enum SourceOperand {
     None,
     Ints(Vec<i64>),
     Name(String),
+    /// `@name` — a function-symbol reference, not a local label.
+    SymbolName(String),
 }
 
 fn err(line: usize, kind: AsmErrorKind) -> AsmError {
@@ -141,13 +143,23 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
                 let [one] = operands.as_slice() else {
                     return Err(err(line_no, AsmErrorKind::BadOperand("takes one name")));
                 };
-                if !is_ident(one) {
-                    return Err(err(
-                        line_no,
-                        AsmErrorKind::BadOperand("jump/call operands are names, not numbers"),
-                    ));
+                if let Some(sym) = one.strip_prefix('@') {
+                    if !is_ident(sym) {
+                        return Err(err(
+                            line_no,
+                            AsmErrorKind::BadOperand("bad symbol name after `@`"),
+                        ));
+                    }
+                    SourceOperand::SymbolName(sym.to_string())
+                } else {
+                    if !is_ident(one) {
+                        return Err(err(
+                            line_no,
+                            AsmErrorKind::BadOperand("jump/call operands are names, not numbers"),
+                        ));
+                    }
+                    SourceOperand::Name((*one).to_string())
                 }
-                SourceOperand::Name((*one).to_string())
             }
             OperandKind::SymbolVec => {
                 if operands.is_empty() {

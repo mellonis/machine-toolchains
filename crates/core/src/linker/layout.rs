@@ -30,7 +30,8 @@ enum Piece {
         width: u8,
         orig_target: u32,
     },
-    /// `orig` is the CALL OPCODE's address; the hole is `orig + 1`.
+    /// A symbol site (call or relocated tail jump). `orig` is the opcode's
+    /// address; the hole is `orig + 1`.
     CallSite {
         orig: u32,
         callee: usize,
@@ -97,12 +98,27 @@ fn classify(syntax: &ArchSyntax, f: &FuncRef) -> Result<Vec<Piece>, LinkError> {
                     .expect("mnemonic came from a successful decode against this syntax");
                 match (entry.flow, operand) {
                     (Flow::Jump | Flow::Branch, DecodedOperand::RelTarget(orig_target)) => {
-                        pieces.push(Piece::Jump {
-                            orig: addr,
-                            opcode: entry.opcode,
-                            width: (len - 1) as u8,
-                            orig_target,
-                        });
+                        let hole = addr + 1;
+                        if let Some(&callee) = call_holes.get(&hole) {
+                            // A relocated symbol jump (tail call). Branches
+                            // are labels-only in v1 — a holed branch is a
+                            // malformed object, not a feature.
+                            if entry.flow == Flow::Branch {
+                                return Err(LinkError::MalformedBlob {
+                                    symbol: f.name.to_string(),
+                                    at: hole,
+                                });
+                            }
+                            consumed_holes.insert(hole);
+                            pieces.push(Piece::CallSite { orig: addr, callee });
+                        } else {
+                            pieces.push(Piece::Jump {
+                                orig: addr,
+                                opcode: entry.opcode,
+                                width: (len - 1) as u8,
+                                orig_target,
+                            });
+                        }
                     }
                     (Flow::Call, DecodedOperand::RelTarget(_)) => {
                         let hole = addr + 1;
@@ -613,6 +629,54 @@ X:      stop
             }]),
         };
         let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::MalformedBlob {
+                symbol: "main".into(),
+                at: 2
+            }
+        );
+    }
+
+    #[test]
+    fn tail_jump_relaxes_like_a_call() {
+        let syntax = syntax_with_short_call();
+        // main tail-jumps g: [ent][jmp @g] → linked short: [0E][30 off][0E][0B].
+        let src = ".func main\n        jmp @g\n.func g\n        ret\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let out = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap();
+        // jmp.s at 1, end 3, g at 3 → off 0.
+        assert_eq!(out.executable.code, vec![0x0E, 0x30, 0x00, 0x0E, 0x0B]);
+        assert_eq!(out.report.relaxed_calls, 1);
+    }
+
+    #[test]
+    fn holed_branch_is_malformed() {
+        use crate::formats::object::{ObjectFile, Relocation, Symbol, SymbolDef};
+        let syntax = syntax_with_short_call();
+        // [0E][22 xx][02]: br (Flow::Branch, RelI8) with a reloc hole at 2.
+        let obj = ObjectFile {
+            arch: 0x7E,
+            symbols: vec![
+                Symbol {
+                    name: "main".into(),
+                    def: SymbolDef::Defined { blob: 0 },
+                },
+                Symbol {
+                    name: "g".into(),
+                    def: SymbolDef::External,
+                },
+            ],
+            blobs: vec![vec![0x0E, 0x22, 0x00, 0x02]],
+            relocations: vec![Relocation {
+                blob: 0,
+                offset: 2,
+                symbol: 1,
+            }],
+            debug: None,
+        };
+        let lib = assemble(&syntax, 0x7E, ".func g\n        ret\n", false).unwrap();
+        let e = link(&syntax, &[obj], &[lib], LinkOptions::default()).unwrap_err();
         assert_eq!(
             e,
             crate::linker::LinkError::MalformedBlob {
