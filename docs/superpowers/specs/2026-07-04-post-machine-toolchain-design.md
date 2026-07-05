@@ -752,8 +752,15 @@ number plus a topic keyword ("spec §8 (equivalence contract)"). Section
 numbers are APPEND-ONLY: new material lands as new subsections or at
 section ends; renumbering existing sections is a breaking change that
 requires a `grep -rn "spec §" crates/` sweep in the same commit. This
-spec is the build-time design authority; the user-facing references in
-`docs/` (Plan 7) derive from it and never fork it.
+spec is the build-time design authority ONLY UNTIL the Plan 7 docs land
+(user ruling): Plan 7's documentation task migrates every code-comment
+reference from this spec to the durable references (README + the `docs/`
+language/ISA/format/CLI pages), after which THIS document freezes as a
+historical design record — linked from the history page, no longer cited
+by code, no longer amended. Implementation-internal invariants (e.g. the
+MF-coupling argument, closed-terminator-targets) do not migrate to user
+docs — they stay self-contained in module docs, being contracts between
+passes rather than with users.
 
 **Forge agnosticism:** repo content never hard-links the hosting provider.
 Cross-repo references use plain text — repo name + issue number
