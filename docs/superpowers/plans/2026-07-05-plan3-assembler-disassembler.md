@@ -617,11 +617,12 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
             continue;
         }
 
-        if let Some(name) = text.strip_prefix(".func") {
+        let first_word = text.split_whitespace().next().unwrap_or("");
+        if first_word == ".func" {
             if !pending_labels.is_empty() {
                 return Err(err(line_no, AsmErrorKind::Syntax("label at end of function")));
             }
-            let name = name.trim();
+            let name = text[".func".len()..].trim();
             if !is_ident(name) {
                 return Err(err(line_no, AsmErrorKind::Syntax("bad function name")));
             }
