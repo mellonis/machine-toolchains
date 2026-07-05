@@ -71,8 +71,11 @@ main() {
   no `void` (the language has no types), no parameters, no return values,
   no nesting.
 - `main` is the program entry point; required at link time for a `.pmx`.
-- Identifiers: Unicode, JavaScript-style — first character `ID_Start` or
-  `_`, then `ID_Continue` characters. Case-sensitive.
+- Identifiers: Unicode, JavaScript-flavored, concretely: first character
+  alphabetic (Unicode `Alphabetic`) or `_`, then alphanumeric or `_` — a
+  conservative subset of JS `ID_Start`/`ID_Continue`, and exactly the
+  `.pma` symbol rule, so every compiled name survives the trip through
+  generated assembly. Case-sensitive.
 - Comments: `//` line and `/* ... */` block.
 
 ### 3.2 Statements
@@ -477,10 +480,14 @@ Modules, all pure and individually testable:
 2. **Parser** — recursive descent → AST (one parameterized function-body
    parser; no copy-paste per context like the 2012 state machine).
 3. **Lowering** — AST → per-function CFG IR: basic blocks of
-   `{lft, rgt, wr(i), hlt, brk, call}` with terminators
-   `{fallthrough, goto, check(t,f), return}`. Statement successors (`(5)`,
-   `(!)`, fall-through, end-of-body) all lower to these block edges — the
-   old IR's `-1` stop / `-2` auto-link semantics, made explicit.
+   `{lft, rgt, wr(i), brk, call}` with terminators
+   `{fallthrough, goto, check(t,f), return, halt}` — `halt` is a
+   terminator, not a block op (a block after `halt` can never execute; a
+   false fall-through edge would poison the optimizer's dataflow). `!`
+   check arms target a shared synthetic return block per function.
+   Statement successors (`(5)`, `(!)`, fall-through, end-of-body) all
+   lower to these block edges — the old IR's `-1` stop / `-2` auto-link
+   semantics, made explicit.
 4. **Semantic checks** — undefined labels, duplicate labels/functions;
    warnings for unreachable code (which `-O1` then deletes).
 5. **Optimizer** — see §8.
