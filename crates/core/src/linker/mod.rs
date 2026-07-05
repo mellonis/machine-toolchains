@@ -7,6 +7,7 @@ pub(crate) mod resolve;
 use crate::asm::ArchSyntax;
 use crate::formats::executable::Executable;
 use crate::formats::object::ObjectFile;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LinkError {
@@ -51,7 +52,7 @@ impl Default for LinkOptions {
 
 /// One linked function's range and (optional) debug info, absolute
 /// offsets into the emitted [`Executable`]'s code.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapFunction {
     pub name: String,
     /// Absolute code offset of the function's `ent`.
@@ -66,12 +67,22 @@ pub struct MapFunction {
 
 /// The `.pmx.map` sidecar contents (JSON serialization added in a later
 /// task; this is the plain in-memory shape).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapFile {
     pub arch: u8,
     /// Presentation glyphs; empty if unknown to the generic core linker.
     pub alphabet: Vec<String>,
     pub functions: Vec<MapFunction>,
+}
+
+impl MapFile {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("map serialization is infallible")
+    }
+
+    pub fn from_json(s: &str) -> Result<MapFile, String> {
+        serde_json::from_str(s).map_err(|e| e.to_string())
+    }
 }
 
 /// Structured account of what the linker did — the CLI renders it under
@@ -126,4 +137,30 @@ pub fn link(
             far_calls: built.far_calls,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_json_round_trips() {
+        let map = MapFile {
+            arch: 1,
+            alphabet: vec![" ".into(), "*".into()],
+            functions: vec![MapFunction {
+                name: "main".into(),
+                start: 0,
+                end: 7,
+                labels: vec![("X".into(), 3)],
+                lines: vec![(1, 2), (3, 4)],
+            }],
+        };
+        let json = map.to_json();
+        assert!(json.contains("\"main\""));
+        assert!(json.contains("\"alphabet\""));
+        let back = MapFile::from_json(&json).unwrap();
+        assert_eq!(back, map);
+        assert!(MapFile::from_json("{not json").is_err());
+    }
 }
