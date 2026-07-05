@@ -139,3 +139,27 @@ fn library_supplies_go_to_end_lazily() {
     assert_eq!(names, vec!["main", "goToEnd"]); // unusedHelper dropped
     assert!(!out.executable.code.contains(&HLT));
 }
+
+#[test]
+fn tail_call_layout_round_trips_through_disassembly() {
+    // g is called (a root) AND tail-jumped: both forms must survive.
+    let src = "\
+.func main
+        call    g
+        rgt
+        call    f
+        stp
+.func f
+        lft
+        jmp     @g
+.func g
+        ret
+";
+    let obj = assemble(src, false).unwrap();
+    let out = link(&[obj], &[], LinkOptions::default()).unwrap();
+    let text = disassemble_executable(&out.executable);
+    assert!(text.contains("jmp     @"), "{text}");
+    let obj2 = assemble(&text, false).unwrap();
+    let out2 = link(&[obj2], &[], LinkOptions::default()).unwrap();
+    assert_eq!(out2.executable.code, out.executable.code);
+}

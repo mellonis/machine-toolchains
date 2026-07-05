@@ -190,12 +190,11 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
         }
     };
     let region_end = |i: usize| roots.get(i + 1).copied().unwrap_or(len);
-    // A short-call opcode displays its far partner's mnemonic (the far and
-    // short forms are interchangeable at the source level; only the far
-    // spelling is canonical in disassembly output).
-    let display_mnemonic = |entry: &SyntaxEntry| -> &'static str {
-        if entry.flow == Flow::Call
-            && let Some(pair) = syntax.relax_pairs.iter().find(|p| p.short == entry.opcode)
+    // A short opcode displays as its far partner when the operand is
+    // printed in symbol form (the two are interchangeable at source
+    // level; only far is canonical for symbol sites).
+    let far_mnemonic = |entry: &SyntaxEntry| -> &'static str {
+        if let Some(pair) = syntax.relax_pairs.iter().find(|p| p.short == entry.opcode)
             && let Some(far) = syntax.by_opcode(pair.far)
         {
             return far.mnemonic;
@@ -217,7 +216,8 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
             } = &d.body
             {
                 let e = syntax.by_mnemonic(mnemonic).unwrap();
-                if e.flow != Flow::Call && *t > root && *t < end {
+                if e.flow != Flow::Call && *t > root && *t < end && roots.binary_search(t).is_err()
+                {
                     targets.insert(*t);
                 }
             }
@@ -248,26 +248,30 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
                         continue;
                     }
                     first = false;
-                    let text = match operand {
-                        DecodedOperand::None => Some(String::new()),
-                        DecodedOperand::Ints(v) => {
-                            Some(v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
-                        }
+                    let text: Option<(&'static str, String)> = match operand {
+                        DecodedOperand::None => Some((entry.mnemonic, String::new())),
+                        DecodedOperand::Ints(v) => Some((
+                            entry.mnemonic,
+                            v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "),
+                        )),
                         DecodedOperand::RelTarget(t) => {
-                            if entry.flow == Flow::Call && roots.contains(t) {
-                                Some(func_name(*t))
+                            if entry.flow == Flow::Call && roots.binary_search(t).is_ok() {
+                                Some((far_mnemonic(entry), func_name(*t)))
+                            } else if entry.flow == Flow::Jump && roots.binary_search(t).is_ok() {
+                                // Tail jump to a function: symbol form.
+                                Some((far_mnemonic(entry), format!("@{}", func_name(*t))))
                             } else if entry.flow != Flow::Call && *t > root && *t < end {
-                                Some(format!("L{t:04X}"))
+                                Some((entry.mnemonic, format!("L{t:04X}")))
                             } else {
-                                None // cross-region jump: .byte fallback
+                                None // cross-region non-root: .byte fallback
                             }
                         }
                     };
                     match text {
-                        Some(operand_text) => {
+                        Some((mnemonic, operand_text)) => {
                             out.push_str(&grid_line(
                                 label_name.as_deref(),
-                                display_mnemonic(entry),
+                                mnemonic,
                                 &operand_text,
                             ));
                             out.push('\n');
@@ -473,6 +477,48 @@ START:  nop
             "short call prints far mnemonic:\n{text}"
         );
         assert!(!text.contains("call.s"), "call.s must not appear:\n{text}");
+    }
+
+    // test_syntax() + the 0x21/0x31 call pair, exactly as
+    // `short_call_in_executable_prints_far_mnemonic` builds it inline
+    // (same shape as layout.rs's `syntax_with_short_call()`).
+    fn syntax_with_pairs() -> crate::asm::syntax::ArchSyntax {
+        let mut syntax = test_syntax();
+        syntax.entries.push(SyntaxEntry {
+            opcode: 0x31,
+            mnemonic: "call.s",
+            operand: OperandKind::RelI8,
+            flow: Flow::Call,
+        });
+        syntax.relax_pairs.push(RelaxPair {
+            far: 0x21,
+            short: 0x31,
+        });
+        syntax
+    }
+
+    #[test]
+    fn executable_tail_jump_prints_symbol_form_and_reassembles() {
+        let syntax = syntax_with_pairs();
+        // main calls f (root), f tail-jumps main: infinite loop program.
+        let src = "\
+.func main
+        call    f
+        stop
+.func f
+        jmp     @main
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let out = crate::linker::link(&syntax, &[obj], &[], crate::linker::LinkOptions::default())
+            .unwrap();
+        let text = disassemble_executable(&syntax, &out.executable);
+        assert!(text.contains("jmp     @main"), "{text}");
+        assert!(!text.contains(".byte"), "{text}");
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        let out2 =
+            crate::linker::link(&syntax, &[obj2], &[], crate::linker::LinkOptions::default())
+                .unwrap();
+        assert_eq!(out2.executable.code, out.executable.code);
     }
 
     #[test]
