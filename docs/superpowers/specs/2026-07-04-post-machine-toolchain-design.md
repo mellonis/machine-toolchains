@@ -34,7 +34,7 @@ app.pmx   ──pmt run──────▶ execution on a tape
 | `.pma` | textual assembly (human hub; round-trippable through dis/asm) |
 | `.pmo` | object file (binary; symbols + relocations, per-function code) |
 | `.pmx` | linked executable (binary) |
-| `.pmb` | tape-block snapshot (binary; VM input/output) |
+| `.pmt` | tape-block snapshot (binary; VM input/output — the extension coincides with the `pmt` tool name; both spell "post-machine tape/toolchain", accepted) |
 
 ## 3. Source language (`.pmc`)
 
@@ -372,8 +372,8 @@ Magics are toolchain-neutral — two ASCII letters + a binary epoch byte:
 byte marks header-layout generations and doubles as a text-file guard;
 the `u16 format version` field covers evolution within an epoch) —
 because the containers are shared across machine toolchains
-(§10): the file *extension* carries the family flavor (`.pmo`/`.pmx`/`.pmb`
-from `pmt`; `.tmo`/`.tmx`/`.tmb` from `tmt` later), the magic + arch byte
+(§10): the file *extension* carries the family flavor (`.pmo`/`.pmx`/`.pmt`
+from `pmt`; `.tmo`/`.tmx`/`.tmt` from `tmt` later), the magic + arch byte
 identify the actual content. Tools never dispatch on extensions.
 
 ### 6.1 `.pmx` — executable
@@ -420,7 +420,7 @@ Per-function granularity is what gives the linker dead-function elimination
 and leaves the door open for link-time inlining. A "library" is simply a
 `.pmo` with many functions — only what `main` reaches is linked in.
 
-### 6.3 `.pmb` — tape-block snapshot
+### 6.3 `.pmt` — tape-block snapshot
 
 Binary tape-block state (the `TapeBlock` concept: N tapes with their heads;
 PM-1 blocks always hold one tape), usable as VM input and output — golden
@@ -433,11 +433,16 @@ u8 tape count
 per tape: i64 origin | u32 length | u8 indices[length] | i64 head position
 ```
 
-The alphabet travels with the data — a `.pmb` renders with its own glyphs
+The alphabet travels with the data — a `.pmt` renders with its own glyphs
 (index 0 = blank by convention); one dense span per tape, cells outside it
-blank. CLI: `pmt tape build " * * *" --head 3 -o in.pmb`,
-`pmt tape show in.pmb`,
-`pmt run app.pmx --tape-block in.pmb [--save-tape-block out.pmb]`.
+blank. **Glyphs live ONLY on the tape side**: the tape block's alphabet is
+the authoritative rendering source; with no tape at hand, tools fall back
+to the arch module's default glyphs (PM-1: `" "`, `"*"`). Code-side
+artifacts — `.pmo`, `.pmx`, and the `.pmx.map` sidecar — carry indices
+only, never glyphs (§4's realizability rule: hardware never sees glyphs).
+CLI: `pmt tape build " * * *" --head 3 -o in.pmt`,
+`pmt tape show in.pmt`,
+`pmt run app.pmx --tape-block in.pmt [--save-tape-block out.pmt]`.
 
 ### 6.4 `.pma` — assembly text
 
@@ -603,7 +608,7 @@ against the old notes during implementation.
   in-repo (it's ~20 lines). A `wasm32` build of `core` (for a future
   browser demo) is a designed-for target, not a v1 deliverable.
 - **Crates:** the shared/arch boundary is enforced by the crate split:
-  - `crates/core` (lib) — VM core + buses, tape devices (tapes, `.pmb`),
+  - `crates/core` (lib) — VM core + buses, tape devices (tapes, `.pmt`),
     `MO`/`MX`/`MT` container formats, linker, assembler/disassembler
     frameworks, `DebugSession`. **Arch-agnostic by contract**: core
     contains no opcode; arch modules supply decode tables, instruction
@@ -617,8 +622,8 @@ against the old notes during implementation.
   decisions.
 - **Build modes:** orthogonal switches, `cc`-style — `-g` (debug info:
   label/line maps in `.pmo`; at link, a JSON sidecar `app.pmx.map` carrying
-  function ranges, line maps, and alphabet glyph metadata — the `.pmx`
-  itself stays a pure code image), `-O0`/`-O1`, `--strip-debugger` (drop
+  function ranges and line maps — the `.pmx` itself stays a pure code
+  image, and glyphs stay on the tape side, §6.3), `-O0`/`-O1`, `--strip-debugger` (drop
   `brk` at codegen). Presets: `--debug` ≡ `-g -O0`; `--release` ≡
   `-O1 --strip-debugger`. Default: `-O0`, no `-g`. `-g -O1` is legal with
   the usual caveat: optimized code maps to source approximately.
@@ -644,7 +649,7 @@ against the old notes during implementation.
   for format round-trips and relaxation fixpoints.
 - **Golden end-to-end:** ports of the historical programs (`Sum.pms`,
   `Ty.pms` → `.pmc`) through compile → link → run, asserting final tape
-  state (diffed as `.pmb` snapshots, §6.3).
+  state (diffed as `.pmt` snapshots, §6.3).
 - **Round-trip:** `asm(dis(x)) == x` for `.pmo` and `.pmx`.
 - **Equivalence:** every optimizer pass is tested by running optimized vs
   unoptimized builds on the same tapes and comparing final state (plus
@@ -655,7 +660,7 @@ against the old notes during implementation.
 ## 12. Documentation
 
 `docs/` in-repo: language reference (`.pmc`), ISA reference, file-format
-spec (`.pmo`/`.pmx`/`.pmb`/`.pma`), CLI guide, and a history page mapping this
+spec (`.pmo`/`.pmx`/`.pmt`/`.pma`), CLI guide, and a history page mapping this
 design back to the four Delphi generations (what was inherited: the
 language lineage, fall-through optimization, `ent`-style safety the 2007
 call stack lacked, the PMProcessor's disassembler-first mindset).
