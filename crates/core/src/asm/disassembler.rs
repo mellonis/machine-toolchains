@@ -560,4 +560,22 @@ START:  nop
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
         assert_eq!(obj1, obj2);
     }
+
+    #[test]
+    fn self_recursive_tail_jump_round_trips() {
+        // A jump to one's OWN root prints in symbol form and survives
+        // the round trip (Task-2 behavior expansion, empirically pinned).
+        let syntax = test_syntax();
+        let src = ".func main\n        jmp @main\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let out = crate::linker::link(&syntax, &[obj], &[], crate::linker::LinkOptions::default())
+            .unwrap();
+        let text = disassemble_executable(&syntax, &out.executable);
+        assert!(text.contains("jmp     @main"), "{text}");
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        let out2 =
+            crate::linker::link(&syntax, &[obj2], &[], crate::linker::LinkOptions::default())
+                .unwrap();
+        assert_eq!(out2.executable.code, out.executable.code);
+    }
 }

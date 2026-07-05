@@ -49,15 +49,19 @@ pub struct OptReport {
 
 type PassFn = fn(&mut IrFunction) -> u32;
 
-/// Fixed pipeline, in per-round application order. Tasks 2-5 extend it.
+/// Fixed pipeline, in per-round application order. tail-call runs BEFORE
+/// tail-merge: return-chaining rewrites `Return` into `FallThrough` and
+/// would otherwise destroy the tail-call precondition (Task-6 finding) —
+/// and a tail call (call + ret + stack slot) beats return-chaining
+/// (1 byte) whenever both apply to the same block.
 const PIPELINE: &[(&str, PassFn)] = &[
     ("check-fold", check_fold::run),
     ("jump-threading", jump_threading::run),
     ("cell-state", cell_state::run),
     ("branch-fold", branch_fold::run),
+    ("tail-call", tail_call::run),
     ("tail-merge", tail_merge::run),
     ("dce", dce::run),
-    ("tail-call", tail_call::run),
 ];
 
 type ProgramPassFn = fn(&mut IrProgram) -> u32;

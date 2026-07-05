@@ -429,3 +429,76 @@ fn tail_merge_shares_the_stp_exactly_as_the_spec_promises() {
     // ent, jm.s +2, wr 1, stp — one stp serves both paths.
     assert_eq!(linked.executable.code, vec![ENT, JM_S, 0x02, WR, 0x81, STP]);
 }
+
+#[test]
+fn flagship_is_untouched_by_the_6b_passes() {
+    // The 6a crown jewel must not move: no calls, no duplicate blocks,
+    // no empty-return adjacency (b0 ends Goto, not Return).
+    let out = compile(
+        FLAGSHIP,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
+    use mtc_post_machine::arch::opcodes::*;
+    assert_eq!(
+        linked.executable.code,
+        vec![ENT, WR, 0x81, RGT, WR, 0x80, STP]
+    );
+}
+
+#[test]
+fn inline_then_tail_call_compose() {
+    // step() is inlined into walk(); walk()'s own trailing call to
+    // itself is NOT inlined (recursion) but IS tail-converted — the
+    // classic loop-from-recursion, verified terminating identically.
+    let src = "\
+step() { right; }
+walk() { @step(); check(1, !); 1: @walk(!); }
+main() { @walk(); mark; }
+";
+    let (o0, o1) = assert_equivalent(src, TAPES);
+    assert!(o1 < o0, "{o0} -> {o1}");
+    let out = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            capture_ir: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let stages: Vec<&str> = out.ir_snapshots.iter().map(|(s, _)| s.as_str()).collect();
+    assert!(stages.contains(&"after:inline"), "{stages:?}");
+    assert!(stages.contains(&"after:tail-call"), "{stages:?}");
+    // The recursive call became a tail jump:
+    let walk = out.ir.functions.iter().find(|f| f.name == "walk").unwrap();
+    assert!(walk.blocks.iter().any(|b| matches!(
+        &b.term,
+        mtc_post_machine::ir::IrTerm::TailCall { name } if name == "walk"
+    )));
+}
+
+#[test]
+fn fno_tail_call_keeps_calls() {
+    let src = "f() { right(!); } g() { left, @f(!); } main() { @g(); }";
+    let out = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            disabled_passes: vec!["inline".to_string(), "tail-call".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(!out.report.opt.changes.iter().any(|c| c.pass == "tail-call"));
+    let g = out.ir.functions.iter().find(|f| f.name == "g").unwrap();
+    assert!(
+        g.blocks
+            .iter()
+            .all(|b| !matches!(b.term, mtc_post_machine::ir::IrTerm::TailCall { .. }))
+    );
+}
