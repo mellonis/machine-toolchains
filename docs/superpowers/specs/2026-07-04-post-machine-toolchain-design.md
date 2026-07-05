@@ -476,6 +476,16 @@ in v1, which has no indirect control flow; bytes never reached print as
 remains the runtime call guard, but function discovery comes from control
 flow, not byte scanning.
 
+**Symbol jumps (tail calls):** `jmp @name` takes a function symbol, not a
+label — it assembles as the far `jmp` plus a relocation (the same
+hole-and-debt mechanism as `call`) and relaxes to `jmp.s` at link time.
+`jmp.s @name` is an error (width is linker-selected, like `call.s`), and
+conditional `jm`/`jnm @name` are errors — v1 branches take labels only.
+Disassemblers print relocated jumps (from objects, via the relocation
+table) and jumps landing on function roots (from executables, via
+discovery) in the `jmp @name` form; a jump into another function's middle
+that targets no root still falls back to `.byte`.
+
 ## 7. Compiler
 
 Modules, all pure and individually testable:
@@ -486,9 +496,11 @@ Modules, all pure and individually testable:
    parser; no copy-paste per context like the 2012 state machine).
 3. **Lowering** — AST → per-function CFG IR: basic blocks of
    `{lft, rgt, wr(i), brk, call}` with terminators
-   `{fallthrough, goto, check(t,f), return, halt}` — `halt` is a
-   terminator, not a block op (a block after `halt` can never execute; a
-   false fall-through edge would poison the optimizer's dataflow). `!`
+   `{fallthrough, goto, check(t,f), return, halt, tailcall(name)}` —
+   `halt` is a terminator, not a block op (a block after `halt` can never
+   execute; a false fall-through edge would poison the optimizer's
+   dataflow); `tailcall(name)` is produced only by the optimizer (§8 pass
+   8), never by lowering, and bumped the IR JSON version to 2. `!`
    check arms target a shared synthetic return block per function.
    Statement successors (`(5)`, `(!)`, fall-through, end-of-body) all
    lower to these block edges — the old IR's `-1` stop / `-2` auto-link
@@ -519,7 +531,12 @@ programs compile to `.pmx`.
 
 **Equivalence contract** — every pass must preserve: final tape contents,
 termination kind (`stp` / `hlt` / which trap), and every MF-dependent branch
-decision. Explicitly *not* observable: step count and intermediate states —
+decision. Resource-limit traps (step/tact limits, stack overflow/underflow)
+are quality-of-implementation outcomes, not semantic observables: passes may
+change resource consumption — inline and tail-call change stack depth, and a
+self-recursive tail call becomes an in-place loop (StackOverflow at `-O0` →
+StepLimit at `-O1` is legal). Explicitly *not* observable: step count and
+intermediate states —
 except at un-stripped `brk` instructions, which are observability barriers
 (no motion or elimination across them; the debugger sees honest state).
 The **effect model** each pass reasons over: cell writes, head moves
