@@ -163,6 +163,18 @@ fn namespace_members_are_bare_inside_qualified_outside() {
     let src =
         "namespace std { helper() { right; } export api() { @helper(); } } main() { @std::api(); }";
     let out = compile(src, CompileOptions::default()).unwrap();
+    // And the bare form from file scope IS an undeclared external:
+    let bare = compile(
+        "namespace std { export api() { right; } } main() { @api(); }",
+        CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        bare.report
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("undeclared external `api`"))
+    );
     assert!(
         out.report
             .warnings
@@ -185,8 +197,6 @@ fn namespace_members_are_bare_inside_qualified_outside() {
 #[test]
 fn deliberate_interposition_via_namespace_injection() {
     // User re-declares inside `std` — same symbol name, user wins.
-    // (Keep this test simple: link a user object defining std.step
-    // against a library defining std.step — user's wins.)
     let lib = compile(
         "namespace std { export step() { right; } }",
         CompileOptions::default(),
@@ -201,7 +211,7 @@ fn deliberate_interposition_via_namespace_injection() {
     let (_, _, head) = run_exe(&linked.executable, &[false], 0);
     assert_eq!(
         head, -1,
-        "user's std.step (left) must win over the library's (right)"
+        "user's std::step (left) must win over the library's (right)"
     );
 }
 
