@@ -3,12 +3,6 @@
 //! silently by user definitions), then BFS from `main` so only reachable
 //! functions are linked in — dead functions are dropped and may reference
 //! anything, even names that don't exist.
-//!
-//! TODO(plan4-task3): `resolve`, `Resolved`, and `FuncRef` are consumed by
-//! the layout/emission step (`link()`); until that lands, they're only
-//! exercised by this module's own tests, which the plain `--lib` build
-//! (no `cfg(test)`) doesn't see.
-#![allow(dead_code)]
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -28,8 +22,8 @@ pub(crate) struct FuncRef<'a> {
 pub(crate) struct Resolved<'a> {
     /// Functions in layout order: main first, then BFS discovery order.
     pub order: Vec<FuncRef<'a>>,
-    /// Sorted names of Defined-but-unreached functions, across user
-    /// objects and libraries (shadowed library definitions included).
+    /// Sorted names whose winning (post-shadowing) definition went
+    /// unreached; shadowed library copies are not reported.
     pub dropped: Vec<String>,
 }
 

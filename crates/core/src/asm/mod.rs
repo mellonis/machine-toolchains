@@ -5,7 +5,7 @@ mod assembler;
 pub(crate) mod decode;
 mod disassembler;
 mod parser;
-mod syntax;
+pub(crate) mod syntax;
 
 pub use assembler::assemble;
 pub use disassembler::{disassemble_executable, disassemble_object};
