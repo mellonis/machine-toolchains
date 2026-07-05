@@ -13,6 +13,15 @@ pub const RESERVED: [&str; 8] = [
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub functions: Vec<Function>,
+    pub imports: Vec<Import>,
+}
+
+/// An imported name (Task 4 fills population; the field exists now so
+/// Task 4's diff is surgical).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    pub name: String,
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,6 +30,14 @@ pub struct Function {
     pub line: u32,
     pub col: u32,
     pub body: Vec<Statement>,
+    /// `export` (contextual keyword) or `main` (always exported).
+    pub exported: bool,
+    /// Nesting is always local; flatten computes this for top-level
+    /// functions as `!exported`.
+    pub local: bool,
+    /// Nested function definitions (spec §3), hoisted and visible to
+    /// their own siblings and enclosing scope's body; emptied by flatten.
+    pub nested: Vec<Function>,
 }
 
 /// One `;`-terminated statement: an optional run of labels, then one or
@@ -150,9 +167,23 @@ impl Parser<'_> {
     }
 
     fn program(mut self) -> Result<Program, CompileError> {
+        let imports = Vec::new(); // populated in Task 4; declared now
         let mut functions: Vec<Function> = Vec::new();
         while !matches!(self.peek().kind, TokenKind::Eof) {
-            let f = self.function()?;
+            // Contextual keyword: `export` + identifier = exported def;
+            // `export` + `(` is a function NAMED export.
+            let exported = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(_))
+                ) {
+                self.bump();
+                true
+            } else {
+                false
+            };
+            let mut f = self.function()?;
+            f.exported = exported || f.name == "main"; // main always exports
             if functions.iter().any(|g| g.name == f.name) {
                 return Err(CompileError {
                     line: f.line,
@@ -162,7 +193,7 @@ impl Parser<'_> {
             }
             functions.push(f);
         }
-        Ok(Program { functions })
+        Ok(Program { functions, imports })
     }
 
     fn function(&mut self) -> Result<Function, CompileError> {
@@ -183,8 +214,50 @@ impl Parser<'_> {
         self.expect(&TokenKind::LBrace, "`{`")?;
 
         let mut body = Vec::new();
+        let mut nested = Vec::new();
         let mut seen_labels: HashSet<u32> = HashSet::new();
         loop {
+            // Nested definition: IDENT ( ) {  — visibility-only nesting.
+            let is_nested_def = matches!(&self.peek().kind, TokenKind::Ident(w)
+                    if !RESERVED.contains(&w.as_str()))
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::LParen)
+                )
+                && matches!(
+                    self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                    Some(TokenKind::RParen)
+                )
+                && matches!(
+                    self.tokens.get(self.pos + 3).map(|t| &t.kind),
+                    Some(TokenKind::LBrace)
+                );
+            if is_nested_def {
+                let child = self.function()?;
+                if nested.iter().any(|g: &Function| g.name == child.name) {
+                    return Err(CompileError {
+                        line: child.line,
+                        col: child.col,
+                        kind: CompileErrorKind::DuplicateFunction(child.name),
+                    });
+                }
+                nested.push(child);
+                continue;
+            }
+            // `export` before a nested definition is an error.
+            if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(_))
+                )
+            {
+                let t = self.peek();
+                return Err(CompileError {
+                    line: t.line,
+                    col: t.col,
+                    kind: CompileErrorKind::NestedExport,
+                });
+            }
             // Labels announced before the next statement (possibly stacked).
             let mut labels = Vec::new();
             loop {
@@ -218,6 +291,9 @@ impl Parser<'_> {
             line: name_tok.line,
             col: name_tok.col,
             body,
+            exported: false,
+            local: false,
+            nested,
         })
     }
 
@@ -548,5 +624,32 @@ main() {
             Item::Call { name, .. } => assert_eq!(name, "идиВКонец"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn export_is_contextual_and_main_auto_exports() {
+        let p = parse_src("export api() { left; } helper() { right; } main() { mark; }").unwrap();
+        assert!(p.functions[0].exported);
+        assert!(!p.functions[1].exported);
+        assert!(p.functions[2].exported); // main
+        let p = parse_src("export() { left; } main() { @export(); }").unwrap();
+        assert_eq!(p.functions[0].name, "export"); // a function NAMED export
+    }
+
+    #[test]
+    fn nested_definitions_parse_recursively() {
+        let p = parse_src("main() { walk() { step() { right; } @step(); } @walk(); }").unwrap();
+        let main = &p.functions[0];
+        assert_eq!(main.nested.len(), 1);
+        assert_eq!(main.nested[0].name, "walk");
+        assert_eq!(main.nested[0].nested[0].name, "step");
+    }
+
+    #[test]
+    fn nested_export_and_same_scope_duplicates_error() {
+        let e = parse_src("main() { export inner() { left; } }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::NestedExport));
+        let e = parse_src("main() { f() { left; } f() { right; } }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "f"));
     }
 }

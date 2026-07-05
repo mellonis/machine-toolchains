@@ -47,6 +47,8 @@ pub enum CompileErrorKind {
     /// The generated `.pma` failed to assemble — a compiler bug, not a
     /// user error; the message carries the assembler diagnostic.
     Internal(String),
+    /// `export` on a nested definition — nesting is always local.
+    NestedExport,
 }
 
 impl std::fmt::Display for CompileError {
@@ -87,6 +89,9 @@ impl std::fmt::Display for CompileError {
                 write!(f, "label `{l}` at end of function binds to nothing")
             }
             CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
+            CompileErrorKind::NestedExport => {
+                write!(f, "nested functions are always local — remove `export`")
+            }
         }
     }
 }
@@ -145,7 +150,7 @@ pub struct CompileOutput {
 /// bug and reports as `CompileErrorKind::Internal`.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
     let tokens = crate::lexer::lex(source)?;
-    let program = crate::parser::parse(&tokens)?;
+    let program = flatten(crate::parser::parse(&tokens)?);
     let (mut ir, warnings) = crate::ir::lower(&program)?;
     let mut ir_snapshots = Vec::new();
     if options.capture_ir {
@@ -185,6 +190,75 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
         ir_snapshots,
         report: CompileReport { warnings, opt },
     })
+}
+
+/// Flatten nested definitions (spec §3): dot-mangle names
+/// (`outer.inner`), resolve calls lexically (innermost scope outward,
+/// then top level, else external), compute symbol locality. Infallible:
+/// unresolved names simply stay external.
+fn flatten(program: crate::parser::Program) -> crate::parser::Program {
+    use crate::parser::{Function, Item, Program};
+    use std::collections::HashMap;
+
+    let top: HashMap<String, String> = program
+        .functions
+        .iter()
+        .map(|f| (f.name.clone(), f.name.clone()))
+        .collect();
+
+    fn emit(
+        mut f: Function,
+        prefix: &str,
+        scopes: &[HashMap<String, String>],
+        out: &mut Vec<Function>,
+    ) {
+        let full = if prefix.is_empty() {
+            f.name.clone()
+        } else {
+            format!("{prefix}.{}", f.name)
+        };
+        // This function's own children are visible inside its body.
+        let child_map: HashMap<String, String> = f
+            .nested
+            .iter()
+            .map(|c| (c.name.clone(), format!("{full}.{}", c.name)))
+            .collect();
+        let mut inner = scopes.to_vec();
+        inner.push(child_map);
+
+        for stmt in &mut f.body {
+            for item in &mut stmt.items {
+                if let Item::Call { name, .. } = item {
+                    for scope in inner.iter().rev() {
+                        if let Some(m) = scope.get(name) {
+                            *name = m.clone();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let children = std::mem::take(&mut f.nested);
+        let is_nested = !prefix.is_empty();
+        f.local = is_nested || !f.exported;
+        f.exported = f.exported && !is_nested;
+        f.name = full.clone();
+        out.push(f);
+        for c in children {
+            emit(c, &full, &inner, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    let imports = program.imports.clone();
+    for f in program.functions {
+        emit(f, "", std::slice::from_ref(&top), &mut out);
+    }
+    Program {
+        functions: out,
+        imports,
+    }
 }
 
 /// The assembler recorded `(code_offset, pma_line)`; compose with the
@@ -308,5 +382,39 @@ mod tests {
         let stages: Vec<&str> = out.ir_snapshots.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(stages, vec!["lowered", "final"]);
         assert_eq!(out.ir_snapshots[0].1, out.ir_snapshots[1].1); // -O0: identical
+    }
+
+    #[test]
+    fn flatten_mangles_resolves_and_localizes() {
+        let out = compile(
+            "export api() { helper() { right; } @helper(); } helper() { left; } main() { @api(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        let names: Vec<(&str, bool)> = out
+            .ir
+            .functions
+            .iter()
+            .map(|f| (f.name.as_str(), f.local))
+            .collect();
+        assert!(names.contains(&("api", false)));
+        assert!(names.contains(&("api.helper", true)));
+        assert!(names.contains(&("helper", true))); // shadowed, untouched
+        assert!(names.contains(&("main", false)));
+        let api = out.ir.functions.iter().find(|f| f.name == "api").unwrap();
+        assert!(api.blocks.iter().any(|b| b.ops.iter().any(|op| matches!(
+            op, crate::ir::IrOp::Call { name, .. } if name == "api.helper"
+        ))));
+    }
+
+    #[test]
+    fn codegen_prints_the_local_modifier() {
+        let out = compile(
+            "helper() { right; } main() { @helper(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        assert!(out.pma.contains(".func helper local"), "{}", out.pma);
+        assert!(out.pma.contains(".func main\n"), "{}", out.pma);
     }
 }

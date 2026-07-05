@@ -99,7 +99,10 @@ fn emit_function(f: &IrFunction, options: CodegenOptions, e: &mut Emitter) {
         }
     }
 
-    e.push(format!(".func {}", f.name), f.line);
+    e.push(
+        format!(".func {}{}", f.name, if f.local { " local" } else { "" }),
+        f.line,
+    );
     for (i, b) in f.blocks.iter().enumerate() {
         if referenced.contains(&b.id) {
             if b.labels.is_empty() {

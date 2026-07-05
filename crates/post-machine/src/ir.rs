@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::compiler::{CompileError, CompileErrorKind, Warning};
 use crate::parser::{Builtin, CheckArm, Item, Program, Successor};
 
-pub const IR_VERSION: u32 = 2;
+pub const IR_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrProgram {
@@ -25,6 +25,9 @@ pub struct IrFunction {
     /// Entry is `blocks[0]`. Ids are unique within the function but need
     /// not stay dense once optimizer passes (Plan 6) delete blocks.
     pub blocks: Vec<IrBlock>,
+    /// Hidden-by-default visibility (spec §3, §9): `true` unless the
+    /// source marked the function `export` (`main` is always exported).
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +130,7 @@ fn lower_function(
                 term: IrTerm::Return,
                 term_line: 0,
             }],
+            local: f.local,
         });
     }
 
@@ -312,6 +316,7 @@ fn lower_function(
         name: f.name.clone(),
         line: f.line,
         blocks,
+        local: f.local,
     })
 }
 
@@ -494,7 +499,7 @@ mod tests {
         let (ir, _) = ir_of("main() { @go(); check(1, !); 1: mark(!); }");
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 2"));
+        assert!(json.contains("\"version\": 3"));
     }
 
     #[test]

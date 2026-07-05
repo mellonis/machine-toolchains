@@ -286,7 +286,7 @@ main() {
     )
     .unwrap();
     let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
-    assert_eq!(linked.report.dropped, vec!["goToEnd".to_string()]);
+    assert_eq!(linked.report.dropped, Vec::<String>::new());
 }
 
 #[test]

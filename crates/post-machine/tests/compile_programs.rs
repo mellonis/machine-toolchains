@@ -32,13 +32,13 @@ main() {
 ";
 
 const EXPECTED_PMA: &str = "\
-.func goToEnd
+.func goToEnd local
 L1:
         rgt
         jm      L1
         lft
         ret
-.func goToBegin
+.func goToBegin local
 L1:
         lft
         jm      L1
@@ -90,7 +90,7 @@ fn spec_sample_links_byte_exact() {
 fn spec_sample_runs_and_drops_the_dead_function() {
     let out = compile(SPEC_PMC, CompileOptions::default()).unwrap();
     let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
-    assert_eq!(linked.report.dropped, vec!["goToBegin".to_string()]);
+    assert_eq!(linked.report.dropped, Vec::<String>::new());
 
     // Marks at 0..=2, head on the first mark (the Plan 4 scenario).
     let reg = registry();
@@ -150,7 +150,7 @@ fn emitted_ir_is_a_versioned_json_artifact() {
     let json = out.ir.to_json();
     let back = IrProgram::from_json(&json).unwrap();
     assert_eq!(back, out.ir);
-    assert_eq!(back.version, 2);
+    assert_eq!(back.version, 3);
     assert_eq!(back.functions.len(), 3);
 }
 
@@ -189,7 +189,7 @@ main() {
 #[test]
 fn a_pmc_compiled_library_links_lazily() {
     let lib = compile(
-        "goToEnd() { 1: right; check(1, 2); 2: left; } unusedHelper() { halt; }",
+        "export goToEnd() { 1: right; check(1, 2); 2: left; } unusedHelper() { halt; }",
         CompileOptions::default(),
     )
     .unwrap();
