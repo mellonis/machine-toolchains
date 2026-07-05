@@ -201,4 +201,14 @@ mod tests {
         // The blank edge is only reachable AFTER rgt -> refined.
         assert_eq!(facts[&1], Fact::Coupled(Some(0)));
     }
+
+    #[test]
+    fn back_edge_coupled_disagreement_merges_to_unknown() {
+        // Loop header fed by entry (after `mark`: Coupled(Some(1))) and a
+        // back edge (after `unmark`: Coupled(Some(0))) — must merge to
+        // Coupled(None), the only nontrivial worklist re-push path.
+        let (_, facts) =
+            facts_of("f() { mark; 1: right; check(2, 3); 2: unmark; goto 1; 3: left; }");
+        assert_eq!(facts[&1], Fact::Coupled(None));
+    }
 }

@@ -495,4 +495,21 @@ mod tests {
         broken.blocks[0].term = IrTerm::Goto { to: 99 };
         assert!(validate_function(&broken).is_err());
     }
+
+    #[test]
+    fn validate_function_rejects_empty_functions() {
+        let (ir, _) = ir_of("f() { left; }");
+        let mut broken = ir.functions[0].clone();
+        broken.blocks.clear();
+        assert!(validate_function(&broken).is_err());
+    }
+
+    #[test]
+    fn validate_function_rejects_duplicate_ids() {
+        let (ir, _) = ir_of("f() { left; }");
+        let mut broken = ir.functions[0].clone();
+        let dup = broken.blocks[0].clone();
+        broken.blocks.push(dup);
+        assert!(validate_function(&broken).is_err());
+    }
 }

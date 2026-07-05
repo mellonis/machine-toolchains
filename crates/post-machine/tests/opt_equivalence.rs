@@ -251,9 +251,12 @@ fn capture_ir_records_the_pass_stages() {
 
 #[test]
 fn spec_sample_is_already_optimal() {
-    // goToEnd / goToBegin / main from spec §3: nothing for 6a passes to
-    // do (loops re-enter Uncoupled; calls clobber facts) — -O1 must be
-    // byte-identical to -O0, proving the optimizer's do-no-harm floor.
+    // goToEnd / main from spec §3: nothing for 6a passes to do —
+    // goToEnd's loop head re-merges to Uncoupled; in main, `right`
+    // after the call leaves Coupled(None) (the call itself changes
+    // nothing that matters), and the arm writes are genuine value
+    // flips no fact could license dropping. -O1 must be byte-identical
+    // to -O0: the optimizer's do-no-harm floor.
     let src = "\
 goToEnd() {
 1:  right;

@@ -12,4 +12,4 @@ pub mod parser;
 pub use compiler::{
     CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, Warning, compile,
 };
-pub use optimizer::OptLevel;
+pub use optimizer::{OptLevel, OptReport, PassChange};
