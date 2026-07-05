@@ -2,6 +2,7 @@
 //! instruction knowledge arrives via [`ArchSyntax`] tables.
 
 mod assembler;
+pub(crate) mod decode;
 mod disassembler;
 mod parser;
 mod syntax;

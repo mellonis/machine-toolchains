@@ -3,109 +3,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::decode::{Body, Decoded, DecodedOperand, decode_at, decode_stream};
 use super::syntax::ArchSyntax;
 use crate::formats::executable::Executable;
 use crate::formats::object::{ObjectFile, SymbolDef};
-use crate::vm::OperandKind;
-
-/// One decoded instruction (or undecodable byte) at a code offset.
-struct Decoded {
-    addr: u32,
-    len: u32,
-    body: Body,
-}
-
-enum Body {
-    Instr {
-        mnemonic: &'static str,
-        operand: DecodedOperand,
-    },
-    Raw(u8),
-}
-
-enum DecodedOperand {
-    None,
-    Ints(Vec<u32>),
-    RelTarget(u32), // absolute target address (same space as `addr`)
-}
-
-/// Decode ONE instruction at `addr` within `[addr, end)`. `None` means an
-/// unknown opcode or a truncated operand; the caller decides how to fall
-/// back (`.byte` in streams, path-stop in traversal).
-fn decode_at(syntax: &ArchSyntax, code: &[u8], addr: u32, end: u32) -> Option<Decoded> {
-    let opcode = code[addr as usize];
-    let entry = syntax.by_opcode(opcode)?;
-    let (len, operand) = match entry.operand {
-        OperandKind::None => (1, DecodedOperand::None),
-        OperandKind::RelI8 => {
-            if addr + 2 > end {
-                return None;
-            }
-            let off = code[(addr + 1) as usize] as i8;
-            let target = (i64::from(addr) + 2 + i64::from(off)) as u32;
-            (2, DecodedOperand::RelTarget(target))
-        }
-        OperandKind::RelI32 => {
-            if addr + 5 > end {
-                return None;
-            }
-            let bytes: [u8; 4] = code[(addr + 1) as usize..(addr + 5) as usize]
-                .try_into()
-                .unwrap();
-            let off = i32::from_le_bytes(bytes);
-            let target = (i64::from(addr) + 5 + i64::from(off)) as u32;
-            (5, DecodedOperand::RelTarget(target))
-        }
-        OperandKind::SymbolVec => {
-            let mut i = addr + 1;
-            let mut symbols = Vec::new();
-            let mut ok = false;
-            while i < end {
-                let b = code[i as usize];
-                symbols.push(u32::from(b & 0x7F));
-                i += 1;
-                if b & 0x80 != 0 {
-                    ok = true;
-                    break;
-                }
-            }
-            if !ok {
-                return None;
-            }
-            (i - addr, DecodedOperand::Ints(symbols))
-        }
-    };
-    Some(Decoded {
-        addr,
-        len,
-        body: Body::Instr {
-            mnemonic: entry.mnemonic,
-            operand,
-        },
-    })
-}
-
-fn decode_stream(syntax: &ArchSyntax, code: &[u8], start: u32, end: u32) -> Vec<Decoded> {
-    let mut out = Vec::new();
-    let mut addr = start;
-    while addr < end {
-        match decode_at(syntax, code, addr, end) {
-            Some(d) => {
-                addr += d.len;
-                out.push(d);
-            }
-            None => {
-                out.push(Decoded {
-                    addr,
-                    len: 1,
-                    body: Body::Raw(code[addr as usize]),
-                });
-                addr += 1;
-            }
-        }
-    }
-    out
-}
 
 fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
     let label_field = match label {
@@ -167,32 +68,52 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
             let label_name = targets
                 .contains(&d.addr)
                 .then(|| format!("L{:04X}", d.addr));
-            let line = match &d.body {
-                Body::Raw(b) => grid_line(label_name.as_deref(), ".byte", &b.to_string()),
+            match &d.body {
+                Body::Raw(b) => {
+                    out.push_str(&grid_line(label_name.as_deref(), ".byte", &b.to_string()));
+                    out.push('\n');
+                }
                 Body::Instr { mnemonic, operand } => {
                     let entry = syntax.by_mnemonic(mnemonic).unwrap();
-                    let operand_text = match operand {
-                        DecodedOperand::None => String::new(),
+                    let text: Option<String> = match operand {
+                        DecodedOperand::None => Some(String::new()),
                         DecodedOperand::Ints(v) => {
-                            v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                            Some(v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
                         }
                         DecodedOperand::RelTarget(t) => {
                             if syntax.is_call(entry.opcode) {
                                 // The hole starts one byte after the opcode.
-                                match reloc_at.get(&(blob, d.addr + 1)) {
-                                    Some(name) => (*name).to_string(),
-                                    None => format!("L{t:04X}"), // resolved call (linker output)
-                                }
+                                reloc_at
+                                    .get(&(blob, d.addr + 1))
+                                    .map(|name| (*name).to_string())
+                                // None: reloc-less call site -> .byte fallback below.
                             } else {
-                                format!("L{t:04X}")
+                                Some(format!("L{t:04X}"))
                             }
                         }
                     };
-                    grid_line(label_name.as_deref(), mnemonic, &operand_text)
+                    match text {
+                        Some(operand_text) => {
+                            out.push_str(&grid_line(
+                                label_name.as_deref(),
+                                mnemonic,
+                                &operand_text,
+                            ));
+                            out.push('\n');
+                        }
+                        None => {
+                            for k in 0..d.len {
+                                out.push_str(&grid_line(
+                                    if k == 0 { label_name.as_deref() } else { None },
+                                    ".byte",
+                                    &code[(d.addr + k) as usize].to_string(),
+                                ));
+                                out.push('\n');
+                            }
+                        }
+                    }
                 }
-            };
-            out.push_str(&line);
-            out.push('\n');
+            }
         }
     }
     out
@@ -204,7 +125,7 @@ fn decode_one(syntax: &ArchSyntax, code: &[u8], addr: u32) -> Option<Decoded> {
 }
 
 pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
-    use crate::asm::syntax::Flow;
+    use crate::asm::syntax::{Flow, SyntaxEntry};
     let code = &exe.code;
     let len = code.len() as u32;
 
@@ -246,6 +167,18 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
     let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();
     let func_name = |addr: u32| format!("func_{addr:04X}");
     let region_end = |i: usize| roots.get(i + 1).copied().unwrap_or(len);
+    // A short-call opcode displays its far partner's mnemonic (the far and
+    // short forms are interchangeable at the source level; only the far
+    // spelling is canonical in disassembly output).
+    let display_mnemonic = |entry: &SyntaxEntry| -> &'static str {
+        if entry.flow == Flow::Call
+            && let Some(pair) = syntax.relax_pairs.iter().find(|p| p.short == entry.opcode)
+            && let Some(far) = syntax.by_opcode(pair.far)
+        {
+            return far.mnemonic;
+        }
+        entry.mnemonic
+    };
 
     let mut out = String::new();
     for (i, &root) in roots.iter().enumerate() {
@@ -312,7 +245,7 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
                         Some(operand_text) => {
                             out.push_str(&grid_line(
                                 label_name.as_deref(),
-                                mnemonic,
+                                display_mnemonic(entry),
                                 &operand_text,
                             ));
                             out.push('\n');
@@ -341,7 +274,9 @@ mod tests {
     use super::*;
     use crate::asm::assembler::assemble;
     use crate::asm::syntax::fixture::test_syntax;
+    use crate::asm::syntax::{Flow, RelaxPair, SyntaxEntry};
     use crate::formats::executable::Executable;
+    use crate::vm::OperandKind;
 
     #[test]
     fn object_disassembly_uses_canonical_grid() {
@@ -489,5 +424,60 @@ START:  nop
             "cross-region jmp must not print as jmp"
         );
         assert!(text.contains("ret"));
+    }
+
+    #[test]
+    fn short_call_in_executable_prints_far_mnemonic() {
+        let syntax = test_syntax();
+        // Add a short-call opcode to a LOCAL syntax copy: fixture has none.
+        let mut syntax = syntax;
+        syntax.entries.push(SyntaxEntry {
+            opcode: 0x31,
+            mnemonic: "call.s",
+            operand: OperandKind::RelI8,
+            flow: Flow::Call,
+        });
+        syntax.relax_pairs.push(RelaxPair {
+            far: 0x21,
+            short: 0x31,
+        });
+        // f at 0 short-calls g at 4: call.s at 1, end 3, off = +1.
+        let code = vec![0x0E, 0x31, 0x01, 0x02, 0x0E, 0x0B];
+        let exe = Executable {
+            arch: 0x7E,
+            entry: 0,
+            code,
+        };
+        let text = disassemble_executable(&syntax, &exe);
+        assert!(
+            text.contains("call    func_0004"),
+            "short call prints far mnemonic:\n{text}"
+        );
+        assert!(!text.contains("call.s"), "call.s must not appear:\n{text}");
+    }
+
+    #[test]
+    fn object_call_without_relocation_falls_back_to_bytes() {
+        let syntax = test_syntax();
+        let obj = crate::formats::object::ObjectFile {
+            arch: 0x7E,
+            symbols: vec![crate::formats::object::Symbol {
+                name: "f".into(),
+                def: crate::formats::object::SymbolDef::Defined { blob: 0 },
+            }],
+            // ent, call with a PATCHED (non-hole) offset and NO reloc, stop
+            blobs: vec![vec![0x0E, 0x21, 0x02, 0x00, 0x00, 0x00, 0x02]],
+            relocations: vec![],
+            debug: None,
+        };
+        let text = disassemble_object(&syntax, &obj);
+        assert!(
+            text.contains(".byte   33"),
+            "0x21 opcode dumps as byte:\n{text}"
+        );
+        assert!(!text.contains("L0"), "no phantom labels:\n{text}");
+        // Round-trip still holds through the fallback:
+        let back = crate::asm::assembler::assemble(&syntax, 0x7E, &text, false).unwrap();
+        assert_eq!(back.blobs, obj.blobs);
     }
 }
