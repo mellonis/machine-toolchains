@@ -148,3 +148,135 @@ fn dropped_confirming_write_still_feeds_later_mf_observations() {
     let (o0, o1) = assert_equivalent(src, TAPES);
     assert!(o1 < o0, "drop + fold must shrink: {o0} -> {o1}");
 }
+
+/// The program the whole optimizer story was started for in 2002:
+/// redundant marks, a decided branch, a dead arm, a confirming write.
+const FLAGSHIP: &str = "\
+main() {
+    mark;
+    mark;
+    right;
+    mark, mark, unmark;
+    check(1, 2);
+1:  mark(!);
+2:  unmark;
+}
+";
+
+#[test]
+fn flagship_optimizes_to_exact_bytes() {
+    use mtc_post_machine::arch::opcodes::*;
+    // Derivation (task-6 BLOCKED ruling: everything lands in r1 —
+    // block_entry_facts is computed over the WHOLE function per pass
+    // call, and the still-standing check's edge refinement already
+    // tells both arms their cell): cell-state r1: b0 [wr1,wr1,rgt,
+    // wr1,wr1,wr0] -> idempotent-drop 2nd+4th wr1, dead-store the wr1
+    // before wr0 -> [wr1, rgt, wr0]; b1's confirming wr1 (marked edge,
+    // Coupled(Some(1))) and b2's confirming wr0 (blank edge,
+    // Coupled(Some(0))) drop in the SAME call. branch-fold r1: fact
+    // Coupled(Some(0)) at the check -> goto blank arm. dce r1: block
+    // `1:` dies. r2: zero changes — fixpoint. rounds == 2.
+    // Codegen: ent, wr 1, rgt, wr 0, stp = 7 bytes.
+    let out = compile(
+        FLAGSHIP,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
+    assert_eq!(
+        linked.executable.code,
+        vec![ENT, WR, 0x81, RGT, WR, 0x80, STP]
+    );
+    assert_eq!(out.report.opt.rounds, 2);
+
+    // -O0 reference: 20 bytes (ent + 11 op bytes + jnm.s 2 + wr/stp 3 + wr/stp 3).
+    let o0 = compile(FLAGSHIP, CompileOptions::default()).unwrap();
+    let l0 = link(&[o0.object], &[], LinkOptions::default()).unwrap();
+    assert_eq!(l0.executable.code.len(), 20);
+}
+
+#[test]
+fn flagship_is_equivalent_on_all_tapes() {
+    let (o0, o1) = assert_equivalent(FLAGSHIP, TAPES);
+    assert_eq!((o0, o1), (20, 7));
+}
+
+#[test]
+fn fno_disables_a_single_pass() {
+    let out = compile(
+        FLAGSHIP,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            disabled_passes: vec!["cell-state".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !out.report
+            .opt
+            .changes
+            .iter()
+            .any(|c| c.pass == "cell-state"),
+        "{:?}",
+        out.report.opt.changes
+    );
+    let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
+    assert!(linked.executable.code.len() > 7);
+}
+
+#[test]
+fn capture_ir_records_the_pass_stages() {
+    let out = compile(
+        FLAGSHIP,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            capture_ir: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let stages: Vec<&str> = out.ir_snapshots.iter().map(|(s, _)| s.as_str()).collect();
+    assert_eq!(stages.first().copied(), Some("lowered"));
+    assert_eq!(stages.last().copied(), Some("final"));
+    assert!(stages.contains(&"after:cell-state"), "{stages:?}");
+    assert!(stages.contains(&"after:branch-fold"), "{stages:?}");
+    assert!(stages.contains(&"after:dce"), "{stages:?}");
+    assert_ne!(out.ir_snapshots.first(), out.ir_snapshots.last());
+    assert_eq!(out.ir, out.ir_snapshots.last().unwrap().1);
+}
+
+#[test]
+fn spec_sample_is_already_optimal() {
+    // goToEnd / goToBegin / main from spec §3: nothing for 6a passes to
+    // do (loops re-enter Uncoupled; calls clobber facts) — -O1 must be
+    // byte-identical to -O0, proving the optimizer's do-no-harm floor.
+    let src = "\
+goToEnd() {
+1:  right;
+    check(1, 2);
+2:  left;
+}
+
+main() {
+    @goToEnd();
+    right;
+    check(3, 4);
+3:  unmark(!);
+4:  mark;
+}
+";
+    let o0 = compile(src, CompileOptions::default()).unwrap();
+    let o1 = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(o0.object, o1.object);
+}
