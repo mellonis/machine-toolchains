@@ -8,7 +8,7 @@ pub mod driver;
 pub mod machine;
 pub mod trap;
 
-pub use arch::{Arch, MicroOp, Operand, OperandKind};
+pub use arch::{Arch, MicroOp, Operand, OperandKind, encode_operand};
 pub use bus::{BusRequest, BusResponse, CoreEvent};
 pub use core::Core;
 pub use devices::{InfiniteTape, Tape};

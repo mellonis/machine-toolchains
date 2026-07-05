@@ -42,3 +42,42 @@ impl std::fmt::Display for FormatError {
 }
 
 impl std::error::Error for FormatError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerKind {
+    Object,
+    Executable,
+    TapeBlock,
+}
+
+/// Identify a container by magic (tools never dispatch on extensions —
+/// spec §6).
+pub fn sniff(bytes: &[u8]) -> Option<ContainerKind> {
+    match bytes.get(..3)? {
+        m if m == executable::MAGIC_EXECUTABLE => Some(ContainerKind::Executable),
+        m if m == object::MAGIC_OBJECT => Some(ContainerKind::Object),
+        m if m == tapeblock::MAGIC_TAPEBLOCK => Some(ContainerKind::TapeBlock),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sniff_recognizes_all_containers_and_rejects_noise() {
+        assert!(matches!(sniff(b"MO\x01rest"), Some(ContainerKind::Object)));
+        assert!(matches!(
+            sniff(b"MX\x01rest"),
+            Some(ContainerKind::Executable)
+        ));
+        assert!(matches!(
+            sniff(b"MT\x01rest"),
+            Some(ContainerKind::TapeBlock)
+        ));
+        assert!(sniff(b"MZ\x01").is_none());
+        assert!(sniff(b"MO").is_none()); // too short
+        assert!(sniff(b"MO\x02xx").is_none()); // wrong epoch
+    }
+}

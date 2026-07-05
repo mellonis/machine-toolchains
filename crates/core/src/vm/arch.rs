@@ -43,6 +43,27 @@ pub trait Arch {
     fn is_entry_marker(&self, byte: u8) -> bool;
 }
 
+/// Encode an operand to its wire form (spec §5 / Appendix A). The inverse
+/// of the core's fetch-time decoding — property-tested against it.
+pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
+    Ok(match operand {
+        Operand::None => Vec::new(),
+        Operand::I8(v) => vec![*v as u8],
+        Operand::I32(v) => v.to_le_bytes().to_vec(),
+        Operand::Symbols(symbols) => {
+            let Some((last, init)) = symbols.split_last() else {
+                return Err("symbol vector must not be empty");
+            };
+            if symbols.iter().any(|&s| s > 0x7F) {
+                return Err("symbol payload exceeds 7 bits");
+            }
+            let mut out: Vec<u8> = init.iter().map(|&s| s as u8).collect();
+            out.push(*last as u8 | 0x80);
+            out
+        }
+    })
+}
+
 /// Fake architecture for core tests — proves core is arch-agnostic.
 /// 0x01 nop | 0x02 stop | 0x03 halt | 0x04 brk | 0x05 left+latch |
 /// 0x06 right+latch | 0x07 wr(vec)+latch | 0x08 jmp rel8 | 0x09 jm rel32 |
@@ -127,5 +148,26 @@ mod tests {
         let a = TestArch;
         assert!(a.is_entry_marker(0x0E));
         assert!(!a.is_entry_marker(0x01));
+    }
+
+    #[test]
+    fn encode_operand_matches_wire_format() {
+        use super::encode_operand;
+        assert_eq!(encode_operand(&Operand::None).unwrap(), Vec::<u8>::new());
+        assert_eq!(encode_operand(&Operand::I8(-3)).unwrap(), vec![0xFD]);
+        assert_eq!(
+            encode_operand(&Operand::I32(-6)).unwrap(),
+            vec![0xFA, 0xFF, 0xFF, 0xFF]
+        );
+        assert_eq!(
+            encode_operand(&Operand::Symbols(vec![1])).unwrap(),
+            vec![0x81]
+        );
+        assert_eq!(
+            encode_operand(&Operand::Symbols(vec![3, 0x7F, 0])).unwrap(),
+            vec![0x03, 0x7F, 0x80]
+        );
+        assert!(encode_operand(&Operand::Symbols(vec![])).is_err());
+        assert!(encode_operand(&Operand::Symbols(vec![0x80])).is_err());
     }
 }
