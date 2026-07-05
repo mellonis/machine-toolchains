@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn o1_with_empty_pipeline_is_identity_and_reports_one_round() {
+    fn o1_on_unoptimizable_program_is_identity() {
         let src = "main() { right; mark; }";
         let o0 = compile(src, CompileOptions::default()).unwrap();
         let o1 = compile(

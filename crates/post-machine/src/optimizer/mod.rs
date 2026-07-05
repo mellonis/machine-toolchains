@@ -7,6 +7,10 @@ use std::collections::HashSet;
 
 use crate::ir::{IrFunction, IrProgram};
 
+pub mod check_fold;
+pub mod dce;
+pub mod jump_threading;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
     #[default]
@@ -40,7 +44,11 @@ pub struct OptReport {
 type PassFn = fn(&mut IrFunction) -> u32;
 
 /// Fixed pipeline, in per-round application order. Tasks 2-5 extend it.
-const PIPELINE: &[(&str, PassFn)] = &[];
+const PIPELINE: &[(&str, PassFn)] = &[
+    ("check-fold", check_fold::run),
+    ("jump-threading", jump_threading::run),
+    ("dce", dce::run),
+];
 
 const MAX_ROUNDS: u32 = 10;
 
