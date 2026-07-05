@@ -16,12 +16,36 @@ pub struct Program {
     pub imports: Vec<Import>,
 }
 
-/// An imported name (Task 4 fills population; the field exists now so
-/// Task 4's diff is surgical).
+/// One `use` list item: `use a, std::b as c;` yields two of these.
+/// Every import declares an external symbol by its FULL `::`-joined
+/// path and binds ONE bare name in its declaring scope (alias if
+/// present, else the path tail).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Import {
-    pub name: String,
+    /// `IDENT (:: IDENT)*` — `use std::goToEnd;` → `["std", "goToEnd"]`.
+    pub path: Vec<String>,
+    /// `as NAME` rebinds the bare name (the declared symbol is unchanged).
+    pub alias: Option<String>,
     pub line: u32,
+    /// The declaring namespace block's path; empty = file level. The
+    /// binding is visible in that block and nested scopes only.
+    pub ns: Vec<String>,
+}
+
+impl Import {
+    /// The bare name this import binds in its scope.
+    pub fn binding(&self) -> &str {
+        self.alias.as_deref().unwrap_or_else(|| {
+            self.path
+                .last()
+                .expect("parser: import paths are non-empty")
+        })
+    }
+
+    /// The full `::`-joined external symbol this import declares.
+    pub fn full_path(&self) -> String {
+        self.path.join("::")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +62,11 @@ pub struct Function {
     /// Nested function definitions (spec §3), hoisted and visible to
     /// their own siblings and enclosing scope's body; emptied by flatten.
     pub nested: Vec<Function>,
+    /// Enclosing namespace path (parser-set on top-level definitions;
+    /// nested functions inherit through their top-level ancestor). The
+    /// full symbol joins namespaces with `::` and nesting with `.` —
+    /// `std::api.helper`.
+    pub ns: Vec<String>,
 }
 
 /// One `;`-terminated statement: an optional run of labels, then one or
@@ -110,6 +139,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Comma => "`,`".into(),
         TokenKind::Semi => "`;`".into(),
         TokenKind::Colon => "`:`".into(),
+        TokenKind::ColonColon => "`::`".into(),
         TokenKind::LParen => "`(`".into(),
         TokenKind::RParen => "`)`".into(),
         TokenKind::LBrace => "`{`".into(),
@@ -119,12 +149,24 @@ fn describe(kind: &TokenKind) -> String {
 }
 
 pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
-    Parser { tokens, pos: 0 }.program()
+    Parser {
+        tokens,
+        pos: 0,
+        namespaces: HashSet::new(),
+    }
+    .program()
 }
 
 struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
+    /// Every namespace path declared so far (reopened blocks insert the
+    /// same path again, harmlessly). Namespace names share the name pool
+    /// with function names per scope — a human-clarity rule: since `::`
+    /// (namespaces) and `.` (nesting) are distinct separators, `a::x`
+    /// and `a.x` cannot collide; the pool rule just stops both spellings
+    /// coexisting confusingly in one file.
+    namespaces: HashSet<Vec<String>>,
 }
 
 impl Parser<'_> {
@@ -167,9 +209,38 @@ impl Parser<'_> {
     }
 
     fn program(mut self) -> Result<Program, CompileError> {
-        let mut imports = Vec::new(); // populated in Task 4; declared now
         let mut functions: Vec<Function> = Vec::new();
-        while !matches!(self.peek().kind, TokenKind::Eof) {
+        let mut imports = Vec::new();
+        self.top_items(&[], &mut functions, &mut imports, None)?;
+        Ok(Program { functions, imports })
+    }
+
+    /// One namespace level's item loop; the whole file is the `ns == []`
+    /// level. Handles `use` (legal at any namespace depth, never in
+    /// function bodies), `namespace NAME { … }` (contextual; recurse
+    /// with the extended path), `export`, and function definitions.
+    /// `terminator` is `Some(RBrace)` inside a block, `None` at file
+    /// level (ends at Eof).
+    fn top_items(
+        &mut self,
+        ns: &[String],
+        functions: &mut Vec<Function>,
+        imports: &mut Vec<Import>,
+        terminator: Option<&TokenKind>,
+    ) -> Result<(), CompileError> {
+        loop {
+            let t = self.peek().clone();
+            match (&t.kind, terminator) {
+                (TokenKind::Eof, None) => return Ok(()),
+                (TokenKind::Eof, Some(_)) => {
+                    return Err(Self::expected(&t, "`}` to close the namespace block"));
+                }
+                (k, Some(term)) if k == term => {
+                    self.bump();
+                    return Ok(());
+                }
+                _ => {}
+            }
             // Contextual keyword: `use` + identifier = import declaration;
             // `use` + `(` is a function NAMED use.
             if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "use")
@@ -180,6 +251,7 @@ impl Parser<'_> {
             {
                 self.bump();
                 loop {
+                    // path := IDENT (`::` IDENT)*  [ `as` IDENT ]
                     let t = self.peek().clone();
                     let TokenKind::Ident(name) = &t.kind else {
                         return Err(Self::expected(&t, "an imported function name"));
@@ -187,11 +259,34 @@ impl Parser<'_> {
                     if RESERVED.contains(&name.as_str()) {
                         return Err(Self::expected(&t, "an imported function name"));
                     }
-                    imports.push(Import {
-                        name: name.clone(),
-                        line: t.line,
-                    });
+                    let mut path = vec![name.clone()];
                     self.bump();
+                    while matches!(self.peek().kind, TokenKind::ColonColon) {
+                        self.bump();
+                        let t = self.peek().clone();
+                        let TokenKind::Ident(seg) = &t.kind else {
+                            return Err(Self::expected(&t, "a name after `::`"));
+                        };
+                        path.push(seg.clone());
+                        self.bump();
+                    }
+                    let alias = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "as") {
+                        self.bump();
+                        let t = self.peek().clone();
+                        let TokenKind::Ident(a) = &t.kind else {
+                            return Err(Self::expected(&t, "an alias after `as`"));
+                        };
+                        self.bump();
+                        Some(a.clone())
+                    } else {
+                        None
+                    };
+                    imports.push(Import {
+                        path,
+                        alias,
+                        line: t.line,
+                        ns: ns.to_vec(),
+                    });
                     let sep = self.peek().clone();
                     match sep.kind {
                         TokenKind::Comma => {
@@ -204,6 +299,46 @@ impl Parser<'_> {
                         _ => return Err(Self::expected(&sep, "`,` or `;`")),
                     }
                 }
+                continue;
+            }
+            // Contextual keyword: `namespace NAME {` opens a (reopenable)
+            // block; `namespace` + `(` stays a function NAMED namespace.
+            if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "namespace")
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Ident(_))
+                )
+                && matches!(
+                    self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                    Some(TokenKind::LBrace)
+                )
+            {
+                self.bump(); // `namespace`
+                let name_tok = self.peek().clone();
+                let TokenKind::Ident(name) = &name_tok.kind else {
+                    unreachable!("checked above");
+                };
+                let name = name.clone();
+                if RESERVED.contains(&name.as_str()) {
+                    return Err(Self::err_at(
+                        &name_tok,
+                        CompileErrorKind::ReservedFunctionName(name),
+                    ));
+                }
+                // Shared name pool: a namespace may not reuse a sibling
+                // function's name (reopening the same namespace is fine).
+                if functions.iter().any(|g| g.ns == ns && g.name == name) {
+                    return Err(Self::err_at(
+                        &name_tok,
+                        CompileErrorKind::DuplicateFunction(name),
+                    ));
+                }
+                self.bump(); // the name
+                self.bump(); // `{`
+                let mut child = ns.to_vec();
+                child.push(name);
+                self.namespaces.insert(child.clone());
+                self.top_items(&child, functions, imports, Some(&TokenKind::RBrace))?;
                 continue;
             }
             // Contextual keyword: `export` + identifier = exported def;
@@ -219,8 +354,22 @@ impl Parser<'_> {
                 false
             };
             let mut f = self.function()?;
-            f.exported = exported || f.name == "main"; // main always exports
-            if functions.iter().any(|g| g.name == f.name) {
+            f.ns = ns.to_vec();
+            // Only the un-namespaced top-level `main` auto-exports (and is
+            // the entry); a namespaced `main` is an ordinary function.
+            f.exported = exported || (ns.is_empty() && f.name == "main");
+            if functions.iter().any(|g| g.ns == f.ns && g.name == f.name) {
+                return Err(CompileError {
+                    line: f.line,
+                    col: f.col,
+                    kind: CompileErrorKind::DuplicateFunction(f.name),
+                });
+            }
+            // Shared name pool: a function may not reuse a sibling
+            // namespace's name.
+            let mut as_ns = ns.to_vec();
+            as_ns.push(f.name.clone());
+            if self.namespaces.contains(&as_ns) {
                 return Err(CompileError {
                     line: f.line,
                     col: f.col,
@@ -229,7 +378,6 @@ impl Parser<'_> {
             }
             functions.push(f);
         }
-        Ok(Program { functions, imports })
     }
 
     fn function(&mut self) -> Result<Function, CompileError> {
@@ -330,6 +478,7 @@ impl Parser<'_> {
             exported: false,
             local: false,
             nested,
+            ns: Vec::new(),
         })
     }
 
@@ -394,7 +543,7 @@ impl Parser<'_> {
                 let TokenKind::Ident(name) = &name_tok.kind else {
                     return Err(Self::expected(&name_tok, "a function name after `@`"));
                 };
-                let name = name.clone();
+                let mut name = name.clone();
                 if RESERVED.contains(&name.as_str()) {
                     return Err(Self::err_at(
                         &name_tok,
@@ -402,6 +551,19 @@ impl Parser<'_> {
                     ));
                 }
                 self.bump();
+                // Qualified call: `@ns::path::f()` — ABSOLUTE (flatten
+                // skips the scope chain), `::` segments only (nested
+                // functions stay unnameable — the grammar has no `.`).
+                while matches!(self.peek().kind, TokenKind::ColonColon) {
+                    self.bump();
+                    let t = self.peek().clone();
+                    let TokenKind::Ident(seg) = &t.kind else {
+                        return Err(Self::expected(&t, "a name after `::`"));
+                    };
+                    name.push_str("::");
+                    name.push_str(seg);
+                    self.bump();
+                }
                 self.expect(&TokenKind::LParen, "`(` (user calls are written `@name()`)")?;
                 let succ = self.successor()?;
                 self.expect(&TokenKind::RParen, "`)`")?;
@@ -679,6 +841,78 @@ main() {
         assert_eq!(main.nested.len(), 1);
         assert_eq!(main.nested[0].name, "walk");
         assert_eq!(main.nested[0].nested[0].name, "step");
+    }
+
+    #[test]
+    fn namespace_blocks_stamp_paths_and_nest() {
+        let p =
+            parse_src("namespace a { f() { left; } namespace b { g() { right; } } } h() { mark; }")
+                .unwrap();
+        let tagged: Vec<(&str, Vec<&str>)> = p
+            .functions
+            .iter()
+            .map(|f| (f.name.as_str(), f.ns.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            tagged,
+            vec![("f", vec!["a"]), ("g", vec!["a", "b"]), ("h", vec![])]
+        );
+        // `namespace` + `(` stays a function NAMED namespace.
+        let p = parse_src("namespace() { left; } main() { @namespace(); }").unwrap();
+        assert_eq!(p.functions[0].name, "namespace");
+    }
+
+    #[test]
+    fn import_paths_aliases_and_scopes_parse() {
+        let p = parse_src("use a, std::b as c; namespace ns { use d::e; }").unwrap();
+        assert_eq!(p.imports.len(), 3);
+        assert_eq!(p.imports[0].path, vec!["a"]);
+        assert_eq!(p.imports[0].alias, None);
+        assert_eq!(p.imports[0].binding(), "a");
+        assert!(p.imports[0].ns.is_empty());
+        assert_eq!(p.imports[1].path, vec!["std", "b"]);
+        assert_eq!(p.imports[1].alias.as_deref(), Some("c"));
+        assert_eq!(p.imports[1].binding(), "c");
+        assert_eq!(p.imports[1].full_path(), "std::b");
+        assert_eq!(p.imports[2].path, vec!["d", "e"]);
+        assert_eq!(p.imports[2].ns, vec!["ns"]);
+    }
+
+    #[test]
+    fn qualified_calls_parse_to_joined_names() {
+        let p = parse_src("main() { @std::api::run(); }").unwrap();
+        match &p.functions[0].body[0].items[0] {
+            Item::Call { name, .. } => assert_eq!(name, "std::api::run"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let e = parse_src("main() { @std::(); }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::Expected { what, .. } if what.contains("::")));
+    }
+
+    #[test]
+    fn namespace_name_pool_and_reopening_rules() {
+        // Reopening the same namespace is legal (scopes merge by path).
+        assert!(parse_src("namespace a { f() { left; } } namespace a { g() { right; } }").is_ok());
+        // Same (path, name) across reopened blocks is a duplicate.
+        let e =
+            parse_src("namespace a { f() { left; } } namespace a { f() { right; } }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "f"));
+        // The same bare name in different namespaces is legal.
+        assert!(parse_src("namespace a { f() { left; } } namespace b { f() { right; } }").is_ok());
+        // Namespace and function names share one pool per scope.
+        let e = parse_src("namespace a { } a() { left; }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "a"));
+        let e = parse_src("a() { left; } namespace a { }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "a"));
+        // An unclosed block is an error, not silent Eof acceptance.
+        let e = parse_src("namespace a { f() { left; }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn use_stays_illegal_inside_function_bodies() {
+        let e = parse_src("main() { use go; }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "use"));
     }
 
     #[test]

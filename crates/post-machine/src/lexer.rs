@@ -11,6 +11,9 @@ pub enum TokenKind {
     Comma,
     Semi,
     Colon,
+    /// `::` — lexed greedily; a single `:` stays [`TokenKind::Colon`],
+    /// so numeric labels (`1:`) are unaffected.
+    ColonColon,
     LParen,
     RParen,
     LBrace,
@@ -111,12 +114,22 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
             }
             continue;
         }
+        if c == ':' {
+            cur.bump();
+            let kind = if cur.peek() == Some(':') {
+                cur.bump();
+                TokenKind::ColonColon
+            } else {
+                TokenKind::Colon
+            };
+            tokens.push(Token { kind, line, col });
+            continue;
+        }
         let single = match c {
             '@' => Some(TokenKind::At),
             '!' => Some(TokenKind::Bang),
             ',' => Some(TokenKind::Comma),
             ';' => Some(TokenKind::Semi),
-            ':' => Some(TokenKind::Colon),
             '(' => Some(TokenKind::LParen),
             ')' => Some(TokenKind::RParen),
             '{' => Some(TokenKind::LBrace),
@@ -252,6 +265,28 @@ mod tests {
                 TokenKind::Semi,
                 TokenKind::Eof
             ]
+        );
+    }
+
+    #[test]
+    fn colon_colon_is_greedy_and_labels_keep_single_colons() {
+        assert_eq!(
+            kinds("std::api"),
+            vec![
+                TokenKind::Ident("std".into()),
+                TokenKind::ColonColon,
+                TokenKind::Ident("api".into()),
+                TokenKind::Eof
+            ]
+        );
+        assert_eq!(
+            kinds("1:"),
+            vec![TokenKind::Number(1), TokenKind::Colon, TokenKind::Eof]
+        );
+        // Greedy: `:::` is `::` then `:`.
+        assert_eq!(
+            kinds(":::"),
+            vec![TokenKind::ColonColon, TokenKind::Colon, TokenKind::Eof]
         );
     }
 

@@ -49,6 +49,10 @@ pub enum CompileErrorKind {
     Internal(String),
     /// `export` on a nested definition — nesting is always local.
     NestedExport,
+    /// Two imports bind one bare name in one scope. Keyed on the binding
+    /// name AFTER aliasing (alias if present, else path tail); the same
+    /// binding in DIFFERENT scopes is legal (inner shadows outer).
+    DuplicateBinding(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -91,6 +95,12 @@ impl std::fmt::Display for CompileError {
             CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
             CompileErrorKind::NestedExport => {
                 write!(f, "nested functions are always local — remove `export`")
+            }
+            CompileErrorKind::DuplicateBinding(n) => {
+                write!(
+                    f,
+                    "`{n}` is bound twice — qualify the call (`@ns::{n}()`) or disambiguate with `as`"
+                )
             }
         }
     }
@@ -150,9 +160,11 @@ pub struct CompileOutput {
 /// bug and reports as `CompileErrorKind::Internal`.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
     let tokens = crate::lexer::lex(source)?;
-    let program = flatten(crate::parser::parse(&tokens)?);
+    let parsed = crate::parser::parse(&tokens)?;
+    check_duplicate_bindings(&parsed)?;
+    let (program, vis) = flatten(parsed);
     let (mut ir, mut warnings) = crate::ir::lower(&program)?;
-    warnings.extend(visibility_warnings(&program));
+    warnings.extend(vis);
     let mut ir_snapshots = Vec::new();
     if options.capture_ir {
         ir_snapshots.push(("lowered".to_string(), ir.clone()));
@@ -193,28 +205,155 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     })
 }
 
-/// Flatten nested definitions (spec §3): dot-mangle names
-/// (`outer.inner`), resolve calls lexically (innermost scope outward,
-/// then top level, else external), compute symbol locality. Infallible:
-/// unresolved names simply stay external.
-fn flatten(program: crate::parser::Program) -> crate::parser::Program {
-    use crate::parser::{Function, Item, Program};
+/// Two imports binding one bare name in one scope collide — checked
+/// right after parse, keyed on `(ns, binding name)` where the binding
+/// name is the POST-ALIAS one. An exactly-duplicate `use` (same path
+/// and alias) is tolerated: the duplicate surfaces as an unused-import
+/// warning from flatten instead.
+fn check_duplicate_bindings(program: &crate::parser::Program) -> Result<(), CompileError> {
     use std::collections::HashMap;
+    let mut seen: HashMap<(&[String], &str), &crate::parser::Import> = HashMap::new();
+    for import in &program.imports {
+        match seen.entry((import.ns.as_slice(), import.binding())) {
+            std::collections::hash_map::Entry::Occupied(prev) => {
+                let p = prev.get();
+                if p.path != import.path || p.alias != import.alias {
+                    return Err(CompileError {
+                        line: import.line,
+                        col: 0,
+                        kind: CompileErrorKind::DuplicateBinding(import.binding().to_string()),
+                    });
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(import);
+            }
+        }
+    }
+    Ok(())
+}
 
-    let top: HashMap<String, String> = program
-        .functions
-        .iter()
-        .map(|f| (f.name.clone(), f.name.clone()))
-        .collect();
+/// The full symbol name of a top-level function: namespaces join with
+/// `::` (`std::api`); un-namespaced names have no `::`. Function
+/// nesting appends `.` segments later (`std::api.helper`) — every
+/// symbol self-decomposes at the last `::`.
+fn full_name(ns: &[String], name: &str) -> String {
+    if ns.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}::{}", ns.join("::"), name)
+    }
+}
+
+/// Flatten definitions and resolve calls (spec §3 as amended by plan
+/// 6c): mangle names (`::` for namespaces, `.` for nesting), resolve
+/// each call innermost-outward — the function's own nested maps (defs
+/// only), then per enclosing namespace prefix (longest first) that
+/// level's definitions THEN its import bindings — and compute symbol
+/// locality. Call names containing `::` are ABSOLUTE: they skip the
+/// scope chain and imports, stay verbatim, and are self-declaring (no
+/// undeclared warning). Infallible — unresolved bare names simply stay
+/// external; all visibility warnings (undeclared externals, unused
+/// imports, unused functions) are produced here.
+fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warning>) {
+    use crate::parser::{Function, Item, Program};
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let Program { functions, imports } = program;
+
+    // Per-scope structures, keyed by ns path:
+    //   defs:     ns-path -> (bare name -> full name)
+    //   bindings: ns-path -> (bare name -> (import index, full "::" path))
+    let mut defs: HashMap<Vec<String>, HashMap<String, String>> = HashMap::new();
+    for f in &functions {
+        defs.entry(f.ns.clone())
+            .or_default()
+            .insert(f.name.clone(), full_name(&f.ns, &f.name));
+    }
+    let mut bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>> = HashMap::new();
+    for (i, imp) in imports.iter().enumerate() {
+        // First-wins: an exactly-duplicate import keeps the first slot,
+        // so the duplicate is never marked used and warns as unused.
+        bindings
+            .entry(imp.ns.clone())
+            .or_default()
+            .entry(imp.binding().to_string())
+            .or_insert_with(|| (i, imp.full_path()));
+    }
+
+    struct Ctx {
+        defs: HashMap<Vec<String>, HashMap<String, String>>,
+        bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
+        imports_used: Vec<bool>,
+        warned_undeclared: HashSet<String>,
+        warnings: Vec<Warning>,
+    }
+
+    let mut ctx = Ctx {
+        defs,
+        bindings,
+        imports_used: vec![false; imports.len()],
+        warned_undeclared: HashSet::new(),
+        warnings: Vec::new(),
+    };
+
+    /// Resolve one call name in place, innermost scope outward.
+    fn resolve(
+        name: &mut String,
+        line: u32,
+        nested: &[HashMap<String, String>],
+        ns: &[String],
+        ctx: &mut Ctx,
+    ) {
+        // Absolute: leave verbatim, no warning, no import consumption
+        // (self-declaring; resolves internally iff this module defines
+        // that symbol, else stays external).
+        if name.contains("::") {
+            return;
+        }
+        for scope in nested.iter().rev() {
+            if let Some(m) = scope.get(name.as_str()) {
+                *name = m.clone();
+                return;
+            }
+        }
+        // Enclosing namespace levels, innermost outward; each level's
+        // definitions outrank its import bindings.
+        for k in (0..=ns.len()).rev() {
+            let prefix = &ns[..k];
+            if let Some(m) = ctx.defs.get(prefix).and_then(|d| d.get(name.as_str())) {
+                *name = m.clone();
+                return;
+            }
+            if let Some(&(idx, ref path)) =
+                ctx.bindings.get(prefix).and_then(|b| b.get(name.as_str()))
+            {
+                ctx.imports_used[idx] = true;
+                *name = path.clone();
+                return;
+            }
+        }
+        // Total miss: the call stays a bare external; warn once per name.
+        if ctx.warned_undeclared.insert(name.clone()) {
+            ctx.warnings.push(Warning {
+                line,
+                message: format!(
+                    "call to undeclared external `{name}` — declare it with `use {name};`"
+                ),
+            });
+        }
+    }
 
     fn emit(
         mut f: Function,
         prefix: &str,
-        scopes: &[HashMap<String, String>],
+        ns: &[String],
+        nested_scopes: &[HashMap<String, String>],
+        ctx: &mut Ctx,
         out: &mut Vec<Function>,
     ) {
         let full = if prefix.is_empty() {
-            f.name.clone()
+            full_name(ns, &f.name)
         } else {
             format!("{prefix}.{}", f.name)
         };
@@ -224,18 +363,13 @@ fn flatten(program: crate::parser::Program) -> crate::parser::Program {
             .iter()
             .map(|c| (c.name.clone(), format!("{full}.{}", c.name)))
             .collect();
-        let mut inner = scopes.to_vec();
+        let mut inner = nested_scopes.to_vec();
         inner.push(child_map);
 
         for stmt in &mut f.body {
             for item in &mut stmt.items {
-                if let Item::Call { name, .. } = item {
-                    for scope in inner.iter().rev() {
-                        if let Some(m) = scope.get(name) {
-                            *name = m.clone();
-                            break;
-                        }
-                    }
+                if let Item::Call { name, line, .. } = item {
+                    resolve(name, *line, &inner, ns, ctx);
                 }
             }
         }
@@ -247,19 +381,79 @@ fn flatten(program: crate::parser::Program) -> crate::parser::Program {
         f.name = full.clone();
         out.push(f);
         for c in children {
-            emit(c, &full, &inner, out);
+            emit(c, &full, ns, &inner, ctx, out);
         }
     }
 
-    let mut out = Vec::new();
-    let imports = program.imports.clone();
-    for f in program.functions {
-        emit(f, "", std::slice::from_ref(&top), &mut out);
+    let mut out: Vec<Function> = Vec::new();
+    for f in functions {
+        let ns = f.ns.clone();
+        emit(f, "", &ns, &[], &mut ctx, &mut out);
     }
-    Program {
-        functions: out,
-        imports,
+
+    let mut warnings = ctx.warnings;
+
+    // Unused imports: none of the import's bindings resolved any call.
+    for (i, imp) in imports.iter().enumerate() {
+        if !ctx.imports_used[i] {
+            warnings.push(Warning {
+                line: imp.line,
+                message: format!("unused import `{}`", imp.full_path()),
+            });
+        }
     }
+
+    // Unused functions: reachability over the FLATTENED functions;
+    // roots = exports + the bare top-level `main` (namespaced exports
+    // are roots — outside callers unknowable); edges from resolved
+    // internal calls (full names, qualified self-calls included).
+    let defined: HashSet<&str> = out.iter().map(|f| f.name.as_str()).collect();
+    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for f in &out {
+        let mut callees = Vec::new();
+        for stmt in &f.body {
+            for item in &stmt.items {
+                if let Item::Call { name, .. } = item
+                    && defined.contains(name.as_str())
+                {
+                    callees.push(name.as_str());
+                }
+            }
+        }
+        edges.insert(f.name.as_str(), callees);
+    }
+    let mut reached: HashSet<&str> = HashSet::new();
+    let mut queue: VecDeque<&str> = out
+        .iter()
+        .filter(|f| f.exported)
+        .map(|f| f.name.as_str())
+        .collect();
+    while let Some(name) = queue.pop_front() {
+        if !reached.insert(name) {
+            continue;
+        }
+        if let Some(callees) = edges.get(name) {
+            for c in callees {
+                queue.push_back(c);
+            }
+        }
+    }
+    for f in &out {
+        if !reached.contains(f.name.as_str()) {
+            warnings.push(Warning {
+                line: f.line,
+                message: format!("unused function `{}` (not exported, never called)", f.name),
+            });
+        }
+    }
+
+    (
+        Program {
+            functions: out,
+            imports,
+        },
+        warnings,
+    )
 }
 
 /// The assembler recorded `(code_offset, pma_line)`; compose with the
@@ -276,86 +470,6 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
                 .collect();
         }
     }
-}
-
-/// Import & liveness warnings (spec §3.3 as amended): undeclared
-/// externals (once per name), unused imports, and unused functions —
-/// reachability from `main` + exports; sound because unexported
-/// functions are invisible outside this module.
-fn visibility_warnings(program: &crate::parser::Program) -> Vec<Warning> {
-    use crate::parser::Item;
-    use std::collections::{HashMap, HashSet, VecDeque};
-
-    let defined: HashSet<&str> = program.functions.iter().map(|f| f.name.as_str()).collect();
-    let imported: HashSet<&str> = program.imports.iter().map(|i| i.name.as_str()).collect();
-
-    let mut warnings = Vec::new();
-    let mut external_called: HashSet<&str> = HashSet::new();
-    let mut warned_undeclared: HashSet<&str> = HashSet::new();
-    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
-
-    for f in &program.functions {
-        let mut callees = Vec::new();
-        for stmt in &f.body {
-            for item in &stmt.items {
-                if let Item::Call { name, line, .. } = item {
-                    if defined.contains(name.as_str()) {
-                        callees.push(name.as_str());
-                    } else {
-                        external_called.insert(name.as_str());
-                        if !imported.contains(name.as_str())
-                            && warned_undeclared.insert(name.as_str())
-                        {
-                            warnings.push(Warning {
-                                line: *line,
-                                message: format!(
-                                    "call to undeclared external `{name}` — declare it with `use {name};`"
-                                ),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        edges.insert(f.name.as_str(), callees);
-    }
-
-    for import in &program.imports {
-        if !external_called.contains(import.name.as_str()) {
-            warnings.push(Warning {
-                line: import.line,
-                message: format!("unused import `{}`", import.name),
-            });
-        }
-    }
-
-    // Unused functions: reachability from main + exports.
-    let mut reached: HashSet<&str> = HashSet::new();
-    let mut queue: VecDeque<&str> = program
-        .functions
-        .iter()
-        .filter(|f| f.exported || f.name == "main")
-        .map(|f| f.name.as_str())
-        .collect();
-    while let Some(name) = queue.pop_front() {
-        if !reached.insert(name) {
-            continue;
-        }
-        if let Some(callees) = edges.get(name) {
-            for c in callees {
-                queue.push_back(c);
-            }
-        }
-    }
-    for f in &program.functions {
-        if !reached.contains(f.name.as_str()) {
-            warnings.push(Warning {
-                line: f.line,
-                message: format!("unused function `{}` (not exported, never called)", f.name),
-            });
-        }
-    }
-    warnings
 }
 
 #[cfg(test)]
@@ -573,6 +687,60 @@ mod tests {
                 .warnings
                 .iter()
                 .all(|w| !w.message.contains("unused function"))
+        );
+    }
+
+    #[test]
+    fn duplicate_bindings_error_and_exact_duplicates_only_warn() {
+        let e = compile(
+            "use goToEnd; use std::goToEnd; main() { @goToEnd(); }",
+            CompileOptions::default(),
+        )
+        .unwrap_err();
+        assert!(format!("{e}").contains("bound twice"));
+        assert!(matches!(e.kind, CompileErrorKind::DuplicateBinding(n) if n == "goToEnd"));
+        // An exactly-duplicate `use` line is tolerated — the duplicate
+        // never binds a call, so it surfaces as an unused import.
+        let out = compile(
+            "use go; use go; main() { @go(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            out.report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("unused import `go`"))
+        );
+        assert!(
+            out.report
+                .warnings
+                .iter()
+                .all(|w| !w.message.contains("undeclared"))
+        );
+    }
+
+    #[test]
+    fn namespaced_locality_follows_export() {
+        // Locality is the unchanged rule applied to the FULL name:
+        // `export` inside a namespace → Defined `std::f`; unexported →
+        // Local `std::g`.
+        let out = compile(
+            "namespace std { export f() { left; } g() { right; } } main() { @std::f(); @std::g(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            out.object
+                .symbols
+                .iter()
+                .any(|s| s.name == "std::f" && matches!(s.def, SymbolDef::Defined { .. }))
+        );
+        assert!(
+            out.object
+                .symbols
+                .iter()
+                .any(|s| s.name == "std::g" && matches!(s.def, SymbolDef::Local { .. }))
         );
     }
 
