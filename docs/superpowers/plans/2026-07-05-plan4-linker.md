@@ -547,11 +547,14 @@ L:      nop
         assert_eq!(obj.blobs[0][7], 0x30);
         assert_eq!(obj.blobs[0][8] as i8, -8);
         let out = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap();
-        // After shrink: [0E][01][31 off][30 off'][02] = 6 bytes; go at 6.
-        // call.s at 2, end 4, target 6 → +2. jmp.s at 4..6, end 6, target 1 → -5.
+        // After shrink: [0E][01][31 off][30 off'][02] = 7 bytes; go at 7.
+        // call.s at 2, end 4, target 7 → +3. jmp.s at 4..6, end 6, target 1 → -5.
+        // (Task 3 fix: original text said "target 6"/off +2/"= 6 bytes",
+        // inconsistent with its own vec, which lays out 7 main bytes before
+        // go; re-derived by hand and confirmed empirically.)
         assert_eq!(
             out.executable.code,
-            vec![0x0E, 0x01, 0x31, 0x02, 0x30, 0xFB, 0x02, 0x0E, 0x0B]
+            vec![0x0E, 0x01, 0x31, 0x03, 0x30, 0xFB, 0x02, 0x0E, 0x0B]
         );
     }
 
