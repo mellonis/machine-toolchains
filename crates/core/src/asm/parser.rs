@@ -1,6 +1,4 @@
 //! `.pma` text → per-function source items (spec §6.4 grammar).
-#![allow(dead_code)] // whole module is scaffolding; the assembler (Task 3) is
-// the first non-test consumer of `parse` and its output types — remove then.
 
 use super::syntax::ArchSyntax;
 use super::{AsmError, AsmErrorKind};
@@ -9,7 +7,6 @@ use crate::vm::OperandKind;
 #[derive(Debug)]
 pub(crate) struct SourceFunction {
     pub name: String,
-    pub line: usize,
     pub items: Vec<SourceItem>,
 }
 
@@ -82,7 +79,6 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
             }
             functions.push(SourceFunction {
                 name: name.to_string(),
-                line: line_no,
                 items: Vec::new(),
             });
             continue;

@@ -1,9 +1,11 @@
 //! Arch-generic assembler/disassembler frameworks (spec §6.4). All
 //! instruction knowledge arrives via [`ArchSyntax`] tables.
 
+mod assembler;
 mod parser;
 mod syntax;
 
+pub use assembler::assemble;
 pub use syntax::{ArchSyntax, Flow, RelaxPair, SyntaxEntry};
 
 #[derive(Debug, PartialEq, Eq)]
