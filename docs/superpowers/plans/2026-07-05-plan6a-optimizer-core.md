@@ -1228,12 +1228,16 @@ main() {
 #[test]
 fn flagship_optimizes_to_exact_bytes() {
     use mtc_post_machine::arch::opcodes::*;
-    // Derivation: cell-state r1: [wr1,wr1,rgt,wr1,wr1,wr0] ->
-    // idempotent-drop 2nd+4th wr1, dead-store the wr1 before wr0 ->
-    // [wr1, rgt, wr0]; branch-fold r1: fact Coupled(Some(0)) at the
-    // check -> goto blank arm (label 2); dce r1: block `1:` dies.
-    // r2: block `2:`'s wr0 is idempotent (entry fact Coupled(Some(0)))
-    // -> dropped, leaving an empty Return block. r3: no changes.
+    // Derivation (task-6 BLOCKED ruling: everything lands in r1 —
+    // block_entry_facts is computed over the WHOLE function per pass
+    // call, and the still-standing check's edge refinement already
+    // tells both arms their cell): cell-state r1: b0 [wr1,wr1,rgt,
+    // wr1,wr1,wr0] -> idempotent-drop 2nd+4th wr1, dead-store the wr1
+    // before wr0 -> [wr1, rgt, wr0]; b1's confirming wr1 (marked edge,
+    // Coupled(Some(1))) and b2's confirming wr0 (blank edge,
+    // Coupled(Some(0))) drop in the SAME call. branch-fold r1: fact
+    // Coupled(Some(0)) at the check -> goto blank arm. dce r1: block
+    // `1:` dies. r2: zero changes — fixpoint. rounds == 2.
     // Codegen: ent, wr 1, rgt, wr 0, stp = 7 bytes.
     let out = compile(
         FLAGSHIP,
@@ -1248,7 +1252,7 @@ fn flagship_optimizes_to_exact_bytes() {
         linked.executable.code,
         vec![ENT, WR, 0x81, RGT, WR, 0x80, STP]
     );
-    assert_eq!(out.report.opt.rounds, 3);
+    assert_eq!(out.report.opt.rounds, 2);
 
     // -O0 reference: 20 bytes (ent + 11 op bytes + jnm.s 2 + wr/stp 3 + wr/stp 3).
     let o0 = compile(FLAGSHIP, CompileOptions::default()).unwrap();
@@ -1352,7 +1356,7 @@ git commit -m "test(post-machine): -O1 goldens — flagship 20->7 bytes, fno opt
 - **Spec coverage:** §8 passes 1-4 and 6 land here with the §8 equivalence contract and §11's optimized-vs-unoptimized testing regime; §7.1 gains real multi-stage `--emit-ir` backing (`capture_ir`). Passes 5/7/8 (inline, tail-merge, tail-call) are Plan 6b by declared scope split. `--strict-cells` (spec §8 pass 4 note) is deliberately deferred to the plan that makes cell semantics configurable — at PM-1 v1 all writes are idempotent-by-default, so the opt-out has nothing to toggle yet.
 - **Soundness:** the coupling invariant and its reset-MF exception are stated once (plan header + dataflow module docs) and enforced three ways: `Uncoupled` entry facts, gated check-edge refinement, and the `reset_mf_semantics_survive_o1` / `entry_is_uncoupled…` tests. cell-state's MF-safety argument rides the same invariant (both the skipped and current MF equal `i == 1`).
 - **Plan 5 acceptance item:** discharged via `validate_function` + the driver's debug-build check after every pass application; dce preserves closure by construction (deletes only unreachable blocks); jump-threading and branch-fold only retarget to existing ids.
-- **Derived numbers double-checked:** flagship -O0 = 20 bytes (1 ent + 11 op bytes + 2 jnm.s + 3 + 3), -O1 = 7, rounds = 3 (traced in the test comment). Loop-entry merge in `loop_facts_reach_fixpoint` re-derived: entry ∨ marked-edge = Uncoupled.
+- **Derived numbers double-checked:** flagship -O0 = 20 bytes (1 ent + 11 op bytes + 2 jnm.s + 3 + 3), -O1 = 7, rounds = 2 (task-6 ruling: check-edge refinement lands all drops in round 1). Loop-entry merge in `loop_facts_reach_fixpoint` re-derived: entry ∨ marked-edge = Uncoupled.
 - **Type consistency:** every pass is `fn(&mut IrFunction) -> u32`; `PIPELINE` grows monotonically across Tasks 2/4/5 to the exact final order named in Global Constraints; `CompileOptions` literals updated everywhere including the (to-be-committed) example.
 
 
