@@ -8,7 +8,8 @@ use super::syntax::ArchSyntax;
 use crate::formats::executable::Executable;
 use crate::formats::object::{ObjectFile, SymbolDef};
 
-fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
+/// Canonical .pma grid (spec §6.4): label col 0, mnemonic col 8, operand col 16; trailing spaces trimmed.
+pub fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
     let label_field = match label {
         Some(l) => format!("{l}:"),
         None => String::new(),

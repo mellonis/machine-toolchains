@@ -8,7 +8,7 @@ mod parser;
 pub(crate) mod syntax;
 
 pub use assembler::assemble;
-pub use disassembler::{disassemble_executable, disassemble_object};
+pub use disassembler::{disassemble_executable, disassemble_object, grid_line};
 pub use syntax::{ArchSyntax, Flow, RelaxPair, SyntaxEntry};
 
 #[derive(Debug, PartialEq, Eq)]
