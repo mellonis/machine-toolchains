@@ -7,6 +7,7 @@ use super::decode::{Body, Decoded, DecodedOperand, decode_at, decode_stream};
 use super::syntax::ArchSyntax;
 use crate::formats::executable::Executable;
 use crate::formats::object::{ObjectFile, SymbolDef};
+use crate::linker::MapFile;
 
 /// Canonical .pma grid (spec §6.4): label col 0, mnemonic col 8, operand col 16; trailing spaces trimmed.
 pub fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
@@ -143,7 +144,11 @@ fn decode_one(syntax: &ArchSyntax, code: &[u8], addr: u32) -> Option<Decoded> {
     decode_at(syntax, code, addr, code.len() as u32)
 }
 
-pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
+pub fn disassemble_executable(
+    syntax: &ArchSyntax,
+    exe: &Executable,
+    map: Option<&MapFile>,
+) -> String {
     use crate::asm::syntax::{Flow, SyntaxEntry};
     let code = &exe.code;
     let len = code.len() as u32;
@@ -188,7 +193,15 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
     // symbol is literally `main` (spec §9), so the synthesis is faithful
     // and restores §6.4's round-trip claim (dis → asm → link reproduces
     // the executable). All other roots keep the address-derived name.
+    // When a map is supplied, its function names take priority (spec-
+    // faithful debugger view); `main`/`func_XXXX` synthesis is the
+    // `None`-map fallback used by the round-trip law.
     let func_name = |addr: u32| {
+        if let Some(m) = map
+            && let Some(f) = m.functions.iter().find(|f| f.start == addr)
+        {
+            return f.name.clone();
+        }
         if addr == exe.entry {
             "main".to_string()
         } else {
@@ -298,6 +311,89 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
     out
 }
 
+/// One formatted debugger-listing line at `addr` (no trailing newline) +
+/// the decoded instruction's byte length. Unknown opcode and truncated
+/// operand both fall back to `.byte`, length 1 (mirrors [`decode_one`],
+/// which returns `None` for exactly those cases). `resolve` maps a
+/// branch/call/jump target address to an optional display name.
+pub fn listing_line(
+    syntax: &ArchSyntax,
+    code: &[u8],
+    addr: u32,
+    resolve: &dyn Fn(u32) -> Option<String>,
+) -> (String, u32) {
+    let (len, mnemonic, operand): (u32, &str, String) = match decode_one(syntax, code, addr) {
+        None => (1, ".byte", code[addr as usize].to_string()),
+        Some(Decoded {
+            len,
+            body: Body::Instr { mnemonic, operand },
+            ..
+        }) => {
+            let operand_text = match operand {
+                DecodedOperand::None => String::new(),
+                DecodedOperand::Ints(v) => {
+                    v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                }
+                DecodedOperand::RelTarget(t) => match resolve(t) {
+                    Some(name) => format!("{t:#06x} <{name}>"),
+                    None => format!("{t:#06x}"),
+                },
+            };
+            (len, mnemonic, operand_text)
+        }
+        Some(Decoded {
+            body: Body::Raw(_), ..
+        }) => unreachable!("decode_one/decode_at only ever produces Body::Instr"),
+    };
+    let bytes_hex = code[addr as usize..(addr + len) as usize]
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let line = format!("  {addr:04x}:  {bytes_hex:<15} {mnemonic:<8}{operand}");
+    (line.trim_end().to_string(), len)
+}
+
+/// Debugger code view (addresses + raw bytes + mnemonics): every byte
+/// accounted for, function headers from `map` when supplied, jump/call
+/// targets resolved to `function`/`function.label` names. NOT
+/// reassembleable — this is a read-only rendering, unlike
+/// [`disassemble_executable`]'s canonical `.pma` text.
+pub fn listing_executable(syntax: &ArchSyntax, exe: &Executable, map: Option<&MapFile>) -> String {
+    let code = &exe.code;
+    let len = code.len() as u32;
+
+    let name_at = |addr: u32| -> Option<String> {
+        map.and_then(|m| {
+            m.functions.iter().find_map(|f| {
+                if f.start == addr {
+                    return Some(f.name.clone());
+                }
+                f.labels
+                    .iter()
+                    .find(|(_, a)| *a == addr)
+                    .map(|(label, _)| format!("{}.{}", f.name, label))
+            })
+        })
+    };
+
+    let mut out = String::new();
+    let mut addr = 0u32;
+    while addr < len {
+        if let Some(m) = map
+            && let Some(f) = m.functions.iter().find(|f| f.start == addr)
+        {
+            out.push_str(&f.name);
+            out.push_str(":\n");
+        }
+        let (line, ilen) = listing_line(syntax, code, addr, &name_at);
+        out.push_str(&line);
+        out.push('\n');
+        addr += ilen;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,7 +470,7 @@ START:  nop
             entry: 0,
             code,
         };
-        let text = disassemble_executable(&syntax, &exe);
+        let text = disassemble_executable(&syntax, &exe, None);
         assert!(text.contains(".func main")); // entry root is named main
         assert!(text.contains(".func func_0007"));
         assert!(text.contains("call    func_0007"));
@@ -396,7 +492,7 @@ START:  nop
             entry: 0,
             code,
         };
-        let text = disassemble_executable(&syntax, &exe);
+        let text = disassemble_executable(&syntax, &exe, None);
         assert!(text.contains(".func main")); // entry root is named main
         assert!(text.contains(".func func_0014"));
         assert!(
@@ -420,7 +516,7 @@ START:  nop
             entry: 0,
             code,
         };
-        let text = disassemble_executable(&syntax, &exe);
+        let text = disassemble_executable(&syntax, &exe, None);
         assert!(
             text.contains("stop"),
             "fall-through path must be discovered"
@@ -443,7 +539,7 @@ START:  nop
             entry: 0,
             code,
         };
-        let text = disassemble_executable(&syntax, &exe);
+        let text = disassemble_executable(&syntax, &exe, None);
         assert!(text.contains(".func func_000C"));
         assert!(text.contains("call    func_000C"));
         // the jmp into g's body cannot be a local label -> whole instruction as bytes
@@ -477,7 +573,7 @@ START:  nop
             entry: 0,
             code,
         };
-        let text = disassemble_executable(&syntax, &exe);
+        let text = disassemble_executable(&syntax, &exe, None);
         assert!(
             text.contains("call    func_0004"),
             "short call prints far mnemonic:\n{text}"
@@ -517,7 +613,7 @@ START:  nop
         let obj = assemble(&syntax, 0x7E, src, false).unwrap();
         let out = crate::linker::link(&syntax, &[obj], &[], crate::linker::LinkOptions::default())
             .unwrap();
-        let text = disassemble_executable(&syntax, &out.executable);
+        let text = disassemble_executable(&syntax, &out.executable, None);
         assert!(text.contains("jmp     @main"), "{text}");
         assert!(!text.contains(".byte"), "{text}");
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
@@ -576,7 +672,7 @@ START:  nop
         let obj = assemble(&syntax, 0x7E, src, false).unwrap();
         let out = crate::linker::link(&syntax, &[obj], &[], crate::linker::LinkOptions::default())
             .unwrap();
-        let text = disassemble_executable(&syntax, &out.executable);
+        let text = disassemble_executable(&syntax, &out.executable, None);
         assert!(text.contains("jmp     @main"), "{text}");
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
         let out2 =
@@ -594,5 +690,138 @@ START:  nop
         assert!(text.contains(".func helper local"), "{text}");
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
         assert_eq!(obj1, obj2);
+    }
+
+    #[test]
+    fn map_aware_executable_dis_prefers_map_names_none_pins_today() {
+        use crate::linker::{MapFile, MapFunction};
+        let syntax = test_syntax();
+        // Same shape as `executable_disassembly_discovers_functions_by_traversal`:
+        // f at 0 calls g at 7 (call end 6; 7-6=1), g = [0E][0B].
+        let code = vec![0x0E, 0x21, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
+        let exe = Executable {
+            arch: 0x7E,
+            entry: 0,
+            code,
+        };
+
+        // `None` -> byte-identical to today's synthesized name (pinned).
+        let text_no_map = disassemble_executable(&syntax, &exe, None);
+        assert!(text_no_map.contains(".func main"));
+        assert!(text_no_map.contains(".func func_0007"));
+        assert!(text_no_map.contains("call    func_0007"));
+
+        // A map naming the callee root wins over `func_XXXX` synthesis.
+        let map = MapFile {
+            arch: 0x7E,
+            functions: vec![MapFunction {
+                name: "helper".into(),
+                start: 7,
+                end: 9,
+                labels: vec![],
+                lines: vec![],
+            }],
+        };
+        let text_with_map = disassemble_executable(&syntax, &exe, Some(&map));
+        assert!(text_with_map.contains(".func helper"), "{text_with_map}");
+        assert!(text_with_map.contains("call    helper"), "{text_with_map}");
+        assert!(!text_with_map.contains("func_0007"), "{text_with_map}");
+    }
+
+    /// The core crate cannot depend on PM-1: a minimal local `ArchSyntax`
+    /// with exactly the entries the derived golden uses (spec §5 opcodes),
+    /// mirroring `fixture::test_syntax()`.
+    fn pm1_like_syntax() -> crate::asm::syntax::ArchSyntax {
+        use Flow::{Branch, FallThrough as FT, Stop};
+        crate::asm::syntax::ArchSyntax {
+            entries: vec![
+                SyntaxEntry {
+                    opcode: 0x0D,
+                    mnemonic: "ent",
+                    operand: OperandKind::None,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x05,
+                    mnemonic: "rgt",
+                    operand: OperandKind::None,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x06,
+                    mnemonic: "wr",
+                    operand: OperandKind::SymbolVec,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x19,
+                    mnemonic: "jm.s",
+                    operand: OperandKind::RelI8,
+                    flow: Branch,
+                },
+                SyntaxEntry {
+                    opcode: 0x02,
+                    mnemonic: "stp",
+                    operand: OperandKind::None,
+                    flow: Stop,
+                },
+            ],
+            relax_pairs: vec![],
+            entry_opcode: 0x0D,
+        }
+    }
+
+    #[test]
+    fn listing_renders_the_derived_golden() {
+        use crate::linker::{MapFile, MapFunction};
+        // 0: ent | 1: rgt | 2-3: wr 1 (0x06 0x81) | 4-5: jm.s -5 → 1 | 6: stp
+        let exe = Executable {
+            arch: 0x01,
+            entry: 0,
+            code: vec![0x0D, 0x05, 0x06, 0x81, 0x19, 0xFB, 0x02],
+        };
+        let map = MapFile {
+            arch: 0x01,
+            functions: vec![MapFunction {
+                name: "main".into(),
+                start: 0,
+                end: 7,
+                labels: vec![("L1".into(), 1)],
+                lines: vec![],
+            }],
+        };
+        let listing = listing_executable(&pm1_like_syntax(), &exe, Some(&map));
+        let expected = "\
+main:
+  0000:  0D              ent
+  0001:  05              rgt
+  0002:  06 81           wr      1
+  0004:  19 FB           jm.s    0x0001 <main.L1>
+  0006:  02              stp
+";
+        assert_eq!(listing, expected);
+    }
+
+    #[test]
+    fn listing_line_symbol_vec_reports_len_and_joined_operand() {
+        let syntax = pm1_like_syntax();
+        let code = [0x06, 0x01, 0x82];
+        let (line, len) = listing_line(&syntax, &code, 0, &|_| None);
+        assert_eq!(len, 3);
+        assert!(line.ends_with("wr      1, 2"), "{line}");
+    }
+
+    #[test]
+    fn listing_line_lengths_cover_the_golden_exe() {
+        let syntax = pm1_like_syntax();
+        let code: Vec<u8> = vec![0x0D, 0x05, 0x06, 0x81, 0x19, 0xFB, 0x02];
+        let mut addr = 0u32;
+        let mut total = 0u32;
+        while (addr as usize) < code.len() {
+            let (_, len) = listing_line(&syntax, &code, addr, &|_| None);
+            total += len;
+            addr += len;
+        }
+        assert_eq!(total, code.len() as u32);
     }
 }

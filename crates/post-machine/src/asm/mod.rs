@@ -151,7 +151,18 @@ pub fn disassemble_object(obj: &ObjectFile) -> String {
 }
 
 pub fn disassemble_executable(exe: &Executable) -> String {
-    mtc_core::asm::disassemble_executable(&pm1_syntax(), exe)
+    mtc_core::asm::disassemble_executable(&pm1_syntax(), exe, None)
+}
+
+pub fn disassemble_executable_with_map(
+    exe: &Executable,
+    map: &mtc_core::linker::MapFile,
+) -> String {
+    mtc_core::asm::disassemble_executable(&pm1_syntax(), exe, Some(map))
+}
+
+pub fn listing_executable(exe: &Executable, map: Option<&mtc_core::linker::MapFile>) -> String {
+    mtc_core::asm::listing_executable(&pm1_syntax(), exe, map)
 }
 
 pub fn link(
