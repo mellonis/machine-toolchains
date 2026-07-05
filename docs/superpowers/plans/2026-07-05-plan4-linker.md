@@ -767,7 +767,8 @@ fn spec_sample_links_byte_exact_and_runs() {
     // Tacts (electronic), derived by hand — see plan self-review:
     // core: ent 2 + call.s 5 + [ent 2 + 3×rgt 2 + 3×jm.s 3 + lft 2 + ret 3]
     //       + rgt 2 + wr 3 + stp 1 = 35; stall: moves/writes/latches = 12.
-    assert_eq!(result.stats, RunStats { steps: 14, core_tacts: 35, stall_tacts: 12 });
+    // steps = retired instructions (terminal stp never reaches Step) = 13.
+    assert_eq!(result.stats, RunStats { steps: 13, core_tacts: 35, stall_tacts: 12 });
 }
 
 #[test]
@@ -860,7 +861,7 @@ git commit crates/post-machine -m "feat(post-machine): pm link wrapper; first li
 - **Hand-derived values (all derived twice):**
   - `links_two_functions_with_relaxed_call`: main 4 bytes `[0E][31 01][02]`, go at 4.
   - `jump_spanning_a_shrunk_call_is_repatched`: orig jmp.s off −8 → post-shrink −5 (`0xFB`); code `[0E][01][31 02][30 FB][02][0E][0B]`.
-  - Spec sample linked: 13 bytes, `call.s` off 4, `jm.s` off `0xFD`; run: steps 14, core 35 (= 2+5+2+6+9+2+3+2+3+1), stall 12 (= 3 rgt·2 + lft·2 + rgt·2 + wr·2); final tape `[0,1,2,3]`, head 3.
+  - Spec sample linked: 13 bytes, `call.s` off 4, `jm.s` off `0xFD`; run: steps 13 (terminal stp uncounted), core 35 (= 2+5+2+6+9+2+3+2+3+1), stall 12 (= 3 rgt·2 + lft·2 + rgt·2 + wr·2); final tape `[0,1,2,3]`, head 3.
   - Relaxation delta: exactly +3 bytes and +3 core tacts for the far build, stall unchanged.
   - Map: `goToEnd` at 7..13, label `L1` at absolute 8.
 - **Type consistency:** `FuncRef.calls` uses hole offsets (operand start), `Piece::CallSite.orig` uses opcode addresses (hole − 1) — conversion happens once in classification; `MapFile` is plain in Task 3 and gains serde in Task 4 without field changes.
