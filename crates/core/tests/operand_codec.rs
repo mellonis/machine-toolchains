@@ -23,11 +23,8 @@ impl mtc_core::vm::Arch for CodecArch {
         opcode: u8,
         operand: &Operand,
     ) -> Result<Vec<mtc_core::vm::MicroOp>, mtc_core::vm::Trap> {
-        // Smuggle the decoded operand out through a Write micro-op stream:
-        // encode a fingerprint the test can compare. Simplest: return Stop
-        // and let the test capture via a thread_local? No — cleanest is to
-        // panic on mismatch here, with the expected operand injected via a
-        // cell. See EXPECTED below.
+        // The decoded operand is verified here, inside the live core's
+        // lower() call — see EXPECTED below.
         EXPECTED.with(|e| {
             let expected = e.borrow();
             assert_eq!(

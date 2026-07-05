@@ -60,9 +60,12 @@ pub(crate) mod fixture {
     /// Standalone syntax for asm framework tests (independent of TestArch —
     /// the assembler never executes, it only needs kinds/sizes).
     /// nop 0x01 | stop 0x02 | wr 0x07 (SymbolVec) | jmp 0x20 far / 0x30 short |
-    /// call 0x21 (far, symbol operand) | ret 0x0B | entry marker 0x0E
+    /// call 0x21 (far, symbol operand) | ret 0x0B | entry marker 0x0E |
+    /// br 0x22 (RelI8, unpaired — disassembler traversal coverage only; per
+    /// framework invariant a RelI8 Jump/Branch not in a relax pair takes the
+    /// far path in the assembler, so `br` must not appear in assembler tests)
     pub(crate) fn test_syntax() -> ArchSyntax {
-        use Flow::{Call, FallThrough as FT, Jump, Stop};
+        use Flow::{Branch, Call, FallThrough as FT, Jump, Stop};
         ArchSyntax {
             entries: vec![
                 SyntaxEntry {
@@ -100,6 +103,12 @@ pub(crate) mod fixture {
                     mnemonic: "call",
                     operand: OperandKind::RelI32,
                     flow: Call,
+                },
+                SyntaxEntry {
+                    opcode: 0x22,
+                    mnemonic: "br",
+                    operand: OperandKind::RelI8,
+                    flow: Branch,
                 },
                 SyntaxEntry {
                     opcode: 0x0B,

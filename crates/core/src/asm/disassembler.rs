@@ -447,6 +447,26 @@ START:  nop
     }
 
     #[test]
+    fn branch_traversal_discovers_fall_through() {
+        let syntax = test_syntax();
+        // 0: ent | 1: br +1 -> 4 | 3: stop (fall-through, must be discovered) | 4: ret
+        let code = vec![0x0E, 0x22, 0x01, 0x02, 0x0B];
+        let exe = Executable {
+            arch: 0x7E,
+            entry: 0,
+            code,
+        };
+        let text = disassemble_executable(&syntax, &exe);
+        assert!(
+            text.contains("stop"),
+            "fall-through path must be discovered"
+        );
+        assert!(text.contains("ret"));
+        assert!(text.contains("br      L0004"));
+        assert!(!text.contains(".byte"), "everything reachable, no gaps");
+    }
+
+    #[test]
     fn cross_region_jump_falls_back_to_bytes() {
         let syntax = test_syntax();
         // f calls g (so g is a root) AND jumps into g's BODY (addr 13):

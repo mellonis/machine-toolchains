@@ -2,7 +2,7 @@
 //! assembled program actually running on the Machine.
 
 use mtc_core::formats::object::SymbolDef;
-use mtc_core::vm::{ArchRegistry, InfiniteTape, Machine, Outcome, RunOptions};
+use mtc_core::vm::{InfiniteTape, Machine, Outcome, RunOptions};
 use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::arch::opcodes::*;
 use mtc_post_machine::asm::{assemble, disassemble_object};
@@ -64,8 +64,6 @@ L:      rgt
     let arch = Pm1;
     let machine = Machine::with_arch(&arch, obj.blobs[0].clone(), 0).unwrap();
     let mut tape = InfiniteTape::from_cells([true, true, true], 0, 0);
-    let mut registry = ArchRegistry::new();
-    registry.register(Box::new(Pm1));
     let result = machine.run(&mut tape, RunOptions::default());
     assert_eq!(result.outcome, Outcome::Stopped);
     assert_eq!(tape.head(), 3); // stopped on the first blank — assembled, not hand-built
@@ -82,5 +80,12 @@ fn forced_short_and_explicit_far_forms() {
 #[test]
 fn errors_carry_lines() {
     let e = assemble(".func f\n        wr\n", false).unwrap_err();
+    assert_eq!(e.line, 2);
+}
+
+#[test]
+fn short_call_by_name_is_rejected() {
+    let e = assemble(".func f\n        call.s  g\n", false).unwrap_err();
+    assert!(matches!(e.kind, mtc_core::asm::AsmErrorKind::BadOperand(_)));
     assert_eq!(e.line, 2);
 }

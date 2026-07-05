@@ -156,6 +156,14 @@ fn assemble_function(
                     }
                     (OperandKind::RelI8 | OperandKind::RelI32, SourceOperand::Name(name)) => {
                         if syntax.is_call(*opcode) {
+                            if entry.operand == OperandKind::RelI8 {
+                                return Err(err(
+                                    *line,
+                                    AsmErrorKind::BadOperand(
+                                        "call.s width is linker-selected; write call",
+                                    ),
+                                ));
+                            }
                             slots.push(Slot::Call {
                                 line: *line,
                                 opcode: *opcode,
@@ -305,7 +313,7 @@ fn assemble_function(
                 .map(|(name, &i)| (name.clone(), starts[i]))
                 .collect::<Vec<_>>();
             let mut labels = labels;
-            labels.sort_by_key(|(_, a)| *a);
+            labels.sort_by(|a, b| (a.1, a.0.as_str()).cmp(&(b.1, b.0.as_str())));
             return Ok((blob, relocs, BlobDebug { labels, lines }));
         }
     }
@@ -350,19 +358,36 @@ mod tests {
     }
 
     #[test]
-    fn boundary_offsets_stay_short() {
-        // Exactly -128 and +127 must fit i8.
-        // Backward: target ent at 0? Use label on first nop (addr 1):
-        // [0E][01]...125 nops...[30 xx] → instr_end = 1+125+... compute:
-        // simpler: forward jump over 125 nops → off 125 (fits), stays short.
-        let mut src = String::from(".func f\n        jmp END\n");
+    fn relaxation_boundaries_are_exact() {
+        // Forward: off = +127 stays short; +128 grows far.
+        // jmp.s hole is 2 bytes: instr_end = 3; target = 3 + N nops + ... derive:
+        // layout: [ent][jmp ...][N nops][END stop]; short: end=3, target=3+N → off=N.
+        let make = |n: usize| {
+            let mut s = String::from(".func f\n        jmp END\n");
+            for _ in 0..n {
+                s.push_str("        nop\n");
+            }
+            s.push_str("END:    stop\n");
+            s
+        };
+        let short = assemble(&test_syntax(), 0x7E, &make(127), false).unwrap();
+        assert_eq!(short.blobs[0][1], 0x30, "off +127 must stay short");
+        assert_eq!(short.blobs[0][2] as i8, 127);
+        let far = assemble(&test_syntax(), 0x7E, &make(128), false).unwrap();
+        assert_eq!(far.blobs[0][1], 0x20, "off +128 must grow far");
+
+        // Backward: off = -128 stays short. [ent][L:127 nops? derive]:
+        // layout: [ent][L: nop x N][jmp L]: jmp short at 1+N..3+N, end 3+N, target 1 → off = -(N+2).
+        // off -128 → N = 126.
+        let mut s = String::from(".func f\nL:      nop\n");
         for _ in 0..125 {
-            src.push_str("        nop\n");
+            s.push_str("        nop\n");
         }
-        src.push_str("END:    stop\n");
-        let obj = asm(&src);
-        assert_eq!(obj.blobs[0][1], 0x30); // short
-        assert_eq!(obj.blobs[0][2] as i8, 125);
+        s.push_str("        jmp     L\n");
+        let back = assemble(&test_syntax(), 0x7E, &s, false).unwrap();
+        let blob = &back.blobs[0];
+        assert_eq!(blob[1 + 126], 0x30, "off -128 must stay short");
+        assert_eq!(blob[1 + 127] as i8, -128);
     }
 
     #[test]
@@ -457,5 +482,19 @@ mod tests {
         assert_eq!(dbg[0].labels, vec![("L".to_string(), 1)]);
         assert_eq!(dbg[0].lines, vec![(1, 2), (2, 3)]); // (blob offset, source line)
         assert_eq!(obj.arch, 0x7E);
+
+        // Multiple labels at the same address sort by name, deterministically.
+        let obj = assemble(
+            &test_syntax(),
+            0x7E,
+            ".func f\nB:\nA:\n        nop\n        stop\n",
+            true,
+        )
+        .unwrap();
+        let dbg = obj.debug.as_ref().unwrap();
+        assert_eq!(
+            dbg[0].labels,
+            vec![("A".to_string(), 1), ("B".to_string(), 1)]
+        );
     }
 }
