@@ -7,3 +7,7 @@ pub mod compiler;
 pub mod ir;
 pub mod lexer;
 pub mod parser;
+
+pub use compiler::{
+    CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, Warning, compile,
+};
