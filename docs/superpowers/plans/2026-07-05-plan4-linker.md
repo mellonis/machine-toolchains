@@ -210,7 +210,7 @@ git commit crates/core/src/asm -m "refactor(core): shared asm decode module; dis
   pub(crate) fn resolve<'a>(objects: &'a [ObjectFile], libraries: &'a [ObjectFile])
       -> Result<Resolved<'a>, LinkError>;
   ```
-- Semantics: arch consistency checked first (against the first object's arch; empty input → `NoEntrySymbol`); namespace = user Defined (dup → `DuplicateSymbol`, name-sorted first offender) then libraries first-wins; BFS from `"main"` (missing → `NoEntrySymbol`); every reached function's relocations resolve through the namespace — reached-but-undefined names accumulate into `Unresolved` (sorted, deduped); callee indices assigned in discovery order (queue seeded with `main`, neighbors pushed in relocation-offset order).
+- Semantics: arch consistency checked first (against the first object's arch; empty input → `NoEntrySymbol`); namespace = user Defined (dup → `DuplicateSymbol`, first collision in file order — deterministic, Vec-driven) then libraries first-wins; BFS from `"main"` (missing → `NoEntrySymbol`); every reached function's relocations resolve through the namespace — reached-but-undefined names accumulate into `Unresolved` (sorted, deduped); callee indices assigned in discovery order (queue seeded with `main`, neighbors pushed in relocation-offset order). `dropped` is NAME-level, post-shadowing: names in the namespace whose winning site is unreached (a shadowed library copy never appears).
 
 - [ ] **Step 1: Write the failing tests**
 
