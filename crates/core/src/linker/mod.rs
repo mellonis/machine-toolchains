@@ -99,6 +99,8 @@ impl MapFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkReport {
     /// Defined but unreachable, sorted (see `resolve::Resolved::dropped`).
+    /// Name-level and namespace-based: local symbols never appear here —
+    /// unreached locals are silently omitted.
     pub dropped: Vec<String>,
     /// Count of symbol sites (calls and tail jumps) relaxed to their short form.
     pub relaxed_calls: u32,

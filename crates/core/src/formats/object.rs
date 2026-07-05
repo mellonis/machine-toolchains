@@ -1,10 +1,12 @@
 //! `MO` object container (spec §6.2).
 
+use super::FormatError;
 use super::crc32::{stamp_crc, verify_crc};
 use super::io::{Reader, put_u16, put_u32};
-use super::{FORMAT_VERSION, FormatError};
 
 pub const MAGIC_OBJECT: [u8; 3] = [b'M', b'O', 0x01];
+/// MO format version within epoch 0x01. v2 added symbol kind 2 (Local).
+pub const OBJECT_FORMAT_VERSION: u16 = 2;
 const CRC_OFFSET: usize = 7;
 const EXTERNAL_BLOB: u32 = 0xFFFF_FFFF;
 const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
@@ -14,7 +16,7 @@ const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
 ///
 /// Invariants — enforced by `from_bytes`, and REQUIRED of any
 /// hand-constructed value handed to the linker:
-/// - every `SymbolDef::Defined { blob }` indexes into `blobs`;
+/// - every `Defined`/`Local` symbol indexes into `blobs`;
 /// - every relocation's `blob` indexes into `blobs`, its `symbol` into
 ///   `symbols`, and `offset..offset + 4` lies inside that blob;
 /// - each relocation hole is the operand of a far-call instruction at
@@ -41,7 +43,14 @@ pub struct Symbol {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymbolDef {
-    Defined { blob: u32 },
+    Defined {
+        blob: u32,
+    },
+    /// Defined but NOT exported: bound directly within its own object,
+    /// invisible to cross-object resolution (spec §6.2 kind 2, §9).
+    Local {
+        blob: u32,
+    },
     External,
 }
 
@@ -93,7 +102,7 @@ impl ObjectFile {
 
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC_OBJECT);
-        put_u16(&mut out, FORMAT_VERSION);
+        put_u16(&mut out, OBJECT_FORMAT_VERSION);
         out.push(self.arch);
         out.push(if self.debug.is_some() {
             FLAG_HAS_DEBUG
@@ -120,6 +129,10 @@ impl ObjectFile {
             match sym.def {
                 SymbolDef::Defined { blob } => {
                     out.push(1);
+                    put_u32(&mut out, blob);
+                }
+                SymbolDef::Local { blob } => {
+                    out.push(2);
                     put_u32(&mut out, blob);
                 }
                 SymbolDef::External => {
@@ -189,7 +202,7 @@ impl ObjectFile {
 
         let mut r = Reader::new(&bytes[3..]);
         let version = r.u16()?;
-        if version != FORMAT_VERSION {
+        if !(1..=OBJECT_FORMAT_VERSION).contains(&version) {
             return Err(FormatError::UnsupportedVersion(version));
         }
         let arch = r.u8()?;
@@ -278,6 +291,12 @@ impl ObjectFile {
                     }
                     SymbolDef::Defined { blob }
                 }
+                2 => {
+                    if blob as usize >= blobs.len() {
+                        return Err(FormatError::Malformed("symbol blob index out of range"));
+                    }
+                    SymbolDef::Local { blob }
+                }
                 _ => return Err(FormatError::Malformed("unknown symbol kind")),
             };
             symbols.push(Symbol { name, def });
@@ -342,6 +361,47 @@ mod tests {
         assert_eq!(&bytes[0..3], b"MO\x01");
         let back = ObjectFile::from_bytes(&bytes).unwrap();
         assert_eq!(back, sample());
+    }
+
+    #[test]
+    fn round_trip_with_local_symbol() {
+        let mut obj = sample();
+        // A second blob for a local-only helper function.
+        obj.blobs.push(vec![0x0D, 0x02]); // ent, stp
+        obj.symbols.push(Symbol {
+            name: "helper".into(),
+            def: SymbolDef::Local { blob: 1 },
+        });
+        let bytes = obj.to_bytes();
+        // Wire version field sits right after the 3-byte magic.
+        assert_eq!(
+            u16::from_le_bytes([bytes[3], bytes[4]]),
+            OBJECT_FORMAT_VERSION
+        );
+        assert_eq!(OBJECT_FORMAT_VERSION, 2);
+        let back = ObjectFile::from_bytes(&bytes).unwrap();
+        assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn version_1_bytes_are_still_accepted() {
+        // Valid v2 bytes of an object WITHOUT locals, downgraded to v1: the
+        // reader must still accept it (1..=OBJECT_FORMAT_VERSION).
+        let mut bytes = sample().to_bytes();
+        bytes[3..5].copy_from_slice(&1u16.to_le_bytes());
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        assert!(ObjectFile::from_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn local_symbol_with_bad_blob_rejected() {
+        let mut obj = sample();
+        obj.symbols[0].def = SymbolDef::Local { blob: 7 };
+        let bytes = obj.to_bytes();
+        assert!(matches!(
+            ObjectFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("symbol blob index out of range"))
+        ));
     }
 
     #[test]

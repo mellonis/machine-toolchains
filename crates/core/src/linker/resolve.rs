@@ -47,6 +47,7 @@ pub(crate) fn resolve<'a>(
     }
 
     // Namespace: user objects (dup = error), then libraries (first-wins).
+    // Local symbols never enter the namespace: not exported, not shadowable.
     let mut namespace: HashMap<&str, Site> = HashMap::new();
     for (oi, object) in objects.iter().enumerate() {
         for symbol in &object.symbols {
@@ -97,12 +98,19 @@ pub(crate) fn resolve<'a>(
             .collect();
         relocs.sort_by_key(|r| r.offset);
         for reloc in relocs {
-            let name = object.symbols[reloc.symbol as usize].name.as_str();
-            match namespace.get(name) {
+            let symbol = &object.symbols[reloc.symbol as usize];
+            let target: Option<Site> = match symbol.def {
+                // Locals bind directly within their own object — never
+                // through the namespace, so they can't shadow or be
+                // shadowed (spec §9).
+                SymbolDef::Local { blob } => Some((site.0, blob)),
+                _ => namespace.get(symbol.name.as_str()).copied(),
+            };
+            match target {
                 None => {
-                    unresolved.insert(name.to_string());
+                    unresolved.insert(symbol.name.clone());
                 }
-                Some(&callee) => {
+                Some(callee) => {
                     let idx = *index_of.entry(callee).or_insert_with(|| {
                         order_sites.push(callee);
                         queue.push_back(callee);
@@ -137,9 +145,13 @@ pub(crate) fn resolve<'a>(
             let name = object
                 .symbols
                 .iter()
-                .find(|s| s.def == SymbolDef::Defined { blob: site.1 })
+                .find(|s| {
+                    matches!(s.def,
+                        SymbolDef::Defined { blob } | SymbolDef::Local { blob }
+                            if blob == site.1)
+                })
                 .map(|s| s.name.as_str())
-                .expect("site came from a Defined symbol");
+                .expect("site came from a Defined or Local symbol");
             FuncRef {
                 name,
                 blob: &object.blobs[site.1 as usize],
@@ -287,5 +299,62 @@ mod tests {
                 found: 0x11
             }
         );
+    }
+
+    /// Like `obj`, but functions whose name is in `locals` get Local defs.
+    fn obj_with_locals(arch: u8, funcs: &[(&str, &[&str])], locals: &[&str]) -> ObjectFile {
+        let mut o = obj(arch, funcs);
+        for s in &mut o.symbols {
+            if locals.contains(&s.name.as_str())
+                && let SymbolDef::Defined { blob } = s.def
+            {
+                s.def = SymbolDef::Local { blob };
+            }
+        }
+        o
+    }
+
+    #[test]
+    fn locals_bind_directly_and_may_repeat_across_objects() {
+        // Both objects define a LOCAL `helper`; each binds to its own.
+        let a = obj_with_locals(
+            0x7E,
+            &[("main", &["helper", "api"]), ("helper", &[])],
+            &["helper"],
+        );
+        let b = obj_with_locals(0x7E, &[("api", &["helper"]), ("helper", &[])], &["helper"]);
+        let objs = [a, b];
+        let r = resolve(&objs, &[]).unwrap();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        // main, its own helper, api, api's own helper: BOTH helpers linked.
+        assert_eq!(names, vec!["main", "helper", "api", "helper"]);
+    }
+
+    #[test]
+    fn foreign_locals_are_unresolvable_and_locals_never_shadow() {
+        // Object B's `helper` is local; A's external ref must NOT see it.
+        let a = obj(0x7E, &[("main", &["helper"])]);
+        let b = obj_with_locals(0x7E, &[("helper", &[])], &["helper"]);
+        let e = resolve(&[a, b], &[]).unwrap_err();
+        assert_eq!(e, LinkError::Unresolved(vec!["helper".into()]));
+    }
+
+    #[test]
+    fn local_and_global_same_name_coexist_without_duplicate_error() {
+        // A exports `helper`; B has a LOCAL `helper` — no DuplicateSymbol,
+        // and B's caller binds to B's own local, not A's export.
+        let a = obj(0x7E, &[("main", &["api"]), ("helper", &[])]);
+        let b = obj_with_locals(0x7E, &[("api", &["helper"]), ("helper", &[])], &["helper"]);
+        let objs = [a, b];
+        let r = resolve(&objs, &[]).unwrap();
+        // api's call resolved into object B (site-identity, not name):
+        let api = r.order.iter().position(|f| f.name == "api").unwrap();
+        let callee_idx = r.order[api].calls[0].1;
+        // B's local helper blob is [0x0E, 0x02] (no calls); A's exported
+        // helper has the same shape — distinguish by checking the callee
+        // is NOT the same FuncRef the unreached A-helper would be: A's
+        // helper must be in dropped (unreached), B's local not reported.
+        assert_eq!(r.dropped, vec!["helper".to_string()]);
+        assert!(callee_idx < r.order.len());
     }
 }
