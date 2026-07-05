@@ -29,87 +29,80 @@ enum DecodedOperand {
     RelTarget(u32), // absolute target address (same space as `addr`)
 }
 
+/// Decode ONE instruction at `addr` within `[addr, end)`. `None` means an
+/// unknown opcode or a truncated operand; the caller decides how to fall
+/// back (`.byte` in streams, path-stop in traversal).
+fn decode_at(syntax: &ArchSyntax, code: &[u8], addr: u32, end: u32) -> Option<Decoded> {
+    let opcode = code[addr as usize];
+    let entry = syntax.by_opcode(opcode)?;
+    let (len, operand) = match entry.operand {
+        OperandKind::None => (1, DecodedOperand::None),
+        OperandKind::RelI8 => {
+            if addr + 2 > end {
+                return None;
+            }
+            let off = code[(addr + 1) as usize] as i8;
+            let target = (i64::from(addr) + 2 + i64::from(off)) as u32;
+            (2, DecodedOperand::RelTarget(target))
+        }
+        OperandKind::RelI32 => {
+            if addr + 5 > end {
+                return None;
+            }
+            let bytes: [u8; 4] = code[(addr + 1) as usize..(addr + 5) as usize]
+                .try_into()
+                .unwrap();
+            let off = i32::from_le_bytes(bytes);
+            let target = (i64::from(addr) + 5 + i64::from(off)) as u32;
+            (5, DecodedOperand::RelTarget(target))
+        }
+        OperandKind::SymbolVec => {
+            let mut i = addr + 1;
+            let mut symbols = Vec::new();
+            let mut ok = false;
+            while i < end {
+                let b = code[i as usize];
+                symbols.push(u32::from(b & 0x7F));
+                i += 1;
+                if b & 0x80 != 0 {
+                    ok = true;
+                    break;
+                }
+            }
+            if !ok {
+                return None;
+            }
+            (i - addr, DecodedOperand::Ints(symbols))
+        }
+    };
+    Some(Decoded {
+        addr,
+        len,
+        body: Body::Instr {
+            mnemonic: entry.mnemonic,
+            operand,
+        },
+    })
+}
+
 fn decode_stream(syntax: &ArchSyntax, code: &[u8], start: u32, end: u32) -> Vec<Decoded> {
     let mut out = Vec::new();
     let mut addr = start;
     while addr < end {
-        let opcode = code[addr as usize];
-        let Some(entry) = syntax.by_opcode(opcode) else {
-            out.push(Decoded {
-                addr,
-                len: 1,
-                body: Body::Raw(opcode),
-            });
-            addr += 1;
-            continue;
-        };
-        let (len, operand) = match entry.operand {
-            OperandKind::None => (1, DecodedOperand::None),
-            OperandKind::RelI8 => {
-                if addr + 2 > end {
-                    out.push(Decoded {
-                        addr,
-                        len: 1,
-                        body: Body::Raw(opcode),
-                    });
-                    addr += 1;
-                    continue;
-                }
-                let off = code[(addr + 1) as usize] as i8;
-                let target = (i64::from(addr) + 2 + i64::from(off)) as u32;
-                (2, DecodedOperand::RelTarget(target))
+        match decode_at(syntax, code, addr, end) {
+            Some(d) => {
+                addr += d.len;
+                out.push(d);
             }
-            OperandKind::RelI32 => {
-                if addr + 5 > end {
-                    out.push(Decoded {
-                        addr,
-                        len: 1,
-                        body: Body::Raw(opcode),
-                    });
-                    addr += 1;
-                    continue;
-                }
-                let bytes: [u8; 4] = code[(addr + 1) as usize..(addr + 5) as usize]
-                    .try_into()
-                    .unwrap();
-                let off = i32::from_le_bytes(bytes);
-                let target = (i64::from(addr) + 5 + i64::from(off)) as u32;
-                (5, DecodedOperand::RelTarget(target))
+            None => {
+                out.push(Decoded {
+                    addr,
+                    len: 1,
+                    body: Body::Raw(code[addr as usize]),
+                });
+                addr += 1;
             }
-            OperandKind::SymbolVec => {
-                let mut i = addr + 1;
-                let mut symbols = Vec::new();
-                let mut ok = false;
-                while i < end {
-                    let b = code[i as usize];
-                    symbols.push(u32::from(b & 0x7F));
-                    i += 1;
-                    if b & 0x80 != 0 {
-                        ok = true;
-                        break;
-                    }
-                }
-                if !ok {
-                    out.push(Decoded {
-                        addr,
-                        len: 1,
-                        body: Body::Raw(opcode),
-                    });
-                    addr += 1;
-                    continue;
-                }
-                (i - addr, DecodedOperand::Ints(symbols))
-            }
-        };
-        out.push(Decoded {
-            addr,
-            len,
-            body: Body::Instr {
-                mnemonic: entry.mnemonic,
-                operand,
-            },
-        });
-        addr += len;
+        }
     }
     out
 }
@@ -207,16 +200,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
 
 /// Decode ONE instruction at `addr` (None = unknown opcode / truncated).
 fn decode_one(syntax: &ArchSyntax, code: &[u8], addr: u32) -> Option<Decoded> {
-    let mut v = decode_stream(syntax, code, addr, code.len() as u32);
-    match v.drain(..).next() {
-        Some(
-            d @ Decoded {
-                body: Body::Instr { .. },
-                ..
-            },
-        ) => Some(d),
-        _ => None,
-    }
+    decode_at(syntax, code, addr, code.len() as u32)
 }
 
 pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
@@ -460,5 +444,30 @@ START:  nop
             text.contains(".byte   1"),
             "unreachable padding dumps as bytes"
         );
+    }
+
+    #[test]
+    fn cross_region_jump_falls_back_to_bytes() {
+        let syntax = test_syntax();
+        // f calls g (so g is a root) AND jumps into g's BODY (addr 13):
+        // 0: ent | 1: call +6 -> 12 | 6: jmp +2 -> 13 | 11: stop | 12: ent | 13: ret
+        let code = vec![
+            0x0E, 0x21, 0x06, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B,
+        ];
+        let exe = Executable {
+            arch: 0x7E,
+            entry: 0,
+            code,
+        };
+        let text = disassemble_executable(&syntax, &exe);
+        assert!(text.contains(".func func_000C"));
+        assert!(text.contains("call    func_000C"));
+        // the jmp into g's body cannot be a local label -> whole instruction as bytes
+        assert!(text.contains(".byte   32")); // 0x20 opcode byte
+        assert!(
+            !text.contains("jmp"),
+            "cross-region jmp must not print as jmp"
+        );
+        assert!(text.contains("ret"));
     }
 }
