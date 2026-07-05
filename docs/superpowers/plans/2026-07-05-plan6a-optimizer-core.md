@@ -1179,6 +1179,17 @@ fn reset_mf_semantics_survive_o1() {
     let (o0, o1) = assert_equivalent(src, TAPES);
     assert_eq!(o0, o1, "an unfoldable program must be byte-stable");
 }
+
+#[test]
+fn dropped_confirming_write_still_feeds_later_mf_observations() {
+    // Task-4 review follow-up (controller-ratified): on the marked arm,
+    // `mark` is a confirming write cell-state drops — the SECOND check
+    // then observes MF that the dropped write would have latched. The
+    // coupling invariant says dropping is invisible; this runs it.
+    let src = "main() { right; check(1, 2); 1: mark; check(3, 2); 3: right(!); 2: left; }";
+    let (o0, o1) = assert_equivalent(src, TAPES);
+    assert!(o1 < o0, "drop + fold must shrink: {o0} -> {o1}");
+}
 ```
 
 - [ ] **Step 3: Gates, then commit.**
