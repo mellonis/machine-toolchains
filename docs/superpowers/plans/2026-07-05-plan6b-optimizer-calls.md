@@ -4,7 +4,7 @@
 
 **Goal:** The remaining spec §8 passes — **inline** (5), **tail-merge** (7), **tail-call** (8) — complete `-O1`, on top of new core support for symbol-operand jumps (`jmp @name`) through the assembler, linker, and both disassemblers.
 
-**Architecture:** Tail calls need a relocated jump: the assembler's existing `Slot::Call` machinery (far opcode + 4-byte hole + relocation) is reused verbatim for `jmp @name`; the linker's `classify()` learns to treat a holed jump as a relaxable symbol site; disassemblers print cross-function jumps as `jmp @name`, preserving the round-trip law. In the optimizer, `IrTerm` gains a `TailCall { name }` terminator (IR JSON version 2), the driver gains a program-level pass stage (inline needs cross-function access), and the pipeline becomes: **inline** (program-level) then per-function **check-fold, jump-threading, cell-state, branch-fold, tail-merge, dce, tail-call**.
+**Architecture:** Tail calls need a relocated jump: the assembler's existing `Slot::Call` machinery (far opcode + 4-byte hole + relocation) is reused verbatim for `jmp @name`; the linker's `classify()` learns to treat a holed jump as a relaxable symbol site; disassemblers print cross-function jumps as `jmp @name`, preserving the round-trip law. In the optimizer, `IrTerm` gains a `TailCall { name }` terminator (IR JSON version 2), the driver gains a program-level pass stage (inline needs cross-function access), and the pipeline becomes: **inline** (program-level) then per-function **check-fold, jump-threading, cell-state, branch-fold, tail-call, tail-merge, dce** (Task-6 ruling: tail-call runs BEFORE tail-merge — return-chaining would otherwise rewrite a tail-position `Return` to `FallThrough` and permanently destroy tail-call's precondition; ordering also prefers the larger saving when both apply).
 
 **Tech Stack:** Rust edition 2024, no new dependencies. Baseline: 239 workspace tests green at master/52cf8af.
 
@@ -20,7 +20,7 @@
 - Inline candidate rule, exactly: callee is defined in this module, is a **leaf** (no `Call` ops, no `TailCall` terminators anywhere in its blocks), contains no `Brk`, is not the caller itself, and (total op count ≤ `INLINE_MAX_OPS = 6` **or** is called from exactly one site module-wide). Candidate set is computed once per pass invocation, from the pre-pass program state.
 - Tail-call rule, exactly: a block whose last op is `Call` and whose terminator is `Return`, in any function **except `main`** (main's return is `stp`; the callee's `ret` would underflow).
 - Tail-merge v1 scope, exactly: (a) whole-block dedup — identical ops (modulo line numbers) + identical terminator → retarget all references to the first (keeper) and delete the duplicate; (b) return-chaining — a `Return` block physically followed by an empty `Return` block gets `FallThrough` to it (adjacent = free; the spec §8 example's shared `stp`).
-- Pass names for `--fno-<name>` and reports: `inline`, `tail-merge`, `tail-call` (joining the five 6a names). Pipeline per round: program-level `inline` first, then per-function `check-fold, jump-threading, cell-state, branch-fold, tail-merge, dce, tail-call`.
+- Pass names for `--fno-<name>` and reports: `inline`, `tail-merge`, `tail-call` (joining the five 6a names). Pipeline per round: program-level `inline` first, then per-function `check-fold, jump-threading, cell-state, branch-fold, tail-call, tail-merge, dce` (Task-6 ruling — see Architecture note).
 - `IrTerm` loses `Copy` (TailCall carries a `String`): every existing `match`/`if let` on a term is updated mechanically (the compiler enumerates the sites; bind by reference and deref the `u32`s). No wildcard arms — exhaustiveness stays the safety net.
 - `-O0` and all Plan 5/6a `-O0` goldens stay bit-identical. ONE 6a `-O1` golden changes **intentionally**: `spec_sample_is_already_optimal` becomes wrong once inline exists (main's call to goToEnd inlines) and is rewritten in Task 4 — this is the only sanctioned golden change.
 - Gates per task: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`. Commits per task, path-scoped, never push, no attribution footers. BLOCK with derivation on any golden mismatch; never adjust numbers to observed output.
@@ -522,7 +522,7 @@ mod tests {
 }
 ```
 
-Wire `("tail-call", tail_call::run)` as the LAST entry of the per-function `PIPELINE` and declare the module.
+Wire `("tail-call", tail_call::run)` into the per-function `PIPELINE` and declare the module. [Task-6 ruling: its position is AFTER `branch-fold` and BEFORE `tail-merge`/`dce` — originally authored as last, which let return-chaining destroy the tail-call precondition; see Architecture note.]
 
 - [ ] **Step 4: Equivalence + semantics pins** (append to `tests/opt_equivalence.rs`):
 
@@ -987,7 +987,7 @@ git commit -m "feat(post-machine): inline pass — program-level driver stage; s
 
 **Files:**
 - Create: `crates/post-machine/src/optimizer/tail_merge.rs`
-- Modify: `crates/post-machine/src/optimizer/mod.rs` (PIPELINE gains `("tail-merge", tail_merge::run)` between `branch-fold` and `dce`), `crates/post-machine/tests/opt_equivalence.rs`
+- Modify: `crates/post-machine/src/optimizer/mod.rs` (PIPELINE gains `("tail-merge", tail_merge::run)` between `tail-call` and `dce` — Task-6 ruling), `crates/post-machine/tests/opt_equivalence.rs`
 
 - [ ] **Step 1: `tail_merge.rs`:**
 
