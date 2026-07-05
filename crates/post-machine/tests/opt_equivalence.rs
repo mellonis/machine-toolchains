@@ -244,7 +244,7 @@ fn capture_ir_records_the_pass_stages() {
     assert_eq!(stages.last().copied(), Some("final"));
     assert!(stages.contains(&"after:cell-state"), "{stages:?}");
     assert!(stages.contains(&"after:branch-fold"), "{stages:?}");
-    assert!(stages.contains(&"after:dce"), "{stages:?}");
+    assert!(stages.contains(&"after:tail-merge"), "{stages:?}");
     assert_ne!(out.ir_snapshots.first(), out.ir_snapshots.last());
     assert_eq!(out.ir, out.ir_snapshots.last().unwrap().1);
 }
@@ -407,4 +407,25 @@ fn tail_call_emits_a_relaxed_jump() {
             ENT, RGT, RET, // f
         ]
     );
+}
+
+#[test]
+fn tail_merge_shares_the_stp_exactly_as_the_spec_promises() {
+    use mtc_post_machine::arch::opcodes::*;
+    // Spec §8 pass 7's own example. -O0: jm B2; wr 1; stp; B2: stp = 7
+    // bytes (two stp). -O1: return-chaining drops the first stp — 6.
+    let src = "main() { 1: check(!, 2); 2: mark(!); }";
+    let (o0, o1) = assert_equivalent(src, TAPES);
+    assert_eq!((o0, o1), (7, 6));
+    let out = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
+    // ent, jm.s +2, wr 1, stp — one stp serves both paths.
+    assert_eq!(linked.executable.code, vec![ENT, JM_S, 0x02, WR, 0x81, STP]);
 }

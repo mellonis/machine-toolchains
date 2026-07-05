@@ -15,6 +15,7 @@ pub mod dce;
 pub mod inline;
 pub mod jump_threading;
 pub mod tail_call;
+pub mod tail_merge;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
@@ -54,6 +55,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("jump-threading", jump_threading::run),
     ("cell-state", cell_state::run),
     ("branch-fold", branch_fold::run),
+    ("tail-merge", tail_merge::run),
     ("dce", dce::run),
     ("tail-call", tail_call::run),
 ];
