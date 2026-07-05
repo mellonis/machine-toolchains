@@ -9,7 +9,7 @@
 //! their original width with the offset recomputed through the map (the
 //! shrink-only invariant guarantees it still fits).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::resolve::FuncRef;
 use super::{LinkError, MapFunction};
@@ -54,11 +54,18 @@ pub(super) struct Built {
     pub far_calls: u32,
 }
 
-/// Decode `f`'s original blob into a `Piece` list. Decode failure or a
-/// call instruction with no matching hole in `f.calls` → `MalformedBlob`.
+/// Decode `f`'s original blob into a `Piece` list. Decode failure, a call
+/// instruction with no matching hole in `f.calls`, or a hole in `f.calls`
+/// that no decoded call instruction ever consumes → `MalformedBlob`. The
+/// last case matters just as much as the first two: a hole that lands
+/// inside a non-call piece (raw bytes, or the middle of some other
+/// decoded instruction) would otherwise be copied verbatim — emitting the
+/// relocation's zeroed operand as silent garbage in an otherwise
+/// CRC-valid, plausible-looking executable.
 fn classify(syntax: &ArchSyntax, f: &FuncRef) -> Result<Vec<Piece>, LinkError> {
     let blob = f.blob;
     let call_holes: HashMap<u32, usize> = f.calls.iter().copied().collect();
+    let mut consumed_holes: HashSet<u32> = HashSet::new();
     let decoded = decode::decode_stream(syntax, blob, 0, blob.len() as u32);
 
     let mut pieces = Vec::with_capacity(decoded.len());
@@ -93,6 +100,7 @@ fn classify(syntax: &ArchSyntax, f: &FuncRef) -> Result<Vec<Piece>, LinkError> {
                                 at: hole,
                             });
                         };
+                        consumed_holes.insert(hole);
                         pieces.push(Piece::CallSite { orig: addr, callee });
                     }
                     _ => {
@@ -105,6 +113,20 @@ fn classify(syntax: &ArchSyntax, f: &FuncRef) -> Result<Vec<Piece>, LinkError> {
             }
         }
     }
+
+    // `f.calls` is already in blob order (see `FuncRef::calls`), so the
+    // first unconsumed entry is the lowest-offset one — deterministic.
+    if let Some(&(offset, _)) = f
+        .calls
+        .iter()
+        .find(|(off, _)| !consumed_holes.contains(off))
+    {
+        return Err(LinkError::MalformedBlob {
+            symbol: f.name.to_string(),
+            at: offset,
+        });
+    }
+
     Ok(pieces)
 }
 
@@ -449,5 +471,46 @@ X:      stop
         let obj = assemble(&syntax, 0x7E, &src, false).unwrap();
         let out = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap();
         assert_eq!(out.executable.code[1], 0x21, "call must stay far");
+    }
+
+    #[test]
+    fn unconsumed_call_hole_is_malformed() {
+        use crate::formats::object::{ObjectFile, Relocation, Symbol, SymbolDef};
+        let syntax = syntax_with_short_call();
+        // Blob is all nops — the reloc's hole at offset 2 sits inside plain
+        // instructions and no call opcode precedes it.
+        let obj = ObjectFile {
+            arch: 0x7E,
+            symbols: vec![
+                Symbol {
+                    name: "main".into(),
+                    def: SymbolDef::Defined { blob: 0 },
+                },
+                Symbol {
+                    name: "go".into(),
+                    def: SymbolDef::External,
+                },
+            ],
+            blobs: vec![vec![0x0E, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02]],
+            relocations: vec![Relocation {
+                blob: 0,
+                offset: 2,
+                symbol: 1,
+            }],
+            debug: None,
+        };
+        // `go` must resolve so we reach layout: provide it via a library.
+        let lib = {
+            let s = ".func go\n        ret\n";
+            assemble(&syntax, 0x7E, s, false).unwrap()
+        };
+        let e = link(&syntax, &[obj], &[lib], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::MalformedBlob {
+                symbol: "main".into(),
+                at: 2
+            }
+        );
     }
 }
