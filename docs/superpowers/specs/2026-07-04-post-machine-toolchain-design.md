@@ -762,11 +762,16 @@ MF-coupling argument, closed-terminator-targets) do not migrate to user
 docs — they stay self-contained in module docs, being contracts between
 passes rather than with users.
 
-**Forge agnosticism:** repo content never hard-links the hosting provider.
-Cross-repo references use plain text — repo name + issue number
-(`turing-machine-js #219`) — never URLs; the canonical repository URL
+**Forge agnosticism:** the rule binds PUBLISHED content — `README.md`,
+the `docs/` reference pages, and code comments: no provider URLs, and no
+forge-issue references at all; cross-project work is described in prose
+(the library and the feature by name, e.g. "the abortState sentinel
+being designed for turing-machine-js"). The canonical repository URL
 lives ONLY in `Cargo.toml`'s `repository` metadata field (one line to
-update on migration).
+update on migration). Internal dev artifacts (progress ledger, plan
+documents) are unrestricted — issue links and URLs are fine there.
+(As refined by user rulings of 2026-07-06; the original rule was
+repo-wide plain-text references.)
 
 ## 13. Out of scope (v1)
 
