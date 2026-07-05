@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use crate::ir::{IrFunction, IrProgram};
 
 pub mod check_fold;
+pub mod dataflow;
 pub mod dce;
 pub mod jump_threading;
 
