@@ -7,6 +7,7 @@ use std::collections::HashSet;
 
 use crate::ir::{IrFunction, IrProgram};
 
+pub mod branch_fold;
 pub mod cell_state;
 pub mod check_fold;
 pub mod dataflow;
@@ -50,6 +51,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("check-fold", check_fold::run),
     ("jump-threading", jump_threading::run),
     ("cell-state", cell_state::run),
+    ("branch-fold", branch_fold::run),
     ("dce", dce::run),
 ];
 
