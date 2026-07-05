@@ -118,8 +118,10 @@ pub struct CompileReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileOutput {
     pub object: ObjectFile,
-    /// The generated assembly (`-S` output). The object IS its assembly,
-    /// so the two can never disagree.
+    /// The generated assembly (`-S` output). The object is assembled from
+    /// exactly this text, so the code bytes can never disagree; under `-g`
+    /// the object's debug LINES are additionally remapped to `.pmc`
+    /// sources, so `object != assemble(pma, true)` on that side table.
     pub pma: String,
     /// The lowered CFG (`--emit-ir`). At `-O0` this is also the final IR;
     /// Plan 6 adds per-pass snapshots.
