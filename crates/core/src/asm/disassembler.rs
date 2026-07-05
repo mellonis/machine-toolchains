@@ -165,7 +165,17 @@ pub fn disassemble_executable(syntax: &ArchSyntax, exe: &Executable) -> String {
     }
 
     let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();
-    let func_name = |addr: u32| format!("func_{addr:04X}");
+    // The entry root is named `main`: the linker guarantees the entry
+    // symbol is literally `main` (spec §9), so the synthesis is faithful
+    // and restores §6.4's round-trip claim (dis → asm → link reproduces
+    // the executable). All other roots keep the address-derived name.
+    let func_name = |addr: u32| {
+        if addr == exe.entry {
+            "main".to_string()
+        } else {
+            format!("func_{addr:04X}")
+        }
+    };
     let region_end = |i: usize| roots.get(i + 1).copied().unwrap_or(len);
     // A short-call opcode displays its far partner's mnemonic (the far and
     // short forms are interchangeable at the source level; only the far
@@ -346,7 +356,7 @@ START:  nop
             code,
         };
         let text = disassemble_executable(&syntax, &exe);
-        assert!(text.contains(".func func_0000"));
+        assert!(text.contains(".func main")); // entry root is named main
         assert!(text.contains(".func func_0007"));
         assert!(text.contains("call    func_0007"));
         assert!(text.contains("ret"));
@@ -368,7 +378,7 @@ START:  nop
             code,
         };
         let text = disassemble_executable(&syntax, &exe);
-        assert!(text.contains(".func func_0000"));
+        assert!(text.contains(".func main")); // entry root is named main
         assert!(text.contains(".func func_0014"));
         assert!(
             !text.contains("func_0002"),
