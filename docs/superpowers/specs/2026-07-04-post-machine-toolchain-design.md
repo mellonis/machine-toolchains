@@ -746,6 +746,15 @@ design back to the four Delphi generations (what was inherited: the
 language lineage, fall-through optimization, `ent`-style safety the 2007
 call stack lacked, the PMProcessor's disassembler-first mindset).
 
+
+**Section-reference stability:** code comments cite this spec by section
+number plus a topic keyword ("spec §8 (equivalence contract)"). Section
+numbers are APPEND-ONLY: new material lands as new subsections or at
+section ends; renumbering existing sections is a breaking change that
+requires a `grep -rn "spec §" crates/` sweep in the same commit. This
+spec is the build-time design authority; the user-facing references in
+`docs/` (Plan 7) derive from it and never fork it.
+
 ## 13. Out of scope (v1)
 
 - Cross-module (link-time) inlining — extension point only.
