@@ -326,7 +326,7 @@ git commit -m "feat(core): operand encoders property-tested against live decode;
 - Consumes: `OperandKind`.
 - Produces: `Flow`, `SyntaxEntry`, `RelaxPair`, `ArchSyntax`, `AsmError`, `AsmErrorKind` (public); crate-internal parser output consumed by Task 3:
   ```rust
-  pub(crate) struct SourceFunction { pub name: String, pub line: usize, pub items: Vec<SourceItem> }
+  pub(crate) struct SourceFunction { pub name: String, pub items: Vec<SourceItem> }
   pub(crate) enum SourceItem {
       Instr { line: usize, labels: Vec<String>, opcode: u8, operand: SourceOperand },
       RawByte { line: usize, labels: Vec<String>, value: u8 },
@@ -575,8 +575,6 @@ use crate::vm::OperandKind;
 #[derive(Debug)]
 pub(crate) struct SourceFunction {
     pub name: String,
-    #[allow(dead_code)] // consumed by the assembler in Task 3
-    pub line: usize,
     pub items: Vec<SourceItem>,
 }
 
@@ -629,7 +627,7 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
             if functions.iter().any(|f| f.name == name) {
                 return Err(err(line_no, AsmErrorKind::DuplicateFunction(name.to_string())));
             }
-            functions.push(SourceFunction { name: name.to_string(), line: line_no, items: Vec::new() });
+            functions.push(SourceFunction { name: name.to_string(), items: Vec::new() });
             continue;
         }
 
