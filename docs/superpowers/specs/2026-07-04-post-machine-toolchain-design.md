@@ -616,7 +616,11 @@ against the old notes during implementation.
   `-O1 --strip-debugger`. Default: `-O0`, no `-g`. `-g -O1` is legal with
   the usual caveat: optimized code maps to source approximately.
 - **CLI:** one binary `pmt` with subcommands `compile`, `asm`, `link`, `dis`,
-  `run`, `tape` (§6.3), `ir` (§7.1). Library-first: the bin is a thin
+  `run`, `tape` (§6.3), `ir` (§7.1). **Verbosity:** library code never
+  prints — each stage returns a structured report (e.g. the linker's
+  `LinkReport`: dropped functions, relax decisions) that `pmt -v` renders;
+  `pmt run --trace` streams per-instruction listing-form disassembly via
+  the step API. Library-first: the bin is a thin
   wrapper over public library functions (`compile(source)`,
   `assemble(asm_text)`, `link(objects)`, `disassemble(bytes)`, `Processor`,
   tapes), so tests — and a future WASM browser demo — consume the API
