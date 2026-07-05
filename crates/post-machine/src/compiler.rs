@@ -586,4 +586,37 @@ mod tests {
             .is_ok()
         );
     }
+
+    #[test]
+    fn uncalled_nested_functions_warn_under_their_mangled_name() {
+        let out = compile(
+            "export api() { helper() { right; } left; } main() { @api(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            out.report
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("unused function `api.helper`")),
+            "{:?}",
+            out.report.warnings
+        );
+    }
+
+    #[test]
+    fn undeclared_external_dedup_is_program_wide() {
+        let out = compile(
+            "a() { @go(); } main() { @a(); @go(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        let n = out
+            .report
+            .warnings
+            .iter()
+            .filter(|w| w.message.contains("undeclared"))
+            .count();
+        assert_eq!(n, 1);
+    }
 }

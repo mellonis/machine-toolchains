@@ -65,7 +65,12 @@ fn registry() -> ArchRegistry {
 fn spec_sample_compiles_to_the_expected_assembly() {
     let out = compile(SPEC_PMC, CompileOptions::default()).unwrap();
     assert_eq!(out.pma, EXPECTED_PMA);
-    assert!(out.report.warnings.is_empty());
+    assert_eq!(out.report.warnings.len(), 1, "{:?}", out.report.warnings);
+    assert!(
+        out.report.warnings[0]
+            .message
+            .contains("unused function `goToBegin`")
+    );
 }
 
 #[test]
