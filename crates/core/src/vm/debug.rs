@@ -201,6 +201,12 @@ impl<'a> DebugSession<'a> {
         if let Some(done) = self.gate() {
             return done;
         }
+        // A zero budget pauses immediately without stepping (and guards
+        // the decrement below against u64 underflow) — ratified fix,
+        // 2026-07-06, after the Task-1 implementer flagged the panic.
+        if budget == Some(0) {
+            return DebugEvent::Paused(PauseCause::Manual);
+        }
         loop {
             let event = self.advance(device);
             match event {
@@ -359,5 +365,46 @@ mod tests {
             s.run_steps(&mut tape, 10),
             DebugEvent::Finished(Outcome::Stopped)
         );
+    }
+
+    #[test]
+    fn run_steps_zero_budget_pauses_without_stepping() {
+        let mut s = session(&[0x01, 0x02]);
+        let mut tape = InfiniteTape::new();
+        assert_eq!(
+            s.run_steps(&mut tape, 0),
+            DebugEvent::Paused(PauseCause::Manual)
+        );
+        assert_eq!(s.stats().steps, 0);
+        assert_eq!(
+            s.run_steps(&mut tape, 10),
+            DebugEvent::Finished(Outcome::Stopped)
+        );
+    }
+
+    #[test]
+    fn state_accessors_cover_mf_stack_and_trap_ip() {
+        // mf(): right onto a marked cell latches MF
+        let mut s = session(&[0x06, 0x02]);
+        let mut tape = InfiniteTape::from_cells([false, true], 0, 0);
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Paused(PauseCause::Step));
+        assert!(s.mf());
+
+        // stack(): inside a call, the return address is visible
+        // 0: call +2 -> 7; 5: nop; 6: stop; 7: ent; 8: nop; 9: ret
+        let code = &[0x0A, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02, 0x0E, 0x01, 0x0B];
+        let mut s = session(code);
+        let mut tape = InfiniteTape::new();
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Paused(PauseCause::Step));
+        assert_eq!(s.stack(), &[5]);
+
+        // ip() after a trap pause: the FAULTING instruction's address
+        let mut s = session(&[0x0B]); // ret on empty stack at address 0
+        let mut tape = InfiniteTape::new();
+        assert_eq!(
+            s.continue_(&mut tape),
+            DebugEvent::Paused(PauseCause::Trap(Trap::StackUnderflow))
+        );
+        assert_eq!(s.ip(), 0);
     }
 }
