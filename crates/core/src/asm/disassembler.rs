@@ -49,11 +49,17 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
         .collect();
 
     for symbol in &obj.symbols {
-        let SymbolDef::Defined { blob } = symbol.def else {
-            continue;
+        let (blob, local) = match symbol.def {
+            SymbolDef::Defined { blob } => (blob, false),
+            SymbolDef::Local { blob } => (blob, true),
+            SymbolDef::External => continue,
         };
         let code = &obj.blobs[blob as usize];
-        out.push_str(&format!(".func {}\n", symbol.name));
+        out.push_str(&format!(
+            ".func {}{}\n",
+            symbol.name,
+            if local { " local" } else { "" }
+        ));
         // Skip the leading entry byte if present (implied by .func).
         let start = if code.first() == Some(&syntax.entry_opcode) {
             1
@@ -577,5 +583,16 @@ START:  nop
             crate::linker::link(&syntax, &[obj2], &[], crate::linker::LinkOptions::default())
                 .unwrap();
         assert_eq!(out2.executable.code, out.executable.code);
+    }
+
+    #[test]
+    fn local_functions_round_trip_through_object_disassembly() {
+        let syntax = test_syntax();
+        let src = ".func api\n        call helper\n        stop\n.func helper local\n        ret\n";
+        let obj1 = assemble(&syntax, 0x7E, src, false).unwrap();
+        let text = disassemble_object(&syntax, &obj1);
+        assert!(text.contains(".func helper local"), "{text}");
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        assert_eq!(obj1, obj2);
     }
 }

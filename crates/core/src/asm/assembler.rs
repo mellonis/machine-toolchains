@@ -62,7 +62,11 @@ pub fn assemble(
         .enumerate()
         .map(|(i, f)| Symbol {
             name: f.name.clone(),
-            def: SymbolDef::Defined { blob: i as u32 },
+            def: if f.local {
+                SymbolDef::Local { blob: i as u32 }
+            } else {
+                SymbolDef::Defined { blob: i as u32 }
+            },
         })
         .collect();
     let mut symbol_index: HashMap<String, u32> = symbols
@@ -559,5 +563,17 @@ mod tests {
         assert!(matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("labels")));
         let e = assemble(&test_syntax(), 0x7E, ".func f\n        call @g\n", false).unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("drop the `@`")));
+    }
+
+    #[test]
+    fn local_functions_get_local_symbols_and_intra_file_calls_bind() {
+        let obj =
+            asm(".func api\n        call helper\n        stop\n.func helper local\n        ret\n");
+        assert!(matches!(obj.symbols[1].def, SymbolDef::Local { blob: 1 }));
+        assert_eq!(obj.relocations.len(), 1);
+        assert_eq!(
+            obj.symbols[obj.relocations[0].symbol as usize].name,
+            "helper"
+        );
     }
 }

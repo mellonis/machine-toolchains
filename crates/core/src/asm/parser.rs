@@ -7,6 +7,7 @@ use crate::vm::OperandKind;
 #[derive(Debug)]
 pub(crate) struct SourceFunction {
     pub name: String,
+    pub local: bool,
     pub items: Vec<SourceItem>,
 }
 
@@ -44,7 +45,21 @@ fn is_ident(s: &str) -> bool {
         Some(c) if c.is_alphabetic() || c == '_' => {}
         _ => return false,
     }
-    chars.all(|c| c.is_alphanumeric() || c == '_')
+    chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+}
+
+/// Symbol names: `::`-separated namespace segments, then a dotted
+/// function path (`std::api.helper`). Labels do NOT use this rule.
+fn is_symbol_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.split("::").all(|segment| {
+            let mut chars = segment.chars();
+            match chars.next() {
+                Some(c) if c.is_alphabetic() || c == '_' => {}
+                _ => return false,
+            }
+            chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        })
 }
 
 pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunction>, AsmError> {
@@ -69,8 +84,25 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
                     AsmErrorKind::Syntax("label at end of function"),
                 ));
             }
-            let name = directive.next().unwrap_or("").trim();
-            if !is_ident(name) {
+            let rest = directive.next().unwrap_or("").trim();
+            let mut words = rest.split_whitespace();
+            let name = words.next().unwrap_or("");
+            let local = match words.next() {
+                None => false,
+                Some("local") => {
+                    if words.next().is_some() {
+                        return Err(err(line_no, AsmErrorKind::Syntax("junk after `local`")));
+                    }
+                    true
+                }
+                Some(_) => {
+                    return Err(err(
+                        line_no,
+                        AsmErrorKind::Syntax("expected `local` or end of line after the name"),
+                    ));
+                }
+            };
+            if !is_symbol_name(name) {
                 return Err(err(line_no, AsmErrorKind::Syntax("bad function name")));
             }
             if functions.iter().any(|f| f.name == name) {
@@ -81,6 +113,7 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
             }
             functions.push(SourceFunction {
                 name: name.to_string(),
+                local,
                 items: Vec::new(),
             });
             continue;
@@ -144,7 +177,7 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
                     return Err(err(line_no, AsmErrorKind::BadOperand("takes one name")));
                 };
                 if let Some(sym) = one.strip_prefix('@') {
-                    if !is_ident(sym) {
+                    if !is_symbol_name(sym) {
                         return Err(err(
                             line_no,
                             AsmErrorKind::BadOperand("bad symbol name after `@`"),
@@ -152,7 +185,7 @@ pub(crate) fn parse(syntax: &ArchSyntax, source: &str) -> Result<Vec<SourceFunct
                     }
                     SourceOperand::SymbolName(sym.to_string())
                 } else {
-                    if !is_ident(one) {
+                    if !is_symbol_name(one) {
                         return Err(err(
                             line_no,
                             AsmErrorKind::BadOperand("jump/call operands are names, not numbers"),
@@ -306,5 +339,96 @@ L1:     nop
 
         let e = parse(&syntax, ".func f\nL1:\n").unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::Syntax(_))); // dangling label
+    }
+
+    #[test]
+    fn func_local_modifier_parses() {
+        let syntax = test_syntax();
+        let funcs = parse(&syntax, ".func f local\n        ret\n").unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "f");
+        assert!(funcs[0].local);
+    }
+
+    #[test]
+    fn func_without_local_modifier_defaults_to_false() {
+        let syntax = test_syntax();
+        let funcs = parse(&syntax, ".func f\n        ret\n").unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert!(!funcs[0].local);
+    }
+
+    #[test]
+    fn func_local_modifier_requires_exact_keyword() {
+        let syntax = test_syntax();
+        let e = parse(&syntax, ".func f loco\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::Syntax(_)));
+
+        let e = parse(&syntax, ".func f local extra\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::Syntax(_)));
+    }
+
+    #[test]
+    fn dotted_function_names_accepted() {
+        let syntax = test_syntax();
+        let funcs = parse(&syntax, ".func outer.inner local\n        ret\n").unwrap();
+        assert_eq!(funcs[0].name, "outer.inner");
+        assert!(funcs[0].local);
+    }
+
+    #[test]
+    fn namespaced_function_names_accepted() {
+        let syntax = test_syntax();
+        let funcs = parse(&syntax, ".func std::api.helper local\n        ret\n").unwrap();
+        assert_eq!(funcs[0].name, "std::api.helper");
+        assert!(funcs[0].local);
+    }
+
+    #[test]
+    fn call_operands_accept_dotted_names() {
+        let syntax = test_syntax();
+        let funcs = parse(&syntax, ".func f\n        call outer.inner\n").unwrap();
+        assert_eq!(funcs[0].items.len(), 1);
+        match &funcs[0].items[0] {
+            SourceItem::Instr { operand, .. } => {
+                assert!(matches!(operand, SourceOperand::Name(n) if n == "outer.inner"));
+            }
+            _ => panic!("expected Instr"),
+        }
+    }
+
+    #[test]
+    fn call_operands_accept_namespaced_names() {
+        let syntax = test_syntax();
+        let funcs = parse(&syntax, ".func f\n        call std::api\n").unwrap();
+        assert_eq!(funcs[0].items.len(), 1);
+        match &funcs[0].items[0] {
+            SourceItem::Instr { operand, .. } => {
+                assert!(matches!(operand, SourceOperand::Name(n) if n == "std::api"));
+            }
+            _ => panic!("expected Instr"),
+        }
+    }
+
+    #[test]
+    fn label_with_namespace_colons_errors_not_misparsed() {
+        let syntax = test_syntax();
+        let e = parse(&syntax, ".func f\nstd::x:  nop\n").unwrap_err();
+        // Must error (not silently misparse as a label). The error should be
+        // UnknownMnemonic for the remaining `:x:` part.
+        assert!(matches!(e.kind, AsmErrorKind::UnknownMnemonic(_)));
+    }
+
+    #[test]
+    fn labels_with_dots_still_parse() {
+        let syntax = test_syntax();
+        let funcs = parse(&syntax, ".func f\nfoo.bar:  nop\n").unwrap();
+        assert_eq!(funcs[0].items.len(), 1);
+        match &funcs[0].items[0] {
+            SourceItem::Instr { labels, .. } => {
+                assert_eq!(labels, &vec!["foo.bar".to_string()]);
+            }
+            _ => panic!("expected Instr"),
+        }
     }
 }
