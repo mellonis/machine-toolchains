@@ -1771,3 +1771,13 @@ git commit -m "feat(post-machine): PM-1 assembly syntax, public asm API, spec sa
 - **Type consistency:** every `SyntaxEntry` construction site (fixture, PM-1) carries a `flow`; `ArchSyntax::is_call` derives from `Flow::Call`; `AsmErrorKind` variants match between interface block, parser, and assembler; the fixture's opcodes deliberately differ from both TestArch and PM-1 (framework must not care).
 - **Known limitations, on record:** executable function discovery is recursive descent from `entry` + call targets — exact for v1 (no indirect control flow, no data-in-code); unreachable bytes dump as `.byte`; cross-region jumps fall back to `.byte` and jump-targets-that-are-roots joins discovery when Plan 6's tail-call lands; explicit far mnemonics don't exist (bare = relaxable, `.s` = forced short) — matching "assembler picks the width" (spec §6.4).
 - **Arithmetic spot-checks:** fixture jmp far=5 bytes/short=2; `L: nop / jmp L` → off `1−4=−3`; forward 130 nops → far off `130`; spec sample `jm.s` off `0xFD`; call hole at blob offset 2. All hand-derived twice.
+
+---
+
+## Post-review amendments (2026-07-05, final whole-branch review)
+
+- CRITICAL fix: `call.s NAME` is REJECTED by the assembler (`BadOperand`) — short-call width is linker-selected (spec §5); objects carry only 4-byte call holes (§6.2 invariant).
+- Debug labels sort by (addr, name) — deterministic object bytes.
+- Fixture gains a `br` (RelI8, Flow::Branch) opcode for traversal coverage; NOTE framework invariant: a RelI8 Jump/Branch not registered as a relax-pair short takes the far emit path in the assembler — `br` is for disassembler tests only.
+- Boundary test replaced with exact ±127/−128/+128 edges.
+- Deferred to Plan 4 (design questions recorded in ledger): resolved-call disassembly semantics; jumps spanning linker-shrunk call sites (re-decode blobs vs jump-site records vs restricted relaxation); exe-dis prints `call` vs `call.s` for round-trip scoping; pre-root gap layout constraint.

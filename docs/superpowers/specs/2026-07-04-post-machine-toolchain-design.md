@@ -460,9 +460,13 @@ property, tested against the canonical form).
 
 `pmt dis` accepts both binaries. From `.pmo`: real names via the symbol
 table, per-function code, call sites named from relocations. From `.pmx`:
-names from the `-g` sidecar map when present; otherwise synthesized —
-`func_XXXX:` at every `ent` (function boundaries are self-marking in the
-code stream) and `L_XXXX:` at jump targets.
+names from the `-g` sidecar map when present; otherwise synthesized via
+**recursive-descent discovery** (worklist from the entry point following
+control-flow edges; every verified call target is a function root — exact
+in v1, which has no indirect control flow; bytes never reached print as
+`.byte`): `func_XXXX` at roots, `LXXXX` at jump targets. The `ent` byte
+remains the runtime call guard, but function discovery comes from control
+flow, not byte scanning.
 
 ## 7. Compiler
 
