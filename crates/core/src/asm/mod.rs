@@ -2,10 +2,12 @@
 //! instruction knowledge arrives via [`ArchSyntax`] tables.
 
 mod assembler;
+mod disassembler;
 mod parser;
 mod syntax;
 
 pub use assembler::assemble;
+pub use disassembler::{disassemble_executable, disassemble_object};
 pub use syntax::{ArchSyntax, Flow, RelaxPair, SyntaxEntry};
 
 #[derive(Debug, PartialEq, Eq)]
