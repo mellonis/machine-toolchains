@@ -568,3 +568,50 @@ fn lint_batch_survives_a_fatal_file_and_still_fails() {
     assert!(out.stderr.contains("error:"));
     assert!(out.stderr.contains("bad.pmc"));
 }
+
+#[test]
+fn fix_applies_safe_tier_only_and_force_unlocks_deletions() {
+    let dir = scratch("lint_fix");
+    let src = dir.join("prog.pmc");
+    let original = "main() {\n    goto 007;\n5: right;\n7: left;\n}\n";
+    std::fs::write(&src, original).unwrap();
+
+    // Plain --fix: leading-zeros applied, unused-label deletion left.
+    let out = execute(&args(&["lint", src.to_str().unwrap(), "--fix"])).unwrap();
+    let fixed = std::fs::read_to_string(&src).unwrap();
+    assert!(fixed.contains("goto 7;"), "safe tier applied");
+    assert!(fixed.contains("5: right;"), "gated deletion NOT applied");
+    assert_eq!(out.code, 1, "the unused label remains a finding");
+
+    // --fix --force: the unused-label prefix goes too; re-run is clean.
+    let out = execute(&args(&["lint", src.to_str().unwrap(), "--fix", "--force"])).unwrap();
+    assert_eq!(out.code, 0);
+    let fixed = std::fs::read_to_string(&src).unwrap();
+    assert!(!fixed.contains("5:"));
+
+    // Idempotence: a second forced run changes nothing and stays clean.
+    let before = std::fs::read_to_string(&src).unwrap();
+    let out = execute(&args(&["lint", src.to_str().unwrap(), "--fix", "--force"])).unwrap();
+    assert_eq!(out.code, 0);
+    assert_eq!(std::fs::read_to_string(&src).unwrap(), before);
+}
+
+#[test]
+fn force_without_fix_errors_and_fatal_files_are_never_written() {
+    let dir = scratch("lint_force");
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() { right; }\n").unwrap();
+    let err = execute(&args(&["lint", src.to_str().unwrap(), "--force"])).unwrap_err();
+    assert!(err.contains("--force requires --fix"));
+
+    let bad = dir.join("bad.pmc");
+    let broken = "main( {\n";
+    std::fs::write(&bad, broken).unwrap();
+    let out = execute(&args(&["lint", bad.to_str().unwrap(), "--fix", "--force"])).unwrap();
+    assert_eq!(out.code, 1);
+    assert_eq!(
+        std::fs::read_to_string(&bad).unwrap(),
+        broken,
+        "never written"
+    );
+}

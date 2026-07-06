@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 
 use mtc_core::diagnostics::{Applicability, Diagnostic};
 
-use crate::lint::{LintError, LintOptions, lint as lint_source};
+use crate::lint::{LintError, LintOptions, apply_fixes, lint as lint_source};
 
 use super::{Args, CliOutput};
 
 const LINT_USAGE: &str = "\
-USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]...
+USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]]
 
 PATH is a .pmc file or a directory; directories are walked recursively
 for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
@@ -24,6 +24,10 @@ FLAGS:
                   wins even over explicitly listed files
   --allow CODE    suppress a lint rule by code (repeatable;
                   unknown codes are an error)
+  --fix           apply machine-applicable fixes in place, then re-lint;
+                  the report and exit code reflect what REMAINS
+  --force         with --fix: also apply the gated fixes (deletions and
+                  rewrites whose diagnosis may have another reading)
 ";
 
 pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
@@ -37,6 +41,11 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
         .into_iter()
         .map(PathBuf::from)
         .collect();
+    let fix = args.flag("--fix");
+    let force = args.flag("--force");
+    if force && !fix {
+        return Err(format!("--force requires --fix\n\n{LINT_USAGE}"));
+    }
     let paths = args.positionals()?;
     if paths.is_empty() {
         return Err(format!("lint takes at least one PATH\n\n{LINT_USAGE}"));
@@ -64,10 +73,47 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
             },
         ) {
             Ok(report) => {
-                if !report.diagnostics.is_empty() {
+                let diags = if fix {
+                    // Mask fixes outside the allowed tier, apply, rewrite,
+                    // then re-lint: the report reflects what REMAINS.
+                    let masked: Vec<Diagnostic> = report
+                        .diagnostics
+                        .iter()
+                        .cloned()
+                        .map(|mut d| {
+                            let gated = matches!(
+                                d.fix.as_ref().map(|f| &f.applicability),
+                                Some(Applicability::MaybeIncorrect)
+                            );
+                            if gated && !force {
+                                d.fix = None;
+                            }
+                            d
+                        })
+                        .collect();
+                    let outcome = apply_fixes(&source, &masked);
+                    if outcome.applied > 0 {
+                        fs::write(file, &outcome.fixed_source)
+                            .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+                        match lint_source(
+                            &outcome.fixed_source,
+                            LintOptions {
+                                allow: allow.clone(),
+                            },
+                        ) {
+                            Ok(rerun) => rerun.diagnostics,
+                            Err(e) => return Err(e.to_string()),
+                        }
+                    } else {
+                        report.diagnostics
+                    }
+                } else {
+                    report.diagnostics
+                };
+                if !diags.is_empty() {
                     any = true;
                 }
-                render_findings(&mut stdout, file, &report.diagnostics);
+                render_findings(&mut stdout, file, &diags);
             }
             Err(LintError::Compile(e)) => {
                 // Per-file fatal: report, keep going (batch model).
