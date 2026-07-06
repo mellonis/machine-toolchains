@@ -637,3 +637,35 @@ fn lint_exclude_is_component_based_not_string_prefix() {
     assert!(out.stdout.contains("b.pmc"));
     assert!(!out.stdout.contains("vendor/a.pmc") && !out.stdout.contains("vendor\\a.pmc"));
 }
+
+#[test]
+fn completions_zsh_emits_a_compdef_script() {
+    let out = execute(&args(&["completions", "zsh"])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.starts_with("#compdef pmt"), "{}", out.stdout);
+}
+
+#[test]
+fn completions_bash_and_fish_are_recognized_but_not_yet_implemented() {
+    let bash_err = execute(&args(&["completions", "bash"])).unwrap_err();
+    assert!(bash_err.contains("not implemented"), "{bash_err}");
+    let fish_err = execute(&args(&["completions", "fish"])).unwrap_err();
+    assert!(fish_err.contains("not implemented"), "{fish_err}");
+}
+
+#[test]
+fn completions_unknown_shell_is_a_clear_error() {
+    let err = execute(&args(&["completions", "powershell"])).unwrap_err();
+    assert!(err.contains("unknown shell"), "{err}");
+}
+
+#[test]
+fn completions_help_and_missing_shell_name() {
+    let help = execute(&args(&["completions", "--help"])).unwrap();
+    assert!(help.stdout.contains("USAGE: pmt completions"));
+    let err = execute(&args(&["completions"])).unwrap_err();
+    assert!(
+        err.contains("completions takes exactly one shell name"),
+        "{err}"
+    );
+}
