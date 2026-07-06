@@ -2,6 +2,8 @@
 
 use std::collections::HashSet;
 
+use mtc_core::diagnostics::Span;
+
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::lexer::{Token, TokenKind};
 
@@ -30,6 +32,8 @@ pub struct Import {
     /// The declaring namespace block's path; empty = file level. The
     /// binding is visible in that block and nested scopes only.
     pub ns: Vec<String>,
+    /// Path start → last segment end; an `as` alias is NOT included.
+    pub span: Span,
 }
 
 impl Import {
@@ -53,6 +57,7 @@ pub struct Function {
     pub name: String,
     pub line: u32,
     pub col: u32,
+    pub name_span: Span,
     pub body: Vec<Statement>,
     /// `export` (contextual keyword) or `main` (always exported).
     pub exported: bool,
@@ -69,15 +74,25 @@ pub struct Function {
     pub ns: Vec<String>,
 }
 
+/// A label prefix `N:` — the span runs from the number's start to the
+/// colon's END, spanning any interior whitespace (spaced `1 :` is legal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Label {
+    pub value: u32,
+    pub span: Span,
+}
+
 /// One `;`-terminated statement: an optional run of labels, then one or
 /// more comma-separated items. `items.len() > 1` only for comma groups,
 /// whose position rules the parser has enforced: `check`/`halt` only
 /// last, a successor only on the last item, `goto` never grouped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Statement {
-    pub labels: Vec<u32>,
+    pub labels: Vec<Label>,
     pub items: Vec<Item>,
     pub line: u32,
+    /// First token of the statement (label or item) through the `;` end.
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +121,8 @@ pub enum Item {
     Builtin {
         which: Builtin,
         succ: Successor,
+        /// The `(`…`)` range including both parens; None without parens.
+        succ_span: Option<Span>,
         line: u32,
     },
     Debugger {
@@ -113,12 +130,18 @@ pub enum Item {
     },
     Call {
         name: String,
+        /// Name start → last `::` segment end.
+        name_span: Span,
         succ: Successor,
+        /// The `(`…`)` range; calls always have parens, so always Some.
+        succ_span: Option<Span>,
         line: u32,
     },
     Check {
         marked: CheckArm,
         blank: CheckArm,
+        /// `check` keyword start → `)` end.
+        span: Span,
         line: u32,
     },
     Halt {
@@ -259,6 +282,8 @@ impl Parser<'_> {
                         return Err(Self::expected(&t, "an imported function name"));
                     }
                     let mut path = vec![name.clone()];
+                    let path_start = t.span().start;
+                    let mut path_end = t.span().end;
                     self.bump();
                     while matches!(self.peek().kind, TokenKind::ColonColon) {
                         self.bump();
@@ -267,6 +292,7 @@ impl Parser<'_> {
                             return Err(Self::expected(&t, "a name after `::`"));
                         };
                         path.push(seg.clone());
+                        path_end = t.span().end;
                         self.bump();
                     }
                     let alias = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "as") {
@@ -285,6 +311,10 @@ impl Parser<'_> {
                         alias,
                         line: t.line,
                         ns: ns.to_vec(),
+                        span: Span {
+                            start: path_start,
+                            end: path_end,
+                        },
                     });
                     let sep = self.peek().clone();
                     match sep.kind {
@@ -442,16 +472,26 @@ impl Parser<'_> {
                     break;
                 };
                 self.bump();
+                let colon = self.peek().clone();
                 self.expect(&TokenKind::Colon, "`:` after a label number")?;
                 if !seen_labels.insert(n) {
                     return Err(Self::err_at(&tok, CompileErrorKind::DuplicateLabel(n)));
                 }
-                labels.push(n);
+                labels.push(Label {
+                    value: n,
+                    span: Span {
+                        start: tok.span().start,
+                        end: colon.span().end,
+                    },
+                });
             }
             if matches!(self.peek().kind, TokenKind::RBrace) {
-                if let Some(&label) = labels.first() {
+                if let Some(label) = labels.first() {
                     let t = self.peek().clone();
-                    return Err(Self::err_at(&t, CompileErrorKind::DanglingLabel(label)));
+                    return Err(Self::err_at(
+                        &t,
+                        CompileErrorKind::DanglingLabel(label.value),
+                    ));
                 }
                 self.bump();
                 break;
@@ -462,6 +502,7 @@ impl Parser<'_> {
             name,
             line: name_tok.line,
             col: name_tok.col,
+            name_span: name_tok.span(),
             body,
             exported: false,
             local: false,
@@ -470,7 +511,11 @@ impl Parser<'_> {
         })
     }
 
-    fn statement(&mut self, labels: Vec<u32>) -> Result<Statement, CompileError> {
+    fn statement(&mut self, labels: Vec<Label>) -> Result<Statement, CompileError> {
+        let start = labels
+            .first()
+            .map(|l| l.span.start)
+            .unwrap_or_else(|| self.peek().span().start);
         let line = self.peek().line;
         let mut items = vec![self.item(false)?];
         while matches!(self.peek().kind, TokenKind::Comma) {
@@ -514,11 +559,16 @@ impl Parser<'_> {
             self.bump();
             items.push(self.item(true)?);
         }
+        let semi = self.peek().clone();
         self.expect(&TokenKind::Semi, "`;`")?;
         Ok(Statement {
             labels,
             items,
             line,
+            span: Span {
+                start,
+                end: semi.span().end,
+            },
         })
     }
 
@@ -538,6 +588,7 @@ impl Parser<'_> {
                         CompileErrorKind::BuiltinCalled(name),
                     ));
                 }
+                let mut name_end = name_tok.span().end;
                 self.bump();
                 // Qualified call: `@ns::path::f()` — ABSOLUTE (flatten
                 // skips the scope chain), `::` segments only (nested
@@ -550,14 +601,25 @@ impl Parser<'_> {
                     };
                     name.push_str("::");
                     name.push_str(seg);
+                    name_end = t.span().end;
                     self.bump();
                 }
+                let lparen = self.peek().clone();
                 self.expect(&TokenKind::LParen, "`(` (user calls are written `@name()`)")?;
                 let succ = self.successor()?;
+                let rparen = self.peek().clone();
                 self.expect(&TokenKind::RParen, "`)`")?;
                 Ok(Item::Call {
                     name,
+                    name_span: Span {
+                        start: name_tok.span().start,
+                        end: name_end,
+                    },
                     succ,
+                    succ_span: Some(Span {
+                        start: lparen.span().start,
+                        end: rparen.span().end,
+                    }),
                     line: tok.line,
                 })
             }
@@ -589,10 +651,15 @@ impl Parser<'_> {
                     let marked = self.check_arm()?;
                     self.expect(&TokenKind::Comma, "`,` between check arms")?;
                     let blank = self.check_arm()?;
+                    let rparen = self.peek().clone();
                     self.expect(&TokenKind::RParen, "`)`")?;
                     Ok(Item::Check {
                         marked,
                         blank,
+                        span: Span {
+                            start: tok.span().start,
+                            end: rparen.span().end,
+                        },
                         line: tok.line,
                     })
                 }
@@ -612,17 +679,26 @@ impl Parser<'_> {
                         _ => Builtin::Unmark,
                     };
                     self.bump();
-                    let succ = if matches!(self.peek().kind, TokenKind::LParen) {
+                    let (succ, succ_span) = if matches!(self.peek().kind, TokenKind::LParen) {
+                        let lparen = self.peek().clone();
                         self.bump();
                         let succ = self.successor()?;
+                        let rparen = self.peek().clone();
                         self.expect(&TokenKind::RParen, "`)`")?;
-                        succ
+                        (
+                            succ,
+                            Some(Span {
+                                start: lparen.span().start,
+                                end: rparen.span().end,
+                            }),
+                        )
                     } else {
-                        Successor::FallThrough
+                        (Successor::FallThrough, None)
                     };
                     Ok(Item::Builtin {
                         which,
                         succ,
+                        succ_span,
                         line: tok.line,
                     })
                 }
@@ -711,23 +787,39 @@ main() {
         );
         let main = &p.functions[2];
         assert_eq!(main.body.len(), 5);
-        assert_eq!(
-            main.body[0].items,
-            vec![Item::Call {
-                name: "goToEnd".into(),
+        assert_eq!(main.body[0].items.len(), 1);
+        match &main.body[0].items[0] {
+            Item::Call {
+                name,
                 succ: Successor::FallThrough,
-                line: main.body[0].line
-            }]
-        );
-        assert_eq!(main.body[3].labels, vec![3]);
+                line,
+                ..
+            } => {
+                assert_eq!(name, "goToEnd");
+                assert_eq!(*line, main.body[0].line);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         assert_eq!(
-            main.body[3].items,
-            vec![Item::Builtin {
+            main.body[3]
+                .labels
+                .iter()
+                .map(|l| l.value)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(main.body[3].items.len(), 1);
+        match &main.body[3].items[0] {
+            Item::Builtin {
                 which: Builtin::Unmark,
                 succ: Successor::Return,
-                line: main.body[3].line
-            }]
-        );
+                line,
+                ..
+            } => {
+                assert_eq!(*line, main.body[3].line);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
         match &main.body[2].items[0] {
             Item::Check {
                 marked: CheckArm::Label(3),
@@ -799,7 +891,14 @@ main() {
         assert!(p.functions[0].body.is_empty());
 
         let p = parse_src("f() { 1: 2: left; }").unwrap();
-        assert_eq!(p.functions[0].body[0].labels, vec![1, 2]);
+        assert_eq!(
+            p.functions[0].body[0]
+                .labels
+                .iter()
+                .map(|l| l.value)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[test]
@@ -909,5 +1008,57 @@ main() {
         assert!(matches!(e.kind, CompileErrorKind::NestedExport));
         let e = parse_src("main() { f() { left; } f() { right; } }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "f"));
+    }
+
+    #[test]
+    fn spans_are_retained_for_labels_names_and_items() {
+        let p = parse_src("f() {\n  5 : right(7);\n7:  left;\n}").unwrap();
+        let f = &p.functions[0];
+        assert_eq!(
+            (f.name_span.start.col, f.name_span.end.col),
+            (1, 2) // "f" at 1:1, end-exclusive
+        );
+        let s0 = &f.body[0];
+        let label = &s0.labels[0];
+        assert_eq!(label.value, 5);
+        // "5 : …": number at col 3, colon at col 5 → span 3..6 (spans the gap)
+        assert_eq!((label.span.start.col, label.span.end.col), (3, 6));
+        // statement span: from the label through the `;`
+        assert_eq!(s0.span.start.col, 3);
+        assert_eq!(s0.span.end.col, 16); // after `;` of "right(7);"
+        let Item::Builtin { succ_span, .. } = &s0.items[0] else {
+            panic!("expected builtin");
+        };
+        let ss = succ_span.expect("right(7) has parens");
+        assert_eq!((ss.start.col, ss.end.col), (12, 15)); // "(7)"
+    }
+
+    #[test]
+    fn call_and_check_spans() {
+        let p = parse_src("f() { @a::b(); check(1, !); 1: left; }").unwrap();
+        let f = &p.functions[0];
+        let Item::Call {
+            name,
+            name_span,
+            succ_span,
+            ..
+        } = &f.body[0].items[0]
+        else {
+            panic!("expected call");
+        };
+        assert_eq!(name, "a::b");
+        assert_eq!((name_span.start.col, name_span.end.col), (8, 12)); // "a::b"
+        assert!(succ_span.is_some()); // "()" always parenthesised
+        let Item::Check { span, .. } = &f.body[1].items[0] else {
+            panic!("expected check");
+        };
+        assert_eq!((span.start.col, span.end.col), (16, 27)); // "check(1, !)"
+    }
+
+    #[test]
+    fn import_spans_exclude_the_alias() {
+        let p = parse_src("use std::go as g;\nmain() { @g(); }").unwrap();
+        let imp = &p.imports[0];
+        assert_eq!((imp.span.start.col, imp.span.end.col), (5, 12)); // "std::go"
     }
 }

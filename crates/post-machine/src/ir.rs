@@ -206,8 +206,8 @@ fn lower_function(
 
     let mut label_block: HashMap<u32, u32> = HashMap::new();
     for (i, stmt) in f.body.iter().enumerate() {
-        for &l in &stmt.labels {
-            label_block.insert(l, block_of_stmt[i]);
+        for l in &stmt.labels {
+            label_block.insert(l.value, block_of_stmt[i]);
         }
     }
     let resolve = |label: u32, line: u32| -> Result<u32, CompileError> {
@@ -230,7 +230,7 @@ fn lower_function(
             debug_assert!(current.is_none(), "predecessor closed the block");
             current = Some(IrBlock {
                 id: block_of_stmt[i],
-                labels: stmt.labels.clone(),
+                labels: stmt.labels.iter().map(|l| l.value).collect(),
                 line: stmt.line,
                 ops: vec![],
                 term: IrTerm::Return, // placeholder, always overwritten
@@ -272,6 +272,7 @@ fn lower_function(
                 marked,
                 blank,
                 line,
+                ..
             } => {
                 let mut arm = |a: &CheckArm| -> Result<u32, CompileError> {
                     Ok(match a {

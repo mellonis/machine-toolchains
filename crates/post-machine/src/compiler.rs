@@ -224,7 +224,7 @@ fn check_duplicate_bindings(program: &crate::parser::Program) -> Result<(), Comp
                 let p = prev.get();
                 if p.path != import.path || p.alias != import.alias {
                     return Err(CompileError {
-                        span: Span::point(import.line, 1),
+                        span: import.span,
                         kind: CompileErrorKind::DuplicateBinding(import.binding().to_string()),
                     });
                 }
