@@ -54,7 +54,6 @@ impl From<CompileError> for LintError {
 /// Everything a rule may read. Rules never mutate the program.
 pub(crate) struct LintContext<'a> {
     pub source: &'a str,
-    #[allow(dead_code)]
     pub tokens: &'a [Token],
     /// FLATTENED program: function names are fully qualified
     /// (`std::api.helper`); statement/item shapes are untouched.
@@ -72,7 +71,10 @@ type Rule = fn(&LintContext, &mut Vec<Diagnostic>);
 
 /// The rule table. One entry per rule, keyed by its defect-named code;
 /// registration order is irrelevant (findings are sorted by span).
-pub(crate) const RULES: &[(&str, Rule)] = &[("line-too-long", rules::line_too_long::check)];
+pub(crate) const RULES: &[(&str, Rule)] = &[
+    ("line-too-long", rules::line_too_long::check),
+    ("leading-zeros", rules::leading_zeros::check),
+];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
     for code in &options.allow {
@@ -100,9 +102,6 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
 }
 
 /// Slice `source` by a char-counted span (1-based line/col, end-exclusive).
-// called by lint rules landing in later tasks; exercised directly by tests
-// until then
-#[allow(dead_code)]
 pub(crate) fn span_text(source: &str, span: Span) -> String {
     let mut out = String::new();
     let (mut line, mut col) = (1u32, 1u32);
