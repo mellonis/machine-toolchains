@@ -1,0 +1,13 @@
+// Lint fixture: unused-label shapes from the 8-bit summing showcase.
+main() {
+    @helper();
+1:  check(2, 3);
+2:  right;
+    goto 4;
+3:  left;
+4:  halt;
+}
+
+helper() {
+5:  right;
+}
