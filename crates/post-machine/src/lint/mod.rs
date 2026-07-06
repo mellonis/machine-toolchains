@@ -78,6 +78,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("leftover-debugger", rules::leftover_debugger::check),
     ("namespaced-main", rules::namespaced_main::check),
     ("shadowed-import", rules::shadowed_import::check),
+    ("non-camel-case", rules::non_camel_case::check),
 ];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
