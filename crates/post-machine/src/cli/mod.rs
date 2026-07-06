@@ -3,6 +3,7 @@
 
 mod build;
 mod inspect;
+mod lint;
 mod run;
 
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -33,6 +34,7 @@ SUBCOMMANDS:
   compile  .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
   asm      .pma assembly -> .pmo object
   link     .pmo objects -> .pmx executable (+ .pmx.map sidecar)
+  lint     lint .pmc sources (hygiene findings; docs/lint.md)
   dis      disassemble a .pmo or .pmx (--listing for the address view)
   run      execute a .pmx on a tape
   tape     build/show .pmt tape-block snapshots
@@ -64,6 +66,7 @@ pub fn execute_with(
         Some("compile") => build::compile(&args[1..]),
         Some("asm") => build::asm(&args[1..]),
         Some("link") => build::link(&args[1..]),
+        Some("lint") => lint::lint(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),
         Some("tape") => inspect::tape(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),

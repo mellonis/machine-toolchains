@@ -451,3 +451,57 @@ fn traced_run_off_the_code_end_matches_untraced() {
         "{text}"
     );
 }
+
+#[test]
+fn lint_reports_findings_with_exit_1_and_fix_hints() {
+    let dir = scratch("lint_single");
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() {\n5: right;\n007: left;\n    goto 007;\n}\n").unwrap();
+    let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    // unused-label on `5:` — gated fix hint.
+    assert!(out.stdout.contains("lint: label 5 is never referenced"));
+    assert!(
+        out.stdout
+            .contains("fix (requires --force): remove the label prefix '5:'")
+    );
+    // leading-zeros — safe-tier fix hint.
+    assert!(out.stdout.contains("has leading zeros"));
+    assert!(out.stdout.contains("  fix: rewrite '007' as '7'"));
+}
+
+#[test]
+fn lint_clean_file_exits_0_and_allow_suppresses() {
+    let dir = scratch("lint_clean");
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() { right; }\n").unwrap();
+    let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.is_empty());
+
+    let dirty = dir.join("dirty.pmc");
+    std::fs::write(&dirty, "main() {\n5: right;\n}\n").unwrap();
+    let out = execute(&args(&[
+        "lint",
+        dirty.to_str().unwrap(),
+        "--allow",
+        "unused-label",
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn lint_unknown_allow_code_is_a_tool_error() {
+    let dir = scratch("lint_badallow");
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() { right; }\n").unwrap();
+    let err = execute(&args(&[
+        "lint",
+        src.to_str().unwrap(),
+        "--allow",
+        "no-such-rule",
+    ]))
+    .unwrap_err();
+    assert!(err.contains("no-such-rule"));
+}
