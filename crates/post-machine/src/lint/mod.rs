@@ -57,7 +57,6 @@ pub(crate) struct LintContext<'a> {
     pub tokens: &'a [Token],
     /// FLATTENED program: function names are fully qualified
     /// (`std::api.helper`); statement/item shapes are untouched.
-    #[allow(dead_code)]
     pub ast: &'a Program,
     /// Unoptimized CFG — rules judge source hygiene, not optimizer output.
     #[allow(dead_code)]
@@ -74,6 +73,7 @@ type Rule = fn(&LintContext, &mut Vec<Diagnostic>);
 pub(crate) const RULES: &[(&str, Rule)] = &[
     ("line-too-long", rules::line_too_long::check),
     ("leading-zeros", rules::leading_zeros::check),
+    ("unused-label", rules::unused_label::check),
 ];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
