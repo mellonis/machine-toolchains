@@ -53,8 +53,6 @@ impl From<CompileError> for LintError {
 
 /// Everything a rule may read. Rules never mutate the program.
 pub(crate) struct LintContext<'a> {
-    // consumed by a later lint rule; RULES is empty until then
-    #[allow(dead_code)]
     pub source: &'a str,
     #[allow(dead_code)]
     pub tokens: &'a [Token],
@@ -74,7 +72,7 @@ type Rule = fn(&LintContext, &mut Vec<Diagnostic>);
 
 /// The rule table. One entry per rule, keyed by its defect-named code;
 /// registration order is irrelevant (findings are sorted by span).
-pub(crate) const RULES: &[(&str, Rule)] = &[];
+pub(crate) const RULES: &[(&str, Rule)] = &[("line-too-long", rules::line_too_long::check)];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
     for code in &options.allow {
