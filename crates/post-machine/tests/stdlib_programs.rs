@@ -166,7 +166,11 @@ fn remove_last_mark_on_a_single_mark_empties_the_tape() {
 fn stdlib_compiles_clean_and_exports_exactly_the_roster() {
     use mtc_core::formats::object::SymbolDef;
     let out = compile(stdlib::SOURCE, CompileOptions::default()).expect("compiles");
-    assert!(out.report.warnings.is_empty(), "{:?}", out.report.warnings);
+    assert!(
+        out.report.diagnostics.is_empty(),
+        "{:?}",
+        out.report.diagnostics
+    );
     let mut names: Vec<&str> = stdlib::object()
         .symbols
         .iter()

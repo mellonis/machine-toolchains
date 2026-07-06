@@ -12,6 +12,6 @@ pub mod parser;
 pub mod stdlib;
 
 pub use compiler::{
-    CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, Warning, compile,
+    CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, compile,
 };
 pub use optimizer::{OptLevel, OptReport, PassChange};

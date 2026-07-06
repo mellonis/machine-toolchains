@@ -2,9 +2,10 @@
 //!
 //! Every pipeline stage (lexer → parser → lowering → codegen) reports
 //! fatals through [`CompileError`]; non-fatal findings accumulate as
-//! [`Warning`]s — library code never prints (docs/cli.md).
+//! span-carrying, coded [`Diagnostic`]s — library code never prints
+//! (docs/cli.md).
 
-use mtc_core::diagnostics::Span;
+use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::ObjectFile;
 
 use crate::codegen::{CodegenOptions, emit_program};
@@ -114,13 +115,6 @@ impl std::fmt::Display for CompileErrorKind {
 
 impl std::error::Error for CompileError {}
 
-/// A non-fatal finding, reported (never printed) via `CompileReport`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Warning {
-    pub line: u32,
-    pub message: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompileOptions {
     /// `-g`: record label/line debug info in the object, with lines
@@ -142,7 +136,7 @@ pub struct CompileOptions {
 /// prints (docs/cli.md, the same pattern as the linker's `LinkReport`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileReport {
-    pub warnings: Vec<Warning>,
+    pub diagnostics: Vec<Diagnostic>,
     pub opt: OptReport,
 }
 
@@ -169,8 +163,8 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     let parsed = crate::parser::parse(&tokens)?;
     check_duplicate_bindings(&parsed)?;
     let (program, vis) = flatten(parsed);
-    let (mut ir, mut warnings) = crate::ir::lower(&program)?;
-    warnings.extend(vis);
+    let (mut ir, mut diagnostics) = crate::ir::lower(&program)?;
+    diagnostics.extend(vis);
     let mut ir_snapshots = Vec::new();
     if options.capture_ir {
         ir_snapshots.push(("lowered".to_string(), ir.clone()));
@@ -206,7 +200,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
         pma: pma.text,
         ir,
         ir_snapshots,
-        report: CompileReport { warnings, opt },
+        report: CompileReport { diagnostics, opt },
     })
 }
 
@@ -259,7 +253,7 @@ fn full_name(ns: &[String], name: &str) -> String {
 /// undeclared warning). Infallible — unresolved bare names simply stay
 /// external; all visibility warnings (undeclared externals, unused
 /// imports, unused functions) are produced here.
-fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warning>) {
+fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Diagnostic>) {
     use crate::parser::{Function, Item, Program};
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -290,7 +284,7 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warn
         bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
         imports_used: Vec<bool>,
         warned_undeclared: HashSet<String>,
-        warnings: Vec<Warning>,
+        warnings: Vec<Diagnostic>,
     }
 
     let mut ctx = Ctx {
@@ -304,7 +298,7 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warn
     /// Resolve one call name in place, innermost scope outward.
     fn resolve(
         name: &mut String,
-        line: u32,
+        span: mtc_core::diagnostics::Span,
         nested: &[HashMap<String, String>],
         ns: &[String],
         ctx: &mut Ctx,
@@ -339,11 +333,13 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warn
         }
         // Total miss: the call stays a bare external; warn once per name.
         if ctx.warned_undeclared.insert(name.clone()) {
-            ctx.warnings.push(Warning {
-                line,
+            ctx.warnings.push(Diagnostic {
+                code: "undeclared-external",
+                span,
                 message: format!(
                     "call to undeclared external `{name}` — declare it with `use {name};`"
                 ),
+                fix: None,
             });
         }
     }
@@ -372,8 +368,11 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warn
 
         for stmt in &mut f.body {
             for item in &mut stmt.items {
-                if let Item::Call { name, line, .. } = item {
-                    resolve(name, *line, &inner, ns, ctx);
+                if let Item::Call {
+                    name, name_span, ..
+                } = item
+                {
+                    resolve(name, *name_span, &inner, ns, ctx);
                 }
             }
         }
@@ -400,9 +399,11 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warn
     // Unused imports: none of the import's bindings resolved any call.
     for (i, imp) in imports.iter().enumerate() {
         if !ctx.imports_used[i] {
-            warnings.push(Warning {
-                line: imp.line,
+            warnings.push(Diagnostic {
+                code: "unused-import",
+                span: imp.span,
                 message: format!("unused import `{}`", imp.full_path()),
+                fix: None,
             });
         }
     }
@@ -444,9 +445,11 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Warn
     }
     for f in &out {
         if !reached.contains(f.name.as_str()) {
-            warnings.push(Warning {
-                line: f.line,
+            warnings.push(Diagnostic {
+                code: "unused-function",
+                span: f.name_span,
                 message: format!("unused function `{}` (not exported, never called)", f.name),
+                fix: None,
             });
         }
     }
@@ -514,7 +517,7 @@ mod tests {
                 .any(|s| s.name == "goToEnd" && matches!(s.def, SymbolDef::External))
         );
         assert_eq!(out.object.relocations.len(), 1);
-        assert!(out.report.warnings.is_empty());
+        assert!(out.report.diagnostics.is_empty());
     }
 
     #[test]
@@ -552,7 +555,7 @@ mod tests {
             CompileOptions::default(),
         )
         .unwrap();
-        assert_eq!(out.report.warnings.len(), 1);
+        assert_eq!(out.report.diagnostics.len(), 1);
     }
 
     #[test]
@@ -643,17 +646,23 @@ mod tests {
         let out = compile("main() { @go(); right; @go(); }", CompileOptions::default()).unwrap();
         let n = out
             .report
-            .warnings
+            .diagnostics
             .iter()
-            .filter(|w| w.message.contains("undeclared"))
+            .filter(|d| d.code == "undeclared-external")
             .count();
         assert_eq!(n, 1);
+        assert!(
+            out.report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "undeclared-external" && d.message.contains("undeclared"))
+        );
         let out = compile("use go; main() { @go(); }", CompileOptions::default()).unwrap();
         assert!(
             out.report
-                .warnings
+                .diagnostics
                 .iter()
-                .all(|w| !w.message.contains("undeclared"))
+                .all(|d| d.code != "undeclared-external")
         );
     }
 
@@ -662,9 +671,9 @@ mod tests {
         let out = compile("use ghost; main() { mark; }", CompileOptions::default()).unwrap();
         assert!(
             out.report
-                .warnings
+                .diagnostics
                 .iter()
-                .any(|w| w.message.contains("unused import `ghost`"))
+                .any(|d| d.code == "unused-import" && d.message.contains("unused import `ghost`"))
         );
 
         let out = compile(
@@ -673,10 +682,9 @@ mod tests {
         )
         .unwrap();
         assert!(
-            out.report
-                .warnings
-                .iter()
-                .any(|w| w.message.contains("unused function `dead`"))
+            out.report.diagnostics.iter().any(
+                |d| d.code == "unused-function" && d.message.contains("unused function `dead`")
+            )
         );
 
         // Transitively dead: a called only by dead — both warn.
@@ -687,9 +695,9 @@ mod tests {
         .unwrap();
         let n = out
             .report
-            .warnings
+            .diagnostics
             .iter()
-            .filter(|w| w.message.contains("unused function"))
+            .filter(|d| d.code == "unused-function")
             .count();
         assert_eq!(n, 2);
 
@@ -701,9 +709,9 @@ mod tests {
         .unwrap();
         assert!(
             out.report
-                .warnings
+                .diagnostics
                 .iter()
-                .all(|w| !w.message.contains("unused function"))
+                .all(|d| d.code != "unused-function")
         );
     }
 
@@ -725,15 +733,15 @@ mod tests {
         .unwrap();
         assert!(
             out.report
-                .warnings
+                .diagnostics
                 .iter()
-                .any(|w| w.message.contains("unused import `go`"))
+                .any(|d| d.code == "unused-import" && d.message.contains("unused import `go`"))
         );
         assert!(
             out.report
-                .warnings
+                .diagnostics
                 .iter()
-                .all(|w| !w.message.contains("undeclared"))
+                .all(|d| d.code != "undeclared-external")
         );
     }
 
@@ -781,12 +789,34 @@ mod tests {
         .unwrap();
         assert!(
             out.report
-                .warnings
+                .diagnostics
                 .iter()
-                .any(|w| w.message.contains("unused function `api.helper`")),
+                .any(|d| d.code == "unused-function"
+                    && d.message.contains("unused function `api.helper`")),
             "{:?}",
-            out.report.warnings
+            out.report.diagnostics
         );
+    }
+
+    #[test]
+    fn compile_warnings_carry_codes_and_spans() {
+        let src = "use std::go;\nmain() { right; }\nhelper() { left; }\n";
+        let out = compile(src, CompileOptions::default()).unwrap();
+        let codes: Vec<&str> = out.report.diagnostics.iter().map(|d| d.code).collect();
+        assert!(codes.contains(&"unused-import"));
+        assert!(codes.contains(&"unused-function"));
+        let unused_import = out
+            .report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "unused-import")
+            .unwrap();
+        // "std::go" on line 1, cols 5..12
+        assert_eq!(
+            (unused_import.span.start.line, unused_import.span.start.col),
+            (1, 5)
+        );
+        assert!(out.report.diagnostics.iter().all(|d| d.fix.is_none()));
     }
 
     #[test]
@@ -798,9 +828,9 @@ mod tests {
         .unwrap();
         let n = out
             .report
-            .warnings
+            .diagnostics
             .iter()
-            .filter(|w| w.message.contains("undeclared"))
+            .filter(|d| d.code == "undeclared-external")
             .count();
         assert_eq!(n, 1);
     }

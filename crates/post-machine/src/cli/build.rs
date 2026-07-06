@@ -39,13 +39,14 @@ fn out_path(input: &Path, explicit: Option<String>, extension: &str) -> PathBuf 
 }
 
 fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
-    for w in &report.warnings {
+    for d in &report.diagnostics {
         let _ = writeln!(
             stderr,
-            "{}:{}: warning: {}",
+            "{}:{}:{}: warning: {}",
             input.display(),
-            w.line,
-            w.message
+            d.span.start.line,
+            d.span.start.col,
+            d.message
         );
     }
 }
@@ -116,10 +117,10 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     if verbose {
         render_opt_report(&mut stderr, &out.report);
     }
-    if werror && !out.report.warnings.is_empty() {
+    if werror && !out.report.diagnostics.is_empty() {
         return Err(format!(
             "{stderr}-Werror: {} warning(s) treated as errors",
-            out.report.warnings.len()
+            out.report.diagnostics.len()
         ));
     }
 

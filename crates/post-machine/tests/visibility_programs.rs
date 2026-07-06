@@ -171,17 +171,14 @@ fn namespace_members_are_bare_inside_qualified_outside() {
         CompileOptions::default(),
     )
     .unwrap();
-    assert!(
-        bare.report
-            .warnings
-            .iter()
-            .any(|w| w.message.contains("undeclared external `api`"))
-    );
+    assert!(bare.report.diagnostics.iter().any(
+        |d| d.code == "undeclared-external" && d.message.contains("undeclared external `api`")
+    ));
     assert!(
         out.report
-            .warnings
+            .diagnostics
             .iter()
-            .all(|w| !w.message.contains("undeclared"))
+            .all(|d| d.code != "undeclared-external")
     );
     let api = out
         .ir
@@ -224,9 +221,9 @@ fn reopened_namespaces_merge_within_a_file() {
     let out = compile(src, CompileOptions::default()).unwrap();
     assert!(
         out.report
-            .warnings
+            .diagnostics
             .iter()
-            .all(|w| !w.message.contains("undeclared"))
+            .all(|d| d.code != "undeclared-external")
     );
     let api = out
         .ir
@@ -262,9 +259,9 @@ fn namespace_scoped_imports_bind_inside_only() {
     .unwrap();
     assert!(
         user.report
-            .warnings
+            .diagnostics
             .iter()
-            .all(|w| !w.message.contains("undeclared"))
+            .all(|d| d.code != "undeclared-external")
     );
     let outside = compile(
         "namespace ns { use std::goToEnd as qq; } main() { @qq(); }",
@@ -275,9 +272,9 @@ fn namespace_scoped_imports_bind_inside_only() {
     assert!(
         outside
             .report
-            .warnings
+            .diagnostics
             .iter()
-            .any(|w| w.message.contains("undeclared"))
+            .any(|d| d.code == "undeclared-external")
     );
 }
 
@@ -296,9 +293,9 @@ fn qualified_calls_are_absolute_and_self_declaring() {
     .unwrap();
     assert!(
         user.report
-            .warnings
+            .diagnostics
             .iter()
-            .all(|w| !w.message.contains("undeclared"))
+            .all(|d| d.code != "undeclared-external")
     );
     let linked = link(&[user.object, lib.object], &[], LinkOptions::default());
     // lib passed as a USER object here for simplicity: main + std::goToEnd.
@@ -311,9 +308,9 @@ fn qualified_calls_are_absolute_and_self_declaring() {
     .unwrap();
     assert!(
         ok.report
-            .warnings
+            .diagnostics
             .iter()
-            .all(|w| !w.message.contains("undeclared"))
+            .all(|d| d.code != "undeclared-external")
     );
 }
 

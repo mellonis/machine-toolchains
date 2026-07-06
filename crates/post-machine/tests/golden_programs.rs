@@ -24,7 +24,11 @@ fn build(pmc: &str, opt: OptLevel) -> mtc_core::formats::executable::Executable 
         },
     )
     .expect("compiles");
-    assert!(out.report.warnings.is_empty(), "{:?}", out.report.warnings);
+    assert!(
+        out.report.diagnostics.is_empty(),
+        "{:?}",
+        out.report.diagnostics
+    );
     link(
         &[out.object],
         std::slice::from_ref(stdlib::object()),

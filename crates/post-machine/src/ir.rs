@@ -6,7 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compiler::{CompileError, CompileErrorKind, Warning};
+use mtc_core::diagnostics::{Diagnostic, Span};
+
+use crate::compiler::{CompileError, CompileErrorKind};
 use crate::parser::{Builtin, CheckArm, Item, Program, Successor};
 
 pub const IR_VERSION: u32 = 3;
@@ -149,7 +151,7 @@ fn terminates(stmt: &crate::parser::Statement) -> bool {
 
 /// AST → CFG, plus the label-resolution half of semantic checking and
 /// unreachable-code warnings.
-pub fn lower(program: &Program) -> Result<(IrProgram, Vec<Warning>), CompileError> {
+pub fn lower(program: &Program) -> Result<(IrProgram, Vec<Diagnostic>), CompileError> {
     let mut functions = Vec::with_capacity(program.functions.len());
     let mut warnings = Vec::new();
     for f in &program.functions {
@@ -166,7 +168,7 @@ pub fn lower(program: &Program) -> Result<(IrProgram, Vec<Warning>), CompileErro
 
 fn lower_function(
     f: &crate::parser::Function,
-    warnings: &mut Vec<Warning>,
+    warnings: &mut Vec<Diagnostic>,
 ) -> Result<IrFunction, CompileError> {
     if f.body.is_empty() {
         // `f() {}` — a single empty block: ent; ret.
@@ -223,11 +225,13 @@ fn lower_function(
     }
 
     let mut blocks: Vec<IrBlock> = Vec::new();
+    let mut block_spans: HashMap<u32, Span> = HashMap::new();
     let mut current: Option<IrBlock> = None;
 
     for (i, stmt) in f.body.iter().enumerate() {
         if starts[i] {
             debug_assert!(current.is_none(), "predecessor closed the block");
+            block_spans.insert(block_of_stmt[i], stmt.span);
             current = Some(IrBlock {
                 id: block_of_stmt[i],
                 labels: stmt.labels.iter().map(|l| l.value).collect(),
@@ -356,9 +360,11 @@ fn lower_function(
     }
     for b in &blocks {
         if !seen.contains(&b.id) && b.line != 0 {
-            warnings.push(Warning {
-                line: b.line,
+            warnings.push(Diagnostic {
+                code: "unreachable-code",
+                span: block_spans[&b.id],
                 message: format!("unreachable code in `{}`", f.name),
+                fix: None,
             });
         }
     }
@@ -414,7 +420,7 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::parse;
 
-    fn ir_of(src: &str) -> (IrProgram, Vec<Warning>) {
+    fn ir_of(src: &str) -> (IrProgram, Vec<Diagnostic>) {
         lower(&parse(&lex(src).unwrap()).unwrap()).unwrap()
     }
 
@@ -540,7 +546,8 @@ mod tests {
         let (ir, warnings) = ir_of("f() {\n    goto 1;\n    right;\n1:  left;\n}");
         assert_eq!(ir.functions[0].blocks.len(), 3);
         assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].line, 3);
+        assert_eq!(warnings[0].code, "unreachable-code");
+        assert_eq!(warnings[0].span.start.line, 3);
         assert!(warnings[0].message.contains("unreachable"));
     }
 

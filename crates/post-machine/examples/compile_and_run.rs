@@ -37,8 +37,8 @@ fn main() {
     .expect("source compiles");
 
     println!("== generated .pma (-S output) ==\n{}", out.pma);
-    for w in &out.report.warnings {
-        println!("warning: line {}: {}", w.line, w.message);
+    for d in &out.report.diagnostics {
+        println!("warning: line {}: {}", d.span.start.line, d.message);
     }
     println!("== lowered CFG IR (--emit-ir) ==\n{}\n", out.ir.to_json());
 
