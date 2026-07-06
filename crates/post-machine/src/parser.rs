@@ -12,6 +12,15 @@ pub const RESERVED: [&str; 8] = [
     "goto", "check", "left", "right", "mark", "unmark", "halt", "debugger",
 ];
 
+/// The `.pmc` language acceptance-contract version (docs/language.md):
+/// pre-1.0 the version is 0.N and N bumps on ANY grammar change; at a
+/// declared 1.0 the axes activate (major = breaking, minor = additive).
+/// No patch digit — spec-text corrections are errata;
+/// implementation-conformance fixes live in the crate changelog. The
+/// sigil-adjacency and reserved-path tightenings made this 0.2 (the v1
+/// grammar is retroactively 0.1).
+pub const PMC_LANG_VERSION: &str = "0.2";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -263,6 +272,37 @@ impl Parser<'_> {
                 }
                 _ => {}
             }
+            // `namespace {` / `use {` / `export {`: the contextual keyword
+            // has no name; without this check it parses as a function
+            // named `namespace` and the error blames the `{`.
+            if let TokenKind::Ident(w) = &t.kind
+                && matches!(w.as_str(), "namespace" | "use" | "export")
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::LBrace)
+                )
+            {
+                let kw: &'static str = match w.as_str() {
+                    "use" => "use",
+                    "export" => "export",
+                    _ => "namespace",
+                };
+                return Err(Self::err_at(&t, CompileErrorKind::KeywordNeedsName(kw)));
+            }
+            // A command or call at top level: `left;`, `goto 1;`, `@f();`.
+            // Without this, reserved words blame naming rules and `@`
+            // blames a missing function name.
+            let top_level_stmt = match &t.kind {
+                TokenKind::At => true,
+                TokenKind::Ident(w) => RESERVED.contains(&w.as_str()),
+                _ => false,
+            };
+            if top_level_stmt {
+                return Err(Self::err_at(
+                    &t,
+                    CompileErrorKind::TopLevelStatement(describe(&t.kind)),
+                ));
+            }
             // Contextual keyword: `use` + identifier = import declaration;
             // `use` + `(` is a function NAMED use.
             if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "use")
@@ -291,6 +331,15 @@ impl Parser<'_> {
                         let TokenKind::Ident(seg) = &t.kind else {
                             return Err(Self::expected(&t, "a name after `::`"));
                         };
+                        if RESERVED.contains(&seg.as_str()) {
+                            return Err(Self::err_at(
+                                &t,
+                                CompileErrorKind::ReservedName {
+                                    name: seg.clone(),
+                                    what: "path segment",
+                                },
+                            ));
+                        }
                         path.push(seg.clone());
                         path_end = t.span().end;
                         self.bump();
@@ -325,6 +374,9 @@ impl Parser<'_> {
                             self.bump();
                             break;
                         }
+                        TokenKind::Colon => {
+                            return Err(Self::err_at(&sep, CompileErrorKind::SingleColonInPath));
+                        }
                         _ => return Err(Self::expected(&sep, "`,` or `;`")),
                     }
                 }
@@ -351,7 +403,10 @@ impl Parser<'_> {
                 if RESERVED.contains(&name.as_str()) {
                     return Err(Self::err_at(
                         &name_tok,
-                        CompileErrorKind::ReservedFunctionName(name),
+                        CompileErrorKind::ReservedName {
+                            name,
+                            what: "namespace",
+                        },
                     ));
                 }
                 // Shared name pool: a namespace may not reuse a sibling
@@ -359,7 +414,10 @@ impl Parser<'_> {
                 if functions.iter().any(|g| g.ns == ns && g.name == name) {
                     return Err(Self::err_at(
                         &name_tok,
-                        CompileErrorKind::DuplicateFunction(name),
+                        CompileErrorKind::DuplicateName {
+                            name,
+                            what: "function",
+                        },
                     ));
                 }
                 self.bump(); // the name
@@ -390,7 +448,10 @@ impl Parser<'_> {
             if functions.iter().any(|g| g.ns == f.ns && g.name == f.name) {
                 return Err(CompileError {
                     span: mtc_core::diagnostics::Span::point(f.line, f.col),
-                    kind: CompileErrorKind::DuplicateFunction(f.name),
+                    kind: CompileErrorKind::DuplicateName {
+                        name: f.name,
+                        what: "function",
+                    },
                 });
             }
             // Shared name pool: a function may not reuse a sibling
@@ -400,7 +461,10 @@ impl Parser<'_> {
             if self.namespaces.contains(&as_ns) {
                 return Err(CompileError {
                     span: mtc_core::diagnostics::Span::point(f.line, f.col),
-                    kind: CompileErrorKind::DuplicateFunction(f.name),
+                    kind: CompileErrorKind::DuplicateName {
+                        name: f.name,
+                        what: "namespace",
+                    },
                 });
             }
             functions.push(f);
@@ -416,7 +480,10 @@ impl Parser<'_> {
         if RESERVED.contains(&name.as_str()) {
             return Err(Self::err_at(
                 &name_tok,
-                CompileErrorKind::ReservedFunctionName(name),
+                CompileErrorKind::ReservedName {
+                    name,
+                    what: "function",
+                },
             ));
         }
         self.bump();
@@ -428,6 +495,12 @@ impl Parser<'_> {
         let mut nested = Vec::new();
         let mut seen_labels: HashSet<u32> = HashSet::new();
         loop {
+            if matches!(self.peek().kind, TokenKind::Eof) {
+                return Err(Self::expected(
+                    self.peek(),
+                    "`}` to close the function body",
+                ));
+            }
             // Nested definition: IDENT ( ) {  — visibility-only nesting.
             let is_nested_def = matches!(&self.peek().kind, TokenKind::Ident(w)
                     if !RESERVED.contains(&w.as_str()))
@@ -448,7 +521,10 @@ impl Parser<'_> {
                 if nested.iter().any(|g: &Function| g.name == child.name) {
                     return Err(CompileError {
                         span: mtc_core::diagnostics::Span::point(child.line, child.col),
-                        kind: CompileErrorKind::DuplicateFunction(child.name),
+                        kind: CompileErrorKind::DuplicateName {
+                            name: child.name,
+                            what: "function",
+                        },
                     });
                 }
                 nested.push(child);
@@ -599,10 +675,23 @@ impl Parser<'_> {
                     let TokenKind::Ident(seg) = &t.kind else {
                         return Err(Self::expected(&t, "a name after `::`"));
                     };
+                    if RESERVED.contains(&seg.as_str()) {
+                        return Err(Self::err_at(
+                            &t,
+                            CompileErrorKind::ReservedName {
+                                name: seg.clone(),
+                                what: "path segment",
+                            },
+                        ));
+                    }
                     name.push_str("::");
                     name.push_str(seg);
                     name_end = t.span().end;
                     self.bump();
+                }
+                if matches!(self.peek().kind, TokenKind::Colon) {
+                    let t = self.peek().clone();
+                    return Err(Self::err_at(&t, CompileErrorKind::SingleColonInPath));
                 }
                 let lparen = self.peek().clone();
                 self.expect(&TokenKind::LParen, "`(` (user calls are written `@name()`)")?;
@@ -702,6 +791,11 @@ impl Parser<'_> {
                         line: tok.line,
                     })
                 }
+                "use" => Err(Self::err_at(&tok, CompileErrorKind::KeywordInBody("use"))),
+                "namespace" => Err(Self::err_at(
+                    &tok,
+                    CompileErrorKind::KeywordInBody("namespace"),
+                )),
                 other => Err(Self::err_at(
                     &tok,
                     CompileErrorKind::UnknownCommand(other.to_string()),
@@ -853,8 +947,19 @@ main() {
 
     #[test]
     fn reserved_and_at_rules() {
+        // At top level a reserved-word ident is now a `TopLevelStatement`
+        // (docs/language.md) — the naming check runs only once a keyword
+        // has consumed the leading token (e.g. `export <reserved>()`).
         let e = parse_src("check() { }").unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::ReservedFunctionName(n) if n == "check"));
+        assert!(
+            matches!(e.kind, CompileErrorKind::TopLevelStatement(ref n) if n.contains("check"))
+        );
+        // `export` isn't reserved, so it slips past the top-level guard;
+        // `function()` itself then sees the reserved name.
+        let e = parse_src("export check() { }").unwrap_err();
+        assert!(
+            matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "check" && what == "function")
+        );
 
         let e = parse_src("f() { @left(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::BuiltinCalled(n) if n == "left"));
@@ -876,7 +981,9 @@ main() {
     #[test]
     fn duplicate_and_dangling_diagnostics() {
         let e = parse_src("f() { } f() { }").unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "f"));
+        assert!(
+            matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
+        );
 
         let e = parse_src("f() { 1: left; 1: right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DuplicateLabel(1)));
@@ -983,14 +1090,20 @@ main() {
         // Same (path, name) across reopened blocks is a duplicate.
         let e =
             parse_src("namespace a { f() { left; } } namespace a { f() { right; } }").unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "f"));
+        assert!(
+            matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
+        );
         // The same bare name in different namespaces is legal.
         assert!(parse_src("namespace a { f() { left; } } namespace b { f() { right; } }").is_ok());
         // Namespace and function names share one pool per scope.
         let e = parse_src("namespace a { } a() { left; }").unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "a"));
+        assert!(
+            matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "a" && what == "namespace")
+        );
         let e = parse_src("a() { left; } namespace a { }").unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "a"));
+        assert!(
+            matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "a" && what == "function")
+        );
         // An unclosed block is an error, not silent Eof acceptance.
         let e = parse_src("namespace a { f() { left; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::Expected { .. }));
@@ -999,7 +1112,7 @@ main() {
     #[test]
     fn use_stays_illegal_inside_function_bodies() {
         let e = parse_src("main() { use go; }").unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "use"));
+        assert!(matches!(e.kind, CompileErrorKind::KeywordInBody(kw) if kw == "use"));
     }
 
     #[test]
@@ -1007,7 +1120,9 @@ main() {
         let e = parse_src("main() { export inner() { left; } }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::NestedExport));
         let e = parse_src("main() { f() { left; } f() { right; } }").unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::DuplicateFunction(n) if n == "f"));
+        assert!(
+            matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
+        );
     }
 
     #[test]
@@ -1060,5 +1175,78 @@ main() {
         let p = parse_src("use std::go as g;\nmain() { @g(); }").unwrap();
         let imp = &p.imports[0];
         assert_eq!((imp.span.start.col, imp.span.end.col), (5, 12)); // "std::go"
+    }
+
+    fn err_msg(src: &str) -> String {
+        parse_src(src).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn reserved_words_are_barred_in_every_path_segment() {
+        let m = err_msg("main() { @std::goto(); }");
+        assert!(m.contains("reserved word"), "got: {m}");
+        let m = err_msg("use std::goto;\nmain() { right; }");
+        assert!(m.contains("reserved word"), "got: {m}");
+    }
+
+    #[test]
+    fn keyword_followed_by_brace_gets_a_hint() {
+        let m = err_msg("namespace {\n}");
+        assert!(
+            m.contains("did you mean `namespace <name> { … }`"),
+            "got: {m}"
+        );
+        let m = err_msg("use {}");
+        assert!(m.contains("did you mean `use <name>;`"), "got: {m}");
+        let m = err_msg("export {}");
+        assert!(
+            m.contains("did you mean `export <name>() { … }`"),
+            "got: {m}"
+        );
+    }
+
+    #[test]
+    fn use_and_namespace_inside_a_body_say_the_real_rule() {
+        let m = err_msg("main() { use go; }");
+        assert!(m.contains("not allowed inside a function body"), "got: {m}");
+        let m = err_msg("main() { namespace x; }");
+        assert!(m.contains("not allowed inside a function body"), "got: {m}");
+    }
+
+    #[test]
+    fn single_colon_in_a_path_hints_double_colon() {
+        let m = err_msg("use std:b;\nmain() { right; }");
+        assert!(m.contains("did you mean `::`"), "got: {m}");
+        let m = err_msg("main() { @f:g(); }");
+        assert!(m.contains("did you mean `::`"), "got: {m}");
+    }
+
+    #[test]
+    fn namespace_naming_errors_say_namespace() {
+        let m = err_msg("namespace goto { }");
+        assert!(m.contains("namespace"), "got: {m}");
+        let m = err_msg("namespace a { } a() { right; }");
+        assert!(m.contains("namespace"), "got: {m}");
+    }
+
+    #[test]
+    fn unclosed_function_body_mentions_the_brace() {
+        let m = err_msg("f() { left;");
+        assert!(m.contains("`}` to close the function body"), "got: {m}");
+    }
+
+    #[test]
+    fn top_level_statements_state_the_rule() {
+        for src in ["left;\nmain() { right; }", "goto 1;", "@foo();"] {
+            let m = err_msg(src);
+            assert!(m.contains("not allowed at top level"), "{src} got: {m}");
+        }
+    }
+
+    #[test]
+    fn spaced_label_colons_and_paths_stay_legal() {
+        assert!(parse_src("main() { 1 : right; }").is_ok());
+        assert!(parse_src("main() { 1: 2: right; }").is_ok());
+        assert!(parse_src("use std :: goToEnd;\nmain() { @goToEnd(); }").is_ok());
     }
 }

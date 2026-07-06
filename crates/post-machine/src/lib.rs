@@ -15,3 +15,4 @@ pub use compiler::{
     CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, compile,
 };
 pub use optimizer::{OptLevel, OptReport, PassChange};
+pub use parser::PMC_LANG_VERSION;

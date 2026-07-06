@@ -54,7 +54,11 @@ pub fn execute_with(
     match args.first().map(String::as_str) {
         None | Some("--help") | Some("-h") => Ok(CliOutput::ok(USAGE.into(), String::new())),
         Some("--version") => Ok(CliOutput::ok(
-            format!("pmt {}\n", env!("CARGO_PKG_VERSION")),
+            format!(
+                "pmt {}\npmc language {}\n",
+                env!("CARGO_PKG_VERSION"),
+                crate::parser::PMC_LANG_VERSION
+            ),
             String::new(),
         )),
         Some("compile") => build::compile(&args[1..]),

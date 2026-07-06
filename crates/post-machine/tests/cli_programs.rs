@@ -27,6 +27,16 @@ fn unknown_subcommand_errors() {
     assert!(execute(&args(&["bogus"])).is_err());
 }
 
+#[test]
+fn version_reports_the_language_version() {
+    let out = execute(&args(&["--version"])).unwrap();
+    assert!(out.stdout.contains(&format!(
+        "pmc language {}",
+        mtc_post_machine::PMC_LANG_VERSION
+    )));
+    assert_eq!(mtc_post_machine::PMC_LANG_VERSION, "0.2");
+}
+
 const HELLO: &str = "main() { 1: mark; 2: right; 3: mark(!); }";
 
 #[test]

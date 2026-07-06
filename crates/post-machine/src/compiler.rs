@@ -33,13 +33,22 @@ pub enum CompileErrorKind {
         what: &'static str,
         found: String,
     },
-    /// A reserved word used as a function name.
-    ReservedFunctionName(String),
+    /// A reserved word used to name something (`what`: "function",
+    /// "namespace", "path segment").
+    ReservedName {
+        name: String,
+        what: &'static str,
+    },
     /// A bare identifier statement that is not a builtin (docs/language.md).
     UnknownCommand(String),
     /// `@` applied to a builtin name (`@left()`).
     BuiltinCalled(String),
-    DuplicateFunction(String),
+    /// A name already taken in this scope (`what` names the EXISTING
+    /// entity: "function" or "namespace").
+    DuplicateName {
+        name: String,
+        what: &'static str,
+    },
     DuplicateLabel(u32),
     /// `goto`/`check`/successor names a label the function never declares.
     UndefinedLabel(u32),
@@ -59,6 +68,14 @@ pub enum CompileErrorKind {
     /// name AFTER aliasing (alias if present, else path tail); the same
     /// binding in DIFFERENT scopes is legal (inner shadows outer).
     DuplicateBinding(String),
+    /// `namespace {` / `use {` / `export {` — keyword with no name.
+    KeywordNeedsName(&'static str),
+    /// `use` / `namespace` inside a function body.
+    KeywordInBody(&'static str),
+    /// A single `:` where a `::` path separator was meant.
+    SingleColonInPath,
+    /// A command or call at top level (outside any function body).
+    TopLevelStatement(String),
 }
 
 impl std::fmt::Display for CompileError {
@@ -78,8 +95,8 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::Expected { what, found } => {
                 write!(f, "expected {what}, found {found}")
             }
-            CompileErrorKind::ReservedFunctionName(n) => {
-                write!(f, "`{n}` is a reserved word and cannot name a function")
+            CompileErrorKind::ReservedName { name, what } => {
+                write!(f, "`{name}` is a reserved word and cannot name a {what}")
             }
             CompileErrorKind::UnknownCommand(n) => {
                 write!(
@@ -90,7 +107,12 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::BuiltinCalled(n) => {
                 write!(f, "`{n}` is a builtin — write it without `@`")
             }
-            CompileErrorKind::DuplicateFunction(n) => write!(f, "duplicate function `{n}`"),
+            CompileErrorKind::DuplicateName { name, what } => {
+                write!(
+                    f,
+                    "duplicate name `{name}` — already used by a {what} in this scope"
+                )
+            }
             CompileErrorKind::DuplicateLabel(l) => write!(f, "duplicate label `{l}`"),
             CompileErrorKind::UndefinedLabel(l) => write!(f, "undefined label `{l}`"),
             CompileErrorKind::GotoReturn => {
@@ -111,6 +133,32 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "`{n}` is bound twice — qualify the call (`@ns::{n}()`) or disambiguate with `as`"
+                )
+            }
+            CompileErrorKind::KeywordNeedsName(kw) => match *kw {
+                "use" => write!(f, "`use` needs a name — did you mean `use <name>;`?"),
+                "export" => write!(
+                    f,
+                    "`export` needs a name — did you mean `export <name>() {{ … }}`?"
+                ),
+                _ => write!(
+                    f,
+                    "`namespace` needs a name — did you mean `namespace <name> {{ … }}`?"
+                ),
+            },
+            CompileErrorKind::KeywordInBody(kw) => {
+                write!(
+                    f,
+                    "`{kw}` is not allowed inside a function body — imports and namespaces live at file or namespace level"
+                )
+            }
+            CompileErrorKind::SingleColonInPath => {
+                write!(f, "single `:` in a name path — did you mean `::`?")
+            }
+            CompileErrorKind::TopLevelStatement(found) => {
+                write!(
+                    f,
+                    "statements are not allowed at top level — commands and calls live inside function bodies (found {found})"
                 )
             }
         }
