@@ -1,4 +1,5 @@
-//! `.pma` text → per-function source items (spec §6.4 grammar).
+//! `.pma` text → per-function source items (docs/formats.md (assembly
+//! text) grammar).
 
 use super::syntax::ArchSyntax;
 use super::{AsmError, AsmErrorKind};

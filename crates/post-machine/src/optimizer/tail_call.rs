@@ -1,7 +1,8 @@
-//! tail-call (spec §8 pass 8): a call in tail position emits `jmp` to
-//! the callee's `ent` (legal for jumps) instead of `call` + `ret` —
-//! saves a stack slot and the return trip. Never applied in `main`,
-//! whose return is `stp`: the callee's `ret` would underflow.
+//! tail-call: a call in tail position emits `jmp` to the callee's `ent`
+//! (legal for jumps) instead of `call` + `ret` — saves a stack slot and
+//! the return trip. Never applied in `main`, whose return is `stp`: the
+//! callee's `ret` would underflow. Part of the `-O1` pipeline
+//! (optimizer/mod.rs).
 
 use crate::ir::{IrFunction, IrOp, IrTerm};
 

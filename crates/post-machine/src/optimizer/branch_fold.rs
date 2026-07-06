@@ -1,8 +1,8 @@
-//! branch-fold (spec §8 pass 6): a `check` whose MF is statically known
-//! goes unconditional. Sound only on coupled paths where the cell value
-//! is proven (then MF == (cell == 1) by the coupling invariant); the
-//! reset-MF trap (a check before any tape instruction) stays untouched
-//! because such paths are `Uncoupled`.
+//! branch-fold: a `check` whose MF is statically known goes unconditional.
+//! Part of the `-O1` pipeline (optimizer/mod.rs). Sound only on coupled
+//! paths where the cell value is proven (then MF == (cell == 1) by the
+//! coupling invariant); the reset-MF trap (a check before any tape
+//! instruction) stays untouched because such paths are `Uncoupled`.
 
 use crate::ir::{IrFunction, IrTerm};
 use crate::optimizer::dataflow;

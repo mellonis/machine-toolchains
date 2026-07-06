@@ -1,4 +1,4 @@
-//! `MX` executable container (spec §6.1).
+//! `MX` executable container (docs/formats.md).
 
 use super::crc32::{stamp_crc, verify_crc};
 use super::io::{Reader, put_u16, put_u32};

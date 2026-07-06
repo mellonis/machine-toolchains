@@ -1,4 +1,5 @@
-//! Ring-shaped bounded tape — the historical `TBelt` (spec §4.2).
+//! Ring-shaped bounded tape — the historical `TBelt` (docs/isa.md (the
+//! tape and device bus); docs/history.md).
 
 use super::Tape;
 use crate::vm::trap::DeviceFault;

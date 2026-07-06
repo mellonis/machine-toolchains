@@ -1,4 +1,4 @@
-//! The processor VM: sans-I/O core, bus protocol, devices (spec §4).
+//! The processor VM: sans-I/O core, bus protocol, devices (docs/isa.md).
 
 pub mod arch;
 pub mod bus;

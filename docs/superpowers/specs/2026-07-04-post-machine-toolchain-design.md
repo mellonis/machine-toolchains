@@ -1,5 +1,11 @@
 # Post Machine Toolchain — Design
 
+> **FROZEN — historical design record (2026-07-06).** This document was
+> the build-time authority through Plan 7. The durable references now
+> live in `README.md` and `docs/` (language, ISA, formats, CLI, stdlib);
+> code no longer cites this file, and it is no longer amended. For the
+> project's lineage see `docs/history.md`.
+
 **Date:** 2026-07-04
 **Repo:** `mellonis-workspace/machines/toolchains` (own repo under the `machines/` umbrella)
 **Status:** approved design, pre-implementation

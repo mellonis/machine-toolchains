@@ -1,6 +1,7 @@
-//! Equivalence harness (spec §11): every optimizer pass is tested by
-//! running -O0 and -O1 builds of the same program on the same tapes and
-//! comparing observables — outcome kind, final tape, final head.
+//! Equivalence harness (the equivalence contract —
+//! crates/post-machine/src/optimizer/mod.rs): every optimizer pass is
+//! tested by running -O0 and -O1 builds of the same program on the same
+//! tapes and comparing observables — outcome kind, final tape, final head.
 
 use mtc_core::linker::LinkOptions;
 use mtc_core::vm::{ArchRegistry, InfiniteTape, Machine, RunLimits, RunOptions};
@@ -291,9 +292,9 @@ main() {
 
 #[test]
 fn fno_inline_restores_the_do_no_harm_floor() {
-    // With inline off, nothing in the 6b pipeline fires on the spec
+    // With inline off, nothing in the optimizer pipeline fires on this
     // sample (no tail position, no duplicate blocks, no empty-return
-    // adjacency) — the old 6a byte-stability golden, behind the flag.
+    // adjacency) — the old byte-stability golden, behind the flag.
     let src = "\
 goToEnd() {
 1:  right;
@@ -356,10 +357,11 @@ fn tail_call_preserves_behavior_and_shrinks() {
 
 #[test]
 fn self_recursive_tail_call_becomes_an_in_place_loop() {
-    // THE documented resource exception (spec §8 as amended): at -O0 the
-    // recursion overflows the return stack; at -O1 the tail call is a
-    // self-jump — an infinite loop that hits the step limit instead.
-    // Termination KIND changes; that is sanctioned for resource traps.
+    // THE documented resource exception (optimizer/mod.rs's equivalence
+    // contract): at -O0 the recursion overflows the return stack; at -O1
+    // the tail call is a self-jump — an infinite loop that hits the step
+    // limit instead. Termination KIND changes; that is sanctioned for
+    // resource traps.
     let src = "spin() { @spin(!); } main() { @spin(); }";
     let o0 = build(src, OptLevel::O0);
     let o1 = build(src, OptLevel::O1);
@@ -412,8 +414,8 @@ fn tail_call_emits_a_relaxed_jump() {
 #[test]
 fn tail_merge_shares_the_stp_exactly_as_the_spec_promises() {
     use mtc_post_machine::arch::opcodes::*;
-    // Spec §8 pass 7's own example. -O0: jm B2; wr 1; stp; B2: stp = 7
-    // bytes (two stp). -O1: return-chaining drops the first stp — 6.
+    // tail-merge's own module-doc example. -O0: jm B2; wr 1; stp; B2: stp
+    // = 7 bytes (two stp). -O1: return-chaining drops the first stp — 6.
     let src = "main() { 1: check(!, 2); 2: mark(!); }";
     let (o0, o1) = assert_equivalent(src, TAPES);
     assert_eq!((o0, o1), (7, 6));

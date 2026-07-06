@@ -1,4 +1,4 @@
-//! CRC-32 (IEEE 802.3, reflected, poly 0xEDB88320) — spec §6.1.
+//! CRC-32 (IEEE 802.3, reflected, poly 0xEDB88320) — docs/formats.md.
 
 use super::FormatError;
 

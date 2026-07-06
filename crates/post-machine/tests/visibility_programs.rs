@@ -1,6 +1,7 @@
-//! Visibility end-to-end (spec §3/§6.2/§9 as amended by plan 6c):
-//! locals coexist across objects, foreign locals are unreachable,
-//! nesting mangles and runs, and the visibility flip changed no bytes.
+//! Visibility end-to-end (docs/language.md (visibility); docs/formats.md
+//! (.pmo); docs/stdlib.md (linking)): locals coexist across objects,
+//! foreign locals are unreachable, nesting mangles and runs, and the
+//! visibility flip changed no bytes.
 //! Task 6 appends the namespace goldens: `::`-mangled blocks (nestable,
 //! reopenable), scoped `use` with paths and aliases, absolute qualified
 //! calls, binding collisions, and the entry rule for namespaced `main`.

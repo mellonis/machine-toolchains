@@ -1,4 +1,4 @@
-//! `.pmc` lexer (spec §3): source text → tokens with line:col.
+//! `.pmc` lexer (docs/language.md): source text → tokens with line:col.
 
 use crate::compiler::{CompileError, CompileErrorKind};
 
@@ -28,10 +28,10 @@ pub struct Token {
     pub col: u32,
 }
 
-/// Identifier rule (spec §3.1): Unicode; first char alphabetic or `_`,
-/// then alphanumeric or `_` — the same classes as the `.pma` symbol
-/// grammar, so every `.pmc` name survives the trip through generated
-/// assembly.
+/// Identifier rule (docs/language.md): Unicode; first char alphabetic or
+/// `_`, then alphanumeric or `_` — the same classes as the `.pma` symbol
+/// grammar (docs/formats.md (assembly text)), so every `.pmc` name
+/// survives the trip through generated assembly.
 fn is_ident_start(c: char) -> bool {
     c.is_alphabetic() || c == '_'
 }

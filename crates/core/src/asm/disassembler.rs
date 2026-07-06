@@ -1,5 +1,5 @@
-//! Binary → canonical `.pma` text (spec §6.4). Output is valid assembler
-//! input; object round-trips are exact.
+//! Binary → canonical `.pma` text (docs/formats.md (assembly text)).
+//! Output is valid assembler input; object round-trips are exact.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,7 +9,7 @@ use crate::formats::executable::Executable;
 use crate::formats::object::{ObjectFile, SymbolDef};
 use crate::linker::MapFile;
 
-/// Canonical .pma grid (spec §6.4): label col 0, mnemonic col 8, operand col 16; trailing spaces trimmed.
+/// Canonical .pma grid (docs/formats.md (assembly text)): label col 0, mnemonic col 8, operand col 16; trailing spaces trimmed.
 pub fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
     let label_field = match label {
         Some(l) => format!("{l}:"),
@@ -190,11 +190,12 @@ pub fn disassemble_executable(
 
     let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();
     // The entry root is named `main`: the linker guarantees the entry
-    // symbol is literally `main` (spec §9), so the synthesis is faithful
-    // and restores §6.4's round-trip claim (dis → asm → link reproduces
-    // the executable). All other roots keep the address-derived name.
-    // When a map is supplied, its function names take priority (spec-
-    // faithful debugger view); `main`/`func_XXXX` synthesis is the
+    // symbol is literally `main` (docs/stdlib.md; docs/formats.md (.pmo)),
+    // so the synthesis is faithful and restores docs/formats.md (assembly
+    // text)'s round-trip claim (dis → asm → link reproduces the
+    // executable). All other roots keep the address-derived name. When a
+    // map is supplied, its function names take priority (a debugger view
+    // faithful to the linked source); `main`/`func_XXXX` synthesis is the
     // `None`-map fallback used by the round-trip law.
     let func_name = |addr: u32| {
         if let Some(m) = map
@@ -729,7 +730,7 @@ START:  nop
     }
 
     /// The core crate cannot depend on PM-1: a minimal local `ArchSyntax`
-    /// with exactly the entries the derived golden uses (spec §5 opcodes),
+    /// with exactly the entries the derived golden uses (docs/isa.md opcodes),
     /// mirroring `fixture::test_syntax()`.
     fn pm1_like_syntax() -> crate::asm::syntax::ArchSyntax {
         use Flow::{Branch, FallThrough as FT, Stop};

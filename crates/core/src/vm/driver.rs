@@ -1,5 +1,6 @@
 //! Synchronous driver: answers the sans-I/O core's bus requests against
-//! in-memory components and does all tact accounting (spec §4.4).
+//! in-memory components and does all tact accounting (docs/isa.md
+//! (timing model)).
 
 use super::bus::{BusRequest, BusResponse, CoreEvent};
 use super::core::Core;
@@ -93,10 +94,10 @@ pub struct RunResult {
     pub stack: Vec<u32>,
 }
 
-/// One instruction boundary of the sync driver (spec-lineage §4.4
-/// accounting). `started` is the fresh/resume flag: `false` before the
-/// first call. Callers must not call again after `Finished` (the core is
-/// in its terminal phase).
+/// One instruction boundary of the sync driver (docs/isa.md (timing
+/// model) accounting). `started` is the fresh/resume flag: `false` before
+/// the first call. Callers must not call again after `Finished` (the core
+/// is in its terminal phase).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepEvent {
     Retired,
@@ -182,7 +183,7 @@ pub(crate) fn step_instruction(
             }
             CoreEvent::Step | CoreEvent::Break => {
                 stats.steps += 1;
-                stats.core_tacts += 1; // execute base (spec-lineage §4.4)
+                stats.core_tacts += 1; // execute base (docs/isa.md (timing model))
                 if limits.max_steps.is_some_and(|max| stats.steps >= max) {
                     return StepEvent::Finished(Outcome::Trapped(Trap::StepLimit));
                 }
@@ -328,7 +329,7 @@ mod tests {
     #[test]
     fn call_costs_eight_with_rel32() {
         // [0]=call +1 (target 6 = entry), [5]=stop, [6]=entry, [7]=ret
-        // call: fetch 5 + ent-read 1 + push 1 + exec 1 = 8 core (spec §4.4)
+        // call: fetch 5 + ent-read 1 + push 1 + exec 1 = 8 core (docs/isa.md (timing model))
         // entry(Nop): 2; ret: fetch 1 + pop 1 + exec 1 = 3; stop: 1
         let code = [0x0A, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
         let (r, _) = drive(&code, RunLimits::default(), TactProfile::ELECTRONIC);

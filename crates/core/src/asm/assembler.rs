@@ -1,4 +1,6 @@
-//! Two-pass assembly with short/far relaxation (spec §5, §6.2, §6.4).
+//! Two-pass assembly with short/far relaxation (docs/formats.md (assembly
+//! text); docs/isa.md for the opcode/relaxation table this assembles
+//! against).
 
 use std::collections::HashMap;
 

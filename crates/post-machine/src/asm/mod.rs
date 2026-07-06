@@ -1,4 +1,4 @@
-//! PM-1 assembly: the spec §5 mnemonic table bound to the core framework.
+//! PM-1 assembly: the docs/isa.md mnemonic table bound to the core framework.
 
 use mtc_core::asm::{ArchSyntax, AsmError, Flow, RelaxPair, SyntaxEntry};
 use mtc_core::formats::ARCH_PM1;

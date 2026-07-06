@@ -1,5 +1,5 @@
 //! `MO` objects → `MX` executables: symbol resolution, reachability,
-//! layout, and relaxation (spec §9).
+//! layout, and relaxation (docs/stdlib.md (linking)).
 
 mod layout;
 pub(crate) mod resolve;
@@ -49,7 +49,7 @@ impl std::fmt::Display for LinkError {
 impl std::error::Error for LinkError {}
 
 /// Linker knobs; `relax` (default `true`) enables the far→short call
-/// relaxation fixpoint (spec §9).
+/// relaxation fixpoint (docs/isa.md; docs/cli.md for `--no-relax`).
 #[derive(Debug, Clone, Copy)]
 pub struct LinkOptions {
     pub relax: bool,
@@ -115,9 +115,9 @@ pub struct LinkOutput {
     pub report: LinkReport,
 }
 
-/// `MO` objects → `MX` executable (spec §9): resolve symbols and
-/// reachability, then lay out, relax, and emit code for the reached
-/// functions.
+/// `MO` objects → `MX` executable (docs/stdlib.md (linking)): resolve
+/// symbols and reachability, then lay out, relax, and emit code for the
+/// reached functions.
 pub fn link(
     syntax: &ArchSyntax,
     objects: &[ObjectFile],

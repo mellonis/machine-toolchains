@@ -1,4 +1,5 @@
-//! Traps: the processor's controlled stop on an execution error (spec §4.5).
+//! Traps: the processor's controlled stop on an execution error
+//! (docs/isa.md (execution)).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceFault {

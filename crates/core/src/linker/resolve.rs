@@ -1,8 +1,8 @@
-//! Symbol resolution and reachability (spec §9): build the user+library
-//! namespace (user duplicates error, libraries first-wins and shadowed
-//! silently by user definitions), then BFS from `main` so only reachable
-//! functions are linked in — dead functions are dropped and may reference
-//! anything, even names that don't exist.
+//! Symbol resolution and reachability (docs/stdlib.md (linking)): build
+//! the user+library namespace (user duplicates error, libraries
+//! first-wins and shadowed silently by user definitions), then BFS from
+//! `main` so only reachable functions are linked in — dead functions are
+//! dropped and may reference anything, even names that don't exist.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -102,7 +102,8 @@ pub(crate) fn resolve<'a>(
             let target: Option<Site> = match symbol.def {
                 // Locals bind directly within their own object — never
                 // through the namespace, so they can't shadow or be
-                // shadowed (spec §9).
+                // shadowed (docs/language.md (visibility); docs/stdlib.md
+                // (linking)).
                 SymbolDef::Local { blob } => Some((site.0, blob)),
                 _ => namespace.get(symbol.name.as_str()).copied(),
             };

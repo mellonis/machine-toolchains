@@ -1,6 +1,7 @@
-//! cell-state (spec §8 pass 4): the historic redundant mark/unmark
-//! elimination, generalized to `wr`. Two rules, both MF-safe by the
-//! coupling invariant (see dataflow module docs):
+//! cell-state: the historic redundant mark/unmark elimination,
+//! generalized to `wr`. Part of the `-O1` pipeline (optimizer/mod.rs).
+//! Two rules, both MF-safe by the coupling invariant (see dataflow module
+//! docs):
 //!
 //! 1. Idempotent write: `wr i` when the cell provably holds `i` on a
 //!    COUPLED path — the write changes neither the tape nor MF (both

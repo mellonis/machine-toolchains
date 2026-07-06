@@ -1,5 +1,5 @@
-//! PM-1: the Post-machine instruction set (spec §5), as an arch module
-//! for the mtc-core VM. Pure table — no state.
+//! PM-1: the Post-machine instruction set (docs/isa.md), as an arch
+//! module for the mtc-core VM. Pure table — no state.
 
 use mtc_core::vm::{Arch, MicroOp, Operand, OperandKind, Trap};
 
@@ -17,7 +17,7 @@ pub mod opcodes {
     pub const RET: u8 = 0x0C;
     pub const ENT: u8 = 0x0D;
     pub const BRK: u8 = 0x0E;
-    // Short forms: far | 0x10 (spec §5).
+    // Short forms: far | 0x10 (docs/isa.md).
     pub const JMP_S: u8 = 0x18;
     pub const JM_S: u8 = 0x19;
     pub const JNM_S: u8 = 0x1A;
@@ -26,11 +26,11 @@ pub mod opcodes {
 
 use opcodes::*;
 
-/// PM-1 matches against the mark index (spec §4.1).
+/// PM-1 matches against the mark index (docs/isa.md).
 const MARK: u32 = 1;
 
 /// Default rendering glyphs (index 0 = blank, 1 = mark) for tooling with
-/// no tape at hand; a loaded `.pmt`'s own alphabet always wins (spec §6.3).
+/// no tape at hand; a loaded `.pmt`'s own alphabet always wins (docs/formats.md).
 pub const DEFAULT_GLYPHS: [&str; 2] = [" ", "*"];
 
 pub struct Pm1;

@@ -1,8 +1,9 @@
-//! inline (spec §8 pass 5): splice small leaf callees into their call
-//! sites, intra-module. Dissolving the call barrier is what unlocks the
-//! dataflow across it — the other passes then see through the old
-//! boundary. Candidates never contain `brk` (inlining would erase the
-//! call frame a debugger shows) and never contain calls of their own.
+//! inline: splice small leaf callees into their call sites, intra-module.
+//! The one program-level pass in the `-O1` pipeline (optimizer/mod.rs).
+//! Dissolving the call barrier is what unlocks the dataflow across it —
+//! the other passes then see through the old boundary. Candidates never
+//! contain `brk` (inlining would erase the call frame a debugger shows)
+//! and never contain calls of their own.
 
 use std::collections::HashMap;
 

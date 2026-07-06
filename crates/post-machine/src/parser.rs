@@ -1,11 +1,11 @@
-//! `.pmc` recursive-descent parser (spec §3): tokens → AST.
+//! `.pmc` recursive-descent parser (docs/language.md): tokens → AST.
 
 use std::collections::HashSet;
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::lexer::{Token, TokenKind};
 
-/// Spec §3.3: words that cannot name a function.
+/// docs/language.md: words that cannot name a function.
 pub const RESERVED: [&str; 8] = [
     "goto", "check", "left", "right", "mark", "unmark", "halt", "debugger",
 ];
@@ -59,7 +59,7 @@ pub struct Function {
     /// Nesting is always local; flatten computes this for top-level
     /// functions as `!exported`.
     pub local: bool,
-    /// Nested function definitions (spec §3), hoisted and visible to
+    /// Nested function definitions (docs/language.md (visibility)), hoisted and visible to
     /// their own siblings and enclosing scope's body; emptied by flatten.
     pub nested: Vec<Function>,
     /// Enclosing namespace path (parser-set on top-level definitions;
@@ -487,7 +487,7 @@ impl Parser<'_> {
         let mut items = vec![self.item(false)?];
         while matches!(self.peek().kind, TokenKind::Comma) {
             let comma = self.peek().clone();
-            // Whatever precedes a `,` must be bare (spec §3.2).
+            // Whatever precedes a `,` must be bare (docs/language.md).
             match items.last().expect("items is never empty") {
                 Item::Check { .. } => {
                     return Err(Self::err_at(
@@ -782,7 +782,7 @@ main() {
         let e = parse_src("f() { flip; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "flip"));
 
-        // A user function called without `@` is the same error (spec §3.3).
+        // A user function called without `@` is the same error (docs/language.md).
         let e = parse_src("f() { goToEnd(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "goToEnd"));
     }

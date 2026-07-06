@@ -1,6 +1,8 @@
-//! check-fold (spec §8 pass 1): a check with identical arms decides
-//! nothing — replace with an unconditional goto. The single-arm jm/jnm
-//! specialization is codegen's adjacency selection, not an IR rewrite.
+//! check-fold: a check with identical arms decides nothing — replace with
+//! an unconditional goto. The single-arm jm/jnm specialization is
+//! codegen's adjacency selection, not an IR rewrite. Part of the `-O1`
+//! pipeline (optimizer/mod.rs for the equivalence contract every pass
+//! here must preserve).
 
 use crate::ir::{IrFunction, IrTerm};
 

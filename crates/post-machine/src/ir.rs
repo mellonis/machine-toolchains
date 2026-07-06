@@ -1,6 +1,6 @@
-//! Per-function CFG IR (spec §7, §7.1): a versioned, documented JSON
-//! artifact, not an internal detail. Lowering makes every statement
-//! successor an explicit block edge.
+//! Per-function CFG IR (docs/language.md (the IR artifact); docs/formats.md
+//! (IR JSON)): a versioned, documented JSON artifact, not an internal
+//! detail. Lowering makes every statement successor an explicit block edge.
 
 use std::collections::{HashMap, HashSet};
 
@@ -25,7 +25,7 @@ pub struct IrFunction {
     /// Entry is `blocks[0]`. Ids are unique within the function but need
     /// not stay dense once optimizer passes (Plan 6) delete blocks.
     pub blocks: Vec<IrBlock>,
-    /// Hidden-by-default visibility (spec §3, §9): `true` unless the
+    /// Hidden-by-default visibility (docs/language.md (visibility)): `true` unless the
     /// source marked the function `export` (`main` is always exported).
     pub local: bool,
 }
@@ -70,7 +70,7 @@ pub enum IrTerm {
     },
     Return,
     Halt,
-    /// Optimizer-produced (spec §8 pass 8): jump to the callee's `ent`
+    /// Optimizer-produced (the tail-call pass): jump to the callee's `ent`
     /// instead of `call` + `ret`. Never emitted by lowering.
     TailCall {
         name: String,
@@ -308,7 +308,7 @@ fn lower_function(
             }
             Close::None => {
                 if is_last_stmt {
-                    // Falling off the end — implicit return (spec §3.2).
+                    // Falling off the end — implicit return (docs/language.md).
                     let mut b = current.take().expect("block open");
                     b.term = IrTerm::Return;
                     b.term_line = stmt.line;

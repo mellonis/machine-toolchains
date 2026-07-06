@@ -1,4 +1,5 @@
-//! Loader + facade: Executable → validated Machine → runs (spec §4.3).
+//! Loader + facade: Executable → validated Machine → runs (docs/isa.md
+//! (loading)).
 
 use crate::formats::executable::Executable;
 
@@ -113,8 +114,9 @@ impl<'a> Machine<'a> {
 
     pub fn run(&self, device: &mut dyn Tape, opts: RunOptions) -> RunResult {
         let mut core = Core::new(self.arch, self.entry);
-        // Spec §4.3 step 4: latch initial MF from the device, tact-free
-        // (loading, not execution). PM-1 matches against the mark index 1.
+        // Loading step (docs/isa.md (loading)): latch initial MF from the
+        // device, tact-free (loading, not execution). PM-1 matches
+        // against the mark index 1.
         core.set_mf(device.read() == 1);
         let mut stack = ReturnStack::new(opts.stack_depth);
         run(
@@ -127,8 +129,9 @@ impl<'a> Machine<'a> {
         )
     }
 
-    /// A debug session over this machine's image (spec-lineage §4.5).
-    /// The session owns its core/stack; the device arrives per call.
+    /// A debug session over this machine's image (docs/isa.md
+    /// (DebugSession)). The session owns its core/stack; the device
+    /// arrives per call.
     pub fn debug(&self, opts: RunOptions) -> DebugSession<'a> {
         DebugSession::new(
             Core::new(self.arch, self.entry),

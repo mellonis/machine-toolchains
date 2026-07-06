@@ -1,4 +1,4 @@
-//! `MO` object container (spec §6.2).
+//! `MO` object container (docs/formats.md).
 
 use super::FormatError;
 use super::crc32::{stamp_crc, verify_crc};
@@ -47,7 +47,8 @@ pub enum SymbolDef {
         blob: u32,
     },
     /// Defined but NOT exported: bound directly within its own object,
-    /// invisible to cross-object resolution (spec §6.2 kind 2, §9).
+    /// invisible to cross-object resolution (docs/formats.md (.pmo);
+    /// docs/stdlib.md for the linking-visibility rule this backs).
     Local {
         blob: u32,
     },

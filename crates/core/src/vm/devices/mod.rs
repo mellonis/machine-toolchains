@@ -1,5 +1,6 @@
-//! Tape devices behind the device bus (spec §4.2). Index-based; the
-//! processor never sees glyphs and never knows the head position.
+//! Tape devices behind the device bus (docs/isa.md (the tape and device
+//! bus)). Index-based; the processor never sees glyphs and never knows
+//! the head position.
 
 mod annular_tape;
 mod infinite_tape;

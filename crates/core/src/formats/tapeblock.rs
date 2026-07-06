@@ -1,4 +1,4 @@
-//! `MT` tape-block container (spec §6.3).
+//! `MT` tape-block container (docs/formats.md).
 
 use super::crc32::{stamp_crc, verify_crc};
 use super::io::{Reader, put_i64, put_u16, put_u32};

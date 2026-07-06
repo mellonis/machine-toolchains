@@ -1,10 +1,10 @@
-//! tail-merge (spec §8 pass 7), v1 scope: (a) whole-block dedup —
-//! semantically identical blocks (same ops modulo line numbers, same
-//! terminator) collapse to one, references retargeted; (b) return-
-//! chaining — a Return block physically followed by an EMPTY Return
-//! block falls through to share the terminal instruction (the spec's
-//! `jm Lstp; wr 1; Lstp: stp` example: one stp serves both paths).
-//! Suffix-level merging (partial tails) is a future refinement.
+//! tail-merge, v1 scope: (a) whole-block dedup — semantically identical
+//! blocks (same ops modulo line numbers, same terminator) collapse to
+//! one, references retargeted; (b) return-chaining — a Return block
+//! physically followed by an EMPTY Return block falls through to share
+//! the terminal instruction (`jm Lstp; wr 1; Lstp: stp`: one `stp` serves
+//! both paths). Suffix-level merging (partial tails) is a future
+//! refinement. Part of the `-O1` pipeline (optimizer/mod.rs).
 
 use crate::ir::{IrFunction, IrOp, IrTerm};
 
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn return_chaining_shares_the_adjacent_terminal() {
-        // The spec §8 example: 1: check(!, 2); 2: mark(!);
+        // This pass's own module-doc example: 1: check(!, 2); 2: mark(!);
         // blocks: b0 Check{exit, b1}, b1 [wr1] Return, exit [] Return.
         let f = merged("f() { 1: check(!, 2); 2: mark(!); }");
         assert!(matches!(

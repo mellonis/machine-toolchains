@@ -1,5 +1,5 @@
-//! Binary container formats shared by all machine toolchains (spec §6).
-//! Pure byte codecs: no I/O, no architecture knowledge.
+//! Binary container formats shared by all machine toolchains
+//! (docs/formats.md). Pure byte codecs: no I/O, no architecture knowledge.
 
 pub mod crc32;
 pub(crate) mod io;
@@ -53,7 +53,7 @@ pub enum ContainerKind {
 }
 
 /// Identify a container by magic (tools never dispatch on extensions —
-/// spec §6).
+/// docs/formats.md).
 pub fn sniff(bytes: &[u8]) -> Option<ContainerKind> {
     match bytes.get(..3)? {
         m if m == executable::MAGIC_EXECUTABLE => Some(ContainerKind::Executable),

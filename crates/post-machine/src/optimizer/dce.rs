@@ -1,6 +1,7 @@
-//! dce (spec §8 pass 3): delete blocks unreachable from the entry.
-//! Reachability-only deletion cannot dangle a reachable terminator, so
-//! the closed-targets invariant is preserved by construction.
+//! dce: delete blocks unreachable from the entry. Reachability-only
+//! deletion cannot dangle a reachable terminator, so the closed-targets
+//! invariant (optimizer/mod.rs) is preserved by construction. Part of the
+//! `-O1` pipeline.
 
 use std::collections::HashSet;
 

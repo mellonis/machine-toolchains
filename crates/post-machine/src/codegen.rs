@@ -1,11 +1,12 @@
-//! CFG → `.pma` text (spec §7 module 6). The generated text is fed to
-//! the core assembler (spec §2's cc → as pipeline), which supplies
-//! encoding, intra-function jump relaxation, and the `ent` prologue via
-//! `.func` — codegen never touches bytes.
+//! CFG → `.pma` text. The generated text is fed to the core assembler
+//! (the compile → assemble pipeline), which supplies encoding,
+//! intra-function jump relaxation, and the `ent` prologue via `.func` —
+//! codegen never touches bytes.
 //!
-//! Layout invariant (spec §7, active even at `-O0`): an unconditional
-//! transfer to the physically next instruction is never emitted — blocks
-//! are laid out in order and fall-through is selected instead.
+//! Layout invariant (docs/language.md (optimization), active even at
+//! `-O0`): an unconditional transfer to the physically next instruction
+//! is never emitted — blocks are laid out in order and fall-through is
+//! selected instead.
 
 use std::collections::{HashMap, HashSet};
 
@@ -153,7 +154,7 @@ fn emit_function(f: &IrFunction, options: CodegenOptions, e: &mut Emitter) {
                 }
             }
             IrTerm::Return => {
-                // Returning from main stops the machine (spec §3.2).
+                // Returning from main stops the machine (docs/language.md).
                 let mnemonic = if f.name == "main" { "stp" } else { "ret" };
                 e.push(grid(None, mnemonic, ""), b.term_line);
             }

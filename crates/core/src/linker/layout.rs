@@ -1,4 +1,5 @@
-//! Layout, call relaxation, and `MX` code emission (spec §9).
+//! Layout, call relaxation, and `MX` code emission (docs/stdlib.md
+//! (linking); docs/isa.md for the relaxation width rule itself).
 //!
 //! Each reached function's ORIGINAL blob is decoded exactly once into a
 //! `Piece` list. A monotone shrink fixpoint then decides which far calls

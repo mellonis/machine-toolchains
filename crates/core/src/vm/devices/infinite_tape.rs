@@ -1,5 +1,6 @@
-//! Unbounded two-symbol tape with paged sparse storage (spec §4.2):
-//! `TBelt`'s packed bit array, generalized to an infinite tape.
+//! Unbounded two-symbol tape with paged sparse storage (docs/isa.md (the
+//! tape and device bus)): `TBelt`'s packed bit array, generalized to an
+//! infinite tape.
 
 use std::collections::HashMap;
 
@@ -78,7 +79,7 @@ impl InfiniteTape {
         }
     }
 
-    /// Build from a `TapeSnapshot` (spec §6.3). Cells must be 0/1 —
+    /// Build from a `TapeSnapshot` (docs/formats.md). Cells must be 0/1 —
     /// a wider index is the snapshot's problem, not this tape's.
     pub fn from_snapshot(s: &crate::formats::tapeblock::TapeSnapshot) -> Result<Self, DeviceFault> {
         if let Some(&bad) = s.cells.iter().find(|&&c| c > 1) {

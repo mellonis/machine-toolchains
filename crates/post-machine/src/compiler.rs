@@ -1,8 +1,8 @@
-//! `.pmc` compiler driver and shared diagnostics (spec §7).
+//! `.pmc` compiler driver and shared diagnostics.
 //!
 //! Every pipeline stage (lexer → parser → lowering → codegen) reports
 //! fatals through [`CompileError`]; non-fatal findings accumulate as
-//! [`Warning`]s — library code never prints (spec §10).
+//! [`Warning`]s — library code never prints (docs/cli.md).
 
 use mtc_core::formats::object::ObjectFile;
 
@@ -30,7 +30,7 @@ pub enum CompileErrorKind {
     },
     /// A reserved word used as a function name.
     ReservedFunctionName(String),
-    /// A bare identifier statement that is not a builtin (spec §3.3).
+    /// A bare identifier statement that is not a builtin (docs/language.md).
     UnknownCommand(String),
     /// `@` applied to a builtin name (`@left()`).
     BuiltinCalled(String),
@@ -38,9 +38,10 @@ pub enum CompileErrorKind {
     DuplicateLabel(u32),
     /// `goto`/`check`/successor names a label the function never declares.
     UndefinedLabel(u32),
-    /// `goto !` — spec §3.2: put `(!)` on the preceding command instead.
+    /// `goto !` — docs/language.md: put `(!)` on the preceding command instead.
     GotoReturn,
-    /// A comma-group position rule violated (spec §3.2, last table row).
+    /// A comma-group position rule violated (docs/language.md, the
+    /// statement table's last row).
     GroupPosition(&'static str),
     /// A label at the end of a function body binds to nothing.
     DanglingLabel(u32),
@@ -126,10 +127,10 @@ pub struct CompileOptions {
     /// `-g`: record label/line debug info in the object, with lines
     /// remapped to `.pmc` sources.
     pub debug_info: bool,
-    /// `--strip-debugger`: drop `brk` at codegen (spec §10). The
+    /// `--strip-debugger`: drop `brk` at codegen (docs/cli.md). The
     /// optimizer runs BEFORE stripping, so `brk` barriers always hold.
     pub strip_debugger: bool,
-    /// `-O0` (default) or `-O1` (spec §8 passes, 6a subset).
+    /// `-O0` (default) or `-O1` (docs/language.md (optimization)).
     pub opt_level: OptLevel,
     /// Pass names to disable (`--fno-<pass>`), e.g. `"cell-state"`.
     pub disabled_passes: Vec<String>,
@@ -139,7 +140,7 @@ pub struct CompileOptions {
 }
 
 /// Structured stage report — `pmt -v` renders it; the library never
-/// prints (spec §10, the LinkReport pattern).
+/// prints (docs/cli.md, the same pattern as the linker's `LinkReport`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileReport {
     pub warnings: Vec<Warning>,
@@ -161,9 +162,9 @@ pub struct CompileOutput {
     pub report: CompileReport,
 }
 
-/// `.pmc` source → object file (spec §7): lex → parse → lower → emit
-/// `.pma` → assemble. Assembly failure of GENERATED text is a compiler
-/// bug and reports as `CompileErrorKind::Internal`.
+/// `.pmc` source → object file: lex → parse → lower → emit `.pma` →
+/// assemble. Assembly failure of GENERATED text is a compiler bug and
+/// reports as `CompileErrorKind::Internal`.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
     let tokens = crate::lexer::lex(source)?;
     let parsed = crate::parser::parse(&tokens)?;
@@ -251,8 +252,8 @@ fn full_name(ns: &[String], name: &str) -> String {
     }
 }
 
-/// Flatten definitions and resolve calls (spec §3 as amended by plan
-/// 6c): mangle names (`::` for namespaces, `.` for nesting), resolve
+/// Flatten definitions and resolve calls (docs/language.md (visibility)):
+/// mangle names (`::` for namespaces, `.` for nesting), resolve
 /// each call innermost-outward — the function's own nested maps (defs
 /// only), then per enclosing namespace prefix (longest first) that
 /// level's definitions THEN its import bindings — and compute symbol

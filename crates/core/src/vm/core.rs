@@ -1,4 +1,4 @@
-//! The sans-I/O processor core (spec §4): a pure transition function
+//! The sans-I/O processor core (docs/isa.md): a pure transition function
 //! from bus responses to bus requests. Owns registers and the in-flight
 //! instruction; performs no I/O; knows no opcodes (that's the Arch).
 
@@ -286,7 +286,7 @@ impl<'a> Core<'a> {
         }
     }
 
-    /// Operands are relative to the END of the instruction (spec §5);
+    /// Operands are relative to the END of the instruction (docs/isa.md);
     /// at execute time `self.ip` == instr_end (fetch advanced it).
     fn jump_target(&self, off: i32) -> Result<u32, Trap> {
         let target = i64::from(self.ip) + i64::from(off);

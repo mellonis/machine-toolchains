@@ -1,9 +1,27 @@
-//! `-O1` pass driver (spec §8). One module per pass; a pass is either
-//! per-function, `fn(&mut IrFunction) -> u32` (PIPELINE), or program-level,
+//! `-O1` pass driver. One module per pass; a pass is either per-function,
+//! `fn(&mut IrFunction) -> u32` (PIPELINE), or program-level,
 //! `fn(&mut IrProgram) -> u32` (PROGRAM_PIPELINE — currently `inline`).
-//! Every pass returns its change count and MUST preserve the equivalence
-//! contract and the closed-terminator-targets invariant (checked in debug
-//! builds after every application).
+//!
+//! # The equivalence contract (internal — read before touching a pass)
+//!
+//! Every pass returns its change count and MUST preserve: the final tape
+//! contents, the termination kind (`stp` / `hlt` / which trap), and every
+//! branch decision that depends on the match flag. Two things are
+//! explicitly excluded from this contract and MAY change: resource-limit
+//! outcomes (inlining and tail-call change stack depth, so a
+//! `StackOverflow` at `-O0` legally becomes a `StepLimit` trap at `-O1`
+//! once a self-recursive tail call becomes an in-place loop — resource
+//! traps are a quality-of-implementation outcome, not a semantic one),
+//! and step counts/intermediate states — EXCEPT at an un-stripped `brk`,
+//! which is an observability barrier: no motion or elimination may cross
+//! it, so a debugger attached at `-O1` still sees honest state there.
+//! (The user-facing summary of this same contract is docs/language.md
+//! (optimization); this header is the binding version for pass authors —
+//! it is a contract between passes, not with users, so it stays here.)
+//!
+//! Passes also MUST preserve the closed-terminator-targets invariant
+//! (every terminator's target is a block id that still exists in the
+//! function), checked in debug builds after every application.
 
 use std::collections::HashSet;
 

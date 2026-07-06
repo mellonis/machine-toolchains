@@ -1,5 +1,6 @@
-//! Arch-generic assembler/disassembler frameworks (spec §6.4). All
-//! instruction knowledge arrives via [`ArchSyntax`] tables.
+//! Arch-generic assembler/disassembler frameworks (docs/formats.md
+//! (assembly text)). All instruction knowledge arrives via [`ArchSyntax`]
+//! tables.
 
 mod assembler;
 pub(crate) mod decode;

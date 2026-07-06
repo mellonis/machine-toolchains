@@ -1,4 +1,4 @@
-// The pmt standard library (dogfooding: written in .pmc, spec-lineage §9).
+// The pmt standard library (dogfooding: written in .pmc; docs/stdlib.md).
 // Section = maximal run of marked cells. Pre/postconditions are the
 // normative contract; docs/stdlib.md mirrors them.
 //

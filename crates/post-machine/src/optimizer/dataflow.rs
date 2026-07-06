@@ -1,4 +1,4 @@
-//! Shared forward dataflow for cell-state and branch-fold (spec §8).
+//! Shared forward dataflow for cell-state and branch-fold.
 //!
 //! # The MF-coupling invariant (soundness backbone — read before editing)
 //!

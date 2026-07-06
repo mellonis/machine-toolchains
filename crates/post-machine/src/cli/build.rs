@@ -277,8 +277,8 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput::ok(String::new(), stderr))
 }
 
-/// `app.pmx` → `app.pmx.map` (spec-lineage §10: the sidecar keeps the
-/// full executable name).
+/// `app.pmx` → `app.pmx.map` (docs/cli.md; docs/formats.md: the sidecar
+/// keeps the full executable name).
 fn sidecar_path(target: &Path) -> PathBuf {
     let mut s = target.as_os_str().to_owned();
     s.push(".map");

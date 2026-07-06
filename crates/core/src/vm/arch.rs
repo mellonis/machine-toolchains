@@ -1,4 +1,6 @@
-//! The architecture interface: all instruction knowledge enters here (spec §10).
+//! The architecture interface: all instruction knowledge enters here
+//! (README (workspace layout): core is arch-agnostic by contract, and
+//! this trait is where PM-1-specific knowledge is supplied from outside).
 
 use super::trap::Trap;
 
@@ -43,8 +45,8 @@ pub trait Arch {
     fn is_entry_marker(&self, byte: u8) -> bool;
 }
 
-/// Encode an operand to its wire form (spec §5 / Appendix A). The inverse
-/// of the core's fetch-time decoding — property-tested against it.
+/// Encode an operand to its wire form (docs/isa.md). The inverse of the
+/// core's fetch-time decoding — property-tested against it.
 pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
     Ok(match operand {
         Operand::None => Vec::new(),

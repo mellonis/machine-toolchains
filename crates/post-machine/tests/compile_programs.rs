@@ -1,5 +1,6 @@
-//! The first COMPILED Post-machine programs (spec §11's golden path):
-//! `.pmc` → compile → link → run, pinning the spec §3 sample end to end.
+//! The first COMPILED Post-machine programs — the golden compile → link
+//! → run path: `.pmc` → compile → link → run, pinning the docs/language.md
+//! sample end to end.
 
 use mtc_core::linker::LinkOptions;
 use mtc_core::vm::{ArchRegistry, InfiniteTape, Machine, Outcome, RunOptions};
@@ -8,7 +9,7 @@ use mtc_post_machine::asm::link;
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::ir::IrProgram;
 
-/// Spec §3's source sample, verbatim modulo comments.
+/// docs/language.md's source sample, verbatim modulo comments.
 const SPEC_PMC: &str = "\
 goToEnd() {
 1:  right;

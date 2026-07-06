@@ -1,7 +1,8 @@
-//! jump-threading (spec §8 pass 2): a jump to an EMPTY block that only
-//! jumps onward retargets to the final destination. Chains collapse in
-//! one application; a cycle of empty forwarders is a deliberate infinite
-//! loop (`1: goto 1;`) and is preserved untouched.
+//! jump-threading: a jump to an EMPTY block that only jumps onward
+//! retargets to the final destination. Chains collapse in one
+//! application; a cycle of empty forwarders is a deliberate infinite loop
+//! (`1: goto 1;`) and is preserved untouched. Part of the `-O1` pipeline
+//! (optimizer/mod.rs).
 
 use std::collections::{HashMap, HashSet};
 
