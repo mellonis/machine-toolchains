@@ -2,6 +2,10 @@
 //! Libraries never print; every byte of terminal output originates here.
 
 mod build;
+mod inspect;
+mod run;
+
+use mtc_core::formats::tapeblock::TapeSnapshot;
 
 #[derive(Debug)]
 pub struct CliOutput {
@@ -47,9 +51,6 @@ pub fn execute_with(
     args: &[String],
     trace_out: &mut dyn std::io::Write,
 ) -> Result<CliOutput, String> {
-    // Task 5 has no subcommand that streams live trace output yet; the
-    // seam is wired now (ruling R10) so Task 6's `run` can use it.
-    let _ = trace_out;
     match args.first().map(String::as_str) {
         None | Some("--help") | Some("-h") => Ok(CliOutput::ok(USAGE.into(), String::new())),
         Some("--version") => Ok(CliOutput::ok(
@@ -59,8 +60,42 @@ pub fn execute_with(
         Some("compile") => build::compile(&args[1..]),
         Some("asm") => build::asm(&args[1..]),
         Some("link") => build::link(&args[1..]),
+        Some("dis") => inspect::dis(&args[1..]),
+        Some("tape") => inspect::tape(&args[1..]),
+        Some("ir") => inspect::ir(&args[1..]),
+        Some("run") => run::run(&args[1..], trace_out),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
+}
+
+/// Render one tape with its glyphs: the dense span line plus a caret
+/// line under the head. Glyph 0 is blank by convention.
+pub(crate) fn render_tape(snapshot: &TapeSnapshot, alphabet: &[String]) -> String {
+    let glyph = |index: u8| -> &str {
+        alphabet
+            .get(usize::from(index))
+            .map(String::as_str)
+            .unwrap_or("?")
+    };
+    let mut cells_line = String::new();
+    let mut caret_line = String::new();
+    for (i, &cell) in snapshot.cells.iter().enumerate() {
+        let g = glyph(cell);
+        let here = snapshot.origin + i as i64 == snapshot.head;
+        cells_line.push_str(g);
+        caret_line.push_str(&if here {
+            "^".repeat(g.chars().count().max(1))
+        } else {
+            " ".repeat(g.chars().count().max(1))
+        });
+    }
+    format!(
+        "origin {}, head {}\n|{}|\n {}\n",
+        snapshot.origin,
+        snapshot.head,
+        cells_line,
+        caret_line.trim_end()
+    )
 }
 
 /// Minimal flag scanner: flags may appear anywhere; `--name value` and
@@ -128,5 +163,25 @@ impl Args {
             out.push(tok);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_tape_draws_a_single_bordered_span_with_a_caret() {
+        // marks {0, 2}, head 2, glyphs " "/"*": the head sits on the last
+        // cell — a single `|` border at each end only (per-cell borders
+        // would misalign the caret math).
+        let snapshot = TapeSnapshot {
+            origin: 0,
+            cells: vec![1, 0, 1],
+            head: 2,
+        };
+        let alphabet: Vec<String> = vec![" ".into(), "*".into()];
+        let rendered = render_tape(&snapshot, &alphabet);
+        assert_eq!(rendered, "origin 0, head 2\n|* *|\n   ^\n");
     }
 }

@@ -87,6 +87,57 @@ impl IrProgram {
     }
 }
 
+impl IrFunction {
+    /// Mermaid flowchart of the CFG (`pmt ir graph`). Node text: source
+    /// labels, then ops, then a terminal marker for block-ending
+    /// terminators; edges carry the check/goto semantics.
+    pub fn to_mermaid(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::from("flowchart TD\n");
+        for block in &self.blocks {
+            let mut lines: Vec<String> = Vec::new();
+            for &label in &block.labels {
+                lines.push(format!("{label}:"));
+            }
+            for op in &block.ops {
+                lines.push(match op {
+                    IrOp::Lft { .. } => "lft".into(),
+                    IrOp::Rgt { .. } => "rgt".into(),
+                    IrOp::Wr { index, .. } => format!("wr {index}"),
+                    IrOp::Brk { .. } => "brk".into(),
+                    IrOp::Call { name, .. } => format!("call @{name}"),
+                });
+            }
+            match &block.term {
+                IrTerm::Return => lines.push("ret".into()),
+                IrTerm::Halt => lines.push("hlt".into()),
+                IrTerm::TailCall { name } => lines.push(format!("jmp @{name}")),
+                IrTerm::FallThrough { .. } | IrTerm::Goto { .. } | IrTerm::Check { .. } => {}
+            }
+            if lines.is_empty() {
+                lines.push("(empty)".into());
+            }
+            let _ = writeln!(out, "    B{}[\"{}\"]", block.id, lines.join("<br/>"));
+        }
+        for block in &self.blocks {
+            match &block.term {
+                IrTerm::FallThrough { to } => {
+                    let _ = writeln!(out, "    B{} --> B{to}", block.id);
+                }
+                IrTerm::Goto { to } => {
+                    let _ = writeln!(out, "    B{} -->|goto| B{to}", block.id);
+                }
+                IrTerm::Check { marked, blank } => {
+                    let _ = writeln!(out, "    B{} -->|MF| B{marked}", block.id);
+                    let _ = writeln!(out, "    B{} -->|!MF| B{blank}", block.id);
+                }
+                IrTerm::Return | IrTerm::Halt | IrTerm::TailCall { .. } => {}
+            }
+        }
+        out
+    }
+}
+
 /// Does this statement end its basic block?
 fn terminates(stmt: &crate::parser::Statement) -> bool {
     match stmt.items.last().expect("parser: statements have items") {
@@ -536,5 +587,19 @@ mod tests {
         let dup = broken.blocks[0].clone();
         broken.blocks.push(dup);
         assert!(validate_function(&broken).is_err());
+    }
+
+    #[test]
+    fn to_mermaid_renders_flowchart_with_check_edges() {
+        let (ir, _) = ir_of("main() { 1: right; check(1, !); }");
+        let mermaid = ir.functions[0].to_mermaid();
+        assert!(mermaid.starts_with("flowchart TD\n"), "{mermaid}");
+        assert!(mermaid.contains("B0[\"1:<br/>rgt\"]"), "{mermaid}");
+        assert!(mermaid.contains("-->|MF|"), "{mermaid}");
+        assert!(mermaid.contains("-->|!MF|"), "{mermaid}");
+        assert!(
+            mermaid.lines().any(|l| l.trim_end().ends_with("ret\"]")),
+            "{mermaid}"
+        );
     }
 }

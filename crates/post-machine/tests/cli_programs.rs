@@ -202,3 +202,171 @@ fn emit_ir_duplicate_stage_labels_resolve_last_wins() {
         repeating_label
     );
 }
+
+#[test]
+fn full_pipeline_reproduces_the_sum_golden() {
+    let dir = scratch("pipeline_sum");
+    let golden_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let src = dir.join("sum.pmc");
+    fs::copy(golden_dir.join("sum.pmc"), &src).unwrap();
+
+    execute(&args(&["compile", src.to_str().unwrap(), "-O1"])).unwrap();
+    execute(&args(&["link", dir.join("sum.pmo").to_str().unwrap()])).unwrap();
+    execute(&args(&[
+        "tape",
+        "build",
+        "*** **",
+        "-o",
+        dir.join("in.pmt").to_str().unwrap(),
+    ]))
+    .unwrap();
+    let out = execute(&args(&[
+        "run",
+        dir.join("sum.pmx").to_str().unwrap(),
+        "--tape-block",
+        dir.join("in.pmt").to_str().unwrap(),
+        "--save-tape-block",
+        dir.join("out.pmt").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.contains("outcome: Stopped"));
+    assert_eq!(
+        fs::read(dir.join("out.pmt")).unwrap(),
+        fs::read(golden_dir.join("sum.expected.pmt")).unwrap(),
+    );
+}
+
+#[test]
+fn exit_codes_distinguish_halt_and_trap() {
+    let dir = scratch("exit_codes");
+    let src = dir.join("h.pmc");
+    fs::write(&src, "main() { 1: halt; }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("h.pmo").to_str().unwrap()])).unwrap();
+    let out = execute(&args(&["run", dir.join("h.pmx").to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 2);
+
+    // step-limit trap
+    let src = dir.join("spin.pmc");
+    fs::write(&src, "main() { 1: right(1); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("spin.pmo").to_str().unwrap()])).unwrap();
+    let out = execute(&args(&[
+        "run",
+        dir.join("spin.pmx").to_str().unwrap(),
+        "--max-steps",
+        "100",
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 3);
+    assert!(out.stdout.contains("StepLimit"));
+}
+
+#[test]
+fn strict_cells_traps_double_mark() {
+    let dir = scratch("strict");
+    let src = dir.join("dbl.pmc");
+    fs::write(&src, "main() { 1: mark; 2: mark(!); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("dbl.pmo").to_str().unwrap()])).unwrap();
+    let ok = execute(&args(&["run", dir.join("dbl.pmx").to_str().unwrap()])).unwrap();
+    assert_eq!(ok.code, 0); // permissive default
+    let strict = execute(&args(&[
+        "run",
+        dir.join("dbl.pmx").to_str().unwrap(),
+        "--strict-cells",
+    ]))
+    .unwrap();
+    assert_eq!(strict.code, 3);
+}
+
+#[test]
+fn trace_streams_lines_with_post_state_into_the_writer() {
+    use mtc_post_machine::cli::execute_with;
+    let dir = scratch("trace");
+    let src = dir.join("t.pmc");
+    fs::write(&src, "main() { 1: mark; 2: right(!); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("t.pmo").to_str().unwrap()])).unwrap();
+    let mut trace = Vec::new();
+    let out = execute_with(
+        &args(&["run", dir.join("t.pmx").to_str().unwrap(), "--trace"]),
+        &mut trace,
+    )
+    .unwrap();
+    let text = String::from_utf8(trace).unwrap();
+    // ent, wr, rgt, stp — one line each; blank tape latches MF=0 at load
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert!(
+        lines[0].contains("ent") && lines[0].ends_with("; MF=0 head=0"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("wr") && lines[1].ends_with("; MF=1 head=0"),
+        "{}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("rgt") && lines[2].ends_with("; MF=0 head=1"),
+        "{}",
+        lines[2]
+    );
+    assert!(
+        lines[3].contains("stp") && lines[3].ends_with("; MF=0 head=1"),
+        "{}",
+        lines[3]
+    );
+    assert!(out.stderr.is_empty(), "trace must stream, not buffer");
+}
+
+#[test]
+fn dis_listing_and_tape_show_render() {
+    let dir = scratch("dis_listing");
+    let src = dir.join("d.pmc");
+    fs::write(&src, "main() { 1: mark(!); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap(), "-g"])).unwrap();
+    execute(&args(&["link", dir.join("d.pmo").to_str().unwrap()])).unwrap();
+    let out = execute(&args(&[
+        "dis",
+        dir.join("d.pmx").to_str().unwrap(),
+        "--listing",
+    ]))
+    .unwrap();
+    assert!(out.stdout.starts_with("main:"), "{}", out.stdout);
+    assert!(out.stdout.contains("0000:"));
+
+    execute(&args(&[
+        "tape",
+        "build",
+        " **",
+        "-o",
+        dir.join("s.pmt").to_str().unwrap(),
+    ]))
+    .unwrap();
+    let shown = execute(&args(&[
+        "tape",
+        "show",
+        dir.join("s.pmt").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(shown.stdout.contains("| **|"), "{}", shown.stdout);
+}
+
+#[test]
+fn ir_graph_renders_mermaid() {
+    let dir = scratch("ir_graph");
+    let src = dir.join("g.pmc");
+    fs::write(&src, "main() { 1: right; 2: check(1, !); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap(), "--emit-ir"])).unwrap();
+    let out = execute(&args(&[
+        "ir",
+        "graph",
+        dir.join("g.ir.json").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(out.stdout.contains("flowchart TD"));
+    assert!(out.stdout.contains("-->|MF|"));
+}
