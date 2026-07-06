@@ -370,3 +370,42 @@ fn ir_graph_renders_mermaid() {
     assert!(out.stdout.contains("flowchart TD"));
     assert!(out.stdout.contains("-->|MF|"));
 }
+
+#[test]
+fn traced_trap_prints_the_faulting_line_exactly_once() {
+    use mtc_post_machine::cli::execute_with;
+    let dir = scratch("trace_trap");
+    let src = dir.join("spin.pmc");
+    fs::write(&src, "main() { 1: right(1); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("spin.pmo").to_str().unwrap()])).unwrap();
+    let mut trace = Vec::new();
+    let out = execute_with(
+        &args(&[
+            "run",
+            dir.join("spin.pmx").to_str().unwrap(),
+            "--max-steps",
+            "3",
+            "--trace",
+        ]),
+        &mut trace,
+    )
+    .unwrap();
+    assert_eq!(out.code, 3);
+    let text = String::from_utf8(trace).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    // ent, rgt, rgt(StepLimit at step 3) — the faulting line once, not twice
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_ne!(lines[1], lines[2], "faulting line duplicated: {lines:?}");
+}
+
+#[test]
+fn run_accepts_dash_v() {
+    let dir = scratch("run_v");
+    let src = dir.join("ok.pmc");
+    fs::write(&src, "main() { 1: mark(!); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("ok.pmo").to_str().unwrap()])).unwrap();
+    let out = execute(&args(&["run", dir.join("ok.pmx").to_str().unwrap(), "-v"])).unwrap();
+    assert_eq!(out.code, 0);
+}

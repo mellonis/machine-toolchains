@@ -8,8 +8,8 @@ use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeBlockFile;
 use mtc_core::linker::MapFile;
 use mtc_core::vm::{
-    ArchRegistry, DebugEvent, InfiniteTape, Machine, Outcome, RunLimits, RunOptions, StrictTape,
-    TactProfile, Tape,
+    ArchRegistry, DebugEvent, InfiniteTape, Machine, Outcome, PauseCause, RunLimits, RunOptions,
+    StrictTape, TactProfile, Tape,
 };
 
 use crate::arch::{DEFAULT_GLYPHS, Pm1};
@@ -47,6 +47,9 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         return Ok(CliOutput::ok(RUN_USAGE.into(), String::new()));
     }
     let trace = args.flag("--trace");
+    // -v is accepted and currently a no-op (stats always print) — it must
+    // be consumed or positionals() rejects it.
+    let _verbose = args.flag("-v");
     let strict = args.flag("--strict-cells");
     let no_step_limit = args.flag("--no-step-limit");
     let max_steps = match args.value("--max-steps")? {
@@ -266,6 +269,15 @@ fn drive(
             tape.head()
         );
         match event {
+            // A trap pause is terminal for a non-interactive trace: the
+            // faulting line was just written — looping again would print
+            // it twice via the Finished repeat.
+            DebugEvent::Paused(PauseCause::Trap(_)) => {
+                return (
+                    session.finished().expect("trap pause implies finished"),
+                    session.stats(),
+                );
+            }
             DebugEvent::Paused(_) => {}
             DebugEvent::Finished(outcome) => return (outcome, session.stats()),
         }
