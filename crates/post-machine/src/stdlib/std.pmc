@@ -1,0 +1,96 @@
+// The pmt standard library (dogfooding: written in .pmc, spec-lineage §9).
+// Section = maximal run of marked cells. Pre/postconditions are the
+// normative contract; docs/stdlib.md mirrors them.
+//
+// Under --strict-cells note: routines that write assume the stated
+// precondition; eraseSection/remove* unmark only marked cells and
+// append/prepend mark only blank cells when preconditions hold.
+
+namespace std {
+    // pre: head on a mark of a section. post: head on the section's
+    // LAST mark; tape unchanged. (The historic Sum.pms pair.)
+    export goToEnd() {
+        1: right;
+        2: check(1, 3);
+        3: left;
+    }
+
+    // pre: head on a mark of a section. post: head on the section's
+    // FIRST mark; tape unchanged.
+    export goToBegin() {
+        1: left;
+        2: check(1, 3);
+        3: right;
+    }
+
+    // pre: a mark exists strictly right of the head. post: head on the
+    // nearest such mark; tape unchanged.
+    export goToMarkRight() {
+        1: right;
+        2: check(!, 1);
+    }
+
+    // pre: a mark exists strictly left of the head. post: head on the
+    // nearest such mark; tape unchanged.
+    export goToMarkLeft() {
+        1: left;
+        2: check(!, 1);
+    }
+
+    // pre: a blank exists strictly right of the head (always true off a
+    // finite tape's sections). post: head on the nearest such blank.
+    export goToBlankRight() {
+        1: right;
+        2: check(1, !);
+    }
+
+    // pre: a blank exists strictly left of the head. post: head on the
+    // nearest such blank.
+    export goToBlankLeft() {
+        1: left;
+        2: check(1, !);
+    }
+
+    // pre: head on a mark of a section. post: section erased; head on
+    // the first cell right of where the section was.
+    export eraseSection() {
+        1: @goToBegin();
+        2: unmark;
+        3: right;
+        4: check(2, !);
+    }
+
+    // pre: head on a mark of a section. post: section grown by one mark
+    // on the right; head on the new (last) mark.
+    export appendMark() {
+        1: @goToEnd();
+        2: right;
+        3: mark(!);
+    }
+
+    // pre: head on a mark of a section. post: section grown by one mark
+    // on the left; head on the new (first) mark.
+    export prependMark() {
+        1: @goToBegin();
+        2: left;
+        3: mark(!);
+    }
+
+    // pre: head on a mark of a section. post: last mark removed; head
+    // one cell left of the removed mark (the new last mark, or a blank
+    // if the section had one mark).
+    export removeLastMark() {
+        1: @goToEnd();
+        2: unmark;
+        3: left(!);
+    }
+
+    // pre: head on a mark of a section. post: first mark removed; head
+    // one cell right of the removed mark (the new first mark, or a
+    // blank if the section had one mark).
+    export removeFirstMark() {
+        1: @goToBegin();
+        2: unmark;
+        3: right(!);
+    }
+}

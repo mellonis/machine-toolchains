@@ -8,6 +8,7 @@ pub mod ir;
 pub mod lexer;
 pub mod optimizer;
 pub mod parser;
+pub mod stdlib;
 
 pub use compiler::{
     CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, Warning, compile,
