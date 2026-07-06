@@ -225,12 +225,18 @@ fn flag_lines(flag: &FlagSpec, all: &[FlagSpec]) -> Vec<String> {
             )]
         }
         FlagKind::OptionalEqualsValue(hint) => {
-            // `name=-` (not `name`): the value is only ever accepted
-            // joined with `=` — never as a following bare word
+            // `name=-` (not `name`): the value, if given, is only ever
+            // accepted joined with `=` — never as a following bare word
             // (docs/cli.md `--emit-ir[=STAGE]`; `take_emit_ir` bypasses
             // `Args::value`, so a space-separated stage is never read).
+            // The DOUBLE colon before the message (`man zshcompsys`
+            // "Specifying Options": "in the second form [`::`] it is
+            // optional") is load-bearing, not decorative — a single
+            // colon would tell `_arguments` this option always needs a
+            // value, rejecting the bare `--emit-ir` the real parser
+            // accepts (defaults to `final`).
             vec![format!(
-                "'{excl}{}=-[{desc}]:{}:{}'",
+                "'{excl}{}=-[{desc}]::{}:{}'",
                 flag.name,
                 value_message(hint),
                 value_action(hint)
@@ -363,6 +369,14 @@ mod tests {
     fn emit_ir_is_equals_only_and_lists_pass_stages() {
         let script = render(&registry());
         assert!(script.contains("--emit-ir=-["), "{script}");
+        // Double colon before the message: the value is OPTIONAL (a bare
+        // `--emit-ir` is a real, complete flag on its own — defaults to
+        // `final`). A single colon here would tell `_arguments` this
+        // option always needs a value, which is wrong (man zshcompsys).
+        assert!(
+            script.contains("]::value:("),
+            "--emit-ir's value must be optional (double colon): {script}"
+        );
         assert!(script.contains("after\\:inline"), "{script}");
         assert!(script.contains("after\\:dce"), "{script}");
         assert!(script.contains("lowered"));
