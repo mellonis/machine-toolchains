@@ -1,0 +1,20 @@
+// Port of the historic Sum.pms (Delphi generation A, Compiller/):
+// adds the two unary numbers on the tape. Numbers are n+1 marks; input
+// "a gap b" with the head on a's first mark; output one section a+b.
+use std::goToEnd, std::goToBegin;
+
+main() {
+    1: @goToEnd();
+    2: right;
+    3: right;
+    4: @goToEnd();
+    5: unmark;
+    6: left;
+    7: @goToBegin();
+    8: left;
+    9: mark;
+    10: @goToEnd();
+    11: unmark;
+    12: left;
+    13: @goToBegin(!);
+}

@@ -1,0 +1,19 @@
+// Port of the historic Ty.pms (Delphi generation A, Compiller/):
+// removes one mark from the section under the head (unary decrement).
+// The mark/goToEnd/unmark dance at 4-6 is preserved verbatim from the
+// original — historic fidelity over minimality.
+use std::goToEnd;
+use std::goToBegin;
+
+main() {
+    1: check(2, !);
+    2: @goToEnd();
+    3: right;
+    4: mark;
+    5: @goToEnd();
+    6: unmark;
+    7: left;
+    8: unmark;
+    9: left;
+    10: @goToBegin(!);
+}
