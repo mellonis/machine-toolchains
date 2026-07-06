@@ -24,8 +24,9 @@ Produces the `pmt` binary at `target/release/pmt`.
 The five commands below compile, link, build an input tape, run, and
 disassemble a port of the historic `Sum.pms` program (unary addition: two
 marked sections separated by one blank cell, each of length n+1 for the
-number n it represents). From the repository root, with `pmt` built as
-above. (The commands write `.pmo`, `.pmx`, `.pmx.map`, and `.pmt` files next to the source; consider running them in a scratch directory.)
+number n it represents). The commands write `.pmo`, `.pmx`, `.pmx.map`,
+and `.pmt` files into the current directory — consider running them from a
+scratch directory. From the repository root, with `pmt` built as above:
 
 ```
 $ target/release/pmt compile crates/post-machine/tests/golden/sum.pmc -o sum.pmo

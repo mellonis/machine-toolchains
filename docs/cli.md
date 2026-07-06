@@ -42,7 +42,7 @@ FLAGS:
   -S                 emit the generated .pma instead of an object
   --emit-ir[=STAGE]  write the CFG IR JSON next to the output
                      (STAGE: lowered | after:<pass> | final; default final;
-                      repeated stages resolve last-wins — a stage label captured in several optimizer rounds resolves to the last snapshot; the flag itself may appear only once)
+                      repeated stages resolve last-wins)
   --fno-<pass>       disable one optimizer pass (repeatable)
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
@@ -57,6 +57,11 @@ functions — `docs/language.md (visibility)`) always print to stderr as
 per-pass round report; `-Werror` turns every warning into a compile
 failure. `--emit-ir` writes `<output base>.ir.json` — see
 `docs/language.md (the IR artifact)` and `docs/formats.md (IR JSON)`.
+"Repeated stages resolve last-wins" refers to snapshot labels, not the
+flag: a stage label captured in several optimizer rounds (e.g.
+`after:inline`) resolves to the last captured snapshot, while the
+`--emit-ir` flag itself may appear only once per command line —
+repeating it is an unknown-flag error.
 
 ## `pmt asm`
 
