@@ -4,4 +4,5 @@
 
 pub(crate) mod leading_zeros;
 pub(crate) mod line_too_long;
+pub(crate) mod redundant_jump;
 pub(crate) mod unused_label;

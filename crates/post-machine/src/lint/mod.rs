@@ -74,6 +74,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("line-too-long", rules::line_too_long::check),
     ("leading-zeros", rules::leading_zeros::check),
     ("unused-label", rules::unused_label::check),
+    ("redundant-jump-to-next", rules::redundant_jump::check),
 ];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
