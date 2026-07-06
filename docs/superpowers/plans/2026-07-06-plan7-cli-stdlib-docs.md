@@ -1662,8 +1662,13 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
 
     let source = fs::read_to_string(input)
         .map_err(|e| format!("cannot read {}: {e}", input.display()))?;
+    // CompileError's own Display self-prefixes "line L:C:"; the CLI
+    // renders the kind under its file:line:col prefix instead (ratified
+    // fix 2026-07-06 — Task-5 implementer caught the doubled prefix).
+    // CompileErrorKind gains its own Display in the same fix; CompileError's
+    // Display delegates to it, output byte-identical.
     let out = compile_source(&source, options)
-        .map_err(|e| format!("{}:{}:{}: error: {}", input.display(), e.line, e.col, e))?;
+        .map_err(|e| format!("{}:{}:{}: error: {}", input.display(), e.line, e.col, e.kind))?;
 
     let mut stderr = String::new();
     render_warnings(&mut stderr, input, &out.report);
