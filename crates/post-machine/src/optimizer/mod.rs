@@ -94,6 +94,17 @@ const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[("inline", inline::run)];
 
 const MAX_ROUNDS: u32 = 10;
 
+/// The canonical `--fno-<pass>` / `--emit-ir=after:<pass>` names
+/// (docs/language.md (optimization)), in pipeline order: the
+/// program-level pass first, then the per-function pipeline. This is the
+/// single source of truth other surfaces (shell-completion choices, the
+/// drift guard that checks them) read from instead of retyping the list.
+pub fn pass_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = PROGRAM_PIPELINE.iter().map(|(name, _)| *name).collect();
+    names.extend(PIPELINE.iter().map(|(name, _)| *name));
+    names
+}
+
 /// Run the enabled pipeline to a change-fixpoint (round-capped). `-O0`
 /// returns immediately: unoptimized output stays bit-identical to plain
 /// codegen, with no optimizer artifact leaking in.
