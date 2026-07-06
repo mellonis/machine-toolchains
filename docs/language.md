@@ -190,8 +190,7 @@ implementation detail. `pmt compile --emit-ir[=STAGE]` writes it to
   optimizer pass runs), `after:<pass-name>` (state right after a named
   pass last changed something), or `final` (the default — CFG after the
   whole pipeline, i.e. what codegen consumed).
-- Repeating `--emit-ir` with different stages resolves last-wins: only the
-  last occurrence on the command line is honored.
+- Stage labels can repeat across snapshots: a pass that fires in several optimizer rounds captures several `after:<pass>` snapshots. `--emit-ir=after:<pass>` selects the LAST captured snapshot with that label (last-wins). The flag itself appears at most once per command line — repeating it is an unknown-flag error.
 - `pmt ir graph FILE.ir.json [--function NAME]` renders the IR as a
   Mermaid flowchart, one per function (or a single named one).
 

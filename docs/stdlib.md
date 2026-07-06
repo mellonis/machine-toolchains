@@ -23,7 +23,7 @@ its immediate new edge cell).
 
 | Routine | Precondition | Postcondition |
 |---|---|---|
-| `goToEnd()` | head on a mark of a section | head on the section's LAST mark; tape unchanged. (The historic `Sum.pms` pair, with `goToBegin`.) |
+| `goToEnd()` | head on a mark of a section | head on the section's LAST mark; tape unchanged. (The historic Sum.pms pair.) |
 | `goToBegin()` | head on a mark of a section | head on the section's FIRST mark; tape unchanged. |
 | `goToMarkRight()` | a mark exists strictly right of the head | head on the nearest such mark; tape unchanged. |
 | `goToMarkLeft()` | a mark exists strictly left of the head | head on the nearest such mark; tape unchanged. |
@@ -41,6 +41,7 @@ head.
 
 ## Linking semantics
 
+- **Symbol resolution:** duplicate exported symbols across user objects are a link-time error; libraries resolve first-wins and may be shadowed by user objects.
 - **Implicit std:** after all user objects are collected and their symbol
   references resolved against each other, any remaining unresolved names
   are matched against `std.pmo` — familiar `libc` semantics. `--nostdlib`

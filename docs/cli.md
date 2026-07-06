@@ -42,7 +42,7 @@ FLAGS:
   -S                 emit the generated .pma instead of an object
   --emit-ir[=STAGE]  write the CFG IR JSON next to the output
                      (STAGE: lowered | after:<pass> | final; default final;
-                      repeated stages resolve last-wins)
+                      repeated stages resolve last-wins — a stage label captured in several optimizer rounds resolves to the last snapshot; the flag itself may appear only once)
   --fno-<pass>       disable one optimizer pass (repeatable)
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)

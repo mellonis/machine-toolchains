@@ -17,10 +17,9 @@ project. Two of its programs, `Sum.pms` and `Ty.pms`, are ported verbatim
 `.pms → .pmc` line is the language lineage this toolchain continues most
 directly: `check`/`goto`/labelled successors, comma-groups, and the
 builtin vocabulary (`left`/`right`/`mark`/`unmark`) all descend from this
-generation's surface syntax.
+generation's surface syntax. Erratum: the frozen spec dates `Compiller` to 2012; the project is from 2002 (generation A). The freeze preserves the error; this page corrects it.
 
-**The fall-through optimization.** A later revision of the same lineage
-established a layout rule this toolchain still honors as an invariant,
+**The fall-through optimization.** The 2007 generation (`Old Test-PostMachine`'s compiler) added the optimization this toolchain inherits: a layout rule this toolchain still honors as an invariant,
 active even at `-O0`: an unconditional jump to the instruction that is
 already physically next is never emitted. PM-1's code generator lays out
 basic blocks in an order chosen specifically so the common case falls

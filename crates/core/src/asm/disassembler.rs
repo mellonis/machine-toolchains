@@ -190,7 +190,7 @@ pub fn disassemble_executable(
 
     let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();
     // The entry root is named `main`: the linker guarantees the entry
-    // symbol is literally `main` (docs/stdlib.md; docs/formats.md (.pmo)),
+    // symbol is literally `main` (docs/formats.md (.pmx entry)),
     // so the synthesis is faithful and restores docs/formats.md (assembly
     // text)'s round-trip claim (dis → asm → link reproduces the
     // executable). All other roots keep the address-derived name. When a
