@@ -6,5 +6,6 @@ pub(crate) mod identical_check_arms;
 pub(crate) mod leading_zeros;
 pub(crate) mod leftover_debugger;
 pub(crate) mod line_too_long;
+pub(crate) mod namespaced_main;
 pub(crate) mod redundant_jump;
 pub(crate) mod unused_label;
