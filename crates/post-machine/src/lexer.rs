@@ -1,6 +1,7 @@
 //! `.pmc` lexer (docs/language.md): source text → tokens with line:col.
 
 use crate::compiler::{CompileError, CompileErrorKind};
+use mtc_core::diagnostics::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
@@ -26,6 +27,15 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: u32,
     pub col: u32,
+    /// Length in characters. Every token is single-line; 0 only for Eof.
+    pub len: u32,
+}
+
+impl Token {
+    /// End-exclusive span of this token's source text.
+    pub fn span(&self) -> Span {
+        Span::new(self.line, self.col, self.line, self.col + self.len)
+    }
 }
 
 /// Identifier rule (docs/language.md): Unicode; first char alphabetic or
@@ -116,17 +126,41 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
         }
         if c == ':' {
             cur.bump();
-            let kind = if cur.peek() == Some(':') {
+            let (kind, len) = if cur.peek() == Some(':') {
                 cur.bump();
-                TokenKind::ColonColon
+                (TokenKind::ColonColon, 2)
             } else {
-                TokenKind::Colon
+                (TokenKind::Colon, 1)
             };
-            tokens.push(Token { kind, line, col });
+            tokens.push(Token {
+                kind,
+                line,
+                col,
+                len,
+            });
+            continue;
+        }
+        if c == '@' {
+            cur.bump();
+            // Sigil adjacency (docs/language.md): `@` is part of the
+            // callee name's spelling — whitespace, digits, punctuation,
+            // comments, or end of input after it are lex errors.
+            if !cur.peek().is_some_and(is_ident_start) {
+                return Err(err(
+                    line,
+                    col,
+                    "expected a function name immediately after `@`".into(),
+                ));
+            }
+            tokens.push(Token {
+                kind: TokenKind::At,
+                line,
+                col,
+                len: 1,
+            });
             continue;
         }
         let single = match c {
-            '@' => Some(TokenKind::At),
             '!' => Some(TokenKind::Bang),
             ',' => Some(TokenKind::Comma),
             ';' => Some(TokenKind::Semi),
@@ -138,7 +172,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
         };
         if let Some(kind) = single {
             cur.bump();
-            tokens.push(Token { kind, line, col });
+            tokens.push(Token {
+                kind,
+                line,
+                col,
+                len: 1,
+            });
             continue;
         }
         if c.is_ascii_digit() {
@@ -165,6 +204,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
                 kind: TokenKind::Number(value),
                 line,
                 col,
+                len: digits.len() as u32, // ASCII digits: bytes == chars
             });
             continue;
         }
@@ -178,10 +218,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
                     break;
                 }
             }
+            let len = name.chars().count() as u32;
             tokens.push(Token {
                 kind: TokenKind::Ident(name),
                 line,
                 col,
+                len,
             });
             continue;
         }
@@ -192,6 +234,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
         kind: TokenKind::Eof,
         line: cur.line,
         col: cur.col,
+        len: 0,
     });
     Ok(tokens)
 }
@@ -304,5 +347,40 @@ mod tests {
 
         let e = lex("99999999999").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::Lex(ref m) if m.contains("too large")));
+    }
+
+    #[test]
+    fn tokens_carry_char_lengths_and_spans() {
+        let tokens = lex("std::api 12 идиВКонец").unwrap();
+        // std (len 3) :: (len 2) api (len 3) 12 (len 2) идиВКонец (len 9, chars)
+        let lens: Vec<u32> = tokens.iter().map(|t| t.len).collect();
+        assert_eq!(lens, vec![3, 2, 3, 2, 9, 0]); // trailing 0 = Eof
+        let colon_colon = &tokens[1];
+        let s = colon_colon.span();
+        assert_eq!((s.start.line, s.start.col, s.end.col), (1, 4, 6));
+    }
+
+    #[test]
+    fn sigil_must_touch_the_callee_name() {
+        for src in [
+            "f() { @ qq(); }", // space after @
+            "f() { @5(); }",   // digit after @
+            "f() { @(); }",    // punctuation after @
+            "@",               // trailing @
+        ] {
+            let e = lex(src).unwrap_err();
+            assert!(
+                matches!(e.kind, CompileErrorKind::Lex(ref m)
+                    if m.contains("immediately after")),
+                "{src} should be a lex error about sigil adjacency, got {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tight_sigil_still_lexes() {
+        let tokens = lex("@qq()").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::At);
+        assert_eq!(tokens[1].kind, TokenKind::Ident("qq".into()));
     }
 }
