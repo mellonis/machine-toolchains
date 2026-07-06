@@ -112,3 +112,14 @@ fn nostdlib_makes_std_calls_unresolved() {
     let err = execute(&args(&["link", obj.to_str().unwrap(), "--nostdlib"])).unwrap_err();
     assert!(err.to_lowercase().contains("unresolved"));
 }
+
+#[test]
+fn compile_errors_render_one_position_prefix() {
+    let dir = scratch("err_prefix");
+    let src = dir.join("bad.pmc");
+    fs::write(&src, "main() { 1: flip; }").unwrap();
+    let err = execute(&args(&["compile", src.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("bad.pmc:1:"), "{err}");
+    assert!(err.contains("error:"), "{err}");
+    assert!(!err.contains("line 1"), "doubled prefix: {err}");
+}

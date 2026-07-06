@@ -101,8 +101,15 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
 
     let source =
         fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let out = compile_source(&source, options)
-        .map_err(|e| format!("{}:{}:{}: error: {}", input.display(), e.line, e.col, e))?;
+    let out = compile_source(&source, options).map_err(|e| {
+        format!(
+            "{}:{}:{}: error: {}",
+            input.display(),
+            e.line,
+            e.col,
+            e.kind
+        )
+    })?;
 
     let mut stderr = String::new();
     render_warnings(&mut stderr, input, &out.report);

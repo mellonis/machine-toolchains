@@ -62,7 +62,13 @@ impl std::fmt::Display for CompileError {
         } else {
             write!(f, "line {}: ", self.line)?;
         }
-        match &self.kind {
+        write!(f, "{}", self.kind)
+    }
+}
+
+impl std::fmt::Display for CompileErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
             CompileErrorKind::Lex(m) => write!(f, "{m}"),
             CompileErrorKind::Expected { what, found } => {
                 write!(f, "expected {what}, found {found}")
