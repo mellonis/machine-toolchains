@@ -212,8 +212,7 @@ fn lower_function(
     }
     let resolve = |label: u32, line: u32| -> Result<u32, CompileError> {
         label_block.get(&label).copied().ok_or(CompileError {
-            line,
-            col: 0,
+            span: mtc_core::diagnostics::Span::point(line, 1),
             kind: CompileErrorKind::UndefinedLabel(label),
         })
     };

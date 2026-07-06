@@ -105,8 +105,8 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
         format!(
             "{}:{}:{}: error: {}",
             input.display(),
-            e.line,
-            e.col,
+            e.span.start.line,
+            e.span.start.col,
             e.kind
         )
     })?;

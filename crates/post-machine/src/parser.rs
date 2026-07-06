@@ -183,8 +183,7 @@ impl Parser<'_> {
 
     fn err_at(t: &Token, kind: CompileErrorKind) -> CompileError {
         CompileError {
-            line: t.line,
-            col: t.col,
+            span: t.span(),
             kind,
         }
     }
@@ -360,8 +359,7 @@ impl Parser<'_> {
             f.exported = exported || (ns.is_empty() && f.name == "main");
             if functions.iter().any(|g| g.ns == f.ns && g.name == f.name) {
                 return Err(CompileError {
-                    line: f.line,
-                    col: f.col,
+                    span: mtc_core::diagnostics::Span::point(f.line, f.col),
                     kind: CompileErrorKind::DuplicateFunction(f.name),
                 });
             }
@@ -371,8 +369,7 @@ impl Parser<'_> {
             as_ns.push(f.name.clone());
             if self.namespaces.contains(&as_ns) {
                 return Err(CompileError {
-                    line: f.line,
-                    col: f.col,
+                    span: mtc_core::diagnostics::Span::point(f.line, f.col),
                     kind: CompileErrorKind::DuplicateFunction(f.name),
                 });
             }
@@ -420,8 +417,7 @@ impl Parser<'_> {
                 let child = self.function()?;
                 if nested.iter().any(|g: &Function| g.name == child.name) {
                     return Err(CompileError {
-                        line: child.line,
-                        col: child.col,
+                        span: mtc_core::diagnostics::Span::point(child.line, child.col),
                         kind: CompileErrorKind::DuplicateFunction(child.name),
                     });
                 }
@@ -435,12 +431,8 @@ impl Parser<'_> {
                     Some(TokenKind::Ident(_))
                 )
             {
-                let t = self.peek();
-                return Err(CompileError {
-                    line: t.line,
-                    col: t.col,
-                    kind: CompileErrorKind::NestedExport,
-                });
+                let t = self.peek().clone();
+                return Err(Self::err_at(&t, CompileErrorKind::NestedExport));
             }
             // Labels announced before the next statement (possibly stacked).
             let mut labels = Vec::new();
@@ -458,12 +450,8 @@ impl Parser<'_> {
             }
             if matches!(self.peek().kind, TokenKind::RBrace) {
                 if let Some(&label) = labels.first() {
-                    let t = self.peek();
-                    return Err(CompileError {
-                        line: t.line,
-                        col: t.col,
-                        kind: CompileErrorKind::DanglingLabel(label),
-                    });
+                    let t = self.peek().clone();
+                    return Err(Self::err_at(&t, CompileErrorKind::DanglingLabel(label)));
                 }
                 self.bump();
                 break;

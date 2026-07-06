@@ -75,8 +75,7 @@ impl Cursor<'_> {
 
 fn err(line: u32, col: u32, message: String) -> CompileError {
     CompileError {
-        line,
-        col,
+        span: Span::point(line, col),
         kind: CompileErrorKind::Lex(message),
     }
 }
@@ -336,7 +335,7 @@ mod tests {
     #[test]
     fn error_positions_and_kinds() {
         let e = lex("f() { $ }").unwrap_err();
-        assert_eq!((e.line, e.col), (1, 7));
+        assert_eq!((e.span.start.line, e.span.start.col), (1, 7));
         assert!(matches!(e.kind, CompileErrorKind::Lex(ref m) if m.contains('$')));
 
         let e = lex("/* never closed").unwrap_err();

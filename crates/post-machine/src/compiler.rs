@@ -4,18 +4,18 @@
 //! fatals through [`CompileError`]; non-fatal findings accumulate as
 //! [`Warning`]s — library code never prints (docs/cli.md).
 
+use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
 
 use crate::codegen::{CodegenOptions, emit_program};
 use crate::ir::IrProgram;
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 
-/// 1-based `line`; 1-based `col` counted in characters, or 0 when the
-/// error is attributed to a whole line.
+/// Fatal compile error at a real source span (1-based, char-counted,
+/// end-exclusive; see mtc_core::diagnostics).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
-    pub line: u32,
-    pub col: u32,
+    pub span: Span,
     pub kind: CompileErrorKind,
 }
 
@@ -58,12 +58,11 @@ pub enum CompileErrorKind {
 
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.col > 0 {
-            write!(f, "line {}:{}: ", self.line, self.col)?;
-        } else {
-            write!(f, "line {}: ", self.line)?;
-        }
-        write!(f, "{}", self.kind)
+        write!(
+            f,
+            "line {}:{}: {}",
+            self.span.start.line, self.span.start.col, self.kind
+        )
     }
 }
 
@@ -196,8 +195,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     );
     let mut object =
         crate::asm::assemble(&pma.text, options.debug_info).map_err(|e| CompileError {
-            line: 0,
-            col: 0,
+            span: Span::point(0, 0),
             kind: CompileErrorKind::Internal(format!("generated .pma failed to assemble: {e}")),
         })?;
     if options.debug_info {
@@ -226,8 +224,7 @@ fn check_duplicate_bindings(program: &crate::parser::Program) -> Result<(), Comp
                 let p = prev.get();
                 if p.path != import.path || p.alias != import.alias {
                     return Err(CompileError {
-                        line: import.line,
-                        col: 0,
+                        span: Span::point(import.line, 1),
                         kind: CompileErrorKind::DuplicateBinding(import.binding().to_string()),
                     });
                 }
@@ -483,6 +480,19 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
 mod tests {
     use super::*;
     use mtc_core::formats::object::SymbolDef;
+
+    #[test]
+    fn compile_error_carries_a_real_span() {
+        // Pins the shape this task introduces: a `CompileError` is built
+        // from a genuine `span: Span` (not a degenerate point) plus
+        // `kind`, and `Display` reads the span's START only.
+        let e = CompileError {
+            span: Span::new(1, 7, 1, 12),
+            kind: CompileErrorKind::UndefinedLabel(3),
+        };
+        assert_eq!((e.span.start.col, e.span.end.col), (7, 12));
+        assert_eq!(format!("{e}"), "line 1:7: undefined label `3`");
+    }
 
     #[test]
     fn compiles_to_an_object_with_symbols_and_relocations() {
