@@ -208,21 +208,20 @@ pub struct CompileOutput {
 }
 
 /// flatten's per-scope name maps, retained for scope-aware lint rules
-/// instead of being discarded. Not yet consumed within this crate — the
-/// lint layer that reads these fields lands as a separate, later body of
-/// work.
-#[allow(dead_code)]
+/// instead of being discarded.
 pub(crate) struct ScopeSummary {
     /// ns path -> (bare name -> full mangled name)
+    // consumed by a later lint rule (shadowed-import / namespaced-main)
+    #[allow(dead_code)]
     pub defs: HashMap<Vec<String>, HashMap<String, String>>,
     /// ns path -> (bare name -> (import index, full `::` path))
+    // consumed by a later lint rule (shadowed-import / namespaced-main)
+    #[allow(dead_code)]
     pub bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
 }
 
 /// The codegen-free front half of the pipeline: everything the lint
-/// layer (and a future LSP) needs, nothing it doesn't. Not yet fully
-/// consumed within this crate — see `ScopeSummary` above.
-#[allow(dead_code)]
+/// layer (and a future LSP) needs, nothing it doesn't.
 pub(crate) struct AnalysisOutput {
     pub tokens: Vec<Token>,
     pub ast: Program,
