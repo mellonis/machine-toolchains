@@ -76,6 +76,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-label", rules::unused_label::check),
     ("redundant-jump-to-next", rules::redundant_jump::check),
     ("identical-check-arms", rules::identical_check_arms::check),
+    ("leftover-debugger", rules::leftover_debugger::check),
 ];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
