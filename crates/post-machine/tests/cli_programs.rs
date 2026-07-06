@@ -199,7 +199,7 @@ fn emit_ir_duplicate_stage_labels_resolve_last_wins() {
     // stages resolve last-wins).
     assert_eq!(
         cli_ir, last_snapshot,
-        "CLI --emit-ir result should match the LAST occurrence of {} per ruling R4",
+        "CLI --emit-ir result should match the LAST occurrence of {} (last-wins)",
         repeating_label
     );
 }
@@ -409,4 +409,35 @@ fn run_accepts_dash_v() {
     execute(&args(&["link", dir.join("ok.pmo").to_str().unwrap()])).unwrap();
     let out = execute(&args(&["run", dir.join("ok.pmx").to_str().unwrap(), "-v"])).unwrap();
     assert_eq!(out.code, 0);
+}
+
+#[test]
+fn traced_run_off_the_code_end_matches_untraced() {
+    use mtc_post_machine::cli::execute_with;
+    let dir = scratch("trace_off_end");
+    let pma = dir.join("off.pma");
+    fs::write(&pma, ".func main\n        rgt\n").unwrap();
+    execute(&args(&["asm", pma.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("off.pmo").to_str().unwrap()])).unwrap();
+    let exe = dir.join("off.pmx");
+    // untraced: clean trap exit
+    let plain = execute(&args(&["run", exe.to_str().unwrap()])).unwrap();
+    assert_eq!(plain.code, 3);
+    // traced: same outcome, same stats, no panic; last line is synthetic
+    let mut trace = Vec::new();
+    let traced = execute_with(
+        &args(&["run", exe.to_str().unwrap(), "--trace"]),
+        &mut trace,
+    )
+    .unwrap();
+    assert_eq!(traced.code, 3);
+    assert_eq!(
+        traced.stdout, plain.stdout,
+        "traced and untraced runs must be identical"
+    );
+    let text = String::from_utf8(trace).unwrap();
+    assert!(
+        text.lines().last().unwrap().contains("<beyond code image>"),
+        "{text}"
+    );
 }

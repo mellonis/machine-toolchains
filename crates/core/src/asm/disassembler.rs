@@ -317,6 +317,12 @@ pub fn disassemble_executable(
 /// operand both fall back to `.byte`, length 1 (mirrors [`decode_one`],
 /// which returns `None` for exactly those cases). `resolve` maps a
 /// branch/call/jump target address to an optional display name.
+///
+/// Precondition: `addr` must be strictly inside `code` (`addr <
+/// code.len() as u32`) — this indexes `code[addr as usize]` directly.
+/// Callers rendering a fault address (e.g. a fetch that ran off the end
+/// of the code image) must guard the call themselves; see `pmt run
+/// --trace`'s handling of traced runs in `crates/post-machine/src/cli/run.rs`.
 pub fn listing_line(
     syntax: &ArchSyntax,
     code: &[u8],

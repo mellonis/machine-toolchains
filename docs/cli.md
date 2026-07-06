@@ -90,10 +90,12 @@ info when the objects carry -g debug data).
 
 Linking always adds the built-in standard library as an implicit last
 library unless `--nostdlib` is given (`docs/stdlib.md`); explicit `-l NAME`
-libraries are searched for on `-L` directories, in the order given, before
-falling back to the toolchain's own library directory. `-v` renders which
-defined-but-unreachable functions were dropped and how many call/jump sites
-relaxed to their short form versus stayed far.
+resolves `NAME.pmo` against the `-L` directories, in the order given, and
+errors if it isn't found on any of them — there is no on-disk library
+directory to fall back to; the standard library is embedded in the
+toolchain binary itself. `-v` renders which defined-but-unreachable
+functions were dropped and how many call/jump sites relaxed to their short
+form versus stayed far.
 
 ## `pmt dis`
 

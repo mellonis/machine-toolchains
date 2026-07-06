@@ -261,7 +261,18 @@ fn drive(
     loop {
         let ip = session.ip();
         let event = session.step_in(tape);
-        let (line, _) = mtc_core::asm::listing_line(&syntax, &exe.code, ip, &resolve);
+        // `ip` is the address the just-retired instruction was fetched
+        // from; when it faults by running off the end of the code image
+        // (fetch at ip == exe.code.len()), `listing_line` requires
+        // `addr < code.len()` and must not be called — render a synthetic
+        // line instead so a traced run reports the same trap the
+        // untraced run hits, without panicking.
+        let line = if (ip as usize) < exe.code.len() {
+            let (line, _) = mtc_core::asm::listing_line(&syntax, &exe.code, ip, &resolve);
+            line
+        } else {
+            format!("  {ip:04x}:  <beyond code image>")
+        };
         let _ = writeln!(
             w,
             "{line}  ; MF={} head={}",
