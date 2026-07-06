@@ -2,6 +2,7 @@
 //! `pub(crate) fn check(&LintContext, &mut Vec<Diagnostic>)` and is
 //! registered in `super::RULES` under its defect-named code.
 
+pub(crate) mod confusable_names;
 pub(crate) mod identical_check_arms;
 pub(crate) mod leading_zeros;
 pub(crate) mod leftover_debugger;

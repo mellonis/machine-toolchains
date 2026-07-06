@@ -79,6 +79,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("namespaced-main", rules::namespaced_main::check),
     ("shadowed-import", rules::shadowed_import::check),
     ("non-camel-case", rules::non_camel_case::check),
+    ("confusable-names", rules::confusable_names::check),
 ];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
