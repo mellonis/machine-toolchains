@@ -615,3 +615,25 @@ fn force_without_fix_errors_and_fatal_files_are_never_written() {
         "never written"
     );
 }
+
+#[test]
+fn lint_exclude_is_component_based_not_string_prefix() {
+    let dir = scratch("lint_exclude_prefix");
+    std::fs::create_dir_all(dir.join("vendor")).unwrap();
+    std::fs::create_dir_all(dir.join("vendored")).unwrap();
+    std::fs::write(dir.join("vendor/a.pmc"), "main() {\n5: right;\n}\n").unwrap();
+    std::fs::write(dir.join("vendored/b.pmc"), "main() {\n6: right;\n}\n").unwrap();
+    let out = execute(&args(&[
+        "lint",
+        dir.to_str().unwrap(),
+        "--exclude",
+        dir.join("vendor").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    // `vendor/` is pruned; the sibling `vendored/` (a superstring, not a
+    // path-component prefix) is NOT pruned and its findings appear.
+    assert!(out.stdout.contains("vendored"));
+    assert!(out.stdout.contains("b.pmc"));
+    assert!(!out.stdout.contains("vendor/a.pmc") && !out.stdout.contains("vendor\\a.pmc"));
+}

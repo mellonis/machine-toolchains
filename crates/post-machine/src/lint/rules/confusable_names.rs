@@ -114,4 +114,20 @@ mod tests {
                 .all(|d| d.code != "confusable-names")
         );
     }
+
+    #[test]
+    fn confusable_but_cross_scope_is_not_flagged() {
+        // `a::doIt` (namespace a) and top-level `do_it` normalize to the
+        // same "doit" but are DIFFERENT raw names in DIFFERENT scopes —
+        // confusable-names is same-scope-only, so it must NOT fire.
+        // (`do_it` still trips non-camel-case; we filter for the code we mean.)
+        let src = "namespace a {\nexport doIt() { right; }\n}\ndo_it() { left; }\nmain() { @a::doIt(); @do_it(); }\n";
+        let report = lint(src, LintOptions::default()).unwrap();
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .all(|d| d.code != "confusable-names")
+        );
+    }
 }

@@ -60,4 +60,20 @@ mod tests {
         let report = lint(&src, LintOptions::default()).unwrap();
         assert!(report.diagnostics.iter().all(|d| d.code != "line-too-long"));
     }
+
+    #[test]
+    fn multibyte_over_limit_span_end_is_char_counted() {
+        // "// " (3 chars) + 78 Cyrillic chars = 81 chars (159 bytes) — over 80.
+        let long = format!("// {}", "ж".repeat(78));
+        let src = format!("{long}\nmain() {{ right; }}\n");
+        let report = lint(&src, LintOptions::default()).unwrap();
+        let d: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "line-too-long")
+            .collect();
+        assert_eq!(d.len(), 1);
+        assert_eq!((d[0].span.start.line, d[0].span.start.col), (1, 81));
+        assert_eq!(d[0].span.end.col, 82); // char-counted; a byte count would be ~160
+    }
 }

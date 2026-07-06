@@ -68,4 +68,23 @@ mod tests {
         let report = lint(src, LintOptions::default()).unwrap();
         assert!(report.diagnostics.iter().all(|d| d.code != "leading-zeros"));
     }
+
+    #[test]
+    fn leading_zeros_boundary_cases() {
+        // bare `0` is already canonical — NOT flagged.
+        let r = lint("main() { 0: right; }", LintOptions::default()).unwrap();
+        assert!(r.diagnostics.iter().all(|d| d.code != "leading-zeros"));
+        // `00` fires, canonical `0`.
+        let r = lint("main() { 00: right; }", LintOptions::default()).unwrap();
+        let lz: Vec<_> = r
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "leading-zeros")
+            .collect();
+        assert_eq!(lz.len(), 1);
+        assert_eq!(lz[0].fix.as_ref().unwrap().edits[0].replacement, "0");
+        // `10` starts with a non-zero digit — NOT flagged.
+        let r = lint("main() { 10: right; }", LintOptions::default()).unwrap();
+        assert!(r.diagnostics.iter().all(|d| d.code != "leading-zeros"));
+    }
 }
