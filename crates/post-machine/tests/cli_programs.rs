@@ -505,3 +505,66 @@ fn lint_unknown_allow_code_is_a_tool_error() {
     .unwrap_err();
     assert!(err.contains("no-such-rule"));
 }
+
+#[test]
+fn lint_walks_directories_sorted_skips_dot_dirs_and_excludes() {
+    let dir = scratch("lint_walk");
+    std::fs::create_dir_all(dir.join("src/nested")).unwrap();
+    std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor")).unwrap();
+    // b before a alphabetically reversed on disk creation order.
+    std::fs::write(dir.join("src/b.pmc"), "main() {\n5: right;\n}\n").unwrap();
+    std::fs::write(
+        dir.join("src/a.pmc"),
+        "a() {\n6: right;\n}\nmain() { @a(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("src/nested/c.pmc"),
+        "c() {\n7: right;\n}\nmain() { @c(); }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join(".hidden/d.pmc"), "main() {\n8: right;\n}\n").unwrap();
+    std::fs::write(dir.join("vendor/e.pmc"), "main() {\n9: right;\n}\n").unwrap();
+
+    let out = execute(&args(&[
+        "lint",
+        dir.to_str().unwrap(),
+        "--exclude",
+        dir.join("vendor").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    // Sorted walk: a.pmc findings before b.pmc, nested/c.pmc last.
+    let a = out.stdout.find("a.pmc").unwrap();
+    let b = out.stdout.find("b.pmc").unwrap();
+    let c = out.stdout.find("c.pmc").unwrap();
+    assert!(a < b && b < c);
+    // Dot-dir and excluded subtree never appear.
+    assert!(!out.stdout.contains(".hidden"));
+    assert!(!out.stdout.contains("vendor"));
+}
+
+#[test]
+fn lint_zero_match_path_is_an_error() {
+    let dir = scratch("lint_zero");
+    std::fs::create_dir_all(dir.join("empty")).unwrap();
+    let err = execute(&args(&["lint", dir.join("empty").to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("no .pmc files"));
+}
+
+#[test]
+fn lint_batch_survives_a_fatal_file_and_still_fails() {
+    let dir = scratch("lint_fatal");
+    std::fs::write(dir.join("bad.pmc"), "main( {\n").unwrap();
+    std::fs::write(dir.join("good.pmc"), "main() { right; }\n").unwrap();
+    let out = execute(&args(&[
+        "lint",
+        dir.join("bad.pmc").to_str().unwrap(),
+        dir.join("good.pmc").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    assert!(out.stderr.contains("error:"));
+    assert!(out.stderr.contains("bad.pmc"));
+}
