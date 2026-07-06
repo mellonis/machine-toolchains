@@ -37,11 +37,9 @@ pub struct FlagSpec {
     /// check — docs/cli.md) but a completion script can still steer the
     /// user away from the clash.
     pub exclusive_group: Option<String>,
-    /// Set when a flag is meaningful only alongside another — e.g. the
-    /// forthcoming `pmt lint --fix --force`, where `--force` requires
-    /// `--fix` (see the design doc's `pmt lint` sketch). No flag in the
-    /// current (master) registry needs this; the field exists so the
-    /// shape is proven ahead of `lint` landing.
+    /// Set when a flag is meaningful only alongside another — e.g.
+    /// `pmt lint --fix --force`, where `--force` requires `--fix`, and
+    /// `pmt run --head` requiring `--tape`.
     pub requires: Option<String>,
 }
 
@@ -100,7 +98,6 @@ impl FlagSpec {
         self
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // only exercised by the lint-shape proof test today
     fn requires(mut self, flag: &str) -> Self {
         self.requires = Some(flag.to_string());
         self
@@ -145,9 +142,8 @@ pub struct FileHint {
     /// Glob suffixes without the leading `*.` (`"pmc"`, `"pmx.map"`).
     pub extensions: Vec<String>,
     /// Whether a directory is ALSO a valid completion alongside a
-    /// matching file — the forthcoming `pmt lint PATH...` needs this
-    /// (it also accepts directories); no current entry sets it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// matching file — `pmt lint PATH...`/`--exclude` set this since
+    /// they also accept directories.
     pub dirs: bool,
 }
 
@@ -294,6 +290,35 @@ fn link_spec() -> CommandSpec {
     }
 }
 
+/// A `.pmc`-filtered `FileHint` that ALSO accepts directories (`lint`
+/// walks directories recursively for `*.pmc`, docs/lint.md).
+fn pmc_or_dir() -> FileHint {
+    FileHint {
+        extensions: strings(&["pmc"]),
+        dirs: true,
+    }
+}
+
+fn lint_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["lint"]),
+        positional: Positional::OneOrMore(PositionalHint::File(pmc_or_dir())),
+        flags: vec![
+            FlagSpec::value(
+                "--exclude",
+                "skip a path (repeatable)",
+                ValueHint::File(pmc_or_dir()),
+            )
+            .repeatable(),
+            FlagSpec::value("--allow", "allow a lint code (repeatable)", ValueHint::Text)
+                .repeatable(),
+            FlagSpec::boolean("--fix", "apply fixes"),
+            FlagSpec::boolean("--force", "overwrite without confirmation").requires("--fix"),
+            FlagSpec::boolean("--help", "show subcommand help"),
+        ],
+    }
+}
+
 fn dis_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["dis"]),
@@ -417,6 +442,7 @@ fn top_level_help(name: &str) -> &'static str {
         "compile" => ".pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)",
         "asm" => ".pma assembly -> .pmo object",
         "link" => ".pmo objects -> .pmx executable (+ .pmx.map sidecar)",
+        "lint" => "lint .pmc sources (hygiene findings; docs/lint.md)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
         "run" => "execute a .pmx on a tape",
         "tape" => "build/show .pmt tape-block snapshots",
@@ -466,15 +492,16 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing master's real, currently-dispatched CLI
-/// surface: 7 subcommands (`compile`/`asm`/`link`/`dis`/`tape`/`run`/`ir`,
-/// the latter two nested) plus `completions` itself, the 8th. `lint`
-/// (forthcoming) and `build` (issue-tracked) are deliberately absent —
-/// see the design doc for the exact entries they'll need.
+/// surface: 9 top-level subcommands (`compile`/`asm`/`link`/`lint`/`dis`/
+/// `tape`/`run`/`ir`, the latter two nested) plus `completions` itself.
+/// `build` (issue-tracked) is deliberately absent — see the design doc
+/// for the entry it'll need.
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
         asm_spec(),
         link_spec(),
+        lint_spec(),
         dis_spec(),
         tape_build_spec(),
         tape_show_spec(),
@@ -541,6 +568,7 @@ mod tests {
                 "compile",
                 "asm",
                 "link",
+                "lint",
                 "dis",
                 "tape",
                 "run",
@@ -560,42 +588,30 @@ mod tests {
         assert_eq!(expand(&flag), vec!["--fno-inline", "--fno-dce"]);
     }
 
-    /// Proves the registry shape can express `pmt lint`'s harder cases
-    /// (repeatable positional paths that also accept directories,
-    /// repeatable value-taking flags, and a boolean flag gated on
-    /// another) WITHOUT registering `lint` as an active entry — see the
-    /// design doc's one-line sketch, which this mirrors.
+    /// `lint`'s harder cases: a repeatable positional that also accepts
+    /// directories, a repeatable value-taking `--exclude`, and `--force`
+    /// gated on `--fix` — the shape the design doc's sketch proved ahead
+    /// of `lint` landing as an active entry (see git history), now
+    /// checked directly against the real registered `CommandSpec`.
     #[test]
-    fn registry_shape_can_express_the_forthcoming_pmt_lint() {
-        let lint = CommandSpec {
-            path: strings(&["lint"]),
-            positional: Positional::OneOrMore(PositionalHint::File(FileHint {
-                extensions: strings(&["pmc"]),
-                dirs: true, // lint also accepts directories
-            })),
-            flags: vec![
-                FlagSpec::value(
-                    "--exclude",
-                    "skip a path (repeatable)",
-                    ValueHint::File(FileHint {
-                        extensions: strings(&["pmc"]),
-                        dirs: true,
-                    }),
-                )
-                .repeatable(),
-                FlagSpec::value("--allow", "allow a lint code (repeatable)", ValueHint::Text)
-                    .repeatable(),
-                FlagSpec::boolean("--fix", "apply fixes"),
-                FlagSpec::boolean("--force", "overwrite without confirmation").requires("--fix"),
-            ],
-        };
+    fn lint_positional_and_flags_carry_dirs_repeatable_and_requires() {
+        let reg = registry();
+        let lint = reg
+            .commands
+            .iter()
+            .find(|c| c.path == vec!["lint".to_string()])
+            .expect("lint should be registered");
 
         let Positional::OneOrMore(PositionalHint::File(hint)) = &lint.positional else {
             panic!("lint positional should be one-or-more files/dirs");
         };
         assert!(hint.dirs, "lint positionals also accept directories");
-        assert!(lint.flags[0].repeatable, "--exclude is repeatable");
-        assert!(lint.flags[1].repeatable, "--allow is repeatable");
-        assert_eq!(lint.flags[3].requires.as_deref(), Some("--fix"));
+
+        let exclude = lint.flags.iter().find(|f| f.name == "--exclude").unwrap();
+        assert!(exclude.repeatable, "--exclude is repeatable");
+        let allow = lint.flags.iter().find(|f| f.name == "--allow").unwrap();
+        assert!(allow.repeatable, "--allow is repeatable");
+        let force = lint.flags.iter().find(|f| f.name == "--force").unwrap();
+        assert_eq!(force.requires.as_deref(), Some("--fix"));
     }
 }

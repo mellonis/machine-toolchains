@@ -269,15 +269,34 @@ fn value_action(hint: &ValueHint) -> String {
     }
 }
 
-/// `dirs` (also-accept-a-directory) is unused by every currently-live
-/// entry — only the `pmt lint` shape-proof test sets it — so directory-
-/// aware globbing (e.g. via `_alternative`) is left for when `lint`
-/// actually lands rather than guessed at now.
-fn file_action(hint: &FileHint) -> String {
-    match hint.extensions.as_slice() {
+/// The plain extension-filtered glob action, with no directory
+/// alternative — every non-`dirs` entry (design doc §6.1).
+fn glob_action(extensions: &[String]) -> String {
+    match extensions {
         [] => "_files".to_string(),
         [one] => format!("_files -g \"*.{one}\""),
         many => format!("_files -g \"*.({})\"", many.join("|")),
+    }
+}
+
+/// `dirs: true` (`pmt lint`'s positional and its `--exclude`) also
+/// accepts a directory as a complete answer, not just a waypoint on the
+/// way to a matching file — plain `_files -g` lets you traverse through
+/// directories but never offers one as the finished argument. Per the
+/// design doc (§6.1), this renders as a zsh `_alternative` combining the
+/// extension-filtered glob with a bare directory completion
+/// (`_files -/`). The glob action is embedded as an `_alternative`
+/// `tag:description:action` sub-spec, so its own double quotes are
+/// escaped (`\"`) to nest inside that sub-spec's double quotes; the
+/// whole thing then sits inside the OUTER single-quoted `_arguments`
+/// spec line, where embedded double quotes and backslashes are literal.
+fn file_action(hint: &FileHint) -> String {
+    let glob = glob_action(&hint.extensions);
+    if hint.dirs {
+        let escaped_glob = glob.replace('"', "\\\"");
+        format!("_alternative \"files:file:{escaped_glob}\" \"dirs:directory:_files -/\"")
+    } else {
+        glob
     }
 }
 
@@ -347,6 +366,7 @@ mod tests {
             "compile",
             "asm",
             "link",
+            "lint",
             "dis",
             "tape",
             "run",
@@ -414,6 +434,24 @@ mod tests {
         assert!(script.contains("(-O0)-O1["), "{script}");
         assert!(script.contains("(--tape)--tape-block["), "{script}");
         assert!(script.contains("(--tape-block)--tape["), "{script}");
+    }
+
+    #[test]
+    fn dirs_true_renders_a_zsh_alternative_of_glob_and_directory() {
+        let script = render(&registry());
+        // `lint`'s positional and its `--exclude` both accept a `.pmc`
+        // file OR a directory as a complete answer (design doc §6.1).
+        let expected =
+            "_alternative \"files:file:_files -g \\\"*.pmc\\\"\" \"dirs:directory:_files -/\"";
+        assert!(
+            script.contains(expected),
+            "missing dirs-aware _alternative: {script}"
+        );
+        assert_eq!(
+            script.matches(expected).count(),
+            2,
+            "expected lint's positional AND --exclude to both render it: {script}"
+        );
     }
 
     #[test]
