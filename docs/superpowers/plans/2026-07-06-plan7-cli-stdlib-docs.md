@@ -2319,6 +2319,9 @@ pub(super) fn run(
         return Ok(CliOutput::ok(RUN_USAGE.into(), String::new()));
     }
     let trace = args.flag("--trace");
+    // -v is accepted and currently a no-op (stats always print) — it must
+    // be CONSUMED or positionals() rejects it (ratified 2026-07-06).
+    let _verbose = args.flag("-v");
     let strict = args.flag("--strict-cells");
     let no_step_limit = args.flag("--no-step-limit");
     let max_steps = match args.value("--max-steps")? {
@@ -2364,14 +2367,19 @@ pub(super) fn run(
     let map = super::inspect::sidecar_map(exe_path); // shared with dis (see step note)
 
     let stderr = String::new(); // trace is NOT buffered here (R10)
-    let trace_to = |w: &mut dyn std::io::Write| trace.then_some(w);
+    // free fn, not a closure: a closure's Fn impl pins one lifetime for
+    // its &mut argument, but this is called at two independent sites
+    // (Task-6 finding, deviation ratified 2026-07-06)
+    fn trace_to(trace: bool, w: &mut dyn std::io::Write) -> Option<&mut dyn std::io::Write> {
+        if trace { Some(w) } else { None }
+    }
     let (outcome, stats) = if strict {
         let mut wrapped = StrictTape::new(tape);
-        let r = drive(&machine, &exe, &mut wrapped, options, trace_to(trace_out), map.as_ref());
+        let r = drive(&machine, &exe, &mut wrapped, options, trace_to(trace, trace_out), map.as_ref());
         tape = wrapped.into_inner();
         r
     } else {
-        drive(&machine, &exe, &mut tape, options, trace_to(trace_out), map.as_ref())
+        drive(&machine, &exe, &mut tape, options, trace_to(trace, trace_out), map.as_ref())
     };
 
     let snapshot = tape.to_snapshot();
@@ -2484,6 +2492,16 @@ fn drive(
             tape.head()
         );
         match event {
+            // A trap pause is terminal for a non-interactive trace: the
+            // faulting line was just written — looping again would print
+            // it twice via the Finished repeat (ratified 2026-07-06;
+            // Task-6 implementer verified the doubling empirically).
+            DebugEvent::Paused(PauseCause::Trap(_)) => {
+                return (
+                    session.finished().expect("trap pause implies finished"),
+                    session.stats(),
+                );
+            }
             DebugEvent::Paused(_) => {}
             DebugEvent::Finished(outcome) => return (outcome, session.stats()),
         }
@@ -2493,7 +2511,7 @@ fn drive(
 
 Notes for the implementer:
 - `sidecar_map`: extract the silent-sidecar half of Task 6 Step 2's `load_map` into a `pub(super) fn sidecar_map(exe_path: &Path) -> Option<MapFile>` in `inspect.rs` and reuse from both places.
-- A trap pause (`Paused(Trap)`) prints nothing extra and the next `step_in` returns `Finished` — the loop above handles it; the traced line count therefore includes the faulting instruction once.
+- A trap pause (`Paused(Trap)`) ends the traced run immediately (see the terminal arm above) — the traced line count includes the faulting instruction exactly once.
 - `vm/mod.rs` re-exports: `StrictTape` is NOT currently re-exported — extend to `pub use devices::{InfiniteTape, StrictTape, Tape};`. `Tape`, `Outcome`, `TactProfile`, and (from Task 1) `DebugSession`/`DebugEvent`/`PauseCause` are already importable as written.
 - Wire the three `mod` declarations + match arms in `cli/mod.rs` (`mod inspect; mod run;`).
 
