@@ -25,6 +25,12 @@ SUBCOMMANDS:
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 ```
 
+`pmt --version` prints two lines: `pmt <VERSION>` (the toolchain crate's own
+version) and `pmc language <VERSION>` (the `.pmc` language acceptance-contract
+version — `docs/language.md`). The two numbers move on independent axes: a
+crate release with no grammar change repeats the same language-version line,
+while the language version only bumps when the grammar itself changes.
+
 Every flag below appears verbatim in the corresponding subcommand's
 `--help` text; this page is a reference, not a paraphrase.
 
@@ -53,9 +59,10 @@ so `-O0`/`-O1`/`-g`/`--strip-debugger` can still override a piece of a
 preset on the same command line. The default build (no flags) is `-O0`, no
 debug info. Compile warnings (undeclared externals, unused imports, unused
 functions — `docs/language.md (visibility)`) always print to stderr as
-`FILE:LINE: warning: MESSAGE`; `-v` additionally prints the optimizer's
-per-pass round report; `-Werror` turns every warning into a compile
-failure. `--emit-ir` writes `<output base>.ir.json` — see
+`FILE:LINE:COL: warning: MESSAGE` (the column is new; `-Werror` semantics are
+unchanged by it); `-v` additionally prints the optimizer's per-pass round
+report; `-Werror` turns every warning into a compile failure. `--emit-ir`
+writes `<output base>.ir.json` — see
 `docs/language.md (the IR artifact)` and `docs/formats.md (IR JSON)`.
 "Repeated stages resolve last-wins" refers to snapshot labels, not the
 flag: a stage label captured in several optimizer rounds (e.g.

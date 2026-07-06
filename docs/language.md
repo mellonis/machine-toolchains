@@ -1,5 +1,13 @@
 # The `.pmc` language reference
 
+The `.pmc` language version is **0.2** (pre-1.0: the version is `0.N` and `N`
+bumps on any grammar change; at a declared 1.0 the axes activate — major =
+breaking acceptance change, minor = additive syntax; no patch digit —
+spec-text corrections are errata, implementation-conformance fixes live in
+the crate changelog). The v1 toolchain's grammar is retroactively 0.1; the
+sigil-adjacency and reserved-word path-segment tightenings documented below
+are the 0.2 change.
+
 `.pmc` is the C-like source language for the Post-machine toolchain. Control
 flow is deliberately flat: labels, `goto`, `check`, and function calls only —
 no loops, no general `if`, no expressions. A `.pmc` file compiles to a `.pmo`
@@ -35,13 +43,21 @@ alphanumeric or `_`. This is a conservative subset of JS `ID_Start`/
 `ID_Continue`, and it is exactly the `.pma` symbol grammar (see
 `docs/formats.md (assembly text)`), so every compiled name survives the trip
 through generated assembly unchanged. Identifiers are case-sensitive.
-Comments are `//` to end of line and `/* ... */` blocks.
+Comments are `//` to end of line and `/* ... */` blocks; block comments do
+not nest — the first `*/` closes the comment, so `/* /* nested */ */` leaves
+a stray `*/` behind as a lex error rather than a doubly-nested comment. A
+lone `/` that starts neither `//` nor `/*` is a lex error, and so is an
+unterminated `/* ...` block that never finds its closing `*/`.
 
 ### Statements
 
-Every command takes an optional **successor** in parentheses: a numeric label
-(jump there afterwards) or `!` (return afterwards). No successor means fall
-through to the next statement. Returning from `main` stops the machine.
+The four tape builtins and `@`-calls take an optional **successor** in
+parentheses: a numeric label (jump there afterwards) or `!` (return
+afterwards); omitting it falls through to the next statement. `check` takes
+two mandatory arms instead — one per outcome, each a label or `!` — not a
+single optional successor. `goto` takes one mandatory numeric label, never
+optional and never `!`. `halt` and `debugger` take no successor at all.
+Returning from `main` stops the machine.
 
 | Statement | Meaning |
 |---|---|
@@ -52,7 +68,7 @@ through to the next statement. Returning from `main` stops the machine.
 | `goto N;` | unconditional jump; `N` is a numeric label only — `goto !;` is a syntax error (put `(!)` on the preceding command instead) |
 | `@name();` `@name(5);` `@name(!);` | call a user function (`@` sigil), with the same optional successor (`@name(!)` is a tail call) |
 | `N:` | numeric label, local to the enclosing function |
-| `cmd, cmd, …, cmd;` | comma group: commands run in sequence under one statement. Only the last item may carry a successor or be a `check` or `halt`; earlier items must be bare (builtins, `debugger`, or `@calls`) — `halt` mid-group is rejected for the same reason mid-group `check` is: the rest could never run. A label applies to the whole group. |
+| `cmd, cmd, …, cmd;` | comma group: commands run in sequence under one statement. Only the last item may carry a successor or be a `check` or `halt`; earlier items must be bare (builtins, `debugger`, or `@calls`) — `halt` mid-group is rejected for the same reason mid-group `check` is: the rest could never run. `goto` is excluded from a comma group entirely, not merely from non-last position — it may not appear in a group at all, first, middle, or last. A label applies to the whole group. |
 
 There is no `return` keyword: mid-function return is the `(!)` successor, and
 the last command of a body may omit it — falling off the end is an implicit
@@ -65,6 +81,8 @@ return (in `main`, an implicit stop).
 // errors — non-last items must be bare:
 // 3:  left(1), left(2);        // successor mid-group
 // 4:  check(1, 2), left;       // check mid-group
+// 5:  goto 1, left;            // goto never groups, not even first
+// 6:  left, goto 1;            // ...nor last
 ```
 
 ### Rules
@@ -72,15 +90,30 @@ return (in `main`, an implicit stop).
 - **Reserved words** (cannot name a function): `goto`, `check`, `left`,
   `right`, `mark`, `unmark`, `halt`, `debugger`. `export`, `use`,
   `namespace`, and `as` are CONTEXTUAL keywords, not reserved — see
-  Visibility below.
+  Visibility below. The guard applies to every `::` path segment, not just
+  a lone head name: the same bar that stops a reserved word naming a
+  function also stops it naming any segment of a qualified call or import
+  path — `@std::goto();` and `use std::goto;` are both syntax errors,
+  because such a symbol could never be defined from `.pmc` source in the
+  first place.
+- **Sigil adjacency:** `@` must be immediately followed by the callee
+  name — no whitespace, digit, punctuation, comment, or end of input
+  between them; `@ qq();` is a syntax error, because the sigil is part of
+  the name's spelling. This is specific to `@`: spaced label colons
+  (`1 : right;`) and spaced paths (`std :: goToEnd`) are unaffected and
+  remain legal.
 - Builtins may omit `()`. User calls are written `@name();` — the `@` prefix
   and parens are required. A bare identifier statement (with or without
   parens, no `@`) is an error unless it names a builtin; putting `@` on a
   builtin name is an error too.
 - Labels are decimal numbers, unique per function, referenced only by `goto`
-  and `check` in the same function. Declaration order is free.
+  and `check` in the same function. Declaration order is free. Labels may
+  stack — `1: 2: left;` names one statement with both labels; either one
+  reaches it from a `goto` or `check`.
 - Falling off the end of a function body is an implicit return — the last
-  command's `(!)` may always be omitted.
+  command's `(!)` may always be omitted. A function body may also be empty
+  (`f() { }`), which compiles to an immediate return (in `main`, an
+  immediate stop).
 - Calling an undefined function is not a compile error: it becomes an
   external symbol resolved by the linker (no `extern` boilerplate needed) —
   but the compiler warns unless the name is declared with `use` or called
@@ -92,9 +125,10 @@ return (in `main`, an implicit stop).
 
 - **Hidden by default:** top-level functions are module-local unless
   prefixed `export`; the un-namespaced top-level `main` always exports
-  regardless. Local functions are bound directly within their own object,
-  invisible to cross-object resolution — they can neither shadow nor be
-  shadowed by another object's symbols of the same name.
+  regardless — writing `export main() { … }` is therefore a redundant
+  no-op, not an error. Local functions are bound directly within their own
+  object, invisible to cross-object resolution — they can neither shadow
+  nor be shadowed by another object's symbols of the same name.
 - **Nested definitions** (`outer() { inner() { … } … @inner(); }`): flat
   code, scoped callability — an inner function is callable from its
   parent's body and deeper only. It is always local, hoisted (visible
@@ -109,7 +143,10 @@ return (in `main`, an implicit stop).
   become `ns::path::name` symbols — namespaces join with `::`, nesting
   keeps `.` (symbols self-decompose at the last `::`; see below).
   Namespace names share the name pool with functions at the same scope.
-  Only the un-namespaced top-level `main` is ever the program entry.
+  Only the un-namespaced top-level `main` is ever the program entry: a
+  `main` defined inside a `namespace` block is an ordinary function like
+  any other — it is not auto-exported (it needs its own `export` to be
+  visible outside its module) and it is never the program's entry point.
 - **Imports:** `use path [as alias][, path…];` declares an external symbol
   by its full name and binds ONE bare name (the alias if given, else the
   path's last segment) into the declaring scope. A path is
@@ -118,8 +155,11 @@ return (in `main`, an implicit stop).
   level and inside `namespace` blocks; the binding is scoped there and
   below (inner scopes shadow outer ones). Two imports binding the same
   bare name in the same scope are an error (keyed on the name AFTER
-  aliasing); a function definition always outranks an import binding of
-  the same name.
+  aliasing) — UNLESS the two `use` lines are exactly identical (same path
+  and alias), in which case the duplicate is tolerated: the first `use`
+  wins the binding, so the second is never counted as used and surfaces as
+  an unused-import warning instead (see Warnings below). A function
+  definition always outranks an import binding of the same name.
 - **Qualified calls:** `@ns::path::name()` is absolute — it skips the scope
   chain entirely, uses `::`-separated segments only (nested functions stay
   unnameable this way), and is self-declaring: it never triggers the
