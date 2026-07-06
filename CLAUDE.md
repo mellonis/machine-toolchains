@@ -93,3 +93,22 @@ An embedded `.pmc` string (`include_str!("std.pmc")`, 11 exported `std::` routin
 ## Commit style
 
 Conventional commits with scope: `feat(cli):`, `fix(core):`, `test(post-machine):`, `docs(plan):`, `polish(post-machine):`.
+
+## Version spaces and release notes
+
+The repo carries several independently versioned contracts — the
+toolchain crates, the `.pmc` language (`PMC_LANG_VERSION`, an acceptance
+contract: pre-1.0 it is `0.N` and N bumps on ANY grammar change;
+major/minor axes activate at a declared 1.0; no patch digit — errata and
+implementation-conformance fixes never move it), the per-arch `.pma`
+dialects (same kind of contract; PM-1's is implicitly 0.1 until its
+first change introduces a constant), `IR_VERSION` (JSON encoding), and
+the container formats (MO/MX/MT). The toolchain version is never the
+carrier for a language version.
+
+Release notes open with a **version block** listing ALL of these spaces
+explicitly, stating `unchanged` where nothing moved — the block doubles
+as a compatibility matrix across releases. Component sections follow
+only where changes exist. A future `CHANGELOG.md` uses the same
+structure in ref-free prose (published-docs policy); tracker links
+belong in GH release notes.
