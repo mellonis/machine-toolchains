@@ -2,6 +2,7 @@
 //! Libraries never print; every byte of terminal output originates here.
 
 mod build;
+mod completions;
 mod inspect;
 mod lint;
 mod run;
@@ -31,14 +32,15 @@ pmt — Post-machine toolchain
 USAGE: pmt <SUBCOMMAND> [ARGS]
 
 SUBCOMMANDS:
-  compile  .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
-  asm      .pma assembly -> .pmo object
-  link     .pmo objects -> .pmx executable (+ .pmx.map sidecar)
-  lint     lint .pmc sources (hygiene findings; docs/lint.md)
-  dis      disassemble a .pmo or .pmx (--listing for the address view)
-  run      execute a .pmx on a tape
-  tape     build/show .pmt tape-block snapshots
-  ir       render --emit-ir JSON (ir graph -> Mermaid)
+  compile      .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
+  asm          .pma assembly -> .pmo object
+  link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
+  lint         lint .pmc sources (hygiene findings; docs/lint.md)
+  dis          disassemble a .pmo or .pmx (--listing for the address view)
+  run          execute a .pmx on a tape
+  tape         build/show .pmt tape-block snapshots
+  ir           render --emit-ir JSON (ir graph -> Mermaid)
+  completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 ";
@@ -71,6 +73,7 @@ pub fn execute_with(
         Some("tape") => inspect::tape(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
+        Some("completions") => completions::completions(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
 }
