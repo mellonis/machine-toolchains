@@ -14,14 +14,15 @@ pmt — Post-machine toolchain
 USAGE: pmt <SUBCOMMAND> [ARGS]
 
 SUBCOMMANDS:
-  compile  .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
-  asm      .pma assembly -> .pmo object
-  link     .pmo objects -> .pmx executable (+ .pmx.map sidecar)
-  lint     lint .pmc sources (hygiene findings; docs/lint.md)
-  dis      disassemble a .pmo or .pmx (--listing for the address view)
-  run      execute a .pmx on a tape
-  tape     build/show .pmt tape-block snapshots
-  ir       render --emit-ir JSON (ir graph -> Mermaid)
+  compile      .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
+  asm          .pma assembly -> .pmo object
+  link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
+  lint         lint .pmc sources (hygiene findings; docs/lint.md)
+  dis          disassemble a .pmo or .pmx (--listing for the address view)
+  run          execute a .pmx on a tape
+  tape         build/show .pmt tape-block snapshots
+  ir           render --emit-ir JSON (ir graph -> Mermaid)
+  completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 ```
@@ -248,3 +249,27 @@ each function's control-flow graph as a Mermaid `flowchart TD`; block
 contents (labels, ops, terminal instruction) become node text, `check`
 terminators become a pair of `MF`/`!MF` edges. `--function NAME` restricts
 output to one function.
+
+## `pmt completions`
+
+```
+USAGE: pmt completions <SHELL>
+
+Emits a shell completion script to stdout for the given SHELL (zsh; bash
+and fish are recognized but not yet implemented).
+
+  pmt completions zsh > ~/.zfunc/_pmt
+```
+
+The subcommand's own flag/positional surface, and every other
+subcommand's flags and file-extension-filtered positionals, are driven
+from one in-crate registry rather than hand-written per shell — this is
+what keeps the generated script from drifting out of sync with the
+flags the parser actually accepts as subcommands and flags change over
+time. `zsh` completes subcommand names (including the nested `tape
+build`/`tape show` and `ir graph`), each subcommand's flags (long and
+short forms, `-O0`/`-O1` as an either/or pair, `--emit-ir`'s known
+stages), and file arguments filtered to the extension the subcommand
+actually reads. `bash` and `fish` are recognized shell names so the
+error names them explicitly rather than rejecting them as unknown, but
+neither renders yet.
