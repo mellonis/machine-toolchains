@@ -5,12 +5,16 @@
 //! span-carrying, coded [`Diagnostic`]s — library code never prints
 //! (docs/cli.md).
 
+use std::collections::HashMap;
+
 use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::ObjectFile;
 
 use crate::codegen::{CodegenOptions, emit_program};
 use crate::ir::IrProgram;
+use crate::lexer::Token;
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
+use crate::parser::Program;
 
 /// Fatal compile error at a real source span (1-based, char-counted,
 /// end-exclusive; see mtc_core::diagnostics).
@@ -155,16 +159,58 @@ pub struct CompileOutput {
     pub report: CompileReport,
 }
 
+/// flatten's per-scope name maps, retained for scope-aware lint rules
+/// instead of being discarded. Not yet consumed within this crate — the
+/// lint layer that reads these fields lands as a separate, later body of
+/// work.
+#[allow(dead_code)]
+pub(crate) struct ScopeSummary {
+    /// ns path -> (bare name -> full mangled name)
+    pub defs: HashMap<Vec<String>, HashMap<String, String>>,
+    /// ns path -> (bare name -> (import index, full `::` path))
+    pub bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
+}
+
+/// The codegen-free front half of the pipeline: everything the lint
+/// layer (and a future LSP) needs, nothing it doesn't. Not yet fully
+/// consumed within this crate — see `ScopeSummary` above.
+#[allow(dead_code)]
+pub(crate) struct AnalysisOutput {
+    pub tokens: Vec<Token>,
+    pub ast: Program,
+    pub ir: IrProgram,
+    pub diagnostics: Vec<Diagnostic>,
+    pub scopes: ScopeSummary,
+}
+
+/// lex → parse → duplicate-binding check → flatten → lower. Stops before
+/// the optimizer; `compile()` composes this with the back half.
+pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
+    let tokens = crate::lexer::lex(source)?;
+    let parsed = crate::parser::parse(&tokens)?;
+    check_duplicate_bindings(&parsed)?;
+    let (program, scopes, vis) = flatten(parsed);
+    let (ir, mut diagnostics) = crate::ir::lower(&program)?;
+    diagnostics.extend(vis);
+    Ok(AnalysisOutput {
+        tokens,
+        ast: program,
+        ir,
+        diagnostics,
+        scopes,
+    })
+}
+
 /// `.pmc` source → object file: lex → parse → lower → emit `.pma` →
 /// assemble. Assembly failure of GENERATED text is a compiler bug and
 /// reports as `CompileErrorKind::Internal`.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
-    let tokens = crate::lexer::lex(source)?;
-    let parsed = crate::parser::parse(&tokens)?;
-    check_duplicate_bindings(&parsed)?;
-    let (program, vis) = flatten(parsed);
-    let (mut ir, mut diagnostics) = crate::ir::lower(&program)?;
-    diagnostics.extend(vis);
+    let analysis = analyze(source)?;
+    let AnalysisOutput {
+        mut ir,
+        diagnostics,
+        ..
+    } = analysis;
     let mut ir_snapshots = Vec::new();
     if options.capture_ir {
         ir_snapshots.push(("lowered".to_string(), ir.clone()));
@@ -253,9 +299,11 @@ fn full_name(ns: &[String], name: &str) -> String {
 /// undeclared warning). Infallible — unresolved bare names simply stay
 /// external; all visibility warnings (undeclared externals, unused
 /// imports, unused functions) are produced here.
-fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Diagnostic>) {
+fn flatten(
+    program: crate::parser::Program,
+) -> (crate::parser::Program, ScopeSummary, Vec<Diagnostic>) {
     use crate::parser::{Function, Item, Program};
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashSet, VecDeque};
 
     let Program { functions, imports } = program;
 
@@ -394,11 +442,17 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Diag
         emit(f, "", &ns, &[], &mut ctx, &mut out);
     }
 
-    let mut warnings = ctx.warnings;
+    let Ctx {
+        defs,
+        bindings,
+        imports_used,
+        mut warnings,
+        ..
+    } = ctx;
 
     // Unused imports: none of the import's bindings resolved any call.
     for (i, imp) in imports.iter().enumerate() {
-        if !ctx.imports_used[i] {
+        if !imports_used[i] {
             warnings.push(Diagnostic {
                 code: "unused-import",
                 span: imp.span,
@@ -459,6 +513,7 @@ fn flatten(program: crate::parser::Program) -> (crate::parser::Program, Vec<Diag
             functions: out,
             imports,
         },
+        ScopeSummary { defs, bindings },
         warnings,
     )
 }
@@ -817,6 +872,21 @@ mod tests {
             (1, 5)
         );
         assert!(out.report.diagnostics.iter().all(|d| d.fix.is_none()));
+    }
+
+    #[test]
+    fn analyze_stops_before_the_optimizer_and_keeps_the_raw_material() {
+        let src = "use std::go;\nmain() { right; }\n";
+        let a = analyze(src).unwrap();
+        assert!(!a.tokens.is_empty());
+        assert_eq!(a.ir.functions.len(), 1);
+        assert!(a.diagnostics.iter().any(|d| d.code == "unused-import"));
+        // flatten's scope summary is retained, not discarded:
+        assert!(a.scopes.defs.contains_key(&Vec::<String>::new()));
+        assert!(a.scopes.bindings.contains_key(&Vec::<String>::new()));
+        // compile() reports exactly what analyze() found:
+        let out = compile(src, CompileOptions::default()).unwrap();
+        assert_eq!(out.report.diagnostics, a.diagnostics);
     }
 
     #[test]
