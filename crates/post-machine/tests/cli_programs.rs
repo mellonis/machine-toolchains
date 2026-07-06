@@ -2,6 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use mtc_post_machine::cli::execute;
+use mtc_post_machine::compiler::{CompileOptions, compile};
+use mtc_post_machine::optimizer::OptLevel;
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -122,4 +124,81 @@ fn compile_errors_render_one_position_prefix() {
     assert!(err.contains("bad.pmc:1:"), "{err}");
     assert!(err.contains("error:"), "{err}");
     assert!(!err.contains("line 1"), "doubled prefix: {err}");
+}
+
+#[test]
+fn bare_emit_ir_before_the_positional_does_not_eat_it() {
+    let dir = scratch("emit_ir_bare");
+    let src = dir.join("hello.pmc");
+    fs::write(&src, HELLO).unwrap();
+    // the flag PRECEDES the input — scan-based parsing must not consume it
+    let out = execute(&args(&["compile", "--emit-ir", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(dir.join("hello.pmo").exists());
+    let ir = fs::read_to_string(dir.join("hello.ir.json")).unwrap();
+    assert!(ir.contains("\"version\": 3"));
+}
+
+#[test]
+fn emit_ir_duplicate_stage_labels_resolve_last_wins() {
+    let src_text = "walk() { 1: right; 2: check(1, !); }\n\
+                    hop() { 1: @walk(!); }\n\
+                    main() { 1: @hop(); 2: mark(!); }";
+
+    // Compile via library to identify which passes repeat
+    let lib_result = compile(
+        src_text,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            capture_ir: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // Find a label that appears multiple times
+    let mut label_counts = std::collections::HashMap::new();
+    for (label, _) in &lib_result.ir_snapshots {
+        *label_counts.entry(label.clone()).or_insert(0) += 1;
+    }
+
+    // Pick a repeating label (after:inline appears at least twice)
+    let repeating_label = label_counts
+        .iter()
+        .find(|(_, count)| **count > 1)
+        .map(|(label, _)| label.clone())
+        .expect("should have a repeating pass label");
+
+    // Get the LAST (rightmost) occurrence of this label
+    let last_snapshot = lib_result
+        .ir_snapshots
+        .iter()
+        .rev()
+        .find(|(l, _)| l == &repeating_label)
+        .expect("should find last occurrence")
+        .1
+        .to_json();
+
+    // Now compile via CLI with --emit-ir=after:<pass>
+    let dir = scratch("emit_ir_last_wins");
+    let src = dir.join("multi.pmc");
+    fs::write(&src, src_text).unwrap();
+
+    let out = execute(&args(&[
+        "compile",
+        src.to_str().unwrap(),
+        "-O1",
+        &format!("--emit-ir={}", repeating_label),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0, "compile failed: {}", out.stderr);
+
+    let cli_ir = fs::read_to_string(dir.join("multi.ir.json")).unwrap();
+
+    // Verify the CLI result matches the last snapshot (ruling R4: last-wins)
+    assert_eq!(
+        cli_ir, last_snapshot,
+        "CLI --emit-ir result should match the LAST occurrence of {} per ruling R4",
+        repeating_label
+    );
 }
