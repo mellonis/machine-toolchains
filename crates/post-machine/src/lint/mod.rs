@@ -61,7 +61,6 @@ pub(crate) struct LintContext<'a> {
     /// Unoptimized CFG — rules judge source hygiene, not optimizer output.
     #[allow(dead_code)]
     pub ir: &'a IrProgram,
-    #[allow(dead_code)]
     pub scopes: &'a ScopeSummary,
 }
 
@@ -78,6 +77,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("identical-check-arms", rules::identical_check_arms::check),
     ("leftover-debugger", rules::leftover_debugger::check),
     ("namespaced-main", rules::namespaced_main::check),
+    ("shadowed-import", rules::shadowed_import::check),
 ];
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {

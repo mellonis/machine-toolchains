@@ -8,4 +8,5 @@ pub(crate) mod leftover_debugger;
 pub(crate) mod line_too_long;
 pub(crate) mod namespaced_main;
 pub(crate) mod redundant_jump;
+pub(crate) mod shadowed_import;
 pub(crate) mod unused_label;

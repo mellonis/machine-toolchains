@@ -211,12 +211,8 @@ pub struct CompileOutput {
 /// instead of being discarded.
 pub(crate) struct ScopeSummary {
     /// ns path -> (bare name -> full mangled name)
-    // consumed by a later lint rule (shadowed-import / namespaced-main)
-    #[allow(dead_code)]
     pub defs: HashMap<Vec<String>, HashMap<String, String>>,
     /// ns path -> (bare name -> (import index, full `::` path))
-    // consumed by a later lint rule (shadowed-import / namespaced-main)
-    #[allow(dead_code)]
     pub bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
 }
 
