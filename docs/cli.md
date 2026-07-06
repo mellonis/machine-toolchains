@@ -17,6 +17,7 @@ SUBCOMMANDS:
   compile  .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
   asm      .pma assembly -> .pmo object
   link     .pmo objects -> .pmx executable (+ .pmx.map sidecar)
+  lint     lint .pmc sources (hygiene findings; docs/lint.md)
   dis      disassemble a .pmo or .pmx (--listing for the address view)
   run      execute a .pmx on a tape
   tape     build/show .pmt tape-block snapshots
@@ -103,6 +104,45 @@ directory to fall back to; the standard library is embedded in the
 toolchain binary itself. `-v` renders which defined-but-unreachable
 functions were dropped and how many call/jump sites relaxed to their short
 form versus stayed far.
+
+## `pmt lint`
+
+```
+USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]]
+
+PATH is a .pmc file or a directory; directories are walked recursively
+for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
+
+FLAGS:
+  --exclude PATH  skip a file or prune a directory subtree (repeatable;
+                  plain paths compared as spelled — no globs); exclusion
+                  wins even over explicitly listed files
+  --allow CODE    suppress a lint rule by code (repeatable;
+                  unknown codes are an error)
+  --fix           apply machine-applicable fixes in place, then re-lint;
+                  the report and exit code reflect what REMAINS
+  --force         with --fix: also apply the gated fixes (deletions and
+                  rewrites whose diagnosis may have another reading)
+```
+
+PATH is a `.pmc` file or a directory. Directories are walked
+recursively for `*.pmc` in sorted order; symlinks are never followed
+and dot-entries (`.git`, editor scratch) are skipped. A PATH that
+yields no `.pmc` files is an error. `--exclude PATH` (repeatable)
+skips a file or prunes a directory subtree; paths are compared as
+spelled (no globs — the shell covers the include side), and exclusion
+wins even over explicitly listed files.
+
+Files lint independently: a file that fails to parse is reported on
+stderr and the batch continues. Exit codes: 0 = every file clean,
+1 = findings or errors anywhere (tool errors are also 1).
+
+`--fix` applies safe fixes in place and lints the result again — the
+report and exit code reflect what remains. `--fix --force` also
+applies the gated fixes (deletions and rewrites whose diagnosis may
+have another reading). `--force` without `--fix` is an error. A file
+with a fatal error is never written. The rule catalog and per-rule fix
+behavior live in `docs/lint.md`.
 
 ## `pmt dis`
 

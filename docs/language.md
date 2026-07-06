@@ -171,7 +171,10 @@ return (in `main`, an implicit stop).
   an unused import; an unused function (unexported and unreached from
   `main` or any export — sound, because local symbols are invisible
   outside the module by construction). `-Werror` turns every warning on
-  the report into a compile failure.
+  the report into a compile failure. Hygiene findings beyond these
+  warnings — unused labels, shadowed imports, naming style — are the
+  lint layer's job: `pmt lint` (docs/lint.md), a separate channel that
+  never runs during compilation.
 
 ### Symbol grammar
 
