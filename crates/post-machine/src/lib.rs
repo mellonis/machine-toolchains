@@ -15,6 +15,6 @@ pub mod stdlib;
 pub use compiler::{
     CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, compile,
 };
-pub use lint::{LintError, LintOptions, LintReport, lint};
+pub use lint::{FixOutcome, LintError, LintOptions, LintReport, apply_fixes, lint};
 pub use optimizer::{OptLevel, OptReport, PassChange};
 pub use parser::PMC_LANG_VERSION;

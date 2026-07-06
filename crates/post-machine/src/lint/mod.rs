@@ -3,7 +3,10 @@
 //! split: lint reports lint findings ONLY; the compile warnings stay on
 //! the compile channel and are never re-reported here.
 
+pub mod fixes;
 pub mod rules;
+
+pub use fixes::{FixOutcome, apply_fixes};
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 
