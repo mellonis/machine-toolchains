@@ -2,6 +2,7 @@
 //! linker, assembler/disassembler frameworks, tape devices.
 
 pub mod asm;
+pub mod diagnostics;
 pub mod formats;
 pub mod linker;
 pub mod vm;
