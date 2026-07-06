@@ -84,7 +84,7 @@ Full flag reference: `docs/cli.md`.
   `.pmt`, `.pma`, the `.pmx.map` sidecar, and IR JSON.
 - `docs/cli.md` — every `pmt` subcommand and flag.
 - `docs/lint.md` — hygiene findings over `.pmc` sources via `pmt lint`,
-  with `--fix`
+  with `--fix`.
 - `docs/stdlib.md` — the standard library's routine roster and linking
   semantics.
 - `docs/history.md` — where this design comes from.

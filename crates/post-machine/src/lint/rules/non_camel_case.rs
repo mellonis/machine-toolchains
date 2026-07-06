@@ -53,7 +53,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             .rsplit("::")
             .next()
             .and_then(|s| s.rsplit('.').next())
-            .expect("names are non-empty");
+            .expect("rsplit always yields at least one item");
         if !is_lower_camel(last) {
             out.push(Diagnostic {
                 code: "non-camel-case",

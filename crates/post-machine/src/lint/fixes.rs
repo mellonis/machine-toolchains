@@ -30,6 +30,12 @@ fn byte_offset(source: &str, pos: Pos) -> usize {
     source.len()
 }
 
+/// Two invariants are the caller's responsibility, not enforced here (every
+/// current rule trivially satisfies both — a single-edit fix cannot violate
+/// them): a `Fix`'s own `edits` must be mutually disjoint (overlap detection
+/// below runs only BETWEEN fixes, never within one); and every fix must be
+/// parse-preserving, since the CLI writes the fixed source to disk before
+/// re-linting it.
 pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic]) -> FixOutcome {
     // Phase 1 — plan: keep each fix whose edits overlap no kept edit.
     let mut kept_edits: Vec<(usize, usize, String)> = Vec::new();

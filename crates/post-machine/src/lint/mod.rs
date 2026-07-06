@@ -11,7 +11,6 @@ pub use fixes::{FixOutcome, apply_fixes};
 use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::compiler::{self, CompileError, ScopeSummary};
-use crate::ir::IrProgram;
 use crate::lexer::Token;
 use crate::parser::Program;
 
@@ -61,9 +60,6 @@ pub(crate) struct LintContext<'a> {
     /// FLATTENED program: function names are fully qualified
     /// (`std::api.helper`); statement/item shapes are untouched.
     pub ast: &'a Program,
-    /// Unoptimized CFG — rules judge source hygiene, not optimizer output.
-    #[allow(dead_code)]
-    pub ir: &'a IrProgram,
     pub scopes: &'a ScopeSummary,
 }
 
@@ -96,7 +92,6 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
         source,
         tokens: &analysis.tokens,
         ast: &analysis.ast,
-        ir: &analysis.ir,
         scopes: &analysis.scopes,
     };
     let mut diagnostics = Vec::new();
