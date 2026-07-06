@@ -201,9 +201,9 @@ impl<'a> DebugSession<'a> {
         if let Some(done) = self.gate() {
             return done;
         }
-        // A zero budget pauses immediately without stepping (and guards
-        // the decrement below against u64 underflow) — ratified fix,
-        // 2026-07-06, after the Task-1 implementer flagged the panic.
+        // A zero budget pauses immediately without stepping — this also
+        // guards the decrement below against u64 underflow on a zero
+        // budget.
         if budget == Some(0) {
             return DebugEvent::Paused(PauseCause::Manual);
         }

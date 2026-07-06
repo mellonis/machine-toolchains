@@ -139,7 +139,7 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
             Some(label) => out
                 .ir_snapshots
                 .iter()
-                .rev() // last-wins (ruling R4)
+                .rev() // repeated stages resolve last-wins (docs/cli.md)
                 .find(|(l, _)| l == label)
                 .map(|(_, program)| program.to_json())
                 .ok_or_else(|| format!("no IR snapshot labeled `{label}` was captured"))?,

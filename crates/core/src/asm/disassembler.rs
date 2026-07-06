@@ -667,7 +667,7 @@ START:  nop
     #[test]
     fn self_recursive_tail_jump_round_trips() {
         // A jump to one's OWN root prints in symbol form and survives
-        // the round trip (Task-2 behavior expansion, empirically pinned).
+        // the round trip.
         let syntax = test_syntax();
         let src = ".func main\n        jmp @main\n";
         let obj = assemble(&syntax, 0x7E, src, false).unwrap();

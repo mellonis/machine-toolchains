@@ -53,7 +53,7 @@ fn spec_sample_links_byte_exact_and_runs() {
     // goToEnd walks to head 3, lft → head 2, ret; main: rgt → head 3, wr 1.
     assert_eq!(tape.head(), 3);
     assert_eq!(tape.marked_cells(), vec![0, 1, 2, 3]);
-    // Tacts (electronic), derived by hand — see plan self-review:
+    // Tacts (electronic), derived by hand:
     // core: ent 2 + call.s 5 + [ent 2 + 3×rgt 2 + 3×jm.s 3 + lft 2 + ret 3]
     //       + rgt 2 + wr 3 + stp 1 = 35; stall: moves/writes/latches = 12.
     // steps: 13 — the terminal stp returns Stopped before the Step event,

@@ -107,9 +107,9 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
     registry.register(Box::new(Pm1));
     let machine = Machine::from_executable(&exe, &registry).map_err(|e| e.to_string())?;
 
-    let map = super::inspect::sidecar_map(exe_path); // shared with dis (see step note)
+    let map = super::inspect::sidecar_map(exe_path); // sidecar discovery, shared with `dis`
 
-    let stderr = String::new(); // trace is NOT buffered here (R10)
+    let stderr = String::new(); // trace streams straight to trace_out, not buffered here
     let (outcome, stats) = if strict {
         let mut wrapped = StrictTape::new(tape);
         let r = drive(
@@ -229,8 +229,8 @@ fn initial_tape(
 }
 
 /// Plain run, or traced run: DebugSession stepping with one listing
-/// line per executed instruction streamed LIVE to the writer, carrying
-/// the post-execution state suffix (R10). The line is written after its
+/// line per executed instruction streamed live to the writer, in the
+/// `--trace` format (`docs/cli.md`). The line is written after its
 /// instruction retires so `MF`/`head` reflect that instruction's effect.
 fn drive(
     machine: &Machine,

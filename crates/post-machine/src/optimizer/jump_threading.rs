@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn goto_chain_collapses_to_final_target() {
-        // 1 -> 2 -> 3 -> mark: blocks 0(goto 1), 1(goto 2), 2(mark).
+        // 1 -> 2 -> 3 -> mark: blocks 0(goto 1), 1(goto 2), 2(goto 3), 3(mark).
         let mut ir = ir_of("f() { goto 1; 1: goto 2; 2: goto 3; 3: mark; }");
         let f = &mut ir.functions[0];
         assert!(run(f) > 0);

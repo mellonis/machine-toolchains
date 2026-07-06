@@ -1,9 +1,11 @@
 //! The standard library: `.pmc` source embedded in the toolchain and
-//! compiled once per process (ruling R1: "prebuilt std.pmo ships with
-//! the toolchain" realized as an embedded object — a cargo-installed
-//! binary has no data directory). Built with the release preset; -O1
-//! may inline std-internal calls, so overriding a std routine rebinds
-//! direct user calls, not std's internal uses (semantic binding).
+//! compiled once per process. `docs/stdlib.md` covers the prebuilt
+//! `std.pmo` the linker adds implicitly; the SOURCE lives here as an
+//! embedded `.pmc` string (rather than a file in a data directory)
+//! because a cargo-installed binary has no data directory. Built with
+//! the release preset; see `docs/stdlib.md (interposition vs
+//! optimization)` for the semantic-binding caveat this implies for
+//! overriding std routines.
 
 use std::sync::OnceLock;
 

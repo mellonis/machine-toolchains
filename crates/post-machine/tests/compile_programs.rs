@@ -98,7 +98,7 @@ fn spec_sample_runs_and_drops_the_dead_function() {
     let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
     assert_eq!(linked.report.dropped, Vec::<String>::new());
 
-    // Marks at 0..=2, head on the first mark (the Plan 4 scenario).
+    // Marks at 0..=2, head on the first mark.
     let reg = registry();
     let machine = Machine::from_executable(&linked.executable, &reg).unwrap();
     let mut tape = InfiniteTape::from_cells([true, true, true], 0, 0);

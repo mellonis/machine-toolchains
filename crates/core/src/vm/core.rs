@@ -329,7 +329,8 @@ mod tests {
 
     #[test]
     fn fetches_single_byte_instruction() {
-        // 0x01 = nop (no operand) — Task 4 stub yields Step after fetch
+        // 0x01 = nop (no operand): its one micro-op needs no device
+        // interaction, so fetch completes straight to Step.
         let (ev, fetched) = run_fetch(&[0x01], 0);
         assert_eq!(ev, Ev::Step);
         assert_eq!(fetched, vec![0]);
@@ -354,7 +355,7 @@ mod tests {
     fn fetches_symbol_vec_until_high_bit() {
         // 0x07 = wr(vec); TestArch requires exactly one element;
         // 0x81 = payload 1 with high bit (last element).
-        // Task 5: fetch completes and execution begins immediately, so the
+        // Fetch completes and execution begins immediately, so the
         // observable outcome is the Write micro-op's device request (index 1,
         // pinning the 7-bit payload decode) rather than a bare Step.
         let (ev, fetched) = run_fetch(&[0x07, 0x81], 0);
@@ -478,8 +479,9 @@ mod tests {
 
     #[test]
     fn conditional_jump_taken_and_untaken() {
-        // 0x09 jm rel32: at entry mf=false → falls through to stop at 5;
-        // then with initial mf=true → jumps back? Simpler: two programs.
+        // 0x09 jm rel32: at entry mf=false (reset default) → falls
+        // through to stop at 5. The taken case below uses a separate
+        // program that first latches mf=true.
         let fall = [0x09, 0x01, 0x00, 0x00, 0x00, 0x02, 0x02];
         let (ev, log, _) = run_full(&fall, 0, 4, &[], 100);
         assert_eq!(ev, Ev::Stopped);

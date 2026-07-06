@@ -76,8 +76,8 @@ pub struct MapFunction {
     pub lines: Vec<(u32, u32)>,
 }
 
-/// The `.pmx.map` sidecar contents (JSON serialization added in a later
-/// task; this is the plain in-memory shape).
+/// The `.pmx.map` sidecar contents: the plain in-memory shape, JSON via
+/// [`MapFile::to_json`]/[`MapFile::from_json`] (docs/formats.md).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapFile {
     pub arch: u8,
@@ -95,7 +95,7 @@ impl MapFile {
 }
 
 /// Structured account of what the linker did — the CLI renders it under
-/// `-v` (a later plan); libraries never print (library-first principle).
+/// `-v` (docs/cli.md); libraries never print (library-first principle).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkReport {
     /// Defined but unreachable, sorted (see `resolve::Resolved::dropped`).

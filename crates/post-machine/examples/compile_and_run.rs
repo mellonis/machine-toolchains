@@ -1,5 +1,5 @@
-//! End-to-end tour of everything implemented through Plan 5:
-//! `.pmc` source → compile → link → disassemble → run on a tape.
+//! End-to-end tour of the toolchain: `.pmc` source → compile → link →
+//! disassemble → run on a tape.
 //!
 //!     cargo run -p mtc-post-machine --example compile_and_run
 

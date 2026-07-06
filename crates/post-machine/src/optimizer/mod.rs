@@ -70,12 +70,13 @@ pub struct OptReport {
 type PassFn = fn(&mut IrFunction) -> u32;
 
 /// Fixed pipeline, in per-round application order. tail-call runs BEFORE
-/// tail-merge: return-chaining rewrites `Return` into `FallThrough` and
-/// would otherwise destroy the tail-call precondition (Task-6 finding) —
-/// this ordering constraint is load-bearing, not a mere preference.
-/// Statically the two are a tie (each drops one terminal byte); tail-call's
-/// decisive win is at RUNTIME — no stack-slot growth and no return trip —
-/// whenever both apply to the same block.
+/// tail-merge: return-chaining rewrites `Return` into `FallThrough`, which
+/// would destroy tail-call's precondition (a trailing call in a `Return`
+/// block) before it gets a chance to apply — this ordering constraint is
+/// load-bearing, not a mere preference. Statically the two are a tie
+/// (each drops one terminal byte); tail-call's decisive win is at
+/// RUNTIME — no stack-slot growth and no return trip — whenever both
+/// apply to the same block.
 const PIPELINE: &[(&str, PassFn)] = &[
     ("check-fold", check_fold::run),
     ("jump-threading", jump_threading::run),
@@ -94,7 +95,8 @@ const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[("inline", inline::run)];
 const MAX_ROUNDS: u32 = 10;
 
 /// Run the enabled pipeline to a change-fixpoint (round-capped). `-O0`
-/// returns immediately: Plan 5 output stays bit-identical.
+/// returns immediately: unoptimized output stays bit-identical to plain
+/// codegen, with no optimizer artifact leaking in.
 pub fn optimize(
     ir: &mut IrProgram,
     options: &OptOptions,

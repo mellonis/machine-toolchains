@@ -76,8 +76,8 @@ fn check_fold_shrinks_and_preserves() {
 
 #[test]
 fn jump_threading_shrinks_and_preserves() {
-    // NOT a forward-adjacent chain (codegen's fall-through layout already
-    // eats those at -O0 — Task-2 BLOCKED finding, controller-ratified).
+    // NOT a forward-adjacent chain: codegen's fall-through layout invariant
+    // (docs/language.md (optimization)) already elides those at -O0.
     // Here the hop is backward: -O0 emits `jmp L2; wr 1; stp; L2: jmp L1`
     // (8 bytes); -O1 threads goto-2 through the empty forwarder to the
     // mark block, dce deletes the forwarder, fall-through absorbs the
@@ -141,10 +141,10 @@ fn reset_mf_semantics_survive_o1() {
 
 #[test]
 fn dropped_confirming_write_still_feeds_later_mf_observations() {
-    // Task-4 review follow-up (controller-ratified): on the marked arm,
-    // `mark` is a confirming write cell-state drops — the SECOND check
-    // then observes MF that the dropped write would have latched. The
-    // coupling invariant says dropping is invisible; this runs it.
+    // On the marked arm, `mark` is a confirming write cell-state drops —
+    // the SECOND check then observes MF that the dropped write would
+    // have latched. The MF-coupling invariant (optimizer/dataflow.rs)
+    // says dropping is invisible; this test exercises exactly that case.
     let src = "main() { right; check(1, 2); 1: mark; check(3, 2); 3: right(!); 2: left; }";
     let (o0, o1) = assert_equivalent(src, TAPES);
     assert!(o1 < o0, "drop + fold must shrink: {o0} -> {o1}");
@@ -167,10 +167,10 @@ main() {
 #[test]
 fn flagship_optimizes_to_exact_bytes() {
     use mtc_post_machine::arch::opcodes::*;
-    // Derivation (task-6 BLOCKED ruling: everything lands in r1 —
-    // block_entry_facts is computed over the WHOLE function per pass
-    // call, and the still-standing check's edge refinement already
-    // tells both arms their cell): cell-state r1: b0 [wr1,wr1,rgt,
+    // Derivation (everything lands in r1: block_entry_facts is computed
+    // over the WHOLE function per pass call, and the still-standing
+    // check's edge refinement already tells both arms their cell):
+    // cell-state r1: b0 [wr1,wr1,rgt,
     // wr1,wr1,wr0] -> idempotent-drop 2nd+4th wr1, dead-store the wr1
     // before wr0 -> [wr1, rgt, wr0]; b1's confirming wr1 (marked edge,
     // Coupled(Some(1))) and b2's confirming wr0 (blank edge,
@@ -252,13 +252,14 @@ fn capture_ir_records_the_pass_stages() {
 
 #[test]
 fn spec_sample_inlines_at_o1() {
-    // 6a's "already optimal" golden is obsolete BY DESIGN: with inline,
-    // main absorbs goToEnd (leaf, 2 ops) and the linker then drops the
-    // now-uncalled goToEnd. Derivation of the 14-byte -O1 executable:
-    // main after splice: B[](goto g0'), g0'[rgt](check{g0',g1'}),
-    // g1'[lft](goto C), C[rgt](check{b1,b2}), b1[wr0](ret), b2[wr1](ret)
-    // → ent, rgt, jm.s -3, lft, rgt, jnm.s +3, wr 0, stp, wr 1, stp
-    // = 1+1+2+1+1+2+2+1+2+1 = 14. -O0 linked = 18 (Plan 5 golden).
+    // This program is no longer "already optimal" at -O1 now that inline
+    // exists: main absorbs goToEnd (leaf, 2 ops) and the linker then
+    // drops the now-uncalled goToEnd. Derivation of the 14-byte -O1
+    // executable: main after splice: B[](goto g0'), g0'[rgt](check{g0',
+    // g1'}), g1'[lft](goto C), C[rgt](check{b1,b2}), b1[wr0](ret),
+    // b2[wr1](ret) → ent, rgt, jm.s -3, lft, rgt, jnm.s +3, wr 0, stp,
+    // wr 1, stp = 1+1+2+1+1+2+2+1+2+1 = 14. -O0 linked = 18 (unoptimized
+    // reference, unaffected by inline).
     let src = "\
 goToEnd() {
 1:  right;
@@ -294,7 +295,7 @@ main() {
 fn fno_inline_restores_the_do_no_harm_floor() {
     // With inline off, nothing in the optimizer pipeline fires on this
     // sample (no tail position, no duplicate blocks, no empty-return
-    // adjacency) — the old byte-stability golden, behind the flag.
+    // adjacency) — the object must be byte-for-byte identical to -O0's.
     let src = "\
 goToEnd() {
 1:  right;
@@ -325,9 +326,9 @@ main() {
 
 #[test]
 fn tail_call_preserves_behavior_and_shrinks() {
-    // g tail-calls f; inline would dissolve the call first, so pin the
-    // tail-call transform in isolation via --fno-inline (Task 4 adds
-    // inline; this test is written to be correct both before and after).
+    // g tail-calls f; without --fno-inline the inline pass would dissolve
+    // the call before tail-call ever sees it, so pin the tail-call
+    // transform in isolation.
     let src = "f() { right(!); } g() { left, @f(!); } main() { @g(); mark; }";
     let o0 = build(src, OptLevel::O0);
     let out1 = compile(
@@ -434,8 +435,9 @@ fn tail_merge_shares_the_stp_exactly_as_the_spec_promises() {
 
 #[test]
 fn flagship_is_untouched_by_the_6b_passes() {
-    // The 6a crown jewel must not move: no calls, no duplicate blocks,
-    // no empty-return adjacency (b0 ends Goto, not Return).
+    // FLAGSHIP must not move under the tail-call/tail-merge passes: no
+    // calls, no duplicate blocks, no empty-return adjacency (b0 ends
+    // Goto, not Return).
     let out = compile(
         FLAGSHIP,
         CompileOptions {

@@ -45,8 +45,8 @@ pub fn execute(args: &[String]) -> Result<CliOutput, String> {
     execute_with(args, &mut std::io::stderr().lock())
 }
 
-/// Writer seam (R10): `--trace` streams into `trace_out` live. The bin
-/// path passes stderr; tests pass a `Vec<u8>` and assert on it.
+/// Writer seam: `--trace` (`docs/cli.md`) streams into `trace_out` live.
+/// The bin path passes stderr; tests pass a `Vec<u8>` and assert on it.
 pub fn execute_with(
     args: &[String],
     trace_out: &mut dyn std::io::Write,

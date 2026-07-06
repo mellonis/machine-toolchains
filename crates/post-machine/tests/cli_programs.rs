@@ -195,7 +195,8 @@ fn emit_ir_duplicate_stage_labels_resolve_last_wins() {
 
     let cli_ir = fs::read_to_string(dir.join("multi.ir.json")).unwrap();
 
-    // Verify the CLI result matches the last snapshot (ruling R4: last-wins)
+    // Verify the CLI result matches the last snapshot (docs/cli.md: repeated
+    // stages resolve last-wins).
     assert_eq!(
         cli_ir, last_snapshot,
         "CLI --emit-ir result should match the LAST occurrence of {} per ruling R4",

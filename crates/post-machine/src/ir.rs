@@ -23,7 +23,7 @@ pub struct IrFunction {
     /// Source line of the definition.
     pub line: u32,
     /// Entry is `blocks[0]`. Ids are unique within the function but need
-    /// not stay dense once optimizer passes (Plan 6) delete blocks.
+    /// not stay dense once optimizer passes delete blocks.
     pub blocks: Vec<IrBlock>,
     /// Hidden-by-default visibility (docs/language.md (visibility)): `true` unless the
     /// source marked the function `export` (`main` is always exported).
@@ -371,11 +371,10 @@ fn lower_function(
     })
 }
 
-/// Structural invariants every optimizer pass must preserve (the Plan 5
-/// final-review acceptance item): non-empty function, unique block ids,
-/// every terminator target resolvable. `blocks[0]` remains the entry by
-/// position; passes may delete or retarget but never leave a dangling
-/// terminator.
+/// Structural invariants every optimizer pass must preserve: non-empty
+/// function, unique block ids, every terminator target resolvable.
+/// `blocks[0]` remains the entry by position; passes may delete or
+/// retarget but never leave a dangling terminator.
 pub fn validate_function(f: &IrFunction) -> Result<(), String> {
     if f.blocks.is_empty() {
         return Err(format!("{}: function has no blocks", f.name));
