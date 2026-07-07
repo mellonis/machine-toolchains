@@ -12,6 +12,10 @@ pub mod lexer;
 pub mod lint;
 pub mod optimizer;
 pub mod parser;
+/// Frozen pre-C1 parser, retained as the parity oracle for the CST
+/// migration (`tests/parser_parity.rs`). Not part of the stable API.
+#[doc(hidden)]
+pub mod parser_legacy;
 pub mod stdlib;
 
 pub use compiler::{
