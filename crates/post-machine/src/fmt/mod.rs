@@ -5,10 +5,12 @@
 //! future `cli/fmt.rs` is the only place that renders errors or touches
 //! the filesystem.
 //!
-//! **Scope of this module today (fmt build Tasks 4-8a): the TRIVIAL
-//! printer subset, label/command-column alignment, comma-group layout,
-//! comment placement/alignment, namespaces, blank-line policy, and
-//! imports/export printing.** It prints a source-faithful skeleton —
+//! **Scope of this module today (fmt build Tasks 4-8b, the pure-printer
+//! finish): the TRIVIAL printer subset, label/command-column alignment,
+//! comma-group layout, comment placement/alignment, namespaces,
+//! blank-line policy, imports/export printing, and the full
+//! intra-statement spacing table / spaced-form normalization / textual
+//! hygiene / edge cases.** It prints a source-faithful skeleton —
 //! headers, braces, indentation (including namespace nesting, see
 //! [`print_namespace`]), one statement per line (with labels aligned into
 //! a shared command column, see [`command_column`]), canonical item text,
@@ -17,17 +19,18 @@
 //! design doc's "Comments = trivia-tokens native in the CST" + "Trailing
 //! comments", the general blank-line policy (preserve / collapse runs /
 //! never force, see [`top_wants_blank_before`] / [`body_wants_blank_before`]),
-//! grouped `use` lists (see [`print_use`]), and the verbatim `export`
-//! keyword (see [`FunctionCst::has_export`]) — and deliberately leaves the
-//! following as seams for the next task (each seam is marked at its
-//! printing site below):
-//!
-//! - **Full intra-statement spacing normalization (spaced forms like
-//!   `1 : right` / `std :: x`) and the textual-hygiene/edge-case rules**
-//!   (Task 8b) — `parse_cst` only ever hands back the parsed VALUE, so
-//!   every item shape this printer covers is already canonical; the
-//!   spaced-FORM normalization table and the edge cases (trailing
-//!   whitespace, final newline) are Task 8b's.
+//! grouped `use` lists (see [`print_use`]), the verbatim `export` keyword
+//! (see [`FunctionCst::has_export`]), and — Task 8b's own contribution —
+//! the spacing-table/spaced-form/hygiene/edge-case tests in this module's
+//! own `tests` submodule. That last part needed no renderer change:
+//! `parse_cst` only ever hands the printer the parsed VALUE (a label's
+//! `u32`, a path's `Vec<String>` segments), never the author's original
+//! spacing or line endings, so every item shape this printer covers was
+//! already canonical, and the full reprint (spaces + `\n` only, from the
+//! CST) already discards trailing whitespace / CRLF / tabs by
+//! construction — Task 8b's tests PIN that rather than fixing a gap.
+//! Task 9 points the objective-guard harness (`tests/fmt_programs.rs`) at
+//! the full corpus.
 //!
 //! ## Comment placement (Task 7)
 //!
@@ -151,7 +154,7 @@ fn print_use(out: &mut String, u: &UseCst, indent: usize) {
     out.push(';');
     if let Some(tc) = &u.trailing {
         out.push(' ');
-        out.push_str(&tc.comment.text);
+        out.push_str(&normalize_comment_text(&tc.comment.text));
     }
     out.push('\n');
 }
@@ -167,6 +170,24 @@ fn render_use_path(p: &UsePath) -> String {
     s
 }
 
+/// Normalizes one comment's raw trivia text for printing (spec "Textual
+/// hygiene", §C): every line's TRAILING whitespace stripped, joined back
+/// with LF only. [`Comment::text`] is raw lexer trivia, captured
+/// character-for-character from source (module doc's "Comments =
+/// trivia-tokens native in the CST") — a line comment's trailing spaces,
+/// or a `\r` immediately before the closing `\n` of a CRLF source line,
+/// survive into the token verbatim unless stripped here; nothing else in
+/// the pipeline ever touches comment text. Only each line's END is
+/// touched — a block comment's interior LEADING whitespace (content
+/// fidelity, "Re-indentation": "interior lines are preserved verbatim")
+/// is untouched by `trim_end`.
+fn normalize_comment_text(text: &str) -> String {
+    text.split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// One own-line comment (leading / standalone / dangling — content
 /// printing is IDENTICAL for all three; only the surrounding blank-line
 /// decision differs, made by the caller from `blank_before`; module doc's
@@ -175,10 +196,10 @@ fn render_use_path(p: &UsePath) -> String {
 /// whole re-indent; a BLOCK comment's `text` already carries any interior
 /// lines VERBATIM (raw source whitespace, never reflowed) — prefixing
 /// `indent` once, before the first line, is the entire re-indent for it
-/// too.
+/// too. [`normalize_comment_text`] applies the §C hygiene rules on top.
 fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
     out.push_str(&" ".repeat(indent));
-    out.push_str(&comment.text);
+    out.push_str(&normalize_comment_text(&comment.text));
     out.push('\n');
 }
 
@@ -363,7 +384,7 @@ fn print_statement(out: &mut String, s: &StatementCst, code: &str, trailing_spac
     out.push(';');
     if let Some(tc) = &s.trailing {
         out.push_str(&" ".repeat(trailing_spacing));
-        out.push_str(&tc.comment.text);
+        out.push_str(&normalize_comment_text(&tc.comment.text));
     }
     out.push('\n');
 }
@@ -429,13 +450,18 @@ fn compute_trailing_spacing(body: &[BodyItem], codes: &[String]) -> Vec<usize> {
                 let BodyKind::Statement(s) = &body[k].kind else {
                     unreachable!("has_trailing guarantees a Statement");
                 };
-                s.trailing
-                    .as_ref()
-                    .expect("has_trailing guarantees Some")
-                    .comment
-                    .text
-                    .chars()
-                    .count()
+                // Measured on the NORMALIZED text (§C): a raw trailing
+                // `\r`/space in the token must not inflate the column
+                // math for a width nothing will actually print.
+                normalize_comment_text(
+                    &s.trailing
+                        .as_ref()
+                        .expect("has_trailing guarantees Some")
+                        .comment
+                        .text,
+                )
+                .chars()
+                .count()
             })
             .collect();
 
@@ -587,13 +613,13 @@ fn layout_leading(leading: &[Comment]) -> LeadingLayout {
         Some(break_pos) => {
             let mut break_inline = String::new();
             for c in &leading[..break_pos] {
-                break_inline.push_str(&c.text);
+                break_inline.push_str(&normalize_comment_text(&c.text));
                 break_inline.push(' ');
             }
-            break_inline.push_str(&leading[break_pos].text);
+            break_inline.push_str(&normalize_comment_text(&leading[break_pos].text));
             let pre_item_lines = leading[break_pos + 1..]
                 .iter()
-                .map(|c| c.text.clone())
+                .map(|c| normalize_comment_text(&c.text))
                 .collect();
             LeadingLayout {
                 inline_prefix: String::new(),
@@ -605,7 +631,7 @@ fn layout_leading(leading: &[Comment]) -> LeadingLayout {
         None => {
             let mut inline_prefix = String::new();
             for c in leading {
-                inline_prefix.push_str(&c.text);
+                inline_prefix.push_str(&normalize_comment_text(&c.text));
                 inline_prefix.push(' ');
             }
             LeadingLayout {
@@ -673,12 +699,12 @@ fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
     }
 }
 
-/// Canonical item text (spec "Intra-statement token spacing"). This task
-/// gets the canonical (tight) forms right; the full spacing table and
-/// spaced-form normalization (`1 : right` -> `1: right`) is Task 8's — but
-/// since `parse_cst` only ever hands back the parsed VALUE (never the
-/// author's original spacing), this renderer already produces the
-/// canonical form for every item shape it covers.
+/// Canonical item text (spec "Intra-statement token spacing", full
+/// table). Since `parse_cst` only ever hands back the parsed VALUE
+/// (never the author's original spacing), this renderer produces the
+/// canonical (tight) form for every item shape it covers — spaced-form
+/// inputs like `1 : right` or `std :: goToEnd` normalize for free (see
+/// `tests` submodule, "Task 8b").
 pub(crate) fn render_item(item: &Item) -> String {
     match item {
         Item::Builtin { which, succ, .. } => {
@@ -1219,6 +1245,265 @@ mod tests {
             "use std::goToEnd;\nuse a, b::c as d;\n".to_string(),
             "export main() { right; }".to_string(),
             "main() { right; }".to_string(),
+        ] {
+            let once = format(&src).unwrap();
+            let twice = format(&once).unwrap();
+            assert_eq!(twice, once, "not idempotent for {src:?}");
+        }
+    }
+
+    // -- Task 8b: spacing table, spaced-form normalization, hygiene,
+    //    edge cases ---------------------------------------------------
+    //
+    // `parse_cst` only ever hands the printer the parsed VALUE (never the
+    // author's original spacing/line-endings), so most of §A/§B fall out
+    // of Tasks 4-8a's renderer for free; these tests PIN that rather than
+    // changing behaviour. Each is named for its spec-table row / brief
+    // bullet, not reusing the single-letter scheme Tasks 5-8a used (that
+    // alphabet is specific to their own briefs).
+
+    // §A: full intra-statement spacing table (one test per row).
+
+    #[test]
+    fn spacing_table_call() {
+        // `@` tight to name (grammar-level, can't even be spaced), name
+        // tight to `(`, contents tight: `@f()`, `@f(5)`, `@f(!)`.
+        assert_eq!(
+            format("f() { @f(); @f(5); @f(!); }").unwrap(),
+            "f() {\n    @f();\n    @f(5);\n    @f(!);\n}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_builtin_and_successor() {
+        // No space before `(`, contents tight; bare form has no parens at
+        // all (`FallThrough`, grammar 0.2 forbids empty builtin `()`).
+        assert_eq!(
+            format("f() { left; left(5); mark(!); }").unwrap(),
+            "f() {\n    left;\n    left(5);\n    mark(!);\n}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_check() {
+        // Tight `(`/`)`, exactly one space after the arm comma, both arm
+        // shapes (label, `!`).
+        assert_eq!(
+            format("f() { check(1, 3); check(!, 1); }").unwrap(),
+            "f() {\n    check(1, 3);\n    check(!, 1);\n}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_goto() {
+        assert_eq!(
+            format("f() { goto 5; }").unwrap(),
+            "f() {\n    goto 5;\n}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_label_single_and_stacked() {
+        // Single label `1:` then one space before the command (regression
+        // pin, already covered structurally by Task 5's
+        // `a_single_inline_label_command_column_4`, isolated here as the
+        // pure spacing-table row); stacked `1: 2:` — one space between
+        // the two, one space after the final colon (Task 5's
+        // `d_stacked_labels_round_up_command_column` pins the same
+        // bytes under its command-column-rounding framing).
+        assert_eq!(
+            format("f() { 1: right; }").unwrap(),
+            "f() {\n 1: right;\n}\n"
+        );
+        assert_eq!(
+            format("f() { 1: 2: right; }").unwrap(),
+            "f() {\n  1: 2: right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_path() {
+        // `::` tight, including a 3-segment path (already-tight source —
+        // confirms the canonical form is a pass-through, not just a
+        // 2-segment special case).
+        assert_eq!(
+            format("f() { @std::api::run(); }").unwrap(),
+            "f() {\n    @std::api::run();\n}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_comma_and_semicolon() {
+        // `,` tight to the preceding token, one space after; `;` tight to
+        // the preceding token, newline after.
+        assert_eq!(
+            format("f() { left, right, mark; }").unwrap(),
+            "f() {\n    left, right, mark;\n}\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_as_alias() {
+        // `as` (imports): one space each side.
+        assert_eq!(
+            format("use their::name as alias;").unwrap(),
+            "use their::name as alias;\n"
+        );
+    }
+
+    #[test]
+    fn spacing_table_bang() {
+        // `!` tight in both positions it can appear: a call/builtin
+        // successor and a `check` arm.
+        assert_eq!(
+            format("f() { @f(!); check(!, 1); }").unwrap(),
+            "f() {\n    @f(!);\n    check(!, 1);\n}\n"
+        );
+    }
+
+    // §B: spaced-form normalization — the grammar accepts extra
+    // whitespace around `:` and `::`; the printer always emits the
+    // parsed VALUE, so these normalize to tight without any renderer
+    // change (pinned, not fixed).
+
+    #[test]
+    fn spaced_label_normalizes_to_tight() {
+        assert_eq!(
+            format("main() { 1 : right; }").unwrap(),
+            "main() {\n 1: right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn spaced_path_normalizes_in_import_and_call() {
+        assert_eq!(
+            format("use std :: goToEnd;").unwrap(),
+            "use std::goToEnd;\n"
+        );
+        assert_eq!(
+            format("f() { @std :: goToEnd(); }").unwrap(),
+            "f() {\n    @std::goToEnd();\n}\n"
+        );
+    }
+
+    // §C: textual hygiene.
+
+    #[test]
+    fn hygiene_no_trailing_whitespace_even_when_source_has_it() {
+        // Trailing whitespace on every source line — the full reprint is
+        // CST-driven, not a textual copy, so none of it survives.
+        let src = "f() {   \n    right;   \n}   \n";
+        let out = format(src).unwrap();
+        assert_eq!(out, "f() {\n    right;\n}\n");
+        assert!(
+            out.lines().all(|l| l == l.trim_end()),
+            "trailing whitespace in {out:?}"
+        );
+    }
+
+    #[test]
+    fn hygiene_exactly_one_final_newline_regardless_of_trailing_blanks() {
+        // A run of blank lines at the very end of the file has no
+        // following item to carry `blank_before` (module doc's
+        // "Blank-line presence" note) — it disappears, leaving exactly
+        // the one final `\n` the last item already prints.
+        assert_eq!(
+            format("f() { right; }\n\n\n").unwrap(),
+            "f() {\n    right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn hygiene_crlf_and_tabs_reprint_as_lf_and_spaces() {
+        // CRLF line endings and a tab-indented body — the full reprint
+        // discards ALL input whitespace (indentation is fmt's own, in
+        // spaces), so the only surviving shape is the parsed structure.
+        let src = "f() {\r\n\tright;\r\n}\r\n";
+        assert_eq!(format(src).unwrap(), "f() {\n    right;\n}\n");
+    }
+
+    // The three cases above only exercise CODE lines — a comment's own
+    // text is raw lexer trivia (module doc's "Comments = trivia-tokens
+    // native in the CST"), captured character-for-character from source,
+    // so it carries its own trailing whitespace / CRLF independently of
+    // anything the renderer decides about layout. `normalize_comment_text`
+    // is the fix; these three pin it directly.
+
+    #[test]
+    fn hygiene_trailing_whitespace_stripped_from_a_trailing_comment() {
+        let src = "f() {\n    right; // note   \n}\n";
+        assert_eq!(format(src).unwrap(), "f() {\n    right; // note\n}\n");
+    }
+
+    #[test]
+    fn hygiene_crlf_stripped_from_a_trailing_comment() {
+        // CRLF puts a `\r` right before the `\n` a line comment's capture
+        // loop stops at — the token's raw text ends in `\r` unless
+        // normalized.
+        let src = "f() {\r\n    right; // note\r\n}\r\n";
+        let out = format(src).unwrap();
+        assert_eq!(out, "f() {\n    right; // note\n}\n");
+        assert!(!out.contains('\r'), "CR leaked into {out:?}");
+    }
+
+    #[test]
+    fn hygiene_crlf_stripped_from_a_block_comment_interior() {
+        // A block comment's interior line keeps its LEADING whitespace
+        // verbatim (content fidelity) but must still lose a CRLF's
+        // trailing `\r` — the two rules coexist because `trim_end` only
+        // touches the end of each line.
+        let src = "/* a\r\n b */\nf() { right; }";
+        let out = format(src).unwrap();
+        assert_eq!(out, "/* a\n b */\nf() {\n    right;\n}\n");
+        assert!(!out.contains('\r'), "CR leaked into {out:?}");
+    }
+
+    // §D: edge cases (spec "Edge cases").
+
+    #[test]
+    fn edge_whitespace_only_file_is_one_final_newline() {
+        // Complements `empty_file_is_one_final_newline` (literal `""`):
+        // a file that is whitespace but has no tokens at all.
+        assert_eq!(format("   \n\t\n  \n").unwrap(), "\n");
+    }
+
+    #[test]
+    fn edge_comments_only_file_reprints_verbatim() {
+        // No declarations at all — every item is `TopKind::Comment`;
+        // reprints the comments with one final newline.
+        let src = "// a\n// b\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn edge_empty_function_body_pin() {
+        // Regression pin alongside `empty_function_body_has_no_blank_line`
+        // (Task 4): header line + closing brace on its own line, no
+        // blank line between.
+        assert_eq!(format("f() { }").unwrap(), "f() {\n}\n");
+    }
+
+    #[test]
+    fn idempotent_on_task_8b_shapes() {
+        for src in [
+            "f() { @f(); @f(5); @f(!); }".to_string(),
+            "f() { left; left(5); mark(!); }".to_string(),
+            "f() { check(1, 3); check(!, 1); }".to_string(),
+            "f() { goto 5; }".to_string(),
+            "f() { 1: 2: right; }".to_string(),
+            "f() { @std::api::run(); }".to_string(),
+            "use their::name as alias;".to_string(),
+            "f() { @f(!); check(!, 1); }".to_string(),
+            "main() { 1 : right; }".to_string(),
+            "use std :: goToEnd;\nf() { @std :: goToEnd(); }".to_string(),
+            "f() {   \n    right;   \n}   \n".to_string(),
+            "f() { right; }\n\n\n".to_string(),
+            "f() {\r\n\tright;\r\n}\r\n".to_string(),
+            "// a\n// b\n".to_string(),
+            "f() { }".to_string(),
+            "f() {\n    right; // note   \n}\n".to_string(),
+            "f() {\r\n    right; // note\r\n}\r\n".to_string(),
+            "/* a\r\n b */\nf() { right; }".to_string(),
         ] {
             let once = format(&src).unwrap();
             let twice = format(&once).unwrap();

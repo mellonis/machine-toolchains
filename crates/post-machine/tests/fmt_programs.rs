@@ -6,21 +6,29 @@
 //! objective backstop for the whole fmt build — reviewer approval does
 //! NOT substitute for these passing.
 //!
-//! At this task (fmt build Tasks 4-8a) the pretty-printer implements the
+//! At this task (fmt build Tasks 4-8b) the pretty-printer implements the
 //! TRIVIAL subset plus label/command-column alignment plus comma-group
 //! layout plus comment placement/alignment plus namespaces, the general
-//! blank-line policy, and imports/export printing (see `crate::fmt`'s
-//! module doc): labeled or unlabeled statements, comma groups including
-//! multi-line ones (author line breaks preserved, greedy-fill on
-//! overflow), every comment placement — leading, standalone, dangling,
-//! trailing (lone/aligned-run/ragged-run), block-comment re-indent, and
+//! blank-line policy, imports/export printing, and the full
+//! intra-statement spacing table / spaced-form normalization / textual
+//! hygiene / edge cases (see `crate::fmt`'s module doc): labeled or
+//! unlabeled statements, comma groups including multi-line ones (author
+//! line breaks preserved, greedy-fill on overflow), every comment
+//! placement — leading, standalone, dangling, trailing
+//! (lone/aligned-run/ragged-run), block-comment re-indent, and
 //! mid-comma-group (block-inline / line-forces-a-break) — namespace
 //! blocks (nested recursion), blank lines (preserve/collapse/never
-//! force), grouped `use` lists, and the verbatim `export` keyword.
-//! `SIMPLE` is scoped to exactly that subset — Task 8b widens it further
-//! (spaced-form spacing normalization, textual hygiene, edge cases) as
-//! its seam closes, eventually pointing this harness at the full corpus
-//! (Task 9).
+//! force), grouped `use` lists, the verbatim `export` keyword, spaced
+//! forms (`1 : right`, `std :: goToEnd`) normalizing to tight, and the
+//! comments-only-file / empty-function-body edge cases. `SIMPLE` is
+//! scoped to exactly that subset — Task 9 points this harness at the
+//! full corpus.
+//!
+//! Task 8b's own contribution needed no renderer changes: `parse_cst`
+//! only ever hands the printer the parsed VALUE (a label's number, a
+//! path's segments), never the author's original spacing, so the
+//! spaced-form entries below normalize for free — they widen the
+//! corpus to PIN that, not to fix a gap.
 //!
 //! **`comment_fidelity` was VACUOUS through Task 6** — `SIMPLE` carried
 //! no comments, so `comment_texts(src)` was always `[]` on both sides.
@@ -103,6 +111,21 @@ const SIMPLE: &[&str] = &[
     // even though `main`'s auto-export makes it semantically redundant
     // (fmt design doc §D).
     "export main() { right; }",
+    // Task 8b §B: spaced-form normalization — a spaced label (`1 :
+    // right`) normalizes to tight (`1: right`) because the CST only
+    // ever stores the parsed VALUE, never the author's spacing.
+    "main() {\n1 : right;\n}\n",
+    // Task 8b §B: a spaced path in both an import and a qualified call
+    // (`std :: goToEnd`) normalizes to tight `std::goToEnd` the same
+    // way.
+    "use std :: goToEnd;\nmain() { @std :: goToEnd(); }",
+    // Task 8b §D: a file of only comments, no declarations at all —
+    // reprints the comments with one final newline (`compile` needs no
+    // `main` to succeed, so this is a valid corpus entry too).
+    "// just a comment\n// and another\n",
+    // Task 8b §D: an empty function body, alone in the file — `f() { }`
+    // prints as header + closing brace with no blank line between.
+    "f() { }",
 ];
 
 #[test]
