@@ -192,9 +192,10 @@ fn describe(kind: &TokenKind) -> String {
 /// (docs/superpowers/specs/2026-07-07-pmc-fmt-design.md, "Architecture:
 /// one unified lossless CST"). The compiler consumes the `Program`; fmt
 /// reads the CST directly through [`parse_cst`]. The signature is
-/// unchanged from the pre-C1 parser — a byte-identical `Program` is
-/// guaranteed by `tests/parser_parity.rs` against the frozen
-/// `parser_legacy`.
+/// unchanged from the pre-C1 parser — verified byte-identical, for the
+/// whole CST migration, against a frozen pre-C1 reference
+/// implementation; that reference parser and its parity harness were
+/// removed once the CST-based parser was confirmed a sound replacement.
 pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
     parse_cst(tokens).map(|cst| lower_cst(&cst))
 }
