@@ -5,16 +5,14 @@
 //! future `cli/fmt.rs` is the only place that renders errors or touches
 //! the filesystem.
 //!
-//! **Scope of this module today (fmt build Task 4): the TRIVIAL printer
-//! subset only.** It prints a source-faithful skeleton — headers, braces,
-//! indentation, one statement per line, canonical item text, a
-//! single-line comma join — and deliberately leaves the following as
-//! seams for later tasks (each seam is marked at its printing site
-//! below):
+//! **Scope of this module today (fmt build Tasks 4-5): the TRIVIAL
+//! printer subset, plus label/command-column alignment.** It prints a
+//! source-faithful skeleton — headers, braces, indentation, one
+//! statement per line (with labels aligned into a shared command column,
+//! see [`command_column`]), canonical item text, a single-line comma
+//! join — and deliberately leaves the following as seams for later tasks
+//! (each seam is marked at its printing site below):
 //!
-//! - **Labels / command-column alignment** (Task 5) — this task assumes
-//!   every statement is unlabeled; [`crate::cst::StatementCst::labels`]
-//!   and `label_break` are not read yet.
 //! - **Comma-group Y / greedy-fill layout** (Task 6) — [`render_items`]
 //!   always joins on one line; the author's line breaks and the 80-column
 //!   fallback are not implemented yet.
@@ -29,16 +27,16 @@
 //!
 //! "Silently skipped" is a deliberate design choice for this task, per the
 //! brief: an unhandled node must never panic, but this task also must not
-//! half-implement Tasks 5-8's rules. The three-check objective harness
+//! half-implement Tasks 6-8's rules. The three-check objective harness
 //! (`tests/fmt_programs.rs`) is scoped to a SIMPLE program set the
-//! trivial printer fully supports (unlabeled statements, no comments, no
-//! namespaces/imports, single-line comma groups) — each later task widens
-//! that set as its seam closes.
+//! printer fully supports (labeled or unlabeled statements, no comments,
+//! no namespaces/imports, single-line comma groups) — each later task
+//! widens that set as its seam closes.
 
 use crate::compiler::CompileError;
 use crate::cst::{BodyItem, BodyKind, CommaItem, Cst, FunctionCst, StatementCst, TopItem, TopKind};
 use crate::lexer::{LexMode, lex_with};
-use crate::parser::{Builtin, CheckArm, Item, Successor, parse_cst};
+use crate::parser::{Builtin, CheckArm, Item, Label, Successor, parse_cst};
 
 /// Spaces per block level (spec "Indentation" — 4 spaces, never tabs).
 const INDENT_UNIT: usize = 4;
@@ -109,32 +107,121 @@ fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
     out.push_str(&f.name);
     out.push_str("() {\n");
     let body_indent = indent + INDENT_UNIT;
+    // Spec "Label / command alignment": the command column is scoped to
+    // THIS function's own body (a nested function computes its own, one
+    // level deeper — recursion below handles that for free).
+    let command_col = command_column(max_inline_label_prefix_width(&f.body), body_indent);
     for body_item in &f.body {
-        print_body_item(out, body_item, body_indent);
+        print_body_item(out, body_item, body_indent, command_col);
     }
     out.push_str(&pad);
     out.push_str("}\n");
 }
 
-fn print_body_item(out: &mut String, item: &BodyItem, indent: usize) {
+fn print_body_item(out: &mut String, item: &BodyItem, indent: usize, command_col: usize) {
     // Seam (Task 8): `item.blank_before` is not read yet.
     match &item.kind {
-        BodyKind::Statement(s) => print_statement(out, s, indent),
+        BodyKind::Statement(s) => print_statement(out, s, command_col),
         BodyKind::Nested(f) => print_function(out, f, indent),
         // Seam (Task 7): own-line body comments.
         BodyKind::Comment(_) => {}
     }
 }
 
-/// One statement, one line: comma-joined items + `;` (spec "Statements").
+/// Label prefix width: the smallest multiple of [`INDENT_UNIT`] that is
+/// `>= max(base_body_indent, P + 2)`, where `P` is the widest INLINE
+/// labeled statement's label-prefix width in the body (own-line labels
+/// and unlabeled statements don't count toward `P` — spec "Label /
+/// command alignment"). Pure and independently unit-tested below.
+fn command_column(p: usize, base_body_indent: usize) -> usize {
+    let min = base_body_indent.max(p + 2);
+    min.div_ceil(INDENT_UNIT) * INDENT_UNIT
+}
+
+/// `P`: the max label-prefix width among `body`'s own INLINE labeled
+/// statements. Only looks at this function's OWN [`BodyItem`]s — a
+/// nested function's statements belong to ITS body/command-column, not
+/// this one (module doc's per-body scoping).
+fn max_inline_label_prefix_width(body: &[BodyItem]) -> usize {
+    body.iter()
+        .filter_map(|item| match &item.kind {
+            BodyKind::Statement(s) if !s.labels.is_empty() && !s.label_break => {
+                Some(label_prefix_width(&s.labels))
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// A statement's label prefix as printed: each label `N:`, joined by one
+/// space (spec "Intra-statement token spacing" → Label row), e.g. `1:` or
+/// the stacked `1: 2:`. Empty for an unlabeled statement.
+fn label_prefix_text(labels: &[Label]) -> String {
+    labels
+        .iter()
+        .map(|l| format!("{}:", l.value))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Char width of [`label_prefix_text`] — brief step 1: "Width = char
+/// count."
+fn label_prefix_width(labels: &[Label]) -> usize {
+    label_prefix_text(labels).chars().count()
+}
+
+/// Left margin for a `prefix_width`-wide label prefix at `command_col`,
+/// or `None` if that would leave less than the mandatory 1-space margin
+/// (brief step 6's "too long" case; `command_col - 1 - prefix_width`
+/// computed without underflowing on a wide own-line label).
+fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
+    command_col
+        .checked_sub(prefix_width + 1)
+        .filter(|&margin| margin >= 1)
+}
+
+/// One statement (spec "Statements" + "Label / command alignment" +
+/// "Own-line labels"):
 ///
-/// Seam (Task 5): this assumes an UNLABELED statement — `s.labels` and
-/// `s.label_break` are not read. A labeled body is out of this task's
-/// SIMPLE test set.
+/// - **Unlabeled**: `command_col` spaces of indent, then the comma-joined
+///   items.
+/// - **Inline labeled** (`label_break == false`): the label prefix
+///   right-aligned so its final `:` sits at `command_col - 2`, one space,
+///   then the command at `command_col`. [`max_inline_label_prefix_width`]
+///   guarantees a `>= 1` margin for every inline labeled statement in the
+///   body, so [`label_margin`] always returns `Some` here.
+/// - **Own-line labeled** (`label_break == true`, excluded from `P`): the
+///   prefix on its own line — right-aligned like an inline label if it
+///   fits, else hung at a strict 1-space margin — then the command on the
+///   following line at `command_col`. fmt never auto-breaks a label:
+///   `label_break` is read, never inferred or overridden.
 ///
+/// Seam (Task 6): comma groups always join on one line at `command_col`.
 /// Seam (Task 7): `s.trailing` (a same-line trailing comment) is not read.
-fn print_statement(out: &mut String, s: &StatementCst, indent: usize) {
-    out.push_str(&" ".repeat(indent));
+fn print_statement(out: &mut String, s: &StatementCst, command_col: usize) {
+    if s.labels.is_empty() {
+        out.push_str(&" ".repeat(command_col));
+    } else {
+        let prefix = label_prefix_text(&s.labels);
+        let width = prefix.chars().count();
+        if s.label_break {
+            match label_margin(command_col, width) {
+                Some(margin) => out.push_str(&" ".repeat(margin)),
+                None => out.push(' '),
+            }
+            out.push_str(&prefix);
+            out.push('\n');
+            out.push_str(&" ".repeat(command_col));
+        } else {
+            let margin = label_margin(command_col, width).expect(
+                "max_inline_label_prefix_width guarantees a >=1 margin for every inline label",
+            );
+            out.push_str(&" ".repeat(margin));
+            out.push_str(&prefix);
+            out.push(' ');
+        }
+    }
     out.push_str(&render_items(&s.items));
     out.push_str(";\n");
 }
@@ -288,5 +375,79 @@ mod tests {
             let twice = format(&once).unwrap();
             assert_eq!(twice, once, "not idempotent for {src:?}");
         }
+    }
+
+    // -- Task 5: label/command alignment -----------------------------
+
+    #[test]
+    fn command_column_worked_values() {
+        // P=0 (no labels): base indent alone.
+        assert_eq!(command_column(0, 4), 4);
+        // P=2 (`1:`): max(4, 4) = 4.
+        assert_eq!(command_column(2, 4), 4);
+        // P=6 (`11111:`): max(4, 8) = 8.
+        assert_eq!(command_column(6, 4), 8);
+        // P=3 (`12:`): max(4, 5) = 5, rounded up to 8.
+        assert_eq!(command_column(3, 4), 8);
+        // P=5, stacked labels (`1: 2:`): max(4, 7) = 7, rounded up to 8.
+        assert_eq!(command_column(5, 4), 8);
+    }
+
+    #[test]
+    fn command_column_namespaced_base_indent() {
+        // base_body_indent 8 (one level deeper, e.g. a namespaced/nested
+        // body per Task 8). No label wide enough to push past it.
+        assert_eq!(command_column(0, 8), 8);
+        assert_eq!(command_column(2, 8), 8);
+        // P=10 pushes past the deeper base: max(8, 12) = 12, already a
+        // multiple of 4.
+        assert_eq!(command_column(10, 8), 12);
+    }
+
+    #[test]
+    fn a_single_inline_label_command_column_4() {
+        assert_eq!(
+            format("main() { 1: right; check(1, 2); }").unwrap(),
+            "main() {\n 1: right;\n    check(1, 2);\n}\n"
+        );
+    }
+
+    #[test]
+    fn b_widest_inline_label_pads_narrower_ones_left() {
+        // `stop` in the brief's illustration isn't a real `.pmc` command;
+        // substituted with `halt` (identical 4-char width, so the
+        // alignment columns this test pins are unaffected).
+        assert_eq!(
+            format("main() { 11111: right; left; 12: halt; }").unwrap(),
+            "main() {\n 11111: right;\n        left;\n    12: halt;\n}\n"
+        );
+    }
+
+    #[test]
+    fn c_own_line_labels_fit_and_overflow() {
+        // `12:` is own-line but fits (right-aligns like an inline label);
+        // `999999999:` is own-line and too long (hangs at 1 space). Both
+        // commands land on the same command column (8) set by `11111:`.
+        let src = "main() {\n11111: right;\n12:\nleft;\n999999999:\nhalt;\n}\n";
+        assert_eq!(
+            format(src).unwrap(),
+            "main() {\n 11111: right;\n    12:\n        left;\n 999999999:\n        halt;\n}\n"
+        );
+    }
+
+    #[test]
+    fn d_stacked_labels_round_up_command_column() {
+        // Prefix `1: 2:` has width 5 -> C = max(4, 7) = 7, rounded up to
+        // 8 (the only multiple of 4 satisfying the round-up rule) -> a
+        // 2-space left margin (8 - 1 - 5 = 2). NOTE: the task brief's
+        // illustrative code block shows a single leading space (i.e. an
+        // un-rounded C=7); that contradicts the brief's own stated
+        // algorithm (explicitly "rounded to 8" in the same block) and the
+        // mandatory P=3 unit test above (which only round-up produces).
+        // Implemented per the stated round-up rule; see task-5-report.md.
+        assert_eq!(
+            format("main() { 1: 2: right; }").unwrap(),
+            "main() {\n  1: 2: right;\n}\n"
+        );
     }
 }

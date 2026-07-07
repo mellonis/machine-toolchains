@@ -6,25 +6,34 @@
 //! objective backstop for the whole fmt build — reviewer approval does
 //! NOT substitute for these passing.
 //!
-//! At this task (fmt build Task 4 / 4b) the pretty-printer implements
-//! only the TRIVIAL subset (see `crate::fmt`'s module doc): unlabeled
-//! statements, no comments, no namespaces/imports, single-line comma
-//! groups. `SIMPLE` is scoped to exactly that subset — Tasks 5-8 widen
-//! it (labels, comma-group wrapping, comments, blank
-//! lines/imports/namespaces/spacing/edge-cases) as each seam closes,
-//! eventually pointing this harness at the full corpus (Task 9).
+//! At this task (fmt build Tasks 4-5) the pretty-printer implements the
+//! TRIVIAL subset plus label/command-column alignment (see `crate::fmt`'s
+//! module doc): labeled or unlabeled statements, no comments, no
+//! namespaces/imports, single-line comma groups. `SIMPLE` is scoped to
+//! exactly that subset — Tasks 6-8 widen it further (comma-group
+//! wrapping, comments, blank lines/imports/namespaces/spacing/edge-cases)
+//! as each seam closes, eventually pointing this harness at the full
+//! corpus (Task 9).
 
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::format;
 use mtc_post_machine::lexer::{LexMode, TokenKind, lex_with};
 use mtc_post_machine::optimizer::OptLevel;
 
-/// Valid `.pmc` programs the trivial printer fully supports.
+/// Valid `.pmc` programs the printer fully supports.
 const SIMPLE: &[&str] = &[
     "main() { right; }",
     "f() { right; @g(); } g() { left; }",
     "main() { left, right, mark; }",
     "export f() { right(!); } g() { @f(); mark(!); } main() { @g(); debugger; halt; }",
+    // Task 5: an inline labeled statement + an unlabeled one, sharing a
+    // command column (spec "Label / command alignment").
+    "main() { 1: right; goto 1; }",
+    // Task 5: own-line labels (`label_break`) — one that fits the label
+    // field, one that overflows and hangs (spec "Own-line labels"). The
+    // riskiest idempotence case: fmt's re-parse must re-derive the same
+    // `label_break` from the newline it just emitted.
+    "main() {\n11111: right;\n12:\nleft;\n999999999:\nhalt;\n}\n",
 ];
 
 #[test]
