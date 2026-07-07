@@ -46,7 +46,12 @@
 //! A mid-comma-group comment ([`crate::cst::CommaItem::leading`]) either
 //! stays inline (a BLOCK comment) or forces the group onto multiple lines
 //! (a LINE comment can't be followed by code on its own line — see
-//! [`render_items`]).
+//! [`render_items`]). A comment on the SAME line as a function's opening
+//! `{` or closing `}` (`FunctionCst::open_trailing` /
+//! `FunctionCst::close_trailing`, the "c-brace" fix) rides that brace's
+//! own line instead — see [`print_function`]; unlike the mid-comma-group
+//! case, ANY comment adjacent to `{` forces the body onto the next line,
+//! there is no BLOCK-stays-inline exception at a brace.
 
 use crate::compiler::CompileError;
 use crate::cst::{
@@ -216,6 +221,16 @@ fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
 /// && f.name == "main")`). Printing `has_export` directly means
 /// `export main() { … }` keeps its (legal but redundant) `export`, and
 /// bare `main() { … }` stays bare — both compile identically either way.
+///
+/// **c-brace** (`cst.rs`'s "Comment placement"): `f.open_trailing`
+/// prints right after `{` on the header line — space-joined when there's
+/// more than one, which only happens for a run of BLOCK comments (a LINE
+/// comment eats the rest of its physical line, so it can only ever be
+/// the last entry `parse_cst` captured). Any `open_trailing` at all means
+/// the body starts on the FOLLOWING line regardless of comment kind —
+/// unlike a mid-comma-group leading comment ([`layout_leading`]), there
+/// is no "stays inline" case here. `f.close_trailing` rides the closing
+/// `}` the same way a statement's `trailing` rides its `;`.
 fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
     let pad = " ".repeat(indent);
     out.push_str(&pad);
@@ -223,7 +238,19 @@ fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
         out.push_str("export ");
     }
     out.push_str(&f.name);
-    out.push_str("() {\n");
+    out.push_str("() {");
+    if f.open_trailing.is_empty() {
+        out.push('\n');
+    } else {
+        out.push(' ');
+        let texts: Vec<String> = f
+            .open_trailing
+            .iter()
+            .map(|c| normalize_comment_text(&c.text))
+            .collect();
+        out.push_str(&texts.join(" "));
+        out.push('\n');
+    }
     let body_indent = indent + INDENT_UNIT;
     // Spec "Label / command alignment": the command column is scoped to
     // THIS function's own body (a nested function computes its own, one
@@ -250,7 +277,12 @@ fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
         print_body_item(out, body_item, body_indent, &codes[i], trailing_spacing[i]);
     }
     out.push_str(&pad);
-    out.push_str("}\n");
+    out.push('}');
+    if let Some(c) = &f.close_trailing {
+        out.push(' ');
+        out.push_str(&normalize_comment_text(&c.text));
+    }
+    out.push('\n');
 }
 
 fn print_body_item(
@@ -1509,5 +1541,95 @@ mod tests {
             let twice = format(&once).unwrap();
             assert_eq!(twice, once, "not idempotent for {src:?}");
         }
+    }
+
+    // -- Finalize: c-brace comment fix + M3 regression --------------
+    //
+    // §1: a comment on the SAME line as a function's opening `{` or
+    // closing `}` used to be forced onto its own line (treated like an
+    // ordinary leading/dangling body comment); it now stays on the brace
+    // line it started on, and code after it reflows (`print_function`'s
+    // c-brace doc). §2 pins the M3 path — a LINE comment leading a
+    // statement's FIRST comma-group item (between the label and the
+    // first command) forces the group onto multiple lines — which was
+    // exercised structurally but never asserted byte-for-byte.
+
+    #[test]
+    fn cbrace_a_trailing_the_close_brace_stays_on_its_line() {
+        assert_eq!(
+            format("f() { right; } // t").unwrap(),
+            "f() {\n    right;\n} // t\n"
+        );
+    }
+
+    #[test]
+    fn cbrace_b_line_comment_after_the_open_brace_stays_on_the_header() {
+        assert_eq!(
+            format("f() { // note\n right;\n}").unwrap(),
+            "f() { // note\n    right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn cbrace_c_block_comment_after_the_open_brace_stays_on_the_header() {
+        // The block comment is BEFORE the (unlabeled) statement and
+        // ADJACENT TO `{`, so it stays on the `{` line and `right` drops
+        // to the body — unlike a mid-comma-group block comment (see
+        // `cbrace_d_labeled_statement_block_comment_stays_inline` below),
+        // there is no "stays inline" case at a brace.
+        assert_eq!(
+            format("f() { /* c */ right; }").unwrap(),
+            "f() { /* c */\n    right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn cbrace_d_labeled_statement_block_comment_stays_inline() {
+        // The distinction the brief calls out as UNCHANGED: `/* c */`
+        // here is inside the statement, after the label — not adjacent
+        // to `{` (a real command, `1:`, sits between them) — so this
+        // stays on the `q_mid_comma_group_block_comment_stays_inline`
+        // path, not the c-brace one.
+        assert_eq!(
+            format("f() { 1: /* c */ right; }").unwrap(),
+            "f() {\n 1: /* c */ right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn idempotent_on_cbrace_shapes() {
+        for src in [
+            "f() { right; } // t".to_string(),
+            "f() { // note\n right;\n}".to_string(),
+            "f() { /* c */ right; }".to_string(),
+            "f() { 1: /* c */ right; }".to_string(),
+        ] {
+            let once = format(&src).unwrap();
+            let twice = format(&once).unwrap();
+            assert_eq!(twice, once, "not idempotent for {src:?}");
+        }
+    }
+
+    #[test]
+    fn m3_item0_leading_line_comment_forces_a_comma_group_break() {
+        // A comment between an own-line label's `:` and the first
+        // command (`statement`'s "rare" leading trivia, `parser.rs`) —
+        // the LINE comment makes `layouts[0].forced_break` true in
+        // `render_items`, which `emit_forced_break` handles BEFORE the
+        // main group loop (there's no preceding `,` to attach it to).
+        // The label is also own-line here (`label_break`) since its
+        // only inline neighbor is the comment, not a command.
+        assert_eq!(
+            format("f() { 1: // c\n left, right; }").unwrap(),
+            "f() {\n 1:\n    // c\n    left, right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn idempotent_on_m3_shape() {
+        let src = "f() { 1: // c\n left, right; }";
+        let once = format(src).unwrap();
+        let twice = format(&once).unwrap();
+        assert_eq!(twice, once, "not idempotent for {src:?}");
     }
 }

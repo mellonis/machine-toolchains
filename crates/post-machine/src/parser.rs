@@ -755,6 +755,31 @@ impl Parser<'_> {
         let mut nested_names: HashSet<String> = HashSet::new();
         let mut seen_labels: HashSet<u32> = HashSet::new();
         self.prev_end_line = brace.line;
+        // c-brace fix (`cst.rs`'s "Comment placement" doc): comment(s)
+        // riding the SAME physical line as `{`, before the first body
+        // item, are captured here instead of falling into the ordinary
+        // leading-comment drain below (which would print them as their
+        // own body item, moving them off the header line). `sig_index ==
+        // self.pos` (not `<=`) is deliberate — it excludes a comment that
+        // sits BEFORE `{` (e.g. `f() /* x */ { ... }`, sig_index one
+        // token earlier) even when that comment happens to share `{`'s
+        // physical line; only a comment genuinely AFTER `{` has
+        // `sig_index` equal to the position `{` just advanced `self.pos`
+        // to.
+        let mut open_trailing: Vec<Comment> = Vec::new();
+        while self.cpos < self.comments.len() {
+            let ca = &self.comments[self.cpos];
+            if ca.sig_index == self.pos && ca.line == brace.line {
+                open_trailing.push(ca.comment.clone());
+                self.cpos += 1;
+            } else {
+                break;
+            }
+        }
+        if let Some(last) = open_trailing.last() {
+            self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
+        }
+        let mut close_trailing: Option<Comment> = None;
         loop {
             // Own-line comments (leading/standalone/dangling) become body
             // items in source position.
@@ -852,8 +877,26 @@ impl Parser<'_> {
                         CompileErrorKind::DanglingLabel(label.value),
                     ));
                 }
-                self.prev_end_line = self.peek().line;
+                let close_line = self.peek().line;
+                self.prev_end_line = close_line;
                 self.bump();
+                // c-brace fix, symmetric to `open_trailing` above: a
+                // comment on the SAME line as `}` rides the closing
+                // brace instead of becoming the next sibling's leading
+                // own-line comment. The top-of-loop `drain_pending()`
+                // above already caught up `self.cpos` to the pre-`}`
+                // `self.pos`, so nothing is pending here except a
+                // comment genuinely following `}` (`sig_index ==
+                // self.pos`, the position `}` just advanced to).
+                if self.cpos < self.comments.len() {
+                    let ca = &self.comments[self.cpos];
+                    if ca.sig_index == self.pos && ca.line == close_line {
+                        self.prev_end_line =
+                            close_line + ca.comment.text.matches('\n').count() as u32;
+                        close_trailing = Some(ca.comment.clone());
+                        self.cpos += 1;
+                    }
+                }
                 break;
             }
             let stmt = self.statement(labels, last_colon_line)?;
@@ -872,6 +915,8 @@ impl Parser<'_> {
             exported: false,
             has_export: false,
             body,
+            open_trailing,
+            close_trailing,
         })
     }
 

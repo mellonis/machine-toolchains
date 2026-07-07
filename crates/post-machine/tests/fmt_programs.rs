@@ -159,6 +159,21 @@ const SIMPLE: &[&str] = &[
     // Task 8b §D: an empty function body, alone in the file — `f() { }`
     // prints as header + closing brace with no blank line between.
     "f() { }",
+    // Finalize §1 ("c-brace"): a comment on the SAME line as the
+    // closing `}` rides that line instead of forcing its own — the
+    // corpus-level partner to `fmt::tests::cbrace_a_...`.
+    "f() { right; } // t",
+    // Finalize §1: a comment on the SAME line as the opening `{`, before
+    // the first statement — a LINE comment (`fmt::tests::cbrace_b_...`)
+    // and a BLOCK comment (`fmt::tests::cbrace_c_...`) both stay on the
+    // header line; either way the body starts on the next line.
+    "f() { // note\n right;\n}",
+    "f() { /* c */ right; }",
+    // Finalize §2 (M3): a LINE comment leading a statement's first
+    // comma-group item (between an own-line label's `:` and the first
+    // command) forces the group onto multiple lines
+    // (`fmt::tests::m3_item0_...`).
+    "f() { 1: // c\n left, right; }",
 ];
 
 /// `SIMPLE` entries paired with a label equal to their own source (the

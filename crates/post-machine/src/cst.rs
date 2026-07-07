@@ -80,6 +80,12 @@
 //!   followed by another blank before the next item.
 //! - **Dangling** — one or more trailing `Comment` items at the end of a
 //!   `Vec` with no following node (end of a body/namespace/file).
+//! - **c-brace** — a comment on the SAME line as a [`FunctionCst`]'s
+//!   opening `{` or closing `}` rides that brace's own line instead of
+//!   becoming a leading/dangling body item ([`FunctionCst::open_trailing`]
+//!   / [`FunctionCst::close_trailing`]) — the general rule "a comment
+//!   stays on the line where it started" applies to the brace lines too,
+//!   not just statement lines.
 
 use mtc_core::diagnostics::Span;
 
@@ -208,6 +214,18 @@ pub struct FunctionCst {
     /// nested function definitions interleaved as written (module doc's
     /// "Statements and nested function definitions interleave").
     pub body: Vec<BodyItem>,
+    /// Comment(s) on the SAME physical line as the opening `{`, before
+    /// the first body item — e.g. `f() { // note` or
+    /// `f() { /* c */ right; }` (module doc's "Comment placement",
+    /// "c-brace" fix). Empty when no such comment exists. Unlike a
+    /// mid-comma-group [`CommaItem::leading`] run, ANY comment here
+    /// (block or line) forces the body onto its own line below — a
+    /// comment glued to `{` never shares its line with the first
+    /// statement's code.
+    pub open_trailing: Vec<Comment>,
+    /// A comment on the SAME physical line as the closing `}` — e.g.
+    /// `} // t`. `None` when absent.
+    pub close_trailing: Option<Comment>,
 }
 
 /// One function-body item, plus whether a blank line precedes it in
@@ -332,6 +350,8 @@ mod tests {
                 exported: false,
                 has_export: false,
                 body: vec![],
+                open_trailing: vec![],
+                close_trailing: None,
             }),
         };
         let standalone = BodyItem {
@@ -351,6 +371,8 @@ mod tests {
             exported: true,
             has_export: true,
             body: vec![leading, labeled_statement, nested_fn, standalone],
+            open_trailing: vec![],
+            close_trailing: None,
         };
 
         let ns = NamespaceCst {
