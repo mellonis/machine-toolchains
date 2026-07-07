@@ -179,6 +179,14 @@ const SIMPLE: &[&str] = &[
     // on their respective brace lines — the corpus-level partner to
     // `fmt::tests::ns_cbrace_*`.
     "namespace ns { // note\n    f() { right; }\n} // t\nmain() { @ns::f(); }",
+    // M2 fix: a mid-comma-group BLOCK comment that spans two physical
+    // source lines — the corpus-level partner to
+    // `fmt::tests::m2_multiline_comment_greedy_fill_uses_last_line_width`.
+    // Forces `right` to start a new greedy-fill group whose `first` item
+    // embeds a `\n`; the width tracker must measure only the comment's
+    // last physical line, not both lines summed, when deciding whether
+    // the five `mark`s that follow need to wrap.
+    "main() { left, /* xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ny */ right, mark, mark, mark, mark, mark; }",
 ];
 
 /// `SIMPLE` entries paired with a label equal to their own source (the

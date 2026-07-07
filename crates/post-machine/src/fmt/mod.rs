@@ -720,6 +720,25 @@ fn emit_forced_break(out: &mut String, layout: &LeadingLayout, command_col: usiz
     out.push_str(&" ".repeat(command_col));
 }
 
+/// The true output column after appending `text` at the point where the
+/// cursor sits at `base`. A [`CommaItem::leading`] BLOCK comment can
+/// embed real newlines (module doc §D; `render_items`'s doc on
+/// [`layout_leading`]); when `text` contains one, everything up to its
+/// FIRST `\n` continues from `base`, but every line after that is raw
+/// content printed verbatim with no re-indent (`print_comment`'s doc:
+/// only a comment's first line gets `command_col` prefixed) — so the
+/// cursor's true resulting column is simply the width of the substring
+/// AFTER the LAST `\n`, independent of `base` entirely. Text with no
+/// embedded newline (the overwhelming common case: no comment, or a
+/// single-line one) takes the plain `base + chars(text)` sum, unchanged
+/// from before this helper existed.
+fn line_width_after(base: usize, text: &str) -> usize {
+    match text.rsplit_once('\n') {
+        Some((_, last_line)) => last_line.chars().count(),
+        None => base + text.chars().count(),
+    }
+}
+
 /// Rule 2's greedy-fill, applied to one group's items (the whole
 /// statement when there was no author break at all; one preserved line
 /// when rule 3's grouping still leaves a line over 80). Packs items onto
@@ -736,24 +755,34 @@ fn emit_forced_break(out: &mut String, layout: &LeadingLayout, command_col: usiz
 /// never re-checked against the limit — with no preceding comma to break
 /// on, a single over-wide command stays overlong (`line-too-long` lint's
 /// job, not fmt's).
+///
+/// Running-width tracking uses [`line_width_after`] rather than a bare
+/// `chars().count()` add: a mid-group multi-line BLOCK comment (only
+/// ever possible as a group's `first` item — any such comment forces its
+/// own `newline_before` group boundary, see `render_items`'s doc) must
+/// not have every one of its physical lines summed into one inflated
+/// width; only its LAST physical line reflects the cursor's true column
+/// (M2 fix). Comment-free / single-line-comment items are byte-identical
+/// to the pre-fix arithmetic, since [`line_width_after`] takes the exact
+/// same `base + chars(text)` branch whenever `text` has no `\n`.
 fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
     let mut items = texts.iter();
     let first = items.next().expect("a comma group is never empty");
     out.push_str(first);
-    let mut col = command_col + first.chars().count();
+    let mut col = line_width_after(command_col, first);
     for text in items {
         let w = text.chars().count();
         // Same `+ 1 <= LINE_WIDTH` -> `< LINE_WIDTH` fold as above.
         if col + 2 + w < LINE_WIDTH {
             out.push_str(", ");
             out.push_str(text);
-            col += 2 + w;
+            col = line_width_after(col + 2, text);
         } else {
             out.push(',');
             out.push('\n');
             out.push_str(&" ".repeat(command_col));
             out.push_str(text);
-            col = command_col + w;
+            col = line_width_after(command_col, text);
         }
     }
 }
@@ -1102,6 +1131,80 @@ mod tests {
             let twice = format(&once).unwrap();
             assert_eq!(twice, once, "not idempotent for {src:?}");
         }
+    }
+
+    #[test]
+    fn m2_multiline_comment_greedy_fill_uses_last_line_width() {
+        // M2 regression: a mid-comma-group BLOCK comment
+        // (`CommaItem::leading`) that spans two physical source lines
+        // forces the FOLLOWING item (`right`) to start a NEW group --
+        // `newline_before` compares raw source LINE NUMBERS
+        // (`parser.rs`: `item_start_line > last_item_end_line`), and any
+        // embedded `\n` inside a leading comment necessarily advances the
+        // line count between the previous item and this one, regardless
+        // of source formatting. That makes the comment-prefixed `right`
+        // text the `first` item of `greedy_fill_group`'s SECOND group.
+        //
+        // The old buggy width tracker measured `first.chars().count()`,
+        // summing BOTH physical lines of the comment as if they sat on
+        // one line, instead of the cursor's TRUE resulting column (the
+        // width of the text AFTER the comment's closing `*/` -- its own
+        // last physical line, printed verbatim with no re-indent).
+        //
+        // Hand trace (command_col = 4, unlabeled `main`):
+        //   comment's first line: "/* " + 70 `x`s = 73 chars (77 with the
+        //   4-space indent -- under 80, unaffected by this fix either
+        //   way).
+        //   comment's last line "y */" (4) + " right" (6) = 10 -- the
+        //   TRUE column after this item (`line_width_after`, no `+
+        //   command_col`: the tail line is raw, un-indented content).
+        //   Old (buggy) total char count of the whole comment+item text
+        //   (both lines summed, `\n` counted as 1 char): 78 (comment) + 1
+        //   (space) + 5 ("right") = 84 -> buggy col = 4 + 84 = 88.
+        //
+        //   Next item `mark` (w = 4): buggy check `88 + 2 + 4 = 94` is
+        //   NOT `< 80` -> spurious break. Corrected check `10 + 2 + 4 =
+        //   16` IS `< 80` -> fits, and each following `mark` also fits
+        //   (16, 22, 28, 34, 40, all < 80) -- none of the five `mark`s
+        //   need to break once the width tracker is correct.
+        let comment = format!("/* {}\ny */", "x".repeat(70));
+        let src = format!("main() {{ left, {comment} right, mark, mark, mark, mark, mark; }}");
+        let expected = format!(
+            "main() {{\n    left,\n    {comment} right, mark, mark, mark, mark, mark;\n}}\n"
+        );
+        let out = format(&src).unwrap();
+        assert_eq!(out, expected);
+        // Every physical line the fixed width math produces must be
+        // <= 80 (spec "Line limit" -- the whole point of greedy-fill).
+        assert!(out.lines().all(|l| l.chars().count() <= 80));
+        // Idempotent: reformatting the wrapped output is a no-op.
+        assert_eq!(format(&expected).unwrap(), expected);
+    }
+
+    #[test]
+    fn m2_control_single_line_comment_unaffected() {
+        // Control for the fix above: the SAME shape, but the comment
+        // collapsed to ONE physical line. No embedded `\n` -> no advance
+        // in `newline_before`'s line-number comparison -> `right` stays
+        // in `left`'s own group (not a fresh one), and greedy-fill's
+        // width math is entirely UNTOUCHED by this fix (the
+        // `text.contains('\n')` branch this fix adds is never taken; the
+        // width comes out through the exact same `base + chars(text)`
+        // arithmetic as before). The single long comment+item still
+        // can't share a line with `left` (plain `chars().count()`, no
+        // bug involved here) and lands alone on its own over-80 physical
+        // line, matching `greedy_fill_group`'s already-documented
+        // behavior for an over-wide item placed first on a line ("a
+        // single over-wide command stays overlong -- `line-too-long`
+        // lint's job, not fmt's").
+        let comment = format!("/* {} y */", "x".repeat(70));
+        let src = format!("main() {{ left, {comment} right, mark, mark, mark, mark, mark; }}");
+        let expected = format!(
+            "main() {{\n    left,\n    {comment} right,\n    mark, mark, mark, mark, mark;\n}}\n"
+        );
+        let out = format(&src).unwrap();
+        assert_eq!(out, expected);
+        assert_eq!(format(&expected).unwrap(), expected);
     }
 
     // -- Task 7: comments -------------------------------------------
