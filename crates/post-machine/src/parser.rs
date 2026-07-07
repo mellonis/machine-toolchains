@@ -431,7 +431,7 @@ impl Parser<'_> {
 
     /// The whole file is the `ns == []` namespace level.
     fn file(mut self) -> Result<Vec<TopItem>, CompileError> {
-        self.top_items(&[], None)
+        self.top_items(&[], None).map(|(items, _)| items)
     }
 
     /// One namespace level's item loop, building `TopItem`s in source
@@ -441,12 +441,14 @@ impl Parser<'_> {
     /// interleaves own-line comments as [`TopKind::Comment`] items.
     /// `terminator` is `Some(RBrace)` inside a block, `None` at file level
     /// (ends at Eof). Duplicate-name checks run here, exactly as the pre-C1
-    /// parser did.
+    /// parser did. Returns the items plus the block's `close_trailing`
+    /// comment (c-brace fix, mirrors `function`'s close_trailing) — always
+    /// `None` when `terminator` is `None` (a file has no closing brace).
     fn top_items(
         &mut self,
         ns: &[String],
         terminator: Option<&TokenKind>,
-    ) -> Result<Vec<TopItem>, CompileError> {
+    ) -> Result<(Vec<TopItem>, Option<Comment>), CompileError> {
         let mut items: Vec<TopItem> = Vec::new();
         loop {
             // Own-line comments (leading/standalone/dangling) become their
@@ -461,14 +463,35 @@ impl Parser<'_> {
             }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
-                (TokenKind::Eof, None) => return Ok(items),
+                (TokenKind::Eof, None) => return Ok((items, None)),
                 (TokenKind::Eof, Some(_)) => {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
                 (k, Some(term)) if k == term => {
-                    self.prev_end_line = t.line;
+                    let close_line = t.line;
+                    self.prev_end_line = close_line;
                     self.bump();
-                    return Ok(items);
+                    // c-brace fix, symmetric to the namespace's own
+                    // `open_trailing` capture below `top_items`'s caller:
+                    // a comment on the SAME line as `}` rides the closing
+                    // brace instead of becoming the next sibling's
+                    // leading own-line comment. The top-of-loop
+                    // `drain_pending()` above already caught up
+                    // `self.cpos` to the pre-`}` `self.pos`, so nothing
+                    // is pending here except a comment genuinely
+                    // following `}` (`sig_index == self.pos`, the
+                    // position `}` just advanced to).
+                    let mut close_trailing: Option<Comment> = None;
+                    if self.cpos < self.comments.len() {
+                        let ca = &self.comments[self.cpos];
+                        if ca.sig_index == self.pos && ca.line == close_line {
+                            self.prev_end_line =
+                                close_line + ca.comment.text.matches('\n').count() as u32;
+                            close_trailing = Some(ca.comment.clone());
+                            self.cpos += 1;
+                        }
+                    }
+                    return Ok((items, close_trailing));
                 }
                 _ => {}
             }
@@ -663,8 +686,32 @@ impl Parser<'_> {
                 child.push(name.clone());
                 self.namespaces.insert(child.clone());
                 self.prev_end_line = brace.line;
-                let child_items = self.top_items(&child, Some(&TokenKind::RBrace))?;
-                // `top_items` set `prev_end_line` to the closing `}` line.
+                // c-brace fix (`cst.rs`'s "Comment placement" doc,
+                // mirrors `function`'s `open_trailing` capture): comment(s)
+                // riding the SAME physical line as the namespace's `{`,
+                // before the first body item, are captured here instead
+                // of falling into `top_items`'s ordinary leading-comment
+                // drain (which would print them as their own body item,
+                // moving them off the header line). `sig_index ==
+                // self.pos` (not `<=`) excludes a comment that sits
+                // BEFORE `{` even when it shares `{`'s physical line.
+                let mut open_trailing: Vec<Comment> = Vec::new();
+                while self.cpos < self.comments.len() {
+                    let ca = &self.comments[self.cpos];
+                    if ca.sig_index == self.pos && ca.line == brace.line {
+                        open_trailing.push(ca.comment.clone());
+                        self.cpos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(last) = open_trailing.last() {
+                    self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
+                }
+                let (child_items, close_trailing) =
+                    self.top_items(&child, Some(&TokenKind::RBrace))?;
+                // `top_items` set `prev_end_line` to the closing `}` line
+                // (or its close_trailing comment's last line).
                 let blank_before = ns_line > ns_saved + 1;
                 items.push(TopItem {
                     blank_before,
@@ -673,6 +720,8 @@ impl Parser<'_> {
                         name_span,
                         line: ns_line,
                         items: child_items,
+                        open_trailing,
+                        close_trailing,
                     }),
                 });
                 continue;

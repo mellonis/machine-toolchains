@@ -46,12 +46,14 @@
 //! A mid-comma-group comment ([`crate::cst::CommaItem::leading`]) either
 //! stays inline (a BLOCK comment) or forces the group onto multiple lines
 //! (a LINE comment can't be followed by code on its own line — see
-//! [`render_items`]). A comment on the SAME line as a function's opening
-//! `{` or closing `}` (`FunctionCst::open_trailing` /
-//! `FunctionCst::close_trailing`, the "c-brace" fix) rides that brace's
-//! own line instead — see [`print_function`]; unlike the mid-comma-group
-//! case, ANY comment adjacent to `{` forces the body onto the next line,
-//! there is no BLOCK-stays-inline exception at a brace.
+//! [`render_items`]). A comment on the SAME line as a function's or a
+//! namespace's opening `{` or closing `}` (`FunctionCst::open_trailing` /
+//! `FunctionCst::close_trailing`, `NamespaceCst::open_trailing` /
+//! `NamespaceCst::close_trailing`, the "c-brace" fix) rides that brace's
+//! own line instead — see [`print_function`] / [`print_namespace`];
+//! unlike the mid-comma-group case, ANY comment adjacent to `{` forces
+//! the body onto the next line, there is no BLOCK-stays-inline exception
+//! at a brace.
 
 use crate::compiler::CompileError;
 use crate::cst::{
@@ -133,15 +135,40 @@ fn print_top_item(out: &mut String, item: &TopItem, indent: usize) {
 /// level uses, so nesting (a namespace inside a namespace) recurses for
 /// free, and a nested function's body indent (namespace +1, function +1)
 /// already falls out of [`print_function`]'s own `indent + INDENT_UNIT`.
+///
+/// **c-brace** (`cst.rs`'s "Comment placement"), mirrors
+/// [`print_function`]'s handling of [`FunctionCst::open_trailing`] /
+/// [`FunctionCst::close_trailing`]: `ns.open_trailing` prints right after
+/// `{` on the header line (space-joined when there's more than one, which
+/// only happens for a run of BLOCK comments), forcing `items` onto the
+/// following line regardless of comment kind; `ns.close_trailing` rides
+/// the closing `}` the same way.
 fn print_namespace(out: &mut String, ns: &NamespaceCst, indent: usize) {
     let pad = " ".repeat(indent);
     out.push_str(&pad);
     out.push_str("namespace ");
     out.push_str(&ns.name);
-    out.push_str(" {\n");
+    out.push_str(" {");
+    if ns.open_trailing.is_empty() {
+        out.push('\n');
+    } else {
+        out.push(' ');
+        let texts: Vec<String> = ns
+            .open_trailing
+            .iter()
+            .map(|c| normalize_comment_text(&c.text))
+            .collect();
+        out.push_str(&texts.join(" "));
+        out.push('\n');
+    }
     print_top_items(out, &ns.items, indent + INDENT_UNIT);
     out.push_str(&pad);
-    out.push_str("}\n");
+    out.push('}');
+    if let Some(c) = &ns.close_trailing {
+        out.push(' ');
+        out.push_str(&normalize_comment_text(&c.text));
+    }
+    out.push('\n');
 }
 
 /// One `use` list (spec "Imports"): paths in source order, never
@@ -1628,6 +1655,64 @@ mod tests {
     #[test]
     fn idempotent_on_m3_shape() {
         let src = "f() { 1: // c\n left, right; }";
+        let once = format(src).unwrap();
+        let twice = format(&once).unwrap();
+        assert_eq!(twice, once, "not idempotent for {src:?}");
+    }
+
+    // -- Namespace c-brace fix (mirrors FunctionCst's open_trailing /
+    // close_trailing onto NamespaceCst) --------------------------------
+    //
+    // Same gap `cbrace_a`/`cbrace_b` fixed for functions, applied to
+    // `namespace NAME { … }`: a comment on the SAME line as the
+    // namespace's opening `{` or closing `}` used to be forced onto its
+    // own line inside/after the block; it now rides the brace line.
+
+    #[test]
+    fn ns_cbrace_a_trailing_the_close_brace_stays_on_its_line() {
+        assert_eq!(
+            format("namespace ns { f() { right; } } // t").unwrap(),
+            "namespace ns {\n    f() {\n        right;\n    }\n} // t\n"
+        );
+    }
+
+    #[test]
+    fn ns_cbrace_b_line_comment_after_the_open_brace_stays_on_the_header() {
+        assert_eq!(
+            format("namespace ns { // note\n f() { right; }\n}").unwrap(),
+            "namespace ns { // note\n    f() {\n        right;\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn idempotent_on_ns_cbrace_shapes() {
+        for src in [
+            "namespace ns { f() { right; } } // t".to_string(),
+            "namespace ns { // note\n f() { right; }\n}".to_string(),
+        ] {
+            let once = format(&src).unwrap();
+            let twice = format(&once).unwrap();
+            assert_eq!(twice, once, "not idempotent for {src:?}");
+        }
+    }
+
+    #[test]
+    fn ns_cbrace_c_nested_namespaces_each_close_trailing_binds_to_its_own_brace() {
+        // The one interaction the flat single-namespace tests above don't
+        // exercise: `close_trailing` is threaded back out of `top_items`
+        // across a RECURSIVE call (the inner namespace's own `top_items`
+        // call returns ITS close_trailing to the inner-namespace caller,
+        // not the outer's). `// t1` must bind to `b`'s `}`, `// t2` to
+        // `a`'s — never swapped or duplicated.
+        assert_eq!(
+            format("namespace a { namespace b { f() { right; } } // t1\n} // t2").unwrap(),
+            "namespace a {\n    namespace b {\n        f() {\n            right;\n        }\n    } // t1\n} // t2\n"
+        );
+    }
+
+    #[test]
+    fn idempotent_on_nested_ns_cbrace_shape() {
+        let src = "namespace a { namespace b { f() { right; } } // t1\n} // t2";
         let once = format(src).unwrap();
         let twice = format(&once).unwrap();
         assert_eq!(twice, once, "not idempotent for {src:?}");

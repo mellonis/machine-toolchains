@@ -174,6 +174,11 @@ const SIMPLE: &[&str] = &[
     // command) forces the group onto multiple lines
     // (`fmt::tests::m3_item0_...`).
     "f() { 1: // c\n left, right; }",
+    // Namespace c-brace fix: a comment on the SAME line as the
+    // namespace's opening `{` and another on its closing `}` both stay
+    // on their respective brace lines — the corpus-level partner to
+    // `fmt::tests::ns_cbrace_*`.
+    "namespace ns { // note\n    f() { right; }\n} // t\nmain() { @ns::f(); }",
 ];
 
 /// `SIMPLE` entries paired with a label equal to their own source (the

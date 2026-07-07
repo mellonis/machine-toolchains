@@ -80,12 +80,13 @@
 //!   followed by another blank before the next item.
 //! - **Dangling** — one or more trailing `Comment` items at the end of a
 //!   `Vec` with no following node (end of a body/namespace/file).
-//! - **c-brace** — a comment on the SAME line as a [`FunctionCst`]'s
-//!   opening `{` or closing `}` rides that brace's own line instead of
-//!   becoming a leading/dangling body item ([`FunctionCst::open_trailing`]
-//!   / [`FunctionCst::close_trailing`]) — the general rule "a comment
-//!   stays on the line where it started" applies to the brace lines too,
-//!   not just statement lines.
+//! - **c-brace** — a comment on the SAME line as a [`FunctionCst`]'s or
+//!   [`NamespaceCst`]'s opening `{` or closing `}` rides that brace's own
+//!   line instead of becoming a leading/dangling body item
+//!   ([`FunctionCst::open_trailing`] / [`FunctionCst::close_trailing`],
+//!   [`NamespaceCst::open_trailing`] / [`NamespaceCst::close_trailing`])
+//!   — the general rule "a comment stays on the line where it started"
+//!   applies to the brace lines too, not just statement lines.
 
 use mtc_core::diagnostics::Span;
 
@@ -183,6 +184,16 @@ pub struct NamespaceCst {
     /// Body items in source order; may itself contain nested
     /// [`TopKind::Namespace`] blocks.
     pub items: Vec<TopItem>,
+    /// Comment(s) on the SAME physical line as the opening `{`, before
+    /// the first body item — e.g. `namespace ns { // note` (module doc's
+    /// "Comment placement", "c-brace" fix, mirrors
+    /// [`FunctionCst::open_trailing`]). Empty when no such comment
+    /// exists. Any comment here forces the body onto its own line below.
+    pub open_trailing: Vec<Comment>,
+    /// A comment on the SAME physical line as the closing `}` — e.g.
+    /// `} // t` (mirrors [`FunctionCst::close_trailing`]). `None` when
+    /// absent.
+    pub close_trailing: Option<Comment>,
 }
 
 /// One function definition (top-level or nested) exactly as written —
@@ -383,6 +394,8 @@ mod tests {
                 blank_before: false,
                 kind: TopKind::Function(f),
             }],
+            open_trailing: vec![],
+            close_trailing: None,
         };
 
         let cst = Cst {
