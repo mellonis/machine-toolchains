@@ -319,6 +319,31 @@ fn lint_spec() -> CommandSpec {
     }
 }
 
+/// Mirrors [`lint_spec`]: same positional shape (`.pmc` files/dirs,
+/// `--exclude` repeatable), plus `--check` (docs/cli.md (pmt fmt)). The
+/// `-` stdin form isn't a registry entry — it's a single bare token, not
+/// a completable path shape (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`,
+/// "CLI: pmt fmt").
+fn fmt_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["fmt"]),
+        positional: Positional::OneOrMore(PositionalHint::File(pmc_or_dir())),
+        flags: vec![
+            FlagSpec::value(
+                "--exclude",
+                "skip a path (repeatable)",
+                ValueHint::File(pmc_or_dir()),
+            )
+            .repeatable(),
+            FlagSpec::boolean(
+                "--check",
+                "report without writing; exit 1 if any would change",
+            ),
+            FlagSpec::boolean("--help", "show subcommand help"),
+        ],
+    }
+}
+
 fn dis_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["dis"]),
@@ -443,6 +468,7 @@ fn top_level_help(name: &str) -> &'static str {
         "asm" => ".pma assembly -> .pmo object",
         "link" => ".pmo objects -> .pmx executable (+ .pmx.map sidecar)",
         "lint" => "lint .pmc sources (hygiene findings; docs/lint.md)",
+        "fmt" => "format .pmc sources in place (--check to preview; -)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
         "run" => "execute a .pmx on a tape",
         "tape" => "build/show .pmt tape-block snapshots",
@@ -492,16 +518,17 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing master's real, currently-dispatched CLI
-/// surface: 9 top-level subcommands (`compile`/`asm`/`link`/`lint`/`dis`/
-/// `tape`/`run`/`ir`, the latter two nested) plus `completions` itself.
-/// `build` (issue-tracked) is deliberately absent — see the design doc
-/// for the entry it'll need.
+/// surface: 10 top-level subcommands (`compile`/`asm`/`link`/`lint`/
+/// `fmt`/`dis`/`tape`/`run`/`ir`, the latter two nested) plus
+/// `completions` itself. `build` (issue-tracked) is deliberately absent
+/// — see the design doc for the entry it'll need.
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
         asm_spec(),
         link_spec(),
         lint_spec(),
+        fmt_spec(),
         dis_spec(),
         tape_build_spec(),
         tape_show_spec(),
@@ -569,6 +596,7 @@ mod tests {
                 "asm",
                 "link",
                 "lint",
+                "fmt",
                 "dis",
                 "tape",
                 "run",

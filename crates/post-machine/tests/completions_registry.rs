@@ -49,6 +49,7 @@ const EXPECTED_TOP_LEVEL: &[&str] = &[
     "asm",
     "link",
     "lint",
+    "fmt",
     "dis",
     "run",
     "tape",

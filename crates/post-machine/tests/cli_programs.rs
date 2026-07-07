@@ -669,3 +669,203 @@ fn completions_help_and_missing_shell_name() {
         "{err}"
     );
 }
+
+// --- `pmt fmt` -------------------------------------------------------
+
+/// Spawns the real `pmt` binary with piped stdio: the only way to feed
+/// `pmt fmt -` a controlled stdin from an in-process test (the `-`
+/// variants read the real process stdin, which `execute()`'s in-process
+/// calls above never touch).
+fn run_pmt_stdin(fmt_args: &[&str], stdin_data: &str) -> std::process::Output {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_pmt"))
+        .args(fmt_args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn pmt");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin_data.as_bytes())
+        .unwrap();
+    child.wait_with_output().expect("failed to wait on pmt")
+}
+
+#[test]
+fn fmt_writes_in_place_only_when_changed() {
+    let dir = scratch("fmt_inplace");
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() { right; }").unwrap();
+
+    let out = execute(&args(&["fmt", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    let formatted = std::fs::read_to_string(&src).unwrap();
+    assert_eq!(formatted, "main() {\n    right;\n}\n");
+
+    // Idempotence: a second run on an already-formatted file must not
+    // touch it at all (no spurious mtime churn).
+    let before = std::fs::metadata(&src).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let out = execute(&args(&["fmt", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    let after = std::fs::metadata(&src).unwrap().modified().unwrap();
+    assert_eq!(
+        before, after,
+        "already-formatted file must not be rewritten"
+    );
+    assert_eq!(std::fs::read_to_string(&src).unwrap(), formatted);
+}
+
+#[test]
+fn fmt_check_reports_and_writes_nothing() {
+    let dir = scratch("fmt_check");
+    let dirty = dir.join("dirty.pmc");
+    let original = "main() { right; }";
+    std::fs::write(&dirty, original).unwrap();
+
+    let out = execute(&args(&["fmt", "--check", dirty.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    assert!(out.stdout.contains(dirty.to_str().unwrap()));
+    assert_eq!(
+        std::fs::read_to_string(&dirty).unwrap(),
+        original,
+        "never written"
+    );
+
+    let clean = dir.join("clean.pmc");
+    std::fs::write(&clean, "main() {\n    right;\n}\n").unwrap();
+    let out = execute(&args(&["fmt", "--check", clean.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn fmt_dash_reads_stdin_and_writes_stdout() {
+    let out = run_pmt_stdin(&["fmt", "-"], "main() { right; }");
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "main() {\n    right;\n}\n"
+    );
+}
+
+#[test]
+fn fmt_dash_check_exits_0_or_1_with_no_output() {
+    let clean = run_pmt_stdin(&["fmt", "-", "--check"], "main() {\n    right;\n}\n");
+    assert!(clean.status.success());
+    assert!(clean.stdout.is_empty());
+
+    let dirty = run_pmt_stdin(&["fmt", "-", "--check"], "main() { right; }");
+    assert_eq!(dirty.status.code(), Some(1));
+    assert!(dirty.stdout.is_empty());
+}
+
+#[test]
+fn fmt_dash_combined_with_path_is_an_error() {
+    let dir = scratch("fmt_dash_combo");
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() { right; }").unwrap();
+    let err = execute(&args(&["fmt", "-", src.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains('-'), "{err}");
+}
+
+#[test]
+fn fmt_dash_parse_error_goes_to_stderr_and_nothing_to_stdout() {
+    let out = run_pmt_stdin(&["fmt", "-"], "main() { 1: right; 1: left; }");
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(!out.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("error:"));
+}
+
+#[test]
+fn fmt_walks_directories_sorted_skips_dot_dirs_and_excludes() {
+    let dir = scratch("fmt_walk");
+    std::fs::create_dir_all(dir.join("src/nested")).unwrap();
+    std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+    std::fs::create_dir_all(dir.join("vendor")).unwrap();
+    std::fs::write(dir.join("src/b.pmc"), "main() { right; }").unwrap();
+    std::fs::write(dir.join("src/a.pmc"), "main() { left; }").unwrap();
+    std::fs::write(dir.join("src/nested/c.pmc"), "main() { mark; }").unwrap();
+    std::fs::write(dir.join(".hidden/d.pmc"), "main() { right; }").unwrap();
+    std::fs::write(dir.join("vendor/e.pmc"), "main() { right; }").unwrap();
+
+    let out = execute(&args(&[
+        "fmt",
+        "--check",
+        dir.to_str().unwrap(),
+        "--exclude",
+        dir.join("vendor").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    let a = out.stdout.find("a.pmc").unwrap();
+    let b = out.stdout.find("b.pmc").unwrap();
+    let c = out.stdout.find("c.pmc").unwrap();
+    assert!(a < b && b < c);
+    assert!(!out.stdout.contains(".hidden"));
+    assert!(!out.stdout.contains("vendor"));
+}
+
+#[test]
+fn fmt_zero_match_path_is_an_error() {
+    let dir = scratch("fmt_zero");
+    std::fs::create_dir_all(dir.join("empty")).unwrap();
+    let err = execute(&args(&["fmt", dir.join("empty").to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("no .pmc files"));
+}
+
+#[test]
+fn fmt_batch_survives_a_fatal_file_and_still_fails() {
+    let dir = scratch("fmt_fatal");
+    std::fs::write(dir.join("bad.pmc"), "main( {\n").unwrap();
+    std::fs::write(dir.join("good.pmc"), "main() { right; }").unwrap();
+    let out = execute(&args(&[
+        "fmt",
+        dir.join("bad.pmc").to_str().unwrap(),
+        dir.join("good.pmc").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    assert!(out.stderr.contains("error:"));
+    assert!(out.stderr.contains("bad.pmc"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("bad.pmc")).unwrap(),
+        "main( {\n",
+        "a fatal file is never written"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("good.pmc")).unwrap(),
+        "main() {\n    right;\n}\n",
+        "the batch continues past the fatal file"
+    );
+}
+
+#[test]
+fn fmt_exclude_prunes_a_subtree_and_an_explicit_file() {
+    let dir = scratch("fmt_exclude");
+    std::fs::create_dir_all(dir.join("vendor")).unwrap();
+    std::fs::write(dir.join("vendor/a.pmc"), "main() { right; }").unwrap();
+    std::fs::write(dir.join("keep.pmc"), "main() { left; }").unwrap();
+    std::fs::write(dir.join("skip.pmc"), "main() { mark; }").unwrap();
+
+    let out = execute(&args(&[
+        "fmt",
+        "--check",
+        dir.to_str().unwrap(),
+        "--exclude",
+        dir.join("vendor").to_str().unwrap(),
+        "--exclude",
+        dir.join("skip.pmc").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    assert!(out.stdout.contains("keep.pmc"));
+    assert!(!out.stdout.contains("vendor"));
+    assert!(!out.stdout.contains("skip.pmc"));
+}

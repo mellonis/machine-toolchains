@@ -140,7 +140,14 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
 /// Walk one PATH argument. Returns how many `.pmc` files the PATH
 /// yielded BEFORE exclusion (zero = the caller's typo error); excluded
 /// files are counted but not collected — an excluded PATH is not a typo.
-fn collect_pmc(path: &Path, excludes: &[PathBuf], out: &mut Vec<PathBuf>) -> Result<usize, String> {
+///
+/// `pub(super)`: `cli/fmt.rs` shares this walk verbatim rather than
+/// duplicating it (docs/cli.md (pmt fmt) — identical batch model).
+pub(super) fn collect_pmc(
+    path: &Path,
+    excludes: &[PathBuf],
+    out: &mut Vec<PathBuf>,
+) -> Result<usize, String> {
     let excluded = |p: &Path| excludes.iter().any(|e| p.starts_with(e));
     let meta =
         fs::symlink_metadata(path).map_err(|e| format!("cannot stat {}: {e}", path.display()))?;

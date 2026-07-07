@@ -3,6 +3,7 @@
 
 mod build;
 mod completions;
+mod fmt;
 mod inspect;
 mod lint;
 mod run;
@@ -36,6 +37,7 @@ SUBCOMMANDS:
   asm          .pma assembly -> .pmo object
   link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
   lint         lint .pmc sources (hygiene findings; docs/lint.md)
+  fmt          format .pmc sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
   tape         build/show .pmt tape-block snapshots
@@ -69,6 +71,7 @@ pub fn execute_with(
         Some("asm") => build::asm(&args[1..]),
         Some("link") => build::link(&args[1..]),
         Some("lint") => lint::lint(&args[1..]),
+        Some("fmt") => fmt::fmt(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),
         Some("tape") => inspect::tape(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
