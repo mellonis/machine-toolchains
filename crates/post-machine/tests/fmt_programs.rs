@@ -6,14 +6,15 @@
 //! objective backstop for the whole fmt build — reviewer approval does
 //! NOT substitute for these passing.
 //!
-//! At this task (fmt build Tasks 4-5) the pretty-printer implements the
-//! TRIVIAL subset plus label/command-column alignment (see `crate::fmt`'s
-//! module doc): labeled or unlabeled statements, no comments, no
-//! namespaces/imports, single-line comma groups. `SIMPLE` is scoped to
-//! exactly that subset — Tasks 6-8 widen it further (comma-group
-//! wrapping, comments, blank lines/imports/namespaces/spacing/edge-cases)
-//! as each seam closes, eventually pointing this harness at the full
-//! corpus (Task 9).
+//! At this task (fmt build Tasks 4-6) the pretty-printer implements the
+//! TRIVIAL subset plus label/command-column alignment plus comma-group
+//! layout (see `crate::fmt`'s module doc): labeled or unlabeled
+//! statements, no comments, no namespaces/imports, comma groups including
+//! multi-line ones (author line breaks preserved, greedy-fill on
+//! overflow). `SIMPLE` is scoped to exactly that subset — Task 8 widens
+//! it further (comments, blank lines/imports/namespaces/spacing/
+//! edge-cases) as its seam closes, eventually pointing this harness at
+//! the full corpus (Task 9).
 
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::format;
@@ -34,6 +35,20 @@ const SIMPLE: &[&str] = &[
     // riskiest idempotence case: fmt's re-parse must re-derive the same
     // `label_break` from the newline it just emitted.
     "main() {\n11111: right;\n12:\nleft;\n999999999:\nhalt;\n}\n",
+    // Task 6: rule 3 — the author split a comma group across two lines;
+    // fmt preserves the grouping and aligns the continuation to the
+    // command column (spec "Comma-group layout").
+    "main() {\n1: left, right,\nmark;\n}\n",
+    // Task 6: rule 2 — no author newline, but the one-line join overflows
+    // 80 and greedy-fill wraps it. The riskiest idempotence case here:
+    // re-parsing the wrapped output reads the greedy-fill break as an
+    // author `newline_before`, so a second pass must reproduce the same
+    // bytes via rule 3 instead of rule 2.
+    "main() { @abcdefghijklmnopq(), @abcdefghijklmnopq(), @abcdefghijklmnopq(), @abcdefghijklmnopq(); } abcdefghijklmnopq() { halt; }",
+    // Task 6: rule 3 whose first preserved line itself overflows 80 —
+    // greedy-fill applies to that line only, the second preserved line
+    // (`mark`) stays untouched.
+    "main() { @abcdefghijklmnopq(), @abcdefghijklmnopq(), @abcdefghijklmnopq(), @abcdefghijklmnopq(),\nmark; } abcdefghijklmnopq() { halt; }",
 ];
 
 #[test]

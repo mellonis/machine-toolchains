@@ -206,7 +206,9 @@ pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
 /// parser — spans, control flow, and the duplicate-name/-label checks all
 /// carry over verbatim. The dropped-in-lowering trivia (`blank_before`,
 /// `label_break`, comment nodes, `trailing`, `CommaItem::leading`) is
-/// attached from the split-off comments by source position.
+/// attached from the split-off comments by source position;
+/// `CommaItem::newline_before` is attached instead from the significant
+/// tokens' own line numbers (it records a source newline, not a comment).
 pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
     let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut comments: Vec<CommentAt> = Vec::new();
@@ -857,7 +859,14 @@ impl Parser<'_> {
         let mut items = vec![CommaItem {
             item: self.item(false)?,
             leading,
+            // The first entry's `newline_before` is always false (fmt
+            // design doc, "Comma-group layout").
+            newline_before: false,
         }];
+        // `pos` has advanced past the item just parsed; `pos - 1` is its
+        // last significant token, whose line is the "item K-1's last
+        // token" side of the next entry's newline comparison.
+        let mut last_item_end_line = self.tokens[self.pos - 1].line;
         while matches!(self.peek().kind, TokenKind::Comma) {
             let comma = self.peek().clone();
             // Whatever precedes a `,` must be bare (docs/language.md).
@@ -899,10 +908,18 @@ impl Parser<'_> {
             self.bump();
             // A mid-group comment attaches to the following item's leading.
             let leading = self.drain_pending_comments();
+            // The comments are a side channel (split off before the
+            // significant-token walk, see `parse_cst`), so `self.peek()`
+            // here already sits on this item's real first token, whatever
+            // comments were just drained.
+            let item_start_line = self.peek().line;
+            let newline_before = item_start_line > last_item_end_line;
             items.push(CommaItem {
                 item: self.item(true)?,
                 leading,
+                newline_before,
             });
+            last_item_end_line = self.tokens[self.pos - 1].line;
         }
         let semi = self.peek().clone();
         self.expect(&TokenKind::Semi, "`;`")?;
@@ -1196,11 +1213,15 @@ f() {
         assert!(s0.items[0].leading.is_empty());
 
         // A mid-group comment rides the FOLLOWING comma item's `leading`.
+        // Both items sit on the same source line, so `newline_before` is
+        // false for both (the comment alone doesn't count as a break).
         let BodyKind::Statement(s1) = &f.body[1].kind else {
             panic!("expected the second body statement");
         };
         assert_eq!(s1.items.len(), 2);
         assert!(s1.items[0].leading.is_empty());
+        assert!(!s1.items[0].newline_before);
+        assert!(!s1.items[1].newline_before);
         assert_eq!(
             s1.items[1]
                 .leading
@@ -1216,6 +1237,35 @@ f() {
             .filter(|t| matches!(t.kind, TokenKind::Comment(_)))
             .count();
         assert_eq!(comment_count, 4);
+    }
+
+    /// `CommaItem::newline_before` (fmt design doc, "Comma-group
+    /// layout"): the first entry is always `false`; a later entry is
+    /// `true` iff the author put a newline before it, compared by token
+    /// line — not by whether a comment happens to sit between the items.
+    #[test]
+    fn parse_cst_records_comma_group_newline_before() {
+        use crate::cst::BodyKind;
+        use crate::lexer::{LexMode, lex_with};
+
+        let src = "f() {\n1: left, right,\nmark, unmark;\n}\n";
+        let tokens = lex_with(src, LexMode::WithComments).unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let TopKind::Function(f) = &cst.items[0].kind else {
+            panic!("expected a function item");
+        };
+        let BodyKind::Statement(s) = &f.body[0].kind else {
+            panic!("expected the body statement");
+        };
+        assert_eq!(s.items.len(), 4);
+        // `left` (first item), never a break by contract.
+        assert!(!s.items[0].newline_before);
+        // `right` shares `left`'s source line.
+        assert!(!s.items[1].newline_before);
+        // `mark` sits on a new source line — the author's break.
+        assert!(s.items[2].newline_before);
+        // `unmark` shares `mark`'s source line.
+        assert!(!s.items[3].newline_before);
     }
 
     #[test]

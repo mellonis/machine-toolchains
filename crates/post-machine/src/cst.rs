@@ -205,6 +205,13 @@ pub enum BodyKind {
 pub struct CommaItem {
     pub item: Item,
     pub leading: Vec<Comment>,
+    /// Whether the author put a newline before this item, inside its
+    /// comma group (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`,
+    /// "Comma-group layout") — the first entry's is always `false`. Set
+    /// from token line numbers (item K's first token on a later line than
+    /// item K-1's last token), not from comment positions.
+    /// [`crate::parser::lower_cst`] drops it too, like `leading`.
+    pub newline_before: bool,
 }
 
 /// One `;`-terminated statement, reusing the parser's statement-internal
@@ -266,6 +273,7 @@ mod tests {
                         line: 3,
                     },
                     leading: vec![],
+                    newline_before: false,
                 }],
                 line: 3,
                 span: dummy_span,

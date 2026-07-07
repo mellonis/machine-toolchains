@@ -5,17 +5,15 @@
 //! future `cli/fmt.rs` is the only place that renders errors or touches
 //! the filesystem.
 //!
-//! **Scope of this module today (fmt build Tasks 4-5): the TRIVIAL
-//! printer subset, plus label/command-column alignment.** It prints a
-//! source-faithful skeleton — headers, braces, indentation, one
-//! statement per line (with labels aligned into a shared command column,
-//! see [`command_column`]), canonical item text, a single-line comma
-//! join — and deliberately leaves the following as seams for later tasks
-//! (each seam is marked at its printing site below):
+//! **Scope of this module today (fmt build Tasks 4-6): the TRIVIAL
+//! printer subset, label/command-column alignment, and comma-group
+//! layout.** It prints a source-faithful skeleton — headers, braces,
+//! indentation, one statement per line (with labels aligned into a shared
+//! command column, see [`command_column`]), canonical item text, and the
+//! comma-group Y / greedy-fill layout (see [`render_items`]) — and
+//! deliberately leaves the following as seams for later tasks (each seam
+//! is marked at its printing site below):
 //!
-//! - **Comma-group Y / greedy-fill layout** (Task 6) — [`render_items`]
-//!   always joins on one line; the author's line breaks and the 80-column
-//!   fallback are not implemented yet.
 //! - **Comments** (Task 7) — [`crate::cst::TopKind::Comment`],
 //!   [`crate::cst::BodyKind::Comment`], and every node's `trailing` field
 //!   are read nowhere in this module; comment nodes are silently skipped
@@ -27,11 +25,11 @@
 //!
 //! "Silently skipped" is a deliberate design choice for this task, per the
 //! brief: an unhandled node must never panic, but this task also must not
-//! half-implement Tasks 6-8's rules. The three-check objective harness
+//! half-implement Task 8's rules. The three-check objective harness
 //! (`tests/fmt_programs.rs`) is scoped to a SIMPLE program set the
 //! printer fully supports (labeled or unlabeled statements, no comments,
-//! no namespaces/imports, single-line comma groups) — each later task
-//! widens that set as its seam closes.
+//! no namespaces/imports, comma groups including multi-line ones) — Task 8
+//! widens that set further as its seam closes.
 
 use crate::compiler::CompileError;
 use crate::cst::{BodyItem, BodyKind, CommaItem, Cst, FunctionCst, StatementCst, TopItem, TopKind};
@@ -197,7 +195,6 @@ fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
 ///   following line at `command_col`. fmt never auto-breaks a label:
 ///   `label_break` is read, never inferred or overridden.
 ///
-/// Seam (Task 6): comma groups always join on one line at `command_col`.
 /// Seam (Task 7): `s.trailing` (a same-line trailing comment) is not read.
 fn print_statement(out: &mut String, s: &StatementCst, command_col: usize) {
     if s.labels.is_empty() {
@@ -222,19 +219,109 @@ fn print_statement(out: &mut String, s: &StatementCst, command_col: usize) {
             out.push(' ');
         }
     }
-    out.push_str(&render_items(&s.items));
+    // Whichever branch above ran, the current physical line now has
+    // exactly `command_col` characters on it (indent alone, or margin +
+    // label prefix + one space, which `label_margin` sizes to land
+    // exactly on `command_col` too) — `render_items` relies on this to
+    // size its own line-fit checks without inspecting `out`.
+    out.push_str(&render_items(&s.items, command_col));
     out.push_str(";\n");
 }
 
-/// Seam (Task 6): always a single-line comma join — the Y/greedy-fill
-/// layout (respect author line breaks, 80-column overflow) is not
-/// implemented yet. Also does not read [`CommaItem::leading`] (Task 7).
-fn render_items(items: &[CommaItem]) -> String {
-    items
-        .iter()
-        .map(|ci| render_item(&ci.item))
-        .collect::<Vec<_>>()
-        .join(", ")
+/// Line width limit (spec "Line limit" — 80 characters, matching lint's
+/// `line-too-long`; char count, not bytes).
+const LINE_WIDTH: usize = 80;
+
+/// Comma-group layout (design doc "Comma-group layout", rules 1-3):
+/// respect the author's line breaks (`CommaItem::newline_before`), with a
+/// greedy-fill width fallback. `command_col` is both the column the
+/// caller's line is already sitting at (see [`print_statement`]'s note)
+/// and the continuation column for every wrapped line this function
+/// introduces.
+///
+/// Items are first partitioned into groups at each `newline_before`
+/// boundary — the first item always starts group 0, and an item with
+/// `newline_before` set always starts a NEW group. When no item sets it,
+/// this yields exactly one group holding every item, which collapses
+/// rules 1/2 (no author break) onto the very same per-group logic as
+/// rule 3's preserved lines: each group is emitted as one line if it fits
+/// (`command_col` + its comma-joined text + 1 for the trailing `,`
+/// boundary or the statement's final `;`, both width 1, <= 80), else
+/// [`greedy_fill_group`] repacks just that group. A non-last group's line
+/// ends with a trailing `,` (the boundary to the next group); the very
+/// last group carries none — [`print_statement`] appends the final `;`
+/// itself.
+///
+/// Does not read [`CommaItem::leading`] (Task 7).
+fn render_items(items: &[CommaItem], command_col: usize) -> String {
+    let texts: Vec<String> = items.iter().map(|ci| render_item(&ci.item)).collect();
+    let mut groups: Vec<Vec<usize>> = vec![vec![0]];
+    for (i, ci) in items.iter().enumerate().skip(1) {
+        if ci.newline_before {
+            groups.push(vec![i]);
+        } else {
+            groups.last_mut().expect("groups is never empty").push(i);
+        }
+    }
+    let last_group_idx = groups.len() - 1;
+    let mut out = String::new();
+    for (gi, group) in groups.iter().enumerate() {
+        if gi > 0 {
+            out.push('\n');
+            out.push_str(&" ".repeat(command_col));
+        }
+        let group_texts: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
+        let joined = group_texts.join(", ");
+        // `+ 1` reserved for the trailing `,`/`;` is folded into `< LINE_WIDTH`
+        // (clippy::int_plus_one) rather than `+ 1 <= LINE_WIDTH`.
+        if command_col + joined.chars().count() < LINE_WIDTH {
+            out.push_str(&joined);
+        } else {
+            greedy_fill_group(&mut out, &group_texts, command_col);
+        }
+        if gi != last_group_idx {
+            out.push(',');
+        }
+    }
+    out
+}
+
+/// Rule 2's greedy-fill, applied to one group's items (the whole
+/// statement when there was no author break at all; one preserved line
+/// when rule 3's grouping still leaves a line over 80). Packs items onto
+/// the current line while they fit, breaking after the last comma that
+/// fit (the comma trails the closed line); the new line starts at
+/// `command_col`.
+///
+/// Every item — including the group's last — is followed on its own
+/// physical line by exactly one trailing punctuation character: an
+/// interior item's separating `,`, or (for the group's last item) the
+/// caller's boundary `,`/final `;`. Both are width 1, so every placement
+/// check below reserves exactly 1 for "whatever comes right after this
+/// item on this line" uniformly. An item placed first on a (new) line is
+/// never re-checked against the limit — with no preceding comma to break
+/// on, a single over-wide command stays overlong (`line-too-long` lint's
+/// job, not fmt's).
+fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
+    let mut items = texts.iter();
+    let first = items.next().expect("a comma group is never empty");
+    out.push_str(first);
+    let mut col = command_col + first.chars().count();
+    for text in items {
+        let w = text.chars().count();
+        // Same `+ 1 <= LINE_WIDTH` -> `< LINE_WIDTH` fold as above.
+        if col + 2 + w < LINE_WIDTH {
+            out.push_str(", ");
+            out.push_str(text);
+            col += 2 + w;
+        } else {
+            out.push(',');
+            out.push('\n');
+            out.push_str(&" ".repeat(command_col));
+            out.push_str(text);
+            col = command_col + w;
+        }
+    }
 }
 
 /// Canonical item text (spec "Intra-statement token spacing"). This task
@@ -449,5 +536,137 @@ mod tests {
             format("main() { 1: 2: right; }").unwrap(),
             "main() {\n  1: 2: right;\n}\n"
         );
+    }
+
+    // -- Task 6: comma-group layout (Y + greedy-fill) ----------------
+
+    #[test]
+    fn e_rule_1_no_newline_fits_stays_a_single_line() {
+        // Unchanged from Task 5 — no `newline_before` anywhere and the
+        // one-line form fits comfortably under 80.
+        assert_eq!(
+            format("f() { left, right; }").unwrap(),
+            "f() {\n    left, right;\n}\n"
+        );
+        assert_eq!(
+            format("main() { left, right, mark; }").unwrap(),
+            "main() {\n    left, right, mark;\n}\n"
+        );
+    }
+
+    #[test]
+    fn f_rule_3_preserves_the_authors_line_break() {
+        // Brief's byte test: `1:` -> C=4; author put a newline before
+        // `mark`, so `left, right` stays on the label's line (trailing
+        // comma) and `mark` continues at the command column.
+        assert_eq!(
+            format("main() {\n1: left, right,\nmark;\n}").unwrap(),
+            "main() {\n 1: left, right,\n    mark;\n}\n"
+        );
+    }
+
+    #[test]
+    fn g_rule_2_greedy_fill_breaks_after_the_last_fitting_comma() {
+        // No author newline; the one-line join overflows 80. Four
+        // identical 20-char calls (`@` + a 17-char name + `()`), command
+        // column 4 (unlabeled `main`): one-line width = 4 + (4*20 + 3*2)
+        // + 1 (`;`) = 4 + 86 + 1 = 91 > 80, so rule 2 applies.
+        //
+        // Hand trace (col starts at the command column, 4):
+        //   call0: col = 4 + 20 = 24 (first on line, placed unconditionally)
+        //   call1: 24 + 2 + 20 + 1 (reserve) = 47 <= 80 -> fits -> col = 46
+        //   call2: 46 + 2 + 20 + 1 = 69 <= 80 -> fits -> col = 68
+        //   call3: 68 + 2 + 20 + 1 = 91 > 80 -> breaks to the command column
+        // Line 1 ends up 4 + "call, call, call," (65) = 69 chars; line 2 is
+        // 4 + "call;" (21) = 25 chars — both <= 80.
+        const CALL: &str = "@abcdefghijklmnopq()";
+        let src =
+            format!("main() {{ {CALL}, {CALL}, {CALL}, {CALL}; }} abcdefghijklmnopq() {{ halt; }}");
+        let expected = format!(
+            "main() {{\n    {CALL}, {CALL}, {CALL},\n    {CALL};\n}}\nabcdefghijklmnopq() {{\n    halt;\n}}\n"
+        );
+        let out = format(&src).unwrap();
+        assert_eq!(out, expected);
+        // The whole point of greedy-fill: no emitted line may exceed 80
+        // (fmt IS the `line-too-long` fix — spec "Line limit").
+        assert!(out.lines().all(|l| l.chars().count() <= 80));
+
+        // Idempotent: reformatting the already-wrapped output must be a
+        // no-op (the harness pins this generically; this test pins the
+        // exact bytes for this specific overflow shape too).
+        assert_eq!(format(&expected).unwrap(), expected);
+    }
+
+    #[test]
+    fn i_greedy_fill_boundary_at_exactly_80_chars() {
+        // Pins the `+ 1` reserve exactly at the 80-char edge, not just
+        // gross overflow: `item0` is `@aaaaaaa()` (10 chars, name = 7
+        // `a`s), command column 4 (unlabeled `main`), so col after item0
+        // = 4 + 10 = 14.
+        let name0 = "a".repeat(7);
+
+        // `name1_fits` = 60 `a`s -> item1 width 63. Joined = 10+2+63=75;
+        // whole line = 4 + 75 + 1 (`;`) = 80 -- exactly the limit, still
+        // one line (rule 1, not rule 2).
+        let name1_fits = "a".repeat(60);
+        let src_fits = format!("main() {{ @{name0}(), @{name1_fits}(); }}");
+        let expected_fits = format!("main() {{\n    @{name0}(), @{name1_fits}();\n}}\n");
+        let out_fits = format(&src_fits).unwrap();
+        assert_eq!(out_fits, expected_fits);
+        assert!(out_fits.lines().all(|l| l.chars().count() <= 80));
+
+        // One `a` longer (61 `a`s -> item1 width 64): the one-line join is
+        // now 81 chars -- one over the limit -- so rule 2 wraps, breaking
+        // right after item0 (item1 alone can't share the line: even by
+        // itself, `col(14) + 2 + 64 = 80`, which the `< LINE_WIDTH` check
+        // rejects since it must also leave room for the trailing `;`).
+        let name1_overflows = "a".repeat(61);
+        let src_overflow = format!("main() {{ @{name0}(), @{name1_overflows}(); }}");
+        let expected_overflow =
+            format!("main() {{\n    @{name0}(),\n    @{name1_overflows}();\n}}\n");
+        let out_overflow = format(&src_overflow).unwrap();
+        assert_eq!(out_overflow, expected_overflow);
+        assert!(out_overflow.lines().all(|l| l.chars().count() <= 80));
+    }
+
+    #[test]
+    fn h_rule_3_line_that_still_overflows_gets_greedy_filled_too() {
+        // A preserved (author-split) group whose FIRST line alone already
+        // overflows 80 falls back to rule 2's greedy-fill for THAT line
+        // only; the second preserved line (`mark`) is untouched. Reusing
+        // `g`'s four-call group (same arithmetic: breaks after the 3rd
+        // call), followed by an author newline before `mark`.
+        const CALL: &str = "@abcdefghijklmnopq()";
+        let src = format!(
+            "main() {{ {CALL}, {CALL}, {CALL}, {CALL},\nmark; }} abcdefghijklmnopq() {{ halt; }}"
+        );
+        let expected = format!(
+            "main() {{\n    {CALL}, {CALL}, {CALL},\n    {CALL},\n    mark;\n}}\nabcdefghijklmnopq() {{\n    halt;\n}}\n"
+        );
+        let out = format(&src).unwrap();
+        assert_eq!(out, expected);
+        assert!(out.lines().all(|l| l.chars().count() <= 80));
+
+        // Re-parsing the wrapped output re-derives a DIFFERENT grouping
+        // (3 preserved lines instead of 2 — the greedy-fill break now
+        // itself reads back as an author newline), but the rendered bytes
+        // must still be stable.
+        assert_eq!(format(&expected).unwrap(), expected);
+    }
+
+    #[test]
+    fn idempotent_on_multi_line_groups() {
+        const CALL: &str = "@abcdefghijklmnopq()";
+        for src in [
+            "main() {\n1: left, right,\nmark;\n}".to_string(),
+            format!("main() {{ {CALL}, {CALL}, {CALL}, {CALL}; }} abcdefghijklmnopq() {{ halt; }}"),
+            format!(
+                "main() {{ {CALL}, {CALL}, {CALL}, {CALL},\nmark; }} abcdefghijklmnopq() {{ halt; }}"
+            ),
+        ] {
+            let once = format(&src).unwrap();
+            let twice = format(&once).unwrap();
+            assert_eq!(twice, once, "not idempotent for {src:?}");
+        }
     }
 }
