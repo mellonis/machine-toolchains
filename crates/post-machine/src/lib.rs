@@ -7,6 +7,7 @@ pub mod codegen;
 pub mod compiler;
 pub mod completions;
 pub mod cst;
+pub mod fmt;
 pub mod ir;
 pub mod lexer;
 pub mod lint;
@@ -21,6 +22,7 @@ pub mod stdlib;
 pub use compiler::{
     CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, compile,
 };
+pub use fmt::format;
 pub use lint::{FixOutcome, LintError, LintOptions, LintReport, apply_fixes, lint};
 pub use optimizer::{OptLevel, OptReport, PassChange};
 pub use parser::PMC_LANG_VERSION;
