@@ -11,8 +11,9 @@
 //! lexes the same way, so the CST's trivia fields are empty and the
 //! lower-copy is the sole thing under test.
 
-use mtc_post_machine::lexer::lex;
-use mtc_post_machine::parser::parse;
+use mtc_post_machine::cst::{BodyKind, Cst, FunctionCst, TopItem, TopKind};
+use mtc_post_machine::lexer::{LexMode, TokenKind, lex, lex_with};
+use mtc_post_machine::parser::{parse, parse_cst};
 use mtc_post_machine::parser_legacy::parse_legacy;
 
 /// The committed corpus: the embedded stdlib, the two goldens, and the
@@ -186,5 +187,70 @@ fn spec_sample_parses_identically() {
 fn grammar_suite_sources_parse_identically() {
     for src in GRAMMAR_SOURCES {
         assert_parity(src, src);
+    }
+}
+
+/// Every comment token placed somewhere in the CST — the Task-3 "nothing
+/// dropped" contract. Counts comment nodes across the whole tree (own-line
+/// `Comment` items + `trailing` on imports/statements + per-comma-item
+/// `leading`) and asserts it equals the number of `Comment` tokens in the
+/// `WithComments` stream. Recursion covers nested functions + namespaces.
+fn count_body(f: &FunctionCst) -> usize {
+    let mut n = 0;
+    for bi in &f.body {
+        match &bi.kind {
+            BodyKind::Comment(_) => n += 1,
+            BodyKind::Statement(s) => {
+                n += usize::from(s.trailing.is_some());
+                n += s.items.iter().map(|ci| ci.leading.len()).sum::<usize>();
+            }
+            BodyKind::Nested(g) => n += count_body(g),
+        }
+    }
+    n
+}
+
+fn count_top(items: &[TopItem]) -> usize {
+    let mut n = 0;
+    for item in items {
+        match &item.kind {
+            TopKind::Comment(_) => n += 1,
+            TopKind::Import(imp) => n += usize::from(imp.trailing.is_some()),
+            TopKind::Namespace(nsc) => n += count_top(&nsc.items),
+            TopKind::Function(f) => n += count_body(f),
+        }
+    }
+    n
+}
+
+fn count_cst_comments(cst: &Cst) -> usize {
+    count_top(&cst.items)
+}
+
+#[test]
+fn with_comments_parse_drops_no_comment_across_the_corpus() {
+    let mut sources: Vec<(&str, &str)> = CORPUS.to_vec();
+    sources.push(("spec_sample", SPEC_SAMPLE));
+    for (label, src) in sources {
+        let tokens = lex_with(src, LexMode::WithComments).unwrap();
+        let token_comments = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, TokenKind::Comment(_)))
+            .count();
+        let cst = parse_cst(&tokens).expect("corpus must parse WithComments too");
+        let cst_comments = count_cst_comments(&cst);
+        assert_eq!(
+            cst_comments, token_comments,
+            "{label}: {cst_comments} CST comment nodes != {token_comments} comment tokens \
+             (a comment was dropped or double-counted)"
+        );
+    }
+    // Grammar sources that parse carry no comments — assert parse_cst
+    // invents none from a WithComments stream either.
+    for src in GRAMMAR_SOURCES {
+        let tokens = lex_with(src, LexMode::WithComments).unwrap();
+        if let Ok(cst) = parse_cst(&tokens) {
+            assert_eq!(count_cst_comments(&cst), 0, "{src}: comment invented");
+        }
     }
 }

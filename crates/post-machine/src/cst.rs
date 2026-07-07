@@ -33,8 +33,13 @@
 //!   embeds [`crate::parser::Label`] and [`crate::parser::Item`]
 //!   (in turn built from [`crate::parser::Builtin`],
 //!   [`crate::parser::Successor`], [`crate::parser::CheckArm`]) verbatim,
-//!   so a future `lower_cst` hands them straight to
-//!   [`crate::parser::Statement`] with no rebuilding.
+//!   so [`crate::parser::lower_cst`] hands them straight to
+//!   [`crate::parser::Statement`] with no rebuilding. Each comma-group
+//!   entry is a [`CommaItem`] pairing the parser's [`Item`] with any
+//!   comment trivia that precedes it INSIDE the group (`a, /* x */ b;`),
+//!   so a formatter never loses a mid-group comment; `lower_cst` maps
+//!   `items.iter().map(|ci| ci.item.clone())` to the AST's flat
+//!   `Vec<Item>` and drops the trivia.
 //! - **`label_break`** records whether the author put a newline after a
 //!   statement's final label `:` (`docs/language.md`'s own-line-label
 //!   shape; the design doc's Formatting rules section "Own-line labels")
@@ -76,8 +81,6 @@
 //! - **Dangling** — one or more trailing `Comment` items at the end of a
 //!   `Vec` with no following node (end of a body/namespace/file).
 
-#![allow(dead_code)] // remove in Task 3, once `parse_cst`/`lower_cst` consume these types.
-
 use mtc_core::diagnostics::Span;
 
 use crate::lexer::Comment;
@@ -112,6 +115,16 @@ pub enum TopKind {
 /// One `use` declaration list item, as written (`docs/language.md`
 /// (imports)) — mirrors [`crate::parser::Import`] minus its
 /// lower-copy-computed `ns` path, plus a same-line trailing comment.
+///
+/// **Known losslessness gap (deferred, does NOT affect C1 parity).** This
+/// is one node PER path, so `use a, b;` and `use a; use b;` produce
+/// indistinguishable CSTs — the `use`-list grouping is lost, as is any
+/// mid-list comment (`use a, /* c */ b;`, which the parser drains as a
+/// separate top-level `Comment` item rather than losing it). The design
+/// requires fmt to preserve `use`-list grouping, so a formatter task must
+/// re-model this (e.g. a grouping node owning a `Vec` of entries) and
+/// re-run the parity gate. `lower_cst` flattens imports regardless, so
+/// Task 3's `Program` parity is unaffected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportCst {
     /// `IDENT (:: IDENT)*`, e.g. `use std::goToEnd;` → `["std", "goToEnd"]`.
@@ -183,13 +196,25 @@ pub enum BodyKind {
     Nested(FunctionCst),
 }
 
+/// One comma-group entry: the parser's [`Item`] plus any comment trivia
+/// that precedes it inside the group. The first entry's `leading` is
+/// normally empty; a mid-group comment (`a, /* x */ b;`) attaches as the
+/// following entry's `leading` so nothing is dropped. [`crate::parser::lower_cst`]
+/// drops `leading` when copying to the AST's flat `Vec<Item>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommaItem {
+    pub item: Item,
+    pub leading: Vec<Comment>,
+}
+
 /// One `;`-terminated statement, reusing the parser's statement-internal
-/// types verbatim ([`Label`], [`Item`]) so a future `lower_cst` hands
-/// them straight to [`crate::parser::Statement`] with no rebuilding.
+/// types verbatim ([`Label`], [`Item`] via [`CommaItem`]) so
+/// [`crate::parser::lower_cst`] hands them straight to
+/// [`crate::parser::Statement`] with no rebuilding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementCst {
     pub labels: Vec<Label>,
-    pub items: Vec<Item>,
+    pub items: Vec<CommaItem>,
     pub line: u32,
     /// First token of the statement (label or item) through the `;` end
     /// (matches [`crate::parser::Statement::span`]).
@@ -233,11 +258,14 @@ mod tests {
                     value: 1,
                     span: dummy_span,
                 }],
-                items: vec![Item::Builtin {
-                    which: Builtin::Right,
-                    succ: Successor::FallThrough,
-                    succ_span: None,
-                    line: 3,
+                items: vec![CommaItem {
+                    item: Item::Builtin {
+                        which: Builtin::Right,
+                        succ: Successor::FallThrough,
+                        succ_span: None,
+                        line: 3,
+                    },
+                    leading: vec![],
                 }],
                 line: 3,
                 span: dummy_span,

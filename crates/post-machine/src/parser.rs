@@ -5,7 +5,11 @@ use std::collections::HashSet;
 use mtc_core::diagnostics::Span;
 
 use crate::compiler::{CompileError, CompileErrorKind};
-use crate::lexer::{Token, TokenKind};
+use crate::cst::{
+    BodyItem, BodyKind, CommaItem, Cst, FunctionCst, ImportCst, NamespaceCst, StatementCst,
+    TopItem, TopKind,
+};
+use crate::lexer::{Comment, Token, TokenKind};
 
 /// docs/language.md: words that cannot name a function.
 pub const RESERVED: [&str; 8] = [
@@ -184,16 +188,139 @@ fn describe(kind: &TokenKind) -> String {
     }
 }
 
+/// tokens → AST, via the lossless CST
+/// (docs/superpowers/specs/2026-07-07-pmc-fmt-design.md, "Architecture:
+/// one unified lossless CST"). The compiler consumes the `Program`; fmt
+/// reads the CST directly through [`parse_cst`]. The signature is
+/// unchanged from the pre-C1 parser — a byte-identical `Program` is
+/// guaranteed by `tests/parser_parity.rs` against the frozen
+/// `parser_legacy`.
 pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
-    Parser {
-        tokens,
+    parse_cst(tokens).map(|cst| lower_cst(&cst))
+}
+
+/// tokens → lossless CST. Accepts either a `WithoutComments` stream (the
+/// compiler's path, no trivia) or a `WithComments` stream (fmt's path,
+/// comments interleaved). Comment tokens are split off up front so the
+/// grammar walk over the significant tokens is identical to the pre-C1
+/// parser — spans, control flow, and the duplicate-name/-label checks all
+/// carry over verbatim. The dropped-in-lowering trivia (`blank_before`,
+/// `label_break`, comment nodes, `trailing`, `CommaItem::leading`) is
+/// attached from the split-off comments by source position.
+pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
+    let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
+    let mut comments: Vec<CommentAt> = Vec::new();
+    for t in tokens {
+        if let TokenKind::Comment(c) = &t.kind {
+            comments.push(CommentAt {
+                comment: c.clone(),
+                line: t.line,
+                sig_index: sig.len(),
+            });
+        } else {
+            sig.push(t.clone());
+        }
+    }
+    let items = Parser {
+        tokens: &sig,
         pos: 0,
         namespaces: HashSet::new(),
+        declared_fns: HashSet::new(),
+        comments,
+        cpos: 0,
+        prev_end_line: 0,
     }
-    .program()
+    .file()?;
+    Ok(Cst { items })
+}
+
+/// Copy a CST into the flat `Program` the compiler consumes — exactly the
+/// namespace-flattening + nested-function hoisting the pre-C1 parser did
+/// inline. Stamps each definition's enclosing `ns` path, hoists nested
+/// functions out of body order into `Function::nested`, and drops all
+/// trivia. `local` is left `false` (flatten computes it), matching the
+/// pre-C1 parser. Spans/lines/cols are copied verbatim.
+pub fn lower_cst(cst: &Cst) -> Program {
+    let mut functions = Vec::new();
+    let mut imports = Vec::new();
+    lower_items(&cst.items, &[], &mut functions, &mut imports);
+    Program { functions, imports }
+}
+
+fn lower_items(
+    items: &[TopItem],
+    ns: &[String],
+    functions: &mut Vec<Function>,
+    imports: &mut Vec<Import>,
+) {
+    for item in items {
+        match &item.kind {
+            TopKind::Comment(_) => {}
+            TopKind::Import(imp) => imports.push(Import {
+                path: imp.path.clone(),
+                alias: imp.alias.clone(),
+                line: imp.line,
+                ns: ns.to_vec(),
+                span: imp.span,
+            }),
+            TopKind::Namespace(nsc) => {
+                let mut child = ns.to_vec();
+                child.push(nsc.name.clone());
+                lower_items(&nsc.items, &child, functions, imports);
+            }
+            TopKind::Function(f) => functions.push(lower_function(f, ns)),
+        }
+    }
+}
+
+/// Lower one function. Nested functions are hoisted into `nested` (out of
+/// body order) and, like the pre-C1 parser, carry an EMPTY `ns` — flatten
+/// resolves nesting through the top-level ancestor. `exported` is copied
+/// from the CST (the caller stamped top-level `main`'s auto-export);
+/// nested functions are never exported.
+fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
+    let mut body = Vec::new();
+    let mut nested = Vec::new();
+    for bi in &f.body {
+        match &bi.kind {
+            BodyKind::Comment(_) => {}
+            BodyKind::Statement(s) => body.push(Statement {
+                labels: s.labels.clone(),
+                items: s.items.iter().map(|ci| ci.item.clone()).collect(),
+                line: s.line,
+                span: s.span,
+            }),
+            BodyKind::Nested(g) => nested.push(lower_function(g, &[])),
+        }
+    }
+    Function {
+        name: f.name.clone(),
+        line: f.line,
+        col: f.col,
+        name_span: f.name_span,
+        body,
+        exported: f.exported,
+        local: false,
+        nested,
+        ns: ns.to_vec(),
+    }
+}
+
+/// A comment token lifted out of the stream during [`parse_cst`]'s split,
+/// remembering where it sat relative to the significant tokens.
+struct CommentAt {
+    comment: Comment,
+    /// The comment's own start line (for `blank_before` gaps).
+    line: u32,
+    /// Number of significant tokens preceding this comment — the `pos`
+    /// the significant-token walk is at when the comment is "pending".
+    sig_index: usize,
 }
 
 struct Parser<'a> {
+    /// Significant (comment-free) tokens only — identical to the
+    /// `WithoutComments` stream, so the grammar walk matches the pre-C1
+    /// parser exactly.
     tokens: &'a [Token],
     pos: usize,
     /// Every namespace path declared so far (reopened blocks insert the
@@ -203,6 +330,17 @@ struct Parser<'a> {
     /// and `a.x` cannot collide; the pool rule just stops both spellings
     /// coexisting confusingly in one file.
     namespaces: HashSet<Vec<String>>,
+    /// Every `(ns, name)` function declared so far — the pre-C1 parser
+    /// scanned its flat `functions` vec for the same-scope duplicate
+    /// check; a set keyed on `(ns, name)` is the equivalent membership
+    /// test and independent of the CST's block nesting.
+    declared_fns: HashSet<(Vec<String>, String)>,
+    /// Comments split out of the stream, in source order.
+    comments: Vec<CommentAt>,
+    /// Cursor into `comments`: everything before it is already attached.
+    cpos: usize,
+    /// End line of the last emitted CST element, for `blank_before`.
+    prev_end_line: u32,
 }
 
 impl Parser<'_> {
@@ -243,36 +381,78 @@ impl Parser<'_> {
         }
     }
 
-    fn program(mut self) -> Result<Program, CompileError> {
-        let mut functions: Vec<Function> = Vec::new();
-        let mut imports = Vec::new();
-        self.top_items(&[], &mut functions, &mut imports, None)?;
-        Ok(Program { functions, imports })
+    /// Attach every pending comment at or before the current sig position,
+    /// returning `(comment, start_line)` in source order. Never drops.
+    fn drain_pending(&mut self) -> Vec<(Comment, u32)> {
+        let mut out = Vec::new();
+        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
+            let ca = &self.comments[self.cpos];
+            out.push((ca.comment.clone(), ca.line));
+            self.cpos += 1;
+        }
+        out
     }
 
-    /// One namespace level's item loop; the whole file is the `ns == []`
-    /// level. Handles `use` (legal at any namespace depth, never in
-    /// function bodies), `namespace NAME { … }` (contextual; recurse
-    /// with the extended path), `export`, and function definitions.
-    /// `terminator` is `Some(RBrace)` inside a block, `None` at file
-    /// level (ends at Eof).
+    /// Like [`Self::drain_pending`] but dropping line info — for
+    /// mid-comma-group leading trivia, which carries no `blank_before`.
+    fn drain_pending_comments(&mut self) -> Vec<Comment> {
+        self.drain_pending().into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// Take the one same-line trailing comment after a `;` (the pending
+    /// comment that follows code on `end_line`), if any.
+    fn take_trailing(&mut self, end_line: u32) -> Option<Comment> {
+        if self.cpos < self.comments.len() {
+            let ca = &self.comments[self.cpos];
+            if ca.sig_index <= self.pos && !ca.comment.own_line && ca.line == end_line {
+                let out = ca.comment.clone();
+                self.cpos += 1;
+                return Some(out);
+            }
+        }
+        None
+    }
+
+    /// The whole file is the `ns == []` namespace level.
+    fn file(mut self) -> Result<Vec<TopItem>, CompileError> {
+        self.top_items(&[], None)
+    }
+
+    /// One namespace level's item loop, building `TopItem`s in source
+    /// order. Handles `use` (legal at any namespace depth, never in
+    /// function bodies), `namespace NAME { … }` (contextual; recurse with
+    /// the extended path), `export`, and function definitions, and
+    /// interleaves own-line comments as [`TopKind::Comment`] items.
+    /// `terminator` is `Some(RBrace)` inside a block, `None` at file level
+    /// (ends at Eof). Duplicate-name checks run here, exactly as the pre-C1
+    /// parser did.
     fn top_items(
         &mut self,
         ns: &[String],
-        functions: &mut Vec<Function>,
-        imports: &mut Vec<Import>,
         terminator: Option<&TokenKind>,
-    ) -> Result<(), CompileError> {
+    ) -> Result<Vec<TopItem>, CompileError> {
+        let mut items: Vec<TopItem> = Vec::new();
         loop {
+            // Own-line comments (leading/standalone/dangling) become their
+            // own items at this level, in source position.
+            for (comment, cline) in self.drain_pending() {
+                let blank_before = cline > self.prev_end_line + 1;
+                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
+                items.push(TopItem {
+                    blank_before,
+                    kind: TopKind::Comment(comment),
+                });
+            }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
-                (TokenKind::Eof, None) => return Ok(()),
+                (TokenKind::Eof, None) => return Ok(items),
                 (TokenKind::Eof, Some(_)) => {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
                 (k, Some(term)) if k == term => {
+                    self.prev_end_line = t.line;
                     self.bump();
-                    return Ok(());
+                    return Ok(items);
                 }
                 _ => {}
             }
@@ -316,6 +496,8 @@ impl Parser<'_> {
                 )
             {
                 self.bump();
+                let mut import_csts: Vec<ImportCst> = Vec::new();
+                let semi_line;
                 loop {
                     // path := IDENT (`::` IDENT)*  [ `as` IDENT ]
                     let t = self.peek().clone();
@@ -359,15 +541,15 @@ impl Parser<'_> {
                     } else {
                         None
                     };
-                    imports.push(Import {
+                    import_csts.push(ImportCst {
                         path,
                         alias,
                         line: t.line,
-                        ns: ns.to_vec(),
                         span: Span {
                             start: path_start,
                             end: path_end,
                         },
+                        trailing: None,
                     });
                     let sep = self.peek().clone();
                     match sep.kind {
@@ -375,6 +557,7 @@ impl Parser<'_> {
                             self.bump();
                         }
                         TokenKind::Semi => {
+                            semi_line = sep.line;
                             self.bump();
                             break;
                         }
@@ -383,6 +566,19 @@ impl Parser<'_> {
                         }
                         _ => return Err(Self::expected(&sep, "`,` or `;`")),
                     }
+                }
+                // The `use` list's trailing comment rides its last entry.
+                let trailing = self.take_trailing(semi_line);
+                if let Some(last) = import_csts.last_mut() {
+                    last.trailing = trailing;
+                }
+                for imp in import_csts {
+                    let blank_before = imp.line > self.prev_end_line + 1;
+                    self.prev_end_line = imp.line;
+                    items.push(TopItem {
+                        blank_before,
+                        kind: TopKind::Import(imp),
+                    });
                 }
                 continue;
             }
@@ -398,6 +594,8 @@ impl Parser<'_> {
                     Some(TokenKind::LBrace)
                 )
             {
+                let ns_saved = self.prev_end_line;
+                let ns_line = t.line;
                 self.bump(); // `namespace`
                 let name_tok = self.peek().clone();
                 let TokenKind::Ident(name) = &name_tok.kind else {
@@ -415,7 +613,7 @@ impl Parser<'_> {
                 }
                 // Shared name pool: a namespace may not reuse a sibling
                 // function's name (reopening the same namespace is fine).
-                if functions.iter().any(|g| g.ns == ns && g.name == name) {
+                if self.declared_fns.contains(&(ns.to_vec(), name.clone())) {
                     return Err(Self::err_at(
                         &name_tok,
                         CompileErrorKind::DuplicateName {
@@ -424,16 +622,32 @@ impl Parser<'_> {
                         },
                     ));
                 }
+                let name_span = name_tok.span();
                 self.bump(); // the name
+                let brace = self.peek().clone();
                 self.bump(); // `{`
                 let mut child = ns.to_vec();
-                child.push(name);
+                child.push(name.clone());
                 self.namespaces.insert(child.clone());
-                self.top_items(&child, functions, imports, Some(&TokenKind::RBrace))?;
+                self.prev_end_line = brace.line;
+                let child_items = self.top_items(&child, Some(&TokenKind::RBrace))?;
+                // `top_items` set `prev_end_line` to the closing `}` line.
+                let blank_before = ns_line > ns_saved + 1;
+                items.push(TopItem {
+                    blank_before,
+                    kind: TopKind::Namespace(NamespaceCst {
+                        name,
+                        name_span,
+                        line: ns_line,
+                        items: child_items,
+                    }),
+                });
                 continue;
             }
             // Contextual keyword: `export` + identifier = exported def;
             // `export` + `(` is a function NAMED export.
+            let fn_saved = self.prev_end_line;
+            let fn_line = self.peek().line;
             let exported = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
                 && matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
@@ -445,15 +659,14 @@ impl Parser<'_> {
                 false
             };
             let mut f = self.function()?;
-            f.ns = ns.to_vec();
             // Only the un-namespaced top-level `main` auto-exports (and is
             // the entry); a namespaced `main` is an ordinary function.
             f.exported = exported || (ns.is_empty() && f.name == "main");
-            if functions.iter().any(|g| g.ns == f.ns && g.name == f.name) {
+            if self.declared_fns.contains(&(ns.to_vec(), f.name.clone())) {
                 return Err(CompileError {
                     span: mtc_core::diagnostics::Span::point(f.line, f.col),
                     kind: CompileErrorKind::DuplicateName {
-                        name: f.name,
+                        name: f.name.clone(),
                         what: "function",
                     },
                 });
@@ -466,16 +679,22 @@ impl Parser<'_> {
                 return Err(CompileError {
                     span: mtc_core::diagnostics::Span::point(f.line, f.col),
                     kind: CompileErrorKind::DuplicateName {
-                        name: f.name,
+                        name: f.name.clone(),
                         what: "namespace",
                     },
                 });
             }
-            functions.push(f);
+            self.declared_fns.insert((ns.to_vec(), f.name.clone()));
+            // `function` set `prev_end_line` to the closing `}` line.
+            let blank_before = fn_line > fn_saved + 1;
+            items.push(TopItem {
+                blank_before,
+                kind: TopKind::Function(f),
+            });
         }
     }
 
-    fn function(&mut self) -> Result<Function, CompileError> {
+    fn function(&mut self) -> Result<FunctionCst, CompileError> {
         let name_tok = self.peek().clone();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(Self::expected(&name_tok, "a function name"));
@@ -493,12 +712,24 @@ impl Parser<'_> {
         self.bump();
         self.expect(&TokenKind::LParen, "`(` after the function name")?;
         self.expect(&TokenKind::RParen, "`)` (functions take no parameters)")?;
+        let brace = self.peek().clone();
         self.expect(&TokenKind::LBrace, "`{`")?;
 
-        let mut body = Vec::new();
-        let mut nested = Vec::new();
+        let mut body: Vec<BodyItem> = Vec::new();
+        let mut nested_names: HashSet<String> = HashSet::new();
         let mut seen_labels: HashSet<u32> = HashSet::new();
+        self.prev_end_line = brace.line;
         loop {
+            // Own-line comments (leading/standalone/dangling) become body
+            // items in source position.
+            for (comment, cline) in self.drain_pending() {
+                let blank_before = cline > self.prev_end_line + 1;
+                self.prev_end_line = cline + comment.text.matches('\n').count() as u32;
+                body.push(BodyItem {
+                    blank_before,
+                    kind: BodyKind::Comment(comment),
+                });
+            }
             if matches!(self.peek().kind, TokenKind::Eof) {
                 return Err(Self::expected(
                     self.peek(),
@@ -521,17 +752,25 @@ impl Parser<'_> {
                     Some(TokenKind::LBrace)
                 );
             if is_nested_def {
+                let nested_saved = self.prev_end_line;
+                let nested_line = self.peek().line;
                 let child = self.function()?;
-                if nested.iter().any(|g: &Function| g.name == child.name) {
+                if nested_names.contains(&child.name) {
                     return Err(CompileError {
                         span: mtc_core::diagnostics::Span::point(child.line, child.col),
                         kind: CompileErrorKind::DuplicateName {
-                            name: child.name,
+                            name: child.name.clone(),
                             what: "function",
                         },
                     });
                 }
-                nested.push(child);
+                nested_names.insert(child.name.clone());
+                // `function` set `prev_end_line` to the nested `}` line.
+                let blank_before = nested_line > nested_saved + 1;
+                body.push(BodyItem {
+                    blank_before,
+                    kind: BodyKind::Nested(child),
+                });
                 continue;
             }
             // `export` before a nested definition is an error.
@@ -545,7 +784,10 @@ impl Parser<'_> {
                 return Err(Self::err_at(&t, CompileErrorKind::NestedExport));
             }
             // Labels announced before the next statement (possibly stacked).
+            let stmt_saved = self.prev_end_line;
+            let stmt_line = self.peek().line;
             let mut labels = Vec::new();
+            let mut last_colon_line: u32 = 0;
             loop {
                 let tok = self.peek().clone();
                 let TokenKind::Number(n) = tok.kind else {
@@ -557,6 +799,7 @@ impl Parser<'_> {
                 if !seen_labels.insert(n) {
                     return Err(Self::err_at(&tok, CompileErrorKind::DuplicateLabel(n)));
                 }
+                last_colon_line = colon.line;
                 labels.push(Label {
                     value: n,
                     span: Span {
@@ -573,35 +816,52 @@ impl Parser<'_> {
                         CompileErrorKind::DanglingLabel(label.value),
                     ));
                 }
+                self.prev_end_line = self.peek().line;
                 self.bump();
                 break;
             }
-            body.push(self.statement(labels)?);
+            let stmt = self.statement(labels, last_colon_line)?;
+            // `statement` set `prev_end_line` to the `;` line.
+            let blank_before = stmt_line > stmt_saved + 1;
+            body.push(BodyItem {
+                blank_before,
+                kind: BodyKind::Statement(stmt),
+            });
         }
-        Ok(Function {
+        Ok(FunctionCst {
             name,
+            name_span: name_tok.span(),
             line: name_tok.line,
             col: name_tok.col,
-            name_span: name_tok.span(),
-            body,
             exported: false,
-            local: false,
-            nested,
-            ns: Vec::new(),
+            body,
         })
     }
 
-    fn statement(&mut self, labels: Vec<Label>) -> Result<Statement, CompileError> {
+    fn statement(
+        &mut self,
+        labels: Vec<Label>,
+        last_colon_line: u32,
+    ) -> Result<StatementCst, CompileError> {
         let start = labels
             .first()
             .map(|l| l.span.start)
             .unwrap_or_else(|| self.peek().span().start);
         let line = self.peek().line;
-        let mut items = vec![self.item(false)?];
+        // The author put a newline after the final label `:` (own-line
+        // label) iff the first command sits on a later line.
+        let label_break = !labels.is_empty() && line > last_colon_line;
+        // A comment between the label and the first command (rare) rides
+        // the first item's leading; the common case leaves it empty.
+        let leading = self.drain_pending_comments();
+        let mut items = vec![CommaItem {
+            item: self.item(false)?,
+            leading,
+        }];
         while matches!(self.peek().kind, TokenKind::Comma) {
             let comma = self.peek().clone();
             // Whatever precedes a `,` must be bare (docs/language.md).
-            match items.last().expect("items is never empty") {
+            match &items.last().expect("items is never empty").item {
                 Item::Check { .. } => {
                     return Err(Self::err_at(
                         &comma,
@@ -637,11 +897,18 @@ impl Parser<'_> {
                 _ => {}
             }
             self.bump();
-            items.push(self.item(true)?);
+            // A mid-group comment attaches to the following item's leading.
+            let leading = self.drain_pending_comments();
+            items.push(CommaItem {
+                item: self.item(true)?,
+                leading,
+            });
         }
         let semi = self.peek().clone();
         self.expect(&TokenKind::Semi, "`;`")?;
-        Ok(Statement {
+        let trailing = self.take_trailing(semi.line);
+        self.prev_end_line = semi.line;
+        Ok(StatementCst {
             labels,
             items,
             line,
@@ -649,6 +916,8 @@ impl Parser<'_> {
                 start,
                 end: semi.span().end,
             },
+            label_break,
+            trailing,
         })
     }
 
@@ -864,6 +1133,89 @@ mod tests {
 
     fn parse_src(src: &str) -> Result<Program, CompileError> {
         parse(&lex(src).unwrap())
+    }
+
+    /// `parse_cst` on a `WithComments` stream must retain every comment as
+    /// trivia and record the layout signals (`blank_before`,
+    /// `label_break`, per-item `leading`, `trailing`) that `lower_cst`
+    /// drops. Reads each of those fields, and confirms no comment is lost.
+    #[test]
+    fn parse_cst_captures_comment_trivia_and_layout() {
+        use crate::cst::{BodyKind, TopKind};
+        use crate::lexer::{LexMode, lex_with};
+
+        let src = "\
+// top comment
+use std::goToEnd; // import trailing
+
+f() {
+    1:
+        left; // trailing
+    right, /* mid */ mark;
+}
+";
+        let tokens = lex_with(src, LexMode::WithComments).unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+
+        // An own-line comment is lifted to its own top-level Comment item.
+        let TopKind::Comment(c0) = &cst.items[0].kind else {
+            panic!(
+                "expected a leading comment item, got {:?}",
+                cst.items[0].kind
+            );
+        };
+        assert_eq!(c0.text, "// top comment");
+        assert!(c0.own_line);
+
+        // The import keeps its same-line trailing comment.
+        let TopKind::Import(imp) = &cst.items[1].kind else {
+            panic!("expected an import item");
+        };
+        assert_eq!(imp.path, vec!["std", "goToEnd"]);
+        assert_eq!(
+            imp.trailing.as_ref().map(|c| c.text.as_str()),
+            Some("// import trailing")
+        );
+
+        // A blank line precedes the function in source.
+        assert!(cst.items[2].blank_before, "blank line precedes f()");
+        let TopKind::Function(f) = &cst.items[2].kind else {
+            panic!("expected a function item");
+        };
+
+        // Own-line label => `label_break`; same-line `;` trailing comment.
+        let BodyKind::Statement(s0) = &f.body[0].kind else {
+            panic!("expected the first body statement");
+        };
+        assert!(s0.label_break, "the label sits on its own line");
+        assert_eq!(
+            s0.trailing.as_ref().map(|c| c.text.as_str()),
+            Some("// trailing")
+        );
+        assert_eq!(s0.items.len(), 1);
+        assert!(s0.items[0].leading.is_empty());
+
+        // A mid-group comment rides the FOLLOWING comma item's `leading`.
+        let BodyKind::Statement(s1) = &f.body[1].kind else {
+            panic!("expected the second body statement");
+        };
+        assert_eq!(s1.items.len(), 2);
+        assert!(s1.items[0].leading.is_empty());
+        assert_eq!(
+            s1.items[1]
+                .leading
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/* mid */"]
+        );
+
+        // Nothing dropped: every comment token is placed somewhere.
+        let comment_count = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, TokenKind::Comment(_)))
+            .count();
+        assert_eq!(comment_count, 4);
     }
 
     #[test]
