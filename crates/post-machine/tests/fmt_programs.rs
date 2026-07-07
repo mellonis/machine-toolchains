@@ -21,8 +21,7 @@
 //! force), grouped `use` lists, the verbatim `export` keyword, spaced
 //! forms (`1 : right`, `std :: goToEnd`) normalizing to tight, and the
 //! comments-only-file / empty-function-body edge cases. `SIMPLE` is
-//! scoped to exactly that subset — Task 9 points this harness at the
-//! full corpus.
+//! scoped to exactly that subset.
 //!
 //! Task 8b's own contribution needed no renderer changes: `parse_cst`
 //! only ever hands the printer the parsed VALUE (a label's number, a
@@ -35,11 +34,39 @@
 //! The commented entries added here (Task 7) are what make the check
 //! actually exercise something: each carries at least one real comment,
 //! so a regression that lost or reordered one would fail this test.
+//!
+//! **Task 9 widens all three checks to the FULL corpus** (`CORPUS`
+//! below): the embedded stdlib (`src/stdlib/std.pmc` — namespaces, doc
+//! comments, labels, calls, all together for the first time), the two
+//! historic goldens (`tests/golden/sum.pmc` + `ty.pmc`), and the lint
+//! fixture (`tests/lint/unused_labels.pmc`) — every `.pmc` file under
+//! this crate, same corpus `tests/parser_parity.rs` already parses both
+//! ways. This is the real validation: `SIMPLE` was hand-picked to
+//! exercise one shape at a time, but nothing before this task had run
+//! the printer over a real, organically-written program. No dogfood
+//! `format(std.pmc) == std.pmc` assertion is added here (std.pmc is not
+//! fmt-clean yet — that's Task 11's job); these three checks are
+//! format-RELATIVE and hold regardless of whether the input already
+//! matches the canonical style.
 
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::format;
 use mtc_post_machine::lexer::{LexMode, TokenKind, lex_with};
 use mtc_post_machine::optimizer::OptLevel;
+
+/// The full `.pmc` corpus: the embedded stdlib, the two historic
+/// goldens, and the lint fixture — the same set `tests/parser_parity.rs`
+/// parses through both the legacy and CST paths. Labelled so a failing
+/// assertion names the file, not just an opaque `&str`.
+const CORPUS: &[(&str, &str)] = &[
+    ("std.pmc", include_str!("../src/stdlib/std.pmc")),
+    ("golden/sum.pmc", include_str!("golden/sum.pmc")),
+    ("golden/ty.pmc", include_str!("golden/ty.pmc")),
+    (
+        "lint/unused_labels.pmc",
+        include_str!("lint/unused_labels.pmc"),
+    ),
+];
 
 /// Valid `.pmc` programs the printer fully supports.
 const SIMPLE: &[&str] = &[
@@ -128,18 +155,29 @@ const SIMPLE: &[&str] = &[
     "f() { }",
 ];
 
+/// `SIMPLE` entries paired with a label equal to their own source (the
+/// existing failure-message shape), chained ahead of the real-world
+/// `CORPUS` — every entry below iterates `(label, src)` pairs so a
+/// corpus failure names the file instead of printing the whole source.
+fn all_sources() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SIMPLE
+        .iter()
+        .map(|s| (*s, *s))
+        .chain(CORPUS.iter().copied())
+}
+
 #[test]
 fn idempotence() {
-    for src in SIMPLE {
+    for (label, src) in all_sources() {
         let once = format(src).expect("formats");
         let twice = format(&once).expect("reformats");
-        assert_eq!(twice, once, "format(format(x)) != format(x) for {src:?}");
+        assert_eq!(twice, once, "format(format(x)) != format(x) for {label:?}");
     }
 }
 
 #[test]
 fn behaviour_preservation_at_o0_and_o1() {
-    for src in SIMPLE {
+    for (label, src) in all_sources() {
         let formatted = format(src).expect("formats");
 
         let orig_o0 = compile(src, CompileOptions::default()).expect("compiles at -O0");
@@ -147,7 +185,7 @@ fn behaviour_preservation_at_o0_and_o1() {
             compile(&formatted, CompileOptions::default()).expect("formatted compiles at -O0");
         assert_eq!(
             orig_o0.object, fmt_o0.object,
-            "-O0 object bytes diverged for {src:?}"
+            "-O0 object bytes diverged for {label:?}"
         );
 
         let o1 = CompileOptions {
@@ -158,7 +196,7 @@ fn behaviour_preservation_at_o0_and_o1() {
         let fmt_o1 = compile(&formatted, o1).expect("formatted compiles at -O1");
         assert_eq!(
             orig_o1.object, fmt_o1.object,
-            "-O1 object bytes diverged for {src:?}"
+            "-O1 object bytes diverged for {label:?}"
         );
     }
 }
@@ -176,12 +214,12 @@ fn comment_texts(src: &str) -> Vec<String> {
 
 #[test]
 fn comment_fidelity() {
-    for src in SIMPLE {
+    for (label, src) in all_sources() {
         let formatted = format(src).expect("formats");
         assert_eq!(
             comment_texts(&formatted),
             comment_texts(src),
-            "comment sequence diverged for {src:?}"
+            "comment sequence diverged for {label:?}"
         );
     }
 }
