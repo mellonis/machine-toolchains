@@ -5,35 +5,29 @@
 //! future `cli/fmt.rs` is the only place that renders errors or touches
 //! the filesystem.
 //!
-//! **Scope of this module today (fmt build Tasks 4-7): the TRIVIAL
+//! **Scope of this module today (fmt build Tasks 4-8a): the TRIVIAL
 //! printer subset, label/command-column alignment, comma-group layout,
-//! and comment placement/alignment.** It prints a source-faithful
-//! skeleton — headers, braces, indentation, one statement per line (with
-//! labels aligned into a shared command column, see [`command_column`]),
-//! canonical item text, the comma-group Y / greedy-fill layout (see
-//! [`render_items`]), and every comment (own-line, trailing, and
-//! mid-comma-group) reprinted per the design doc's "Comments = trivia-
-//! tokens native in the CST" + "Trailing comments" — and deliberately
-//! leaves the following as seams for later tasks (each seam is marked at
-//! its printing site below):
+//! comment placement/alignment, namespaces, blank-line policy, and
+//! imports/export printing.** It prints a source-faithful skeleton —
+//! headers, braces, indentation (including namespace nesting, see
+//! [`print_namespace`]), one statement per line (with labels aligned into
+//! a shared command column, see [`command_column`]), canonical item text,
+//! the comma-group Y / greedy-fill layout (see [`render_items`]), every
+//! comment (own-line, trailing, and mid-comma-group) reprinted per the
+//! design doc's "Comments = trivia-tokens native in the CST" + "Trailing
+//! comments", the general blank-line policy (preserve / collapse runs /
+//! never force, see [`top_wants_blank_before`] / [`body_wants_blank_before`]),
+//! grouped `use` lists (see [`print_use`]), and the verbatim `export`
+//! keyword (see [`FunctionCst::has_export`]) — and deliberately leaves the
+//! following as seams for the next task (each seam is marked at its
+//! printing site below):
 //!
-//! - **Blank lines between plain (comment-free) nodes, imports,
-//!   namespaces, full intra-statement spacing normalization, and the edge
-//!   cases** (Task 8) — [`crate::cst::TopKind::Import`] and
-//!   [`crate::cst::TopKind::Namespace`] are silently skipped. `blank_before`
-//!   IS read, but only immediately next to a comment (own-line comments'
-//!   leading/trailing blank separation, per [`top_wants_blank_before`] /
-//!   [`body_wants_blank_before`]) — a blank line between two plain
-//!   statements/declarations is still untouched, deliberately: Task 8
-//!   owns that general policy.
-//!
-//! "Silently skipped" is a deliberate design choice for the imports/
-//! namespaces seam: an unhandled node must never panic, but this task
-//! also must not half-implement Task 8's rules. The three-check objective
-//! harness (`tests/fmt_programs.rs`) is scoped to a program set the
-//! printer fully supports (labeled or unlabeled statements, comments of
-//! every placement, no namespaces/imports, comma groups including
-//! multi-line ones) — Task 8 widens that set further as its seam closes.
+//! - **Full intra-statement spacing normalization (spaced forms like
+//!   `1 : right` / `std :: x`) and the textual-hygiene/edge-case rules**
+//!   (Task 8b) — `parse_cst` only ever hands back the parsed VALUE, so
+//!   every item shape this printer covers is already canonical; the
+//!   spaced-FORM normalization table and the edge cases (trailing
+//!   whitespace, final newline) are Task 8b's.
 //!
 //! ## Comment placement (Task 7)
 //!
@@ -52,7 +46,10 @@
 //! [`render_items`]).
 
 use crate::compiler::CompileError;
-use crate::cst::{BodyItem, BodyKind, CommaItem, Cst, FunctionCst, StatementCst, TopItem, TopKind};
+use crate::cst::{
+    BodyItem, BodyKind, CommaItem, Cst, FunctionCst, NamespaceCst, StatementCst, TopItem, TopKind,
+    UseCst, UsePath,
+};
 use crate::lexer::{Comment, CommentKind, LexMode, lex_with};
 use crate::parser::{Builtin, CheckArm, Item, Label, Successor, parse_cst};
 
@@ -71,12 +68,7 @@ pub fn format(source: &str) -> Result<String, CompileError> {
 
 fn print_cst(cst: &Cst) -> String {
     let mut out = String::new();
-    for (i, item) in cst.items.iter().enumerate() {
-        if top_wants_blank_before(&cst.items, i) {
-            out.push('\n');
-        }
-        print_top_item(&mut out, item);
-    }
+    print_top_items(&mut out, &cst.items, 0);
     // Edge case (spec "Edge cases"): an empty file still reprints with
     // exactly one final newline. Non-empty output already ends in `\n`
     // from the last printed function/comment, so nothing further is
@@ -87,37 +79,92 @@ fn print_cst(cst: &Cst) -> String {
     out
 }
 
-/// Whether item `i` (`i > 0`) should be preceded by a blank line — the
-/// narrow slice of the design doc's blank-line policy (rule 3: preserve
-/// what the author wrote) that THIS task owns: only a blank directly
-/// touching a comment, on either side (module doc's "Comment placement").
-/// A blank between two plain nodes is Task 8's seam — untouched here.
+/// One level's `TopItem` list, at `indent` — the file level (`indent ==
+/// 0`) and a [`NamespaceCst`]'s own `items` (one level deeper) share this
+/// loop, so [`print_namespace`] gets recursion "for free".
+fn print_top_items(out: &mut String, items: &[TopItem], indent: usize) {
+    for (i, item) in items.iter().enumerate() {
+        if top_wants_blank_before(items, i) {
+            out.push('\n');
+        }
+        print_top_item(out, item, indent);
+    }
+}
+
+/// Whether item `i` (`i > 0`) should be preceded by a blank line (spec
+/// "Blank lines": preserve the author's choice, collapse any run to one,
+/// force nothing). `blank_before` is already a bool (Task-3 CST design),
+/// so a source run of 2+ blanks already collapsed to one by construction.
+/// The `i > 0` guard IS the brace-edge suppression for "immediately after
+/// `{`" (index 0 is always the first item of a body/namespace/file, and
+/// never gets a blank); "immediately before `}`" never arises in the
+/// first place — no `TopItem`/`BodyItem` exists AFTER the last one to
+/// carry a trailing blank's `blank_before`, so nothing further is needed
+/// for that edge.
 fn top_wants_blank_before(items: &[TopItem], i: usize) -> bool {
-    i > 0
-        && items[i].blank_before
-        && (matches!(items[i - 1].kind, TopKind::Comment(_))
-            || matches!(items[i].kind, TopKind::Comment(_)))
+    i > 0 && items[i].blank_before
 }
 
 /// Same rule as [`top_wants_blank_before`], scoped to a function body.
 fn body_wants_blank_before(items: &[BodyItem], i: usize) -> bool {
-    i > 0
-        && items[i].blank_before
-        && (matches!(items[i - 1].kind, BodyKind::Comment(_))
-            || matches!(items[i].kind, BodyKind::Comment(_)))
+    i > 0 && items[i].blank_before
 }
 
-fn print_top_item(out: &mut String, item: &TopItem) {
+fn print_top_item(out: &mut String, item: &TopItem, indent: usize) {
     match &item.kind {
-        TopKind::Function(f) => print_function(out, f, 0),
-        // File level = indent 0 (spec "Indentation").
-        TopKind::Comment(c) => print_comment(out, c, 0),
-        // Seam (Task 8): namespace blocks — not emitted yet, skip, don't
-        // panic.
-        TopKind::Namespace(_) => {}
-        // Seam (Task 8): `use` imports.
-        TopKind::Import(_) => {}
+        TopKind::Function(f) => print_function(out, f, indent),
+        TopKind::Comment(c) => print_comment(out, c, indent),
+        TopKind::Namespace(ns) => print_namespace(out, ns, indent),
+        TopKind::Import(use_cst) => print_use(out, use_cst, indent),
     }
+}
+
+/// `namespace NAME { … }` (spec "Headers and braces": one space before
+/// `{`, the closing `}` alone at the header's own indent) — its `items`
+/// print one level deeper via the same [`print_top_items`] loop the file
+/// level uses, so nesting (a namespace inside a namespace) recurses for
+/// free, and a nested function's body indent (namespace +1, function +1)
+/// already falls out of [`print_function`]'s own `indent + INDENT_UNIT`.
+fn print_namespace(out: &mut String, ns: &NamespaceCst, indent: usize) {
+    let pad = " ".repeat(indent);
+    out.push_str(&pad);
+    out.push_str("namespace ");
+    out.push_str(&ns.name);
+    out.push_str(" {\n");
+    print_top_items(out, &ns.items, indent + INDENT_UNIT);
+    out.push_str(&pad);
+    out.push_str("}\n");
+}
+
+/// One `use` list (spec "Imports"): paths in source order, never
+/// reordered/merged/split (module doc's `UseCst` grouping — Task-3's
+/// former per-path `ImportCst` gap, fixed at the CST level). Trailing
+/// comment placement is the same one-space default as everywhere else in
+/// this task (the design doc's context-sensitive alignment rule targets
+/// function-body statement runs — [`compute_trailing_spacing`] — and
+/// names no equivalent rule for imports).
+fn print_use(out: &mut String, u: &UseCst, indent: usize) {
+    out.push_str(&" ".repeat(indent));
+    out.push_str("use ");
+    let rendered: Vec<String> = u.paths.iter().map(render_use_path).collect();
+    out.push_str(&rendered.join(", "));
+    out.push(';');
+    if let Some(tc) = &u.trailing {
+        out.push(' ');
+        out.push_str(&tc.comment.text);
+    }
+    out.push('\n');
+}
+
+/// One `use`-list path (spec "Intra-statement token spacing" → Path row +
+/// "Imports"): `::` tight, ` as ALIAS` one space each side if present.
+fn render_use_path(p: &UsePath) -> String {
+    let mut s = p.path.join("::");
+    if let Some(alias) = &p.alias {
+        s.push_str(" as ");
+        s.push_str(alias);
+    }
+    s
 }
 
 /// One own-line comment (leading / standalone / dangling — content
@@ -137,27 +184,21 @@ fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
 
 /// Header + body + closing brace (spec "Headers and braces"). Used for
 /// both top-level and nested functions — a nested [`FunctionCst`] has the
-/// same shape, just one indent level deeper and never `exported`.
+/// same shape, just one indent level deeper and (per the grammar) never
+/// `has_export`.
 ///
-/// **Known CST information-loss gap** (parallel to Task 3's deferred
-/// `use`-list-grouping gap): un-namespaced top-level `main` always has
-/// `exported: true` (`parser.rs`'s `f.exported = exported ||
-/// (ns.is_empty() && f.name == "main")`), whether or not the author
-/// literally wrote `export` — the CST has no field distinguishing
-/// `main() { … }` from the legal-but-redundant `export main() { … }`
-/// (`docs/language.md`). `indent == 0` uniquely identifies this
-/// unnamespaced-top-level case (a nested body is always indented; a
-/// namespace's contents indent from its own body, never 0 — spec
-/// "Indentation"), so this printer omits the redundant `export` there
-/// rather than always emitting it — the far more common bare-`main`
-/// spelling must not gain a token fmt never removes elsewhere. This
-/// narrows the "zero token changes" decision by exactly the one spelling
-/// the CST cannot preserve; compiled behavior is identical either way
-/// (`main` is always the entry regardless).
+/// **Export keyword, verbatim** (fmt design doc §D — resolves what was
+/// Task-4's "Known CST information-loss gap"): `f.has_export` records
+/// whether the author literally wrote `export`, independent of
+/// `f.exported` (which additionally folds in top-level `main`'s
+/// auto-export — `parser.rs`'s `f.exported = exported || (ns.is_empty()
+/// && f.name == "main")`). Printing `has_export` directly means
+/// `export main() { … }` keeps its (legal but redundant) `export`, and
+/// bare `main() { … }` stays bare — both compile identically either way.
 fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
     let pad = " ".repeat(indent);
     out.push_str(&pad);
-    if f.exported && !(indent == 0 && f.name == "main") {
+    if f.has_export {
         out.push_str("export ");
     }
     out.push_str(&f.name);
@@ -1077,6 +1118,107 @@ mod tests {
             "f() {\n    /* line one\n   line two */\n    right;\n}\n".to_string(),
             "f() {\n 1: left, /* mid */ right;\n}\n".to_string(),
             "f() {\n    left, // note\n    right;\n}\n".to_string(),
+        ] {
+            let once = format(&src).unwrap();
+            let twice = format(&once).unwrap();
+            assert_eq!(twice, once, "not idempotent for {src:?}");
+        }
+    }
+
+    // -- Task 8a: namespaces, blank lines, imports, export verbatim --
+
+    #[test]
+    fn s_namespace_prints_at_plus_one_indent() {
+        // Brief §A's byte example verbatim.
+        let src = "namespace ns {\n    f() {\n        right;\n    }\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn t_namespace_body_feeds_the_deeper_base_indent_into_command_column() {
+        // A namespaced function's body indent is 8 (namespace +4, function
+        // +4) — the Task-5 `command_column` already treats this as
+        // `base_body_indent`; this end-to-end test proves the recursive
+        // wiring, not just the pure function (already pinned by
+        // `command_column_namespaced_base_indent`). P=2 (`1:`):
+        // command_column(2, 8) = max(8, 4) = 8, so the label right-aligns
+        // with a 5-space margin (8 - 1 - 2) and `left;` sits at indent 8.
+        let src = "namespace ns {\n    f() {\n     1: right;\n        left;\n    }\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn namespace_nesting_recurses_at_increasing_indent() {
+        // Brief §A: "namespaces nest" — a namespace inside a namespace,
+        // proving `print_top_items`'s recursion (not just a function
+        // nested one level deep, covered above).
+        let src = "namespace a {\n    namespace b {\n        f() {\n            right;\n        }\n    }\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn u_blank_line_preserved_between_declarations() {
+        // Brief §B's byte example verbatim.
+        let src = "f() {\n    right;\n}\n\ng() {\n    left;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn v_blank_line_run_collapses_to_one() {
+        let src = "f() {\n    right;\n}\n\n\n\ng() {\n    left;\n}\n";
+        let expected = "f() {\n    right;\n}\n\ng() {\n    left;\n}\n";
+        assert_eq!(format(src).unwrap(), expected);
+    }
+
+    #[test]
+    fn w_blank_line_suppressed_at_brace_edges() {
+        // A blank right after `{` is suppressed (index 0 never gets a
+        // blank); a blank right before `}` never reaches the CST at all
+        // (no BodyItem follows the last statement to carry it) — both
+        // edges land on the same one-liner.
+        let src = "f() {\n\n    right;\n\n}\n";
+        let expected = "f() {\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), expected);
+    }
+
+    #[test]
+    fn x_use_list_grouping_and_spacing() {
+        // Brief §C's byte example verbatim — one `use` node per statement,
+        // never split/merged; `,` tight + one space, `::` tight, ` as `
+        // one space each side.
+        let src = "use std::goToEnd;\nuse a, b::c as d;\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn y_export_keyword_printed_verbatim_when_written() {
+        assert_eq!(
+            format("export main() { right; }").unwrap(),
+            "export main() {\n    right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn z_bare_main_stays_bare() {
+        assert_eq!(
+            format("main() { right; }").unwrap(),
+            "main() {\n    right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn idempotent_on_task_8a_shapes() {
+        for src in [
+            "namespace ns {\n    f() {\n        right;\n    }\n}\n".to_string(),
+            "namespace ns {\n    f() {\n     1: right;\n        left;\n    }\n}\n".to_string(),
+            "namespace a {\n    namespace b {\n        f() {\n            right;\n        }\n    }\n}\n"
+                .to_string(),
+            "f() {\n    right;\n}\n\ng() {\n    left;\n}\n".to_string(),
+            "f() {\n    right;\n}\n\n\n\ng() {\n    left;\n}\n".to_string(),
+            "f() {\n\n    right;\n\n}\n".to_string(),
+            "use std::goToEnd;\nuse a, b::c as d;\n".to_string(),
+            "export main() { right; }".to_string(),
+            "main() { right; }".to_string(),
         ] {
             let once = format(&src).unwrap();
             let twice = format(&once).unwrap();

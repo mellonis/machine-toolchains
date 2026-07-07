@@ -6,8 +6,8 @@ use mtc_core::diagnostics::Span;
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
-    BodyItem, BodyKind, CommaItem, Cst, FunctionCst, ImportCst, NamespaceCst, StatementCst,
-    TopItem, TopKind, TrailingComment,
+    BodyItem, BodyKind, CommaItem, Cst, FunctionCst, NamespaceCst, StatementCst, TopItem, TopKind,
+    TrailingComment, UseCst, UsePath,
 };
 use crate::lexer::{Comment, Token, TokenKind};
 
@@ -259,13 +259,17 @@ fn lower_items(
     for item in items {
         match &item.kind {
             TopKind::Comment(_) => {}
-            TopKind::Import(imp) => imports.push(Import {
-                path: imp.path.clone(),
-                alias: imp.alias.clone(),
-                line: imp.line,
-                ns: ns.to_vec(),
-                span: imp.span,
-            }),
+            TopKind::Import(use_cst) => {
+                for p in &use_cst.paths {
+                    imports.push(Import {
+                        path: p.path.clone(),
+                        alias: p.alias.clone(),
+                        line: p.line,
+                        ns: ns.to_vec(),
+                        span: p.span,
+                    });
+                }
+            }
             TopKind::Namespace(nsc) => {
                 let mut child = ns.to_vec();
                 child.push(nsc.name.clone());
@@ -506,8 +510,9 @@ impl Parser<'_> {
                     Some(TokenKind::Ident(_))
                 )
             {
+                let use_line = t.line;
                 self.bump();
-                let mut import_csts: Vec<ImportCst> = Vec::new();
+                let mut paths: Vec<UsePath> = Vec::new();
                 let semi_line;
                 loop {
                     // path := IDENT (`::` IDENT)*  [ `as` IDENT ]
@@ -521,6 +526,7 @@ impl Parser<'_> {
                     let mut path = vec![name.clone()];
                     let path_start = t.span().start;
                     let mut path_end = t.span().end;
+                    let path_line = t.line;
                     self.bump();
                     while matches!(self.peek().kind, TokenKind::ColonColon) {
                         self.bump();
@@ -552,15 +558,14 @@ impl Parser<'_> {
                     } else {
                         None
                     };
-                    import_csts.push(ImportCst {
+                    paths.push(UsePath {
                         path,
                         alias,
-                        line: t.line,
+                        line: path_line,
                         span: Span {
                             start: path_start,
                             end: path_end,
                         },
-                        trailing: None,
                     });
                     let sep = self.peek().clone();
                     match sep.kind {
@@ -578,19 +583,35 @@ impl Parser<'_> {
                         _ => return Err(Self::expected(&sep, "`,` or `;`")),
                     }
                 }
-                // The `use` list's trailing comment rides its last entry.
+                // The whole `use` list's trailing comment rides the node.
                 let trailing = self.take_trailing(semi_line);
-                if let Some(last) = import_csts.last_mut() {
-                    last.trailing = trailing;
-                }
-                for imp in import_csts {
-                    let blank_before = imp.line > self.prev_end_line + 1;
-                    self.prev_end_line = imp.line;
-                    items.push(TopItem {
-                        blank_before,
-                        kind: TopKind::Import(imp),
-                    });
-                }
+                let use_span = Span {
+                    start: paths
+                        .first()
+                        .expect("a use list has at least one path")
+                        .span
+                        .start,
+                    end: paths
+                        .last()
+                        .expect("a use list has at least one path")
+                        .span
+                        .end,
+                };
+                // One TopItem for the whole grouped list (fmt design doc §C
+                // "Imports: grouping fix") — `blank_before` reads the `use`
+                // keyword's own line, matching what the FIRST path would
+                // have reported under the old per-path scheme.
+                let blank_before = use_line > self.prev_end_line + 1;
+                self.prev_end_line = paths.last().expect("a use list has at least one path").line;
+                items.push(TopItem {
+                    blank_before,
+                    kind: TopKind::Import(UseCst {
+                        paths,
+                        line: use_line,
+                        span: use_span,
+                        trailing,
+                    }),
+                });
                 continue;
             }
             // Contextual keyword: `namespace NAME {` opens a (reopenable)
@@ -670,6 +691,10 @@ impl Parser<'_> {
                 false
             };
             let mut f = self.function()?;
+            // The literal keyword presence (fmt design doc §D "Export
+            // keyword verbatim") — unlike `exported` below, this does NOT
+            // fold in `main`'s auto-export.
+            f.has_export = exported;
             // Only the un-namespaced top-level `main` auto-exports (and is
             // the entry); a namespaced `main` is an ordinary function.
             f.exported = exported || (ns.is_empty() && f.name == "main");
@@ -845,6 +870,7 @@ impl Parser<'_> {
             line: name_tok.line,
             col: name_tok.col,
             exported: false,
+            has_export: false,
             body,
         })
     }
@@ -1194,12 +1220,13 @@ f() {
         assert!(c0.own_line);
 
         // The import keeps its same-line trailing comment.
-        let TopKind::Import(imp) = &cst.items[1].kind else {
+        let TopKind::Import(use_cst) = &cst.items[1].kind else {
             panic!("expected an import item");
         };
-        assert_eq!(imp.path, vec!["std", "goToEnd"]);
+        assert_eq!(use_cst.paths.len(), 1);
+        assert_eq!(use_cst.paths[0].path, vec!["std", "goToEnd"]);
         assert_eq!(
-            imp.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
+            use_cst.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
             Some("// import trailing")
         );
 

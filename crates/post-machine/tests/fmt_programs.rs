@@ -6,18 +6,21 @@
 //! objective backstop for the whole fmt build — reviewer approval does
 //! NOT substitute for these passing.
 //!
-//! At this task (fmt build Tasks 4-7) the pretty-printer implements the
+//! At this task (fmt build Tasks 4-8a) the pretty-printer implements the
 //! TRIVIAL subset plus label/command-column alignment plus comma-group
-//! layout plus comment placement/alignment (see `crate::fmt`'s module
-//! doc): labeled or unlabeled statements, no namespaces/imports, comma
-//! groups including multi-line ones (author line breaks preserved,
-//! greedy-fill on overflow), and every comment placement — leading,
-//! standalone, dangling, trailing (lone/aligned-run/ragged-run),
-//! block-comment re-indent, and mid-comma-group (block-inline /
-//! line-forces-a-break). `SIMPLE` is scoped to exactly that subset —
-//! Task 8 widens it further (blank lines/imports/namespaces/spacing/
-//! edge-cases) as its seam closes, eventually pointing this harness at
-//! the full corpus (Task 9).
+//! layout plus comment placement/alignment plus namespaces, the general
+//! blank-line policy, and imports/export printing (see `crate::fmt`'s
+//! module doc): labeled or unlabeled statements, comma groups including
+//! multi-line ones (author line breaks preserved, greedy-fill on
+//! overflow), every comment placement — leading, standalone, dangling,
+//! trailing (lone/aligned-run/ragged-run), block-comment re-indent, and
+//! mid-comma-group (block-inline / line-forces-a-break) — namespace
+//! blocks (nested recursion), blank lines (preserve/collapse/never
+//! force), grouped `use` lists, and the verbatim `export` keyword.
+//! `SIMPLE` is scoped to exactly that subset — Task 8b widens it further
+//! (spaced-form spacing normalization, textual hygiene, edge cases) as
+//! its seam closes, eventually pointing this harness at the full corpus
+//! (Task 9).
 //!
 //! **`comment_fidelity` was VACUOUS through Task 6** — `SIMPLE` carried
 //! no comments, so `comment_texts(src)` was always `[]` on both sides.
@@ -85,6 +88,21 @@ const SIMPLE: &[&str] = &[
     // Task 7: a mid-comma-group LINE comment — forces the group onto a
     // second line (nothing can follow `//` on its own physical line).
     "f() {\n    left, // note\n    right;\n}\n",
+    // Task 8a: a namespace block, reached by a qualified call (spec
+    // "Namespaces" — printed at +1 indent; nested recursion is exercised
+    // by the module's own unit tests).
+    "namespace ns { f() { right; } } main() { @ns::f(); }",
+    // Task 8a: a blank line preserved between two top-level declarations
+    // (spec "Blank lines" — preserve, collapse runs, never force).
+    "f() {\n    right;\n}\n\ng() {\n    left;\n}\n",
+    // Task 8a: a grouped `use` list — never split into separate
+    // statements (spec "Imports" — order and grouping preserved
+    // verbatim).
+    "use a, b::c as d;\nmain() { @a(); @d(); }",
+    // Task 8a: the literal `export` keyword on `main`, preserved verbatim
+    // even though `main`'s auto-export makes it semantically redundant
+    // (fmt design doc §D).
+    "export main() { right; }",
 ];
 
 #[test]

@@ -67,7 +67,7 @@
 //! into the CST the same way: a leading own-line comment sits before its
 //! node as a [`TopKind::Comment`]/[`BodyKind::Comment`] item in the same
 //! `Vec`; a same-line trailing comment rides directly on the node it
-//! follows ([`ImportCst::trailing`], [`StatementCst::trailing`]). There
+//! follows ([`UseCst::trailing`], [`StatementCst::trailing`]). There
 //! is no attachment pass — position IS the attachment. A future
 //! pretty-printer classifies each comment purely from this structure
 //! (design doc, "Comments = trivia-tokens native in the CST"):
@@ -107,7 +107,7 @@ pub enum TopKind {
     /// An own-line comment at file or namespace level (module doc's
     /// "Comment placement").
     Comment(Comment),
-    Import(ImportCst),
+    Import(UseCst),
     Namespace(NamespaceCst),
     Function(FunctionCst),
 }
@@ -126,28 +126,39 @@ pub struct TrailingComment {
     pub col: u32,
 }
 
-/// One `use` declaration list item, as written (`docs/language.md`
+/// One path within a `use` list, as written (`docs/language.md`
 /// (imports)) — mirrors [`crate::parser::Import`] minus its
-/// lower-copy-computed `ns` path, plus a same-line trailing comment.
-///
-/// **Known losslessness gap (deferred, does NOT affect C1 parity).** This
-/// is one node PER path, so `use a, b;` and `use a; use b;` produce
-/// indistinguishable CSTs — the `use`-list grouping is lost, as is any
-/// mid-list comment (`use a, /* c */ b;`, which the parser drains as a
-/// separate top-level `Comment` item rather than losing it). The design
-/// requires fmt to preserve `use`-list grouping, so a formatter task must
-/// re-model this (e.g. a grouping node owning a `Vec` of entries) and
-/// re-run the parity gate. `lower_cst` flattens imports regardless, so
-/// Task 3's `Program` parity is unaffected.
+/// lower-copy-computed `ns` path.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportCst {
+pub struct UsePath {
     /// `IDENT (:: IDENT)*`, e.g. `use std::goToEnd;` → `["std", "goToEnd"]`.
     pub path: Vec<String>,
     /// `as NAME` rebinding; `None` if absent.
     pub alias: Option<String>,
+    /// Line of this path's first token — matches [`crate::parser::Import::line`]
+    /// (a `use` list's paths need not share a line; the grammar puts no
+    /// restriction on splitting the list across lines).
     pub line: u32,
     /// Path start → last segment end; an `as` alias is NOT included
     /// (matches [`crate::parser::Import::span`]).
+    pub span: Span,
+}
+
+/// One `use` declaration list, as the author wrote it — `use a, b;` is
+/// ONE node holding two [`UsePath`] entries (fixes the formerly per-path
+/// `ImportCst`, which made `use a, b;` and `use a; use b;` indistinguishable
+/// and lost the list's grouping — see the design doc's "Imports" rule:
+/// fmt "neither reorders nor merges/splits `use` statements"). Each path
+/// keeps its own line/span so [`crate::parser::lower_cst`]'s per-path
+/// flattening is unaffected by the grouping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseCst {
+    /// The list's paths, in source order.
+    pub paths: Vec<UsePath>,
+    /// Line of the `use` keyword.
+    pub line: u32,
+    /// First path's start → last path's end; an `as` alias is NOT
+    /// included (mirrors each [`UsePath::span`]'s own convention).
     pub span: Span,
     /// A comment on the same source line, after the `;`.
     pub trailing: Option<TrailingComment>,
@@ -184,6 +195,15 @@ pub struct FunctionCst {
     /// `export` (contextual keyword) or `main` at top level. A nested
     /// function is never exported.
     pub exported: bool,
+    /// Whether the literal `export` keyword was WRITTEN in source — unlike
+    /// `exported`, this does NOT fold in top-level `main`'s auto-export
+    /// (`docs/language.md`: `main` is always the entry regardless of
+    /// spelling). The printer reads this, never `exported`, to decide
+    /// whether to emit the token: `export main() { … }` keeps `export`,
+    /// bare `main() { … }` stays bare, both compile identically.
+    /// [`crate::parser::lower_cst`] ignores this field — the AST's
+    /// `exported` is computed exactly as before.
+    pub has_export: bool,
     /// Body items in source order — statements, own-line comments, and
     /// nested function definitions interleaved as written (module doc's
     /// "Statements and nested function definitions interleave").
@@ -310,6 +330,7 @@ mod tests {
                 line: 4,
                 col: 5,
                 exported: false,
+                has_export: false,
                 body: vec![],
             }),
         };
@@ -328,6 +349,7 @@ mod tests {
             line: 2,
             col: 5,
             exported: true,
+            has_export: true,
             body: vec![leading, labeled_statement, nested_fn, standalone],
         };
 
