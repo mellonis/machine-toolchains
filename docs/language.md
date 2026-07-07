@@ -4,9 +4,8 @@ The `.pmc` language version is **0.2** (pre-1.0: the version is `0.N` and `N`
 bumps on any grammar change; at a declared 1.0 the axes activate — major =
 breaking acceptance change, minor = additive syntax; no patch digit —
 spec-text corrections are errata, implementation-conformance fixes live in
-the crate changelog). The v1 toolchain's grammar is retroactively 0.1; the
-sigil-adjacency and reserved-word path-segment tightenings documented below
-are the 0.2 change.
+the crate changelog). See "Grammar version history" at the end of this
+page for what each version changed.
 
 `.pmc` is the C-like source language for the Post-machine toolchain. Control
 flow is deliberately flat: labels, `goto`, `check`, and function calls only —
@@ -61,7 +60,7 @@ Returning from `main` stops the machine.
 
 | Statement | Meaning |
 |---|---|
-| `left` `right` `mark` `unmark` | tape builtins; `left;` ≡ `left();` = fall through, `left(5);` = then goto 5, `left(!);` = then return |
+| `left` `right` `mark` `unmark` | tape builtins; `left;` = fall through, `left(5);` = then goto 5, `left(!);` = then return — `left();` (empty parens) is a syntax error |
 | `halt` | abnormal stop; no successor — execution ends |
 | `debugger` | breakpoint — pauses under an attached debugger, no-op otherwise; no successor |
 | `check(A1, A2);` | the only conditional: cell marked → `A1`, blank → `A2`; each arm is a label or `!` |
@@ -102,10 +101,14 @@ return (in `main`, an implicit stop).
   the name's spelling. This is specific to `@`: spaced label colons
   (`1 : right;`) and spaced paths (`std :: goToEnd`) are unaffected and
   remain legal.
-- Builtins may omit `()`. User calls are written `@name();` — the `@` prefix
-  and parens are required. A bare identifier statement (with or without
-  parens, no `@`) is an error unless it names a builtin; putting `@` on a
-  builtin name is an error too.
+- **Empty builtin parens:** builtins may omit `()` entirely (`left;`); if
+  parens ARE written on a builtin, they must contain a successor
+  (`left(5)` / `left(!)`) — empty `()` is a syntax error (`left();`), not
+  fall-through sugar. This bar is builtins-only: user calls keep
+  mandatory, emptyable parens — `@name();` stays legal and still means
+  fall-through. A bare identifier statement (with or without parens, no
+  `@`) is an error unless it names a builtin; putting `@` on a builtin
+  name is an error too.
 - Labels are decimal numbers, unique per function, referenced only by `goto`
   and `check` in the same function. Declaration order is free. Labels may
   stack — `1: 2: left;` names one statement with both labels; either one
@@ -238,3 +241,16 @@ implementation detail. `pmt compile --emit-ir[=STAGE]` writes it to
   Mermaid flowchart, one per function (or a single named one).
 
 See `docs/formats.md (IR JSON)` for the JSON shape and version number.
+
+## Grammar version history
+
+- **0.1** — the v1 toolchain's grammar; the retroactive baseline the
+  version scheme measures from.
+- **0.2** — three tightenings, all under Statements/Rules above: sigil
+  adjacency (`@` must be immediately followed by the callee name, with
+  nothing — whitespace, digit, punctuation, comment, or end of input — in
+  between); the reserved-word guard extended to every `::` path segment,
+  not just a lone head name; and empty parens on a tape builtin
+  (`left();`) becoming a syntax error — parens on a builtin, if present,
+  must carry a successor. Call parens (`@f();`) are unaffected by the
+  last one.

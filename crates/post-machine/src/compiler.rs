@@ -43,6 +43,12 @@ pub enum CompileErrorKind {
     UnknownCommand(String),
     /// `@` applied to a builtin name (`@left()`).
     BuiltinCalled(String),
+    /// Empty `()` on a tape builtin (`left()`), docs/language.md: parens
+    /// on a builtin, if present, must carry a successor. Call parens
+    /// (`@f()`) are unaffected.
+    EmptyBuiltinParens {
+        name: String,
+    },
     /// A name already taken in this scope (`what` names the EXISTING
     /// entity: "function" or "namespace").
     DuplicateName {
@@ -106,6 +112,12 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::BuiltinCalled(n) => {
                 write!(f, "`{n}` is a builtin — write it without `@`")
+            }
+            CompileErrorKind::EmptyBuiltinParens { name } => {
+                write!(
+                    f,
+                    "empty parentheses on builtin `{name}` — omit them (`{name}`) or add a successor (`{name}(N)` / `{name}(!)`)"
+                )
             }
             CompileErrorKind::DuplicateName { name, what } => {
                 write!(

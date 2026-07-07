@@ -17,8 +17,8 @@ pub const RESERVED: [&str; 8] = [
 /// declared 1.0 the axes activate (major = breaking, minor = additive).
 /// No patch digit — spec-text corrections are errata;
 /// implementation-conformance fixes live in the crate changelog. The
-/// sigil-adjacency and reserved-path tightenings made this 0.2 (the v1
-/// grammar is retroactively 0.1).
+/// sigil-adjacency, reserved-path, and empty-builtin-parens tightenings
+/// made this 0.2 (the v1 grammar is retroactively 0.1).
 pub const PMC_LANG_VERSION: &str = "0.2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -771,6 +771,21 @@ impl Parser<'_> {
                     let (succ, succ_span) = if matches!(self.peek().kind, TokenKind::LParen) {
                         let lparen = self.peek().clone();
                         self.bump();
+                        // docs/language.md: parens on a builtin, if
+                        // present, must carry a successor — empty `()` is
+                        // no longer fall-through sugar. Builtins-only:
+                        // `successor()` (shared with calls) is untouched,
+                        // so `@f()` stays legal.
+                        if matches!(self.peek().kind, TokenKind::RParen) {
+                            let rparen = self.peek().clone();
+                            return Err(CompileError {
+                                span: Span {
+                                    start: lparen.span().start,
+                                    end: rparen.span().end,
+                                },
+                                kind: CompileErrorKind::EmptyBuiltinParens { name: word.clone() },
+                            });
+                        }
                         let succ = self.successor()?;
                         let rparen = self.peek().clone();
                         self.expect(&TokenKind::RParen, "`)`")?;
@@ -970,6 +985,28 @@ main() {
         // A user function called without `@` is the same error (docs/language.md).
         let e = parse_src("f() { goToEnd(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "goToEnd"));
+    }
+
+    #[test]
+    fn empty_builtin_parens_are_a_syntax_error() {
+        // docs/language.md: `()` on a tape builtin, if written, must carry
+        // a successor — empty parens are no longer fall-through sugar.
+        for name in ["left", "right", "mark", "unmark"] {
+            let e = parse_src(&format!("f() {{ {name}(); }}")).unwrap_err();
+            assert!(
+                matches!(e.kind, CompileErrorKind::EmptyBuiltinParens { name: ref n } if n == name),
+                "{name}(): got {:?}",
+                e.kind
+            );
+        }
+
+        // Bare, and both successor forms, stay legal.
+        assert!(parse_src("f() { left; }").is_ok());
+        assert!(parse_src("f() { left(5); }").is_ok());
+        assert!(parse_src("f() { left(!); }").is_ok());
+
+        // Scope limit: user calls keep mandatory-but-emptyable parens.
+        assert!(parse_src("f() { @f(); }").is_ok());
     }
 
     #[test]
@@ -1248,5 +1285,14 @@ main() {
         assert!(parse_src("main() { 1 : right; }").is_ok());
         assert!(parse_src("main() { 1: 2: right; }").is_ok());
         assert!(parse_src("use std :: goToEnd;\nmain() { @goToEnd(); }").is_ok());
+    }
+
+    #[test]
+    fn empty_builtin_parens_message_names_the_builtin_and_the_fix() {
+        let m = err_msg("main() { mark(); }");
+        assert!(m.contains("`mark`"), "got: {m}");
+        assert!(m.contains("successor"), "got: {m}");
+        // Calls are unaffected: `@f()` stays legal, no error at all.
+        assert!(parse_src("f() { } main() { @f(); }").is_ok());
     }
 }
