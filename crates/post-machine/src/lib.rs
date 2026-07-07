@@ -6,6 +6,7 @@ pub mod cli;
 pub mod codegen;
 pub mod compiler;
 pub mod completions;
+pub mod cst;
 pub mod ir;
 pub mod lexer;
 pub mod lint;
