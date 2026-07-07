@@ -20,6 +20,41 @@ pub enum TokenKind {
     LBrace,
     RBrace,
     Eof,
+    /// Only produced in [`LexMode::WithComments`]. [`lex`] (equivalent to
+    /// `lex_with(_, LexMode::WithoutComments)`) never emits this variant,
+    /// so callers on the default path see an unchanged token stream.
+    Comment(Comment),
+}
+
+/// Which delimiter pair produced a [`Comment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentKind {
+    /// `// ...` to end of line.
+    Line,
+    /// `/* ... */`, possibly spanning multiple source lines.
+    Block,
+}
+
+/// A comment retained as trivia (docs/language.md), produced only in
+/// [`LexMode::WithComments`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    /// Verbatim source text, including the `//` or `/* … */` delimiters.
+    pub text: String,
+    pub kind: CommentKind,
+    /// True iff only whitespace preceded the comment on its physical
+    /// line — i.e. the comment begins at that line's first
+    /// non-whitespace column.
+    pub own_line: bool,
+}
+
+/// Whether [`lex_with`] discards comments (the compiler's path, and what
+/// [`lex`] does) or retains them as [`TokenKind::Comment`] trivia (for a
+/// future formatter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LexMode {
+    WithoutComments,
+    WithComments,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +62,12 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: u32,
     pub col: u32,
-    /// Length in characters. Every token is single-line; 0 only for Eof.
+    /// Length in characters. Every token is single-line and 0 only for
+    /// Eof — EXCEPT a [`TokenKind::Comment`] of [`CommentKind::Block`],
+    /// which may span multiple source lines. For those, `len` is the
+    /// total character count of `Comment::text` (delimiters and any
+    /// embedded newlines all counted), and [`Token::span`]'s end
+    /// position is not meaningful past the first line.
     pub len: u32,
 }
 
@@ -54,6 +94,11 @@ struct Cursor<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     line: u32,
     col: u32,
+    /// True iff nothing but whitespace has been consumed since the last
+    /// newline (or since the start of input). Read at the top of the
+    /// main loop — before a comment's own characters are bumped, which
+    /// would otherwise flip it to false — to compute `Comment::own_line`.
+    at_line_start: bool,
 }
 
 impl Cursor<'_> {
@@ -66,8 +111,12 @@ impl Cursor<'_> {
         if c == '\n' {
             self.line += 1;
             self.col = 1;
+            self.at_line_start = true;
         } else {
             self.col += 1;
+            if !c.is_whitespace() {
+                self.at_line_start = false;
+            }
         }
         Some(c)
     }
@@ -80,16 +129,24 @@ fn err(line: u32, col: u32, message: String) -> CompileError {
     }
 }
 
+/// Lex with comments discarded — the compiler's path. Equivalent to
+/// `lex_with(source, LexMode::WithoutComments)`.
 pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
+    lex_with(source, LexMode::WithoutComments)
+}
+
+pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError> {
     let mut cur = Cursor {
         chars: source.chars().peekable(),
         line: 1,
         col: 1,
+        at_line_start: true,
     };
     let mut tokens = Vec::new();
 
     while let Some(c) = cur.peek() {
         let (line, col) = (cur.line, cur.col);
+        let own_line = cur.at_line_start;
         if c.is_whitespace() {
             cur.bump();
             continue;
@@ -98,17 +155,40 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
             cur.bump();
             match cur.peek() {
                 Some('/') => {
-                    while let Some(c) = cur.bump() {
-                        if c == '\n' {
-                            break;
+                    cur.bump();
+                    // Built regardless of mode (harmless when discarded)
+                    // so the consumption loop below is identical either
+                    // way — the WithoutComments token stream depends
+                    // only on whether the Comment token is pushed.
+                    let mut text = String::from("//");
+                    loop {
+                        match cur.bump() {
+                            Some('\n') => break,
+                            Some(ch) => text.push(ch),
+                            None => break,
                         }
+                    }
+                    if mode == LexMode::WithComments {
+                        let len = text.chars().count() as u32;
+                        tokens.push(Token {
+                            kind: TokenKind::Comment(Comment {
+                                text,
+                                kind: CommentKind::Line,
+                                own_line,
+                            }),
+                            line,
+                            col,
+                            len,
+                        });
                     }
                 }
                 Some('*') => {
                     cur.bump();
+                    let mut text = String::from("/*");
                     let mut prev = '\0';
                     let mut closed = false;
                     while let Some(c) = cur.bump() {
+                        text.push(c);
                         if prev == '*' && c == '/' {
                             closed = true;
                             break;
@@ -117,6 +197,19 @@ pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
                     }
                     if !closed {
                         return Err(err(line, col, "unterminated block comment".into()));
+                    }
+                    if mode == LexMode::WithComments {
+                        let len = text.chars().count() as u32;
+                        tokens.push(Token {
+                            kind: TokenKind::Comment(Comment {
+                                text,
+                                kind: CommentKind::Block,
+                                own_line,
+                            }),
+                            line,
+                            col,
+                            len,
+                        });
                     }
                 }
                 _ => return Err(err(line, col, "unexpected character `/`".into())),
@@ -307,6 +400,92 @@ mod tests {
                 TokenKind::Semi,
                 TokenKind::Eof
             ]
+        );
+    }
+
+    #[test]
+    fn without_comments_matches_the_comment_free_program() {
+        let commented = "// header\nleft(!); // trail\n/* block\n   spanning */\nright(!);";
+        let bare = "left(!); right(!);";
+        assert_eq!(kinds(commented), kinds(bare));
+    }
+
+    #[test]
+    fn with_comments_retains_comments_as_interleaved_trivia() {
+        // Leading own-line `//`, a trailing `// ...` after code, and a
+        // multi-line `/* */` block that starts its own line.
+        let src = "// header\nleft(!); // trail\n/* block\n   spanning */\nright(!);";
+        let tokens = lex_with(src, LexMode::WithComments).unwrap();
+
+        // The significant (non-comment) tokens are exactly what `lex`
+        // would produce on the comment-free program.
+        let significant: Vec<TokenKind> = tokens
+            .iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+            .map(|t| t.kind.clone())
+            .collect();
+        assert_eq!(significant, kinds("left(!); right(!);"));
+
+        // Comment tokens are interleaved at the right positions: index 0
+        // (before any code), index 6 (after the first statement's `;`,
+        // same line), index 7 (its own line, right before `right`).
+        let comment_positions: Vec<usize> = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t.kind, TokenKind::Comment(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(comment_positions, vec![0, 6, 7]);
+
+        let comments: Vec<&Comment> = tokens
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TokenKind::Comment(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(comments.len(), 3);
+
+        assert_eq!(comments[0].kind, CommentKind::Line);
+        assert_eq!(comments[0].text, "// header");
+        assert!(comments[0].own_line, "leading comment starts its own line");
+        assert_eq!((tokens[0].line, tokens[0].col), (1, 1));
+
+        assert_eq!(comments[1].kind, CommentKind::Line);
+        assert_eq!(comments[1].text, "// trail");
+        assert!(
+            !comments[1].own_line,
+            "trailing comment follows code on the same line"
+        );
+        assert_eq!((tokens[6].line, tokens[6].col), (2, 10));
+
+        assert_eq!(comments[2].kind, CommentKind::Block);
+        assert_eq!(comments[2].text, "/* block\n   spanning */");
+        assert!(
+            comments[2].own_line,
+            "block comment starts its own line, even though it spans lines"
+        );
+        assert_eq!((tokens[7].line, tokens[7].col), (3, 1));
+
+        // len is the total char count of `text` (documented convention),
+        // for both single-line and multi-line comments.
+        for (tok, comment) in [
+            (&tokens[0], comments[0]),
+            (&tokens[6], comments[1]),
+            (&tokens[7], comments[2]),
+        ] {
+            assert_eq!(tok.len, comment.text.chars().count() as u32);
+        }
+    }
+
+    #[test]
+    fn comment_errors_fire_in_with_comments_mode_too() {
+        let e = lex_with("/* never closed", LexMode::WithComments).unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::Lex(ref m) if m.contains("unterminated")));
+
+        let e = lex_with("left(!) / right(!);", LexMode::WithComments).unwrap_err();
+        assert!(
+            matches!(e.kind, CompileErrorKind::Lex(ref m) if m.contains("unexpected character `/`"))
         );
     }
 

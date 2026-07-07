@@ -177,6 +177,10 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::LBrace => "`{`".into(),
         TokenKind::RBrace => "`}`".into(),
         TokenKind::Eof => "end of file".into(),
+        // Exhaustiveness only: the parser is always fed `lex()` (==
+        // `lex_with(_, LexMode::WithoutComments)`), which never emits
+        // this variant, so this arm is unreachable in practice.
+        TokenKind::Comment(_) => "a comment".into(),
     }
 }
 
