@@ -6,14 +6,14 @@ use std::goToEnd;
 use std::goToBegin;
 
 main() {
-    1: check(2, !);
-    2: @goToEnd();
-    3: right;
-    4: mark;
-    5: @goToEnd();
-    6: unmark;
-    7: left;
-    8: unmark;
-    9: left;
+     1: check(2, !);
+     2: @goToEnd();
+     3: right;
+     4: mark;
+     5: @goToEnd();
+     6: unmark;
+     7: left;
+     8: unmark;
+     9: left;
     10: @goToBegin(!);
 }

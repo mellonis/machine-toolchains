@@ -43,11 +43,17 @@
 //! this crate, same corpus `tests/parser_parity.rs` already parses both
 //! ways. This is the real validation: `SIMPLE` was hand-picked to
 //! exercise one shape at a time, but nothing before this task had run
-//! the printer over a real, organically-written program. No dogfood
-//! `format(std.pmc) == std.pmc` assertion is added here (std.pmc is not
-//! fmt-clean yet — that's Task 11's job); these three checks are
-//! format-RELATIVE and hold regardless of whether the input already
-//! matches the canonical style.
+//! the printer over a real, organically-written program. These three
+//! checks are format-RELATIVE and hold regardless of whether the input
+//! already matches the canonical style.
+//!
+//! **Task 11** reformats `std.pmc` and the two goldens fmt-clean
+//! (labels hang left into the command column) and adds the dogfood
+//! assertions below: `format(x) == x` byte-identical for each, the
+//! regression lock that catches any future drift from the canonical
+//! style. The lint fixture (`tests/lint/unused_labels.pmc`) is
+//! deliberately left NOT fmt-clean — `lint_programs.rs` pins its
+//! diagnostics' `span.start.line`, which a reformat would shift.
 
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::format;
@@ -221,5 +227,23 @@ fn comment_fidelity() {
             comment_texts(src),
             "comment sequence diverged for {label:?}"
         );
+    }
+}
+
+/// Task 11's dogfood lock (fmt design doc, Acceptance #1): the embedded
+/// stdlib and the two historic goldens are committed in fmt-clean form,
+/// so `format` must be a no-op on them byte-for-byte. This is the
+/// regression guard — any future printer change that would reformat
+/// these files fails here first, not silently on the next `pmt fmt` run.
+/// The lint fixture is excluded on purpose (module doc above).
+#[test]
+fn dogfood_stdlib_and_goldens_are_already_fmt_clean() {
+    for (label, src) in [
+        ("std.pmc", include_str!("../src/stdlib/std.pmc")),
+        ("golden/sum.pmc", include_str!("golden/sum.pmc")),
+        ("golden/ty.pmc", include_str!("golden/ty.pmc")),
+    ] {
+        let formatted = format(src).expect("formats");
+        assert_eq!(formatted, src, "{label} is not fmt-clean");
     }
 }

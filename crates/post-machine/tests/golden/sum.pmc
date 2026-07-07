@@ -4,15 +4,15 @@
 use std::goToEnd, std::goToBegin;
 
 main() {
-    1: @goToEnd();
-    2: right;
-    3: right;
-    4: @goToEnd();
-    5: unmark;
-    6: left;
-    7: @goToBegin();
-    8: left;
-    9: mark;
+     1: @goToEnd();
+     2: right;
+     3: right;
+     4: @goToEnd();
+     5: unmark;
+     6: left;
+     7: @goToBegin();
+     8: left;
+     9: mark;
     10: @goToEnd();
     11: unmark;
     12: left;
