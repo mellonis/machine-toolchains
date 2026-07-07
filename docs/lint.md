@@ -78,8 +78,12 @@ move it out.
 ### line-too-long
 
 A line longer than 80 characters (character count). Report-only: where
-to break a statement is layout policy, a formatter's job. The limit is
-fixed at 80.
+to break a statement is layout policy, a formatter's job — `pmt fmt`
+(`docs/fmt.md`) rewraps an overlong comma group by greedy-filling it
+across lines. A line overlong for a different reason — a single long
+command with no comma to break on, or a trailing comment that pushes an
+otherwise-short line past 80 — has no break point fmt can introduce, so
+it stays reported after formatting. The limit is fixed at 80.
 
 ### leading-zeros
 

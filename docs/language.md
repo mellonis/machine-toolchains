@@ -16,17 +16,17 @@ flags and `docs/isa.md` for what the generated code actually runs on.
 ```c
 // Move right until the first blank cell.
 goToEnd() {
-1:  right;
-    check(1, 2);      // cell marked → goto 1, blank → goto 2
-2:  left;             // last command — implicit return
+ 1: right;
+    check(1, 2); // cell marked → goto 1, blank → goto 2
+ 2: left;        // last command — implicit return
 }
 
 main() {
-    @goToEnd();       // not defined here → external symbol for the linker
+    @goToEnd(); // not defined here → external symbol for the linker
     right;
     check(3, 4);
-3:  unmark(!);        // unmark, then return — in main: stop the machine
-4:  mark;             // last command — implicit stop
+ 3: unmark(!); // unmark, then return — in main: stop the machine
+ 4: mark;      // last command — implicit stop
 }
 ```
 
@@ -74,14 +74,14 @@ the last command of a body may omit it — falling off the end is an implicit
 return (in `main`, an implicit stop).
 
 ```c
-1:  right, right, mark(5);      // group, then goto 5
-2:  left, check(1, !);          // group ending in the conditional
+ 1: right, right, mark(5); // group, then goto 5
+ 2: left, check(1, !);     // group ending in the conditional
 
 // errors — non-last items must be bare:
-// 3:  left(1), left(2);        // successor mid-group
-// 4:  check(1, 2), left;       // check mid-group
-// 5:  goto 1, left;            // goto never groups, not even first
-// 6:  left, goto 1;            // ...nor last
+// 3: left(1), left(2);  // successor mid-group
+// 4: check(1, 2), left; // check mid-group
+// 5: goto 1, left;      // goto never groups, not even first
+// 6: left, goto 1;      // ...nor last
 ```
 
 ### Rules

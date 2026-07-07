@@ -85,6 +85,8 @@ Full flag reference: `docs/cli.md`.
 - `docs/cli.md` — every `pmt` subcommand and flag.
 - `docs/lint.md` — hygiene findings over `.pmc` sources via `pmt lint`,
   with `--fix`.
+- `docs/fmt.md` — the canonical `.pmc` layout via `pmt fmt`, with
+  `--check` and stdin.
 - `docs/stdlib.md` — the standard library's routine roster and linking
   semantics.
 - `docs/history.md` — where this design comes from.

@@ -18,6 +18,7 @@ SUBCOMMANDS:
   asm          .pma assembly -> .pmo object
   link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
   lint         lint .pmc sources (hygiene findings; docs/lint.md)
+  fmt          format .pmc sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
   tape         build/show .pmt tape-block snapshots
@@ -144,6 +145,50 @@ applies the gated fixes (deletions and rewrites whose diagnosis may
 have another reading). `--force` without `--fix` is an error. A file
 with a fatal error is never written. The rule catalog and per-rule fix
 behavior live in `docs/lint.md`.
+
+## `pmt fmt`
+
+```
+USAGE: pmt fmt PATH... [--exclude PATH]... [--check]
+       pmt fmt - [--check]
+
+PATH is a .pmc file or a directory; directories are walked recursively
+for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
+`-` reads one .pmc from stdin and writes the result to stdout; it
+cannot be combined with PATH arguments.
+
+FLAGS:
+  --exclude PATH  skip a file or prune a directory subtree (repeatable;
+                  plain paths compared as spelled — no globs)
+  --check         do not write; with PATH..., list files that would be
+                  reformatted and exit 1 if any would change; with -,
+                  exit 1 if stdin would change (CI mode)
+```
+
+PATH is a `.pmc` file or a directory, walked the same way as `pmt
+lint`'s batch: directories recurse for `*.pmc` in sorted order,
+symlinks are never followed, dot-entries are skipped, and `--exclude
+PATH` (repeatable, no globs) skips a file or prunes a subtree. Files
+format independently: a file that fails to lex or parse is reported on
+stderr and the batch continues.
+
+By default `pmt fmt` rewrites each file in place, and only when its
+formatted text differs from what's already on disk — an
+already-canonical file is never rewritten, so a clean tree sees no
+spurious modification times. `--check` writes nothing; instead it lists
+the path of every file whose formatted text would differ and exits 1 if
+any did, 0 otherwise — the CI-friendly mode. `-` reads one `.pmc` from
+stdin and writes the formatted text to stdout instead of running a
+directory walk; it cannot be combined with `PATH` arguments. `- --check`
+mirrors the same semantics against stdin: nothing is written either way,
+and the exit code alone reports whether stdin would change.
+
+Exit codes: 0 = success (every input already canonical, or rewritten in
+place); 1 = under `--check`, at least one input would change, or a
+lex/parse error occurred anywhere in the batch. The canonical style
+itself — indentation, label/command alignment, comma-group layout,
+blank lines, comment handling, and the token-spacing table — is
+`docs/fmt.md`.
 
 ## `pmt dis`
 
