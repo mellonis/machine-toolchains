@@ -112,6 +112,20 @@ pub enum TopKind {
     Function(FunctionCst),
 }
 
+/// A same-line trailing comment plus its SOURCE column
+/// (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "Trailing
+/// comments"). The column is needed to detect whether the author aligned
+/// a RUN of trailing `//`s in source — it plays no role in the AST:
+/// `lower_cst` ignores this whole type, same as it ignores [`Comment`]
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrailingComment {
+    pub comment: Comment,
+    /// 1-based source column of the comment's first character (mirrors
+    /// [`crate::lexer::Token::col`]).
+    pub col: u32,
+}
+
 /// One `use` declaration list item, as written (`docs/language.md`
 /// (imports)) — mirrors [`crate::parser::Import`] minus its
 /// lower-copy-computed `ns` path, plus a same-line trailing comment.
@@ -136,7 +150,7 @@ pub struct ImportCst {
     /// (matches [`crate::parser::Import::span`]).
     pub span: Span,
     /// A comment on the same source line, after the `;`.
-    pub trailing: Option<Comment>,
+    pub trailing: Option<TrailingComment>,
 }
 
 /// One `namespace NAME { … }` block exactly as the author wrote it — a
@@ -232,7 +246,7 @@ pub struct StatementCst {
     /// this choice and never infers or overrides it.
     pub label_break: bool,
     /// A comment on the same source line, after the `;`.
-    pub trailing: Option<Comment>,
+    pub trailing: Option<TrailingComment>,
 }
 
 #[cfg(test)]
@@ -278,10 +292,13 @@ mod tests {
                 line: 3,
                 span: dummy_span,
                 label_break: false,
-                trailing: Some(Comment {
-                    text: "// trailing".into(),
-                    kind: CommentKind::Line,
-                    own_line: false,
+                trailing: Some(TrailingComment {
+                    comment: Comment {
+                        text: "// trailing".into(),
+                        kind: CommentKind::Line,
+                        own_line: false,
+                    },
+                    col: 12,
                 }),
             }),
         };

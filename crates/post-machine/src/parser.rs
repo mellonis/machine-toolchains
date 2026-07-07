@@ -7,7 +7,7 @@ use mtc_core::diagnostics::Span;
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
     BodyItem, BodyKind, CommaItem, Cst, FunctionCst, ImportCst, NamespaceCst, StatementCst,
-    TopItem, TopKind,
+    TopItem, TopKind, TrailingComment,
 };
 use crate::lexer::{Comment, Token, TokenKind};
 
@@ -217,6 +217,7 @@ pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
             comments.push(CommentAt {
                 comment: c.clone(),
                 line: t.line,
+                col: t.col,
                 sig_index: sig.len(),
             });
         } else {
@@ -314,6 +315,10 @@ struct CommentAt {
     comment: Comment,
     /// The comment's own start line (for `blank_before` gaps).
     line: u32,
+    /// The comment's own start column (`docs/superpowers/specs/
+    /// 2026-07-07-pmc-fmt-design.md`, "Trailing comments" — the
+    /// alignment rule's source-column detection; brief §A).
+    col: u32,
     /// Number of significant tokens preceding this comment — the `pos`
     /// the significant-token walk is at when the comment is "pending".
     sig_index: usize,
@@ -402,12 +407,16 @@ impl Parser<'_> {
     }
 
     /// Take the one same-line trailing comment after a `;` (the pending
-    /// comment that follows code on `end_line`), if any.
-    fn take_trailing(&mut self, end_line: u32) -> Option<Comment> {
+    /// comment that follows code on `end_line`), if any. Carries the
+    /// comment's source column (brief §A) alongside it.
+    fn take_trailing(&mut self, end_line: u32) -> Option<TrailingComment> {
         if self.cpos < self.comments.len() {
             let ca = &self.comments[self.cpos];
             if ca.sig_index <= self.pos && !ca.comment.own_line && ca.line == end_line {
-                let out = ca.comment.clone();
+                let out = TrailingComment {
+                    comment: ca.comment.clone(),
+                    col: ca.col,
+                };
                 self.cpos += 1;
                 return Some(out);
             }
@@ -1190,7 +1199,7 @@ f() {
         };
         assert_eq!(imp.path, vec!["std", "goToEnd"]);
         assert_eq!(
-            imp.trailing.as_ref().map(|c| c.text.as_str()),
+            imp.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
             Some("// import trailing")
         );
 
@@ -1206,7 +1215,7 @@ f() {
         };
         assert!(s0.label_break, "the label sits on its own line");
         assert_eq!(
-            s0.trailing.as_ref().map(|c| c.text.as_str()),
+            s0.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
             Some("// trailing")
         );
         assert_eq!(s0.items.len(), 1);

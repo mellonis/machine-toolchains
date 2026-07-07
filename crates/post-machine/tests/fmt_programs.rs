@@ -6,15 +6,24 @@
 //! objective backstop for the whole fmt build — reviewer approval does
 //! NOT substitute for these passing.
 //!
-//! At this task (fmt build Tasks 4-6) the pretty-printer implements the
+//! At this task (fmt build Tasks 4-7) the pretty-printer implements the
 //! TRIVIAL subset plus label/command-column alignment plus comma-group
-//! layout (see `crate::fmt`'s module doc): labeled or unlabeled
-//! statements, no comments, no namespaces/imports, comma groups including
-//! multi-line ones (author line breaks preserved, greedy-fill on
-//! overflow). `SIMPLE` is scoped to exactly that subset — Task 8 widens
-//! it further (comments, blank lines/imports/namespaces/spacing/
+//! layout plus comment placement/alignment (see `crate::fmt`'s module
+//! doc): labeled or unlabeled statements, no namespaces/imports, comma
+//! groups including multi-line ones (author line breaks preserved,
+//! greedy-fill on overflow), and every comment placement — leading,
+//! standalone, dangling, trailing (lone/aligned-run/ragged-run),
+//! block-comment re-indent, and mid-comma-group (block-inline /
+//! line-forces-a-break). `SIMPLE` is scoped to exactly that subset —
+//! Task 8 widens it further (blank lines/imports/namespaces/spacing/
 //! edge-cases) as its seam closes, eventually pointing this harness at
 //! the full corpus (Task 9).
+//!
+//! **`comment_fidelity` was VACUOUS through Task 6** — `SIMPLE` carried
+//! no comments, so `comment_texts(src)` was always `[]` on both sides.
+//! The commented entries added here (Task 7) are what make the check
+//! actually exercise something: each carries at least one real comment,
+//! so a regression that lost or reordered one would fail this test.
 
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::format;
@@ -49,6 +58,33 @@ const SIMPLE: &[&str] = &[
     // greedy-fill applies to that line only, the second preserved line
     // (`mark`) stays untouched.
     "main() { @abcdefghijklmnopq(), @abcdefghijklmnopq(), @abcdefghijklmnopq(), @abcdefghijklmnopq(),\nmark; } abcdefghijklmnopq() { halt; }",
+    // Task 7: a leading comment run directly above the function it
+    // documents (the `std.pmc` doc-comment shape).
+    "// leading comment stays above f at indent 0\n// a note\nf() {\n    right;\n}\n",
+    // Task 7: a lone trailing comment — one space, no alignment run.
+    "f() {\n    right; // go\n}\n",
+    // Task 7: a trailing-comment run the author aligned in source —
+    // fmt maintains the alignment, recomputed against the reformatted
+    // code (`mark;` is 9 chars incl `;`, `check(!, !);` is 16 — same
+    // width as `check(1, 2)`, but both-return arms need no label defs
+    // to compile; the shared column is 17, an 8-space pad for `mark`
+    // and 1 for `check`).
+    "f() {\n    mark;        // a\n    check(!, !); // b\n}\n",
+    // Task 7: the same two statements, but ragged in source (one space
+    // each, at different absolute columns) — stays ragged.
+    "f() {\n    mark; // a\n    check(!, !); // b\n}\n",
+    // Task 7: a dangling comment at the end of a body, before `}`.
+    "f() {\n    right;\n    // dangling\n}\n",
+    // Task 7: a standalone comment, blank-separated on both sides.
+    "f() {\n    right;\n\n    // standalone\n\n    left;\n}\n",
+    // Task 7: a block comment whose interior line carries its own
+    // (unrelated) indentation, preserved verbatim.
+    "f() {\n    /* line one\n   line two */\n    right;\n}\n",
+    // Task 7: a mid-comma-group BLOCK comment — stays inline.
+    "f() {\n 1: left, /* mid */ right;\n}\n",
+    // Task 7: a mid-comma-group LINE comment — forces the group onto a
+    // second line (nothing can follow `//` on its own physical line).
+    "f() {\n    left, // note\n    right;\n}\n",
 ];
 
 #[test]

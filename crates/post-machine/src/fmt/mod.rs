@@ -5,35 +5,55 @@
 //! future `cli/fmt.rs` is the only place that renders errors or touches
 //! the filesystem.
 //!
-//! **Scope of this module today (fmt build Tasks 4-6): the TRIVIAL
-//! printer subset, label/command-column alignment, and comma-group
-//! layout.** It prints a source-faithful skeleton — headers, braces,
-//! indentation, one statement per line (with labels aligned into a shared
-//! command column, see [`command_column`]), canonical item text, and the
-//! comma-group Y / greedy-fill layout (see [`render_items`]) — and
-//! deliberately leaves the following as seams for later tasks (each seam
-//! is marked at its printing site below):
+//! **Scope of this module today (fmt build Tasks 4-7): the TRIVIAL
+//! printer subset, label/command-column alignment, comma-group layout,
+//! and comment placement/alignment.** It prints a source-faithful
+//! skeleton — headers, braces, indentation, one statement per line (with
+//! labels aligned into a shared command column, see [`command_column`]),
+//! canonical item text, the comma-group Y / greedy-fill layout (see
+//! [`render_items`]), and every comment (own-line, trailing, and
+//! mid-comma-group) reprinted per the design doc's "Comments = trivia-
+//! tokens native in the CST" + "Trailing comments" — and deliberately
+//! leaves the following as seams for later tasks (each seam is marked at
+//! its printing site below):
 //!
-//! - **Comments** (Task 7) — [`crate::cst::TopKind::Comment`],
-//!   [`crate::cst::BodyKind::Comment`], and every node's `trailing` field
-//!   are read nowhere in this module; comment nodes are silently skipped
-//!   (never emitted, never panicked on).
-//! - **Blank lines, imports, namespaces, full intra-statement spacing
-//!   normalization, and the edge cases** (Task 8) —
-//!   [`crate::cst::TopKind::Import`] and [`crate::cst::TopKind::Namespace`]
-//!   are silently skipped; `blank_before` is not read anywhere.
+//! - **Blank lines between plain (comment-free) nodes, imports,
+//!   namespaces, full intra-statement spacing normalization, and the edge
+//!   cases** (Task 8) — [`crate::cst::TopKind::Import`] and
+//!   [`crate::cst::TopKind::Namespace`] are silently skipped. `blank_before`
+//!   IS read, but only immediately next to a comment (own-line comments'
+//!   leading/trailing blank separation, per [`top_wants_blank_before`] /
+//!   [`body_wants_blank_before`]) — a blank line between two plain
+//!   statements/declarations is still untouched, deliberately: Task 8
+//!   owns that general policy.
 //!
-//! "Silently skipped" is a deliberate design choice for this task, per the
-//! brief: an unhandled node must never panic, but this task also must not
-//! half-implement Task 8's rules. The three-check objective harness
-//! (`tests/fmt_programs.rs`) is scoped to a SIMPLE program set the
-//! printer fully supports (labeled or unlabeled statements, no comments,
-//! no namespaces/imports, comma groups including multi-line ones) — Task 8
-//! widens that set further as its seam closes.
+//! "Silently skipped" is a deliberate design choice for the imports/
+//! namespaces seam: an unhandled node must never panic, but this task
+//! also must not half-implement Task 8's rules. The three-check objective
+//! harness (`tests/fmt_programs.rs`) is scoped to a program set the
+//! printer fully supports (labeled or unlabeled statements, comments of
+//! every placement, no namespaces/imports, comma groups including
+//! multi-line ones) — Task 8 widens that set further as its seam closes.
+//!
+//! ## Comment placement (Task 7)
+//!
+//! Every own-line comment ([`crate::cst::TopKind::Comment`] /
+//! [`crate::cst::BodyKind::Comment`]) prints IDENTICALLY regardless of
+//! whether the design doc would label it leading, standalone, or dangling
+//! (see [`print_comment`]) — those three names describe the comment's
+//! RELATIONSHIP to its neighbors (purely for the blank-line decision
+//! above), not a different rendering. A same-line trailing comment
+//! (`StatementCst::trailing`) rides the statement's own line; a run of
+//! trailing comments the author aligned in source is kept aligned,
+//! recomputed against the reformatted code (see [`compute_trailing_spacing`]).
+//! A mid-comma-group comment ([`crate::cst::CommaItem::leading`]) either
+//! stays inline (a BLOCK comment) or forces the group onto multiple lines
+//! (a LINE comment can't be followed by code on its own line — see
+//! [`render_items`]).
 
 use crate::compiler::CompileError;
 use crate::cst::{BodyItem, BodyKind, CommaItem, Cst, FunctionCst, StatementCst, TopItem, TopKind};
-use crate::lexer::{LexMode, lex_with};
+use crate::lexer::{Comment, CommentKind, LexMode, lex_with};
 use crate::parser::{Builtin, CheckArm, Item, Label, Successor, parse_cst};
 
 /// Spaces per block level (spec "Indentation" — 4 spaces, never tabs).
@@ -51,30 +71,68 @@ pub fn format(source: &str) -> Result<String, CompileError> {
 
 fn print_cst(cst: &Cst) -> String {
     let mut out = String::new();
-    for item in &cst.items {
+    for (i, item) in cst.items.iter().enumerate() {
+        if top_wants_blank_before(&cst.items, i) {
+            out.push('\n');
+        }
         print_top_item(&mut out, item);
     }
     // Edge case (spec "Edge cases"): an empty file still reprints with
     // exactly one final newline. Non-empty output already ends in `\n`
-    // from the last printed function, so nothing further is needed there
-    // (asserted by the Task-4 tests below).
+    // from the last printed function/comment, so nothing further is
+    // needed there (asserted by the Task-4 tests below).
     if out.is_empty() {
         out.push('\n');
     }
     out
 }
 
+/// Whether item `i` (`i > 0`) should be preceded by a blank line — the
+/// narrow slice of the design doc's blank-line policy (rule 3: preserve
+/// what the author wrote) that THIS task owns: only a blank directly
+/// touching a comment, on either side (module doc's "Comment placement").
+/// A blank between two plain nodes is Task 8's seam — untouched here.
+fn top_wants_blank_before(items: &[TopItem], i: usize) -> bool {
+    i > 0
+        && items[i].blank_before
+        && (matches!(items[i - 1].kind, TopKind::Comment(_))
+            || matches!(items[i].kind, TopKind::Comment(_)))
+}
+
+/// Same rule as [`top_wants_blank_before`], scoped to a function body.
+fn body_wants_blank_before(items: &[BodyItem], i: usize) -> bool {
+    i > 0
+        && items[i].blank_before
+        && (matches!(items[i - 1].kind, BodyKind::Comment(_))
+            || matches!(items[i].kind, BodyKind::Comment(_)))
+}
+
 fn print_top_item(out: &mut String, item: &TopItem) {
-    // Seam (Task 8): `item.blank_before` is not read — no blank lines are
-    // ever emitted by this task's printer.
     match &item.kind {
         TopKind::Function(f) => print_function(out, f, 0),
-        // Seam (Task 8): namespace blocks. Seam (Task 7): own-line
-        // top-level comments. Neither is emitted yet — skip, don't panic.
-        TopKind::Namespace(_) | TopKind::Comment(_) => {}
+        // File level = indent 0 (spec "Indentation").
+        TopKind::Comment(c) => print_comment(out, c, 0),
+        // Seam (Task 8): namespace blocks — not emitted yet, skip, don't
+        // panic.
+        TopKind::Namespace(_) => {}
         // Seam (Task 8): `use` imports.
         TopKind::Import(_) => {}
     }
+}
+
+/// One own-line comment (leading / standalone / dangling — content
+/// printing is IDENTICAL for all three; only the surrounding blank-line
+/// decision differs, made by the caller from `blank_before`; module doc's
+/// "Comment placement"). Re-indentation (design doc, content fidelity):
+/// a LINE comment is single-line already, so prefixing `indent` IS the
+/// whole re-indent; a BLOCK comment's `text` already carries any interior
+/// lines VERBATIM (raw source whitespace, never reflowed) — prefixing
+/// `indent` once, before the first line, is the entire re-indent for it
+/// too.
+fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
+    out.push_str(&" ".repeat(indent));
+    out.push_str(&comment.text);
+    out.push('\n');
 }
 
 /// Header + body + closing brace (spec "Headers and braces"). Used for
@@ -109,20 +167,41 @@ fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
     // THIS function's own body (a nested function computes its own, one
     // level deeper — recursion below handles that for free).
     let command_col = command_column(max_inline_label_prefix_width(&f.body), body_indent);
-    for body_item in &f.body {
-        print_body_item(out, body_item, body_indent, command_col);
+    // Every statement's code (label + items, no `;`) is rendered ONCE up
+    // front — the trailing-comment alignment pre-pass (§C) needs every
+    // run member's rendered width before any of them is printed; the
+    // print loop below reuses the same strings instead of re-rendering.
+    // Non-statement items get an unused empty placeholder.
+    let codes: Vec<String> = f
+        .body
+        .iter()
+        .map(|bi| match &bi.kind {
+            BodyKind::Statement(s) => render_statement_code(s, command_col),
+            BodyKind::Nested(_) | BodyKind::Comment(_) => String::new(),
+        })
+        .collect();
+    let trailing_spacing = compute_trailing_spacing(&f.body, &codes);
+    for (i, body_item) in f.body.iter().enumerate() {
+        if body_wants_blank_before(&f.body, i) {
+            out.push('\n');
+        }
+        print_body_item(out, body_item, body_indent, &codes[i], trailing_spacing[i]);
     }
     out.push_str(&pad);
     out.push_str("}\n");
 }
 
-fn print_body_item(out: &mut String, item: &BodyItem, indent: usize, command_col: usize) {
-    // Seam (Task 8): `item.blank_before` is not read yet.
+fn print_body_item(
+    out: &mut String,
+    item: &BodyItem,
+    indent: usize,
+    code: &str,
+    trailing_spacing: usize,
+) {
     match &item.kind {
-        BodyKind::Statement(s) => print_statement(out, s, command_col),
+        BodyKind::Statement(s) => print_statement(out, s, code, trailing_spacing),
         BodyKind::Nested(f) => print_function(out, f, indent),
-        // Seam (Task 7): own-line body comments.
-        BodyKind::Comment(_) => {}
+        BodyKind::Comment(c) => print_comment(out, c, indent),
     }
 }
 
@@ -195,8 +274,14 @@ fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
 ///   following line at `command_col`. fmt never auto-breaks a label:
 ///   `label_break` is read, never inferred or overridden.
 ///
-/// Seam (Task 7): `s.trailing` (a same-line trailing comment) is not read.
-fn print_statement(out: &mut String, s: &StatementCst, command_col: usize) {
+/// Returns the statement's code up to but NOT including the final `;` —
+/// no trailing comment, no newline. Split out from [`print_statement`] so
+/// [`compute_trailing_spacing`] (§C) can render every statement once,
+/// up front, to measure line widths before any trailing comment is
+/// placed (`print_function` renders each body item's code exactly once
+/// and reuses it for both purposes).
+fn render_statement_code(s: &StatementCst, command_col: usize) -> String {
+    let mut out = String::new();
     if s.labels.is_empty() {
         out.push_str(&" ".repeat(command_col));
     } else {
@@ -225,7 +310,130 @@ fn print_statement(out: &mut String, s: &StatementCst, command_col: usize) {
     // exactly on `command_col` too) — `render_items` relies on this to
     // size its own line-fit checks without inspecting `out`.
     out.push_str(&render_items(&s.items, command_col));
-    out.push_str(";\n");
+    out
+}
+
+/// One statement's final line(s): the precomputed `code`
+/// ([`render_statement_code`]), the `;`, then a same-line trailing
+/// comment if any — spaced per `trailing_spacing`
+/// ([`compute_trailing_spacing`], §C) — then the newline.
+fn print_statement(out: &mut String, s: &StatementCst, code: &str, trailing_spacing: usize) {
+    out.push_str(code);
+    out.push(';');
+    if let Some(tc) = &s.trailing {
+        out.push_str(&" ".repeat(trailing_spacing));
+        out.push_str(&tc.comment.text);
+    }
+    out.push('\n');
+}
+
+/// Char width of `code`'s LAST physical line, `+ 1` for the `;` that
+/// follows it (a statement's trailing comment always rides the line
+/// carrying the final `;`, even when a multi-line own-line label or
+/// comma-group spreads the rest of the statement across earlier lines —
+/// design doc "Trailing comments": alignment is against "the longest
+/// reformatted code LINE in the run", not the whole statement).
+fn code_line_width_incl_semi(code: &str) -> usize {
+    let last_line = code.rsplit('\n').next().unwrap_or(code);
+    last_line.chars().count() + 1
+}
+
+/// Trailing-comment context-sensitive alignment (design doc "Trailing
+/// comments", brief §C). Returns, per `body` index, the number of spaces
+/// to place between the `;` and a trailing `//`/`/* */` — meaningful only
+/// where that [`BodyItem`] is a [`BodyKind::Statement`] with
+/// `trailing.is_some()`; other entries are unused filler.
+///
+/// A **run** is a maximal sequence of consecutive [`BodyKind::Statement`]
+/// items that each carry a trailing comment, unbroken by a blank line
+/// (`blank_before`) or by a non-statement / no-trailing-comment item in
+/// between. A lone trailing comment, or a run whose source `//` columns
+/// are not all equal, gets one space each. A run of >= 2 sharing a common
+/// SOURCE column is kept aligned at `(widest reformatted code line in the
+/// run) + 1 space`; a line that would cross 80 at that column falls back
+/// to one space instead (design doc, "If placing an aligned `//` would
+/// push its line past 80").
+///
+/// **Idempotence note**: the aligned-vs-source-column check reads ONLY
+/// the run members that do NOT hit the 80-column fallback. A line that
+/// falls back renders at its OWN width-derived column, which need not
+/// equal the run's aligned column — including it in the alignment check
+/// would make a second pass (which re-derives source columns from THIS
+/// pass's OUTPUT) see a different, non-matching set of columns and flip
+/// the run from aligned to ragged. Excluding it keeps the aligned/ragged
+/// verdict — and thus the whole run's layout — stable across passes.
+fn compute_trailing_spacing(body: &[BodyItem], codes: &[String]) -> Vec<usize> {
+    let mut spacing = vec![1usize; body.len()];
+    let has_trailing =
+        |bi: &BodyItem| matches!(&bi.kind, BodyKind::Statement(s) if s.trailing.is_some());
+    let mut i = 0;
+    while i < body.len() {
+        if !has_trailing(&body[i]) {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        let mut j = i + 1;
+        while j < body.len() && has_trailing(&body[j]) && !body[j].blank_before {
+            j += 1;
+        }
+        let run_end = j;
+        let run_len = run_end - run_start;
+
+        let code_w: Vec<usize> = (run_start..run_end)
+            .map(|k| code_line_width_incl_semi(&codes[k]))
+            .collect();
+        let comment_w: Vec<usize> = (run_start..run_end)
+            .map(|k| {
+                let BodyKind::Statement(s) = &body[k].kind else {
+                    unreachable!("has_trailing guarantees a Statement");
+                };
+                s.trailing
+                    .as_ref()
+                    .expect("has_trailing guarantees Some")
+                    .comment
+                    .text
+                    .chars()
+                    .count()
+            })
+            .collect();
+
+        if run_len >= 2 {
+            let max_code_w = *code_w.iter().max().expect("run_len >= 2");
+            let align_col = max_code_w + 1;
+            let overflow: Vec<bool> = (0..run_len)
+                .map(|off| align_col + comment_w[off] > LINE_WIDTH)
+                .collect();
+            let source_cols: Vec<u32> = (run_start..run_end)
+                .map(|k| {
+                    let BodyKind::Statement(s) = &body[k].kind else {
+                        unreachable!("has_trailing guarantees a Statement");
+                    };
+                    s.trailing
+                        .as_ref()
+                        .expect("has_trailing guarantees Some")
+                        .col
+                })
+                .collect();
+            let non_overflow_cols: Vec<u32> = source_cols
+                .iter()
+                .zip(&overflow)
+                .filter(|&(_, ovf)| !ovf)
+                .map(|(&c, _)| c)
+                .collect();
+            let aligned = non_overflow_cols.windows(2).all(|w| w[0] == w[1]);
+            for off in 0..run_len {
+                spacing[run_start + off] = if aligned && !overflow[off] {
+                    align_col - code_w[off]
+                } else {
+                    1
+                };
+            }
+        }
+        // run_len == 1 (lone): leave the default 1.
+        i = run_end;
+    }
+    spacing
 }
 
 /// Line width limit (spec "Line limit" — 80 characters, matching lint's
@@ -252,12 +460,22 @@ const LINE_WIDTH: usize = 80;
 /// last group carries none — [`print_statement`] appends the final `;`
 /// itself.
 ///
-/// Does not read [`CommaItem::leading`] (Task 7).
+/// Also renders [`CommaItem::leading`] (§D, mid-comma-group comments —
+/// `a, /* x */ b` / `a, // x` then `b` on the next line): see
+/// [`layout_leading`] for how a leading comment run resolves to an inline
+/// prefix or a forced break, folded into the SAME group-boundary
+/// machinery a `newline_before` break uses (a forced break behaves like
+/// an author newline for grouping purposes).
 fn render_items(items: &[CommaItem], command_col: usize) -> String {
-    let texts: Vec<String> = items.iter().map(|ci| render_item(&ci.item)).collect();
+    let layouts: Vec<LeadingLayout> = items.iter().map(|ci| layout_leading(&ci.leading)).collect();
+    let texts: Vec<String> = items
+        .iter()
+        .zip(&layouts)
+        .map(|(ci, layout)| format!("{}{}", layout.inline_prefix, render_item(&ci.item)))
+        .collect();
     let mut groups: Vec<Vec<usize>> = vec![vec![0]];
     for (i, ci) in items.iter().enumerate().skip(1) {
-        if ci.newline_before {
+        if ci.newline_before || layouts[i].forced_break {
             groups.push(vec![i]);
         } else {
             groups.last_mut().expect("groups is never empty").push(i);
@@ -265,10 +483,26 @@ fn render_items(items: &[CommaItem], command_col: usize) -> String {
     }
     let last_group_idx = groups.len() - 1;
     let mut out = String::new();
+    // Rare (`parser.rs`'s own leading-trivia doc: "a comment between the
+    // label and the first command"): a forcing LINE comment on item 0
+    // has no preceding `,` to attach to — emit it directly (the caller
+    // already left `out`'s position at `command_col`, per
+    // `render_statement_code`'s invariant).
+    if layouts[0].forced_break {
+        emit_forced_break(&mut out, &layouts[0], command_col);
+    }
     for (gi, group) in groups.iter().enumerate() {
         if gi > 0 {
-            out.push('\n');
-            out.push_str(&" ".repeat(command_col));
+            let first_idx = group[0];
+            if layouts[first_idx].forced_break {
+                // The preceding group's trailing `,` (below) is already
+                // in `out`; one space, then the comment(s), then break.
+                out.push(' ');
+                emit_forced_break(&mut out, &layouts[first_idx], command_col);
+            } else {
+                out.push('\n');
+                out.push_str(&" ".repeat(command_col));
+            }
         }
         let group_texts: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
         let joined = group_texts.join(", ");
@@ -284,6 +518,80 @@ fn render_items(items: &[CommaItem], command_col: usize) -> String {
         }
     }
     out
+}
+
+/// How one [`CommaItem::leading`] list resolves (§D). A BLOCK comment
+/// with no LINE comment among it/its siblings stays inline, prepended to
+/// the item's own text (`inline_prefix`) — the join/greedy-fill logic
+/// downstream never has to know a comment was there. A LINE comment
+/// forces a break: nothing can follow `//` on its physical line, so
+/// everything up to and including the first LINE comment becomes
+/// `break_inline` (emitted right after the preceding separator, before
+/// the forced newline); anything AFTER that first LINE comment
+/// (pathological, but still MUST be reprinted per the brief — fidelity
+/// over layout) becomes `pre_item_lines`, each on its own re-indented
+/// line ahead of the item.
+struct LeadingLayout {
+    inline_prefix: String,
+    forced_break: bool,
+    break_inline: String,
+    pre_item_lines: Vec<String>,
+}
+
+fn layout_leading(leading: &[Comment]) -> LeadingLayout {
+    match leading
+        .iter()
+        .position(|c| matches!(c.kind, CommentKind::Line))
+    {
+        Some(break_pos) => {
+            let mut break_inline = String::new();
+            for c in &leading[..break_pos] {
+                break_inline.push_str(&c.text);
+                break_inline.push(' ');
+            }
+            break_inline.push_str(&leading[break_pos].text);
+            let pre_item_lines = leading[break_pos + 1..]
+                .iter()
+                .map(|c| c.text.clone())
+                .collect();
+            LeadingLayout {
+                inline_prefix: String::new(),
+                forced_break: true,
+                break_inline,
+                pre_item_lines,
+            }
+        }
+        None => {
+            let mut inline_prefix = String::new();
+            for c in leading {
+                inline_prefix.push_str(&c.text);
+                inline_prefix.push(' ');
+            }
+            LeadingLayout {
+                inline_prefix,
+                forced_break: false,
+                break_inline: String::new(),
+                pre_item_lines: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Emits a [`LeadingLayout`]'s forced break: `break_inline` on the
+/// current line, a newline, each `pre_item_lines` entry on its own line
+/// at `command_col`, then `command_col` spaces — leaving the cursor
+/// ready for the item that follows. The caller has already placed
+/// whatever separator (`,` + space, or nothing for item 0) belongs
+/// before it.
+fn emit_forced_break(out: &mut String, layout: &LeadingLayout, command_col: usize) {
+    out.push_str(&layout.break_inline);
+    out.push('\n');
+    for line in &layout.pre_item_lines {
+        out.push_str(&" ".repeat(command_col));
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&" ".repeat(command_col));
 }
 
 /// Rule 2's greedy-fill, applied to one group's items (the whole
@@ -663,6 +971,112 @@ mod tests {
             format!(
                 "main() {{ {CALL}, {CALL}, {CALL}, {CALL},\nmark; }} abcdefghijklmnopq() {{ halt; }}"
             ),
+        ] {
+            let once = format(&src).unwrap();
+            let twice = format(&once).unwrap();
+            assert_eq!(twice, once, "not idempotent for {src:?}");
+        }
+    }
+
+    // -- Task 7: comments -------------------------------------------
+
+    #[test]
+    fn j_leading_comments_stay_above_the_node_at_its_indent() {
+        // A run of blank_before-false own-line comments, immediately
+        // above `f`, no blank anywhere — a byte-identical round trip
+        // pins both content and (no) reflow.
+        let src = "// leading comment stays above f at indent 0\n// a note\nf() {\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn k_trailing_lone_comment_gets_one_space() {
+        let src = "f() {\n    right; // go\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn l_trailing_run_aligned_in_source_is_maintained() {
+        // `mark;` (code width 9 incl `;`) and `check(1, 2);` (width 16)
+        // — the run's alignment column is 16 + 1 = 17, an 8-space pad
+        // for `mark` and a 1-space pad for `check`, landing both `//` at
+        // the same absolute source column (18). Byte-identical round
+        // trip pins alignment maintenance AND idempotence together.
+        let src = format!(
+            "f() {{\n    mark;{}// a\n    check(1, 2); // b\n}}\n",
+            " ".repeat(8)
+        );
+        assert_eq!(format(&src).unwrap(), src);
+    }
+
+    #[test]
+    fn m_trailing_run_ragged_in_source_stays_one_space_each() {
+        // Both lines have one space in source, but at DIFFERENT absolute
+        // columns (`mark;` is shorter) — not author-aligned, so ragged:
+        // stays one space each, unchanged.
+        let src = "f() {\n    mark; // a\n    check(1, 2); // b\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn n_dangling_comment_before_closing_brace() {
+        let src = "f() {\n    right;\n    // dangling\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn o_standalone_comment_keeps_its_blank_separation() {
+        let src = "f() {\n    right;\n\n    // standalone\n\n    left;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn p_block_comment_interior_line_reindents_first_line_only() {
+        // The comment sits flush-left in source (a leading comment for
+        // `right;`, inside the body); its first line moves to the body
+        // indent, but the interior line's OWN 3-space indent is untouched
+        // (design doc, content fidelity: block comments never reflow).
+        let src = "f() {\n/* line one\n   line two */\n    right;\n}\n";
+        let expected = "f() {\n    /* line one\n   line two */\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), expected);
+    }
+
+    #[test]
+    fn q_mid_comma_group_block_comment_stays_inline() {
+        assert_eq!(
+            format("f() { 1: left, /* mid */ right; }").unwrap(),
+            "f() {\n 1: left, /* mid */ right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn r_mid_comma_group_line_comment_forces_a_break() {
+        assert_eq!(
+            format("f() { left, // note\nright; }").unwrap(),
+            "f() {\n    left, // note\n    right;\n}\n"
+        );
+    }
+
+    /// Every Task-7 source above must be idempotent — the comment-
+    /// fidelity harness (`tests/fmt_programs.rs`) pins the same set at
+    /// the corpus level; this pins it locally too, one failure per shape.
+    #[test]
+    fn idempotent_on_commented_shapes() {
+        let aligned_run = format!(
+            "f() {{\n    mark;{}// a\n    check(1, 2); // b\n}}\n",
+            " ".repeat(8)
+        );
+        for src in [
+            "// leading comment stays above f at indent 0\n// a note\nf() {\n    right;\n}\n"
+                .to_string(),
+            "f() {\n    right; // go\n}\n".to_string(),
+            aligned_run,
+            "f() {\n    mark; // a\n    check(1, 2); // b\n}\n".to_string(),
+            "f() {\n    right;\n    // dangling\n}\n".to_string(),
+            "f() {\n    right;\n\n    // standalone\n\n    left;\n}\n".to_string(),
+            "f() {\n    /* line one\n   line two */\n    right;\n}\n".to_string(),
+            "f() {\n 1: left, /* mid */ right;\n}\n".to_string(),
+            "f() {\n    left, // note\n    right;\n}\n".to_string(),
         ] {
             let once = format(&src).unwrap();
             let twice = format(&once).unwrap();
