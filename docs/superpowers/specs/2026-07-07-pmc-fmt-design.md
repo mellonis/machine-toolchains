@@ -137,8 +137,8 @@ list and no post-parse attachment pass. The pretty-printer's only job is
   between) directly above a node: re-emitted on its own line(s) at the
   node's indent. This is the `std.pmc` doc-comment shape.
 - **Trailing** — a comment after a node's last token on the same physical
-  line: re-emitted on that line after the node's text, one space before
-  the `//`.
+  line: re-emitted on that line after the node's text (spacing per the
+  context-sensitive rule under "Trailing comments" below).
 - **Standalone** — an own-line comment separated by a blank line from the
   surrounding nodes: kept in place, its blank-line separation preserved
   (subject to the blank-line policy).
@@ -159,10 +159,7 @@ Re-indentation (content fidelity):
 special case: a mid-group **block** comment (`a, /* x */ b;`) stays
 inline; a mid-group **line** comment (`a, // x`) ends its physical line,
 so the comma group now contains a newline — it is "broken", and the
-comma-group rule below preserves the author's line split. The earlier
-draft's "attach mid-statement comments as trailing to the whole
-statement (moved to end of line)" rule is **deleted**: it was an artifact
-of the side-channel model and contradicts position preservation.
+comma-group rule below preserves the author's line split.
 
 ## Decisions
 
@@ -171,11 +168,13 @@ of the side-channel model and contradicts position preservation.
 | Surface | `pmt fmt` subcommand only; compile/lint/asm/link unchanged |
 | Model | **Wholesale reprint** from the lossless CST. Never per-`Edit` splicing |
 | Source view | The compiler's `parse()` builds **one** lossless CST; fmt reads it directly; compile lowers a *copy* to the existing `Program` AST (C1). No second parser, no dedicated fmt tree |
-| Gate | fmt formats any file that **lexes + parses**; it does NOT require flatten/resolve. A file with an undefined-label or duplicate-binding (post-parse, semantic) still formats — layout is semantics-independent, and WIP should format. Parse/lex failure → typed error, reported + skipped, batch continues. Deliberately a **weaker gate than lint's** (lint requires parse AND resolve) |
+| Gate | fmt formats any file that **lexes + parses**; it does NOT require flatten/resolve. A file with an undefined-label or an undeclared-external (post-parse, semantic) still formats — layout is semantics-independent, and WIP should format. (Duplicate names/labels are caught IN `parse()`, so such a file fails the parse gate and is reported+skipped like any parse error — not formatted.) Parse/lex failure → typed error, reported + skipped, batch continues. Deliberately a **weaker gate than lint's** (lint requires parse AND resolve) |
 | Comments | Retained by the lexer as **trivia** in `WithComments` mode, native in the CST at source position; the compiler lexes `WithoutComments` and its token stream is byte-identical |
 | Token content | fmt makes **zero token changes** — a pure whitespace / blank-line / comment-position transform. Every token spelling is verbatim: leading zeros stay (`007` is lint's `leading-zeros` fix, not fmt's), call names are never re-mangled (`@goToEnd` stays `@goToEnd`), and empty builtin `()` cannot occur (grammar 0.2 rejects it). The two channels never double-fix |
-| Indentation | **4 spaces per block level**, never tabs; grounded in the committed corpus (`std.pmc`) |
-| Comma-group layout | Author's line breaks respected; single line when it fits, greedy-fill on overflow (see Formatting rules) |
+| Indentation | **4 spaces per block level**, never tabs; grounded in the committed corpus (`std.pmc`). The indent unit (4) is also the tab-stop used by label/command alignment |
+| Label/command alignment | Within a body, all commands share a **command column** driven by the widest inline label; inline labels right-align to it, own-line labels are the author's choice, fmt never auto-breaks a label (see Formatting rules → Statements) |
+| Comma-group layout | Author's line breaks respected; single line when it fits, greedy-fill on overflow; continuation aligns to the command column (see Formatting rules) |
+| Trailing-comment layout | Context-sensitive: if the author aligned a run of trailing comments, fmt maintains the alignment (column recomputed from the reformatted code); otherwise one space (see Formatting rules → Trailing comments) |
 | Line limit | 80 characters, matching lint's `line-too-long`. fmt is that rule's fix |
 | CLI write behavior | **In-place by default** for `PATH...` (the directory-walk batch model forces it); `--check` is the dry-run; `pmt fmt -` streams stdin → stdout |
 | `--check` | Exit 1 if any file would change; print the list of files that would be reformatted, write nothing. Exit 0 = all already formatted |
@@ -184,7 +183,7 @@ of the side-channel model and contradicts position preservation.
 | Grammar/version | fmt changes **no** accepted grammar; whitespace is already insignificant except the sigil, which the grammar enforces. `PMC_LANG_VERSION` stays **0.2** (the empty-builtin-paren tightening that made it 0.2 shipped separately, before fmt). No version space moves |
 | Thin renderer | Same rule as lint: formatting is library-side and returns a typed result — `format(source: &str) -> Result<String, CompileError>`; `cli/fmt.rs` is the only place that renders errors and touches the filesystem |
 | Config | None — opinionated, fixed rules (the gofmt model). Width 80 / indent 4 are not tunable this round (a manifest is the parked future home, per the lint spec) |
-| Dogfood | `fmt(std.pmc)` byte-identical to committed `std.pmc` is a hard acceptance criterion (the mirror of lint's "stdlib lints clean") |
+| Dogfood | `fmt(std.pmc)` byte-identical to committed `std.pmc` is a hard acceptance criterion. Because the alignment rules reformat the current `std.pmc` (labels hang left; see Formatting rules), `std.pmc` is **re-committed in fmt-clean form** and the dogfood target is that reformatted file |
 
 Out of scope this round: `.pma`/assembler formatting (the assembler has
 no CST); configurable width or indent; import reordering/merging (order
@@ -226,10 +225,11 @@ All concrete, no placeholders.
 
 **Indentation.** 4 spaces per block level, never tabs. File level = 0.
 `namespace ns { … }` contents = +1. A function body = +1 from its
-header. A nested function body = +1 from its header. (In `std.pmc`,
-`export goToEnd()` sits at 4 spaces inside `namespace std {`, its body at
-8 — the grounding corpus.) Input tabs and CRLF are normalized away by the
-full reprint; output is LF with 4-space indents.
+header. A nested function body = +1 from its header. Input tabs and CRLF
+are normalized away by the full reprint; output is LF with 4-space
+indents. The **base body indent** referenced below is this per-level
+indent for a body (e.g. 4 for a top-level function, 8 for a function
+inside one `namespace`).
 
 **Headers and braces.** A declaration header (`name() {`,
 `export name() {`, `namespace ns {`) sits at its enclosing indent; the
@@ -243,13 +243,65 @@ the author placed on one line (`left; right;`) are split to one per line
 comma group is one statement's internal layout, distinct statements are
 not.
 
-- Label prefix at the body indent: `N:` (number tight to colon); stacked
-  labels are each `N:` separated by one space (`1: 2:`); one space follows
-  the final colon, then the first command. An unlabeled statement's first
-  command sits at the body indent directly. (Commands are therefore *not*
-  aligned to a fixed column across labeled and unlabeled lines — this
-  matches `std.pmc`, where `check(...)` starts left of `right` under
-  `1: right`.)
+*Label / command alignment.* Within a function body all commands begin at
+a shared **command column**, and labels right-align into the space before
+it:
+
+- Let `P` = the rendered width of the **widest inline label prefix** in
+  the body — a label prefix is the statement's labels as printed, e.g.
+  `1:` (width 2) or the stacked `1: 2:` (width 5, one space between
+  stacked labels). Only **inline** labels (label on the same line as its
+  command) count toward `P`; own-line labels (below) do not.
+- **Command column** = the smallest multiple of the indent unit (4) that
+  is `≥ max(base_body_indent, P + 2)`. The `+2` reserves a ≥1-space left
+  margin before the widest label and the one space after its final `:`.
+  (With no labels, or all labels narrow, this is just the base body
+  indent.)
+- **Inline labels** are right-aligned so every `:` lands in the same colon
+  column and the command sits exactly **one space** after it, on the
+  command column. The widest inline label thus gets a left margin of ≥ 1
+  space (exactly 1 when `P + 2` already meets a tab stop; more when the
+  column was rounded up to the next tab stop); shorter labels pad on the
+  **left** to align (ones-digit under ones-digit).
+- **Unlabeled statements** indent directly to the command column.
+
+Worked example — widest inline label `11111` (P = 6) → command column =
+smallest multiple of 4 ≥ max(4, 8) = **8**; a two-digit label pads left to
+align:
+
+```
+ 11111: right;
+        left;
+    12: stop;
+```
+
+**Own-line labels.** The author may place a label on its own line by
+writing a newline after its final `:`; **fmt preserves that choice and
+never breaks a label itself** (the parallel of the comma-group Y rule).
+An own-line label is excluded from `P`. It is laid out by whether it fits
+the label field:
+
+- **Fits** (its prefix would still leave a ≥1-space left margin within the
+  command column) → right-aligned to the same colon column as the inline
+  labels ("aligned with everyone"); its command sits on the following
+  line at the command column.
+- **Too long** (the reason the author broke it) → the prefix hangs at a
+  strict **1-space** left margin; its command sits on the following line
+  at the command column.
+
+Worked example (command column 8, set by inline `11111`):
+
+```
+ 11111: right;
+    12:
+        left;
+ 999999999:
+        stop;
+```
+
+Here `12:` fits (its `:` aligns under `11111:`), while `999999999:`
+overflows the column and hangs at one space; both commands land on the
+command column (8).
 
 **Comma-group layout.** A statement's comma group (`cmd, cmd, cmd;`) is
 laid out by respecting the author's line breaks, with a width fallback.
@@ -260,15 +312,13 @@ The signal is whether the author put a **newline inside the group**:
 2. **No newline, overflows (> 80):** *greedy-fill*. Pack commands onto
    the line while they fit within 80; break after the **last comma that
    fit**, the comma trailing the line it closes; the remainder shifts to
-   a new line indented to the first command's column (body indent + the
-   width of the `N: ` label prefix, or just the body indent when
-   unlabeled); repeat for the remainder. The final `;` rides the last
-   command's line.
+   a new line indented to the **command column**; repeat for the
+   remainder. The final `;` rides the last command's line.
 3. **Newline present (author split it):** preserve the author's line
    grouping — the per-line command counts are kept as written (different
-   counts per line are fine) — and align each line's first command to the
-   continuation column. Greedy-fill (rule 2) is applied **only** to a
-   preserved line that itself exceeds 80.
+   counts per line are fine) — and align each continuation line to the
+   command column. Greedy-fill (rule 2) is applied **only** to a preserved
+   line that itself exceeds 80.
 
 ```
 # rule 1 (fits)                # rule 3 (author split 2 + 1, preserved)
@@ -294,13 +344,13 @@ author-split group is preserved as-is on every pass.
 | Builtin + successor | `left(5)`, `mark(!)` — no space before `(`, contents tight |
 | `check` | `check(1, 3)` — tight `(`, one space after the arm comma, tight `)` |
 | `goto` | `goto 5` — one space |
-| Label | `1:` tight; stacked `1: 2:`; one space after the final colon |
+| Label | `1:`; stacked `1: 2:` (one space between); one space after the final colon (before the command) |
 | Path | `std::api::run` — `::` tight |
 | `,` `;` | tight to the preceding token; one space after `,`, newline after `;` |
 | `as` (imports) | one space each side: `their::name as alias` |
 | `!` | `(!)`, `check(!, 1)` — tight |
 
-Spaced forms the grammar still accepts (`1 : right`, `std :: goToEnd`,
+Spaced forms the grammar still accepts (`1 : right`, `std :: goToEnd`;
 `@qq ()` is already a lex error) are normalized to the tight form above.
 fmt strips no tokens: empty builtin `()` cannot occur (grammar 0.2), and
 mandatory call parens (`@f()`) are never touched.
@@ -323,9 +373,26 @@ reorders nor merges/splits `use` statements.
 
 There is deliberately **no** "exactly one blank between declarations"
 rule — fmt respects the author's vertical rhythm (matching the
-comma-group choice), collapsing only runs. On the committed `std.pmc`
-(one blank between each function, no runs), this is a no-op, so the
-dogfood criterion holds.
+comma-group and label choices), collapsing only runs.
+
+**Trailing comments** (context-sensitive alignment). A **run** is a
+maximal sequence of consecutive statement lines each carrying a trailing
+comment, unbroken by a blank line or a line without one.
+
+- If, in the **source**, the trailing `//` of a run of length ≥ 2 share a
+  common column (the author aligned them), fmt **maintains alignment**:
+  every `//` in the run is placed at one column, recomputed as
+  `(longest reformatted code line in the run) + 1 space` — the column
+  moves with the reflowed code, but the run stays aligned.
+- Otherwise — the author did not align them, or the trailing comment is
+  alone on its run — one space before `//`.
+- If placing an aligned `//` would push its line past 80, that line falls
+  back to one space (and `line-too-long` may report it); the rest of the
+  run stays aligned.
+
+Detection reads the source layout; the column is derived from the
+reformatted code, so the rule is idempotent (a second pass sees the same
+aligned run and recomputes the same column).
 
 **Textual hygiene** (falls out of the full reprint): trailing whitespace
 removed on every line; exactly one final newline; LF line endings.
@@ -392,11 +459,11 @@ FLAGS:
 ## Contracts
 
 - **Idempotence** — `fmt(fmt(x)) == fmt(x)`. The reprint is a pure
-  function of the CST + comment layout, both canonicalized by the first
-  pass (the comma-group layout is idempotent by construction, above).
-  Tested by formatting the corpus and every fixture twice and asserting
-  the second pass is a no-op, plus a property test over generated
-  programs.
+  function of the CST + layout, all canonicalized by the first pass (the
+  comma-group and trailing-comment rules are idempotent by construction,
+  above). Tested by formatting the corpus and every fixture twice and
+  asserting the second pass is a no-op, plus a property test over
+  generated programs.
 - **Behavior preservation** — `fmt(x)` and `x` compile to the same bytes.
   Verified three ways, weakest to strongest:
   1. **Token equivalence:** lex both `WithoutComments`, assert identical
@@ -423,12 +490,18 @@ FLAGS:
 
 - **Per-rule unit tests** in the fmt module (`#[cfg(test)] mod tests`):
   inline source → `fmt` → assert exact output. One focused case per rule
-  — indentation, blank-line policy (cap-to-one, brace edges, author
-  preservation), comma-group single-line vs greedy-fill overflow vs
-  author-split-preserved, the label-width-dependent continuation column,
-  token spacing, spaced-form normalization,
-  leading/trailing/standalone/dangling comment placement, block-comment
-  interior preservation, statement-splitting (`left; right;` → two lines).
+  — indentation; the label/command alignment (command column from the
+  widest inline label; right-aligned padding of a narrow label; the
+  tab-stop round-up; own-line label that fits vs one that overflows; no
+  auto-break); blank-line policy (cap-to-one, brace edges, author
+  preservation); comma-group single-line vs greedy-fill overflow vs
+  author-split-preserved with the command-column continuation; token
+  spacing; spaced-form normalization;
+  leading/trailing/standalone/dangling comment placement;
+  trailing-comment context-sensitive alignment (aligned run maintained,
+  ragged run left at one space, lone comment one space, >80 fallback);
+  block-comment interior preservation; statement-splitting (`left; right;`
+  → two lines).
 - **`fmt_programs.rs`** integration suite (`crates/post-machine/tests/`):
   multi-construct programs; idempotence (double-format no-op);
   behavior-preservation (`compile(fmt(src)) == compile(src)`); comment
@@ -446,20 +519,21 @@ FLAGS:
 - **Property tests** (`proptest`, already a core dev-dep; add to
   post-machine): idempotence and token-equivalence over generated
   well-formed programs.
-- **Dogfood:** `fmt(std.pmc)` is byte-identical to the committed
-  `std.pmc`. If it differs, `std.pmc` (or the rule) is fixed first — the
-  same discipline as lint's "stdlib lints clean". The golden `sum.pmc` /
-  `ty.pmc` and the lint fixtures are asserted fmt-clean (or committed in
-  fmt-clean form).
+- **Dogfood:** `fmt(std.pmc)` is byte-identical to the (reformatted)
+  committed `std.pmc`. The reformat is applied once as part of this work
+  and committed; thereafter any drift means `std.pmc` (or the rule) is
+  fixed first — the same discipline as lint's "stdlib lints clean". The
+  golden `sum.pmc` / `ty.pmc` and the lint fixtures are asserted fmt-clean
+  (or committed in fmt-clean form).
 
 ## Documentation
 
-- **New `docs/fmt.md`:** the canonical style (indent, blank lines,
-  spacing table, comma-group layout, comment handling), `--check` and `-`
-  semantics, exit codes. Ref-free prose (published-docs policy — no
-  issue/PR numbers, no forge URLs). It must describe the blank-line
-  policy as "preserved, runs collapsed to one, none forced" — **not**
-  "one blank between declarations".
+- **New `docs/fmt.md`:** the canonical style (indent, label/command
+  alignment, blank lines, spacing table, comma-group layout, comment
+  handling), `--check` and `-` semantics, exit codes. Ref-free prose
+  (published-docs policy — no issue/PR numbers, no forge URLs). It must
+  describe the blank-line policy as "preserved, runs collapsed to one,
+  none forced" — **not** "one blank between declarations".
 - **`docs/cli.md`:** a `fmt` subcommand section (USAGE block + prose)
   mirroring the `lint` section, including `-`; add `fmt` to the top-level
   subcommand list in `cli/mod.rs`'s `USAGE`.
@@ -467,10 +541,12 @@ FLAGS:
   job" — extend it to name `pmt fmt` as the fix (comma-group layout), and
   to state that a line overlong due to a single long command or a trailing
   comment is not fmt-fixable and stays reported.
-- **`docs/language.md`:** its illustrative snippet uses a pre-fmt
-  indentation that the canonical style supersedes. Regenerate the snippet
-  to canonical style (or add a one-line pointer that `docs/fmt.md` owns
-  canonical layout). Minor; no grammar change.
+- **`docs/language.md`:** its illustrative snippets use a pre-fmt
+  indentation (flush-left labels, a fixed command column via two spaces)
+  that the canonical style supersedes. Regenerate the snippets to the
+  canonical label/command alignment above. Minor; no grammar change. The
+  `.pma` snippets in `README.md` / `docs/formats.md` are the assembler's,
+  out of fmt's scope, and stay.
 - **`README.md`:** one-line `pmt fmt` mention in the CLI overview.
 - **Version block:** fmt's release notes state every version space
   `unchanged` — no grammar/IR/`.pma`/container move (the lexer comment
@@ -482,9 +558,9 @@ FLAGS:
 
 ## Acceptance criteria
 
-1. `fmt(std.pmc)` is byte-identical to the committed `std.pmc`; the
-   golden `sum.pmc`/`ty.pmc` and lint fixtures are fmt-clean (or committed
-   in fmt-clean form).
+1. `fmt(std.pmc)` is byte-identical to the committed `std.pmc` (in its
+   reformatted, fmt-clean form); the golden `sum.pmc`/`ty.pmc` and lint
+   fixtures are fmt-clean (or committed in fmt-clean form).
 2. For every committed `.pmc` program, `compile(fmt(src))` is
    byte-identical to `compile(src)` at `-O0` and `-O1`, and
    `fmt(fmt(src)) == fmt(src)`.
@@ -515,15 +591,23 @@ during design:
   CST + C1 lower-copy** (shared with the LSP), not a dedicated fmt tree.
   C2 (zero-copy views) parked → issue #14.
 - **Comma-group layout** — resolved as **respect the author's breaks +
-  greedy-fill on overflow** (rules 1–3 above), not one-command-per-line.
+  greedy-fill on overflow**, aligning continuations to the command column.
+- **Label/command alignment** — resolved as the **command-column model**
+  above (widest inline label drives a tab-stop-rounded column; inline
+  labels right-align into it; own-line labels are the author's choice;
+  fmt never auto-breaks a label).
+- **Trailing comments** — resolved as **context-sensitive alignment**
+  (maintain an author-aligned run, recomputing the column from reflowed
+  code; one space otherwise).
+- **`std.pmc` reformat** — resolved as **mandatory**: the alignment rules
+  reformat it, and it is re-committed in fmt-clean form as the dogfood
+  target.
 - **Mid-statement comments** — dissolved: trivia-in-CST + position
   preservation handle block (inline) and line (group-becomes-broken)
-  comments with no special rule; the earlier "move to end of line" rule
-  is deleted.
+  comments with no special rule.
 - **Blank-line policy** — resolved as **preserve, collapse runs to one,
   force nothing**.
 
-No open forks remain. The one item left for the reviewer's ruling is
-cosmetic: **regenerate the `docs/language.md` snippet** to canonical
-style, or leave it and point to `docs/fmt.md`? (Noted so the reviewer
-rules rather than the implementer guessing.)
+No open forks remain. One cosmetic item is folded into the plan rather
+than left open: the `docs/language.md` snippets are regenerated to the
+canonical (aligned) style as part of the documentation task.
