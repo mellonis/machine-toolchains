@@ -84,12 +84,48 @@ pub enum CompileErrorKind {
     TopLevelStatement(String),
 }
 
+impl CompileErrorKind {
+    /// Stable kebab-case code, one per variant (docs/cli.md (compile
+    /// errors)). Frozen once published — these are permanent
+    /// user-visible identifiers: the CLI brackets them into every fatal
+    /// rendering, and the language server carries them in the LSP
+    /// diagnostic `code` field (the message stays the kind's own
+    /// `Display`, which is why the suffix lives on [`CompileError`]'s
+    /// `Display`, not here).
+    pub fn code(&self) -> &'static str {
+        match self {
+            CompileErrorKind::Lex(_) => "lex-error",
+            CompileErrorKind::Expected { .. } => "unexpected-token",
+            CompileErrorKind::ReservedName { .. } => "reserved-name",
+            CompileErrorKind::UnknownCommand(_) => "unknown-command",
+            CompileErrorKind::BuiltinCalled(_) => "builtin-called",
+            CompileErrorKind::EmptyBuiltinParens { .. } => "empty-builtin-parens",
+            CompileErrorKind::DuplicateName { .. } => "duplicate-name",
+            CompileErrorKind::DuplicateLabel(_) => "duplicate-label",
+            CompileErrorKind::UndefinedLabel(_) => "undefined-label",
+            CompileErrorKind::GotoReturn => "goto-return",
+            CompileErrorKind::GroupPosition(_) => "group-position",
+            CompileErrorKind::DanglingLabel(_) => "dangling-label",
+            CompileErrorKind::Internal(_) => "internal-error",
+            CompileErrorKind::NestedExport => "nested-export",
+            CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
+            CompileErrorKind::KeywordNeedsName(_) => "keyword-needs-name",
+            CompileErrorKind::KeywordInBody(_) => "keyword-in-body",
+            CompileErrorKind::SingleColonInPath => "single-colon-in-path",
+            CompileErrorKind::TopLevelStatement(_) => "top-level-statement",
+        }
+    }
+}
+
 impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "line {}:{}: {}",
-            self.span.start.line, self.span.start.col, self.kind
+            "line {}:{}: {} [{}]",
+            self.span.start.line,
+            self.span.start.col,
+            self.kind,
+            self.kind.code()
         )
     }
 }
@@ -604,7 +640,62 @@ mod tests {
             kind: CompileErrorKind::UndefinedLabel(3),
         };
         assert_eq!((e.span.start.col, e.span.end.col), (7, 12));
-        assert_eq!(format!("{e}"), "line 1:7: undefined label `3`");
+        assert_eq!(
+            format!("{e}"),
+            "line 1:7: undefined label `3` [undefined-label]"
+        );
+    }
+
+    #[test]
+    fn error_codes_are_pairwise_distinct() {
+        // One representative kind per variant (all 19); `code()`'s match
+        // is exhaustive over the enum, so this also pins that every
+        // variant is accounted for.
+        let kinds = [
+            CompileErrorKind::Lex("x".into()),
+            CompileErrorKind::Expected {
+                what: "x",
+                found: "y".into(),
+            },
+            CompileErrorKind::ReservedName {
+                name: "x".into(),
+                what: "y",
+            },
+            CompileErrorKind::UnknownCommand("x".into()),
+            CompileErrorKind::BuiltinCalled("x".into()),
+            CompileErrorKind::EmptyBuiltinParens { name: "x".into() },
+            CompileErrorKind::DuplicateName {
+                name: "x".into(),
+                what: "y",
+            },
+            CompileErrorKind::DuplicateLabel(1),
+            CompileErrorKind::UndefinedLabel(1),
+            CompileErrorKind::GotoReturn,
+            CompileErrorKind::GroupPosition("x"),
+            CompileErrorKind::DanglingLabel(1),
+            CompileErrorKind::Internal("x".into()),
+            CompileErrorKind::NestedExport,
+            CompileErrorKind::DuplicateBinding("x".into()),
+            CompileErrorKind::KeywordNeedsName("use"),
+            CompileErrorKind::KeywordInBody("use"),
+            CompileErrorKind::SingleColonInPath,
+            CompileErrorKind::TopLevelStatement("x".into()),
+        ];
+        assert_eq!(kinds.len(), 19);
+        let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
+        assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
+    }
+
+    #[test]
+    fn duplicate_label_display_carries_the_bracketed_code() {
+        let e = CompileError {
+            span: Span::new(3, 7, 3, 8),
+            kind: CompileErrorKind::DuplicateLabel(5),
+        };
+        assert_eq!(
+            format!("{e}"),
+            "line 3:7: duplicate label `5` [duplicate-label]"
+        );
     }
 
     #[test]

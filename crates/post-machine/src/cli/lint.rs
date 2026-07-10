@@ -120,11 +120,12 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
                 any = true;
                 let _ = writeln!(
                     stderr,
-                    "{}:{}:{}: error: {}",
+                    "{}:{}:{}: error: {} [{}]",
                     file.display(),
                     e.span.start.line,
                     e.span.start.col,
-                    e.kind
+                    e.kind,
+                    e.kind.code()
                 );
             }
             Err(e @ LintError::UnknownAllowCode(_)) => return Err(e.to_string()),

@@ -104,11 +104,12 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
         fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let out = compile_source(&source, options).map_err(|e| {
         format!(
-            "{}:{}:{}: error: {}",
+            "{}:{}:{}: error: {} [{}]",
             input.display(),
             e.span.start.line,
             e.span.start.col,
-            e.kind
+            e.kind,
+            e.kind.code()
         )
     })?;
 

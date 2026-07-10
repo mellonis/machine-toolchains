@@ -73,6 +73,38 @@ flag: a stage label captured in several optimizer rounds (e.g.
 `--emit-ir` flag itself may appear only once per command line —
 repeating it is an unknown-flag error.
 
+### Compile errors
+
+A fatal compile error stops the compile and renders as
+`FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed suffix is a
+stable kebab-case code identifying the error kind — every fatal
+rendering carries it, wherever the fatal surfaces (`pmt compile`
+itself, and the per-file fatal lines of `pmt lint` and `pmt fmt`).
+Codes are permanent identifiers: they never change meaning and are
+safe to match in scripts and editor integrations.
+
+| Code | Meaning |
+|---|---|
+| `lex-error` | The source failed to tokenize: an unexpected character, an unterminated comment, or similar lexical defect. |
+| `unexpected-token` | The parser needed one construct and saw another. |
+| `reserved-name` | A reserved word used to name a function, namespace, or path segment. |
+| `unknown-command` | A bare identifier statement that is not a builtin — user functions are called `@name()`. |
+| `builtin-called` | `@` applied to a builtin name (`@left()`) — builtins are written without `@`. |
+| `empty-builtin-parens` | Empty `()` on a tape builtin — parens on a builtin, if present, must carry a successor; omit them or write `name(N)` / `name(!)`. |
+| `duplicate-name` | A definition reuses a name already taken by a function or namespace in the same scope. |
+| `duplicate-label` | The same label declared twice in one function. |
+| `undefined-label` | `goto`, `check`, or a successor names a label the function never declares. |
+| `goto-return` | `goto !` — put `(!)` on the preceding command instead. |
+| `group-position` | A comma-group position rule violated (`docs/language.md`, the statement table's last row). |
+| `dangling-label` | A label at the end of a function body binds to nothing. |
+| `internal-error` | The generated assembly failed to assemble — a compiler bug, not a source error; please report it. |
+| `nested-export` | `export` on a nested definition — nested functions are always local. |
+| `duplicate-binding` | Two imports bind the same bare name in one scope — qualify the call or disambiguate with `as`. |
+| `keyword-needs-name` | `namespace`, `use`, or `export` with no name after it. |
+| `keyword-in-body` | `use` or `namespace` inside a function body — imports and namespaces live at file or namespace level. |
+| `single-colon-in-path` | A single `:` in a name path where the `::` separator was meant. |
+| `top-level-statement` | A command or call at top level — statements live inside function bodies. |
+
 ## `pmt asm`
 
 ```
@@ -136,8 +168,10 @@ spelled (no globs — the shell covers the include side), and exclusion
 wins even over explicitly listed files.
 
 Files lint independently: a file that fails to parse is reported on
-stderr and the batch continues. Exit codes: 0 = every file clean,
-1 = findings or errors anywhere (tool errors are also 1).
+stderr — as a fatal compile-error line with its bracketed code
+(`pmt compile` (compile errors)) — and the batch continues. Exit
+codes: 0 = every file clean, 1 = findings or errors anywhere (tool
+errors are also 1).
 
 `--fix` applies safe fixes in place and lints the result again — the
 report and exit code reflect what remains. `--fix --force` also
@@ -170,7 +204,8 @@ lint`'s batch: directories recurse for `*.pmc` in sorted order,
 symlinks are never followed, dot-entries are skipped, and `--exclude
 PATH` (repeatable, no globs) skips a file or prunes a subtree. Files
 format independently: a file that fails to lex or parse is reported on
-stderr and the batch continues.
+stderr — as a fatal compile-error line with its bracketed code
+(`pmt compile` (compile errors)) — and the batch continues.
 
 By default `pmt fmt` rewrites each file in place, and only when its
 formatted text differs from what's already on disk — an

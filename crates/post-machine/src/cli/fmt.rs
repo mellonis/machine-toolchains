@@ -98,11 +98,12 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
                 had_error = true;
                 let _ = writeln!(
                     stderr,
-                    "{}:{}:{}: error: {}",
+                    "{}:{}:{}: error: {} [{}]",
                     file.display(),
                     e.span.start.line,
                     e.span.start.col,
-                    e.kind
+                    e.kind,
+                    e.kind.code()
                 );
             }
         }
@@ -136,8 +137,11 @@ fn fmt_stdin(check: bool) -> Result<CliOutput, String> {
             }
         }
         Err(e) => Err(format!(
-            "<stdin>:{}:{}: error: {}",
-            e.span.start.line, e.span.start.col, e.kind
+            "<stdin>:{}:{}: error: {} [{}]",
+            e.span.start.line,
+            e.span.start.col,
+            e.kind,
+            e.kind.code()
         )),
     }
 }
