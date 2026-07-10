@@ -55,6 +55,15 @@ pub struct Candidate {
 
 /// Definition target; `uri` may name a document other than the requester
 /// (e.g. a materialized library file on disk).
+///
+/// **Range conversion contract** (enforced by the server loop): when
+/// `uri` is open in the DocStore, its span converts exactly against
+/// that document's current text. Otherwise there is no text to convert
+/// against, so the server applies the char==UTF-16 identity (subtract
+/// 1 to go from 1-based to 0-based, nothing else) — exact only when the
+/// target's lines are ASCII up to the span. True by construction for
+/// the materialized stdlib (guarded by a test in the language-service
+/// plan), so external targets stay exact in practice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefTarget {
     pub uri: String,
@@ -233,7 +242,18 @@ pub(crate) mod fake {
             self.config_revision += 1;
         }
 
-        fn completion(&mut self, _uri: &str, pos: Pos) -> Vec<Candidate> {
+        fn completion(&mut self, uri: &str, pos: Pos) -> Vec<Candidate> {
+            // The request-side containment probe (docs/lsp.md): lets the
+            // server-loop tests exercise a panicking *request* handler,
+            // as opposed to `did_update`'s notification-side probe.
+            if self
+                .texts
+                .get(uri)
+                .is_some_and(|text| text.contains("panic-now"))
+            {
+                panic!("fake service panic");
+            }
+
             vec![Candidate {
                 label: "alpha".to_string(),
                 kind: CandidateKind::Function,

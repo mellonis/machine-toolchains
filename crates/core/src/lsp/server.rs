@@ -4,8 +4,16 @@
 //! initialize/initialized/shutdown/exit gating, unknown-method handling,
 //! and decode-error responses. Document sync (didOpen/didChange/
 //! didClose) drives the `DocStore` and republishes diagnostics through
-//! one `publish` helper. Feature dispatch (completion, definition, …)
-//! is layered onto the same `dispatch` seam by a later task.
+//! one `publish` helper; the same helper powers the config- and
+//! watched-file-triggered republish-all sweeps. Feature requests
+//! (completion, definition, code actions, document symbols, semantic
+//! tokens, formatting) convert trait output to wire types via
+//! `position`. Every dispatched message runs under `catch_unwind` so a
+//! panicking handler can't take the whole session down (docs/lsp.md
+//! "Error containment").
+
+use std::collections::HashMap;
+use std::panic::{self, AssertUnwindSafe};
 
 use super::LanguageService;
 use super::docstore::DocStore;
@@ -13,14 +21,21 @@ use super::jsonrpc::{self, DecodeError, Id, Message, error_codes};
 use super::position;
 use super::transport;
 use super::types::{
-    CodeActionOptions, CompletionOptions, DidChangeTextDocumentParams,
+    CodeAction, CodeActionOptions, CodeActionParams, CompletionItem, CompletionOptions,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, FileSystemWatcher, InitializeParams, InitializeResult,
-    PublishDiagnosticsParams, Registration, RegistrationParams, SemanticTokensLegend,
-    SemanticTokensOptions, ServerCapabilities, ServerInfoWire, TextDocumentSyncOptions,
-    WireDiagnostic, diagnostic_severity,
+    DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams,
+    FileSystemWatcher, InitializeParams, InitializeResult, Location, Position,
+    PublishDiagnosticsParams, Range, Registration, RegistrationParams, SemanticTokens,
+    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
+    ServerInfoWire, TextDocumentPositionParams, TextDocumentSyncOptions, TextEdit, WireDiagnostic,
+    WorkspaceEdit, completion_item_kind, diagnostic_severity, symbol_kind,
 };
-use super::{ServiceDiagnostic, ServiceSeverity};
+use super::{
+    Action, Candidate, CandidateKind, DefTarget, ServiceDiagnostic, ServiceSeverity, SymbolNode,
+    SymbolNodeKind,
+};
+use crate::diagnostics::{Pos, Span};
 
 /// Deployment identity for the initialize handshake (`serverInfo`); the
 /// caller (a CLI) supplies it — core knows no product names.
@@ -65,6 +80,7 @@ pub fn run(
     identity: ServerIdentity,
 ) -> i32 {
     let mut state = ServerState::new();
+    let _quiet_panic_hook = QuietPanicHook::install();
 
     loop {
         let payload = match transport::read_message(reader) {
@@ -100,6 +116,16 @@ pub fn run(
 /// Routes one decoded message to the request/notification handlers;
 /// `Message::Response`s (the client answering a server-initiated
 /// request such as `client/registerCapability`) are dropped silently.
+///
+/// **Panic containment** (docs/lsp.md "Error containment"): the routed
+/// call runs under `catch_unwind`, so one bad handler can't take the
+/// session down. A panicking *request* handler answers with
+/// `INTERNAL_ERROR` carrying the panic payload text (no response can
+/// have been written yet — every handler either panics or writes
+/// exactly one response, never both); a panicking *notification*
+/// handler produces no output at all beyond a concise stderr line. The
+/// loop always continues either way (`run` decides EOF-flavored exits;
+/// a contained panic is not one of them).
 fn dispatch(
     state: &mut ServerState,
     writer: &mut dyn std::io::Write,
@@ -109,13 +135,83 @@ fn dispatch(
 ) -> Signal {
     match message {
         Message::Request { id, method, params } => {
-            handle_request(state, writer, service, identity, &id, &method, params);
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                handle_request(state, writer, service, identity, &id, &method, params);
+            }));
+            if let Err(payload) = outcome {
+                let text = panic_message(&*payload);
+                eprintln!("lsp server: request '{method}' panicked: {text}");
+                respond_err(writer, Some(&id), error_codes::INTERNAL_ERROR, &text);
+            }
             Signal::Continue
         }
         Message::Notification { method, params } => {
-            handle_notification(state, writer, service, &method, params)
+            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                handle_notification(state, writer, service, &method, params)
+            }));
+            match outcome {
+                Ok(signal) => signal,
+                Err(payload) => {
+                    let text = panic_message(&*payload);
+                    eprintln!("lsp server: notification '{method}' panicked: {text}");
+                    Signal::Continue
+                }
+            }
         }
         Message::Response { .. } => Signal::Continue,
+    }
+}
+
+/// Best-effort text extraction from a caught panic payload: `panic!`
+/// with a string literal or a `String` message (the vast majority of
+/// panics, including every panic this crate's own code raises)
+/// downcasts cleanly; anything else renders as a fixed placeholder
+/// rather than losing the response entirely.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "panic payload was not a string".to_string()
+    }
+}
+
+/// RAII guard installing a no-op panic hook for the server loop's
+/// lifetime, restoring the previous hook on drop. Covers every exit
+/// path of `run` uniformly (EOF/transport failure, shutdown→exit,
+/// exit-without-shutdown) without an install/restore pair around each
+/// dispatched message. Every panic `dispatch` catches is re-logged as
+/// one concise `eprintln!` line instead of letting the default hook
+/// print a full backtrace.
+///
+/// **Caveat**: the panic hook is process-global. If `run` executes
+/// concurrently on more than one thread (as parallel tests do), there
+/// is a brief window between `take_hook` and `set_hook` where another
+/// thread's panic can still hit the default hook. Accepted: every
+/// panic is still caught by `catch_unwind` regardless, so correctness
+/// never depends on the hook — only, rarely, its stderr noise leaks.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+struct QuietPanicHook {
+    previous: Option<PanicHook>,
+}
+
+impl QuietPanicHook {
+    fn install() -> Self {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(|_info| {}));
+        QuietPanicHook {
+            previous: Some(previous),
+        }
+    }
+}
+
+impl Drop for QuietPanicHook {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            panic::set_hook(previous);
+        }
     }
 }
 
@@ -142,6 +238,14 @@ fn handle_request(
             state.shutdown = true;
             respond_ok(writer, id, serde_json::Value::Null);
         }
+        "textDocument/completion" => handle_completion(state, writer, service, id, params),
+        "textDocument/definition" => handle_definition(state, writer, service, id, params),
+        "textDocument/codeAction" => handle_code_action(state, writer, service, id, params),
+        "textDocument/documentSymbol" => handle_document_symbol(state, writer, service, id, params),
+        "textDocument/semanticTokens/full" => {
+            handle_semantic_tokens(state, writer, service, id, params)
+        }
+        "textDocument/formatting" => handle_formatting(state, writer, service, id, params),
         _ => {
             respond_err(
                 writer,
@@ -239,6 +343,23 @@ fn handle_notification(
             }
             Signal::Continue
         }
+        "workspace/didChangeConfiguration" => {
+            if let Ok(params) = serde_json::from_value::<DidChangeConfigurationParams>(params) {
+                service.did_change_config(params.settings);
+                republish_all(state, writer, service);
+            }
+            Signal::Continue
+        }
+        // No config parsing here — core stays language-agnostic; the
+        // service re-reads its own config/watched sources during
+        // `did_update`. This notification exists only to trigger the
+        // same republish-all sweep.
+        "workspace/didChangeWatchedFiles" => {
+            if serde_json::from_value::<DidChangeWatchedFilesParams>(params).is_ok() {
+                republish_all(state, writer, service);
+            }
+            Signal::Continue
+        }
         // Unknown notifications (including every `$/…` method, e.g.
         // `$/cancelRequest`) are silently dropped per spec.
         _ => Signal::Continue,
@@ -296,6 +417,320 @@ fn to_wire_diagnostic(text: &str, diagnostic: &ServiceDiagnostic) -> WireDiagnos
         source: Some(diagnostic.source.to_string()),
         message: diagnostic.message.clone(),
     }
+}
+
+/// Re-publishes diagnostics for every open document, in URI-sorted
+/// order — the sweep both `workspace/didChangeConfiguration` and
+/// `workspace/didChangeWatchedFiles` trigger. Core has no opinion on
+/// what changed; the service re-reads its own config/watched-file
+/// sources from inside `did_update` itself.
+fn republish_all(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+) {
+    for uri in state.docs.uris() {
+        publish(state, writer, service, &uri);
+    }
+}
+
+/// The current text of an open document, or `""` when `uri` isn't
+/// open. Defensive: a feature request against an unopened document
+/// converts positions against an empty document rather than
+/// panicking (a well-behaved client never does this — every feature
+/// request targets a document it has opened).
+fn doc_text<'a>(state: &'a ServerState, uri: &str) -> &'a str {
+    state
+        .docs
+        .get(uri)
+        .map(|doc| doc.text.as_str())
+        .unwrap_or("")
+}
+
+fn handle_completion(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+    id: &Id,
+    params: serde_json::Value,
+) {
+    let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+        respond_err(
+            writer,
+            Some(id),
+            error_codes::INVALID_PARAMS,
+            "invalid completion params",
+        );
+        return;
+    };
+    let uri = params.text_document.uri;
+    let text = doc_text(state, &uri);
+    let pos = position::pos_from_lsp(text, params.position);
+
+    let items: Vec<CompletionItem> = service
+        .completion(&uri, pos)
+        .into_iter()
+        .map(|candidate| to_completion_item(text, candidate))
+        .collect();
+
+    let result = serde_json::to_value(items).expect("CompletionItem[] is always serializable");
+    respond_ok(writer, id, result);
+}
+
+/// One candidate's insertion is entirely textEdit-driven: the wire
+/// item carries no separate insert-text field (docs/lsp.md).
+fn to_completion_item(text: &str, candidate: Candidate) -> CompletionItem {
+    CompletionItem {
+        label: candidate.label,
+        kind: Some(match candidate.kind {
+            CandidateKind::Function => completion_item_kind::FUNCTION,
+            CandidateKind::Module => completion_item_kind::MODULE,
+            CandidateKind::Keyword => completion_item_kind::KEYWORD,
+            CandidateKind::Value => completion_item_kind::VALUE,
+        }),
+        text_edit: Some(TextEdit {
+            range: position::span_to_range(text, candidate.replace_span),
+            new_text: candidate.insert_text,
+        }),
+    }
+}
+
+fn handle_definition(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+    id: &Id,
+    params: serde_json::Value,
+) {
+    let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+        respond_err(
+            writer,
+            Some(id),
+            error_codes::INVALID_PARAMS,
+            "invalid definition params",
+        );
+        return;
+    };
+    let uri = params.text_document.uri;
+    let text = doc_text(state, &uri);
+    let pos = position::pos_from_lsp(text, params.position);
+
+    let result = match service.definition(&uri, pos) {
+        Some(target) => serde_json::to_value(to_location(state, target))
+            .expect("Location is always serializable"),
+        None => serde_json::Value::Null,
+    };
+    respond_ok(writer, id, result);
+}
+
+/// Converts a `DefTarget` to a wire `Location` per its range-conversion
+/// contract (`DefTarget`'s doc): exact against the target's own text
+/// when it's open in the DocStore, else the char==UTF-16 identity.
+fn to_location(state: &ServerState, target: DefTarget) -> Location {
+    let range = match state.docs.get(&target.uri) {
+        Some(doc) => position::span_to_range(&doc.text, target.span),
+        None => span_to_range_identity(target.span),
+    };
+    Location {
+        uri: target.uri,
+        range,
+    }
+}
+
+/// Char==UTF-16 identity conversion (subtract 1 to go from 1-based to
+/// 0-based, nothing else) for an external `DefTarget` whose text isn't
+/// available to convert against exactly — see `DefTarget`'s doc.
+fn span_to_range_identity(span: Span) -> Range {
+    Range {
+        start: pos_to_position_identity(span.start),
+        end: pos_to_position_identity(span.end),
+    }
+}
+
+fn pos_to_position_identity(pos: Pos) -> Position {
+    Position {
+        line: pos.line.saturating_sub(1),
+        character: pos.col.saturating_sub(1),
+    }
+}
+
+fn handle_code_action(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+    id: &Id,
+    params: serde_json::Value,
+) {
+    let Ok(params) = serde_json::from_value::<CodeActionParams>(params) else {
+        respond_err(
+            writer,
+            Some(id),
+            error_codes::INVALID_PARAMS,
+            "invalid codeAction params",
+        );
+        return;
+    };
+    let uri = params.text_document.uri;
+    let text = doc_text(state, &uri);
+    let span = position::range_to_span(text, params.range);
+
+    let actions: Vec<CodeAction> = service
+        .code_actions(&uri, span)
+        .into_iter()
+        .map(|action| to_code_action(&uri, text, action))
+        .collect();
+
+    let result = serde_json::to_value(actions).expect("CodeAction[] is always serializable");
+    respond_ok(writer, id, result);
+}
+
+/// Edits in an `Action` apply to the requesting document (the trait's
+/// contract), so every edit lands under the same single `uri` key.
+fn to_code_action(uri: &str, text: &str, action: Action) -> CodeAction {
+    let edits = action
+        .edits
+        .into_iter()
+        .map(|edit| TextEdit {
+            range: position::span_to_range(text, edit.span),
+            new_text: edit.replacement,
+        })
+        .collect();
+    let mut changes = HashMap::new();
+    changes.insert(uri.to_string(), edits);
+
+    CodeAction {
+        title: action.title,
+        kind: "quickfix".to_string(),
+        is_preferred: Some(action.preferred),
+        edit: WorkspaceEdit { changes },
+    }
+}
+
+fn handle_document_symbol(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+    id: &Id,
+    params: serde_json::Value,
+) {
+    let Ok(params) = serde_json::from_value::<DocumentSymbolParams>(params) else {
+        respond_err(
+            writer,
+            Some(id),
+            error_codes::INVALID_PARAMS,
+            "invalid documentSymbol params",
+        );
+        return;
+    };
+    let uri = params.text_document.uri;
+    let text = doc_text(state, &uri);
+
+    let result = match service.document_symbols(&uri) {
+        Some(nodes) => {
+            let symbols: Vec<DocumentSymbol> = nodes
+                .into_iter()
+                .map(|node| to_document_symbol(text, node))
+                .collect();
+            serde_json::to_value(symbols).expect("DocumentSymbol[] is always serializable")
+        }
+        None => serde_json::Value::Null,
+    };
+    respond_ok(writer, id, result);
+}
+
+fn to_document_symbol(text: &str, node: SymbolNode) -> DocumentSymbol {
+    DocumentSymbol {
+        name: node.name,
+        kind: match node.kind {
+            SymbolNodeKind::Namespace => symbol_kind::NAMESPACE,
+            SymbolNodeKind::Function => symbol_kind::FUNCTION,
+        },
+        range: position::span_to_range(text, node.span),
+        selection_range: position::span_to_range(text, node.selection_span),
+        children: node
+            .children
+            .into_iter()
+            .map(|child| to_document_symbol(text, child))
+            .collect(),
+    }
+}
+
+fn handle_semantic_tokens(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+    id: &Id,
+    params: serde_json::Value,
+) {
+    let Ok(params) = serde_json::from_value::<SemanticTokensParams>(params) else {
+        respond_err(
+            writer,
+            Some(id),
+            error_codes::INVALID_PARAMS,
+            "invalid semanticTokens params",
+        );
+        return;
+    };
+    let uri = params.text_document.uri;
+    let text = doc_text(state, &uri);
+
+    let result = match service.semantic_tokens(&uri) {
+        Some(tokens) => {
+            let data = position::pack_semantic_tokens(text, &tokens);
+            serde_json::to_value(SemanticTokens { data })
+                .expect("SemanticTokens is always serializable")
+        }
+        None => serde_json::Value::Null,
+    };
+    respond_ok(writer, id, result);
+}
+
+fn handle_formatting(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+    id: &Id,
+    params: serde_json::Value,
+) {
+    let Ok(params) = serde_json::from_value::<DocumentFormattingParams>(params) else {
+        respond_err(
+            writer,
+            Some(id),
+            error_codes::INVALID_PARAMS,
+            "invalid formatting params",
+        );
+        return;
+    };
+    let uri = params.text_document.uri;
+    let text = doc_text(state, &uri);
+
+    let result = match service.format(&uri) {
+        None => serde_json::Value::Null,
+        Some(formatted) if formatted == text => {
+            serde_json::to_value(Vec::<TextEdit>::new()).expect("empty TextEdit[] is serializable")
+        }
+        Some(formatted) => {
+            let end = position::pos_to_lsp(
+                text,
+                Pos {
+                    line: u32::MAX,
+                    col: u32::MAX,
+                },
+            );
+            let edit = TextEdit {
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end,
+                },
+                new_text: formatted,
+            };
+            serde_json::to_value(vec![edit]).expect("TextEdit[] is always serializable")
+        }
+    };
+    respond_ok(writer, id, result);
 }
 
 fn build_initialize_result(
@@ -435,6 +870,14 @@ mod tests {
             "method": "textDocument/didClose",
             "params": {"textDocument": {"uri": uri}},
         })
+    }
+
+    fn request_message(id: i64, method: &str, params: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    }
+
+    fn notification_message(method: &str, params: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"jsonrpc": "2.0", "method": method, "params": params})
     }
 
     fn decode_output_frames(buf: &[u8]) -> Vec<serde_json::Value> {
@@ -939,5 +1382,467 @@ mod tests {
                 "end": {"line": 0, "character": 7},
             })
         );
+    }
+
+    #[test]
+    fn completion_returns_text_edit_shaped_items_with_the_service_kind() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "hi"),
+                request_message(
+                    2,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[2]["result"],
+            serde_json::json!([
+                {
+                    "label": "alpha",
+                    "kind": 3,
+                    "textEdit": {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 0},
+                        },
+                        "newText": "alpha",
+                    },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn definition_hits_the_first_def_occurrence_and_misses_return_null() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///hit.fake", 1, "x def def"),
+                did_open_message("file:///miss.fake", 1, "no such word"),
+                request_message(
+                    2,
+                    "textDocument/definition",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///hit.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                request_message(
+                    3,
+                    "textDocument/definition",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///miss.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[3]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[3]["result"],
+            serde_json::json!({
+                "uri": "file:///hit.fake",
+                "range": {
+                    "start": {"line": 0, "character": 2},
+                    "end": {"line": 0, "character": 5},
+                },
+            })
+        );
+        assert_eq!(outputs[4]["id"], serde_json::json!(3));
+        assert_eq!(outputs[4]["result"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn code_action_returns_the_quickfix_for_an_overlapping_bad_span() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "bad bad"),
+                request_message(
+                    2,
+                    "textDocument/codeAction",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.fake"},
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 3},
+                        },
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[2]["result"],
+            serde_json::json!([
+                {
+                    "title": "remove bad",
+                    "kind": "quickfix",
+                    "isPreferred": true,
+                    "edit": {
+                        "changes": {
+                            "file:///a.fake": [
+                                {
+                                    "range": {
+                                        "start": {"line": 0, "character": 0},
+                                        "end": {"line": 0, "character": 3},
+                                    },
+                                    "newText": "",
+                                },
+                            ],
+                        },
+                    },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn document_symbol_returns_the_root_node_with_function_kind() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "fn one\nfn two"),
+                request_message(
+                    2,
+                    "textDocument/documentSymbol",
+                    serde_json::json!({"textDocument": {"uri": "file:///a.fake"}}),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[2]["result"],
+            serde_json::json!([
+                {
+                    "name": "root",
+                    "kind": 12,
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 6},
+                    },
+                    "selectionRange": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 6},
+                    },
+                    "children": [],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_returns_packed_data_for_two_fn_occurrences() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "fn one\nfn two"),
+                request_message(
+                    2,
+                    "textDocument/semanticTokens/full",
+                    serde_json::json!({"textDocument": {"uri": "file:///a.fake"}}),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        // Two "fn" tokens (function/declaration): line1 cols1..3, line2
+        // cols1..3, both ASCII — hand-computed relative packing.
+        assert_eq!(
+            outputs[2]["result"],
+            serde_json::json!({"data": [0, 0, 2, 0, 1, 1, 0, 2, 0, 1]})
+        );
+    }
+
+    #[test]
+    fn formatting_returns_one_whole_document_edit_when_tabs_are_present() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "a\tb"),
+                request_message(
+                    2,
+                    "textDocument/formatting",
+                    serde_json::json!({"textDocument": {"uri": "file:///a.fake"}}),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[2]["result"],
+            serde_json::json!([
+                {
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 3},
+                    },
+                    "newText": "a    b",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn formatting_returns_empty_array_when_the_text_is_already_clean() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "a b"),
+                request_message(
+                    2,
+                    "textDocument/formatting",
+                    serde_json::json!({"textDocument": {"uri": "file:///a.fake"}}),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["result"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn did_change_configuration_republishes_every_open_document_with_bumped_revision() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "bad"),
+                did_open_message("file:///b.fake", 1, "bad"),
+                notification_message(
+                    "workspace/didChangeConfiguration",
+                    serde_json::json!({"settings": {"n": 1}}),
+                ),
+            ],
+            &mut service,
+        );
+
+        // init response, publish(a), publish(b), then exactly two
+        // republishes (URI-sorted) with the bumped revision embedded.
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[3]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(outputs[3]["params"]["uri"], "file:///a.fake");
+        assert_eq!(
+            outputs[3]["params"]["diagnostics"][0]["message"],
+            "bad word (config rev 1)"
+        );
+        assert_eq!(outputs[4]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(outputs[4]["params"]["uri"], "file:///b.fake");
+        assert_eq!(
+            outputs[4]["params"]["diagnostics"][0]["message"],
+            "bad word (config rev 1)"
+        );
+    }
+
+    #[test]
+    fn did_change_watched_files_republishes_every_open_document() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "bad"),
+                did_open_message("file:///b.fake", 1, "bad"),
+                notification_message(
+                    "workspace/didChangeWatchedFiles",
+                    serde_json::json!({"changes": [{"uri": "file:///fake.json", "type": 2}]}),
+                ),
+            ],
+            &mut service,
+        );
+
+        // Same republish-all sweep as didChangeConfiguration, triggered
+        // by the watched-files notification instead — no config bump
+        // this time, so the embedded revision is unchanged.
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[3]["params"]["uri"], "file:///a.fake");
+        assert_eq!(
+            outputs[3]["params"]["diagnostics"][0]["message"],
+            "bad word (config rev 0)"
+        );
+        assert_eq!(outputs[4]["params"]["uri"], "file:///b.fake");
+        assert_eq!(
+            outputs[4]["params"]["diagnostics"][0]["message"],
+            "bad word (config rev 0)"
+        );
+    }
+
+    #[test]
+    fn panic_probe_did_open_is_contained_and_the_session_stays_alive() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///panic.fake", 1, "panic-now"),
+                did_open_message("file:///healthy.fake", 2, "hi"),
+                request_message(
+                    3,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///healthy.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        // init response, NO publish for the panicking didOpen, the
+        // healthy doc's publish, then a normal completion response —
+        // the contained panic produced no output of its own and did
+        // not disturb anything after it.
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[1]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(outputs[1]["params"]["uri"], "file:///healthy.fake");
+        assert_eq!(outputs[2]["id"], serde_json::json!(3));
+        assert!(outputs[2]["result"].is_array());
+    }
+
+    #[test]
+    fn completion_request_panic_is_contained_as_an_internal_error_response() {
+        let mut service = FakeService::new();
+        let (outputs, exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///panic.fake", 1, "panic-now"),
+                request_message(
+                    2,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///panic.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": null}),
+                serde_json::json!({"jsonrpc": "2.0", "method": "exit"}),
+            ],
+            &mut service,
+        );
+
+        // init response, no publish for the panicking didOpen, the
+        // panicking completion request answers -32603, and the session
+        // is still alive afterward (shutdown still works, exit is
+        // clean).
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[1]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[1]["error"]["code"],
+            serde_json::json!(error_codes::INTERNAL_ERROR)
+        );
+        assert_eq!(outputs[1]["error"]["message"], "fake service panic");
+        assert_eq!(outputs[2]["id"], serde_json::json!(3));
+        assert_eq!(outputs[2]["result"], serde_json::Value::Null);
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn full_spec_shaped_session_runs_every_stage_and_exits_cleanly() {
+        let mut service = FakeService::new();
+        let (outputs, exit_code) = run_session(
+            &[
+                initialize_message(1),
+                serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+                did_open_message("file:///a.fake", 1, "def bad"),
+                request_message(
+                    2,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                request_message(
+                    3,
+                    "textDocument/definition",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                request_message(
+                    4,
+                    "textDocument/formatting",
+                    serde_json::json!({"textDocument": {"uri": "file:///a.fake"}}),
+                ),
+                did_change_message("file:///a.fake", 2, "bad"),
+                notification_message(
+                    "workspace/didChangeConfiguration",
+                    serde_json::json!({"settings": {"n": 1}}),
+                ),
+                notification_message(
+                    "workspace/didChangeWatchedFiles",
+                    serde_json::json!({"changes": []}),
+                ),
+                serde_json::json!({"jsonrpc": "2.0", "id": 5, "method": "shutdown", "params": null}),
+                serde_json::json!({"jsonrpc": "2.0", "method": "exit"}),
+            ],
+            &mut service,
+        );
+
+        // init, registerCapability, publish(open), completion,
+        // definition, formatting, publish(change), publish(config
+        // sweep), publish(watched-files sweep), shutdown = 10 frames;
+        // exit produces none.
+        assert_eq!(outputs.len(), 10);
+        assert_eq!(outputs[0]["id"], serde_json::json!(1));
+        assert_eq!(outputs[1]["method"], "client/registerCapability");
+        assert_eq!(outputs[2]["method"], "textDocument/publishDiagnostics");
+
+        assert_eq!(outputs[3]["id"], serde_json::json!(2));
+        assert_eq!(outputs[3]["result"].as_array().unwrap().len(), 1);
+
+        assert_eq!(outputs[4]["id"], serde_json::json!(3));
+        assert!(outputs[4]["result"].is_object());
+
+        assert_eq!(outputs[5]["id"], serde_json::json!(4));
+        assert_eq!(outputs[5]["result"], serde_json::json!([]));
+
+        assert_eq!(outputs[6]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(outputs[6]["params"]["version"], serde_json::json!(2));
+
+        assert_eq!(outputs[7]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(
+            outputs[7]["params"]["diagnostics"][0]["message"],
+            "bad word (config rev 1)"
+        );
+        assert_eq!(outputs[8]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(
+            outputs[8]["params"]["diagnostics"][0]["message"],
+            "bad word (config rev 1)"
+        );
+
+        assert_eq!(outputs[9]["id"], serde_json::json!(5));
+        assert_eq!(outputs[9]["result"], serde_json::Value::Null);
+        assert_eq!(exit_code, 0);
     }
 }
