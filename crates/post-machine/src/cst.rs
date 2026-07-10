@@ -212,10 +212,12 @@ pub struct FunctionCst {
     pub line: u32,
     /// Column of the name token.
     pub col: u32,
-    /// Extent: the name token's start (the function header's first
-    /// token — `export`, if present, is consumed by the caller before
-    /// this node exists, so it is not included) → the closing `}`'s
-    /// end. For hit-testing and document-symbol ranges.
+    /// Extent: the header's first token → the closing `}`'s end — the
+    /// `export` keyword's start when present (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`
+    /// §declaration header lists `export name() {` as a header instance),
+    /// otherwise the name token's start. A nested function is never
+    /// exported, so its extent always starts at its name token. For
+    /// hit-testing and document-symbol ranges.
     pub span: Span,
     /// `export` (contextual keyword) or `main` at top level. A nested
     /// function is never exported.

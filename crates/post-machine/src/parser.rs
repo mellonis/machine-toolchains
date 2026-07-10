@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use mtc_core::diagnostics::Span;
+use mtc_core::diagnostics::{Pos, Span};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
@@ -752,17 +752,22 @@ impl Parser<'_> {
             // `export` + `(` is a function NAMED export.
             let fn_saved = self.prev_end_line;
             let fn_line = self.peek().line;
-            let exported = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
+            let export_start = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
                 && matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
                     Some(TokenKind::Ident(_))
                 ) {
+                let export_tok = self.peek().clone();
                 self.bump();
-                true
+                Some(export_tok.span().start)
             } else {
-                false
+                None
             };
-            let mut f = self.function()?;
+            let exported = export_start.is_some();
+            // Threaded through so `FunctionCst::span` starts at `export`
+            // (the header's true first token) rather than the name — see
+            // `cst.rs`'s `FunctionCst::span` doc.
+            let mut f = self.function(export_start)?;
             // The literal keyword presence (fmt design doc §D "Export
             // keyword verbatim") — unlike `exported` below, this does NOT
             // fold in `main`'s auto-export.
@@ -802,7 +807,14 @@ impl Parser<'_> {
         }
     }
 
-    fn function(&mut self) -> Result<FunctionCst, CompileError> {
+    // `export_start`: the `export` keyword's span start when the caller
+    // already consumed a leading `export` for this function (top-level
+    // only — a nested definition passes `None`, `NestedExport` bars a
+    // nested `export` before this is ever called). Threaded in rather
+    // than re-detected here because `top_items` already consumed the
+    // token; `FunctionCst::span` starts here when present, at the name
+    // token otherwise (cst.rs's `FunctionCst::span` doc).
+    fn function(&mut self, export_start: Option<Pos>) -> Result<FunctionCst, CompileError> {
         let name_tok = self.peek().clone();
         let TokenKind::Ident(name) = &name_tok.kind else {
             return Err(Self::expected(&name_tok, "a function name"));
@@ -892,7 +904,10 @@ impl Parser<'_> {
             if is_nested_def {
                 let nested_saved = self.prev_end_line;
                 let nested_line = self.peek().line;
-                let child = self.function()?;
+                // Nested definitions can never carry a leading `export`
+                // (`NestedExport` bars it above), so the extent always
+                // starts at the name token.
+                let child = self.function(None)?;
                 if nested_names.contains(&child.name) {
                     return Err(CompileError {
                         span: mtc_core::diagnostics::Span::point(child.line, child.col),
@@ -992,7 +1007,7 @@ impl Parser<'_> {
             line: name_tok.line,
             col: name_tok.col,
             span: Span {
-                start: name_tok.span().start,
+                start: export_start.unwrap_or_else(|| name_tok.span().start),
                 end: close_span.end,
             },
             exported: false,
@@ -1905,18 +1920,21 @@ main() {
         assert_eq!(ns.span, Span::new(1, 1, 3, 2));
 
         // A leading `export` is consumed by `top_items` before
-        // `function()` ever sees it (`f.name_span`/`.line`/`.col` are
-        // already name-token-anchored, ignoring `export` the same way);
-        // `FunctionCst::span` follows that SAME convention — it starts at
-        // the name token, not at `export`. Pinned explicitly since it's
-        // the one place the doc comment's "header first token" reading is
-        // load-bearing.
+        // `function()` ever sees it, but its span start is threaded
+        // through so `FunctionCst::span` still starts at `export` — the
+        // header's true first token (`f.name_span`/`.line`/`.col` stay
+        // name-token-anchored; only the extent `span` reaches back).
+        // Pinned explicitly since it's the one place the doc comment's
+        // "header first token" reading is load-bearing.
         let tokens = lex("export f() {\n    left;\n}\n").unwrap();
         let cst = parse_cst(&tokens).unwrap();
         let TopKind::Function(f) = &cst.items[0].kind else {
             panic!("expected a function item");
         };
-        assert_eq!(f.span, Span::new(1, 8, 3, 2)); // starts at "f", not "export"
+        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "export", not "f"
+        // The bare (non-exported) case above ("Two-line function") already
+        // pins the name-token-anchored start for the un-exported path —
+        // together the two assertions in this test cover both cases.
     }
 
     #[test]
