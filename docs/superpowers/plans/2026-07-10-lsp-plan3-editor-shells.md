@@ -362,7 +362,7 @@ Content (forge-agnostic):
 - Create: `editors/jetbrains/build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, gradle wrapper (`gradlew`, `gradlew.bat`, `gradle/wrapper/*`)
 - Create: `src/main/resources/META-INF/plugin.xml`
 - Create: `src/main/resources/textmate/pmc/package.json` (bundle **manifest** — points at the grammar copied in at build; not a grammar copy)
-- Create: `src/main/kotlin/dev/mellonis/pmc/` — `PmcFileType.kt`, `PmtLanguageServerFactory.kt`, `PmcTextMateBundleProvider.kt`, `PmtVersionCheck.kt`
+- Create: `src/main/kotlin/ru/mellonis/pmc/` — `PmcFileType.kt`, `PmtLanguageServerFactory.kt`, `PmcTextMateBundleProvider.kt`, `PmtVersionCheck.kt`
 
 **`build.gradle.kts`** (pins as of plan time — verify current stables at implementation):
 
@@ -371,7 +371,7 @@ plugins {
     id("org.jetbrains.kotlin.jvm") version "2.1.0"
     id("org.jetbrains.intellij.platform") version "2.2.1"
 }
-group = "dev.mellonis"
+group = "ru.mellonis"
 version = "0.1.0"
 repositories {
     mavenCentral()
@@ -394,7 +394,7 @@ tasks.processResources {
 
 ```xml
 <idea-plugin>
-    <id>dev.mellonis.pmc</id>
+    <id>ru.mellonis.pmc</id>
     <name>PMC (Post machine toolchain)</name>
     <vendor>mellonis</vendor>
     <description>Language support for .pmc via pmt lsp (LSP4IJ): diagnostics,
@@ -403,13 +403,13 @@ tasks.processResources {
     <depends>com.redhat.devtools.lsp4ij</depends>
     <depends>org.jetbrains.plugins.textmate</depends>
     <extensions defaultExtensionNs="com.intellij">
-        <fileType name="PMC" implementationClass="dev.mellonis.pmc.PmcFileType"
+        <fileType name="PMC" implementationClass="ru.mellonis.pmc.PmcFileType"
                   fieldName="INSTANCE" extensions="pmc"/>
-        <textmate.bundleProvider implementation="dev.mellonis.pmc.PmcTextMateBundleProvider"/>
+        <textmate.bundleProvider implementation="ru.mellonis.pmc.PmcTextMateBundleProvider"/>
     </extensions>
     <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
         <server id="pmtLsp" name="pmt lsp"
-                factoryClass="dev.mellonis.pmc.PmtLanguageServerFactory"/>
+                factoryClass="ru.mellonis.pmc.PmtLanguageServerFactory"/>
         <fileTypeMapping fileType="PMC" serverId="pmtLsp" languageId="pmc"/>
     </extensions>
 </idea-plugin>
@@ -473,7 +473,7 @@ class PmtConnectionProvider :
 ### Task 5: JetBrains settings page + run configurations
 
 **Files:**
-- Create: `src/main/kotlin/dev/mellonis/pmc/PmtSettings.kt`, `PmtSettingsConfigurable.kt`, `PmtRunConfigurationType.kt`, `PmtRunConfiguration.kt`, `PmtRunSettingsEditor.kt`; extend `plugin.xml`.
+- Create: `src/main/kotlin/ru/mellonis/pmc/PmtSettings.kt`, `PmtSettingsConfigurable.kt`, `PmtRunConfigurationType.kt`, `PmtRunConfiguration.kt`, `PmtRunSettingsEditor.kt`; extend `plugin.xml`.
 
 **Interfaces:**
 
@@ -515,10 +515,10 @@ class PmtSettings : PersistentStateComponent<PmtSettings.State> {
 
 ```xml
 <extensions defaultExtensionNs="com.intellij">
-    <applicationService serviceImplementation="dev.mellonis.pmc.PmtSettings"/>
-    <applicationConfigurable groupId="tools" id="dev.mellonis.pmc.settings"
-        displayName="pmt" instance="dev.mellonis.pmc.PmtSettingsConfigurable"/>
-    <configurationType implementation="dev.mellonis.pmc.PmtRunConfigurationType"/>
+    <applicationService serviceImplementation="ru.mellonis.pmc.PmtSettings"/>
+    <applicationConfigurable groupId="tools" id="ru.mellonis.pmc.settings"
+        displayName="pmt" instance="ru.mellonis.pmc.PmtSettingsConfigurable"/>
+    <configurationType implementation="ru.mellonis.pmc.PmtRunConfigurationType"/>
 </extensions>
 ```
 
