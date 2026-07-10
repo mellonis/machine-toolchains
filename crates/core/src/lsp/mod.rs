@@ -4,4 +4,5 @@
 //! architecture or language knowledge by contract — exercised against a
 //! crate-private fake service (docs/lsp.md; docs/cli.md (thin-renderer rule)).
 
+pub mod jsonrpc;
 pub mod transport;
