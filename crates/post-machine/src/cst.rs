@@ -181,6 +181,9 @@ pub struct NamespaceCst {
     pub name_span: Span,
     /// Line of the `namespace` keyword.
     pub line: u32,
+    /// Extent: the `namespace` keyword's start → the closing `}`'s end.
+    /// For hit-testing and document-symbol ranges.
+    pub span: Span,
     /// Body items in source order; may itself contain nested
     /// [`TopKind::Namespace`] blocks.
     pub items: Vec<TopItem>,
@@ -209,6 +212,11 @@ pub struct FunctionCst {
     pub line: u32,
     /// Column of the name token.
     pub col: u32,
+    /// Extent: the name token's start (the function header's first
+    /// token — `export`, if present, is consumed by the caller before
+    /// this node exists, so it is not included) → the closing `}`'s
+    /// end. For hit-testing and document-symbol ranges.
+    pub span: Span,
     /// `export` (contextual keyword) or `main` at top level. A nested
     /// function is never exported.
     pub exported: bool,
@@ -333,6 +341,7 @@ mod tests {
                         which: Builtin::Right,
                         succ: Successor::FallThrough,
                         succ_span: None,
+                        succ_label_span: None,
                         line: 3,
                     },
                     leading: vec![],
@@ -358,6 +367,7 @@ mod tests {
                 name_span: dummy_span,
                 line: 4,
                 col: 5,
+                span: dummy_span,
                 exported: false,
                 has_export: false,
                 body: vec![],
@@ -379,6 +389,7 @@ mod tests {
             name_span: dummy_span,
             line: 2,
             col: 5,
+            span: dummy_span,
             exported: true,
             has_export: true,
             body: vec![leading, labeled_statement, nested_fn, standalone],
@@ -390,6 +401,7 @@ mod tests {
             name: "ns".into(),
             name_span: dummy_span,
             line: 1,
+            span: dummy_span,
             items: vec![TopItem {
                 blank_before: false,
                 kind: TopKind::Function(f),

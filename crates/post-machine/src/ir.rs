@@ -212,9 +212,9 @@ fn lower_function(
             label_block.insert(l.value, block_of_stmt[i]);
         }
     }
-    let resolve = |label: u32, line: u32| -> Result<u32, CompileError> {
+    let resolve = |label: u32, ref_span: Span| -> Result<u32, CompileError> {
         label_block.get(&label).copied().ok_or(CompileError {
-            span: mtc_core::diagnostics::Span::point(line, 1),
+            span: ref_span,
             kind: CompileErrorKind::UndefinedLabel(label),
         })
     };
@@ -268,19 +268,22 @@ fn lower_function(
 
         let last = stmt.items.last().expect("parser: statements have items");
         let close = match last {
-            Item::Goto { label, line } => Close::Term(IrTerm::Goto {
-                to: resolve(*label, *line)?,
+            Item::Goto {
+                label, label_span, ..
+            } => Close::Term(IrTerm::Goto {
+                to: resolve(*label, *label_span)?,
             }),
             Item::Halt { .. } => Close::Term(IrTerm::Halt),
             Item::Check {
                 marked,
                 blank,
-                line,
+                marked_span,
+                blank_span,
                 ..
             } => {
-                let mut arm = |a: &CheckArm| -> Result<u32, CompileError> {
+                let mut arm = |a: &CheckArm, arm_span: Span| -> Result<u32, CompileError> {
                     Ok(match a {
-                        CheckArm::Label(l) => resolve(*l, *line)?,
+                        CheckArm::Label(l) => resolve(*l, arm_span)?,
                         CheckArm::Return => {
                             exit_used = true;
                             exit_id
@@ -288,13 +291,26 @@ fn lower_function(
                     })
                 };
                 Close::Term(IrTerm::Check {
-                    marked: arm(marked)?,
-                    blank: arm(blank)?,
+                    marked: arm(marked, *marked_span)?,
+                    blank: arm(blank, *blank_span)?,
                 })
             }
-            Item::Builtin { succ, line, .. } | Item::Call { succ, line, .. } => match succ {
+            Item::Builtin {
+                succ,
+                succ_label_span,
+                ..
+            }
+            | Item::Call {
+                succ,
+                succ_label_span,
+                ..
+            } => match succ {
                 Successor::Label(l) => Close::Term(IrTerm::Goto {
-                    to: resolve(*l, *line)?,
+                    to: resolve(
+                        *l,
+                        succ_label_span
+                            .expect("succ_label_span is Some whenever succ is Successor::Label"),
+                    )?,
                 }),
                 Successor::Return => Close::Term(IrTerm::Return),
                 Successor::FallThrough => Close::None,
@@ -531,14 +547,24 @@ mod tests {
         assert_eq!(ir.functions[0].blocks[0].term, IrTerm::Return);
     }
 
+    /// `undefined-label`'s span is the REFERENCE's own token — the `goto`
+    /// target, a builtin/call successor's number, or a check arm's number
+    /// — not the old degenerate `Span::point(line, 1)`
+    /// (docs/superpowers/plans/2026-07-10-lsp-plan2-pmc-service.md, Task
+    /// 2; one of the plan's two sanctioned output changes).
     #[test]
-    fn undefined_labels_error_wherever_they_are_referenced() {
+    fn undefined_labels_error_with_the_reference_span_not_column_one() {
         let e = lower(&parse(&lex("f() { goto 9; }").unwrap()).unwrap()).unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UndefinedLabel(9)));
+        assert_eq!(e.span, Span::new(1, 12, 1, 13)); // the `9` in "goto 9;"
+
         let e = lower(&parse(&lex("f() { left(7); }").unwrap()).unwrap()).unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UndefinedLabel(7)));
-        let e = lower(&parse(&lex("f() { check(1, 2); 1: mark; }").unwrap()).unwrap()).unwrap_err();
-        assert!(matches!(e.kind, CompileErrorKind::UndefinedLabel(2)));
+        assert_eq!(e.span, Span::new(1, 12, 1, 13)); // the `7` in "left(7);"
+
+        let e = lower(&parse(&lex("f() { check(7, !); }").unwrap()).unwrap()).unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::UndefinedLabel(7)));
+        assert_eq!(e.span, Span::new(1, 13, 1, 14)); // the `7` in "check(7, !);"
     }
 
     #[test]

@@ -136,6 +136,9 @@ pub enum Item {
         succ: Successor,
         /// The `(`…`)` range including both parens; None without parens.
         succ_span: Option<Span>,
+        /// The successor's number token span alone (inside the parens,
+        /// number only); `Some` iff `succ` is `Successor::Label`.
+        succ_label_span: Option<Span>,
         line: u32,
     },
     Debugger {
@@ -148,6 +151,9 @@ pub enum Item {
         succ: Successor,
         /// The `(`…`)` range; calls always have parens, so always Some.
         succ_span: Option<Span>,
+        /// The successor's number token span alone (inside the parens,
+        /// number only); `Some` iff `succ` is `Successor::Label`.
+        succ_label_span: Option<Span>,
         line: u32,
     },
     Check {
@@ -155,6 +161,10 @@ pub enum Item {
         blank: CheckArm,
         /// `check` keyword start → `)` end.
         span: Span,
+        /// The `marked` arm's own token span (a number or `!`).
+        marked_span: Span,
+        /// The `blank` arm's own token span (a number or `!`).
+        blank_span: Span,
         line: u32,
     },
     Halt {
@@ -162,6 +172,8 @@ pub enum Item {
     },
     Goto {
         label: u32,
+        /// The target number token's span.
+        label_span: Span,
         line: u32,
     },
 }
@@ -329,6 +341,10 @@ struct CommentAt {
     sig_index: usize,
 }
 
+/// [`Parser::top_items`]'s return shape: the items, the block's
+/// `close_trailing` comment, and the closing `}` token's own span.
+type TopItemsResult = Result<(Vec<TopItem>, Option<Comment>, Option<Span>), CompileError>;
+
 struct Parser<'a> {
     /// Significant (comment-free) tokens only — identical to the
     /// `WithoutComments` stream, so the grammar walk matches the pre-C1
@@ -431,7 +447,7 @@ impl Parser<'_> {
 
     /// The whole file is the `ns == []` namespace level.
     fn file(mut self) -> Result<Vec<TopItem>, CompileError> {
-        self.top_items(&[], None).map(|(items, _)| items)
+        self.top_items(&[], None).map(|(items, _, _)| items)
     }
 
     /// One namespace level's item loop, building `TopItem`s in source
@@ -441,14 +457,12 @@ impl Parser<'_> {
     /// interleaves own-line comments as [`TopKind::Comment`] items.
     /// `terminator` is `Some(RBrace)` inside a block, `None` at file level
     /// (ends at Eof). Duplicate-name checks run here, exactly as the pre-C1
-    /// parser did. Returns the items plus the block's `close_trailing`
-    /// comment (c-brace fix, mirrors `function`'s close_trailing) — always
-    /// `None` when `terminator` is `None` (a file has no closing brace).
-    fn top_items(
-        &mut self,
-        ns: &[String],
-        terminator: Option<&TokenKind>,
-    ) -> Result<(Vec<TopItem>, Option<Comment>), CompileError> {
+    /// parser did. Returns the items, the block's `close_trailing` comment
+    /// (c-brace fix, mirrors `function`'s close_trailing), and the closing
+    /// `}` token's own span (for the caller's `NamespaceCst::span` extent)
+    /// — both always `None` when `terminator` is `None` (a file has no
+    /// closing brace).
+    fn top_items(&mut self, ns: &[String], terminator: Option<&TokenKind>) -> TopItemsResult {
         let mut items: Vec<TopItem> = Vec::new();
         loop {
             // Own-line comments (leading/standalone/dangling) become their
@@ -463,7 +477,7 @@ impl Parser<'_> {
             }
             let t = self.peek().clone();
             match (&t.kind, terminator) {
-                (TokenKind::Eof, None) => return Ok((items, None)),
+                (TokenKind::Eof, None) => return Ok((items, None, None)),
                 (TokenKind::Eof, Some(_)) => {
                     return Err(Self::expected(&t, "`}` to close the namespace block"));
                 }
@@ -491,7 +505,7 @@ impl Parser<'_> {
                             self.cpos += 1;
                         }
                     }
-                    return Ok((items, close_trailing));
+                    return Ok((items, close_trailing, Some(t.span())));
                 }
                 _ => {}
             }
@@ -708,7 +722,7 @@ impl Parser<'_> {
                 if let Some(last) = open_trailing.last() {
                     self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
                 }
-                let (child_items, close_trailing) =
+                let (child_items, close_trailing, close_span) =
                     self.top_items(&child, Some(&TokenKind::RBrace))?;
                 // `top_items` set `prev_end_line` to the closing `}` line
                 // (or its close_trailing comment's last line).
@@ -719,6 +733,14 @@ impl Parser<'_> {
                         name,
                         name_span,
                         line: ns_line,
+                        span: Span {
+                            start: t.span().start,
+                            end: close_span
+                                .expect(
+                                    "top_items with Some(terminator) always returns a close span",
+                                )
+                                .end,
+                        },
                         items: child_items,
                         open_trailing,
                         close_trailing,
@@ -830,6 +852,11 @@ impl Parser<'_> {
             self.prev_end_line = brace.line + last.text.matches('\n').count() as u32;
         }
         let mut close_trailing: Option<Comment> = None;
+        // Assigned exactly once, in the `RBrace`-closing branch below,
+        // right before the `break` that is this loop's only non-error
+        // exit — the closing `}` token's own span, for
+        // `FunctionCst::span`'s extent end.
+        let close_span: Span;
         loop {
             // Own-line comments (leading/standalone/dangling) become body
             // items in source position.
@@ -927,7 +954,9 @@ impl Parser<'_> {
                         CompileErrorKind::DanglingLabel(label.value),
                     ));
                 }
-                let close_line = self.peek().line;
+                let close_tok = self.peek().clone();
+                let close_line = close_tok.line;
+                close_span = close_tok.span();
                 self.prev_end_line = close_line;
                 self.bump();
                 // c-brace fix, symmetric to `open_trailing` above: a
@@ -962,6 +991,10 @@ impl Parser<'_> {
             name_span: name_tok.span(),
             line: name_tok.line,
             col: name_tok.col,
+            span: Span {
+                start: name_tok.span().start,
+                end: close_span.end,
+            },
             exported: false,
             has_export: false,
             body,
@@ -1115,7 +1148,7 @@ impl Parser<'_> {
                 }
                 let lparen = self.peek().clone();
                 self.expect(&TokenKind::LParen, "`(` (user calls are written `@name()`)")?;
-                let succ = self.successor()?;
+                let (succ, succ_label_span) = self.successor()?;
                 let rparen = self.peek().clone();
                 self.expect(&TokenKind::RParen, "`)`")?;
                 Ok(Item::Call {
@@ -1129,6 +1162,7 @@ impl Parser<'_> {
                         start: lparen.span().start,
                         end: rparen.span().end,
                     }),
+                    succ_label_span,
                     line: tok.line,
                 })
             }
@@ -1147,6 +1181,7 @@ impl Parser<'_> {
                             self.bump();
                             Ok(Item::Goto {
                                 label: n,
+                                label_span: target.span(),
                                 line: tok.line,
                             })
                         }
@@ -1157,9 +1192,9 @@ impl Parser<'_> {
                 "check" => {
                     self.bump();
                     self.expect(&TokenKind::LParen, "`(` after `check`")?;
-                    let marked = self.check_arm()?;
+                    let (marked, marked_span) = self.check_arm()?;
                     self.expect(&TokenKind::Comma, "`,` between check arms")?;
-                    let blank = self.check_arm()?;
+                    let (blank, blank_span) = self.check_arm()?;
                     let rparen = self.peek().clone();
                     self.expect(&TokenKind::RParen, "`)`")?;
                     Ok(Item::Check {
@@ -1169,6 +1204,8 @@ impl Parser<'_> {
                             start: tok.span().start,
                             end: rparen.span().end,
                         },
+                        marked_span,
+                        blank_span,
                         line: tok.line,
                     })
                 }
@@ -1188,41 +1225,46 @@ impl Parser<'_> {
                         _ => Builtin::Unmark,
                     };
                     self.bump();
-                    let (succ, succ_span) = if matches!(self.peek().kind, TokenKind::LParen) {
-                        let lparen = self.peek().clone();
-                        self.bump();
-                        // docs/language.md: parens on a builtin, if
-                        // present, must carry a successor — empty `()` is
-                        // no longer fall-through sugar. Builtins-only:
-                        // `successor()` (shared with calls) is untouched,
-                        // so `@f()` stays legal.
-                        if matches!(self.peek().kind, TokenKind::RParen) {
+                    let (succ, succ_span, succ_label_span) =
+                        if matches!(self.peek().kind, TokenKind::LParen) {
+                            let lparen = self.peek().clone();
+                            self.bump();
+                            // docs/language.md: parens on a builtin, if
+                            // present, must carry a successor — empty `()` is
+                            // no longer fall-through sugar. Builtins-only:
+                            // `successor()` (shared with calls) is untouched,
+                            // so `@f()` stays legal.
+                            if matches!(self.peek().kind, TokenKind::RParen) {
+                                let rparen = self.peek().clone();
+                                return Err(CompileError {
+                                    span: Span {
+                                        start: lparen.span().start,
+                                        end: rparen.span().end,
+                                    },
+                                    kind: CompileErrorKind::EmptyBuiltinParens {
+                                        name: word.clone(),
+                                    },
+                                });
+                            }
+                            let (succ, succ_label_span) = self.successor()?;
                             let rparen = self.peek().clone();
-                            return Err(CompileError {
-                                span: Span {
+                            self.expect(&TokenKind::RParen, "`)`")?;
+                            (
+                                succ,
+                                Some(Span {
                                     start: lparen.span().start,
                                     end: rparen.span().end,
-                                },
-                                kind: CompileErrorKind::EmptyBuiltinParens { name: word.clone() },
-                            });
-                        }
-                        let succ = self.successor()?;
-                        let rparen = self.peek().clone();
-                        self.expect(&TokenKind::RParen, "`)`")?;
-                        (
-                            succ,
-                            Some(Span {
-                                start: lparen.span().start,
-                                end: rparen.span().end,
-                            }),
-                        )
-                    } else {
-                        (Successor::FallThrough, None)
-                    };
+                                }),
+                                succ_label_span,
+                            )
+                        } else {
+                            (Successor::FallThrough, None, None)
+                        };
                     Ok(Item::Builtin {
                         which,
                         succ,
                         succ_span,
+                        succ_label_span,
                         line: tok.line,
                     })
                 }
@@ -1241,31 +1283,35 @@ impl Parser<'_> {
     }
 
     /// Inside `( … )`: empty → fall through, `N` → label, `!` → return.
-    fn successor(&mut self) -> Result<Successor, CompileError> {
+    /// The second element of the result is the number token's own span,
+    /// `Some` iff the successor is `Successor::Label`.
+    fn successor(&mut self) -> Result<(Successor, Option<Span>), CompileError> {
         let t = self.peek().clone();
         match t.kind {
             TokenKind::Number(n) => {
                 self.bump();
-                Ok(Successor::Label(n))
+                Ok((Successor::Label(n), Some(t.span())))
             }
             TokenKind::Bang => {
                 self.bump();
-                Ok(Successor::Return)
+                Ok((Successor::Return, None))
             }
-            _ => Ok(Successor::FallThrough), // the caller checks the `)`
+            _ => Ok((Successor::FallThrough, None)), // the caller checks the `)`
         }
     }
 
-    fn check_arm(&mut self) -> Result<CheckArm, CompileError> {
+    /// The second element of the result is the arm's own token span
+    /// (the number or the `!`), regardless of which arm shape it is.
+    fn check_arm(&mut self) -> Result<(CheckArm, Span), CompileError> {
         let t = self.peek().clone();
         match t.kind {
             TokenKind::Number(n) => {
                 self.bump();
-                Ok(CheckArm::Label(n))
+                Ok((CheckArm::Label(n), t.span()))
             }
             TokenKind::Bang => {
                 self.bump();
-                Ok(CheckArm::Return)
+                Ok((CheckArm::Return, t.span()))
             }
             _ => Err(Self::expected(&t, "a label number or `!`")),
         }
@@ -1742,6 +1788,135 @@ main() {
             panic!("expected check");
         };
         assert_eq!((span.start.col, span.end.col), (16, 27)); // "check(1, !)"
+    }
+
+    /// docs/superpowers/plans/2026-07-10-lsp-plan2-pmc-service.md (Task
+    /// 2): character-precise reference spans, exact `Span::new(...)`
+    /// values against the fixture's actual layout —
+    /// `f() { 1: right(2); check(1, !); goto 1; left, mark(3); }`.
+    #[test]
+    fn reference_spans_on_goto_check_and_builtin_successors() {
+        let p = parse_src("f() { 1: right(2); check(1, !); goto 1; left, mark(3); }").unwrap();
+        let f = &p.functions[0];
+
+        // `1: right(2);` — the successor's number token alone, inside the
+        // parens.
+        let Item::Builtin {
+            succ_label_span, ..
+        } = &f.body[0].items[0]
+        else {
+            panic!("expected builtin");
+        };
+        assert_eq!(
+            succ_label_span.expect("right(2) has a label successor"),
+            Span::new(1, 16, 1, 17)
+        );
+
+        // `check(1, !);` — each arm's own token.
+        let Item::Check {
+            marked_span,
+            blank_span,
+            ..
+        } = &f.body[1].items[0]
+        else {
+            panic!("expected check");
+        };
+        assert_eq!(*marked_span, Span::new(1, 26, 1, 27));
+        assert_eq!(*blank_span, Span::new(1, 29, 1, 30));
+
+        // `goto 1;` — the target number token.
+        let Item::Goto { label_span, .. } = &f.body[2].items[0] else {
+            panic!("expected goto");
+        };
+        assert_eq!(*label_span, Span::new(1, 38, 1, 39));
+
+        // `left, mark(3);` — the bare (no-successor) first item has no
+        // label span at all.
+        let Item::Builtin {
+            which: Builtin::Left,
+            succ_label_span,
+            ..
+        } = &f.body[3].items[0]
+        else {
+            panic!("expected bare left");
+        };
+        assert!(
+            succ_label_span.is_none(),
+            "a bare (successor-less) builtin has no succ_label_span"
+        );
+    }
+
+    #[test]
+    fn succ_label_span_is_none_without_a_label_successor() {
+        // Bare, no parens at all.
+        let p = parse_src("f() { right; }").unwrap();
+        let Item::Builtin {
+            succ_label_span, ..
+        } = &p.functions[0].body[0].items[0]
+        else {
+            panic!("expected builtin");
+        };
+        assert!(succ_label_span.is_none());
+
+        // Parenthesised but a `!` (return) successor, not a label.
+        let p = parse_src("f() { right(!); }").unwrap();
+        let Item::Builtin {
+            succ_label_span, ..
+        } = &p.functions[0].body[0].items[0]
+        else {
+            panic!("expected builtin");
+        };
+        assert!(succ_label_span.is_none());
+    }
+
+    #[test]
+    fn call_succ_label_span_covers_the_number() {
+        let p = parse_src("main() { @g(7); }").unwrap();
+        let Item::Call {
+            succ_label_span, ..
+        } = &p.functions[0].body[0].items[0]
+        else {
+            panic!("expected call");
+        };
+        assert_eq!(
+            succ_label_span.expect("@g(7) has a label successor"),
+            Span::new(1, 13, 1, 14)
+        );
+    }
+
+    #[test]
+    fn function_and_namespace_extent_spans() {
+        use crate::cst::TopKind;
+
+        // Two-line function: name token start → closing `}` end.
+        let tokens = lex("f() {\n    left;\n}\n").unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let TopKind::Function(f) = &cst.items[0].kind else {
+            panic!("expected a function item");
+        };
+        assert_eq!(f.span, Span::new(1, 1, 3, 2));
+
+        // Namespace block: `namespace` keyword start → closing `}` end.
+        let tokens = lex("namespace ns {\n    f() { left; }\n}\n").unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let TopKind::Namespace(ns) = &cst.items[0].kind else {
+            panic!("expected a namespace item");
+        };
+        assert_eq!(ns.span, Span::new(1, 1, 3, 2));
+
+        // A leading `export` is consumed by `top_items` before
+        // `function()` ever sees it (`f.name_span`/`.line`/`.col` are
+        // already name-token-anchored, ignoring `export` the same way);
+        // `FunctionCst::span` follows that SAME convention — it starts at
+        // the name token, not at `export`. Pinned explicitly since it's
+        // the one place the doc comment's "header first token" reading is
+        // load-bearing.
+        let tokens = lex("export f() {\n    left;\n}\n").unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let TopKind::Function(f) = &cst.items[0].kind else {
+            panic!("expected a function item");
+        };
+        assert_eq!(f.span, Span::new(1, 8, 3, 2)); // starts at "f", not "export"
     }
 
     #[test]
