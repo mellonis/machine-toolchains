@@ -17,6 +17,7 @@
 //! a surrogate pair snaps to the character's start.
 
 use crate::diagnostics::{Pos, Span};
+use crate::lsp::SemToken;
 use crate::lsp::types::{Position, Range};
 
 /// Splits `text` into lines the same way on every call site: `'\n'`
@@ -146,6 +147,48 @@ pub fn range_to_span(text: &str, range: Range) -> Span {
     }
 }
 
+/// Absolute tokens → the wire's relative-packed data array
+/// (deltaLine, deltaStartChar, length, tokenType, tokenModifiers)×N,
+/// sorted by span start; columns and lengths in UTF-16 code units.
+pub fn pack_semantic_tokens(text: &str, tokens: &[SemToken]) -> Vec<u32> {
+    let mut sorted: Vec<&SemToken> = tokens.iter().collect();
+    sorted.sort_by_key(|token| token.span.start);
+
+    let mut out = Vec::with_capacity(sorted.len() * 5);
+    let mut prev_line = 0u32;
+    let mut prev_start = 0u32;
+
+    for token in sorted {
+        debug_assert_eq!(
+            token.span.start.line, token.span.end.line,
+            "semantic token span must be single-line"
+        );
+
+        let range = span_to_range(text, token.span);
+        let line = range.start.line;
+        let start = range.start.character;
+        let length = range.end.character - range.start.character;
+
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            start - prev_start
+        } else {
+            start
+        };
+
+        out.push(delta_line);
+        out.push(delta_start);
+        out.push(length);
+        out.push(token.token_type);
+        out.push(token.modifiers);
+
+        prev_line = line;
+        prev_start = start;
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +303,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn sem_token(span: Span, token_type: u32, modifiers: u32) -> SemToken {
+        SemToken {
+            span,
+            token_type,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn two_tokens_on_one_line_second_delta_start_is_relative() {
+        let text = "foo bar";
+        // "foo" at cols 1..4, "bar" at cols 5..8.
+        let t1 = sem_token(Span::new(1, 1, 1, 4), 1, 2);
+        let t2 = sem_token(Span::new(1, 5, 1, 8), 3, 4);
+        assert_eq!(
+            pack_semantic_tokens(text, &[t1, t2]),
+            vec![
+                0, 0, 3, 1, 2, // t1: relative to (0,0)
+                0, 4, 3, 3, 4, // t2: same line, deltaStart relative to t1's start
+            ]
+        );
+    }
+
+    #[test]
+    fn token_on_a_later_line_delta_start_is_absolute_again() {
+        let text = "foo bar\nbaz";
+        let t1 = sem_token(Span::new(1, 1, 1, 4), 1, 2);
+        let t2 = sem_token(Span::new(1, 5, 1, 8), 3, 4);
+        let t3 = sem_token(Span::new(2, 1, 2, 4), 5, 6);
+        assert_eq!(
+            pack_semantic_tokens(text, &[t1, t2, t3]),
+            vec![
+                0, 0, 3, 1, 2, //
+                0, 4, 3, 3, 4, //
+                1, 0, 3, 5, 6, // new line: deltaLine 1, deltaStart absolute
+            ]
+        );
+    }
+
+    #[test]
+    fn token_after_an_emoji_uses_utf16_units_not_char_counts() {
+        // "😀fn😀": the token covers "fn😀" (chars 1..4, cols 2..5).
+        // Char-counted start would be 1 and length 3; UTF-16-counted
+        // start is 2 (past the leading emoji's 2 units) and length is
+        // 4 (1 + 1 + 2), both different from the char counts.
+        let text = "😀fn😀";
+        let t = sem_token(Span::new(1, 2, 1, 5), 9, 10);
+        assert_eq!(pack_semantic_tokens(text, &[t]), vec![0, 2, 4, 9, 10]);
+    }
+
+    #[test]
+    fn unsorted_input_comes_out_sorted_by_span_start() {
+        let text = "foo bar";
+        let t1 = sem_token(Span::new(1, 1, 1, 4), 1, 2);
+        let t2 = sem_token(Span::new(1, 5, 1, 8), 3, 4);
+        // Passed in reverse order; output must match the sorted-order
+        // packing (same as two_tokens_on_one_line_second_delta_start_is_relative).
+        assert_eq!(
+            pack_semantic_tokens(text, &[t2, t1]),
+            vec![0, 0, 3, 1, 2, 0, 4, 3, 3, 4]
+        );
+    }
+
+    #[test]
+    fn empty_input_packs_to_an_empty_vec() {
+        assert_eq!(pack_semantic_tokens("anything", &[]), Vec::<u32>::new());
     }
 }
