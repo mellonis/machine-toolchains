@@ -11,8 +11,9 @@ use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::ObjectFile;
 
 use crate::codegen::{CodegenOptions, emit_program};
+use crate::cst::Cst;
 use crate::ir::IrProgram;
-use crate::lexer::Token;
+use crate::lexer::{LexMode, Token};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::Program;
 
@@ -288,8 +289,10 @@ pub(crate) struct AnalysisOutput {
     /// Per-call-site resolution, keyed by the call's `name_span`. A pure
     /// side channel — nothing here influences codegen, mangling, or
     /// warnings; it exists for a future LSP's go-to-definition / hover.
-    /// Read only by tests until `analyze_staged` (LSP plan 2, Task 4)
-    /// carries it into `PmcAnalysis`.
+    /// `analyze_staged` (LSP plan 2, Task 4) computes its own resolution
+    /// table on a separate pipeline rather than reading this one — this
+    /// field stays read only by `analyze()`'s own tests, which is why
+    /// the allow stays even after Task 4 landed.
     #[allow(dead_code)]
     pub resolutions: Vec<(Span, Resolution)>,
 }
@@ -316,6 +319,106 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         scopes,
         resolutions,
     })
+}
+
+/// The post-parse half of a staged analysis (docs/lsp.md (staged
+/// analysis)): the flattened AST, its scope summary, the merged warnings
+/// (ir diagnostics then flatten's visibility warnings — the same order
+/// `analyze()` produces), and the per-call-site resolution table.
+#[allow(dead_code)] // consumer: PmcLanguageService (LSP plan 2, Task 7)
+pub(crate) struct Analysis {
+    pub ast: Program,
+    pub scopes: ScopeSummary,
+    pub warnings: Vec<Diagnostic>,
+    pub resolutions: Vec<(Span, Resolution)>,
+}
+
+/// The LSP's pipeline entry (docs/lsp.md (staged analysis)): every stage's
+/// outcome, retained independently, so a document that fails partway
+/// through still serves whatever the earlier stages produced. `None`
+/// fields past the first failure; `fatal` carries that one error.
+#[allow(dead_code)] // consumer: PmcLanguageService (LSP plan 2, Task 7)
+pub(crate) struct StagedAnalysis {
+    /// WithComments — `None` only if lexing itself failed.
+    pub tokens: Option<Vec<Token>>,
+    /// `None` if lexing or parsing failed.
+    pub cst: Option<Cst>,
+    /// `None` if any stage failed (parse, duplicate-binding check, or
+    /// lowering).
+    pub analysis: Option<Analysis>,
+    /// The first (only) fatal, at whichever stage produced it.
+    pub fatal: Option<CompileError>,
+}
+
+/// lex (WithComments) → parse_cst → lower_cst → duplicate-binding check →
+/// flatten → ir::lower, retaining each stage's outcome instead of
+/// stopping at the first failure. `lower_cst` and `flatten` are
+/// infallible, so the only post-parse fatals are `DuplicateBinding` (the
+/// binding check) and `UndefinedLabel` (`ir::lower`) — the pipeline
+/// always runs through `ir::lower`, never stopping at `flatten`. The
+/// `IrProgram` itself is discarded once `ir::lower` has had its say: the
+/// LSP's tiers only need the flattened `Analysis`, not the CFG.
+#[allow(dead_code)] // consumer: PmcLanguageService (LSP plan 2, Task 7)
+pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
+    let tokens = match crate::lexer::lex_with(source, LexMode::WithComments) {
+        Ok(tokens) => tokens,
+        Err(fatal) => {
+            return StagedAnalysis {
+                tokens: None,
+                cst: None,
+                analysis: None,
+                fatal: Some(fatal),
+            };
+        }
+    };
+    let cst = match crate::parser::parse_cst(&tokens) {
+        Ok(cst) => cst,
+        Err(fatal) => {
+            return StagedAnalysis {
+                tokens: Some(tokens),
+                cst: None,
+                analysis: None,
+                fatal: Some(fatal),
+            };
+        }
+    };
+    let program = crate::parser::lower_cst(&cst);
+    if let Err(fatal) = check_duplicate_bindings(&program) {
+        return StagedAnalysis {
+            tokens: Some(tokens),
+            cst: Some(cst),
+            analysis: None,
+            fatal: Some(fatal),
+        };
+    }
+    let Flattened {
+        program,
+        scopes,
+        warnings: vis,
+        resolutions,
+    } = flatten(program);
+    match crate::ir::lower(&program) {
+        Ok((_ir, mut warnings)) => {
+            warnings.extend(vis);
+            StagedAnalysis {
+                tokens: Some(tokens),
+                cst: Some(cst),
+                analysis: Some(Analysis {
+                    ast: program,
+                    scopes,
+                    warnings,
+                    resolutions,
+                }),
+                fatal: None,
+            }
+        }
+        Err(fatal) => StagedAnalysis {
+            tokens: Some(tokens),
+            cst: Some(cst),
+            analysis: None,
+            fatal: Some(fatal),
+        },
+    }
 }
 
 /// `.pmc` source → object file: lex → parse → lower → emit `.pma` →
@@ -750,6 +853,7 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer::TokenKind;
     use mtc_core::formats::object::SymbolDef;
 
     #[test]
@@ -1261,5 +1365,100 @@ mod tests {
         let out = compile(src, CompileOptions::default()).unwrap();
         assert!(out.pma.contains(".func main"));
         assert!(out.pma.contains(".func ns::inner"));
+    }
+
+    #[test]
+    fn analyze_staged_on_clean_source_matches_analyze_at_every_stage() {
+        // Tier 1: nothing fails — all four fields Some/None as documented,
+        // and the staged pipeline's findings agree with analyze()'s on
+        // the same source. A leading comment proves `staged.tokens` is a
+        // genuine WithComments stream (not just coincidentally equal to
+        // WithoutComments because the fixture had nothing to filter) —
+        // filtering it of Comment entries must still match analyze()'s
+        // WithoutComments stream exactly.
+        let src = "// a leading comment\nuse ext;\nuse std::goToEnd as ge;\nnamespace ns { export inner() { right; } }\nexport main() {\n    helper() { left; }\n    @helper();\n    @ns::inner();\n    @inner();\n    @ext();\n    @ge();\n    @other::thing();\n    @mystery();\n}\n";
+        let staged = analyze_staged(src);
+        assert!(staged.fatal.is_none());
+        let tokens = staged.tokens.as_ref().expect("lexing succeeded");
+        assert!(staged.cst.is_some(), "parsing succeeded");
+        let analysis = staged.analysis.as_ref().expect("the pipeline succeeded");
+
+        let a = analyze(src).unwrap();
+
+        // WithComments is genuinely in effect: at least one Comment token
+        // is present (otherwise the filter below would be a no-op and
+        // wouldn't prove anything).
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, TokenKind::Comment(_))),
+            "fixture's leading comment should surface as a Comment token"
+        );
+
+        // The WithComments significant-token stream filtered of Comment
+        // trivia is byte-identical to the WithoutComments stream.
+        let significant: Vec<TokenKind> = tokens
+            .iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+            .map(|t| t.kind.clone())
+            .collect();
+        let expected: Vec<TokenKind> = a.tokens.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(significant, expected);
+
+        assert_eq!(analysis.ast, a.ast);
+        assert_eq!(analysis.warnings, a.diagnostics);
+        assert_eq!(analysis.resolutions, a.resolutions);
+        assert_eq!(analysis.scopes.defs, a.scopes.defs);
+        assert_eq!(analysis.scopes.bindings, a.scopes.bindings);
+    }
+
+    #[test]
+    fn analyze_staged_lex_failure_degrades_everything_to_none() {
+        // Tier 2: lexing itself fails — no tokens, no cst, no analysis.
+        let staged = analyze_staged("/* never closed");
+        assert!(staged.tokens.is_none());
+        assert!(staged.cst.is_none());
+        assert!(staged.analysis.is_none());
+        let fatal = staged.fatal.expect("a fatal is recorded");
+        assert_eq!(fatal.kind.code(), "lex-error");
+    }
+
+    #[test]
+    fn analyze_staged_parse_failure_keeps_tokens_but_not_cst() {
+        // Tier 3: lexing succeeds, parsing does not (a bare identifier
+        // statement that is not a builtin — CompileErrorKind::UnknownCommand).
+        let staged = analyze_staged("f() { gibberish; }");
+        assert!(staged.tokens.is_some(), "lexing still succeeded");
+        assert!(staged.cst.is_none());
+        assert!(staged.analysis.is_none());
+        let fatal = staged.fatal.expect("a fatal is recorded");
+        assert_eq!(fatal.kind.code(), "unknown-command");
+    }
+
+    #[test]
+    fn analyze_staged_duplicate_binding_keeps_cst_but_not_analysis() {
+        // Tier 4: parsing succeeds (the CST is a faithful reprint of two
+        // legal `use` lines), the post-parse duplicate-binding check
+        // fails before flatten/ir::lower ever run.
+        let staged = analyze_staged("use goToEnd; use std::goToEnd; main() { @goToEnd(); }");
+        assert!(staged.tokens.is_some());
+        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.analysis.is_none());
+        let fatal = staged.fatal.expect("a fatal is recorded");
+        assert_eq!(fatal.kind.code(), "duplicate-binding");
+    }
+
+    #[test]
+    fn analyze_staged_lower_failure_proves_the_pipeline_reaches_ir_lower() {
+        // Tier 5: parsing and the duplicate-binding check both succeed;
+        // flatten (infallible) runs; only ir::lower fails, on an
+        // undefined label. This is the case that proves analyze_staged
+        // does not stop at flatten.
+        let staged = analyze_staged("main() { goto 99; }");
+        assert!(staged.tokens.is_some());
+        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.analysis.is_none());
+        let fatal = staged.fatal.expect("a fatal is recorded");
+        assert_eq!(fatal.kind.code(), "undefined-label");
     }
 }

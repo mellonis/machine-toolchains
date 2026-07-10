@@ -81,12 +81,36 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("confusable-names", rules::confusable_names::check),
 ];
 
-pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
-    for code in &options.allow {
+/// `--allow` codes must each name a real rule (typo protection). Split out
+/// of `lint()` so the LSP (a future `PmcLanguageService`) can validate an
+/// IDE-settings or `pmt.json` allow-list up front, independently of
+/// running the rules over any particular analysis.
+pub(crate) fn validate_allow(codes: &[String]) -> Result<(), LintError> {
+    for code in codes {
         if !RULES.iter().any(|(c, _)| c == code) {
             return Err(LintError::UnknownAllowCode(code.clone()));
         }
     }
+    Ok(())
+}
+
+/// Run every non-allowed rule over `ctx`, source-ordered by span start
+/// (stable). Split out of `lint()` so the LSP can lint an `Analysis` it
+/// already staged, instead of re-running `compiler::analyze`.
+pub(crate) fn run_rules(ctx: &LintContext, allow: &[String]) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for (code, rule) in RULES {
+        if allow.iter().any(|a| a == code) {
+            continue;
+        }
+        rule(ctx, &mut diagnostics);
+    }
+    diagnostics.sort_by_key(|d| d.span.start); // stable; Pos is Ord
+    diagnostics
+}
+
+pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
+    validate_allow(&options.allow)?;
     let analysis = compiler::analyze(source)?;
     let ctx = LintContext {
         source,
@@ -94,14 +118,7 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
         ast: &analysis.ast,
         scopes: &analysis.scopes,
     };
-    let mut diagnostics = Vec::new();
-    for (code, rule) in RULES {
-        if options.allow.iter().any(|a| a == code) {
-            continue;
-        }
-        rule(&ctx, &mut diagnostics);
-    }
-    diagnostics.sort_by_key(|d| d.span.start); // stable; Pos is Ord
+    let diagnostics = run_rules(&ctx, &options.allow);
     Ok(LintReport { diagnostics })
 }
 
@@ -160,5 +177,61 @@ mod tests {
         assert_eq!(span_text(src, Span::new(2, 2, 2, 4)), "de");
         // Multi-line span crosses the newline.
         assert_eq!(span_text(src, Span::new(1, 2, 2, 2)), "b\nc");
+    }
+
+    #[test]
+    fn validate_allow_accepts_known_codes_and_rejects_unknown_ones() {
+        assert!(validate_allow(&["unused-label".to_string()]).is_ok());
+        assert!(validate_allow(&[]).is_ok());
+        let err = validate_allow(&["no-such-rule".to_string()]).unwrap_err();
+        assert!(matches!(err, LintError::UnknownAllowCode(ref c) if c == "no-such-rule"));
+    }
+
+    #[test]
+    fn run_rules_filters_allowed_codes_and_sorts_by_span() {
+        let src = "\
+main() {
+007: right;
+5:   left;
+     goto 007;
+     debugger;
+}
+";
+        let analysis = compiler::analyze(src).unwrap();
+        let ctx = LintContext {
+            source: src,
+            tokens: &analysis.tokens,
+            ast: &analysis.ast,
+            scopes: &analysis.scopes,
+        };
+
+        let all = run_rules(&ctx, &[]);
+        assert!(!all.is_empty());
+        let mut sorted_starts: Vec<_> = all.iter().map(|d| d.span.start).collect();
+        sorted_starts.sort();
+        let starts: Vec<_> = all.iter().map(|d| d.span.start).collect();
+        assert_eq!(starts, sorted_starts, "run_rules must sort by span start");
+
+        assert!(all.iter().any(|d| d.code == "leftover-debugger"));
+        let filtered = run_rules(&ctx, &["leftover-debugger".to_string()]);
+        assert!(filtered.iter().all(|d| d.code != "leftover-debugger"));
+        assert_eq!(filtered.len() + 1, all.len());
+    }
+
+    #[test]
+    fn lint_output_is_byte_identical_across_the_validate_allow_run_rules_split() {
+        // Regression pin (LSP plan 2, Task 4): `lint()` used to inline the
+        // RULES-membership check and the rule loop + span sort; both moved
+        // into `validate_allow`/`run_rules`. This fixture, run through the
+        // still-public `lint()` entry, must keep producing exactly these
+        // findings, in exactly this order, before and after the split.
+        const FIXTURE: &str = include_str!("../../tests/lint/unused_labels.pmc");
+        let report = lint(FIXTURE, LintOptions::default()).unwrap();
+        let codes: Vec<(&str, u32, u32)> = report
+            .diagnostics
+            .iter()
+            .map(|d| (d.code, d.span.start.line, d.span.start.col))
+            .collect();
+        assert_eq!(codes, vec![("unused-label", 4, 1), ("unused-label", 12, 1)]);
     }
 }
