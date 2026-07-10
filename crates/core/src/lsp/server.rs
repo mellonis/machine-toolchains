@@ -12,8 +12,10 @@
 //! panicking handler can't take the whole session down (docs/lsp.md
 //! "Error containment").
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::Once;
 
 use super::LanguageService;
 use super::docstore::DocStore;
@@ -80,7 +82,7 @@ pub fn run(
     identity: ServerIdentity,
 ) -> i32 {
     let mut state = ServerState::new();
-    let _quiet_panic_hook = QuietPanicHook::install();
+    install_quiet_hook_once();
 
     loop {
         let payload = match transport::read_message(reader) {
@@ -125,7 +127,11 @@ pub fn run(
 /// exactly one response, never both); a panicking *notification*
 /// handler produces no output at all beyond a concise stderr line. The
 /// loop always continues either way (`run` decides EOF-flavored exits;
-/// a contained panic is not one of them).
+/// a contained panic is not one of them). Each `catch_unwind` is wrapped
+/// in a `SuppressPanicOutput` guard so the process-global delegating
+/// hook (`install_quiet_hook_once`) swallows the default panic
+/// diagnostic for exactly this thread, exactly for this one dispatched
+/// message — never a wider window, never another thread.
 fn dispatch(
     state: &mut ServerState,
     writer: &mut dyn std::io::Write,
@@ -135,9 +141,12 @@ fn dispatch(
 ) -> Signal {
     match message {
         Message::Request { id, method, params } => {
-            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-                handle_request(state, writer, service, identity, &id, &method, params);
-            }));
+            let outcome = {
+                let _suppress = SuppressPanicOutput::new();
+                panic::catch_unwind(AssertUnwindSafe(|| {
+                    handle_request(state, writer, service, identity, &id, &method, params);
+                }))
+            };
             if let Err(payload) = outcome {
                 let text = panic_message(&*payload);
                 eprintln!("lsp server: request '{method}' panicked: {text}");
@@ -146,9 +155,12 @@ fn dispatch(
             Signal::Continue
         }
         Message::Notification { method, params } => {
-            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-                handle_notification(state, writer, service, &method, params)
-            }));
+            let outcome = {
+                let _suppress = SuppressPanicOutput::new();
+                panic::catch_unwind(AssertUnwindSafe(|| {
+                    handle_notification(state, writer, service, &method, params)
+                }))
+            };
             match outcome {
                 Ok(signal) => signal,
                 Err(payload) => {
@@ -177,41 +189,70 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// RAII guard installing a no-op panic hook for the server loop's
-/// lifetime, restoring the previous hook on drop. Covers every exit
-/// path of `run` uniformly (EOF/transport failure, shutdown→exit,
-/// exit-without-shutdown) without an install/restore pair around each
-/// dispatched message. Every panic `dispatch` catches is re-logged as
-/// one concise `eprintln!` line instead of letting the default hook
-/// print a full backtrace.
-///
-/// **Caveat**: the panic hook is process-global. If `run` executes
-/// concurrently on more than one thread (as parallel tests do), there
-/// is a brief window between `take_hook` and `set_hook` where another
-/// thread's panic can still hit the default hook. Accepted: every
-/// panic is still caught by `catch_unwind` regardless, so correctness
-/// never depends on the hook — only, rarely, its stderr noise leaks.
-type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>;
-
-struct QuietPanicHook {
-    previous: Option<PanicHook>,
+thread_local! {
+    /// Set for the extent of exactly one `catch_unwind` call (see
+    /// `SuppressPanicOutput`) so the shared hook's delegate-or-swallow
+    /// decision is scoped to a single thread's containment window, never
+    /// to a process-wide interval another thread's unrelated panic could
+    /// land inside.
+    static SUPPRESS_PANIC_OUTPUT: Cell<bool> = const { Cell::new(false) };
 }
 
-impl QuietPanicHook {
-    fn install() -> Self {
+/// Guards one-time installation of the process-global delegating hook
+/// (see `install_quiet_hook_once`) so concurrent callers (parallel
+/// `run_session` tests, for instance) can call it freely — the first
+/// caller installs, every later call is a no-op.
+static HOOK_INIT: Once = Once::new();
+
+/// Installs, once and for the rest of the process's life, a panic hook
+/// that delegates to whatever hook was previously registered UNLESS the
+/// *panicking* thread currently has `SUPPRESS_PANIC_OUTPUT` set.
+///
+/// This replaces an earlier design that swapped the process-global hook
+/// in and out around each `run()` call (install on entry, restore on
+/// drop). That design raced under `cargo test`'s default multi-threaded
+/// execution: an unrelated test panicking while a `run_session` test was
+/// mid-flight could have its default diagnostic silently swallowed by
+/// the installed no-op hook, and two concurrent install/restore
+/// interleavings could restore the wrong "previous" hook, permanently
+/// leaking a no-op hook for the rest of the suite.
+///
+/// The delegating hook sidesteps both failure modes by never being
+/// installed or removed more than once: it is transparent (delegates to
+/// `previous`) to every thread by default, and only the thread currently
+/// inside a `dispatch` call's containment window (or the crate's
+/// panic-containment fixture test) suppresses output, via a
+/// thread-local read that runs on the panicking thread itself — so
+/// suppression can never leak onto another thread's panic.
+pub(crate) fn install_quiet_hook_once() {
+    HOOK_INIT.call_once(|| {
         let previous = panic::take_hook();
-        panic::set_hook(Box::new(|_info| {}));
-        QuietPanicHook {
-            previous: Some(previous),
-        }
+        panic::set_hook(Box::new(move |info| {
+            if !SUPPRESS_PANIC_OUTPUT.with(Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+}
+
+/// RAII guard scoping `SUPPRESS_PANIC_OUTPUT` to one `catch_unwind` call:
+/// sets the thread-local flag true on construction, clears it on drop.
+/// Drop runs on every path out of the enclosing block — panic-caught,
+/// clean return, or (via `catch_unwind`'s boundary) even the panicking
+/// path itself — so suppression can never leak into the next dispatched
+/// message on this thread.
+pub(crate) struct SuppressPanicOutput;
+
+impl SuppressPanicOutput {
+    pub(crate) fn new() -> Self {
+        SUPPRESS_PANIC_OUTPUT.with(|flag| flag.set(true));
+        SuppressPanicOutput
     }
 }
 
-impl Drop for QuietPanicHook {
+impl Drop for SuppressPanicOutput {
     fn drop(&mut self) {
-        if let Some(previous) = self.previous.take() {
-            panic::set_hook(previous);
-        }
+        SUPPRESS_PANIC_OUTPUT.with(|flag| flag.set(false));
     }
 }
 

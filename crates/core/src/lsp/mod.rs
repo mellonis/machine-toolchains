@@ -391,14 +391,20 @@ mod tests {
     #[test]
     fn did_update_panics_on_the_containment_probe() {
         let mut service = FakeService::new();
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {})); // silence the panic backtrace
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            service.did_update("file:///a.fake", "panic-now")
-        }));
-
-        std::panic::set_hook(prev_hook);
+        // Same delegating-hook mechanism `server::dispatch` uses: install
+        // it once (idempotent, process-global) and scope the actual
+        // suppression to this thread's `catch_unwind` window via the RAII
+        // guard, instead of swapping the process-global hook out and back
+        // in around the call — the latter races any unrelated test
+        // panicking concurrently on another thread.
+        server::install_quiet_hook_once();
+        let result = {
+            let _suppress = server::SuppressPanicOutput::new();
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                service.did_update("file:///a.fake", "panic-now")
+            }))
+        };
 
         let err = result.expect_err("did_update must panic on panic-now");
         let message = err
