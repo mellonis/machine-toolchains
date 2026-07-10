@@ -7,6 +7,7 @@
 pub mod docstore;
 pub mod jsonrpc;
 pub mod position;
+pub mod server;
 pub mod transport;
 pub mod types;
 
