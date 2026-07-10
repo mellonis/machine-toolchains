@@ -3,20 +3,24 @@
 //! against a [`LanguageService`], and enforces the LSP lifecycle —
 //! initialize/initialized/shutdown/exit gating, unknown-method handling,
 //! and decode-error responses. Document sync (didOpen/didChange/
-//! didClose/publish) and feature dispatch (completion, definition, …)
-//! are layered onto the same `dispatch` seam by later tasks; this task
-//! implements lifecycle only.
+//! didClose) drives the `DocStore` and republishes diagnostics through
+//! one `publish` helper. Feature dispatch (completion, definition, …)
+//! is layered onto the same `dispatch` seam by a later task.
 
 use super::LanguageService;
 use super::docstore::DocStore;
 use super::jsonrpc::{self, DecodeError, Id, Message, error_codes};
+use super::position;
 use super::transport;
 use super::types::{
-    CodeActionOptions, CompletionOptions, DidChangeWatchedFilesRegistrationOptions,
-    FileSystemWatcher, InitializeParams, InitializeResult, Registration, RegistrationParams,
-    SemanticTokensLegend, SemanticTokensOptions, ServerCapabilities, ServerInfoWire,
-    TextDocumentSyncOptions,
+    CodeActionOptions, CompletionOptions, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, FileSystemWatcher, InitializeParams, InitializeResult,
+    PublishDiagnosticsParams, Registration, RegistrationParams, SemanticTokensLegend,
+    SemanticTokensOptions, ServerCapabilities, ServerInfoWire, TextDocumentSyncOptions,
+    WireDiagnostic, diagnostic_severity,
 };
+use super::{ServiceDiagnostic, ServiceSeverity};
 
 /// Deployment identity for the initialize handshake (`serverInfo`); the
 /// caller (a CLI) supplies it — core knows no product names.
@@ -31,9 +35,6 @@ struct ServerState {
     initialized: bool,
     shutdown: bool,
     next_request_id: i64,
-    /// Wired in Task 8 (document sync + diagnostics publishing); this
-    /// task only constructs it.
-    #[allow(dead_code)]
     docs: DocStore,
 }
 
@@ -193,7 +194,7 @@ fn handle_notification(
     writer: &mut dyn std::io::Write,
     service: &mut dyn LanguageService,
     method: &str,
-    _params: serde_json::Value,
+    params: serde_json::Value,
 ) -> Signal {
     match method {
         "exit" => Signal::Exit,
@@ -204,10 +205,96 @@ fn handle_notification(
             send_register_capability(state, writer, service);
             Signal::Continue
         }
+        "textDocument/didOpen" => {
+            if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(params) {
+                let uri = params.text_document.uri;
+                state.docs.open(
+                    &uri,
+                    params.text_document.version,
+                    params.text_document.text,
+                );
+                publish(state, writer, service, &uri);
+            }
+            Signal::Continue
+        }
+        "textDocument/didChange" => {
+            if let Ok(mut params) = serde_json::from_value::<DidChangeTextDocumentParams>(params) {
+                let uri = params.text_document.uri;
+                // Full sync: only the last content-change entry matters.
+                if let Some(change) = params.content_changes.pop() {
+                    state
+                        .docs
+                        .change(&uri, params.text_document.version, change.text);
+                }
+                publish(state, writer, service, &uri);
+            }
+            Signal::Continue
+        }
+        "textDocument/didClose" => {
+            if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(params) {
+                let uri = params.text_document.uri;
+                state.docs.close(&uri);
+                service.did_close(&uri);
+                publish(state, writer, service, &uri);
+            }
+            Signal::Continue
+        }
         // Unknown notifications (including every `$/…` method, e.g.
-        // `$/cancelRequest`) and not-yet-implemented ones (didOpen/
-        // didChange/… land in Task 8) are silently dropped per spec.
+        // `$/cancelRequest`) are silently dropped per spec.
         _ => Signal::Continue,
+    }
+}
+
+/// Publishes `uri`'s complete diagnostic set. The single path every
+/// (re)publish goes through (didOpen/didChange above; Task 9's
+/// config/watched-files republish sweeps reuse it directly by calling
+/// it once per open document). Looks the document up in the store
+/// itself: when open, re-runs `service.did_update` against its current
+/// text and publishes with its version; when absent (post-didClose),
+/// publishes an empty set with the version omitted.
+fn publish(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    service: &mut dyn LanguageService,
+    uri: &str,
+) {
+    let (version, diagnostics) = match state.docs.get(uri) {
+        Some(doc) => {
+            let diagnostics = service
+                .did_update(uri, &doc.text)
+                .iter()
+                .map(|diagnostic| to_wire_diagnostic(&doc.text, diagnostic))
+                .collect();
+            (Some(doc.version), diagnostics)
+        }
+        None => (None, Vec::new()),
+    };
+
+    let params = PublishDiagnosticsParams {
+        uri: uri.to_string(),
+        version,
+        diagnostics,
+    };
+    let payload = jsonrpc::notification(
+        "textDocument/publishDiagnostics",
+        serde_json::to_value(params).expect("PublishDiagnosticsParams is always serializable"),
+    );
+    let _ = transport::write_message(writer, &payload);
+}
+
+/// Converts one service-level diagnostic to its wire shape, converting
+/// the span against `text` (the document's CURRENT text — no stale
+/// positions).
+fn to_wire_diagnostic(text: &str, diagnostic: &ServiceDiagnostic) -> WireDiagnostic {
+    WireDiagnostic {
+        range: position::span_to_range(text, diagnostic.span),
+        severity: Some(match diagnostic.severity {
+            ServiceSeverity::Error => diagnostic_severity::ERROR,
+            ServiceSeverity::Warning => diagnostic_severity::WARNING,
+        }),
+        code: diagnostic.code.map(|code| code.to_string()),
+        source: Some(diagnostic.source.to_string()),
+        message: diagnostic.message.clone(),
     }
 }
 
@@ -314,6 +401,40 @@ mod tests {
 
     fn initialize_message(id: i64) -> serde_json::Value {
         serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": {}})
+    }
+
+    fn did_open_message(uri: &str, version: i32, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "fake",
+                    "version": version,
+                    "text": text,
+                },
+            },
+        })
+    }
+
+    fn did_change_message(uri: &str, version: i32, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {
+                "textDocument": {"uri": uri, "version": version},
+                "contentChanges": [{"text": text}],
+            },
+        })
+    }
+
+    fn did_close_message(uri: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didClose",
+            "params": {"textDocument": {"uri": uri}},
+        })
     }
 
     fn decode_output_frames(buf: &[u8]) -> Vec<serde_json::Value> {
@@ -704,5 +825,119 @@ mod tests {
         assert!(outputs[0]["id"].is_null());
         assert_eq!(outputs[1]["id"], serde_json::json!(1));
         assert_eq!(exit_code, 1);
+    }
+
+    #[test]
+    fn did_open_publishes_full_diagnostics_set_with_document_version() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "ok bad ok"),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[1]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(
+            outputs[1]["params"],
+            serde_json::json!({
+                "uri": "file:///a.fake",
+                "version": 1,
+                "diagnostics": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 3},
+                            "end": {"line": 0, "character": 6},
+                        },
+                        "severity": 1,
+                        "code": "bad-word",
+                        "source": "fake",
+                        "message": "bad word (config rev 0)",
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn did_change_republishes_new_version_with_empty_diagnostics_when_clean() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "ok bad ok"),
+                did_change_message("file:///a.fake", 2, "all clear"),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(
+            outputs[2]["params"],
+            serde_json::json!({
+                "uri": "file:///a.fake",
+                "version": 2,
+                "diagnostics": [],
+            })
+        );
+    }
+
+    #[test]
+    fn did_close_publishes_an_empty_set_with_version_omitted() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "ok bad ok"),
+                did_change_message("file:///a.fake", 2, "bad"),
+                did_close_message("file:///a.fake"),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 4);
+        let last = &outputs[3];
+        assert_eq!(last["method"], "textDocument/publishDiagnostics");
+        assert_eq!(
+            last["params"],
+            serde_json::json!({
+                "uri": "file:///a.fake",
+                "diagnostics": [],
+            })
+        );
+        assert!(last["params"].get("version").is_none());
+    }
+
+    #[test]
+    fn did_open_reports_multiple_diagnostics_in_source_order() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "bad bad"),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 2);
+        let diagnostics = outputs[1]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(
+            diagnostics[0]["range"],
+            serde_json::json!({
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 3},
+            })
+        );
+        assert_eq!(
+            diagnostics[1]["range"],
+            serde_json::json!({
+                "start": {"line": 0, "character": 4},
+                "end": {"line": 0, "character": 7},
+            })
+        );
     }
 }
