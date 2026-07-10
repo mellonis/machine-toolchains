@@ -264,6 +264,19 @@ pub(crate) struct ScopeSummary {
     pub bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
 }
 
+/// How flatten resolved one call site (docs/lsp.md (navigation)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Resolution {
+    /// A function this module defines (incl. nested and qualified-internal).
+    Local { def_name_span: Span },
+    /// A bare name bound by a `use` import.
+    ImportBinding { use_span: Span, full_path: String },
+    /// A `@ns::name()` call whose target this module does NOT define.
+    QualifiedExternal { full_path: String },
+    /// A bare undeclared external.
+    Unresolved,
+}
+
 /// The codegen-free front half of the pipeline: everything the lint
 /// layer (and a future LSP) needs, nothing it doesn't.
 pub(crate) struct AnalysisOutput {
@@ -272,6 +285,13 @@ pub(crate) struct AnalysisOutput {
     pub ir: IrProgram,
     pub diagnostics: Vec<Diagnostic>,
     pub scopes: ScopeSummary,
+    /// Per-call-site resolution, keyed by the call's `name_span`. A pure
+    /// side channel — nothing here influences codegen, mangling, or
+    /// warnings; it exists for a future LSP's go-to-definition / hover.
+    /// Read only by tests until `analyze_staged` (LSP plan 2, Task 4)
+    /// carries it into `PmcAnalysis`.
+    #[allow(dead_code)]
+    pub resolutions: Vec<(Span, Resolution)>,
 }
 
 /// lex → parse → duplicate-binding check → flatten → lower. Stops before
@@ -280,7 +300,12 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
     let tokens = crate::lexer::lex(source)?;
     let parsed = crate::parser::parse(&tokens)?;
     check_duplicate_bindings(&parsed)?;
-    let (program, scopes, vis) = flatten(parsed);
+    let Flattened {
+        program,
+        scopes,
+        warnings: vis,
+        resolutions,
+    } = flatten(parsed);
     let (ir, mut diagnostics) = crate::ir::lower(&program)?;
     diagnostics.extend(vis);
     Ok(AnalysisOutput {
@@ -289,6 +314,7 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         ir,
         diagnostics,
         scopes,
+        resolutions,
     })
 }
 
@@ -380,6 +406,16 @@ fn full_name(ns: &[String], name: &str) -> String {
     }
 }
 
+/// flatten's full output: the mangled program, per-scope name maps (for
+/// lint), the visibility warnings, and the per-call-site resolution
+/// table (for a future LSP).
+struct Flattened {
+    program: crate::parser::Program,
+    scopes: ScopeSummary,
+    warnings: Vec<Diagnostic>,
+    resolutions: Vec<(Span, Resolution)>,
+}
+
 /// Flatten definitions and resolve calls (docs/language.md (visibility)):
 /// mangle names (`::` for namespaces, `.` for nesting), resolve
 /// each call innermost-outward — the function's own nested maps (defs
@@ -389,10 +425,10 @@ fn full_name(ns: &[String], name: &str) -> String {
 /// scope chain and imports, stay verbatim, and are self-declaring (no
 /// undeclared warning). Infallible — unresolved bare names simply stay
 /// external; all visibility warnings (undeclared externals, unused
-/// imports, unused functions) are produced here.
-fn flatten(
-    program: crate::parser::Program,
-) -> (crate::parser::Program, ScopeSummary, Vec<Diagnostic>) {
+/// imports, unused functions) are produced here. Every call site also
+/// records a [`Resolution`] into the returned table — a pure side
+/// channel that does not influence mangling, warnings, or codegen.
+fn flatten(program: crate::parser::Program) -> Flattened {
     use crate::parser::{Function, Item, Program};
     use std::collections::{HashSet, VecDeque};
 
@@ -417,24 +453,47 @@ fn flatten(
             .entry(imp.binding().to_string())
             .or_insert_with(|| (i, imp.full_path()));
     }
+    // Qualified (`::`) calls can only target namespace-level functions
+    // (never `.`-nested ones — `defs` above is built from the top-level
+    // `functions` list only), so this union is exactly the set of full
+    // names a qualified call may legally hit.
+    let defs_by_full_name: HashSet<String> =
+        defs.values().flat_map(|m| m.values().cloned()).collect();
+
+    /// Internal mirror of [`Resolution`], recorded during the walk. Local
+    /// carries the MANGLED name (a call can target a nested function not
+    /// yet emitted into `out`); ImportBinding carries the import index.
+    /// A post-pass at the end of `flatten` converts both once `out` (and
+    /// `imports`) are in hand — see the post-pass comment below.
+    enum RawResolution {
+        Local { mangled: String },
+        ImportBinding { index: usize },
+        QualifiedExternal { full_path: String },
+        Unresolved,
+    }
 
     struct Ctx {
         defs: HashMap<Vec<String>, HashMap<String, String>>,
         bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
+        defs_by_full_name: HashSet<String>,
         imports_used: Vec<bool>,
         warned_undeclared: HashSet<String>,
         warnings: Vec<Diagnostic>,
+        resolutions: Vec<(Span, RawResolution)>,
     }
 
     let mut ctx = Ctx {
         defs,
         bindings,
+        defs_by_full_name,
         imports_used: vec![false; imports.len()],
         warned_undeclared: HashSet::new(),
         warnings: Vec::new(),
+        resolutions: Vec::new(),
     };
 
-    /// Resolve one call name in place, innermost scope outward.
+    /// Resolve one call name in place, innermost scope outward, and
+    /// record exactly one [`RawResolution`] for this call site.
     fn resolve(
         name: &mut String,
         span: mtc_core::diagnostics::Span,
@@ -444,13 +503,30 @@ fn flatten(
     ) {
         // Absolute: leave verbatim, no warning, no import consumption
         // (self-declaring; resolves internally iff this module defines
-        // that symbol, else stays external).
+        // that symbol, else stays external). Qualified calls can only
+        // hit namespace-level defs (`defs_by_full_name`'s contract).
         if name.contains("::") {
+            let raw = if ctx.defs_by_full_name.contains(name.as_str()) {
+                RawResolution::Local {
+                    mangled: name.clone(),
+                }
+            } else {
+                RawResolution::QualifiedExternal {
+                    full_path: name.clone(),
+                }
+            };
+            ctx.resolutions.push((span, raw));
             return;
         }
         for scope in nested.iter().rev() {
             if let Some(m) = scope.get(name.as_str()) {
                 *name = m.clone();
+                ctx.resolutions.push((
+                    span,
+                    RawResolution::Local {
+                        mangled: name.clone(),
+                    },
+                ));
                 return;
             }
         }
@@ -460,6 +536,12 @@ fn flatten(
             let prefix = &ns[..k];
             if let Some(m) = ctx.defs.get(prefix).and_then(|d| d.get(name.as_str())) {
                 *name = m.clone();
+                ctx.resolutions.push((
+                    span,
+                    RawResolution::Local {
+                        mangled: name.clone(),
+                    },
+                ));
                 return;
             }
             if let Some(&(idx, ref path)) =
@@ -467,10 +549,13 @@ fn flatten(
             {
                 ctx.imports_used[idx] = true;
                 *name = path.clone();
+                ctx.resolutions
+                    .push((span, RawResolution::ImportBinding { index: idx }));
                 return;
             }
         }
-        // Total miss: the call stays a bare external; warn once per name.
+        // Total miss: the call stays a bare external; warn once per name
+        // (the resolution entry, unlike the warning, is unconditional).
         if ctx.warned_undeclared.insert(name.clone()) {
             ctx.warnings.push(Diagnostic {
                 code: "undeclared-external",
@@ -481,6 +566,7 @@ fn flatten(
                 fix: None,
             });
         }
+        ctx.resolutions.push((span, RawResolution::Unresolved));
     }
 
     fn emit(
@@ -538,6 +624,7 @@ fn flatten(
         bindings,
         imports_used,
         mut warnings,
+        resolutions: raw_resolutions,
         ..
     } = ctx;
 
@@ -599,14 +686,49 @@ fn flatten(
         }
     }
 
-    (
-        Program {
+    // Post-pass: RawResolution -> Resolution. Done here, after `out` is
+    // fully built, rather than inline in `resolve` — a call can target a
+    // nested function that hasn't been emitted into `out` yet at the
+    // point it's resolved, so `mangled -> def_name_span` can only be
+    // looked up once every flattened function is in hand. Post-mangle
+    // names are unique, so this map is exact.
+    let def_name_span_by_mangled: HashMap<&str, Span> =
+        out.iter().map(|f| (f.name.as_str(), f.name_span)).collect();
+    let resolutions: Vec<(Span, Resolution)> = raw_resolutions
+        .into_iter()
+        .map(|(span, raw)| {
+            let resolution = match raw {
+                RawResolution::Local { mangled } => Resolution::Local {
+                    def_name_span: *def_name_span_by_mangled
+                        .get(mangled.as_str())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "flatten: resolved local `{mangled}` has no flattened definition"
+                            )
+                        }),
+                },
+                RawResolution::ImportBinding { index } => Resolution::ImportBinding {
+                    use_span: imports[index].span,
+                    full_path: imports[index].full_path(),
+                },
+                RawResolution::QualifiedExternal { full_path } => {
+                    Resolution::QualifiedExternal { full_path }
+                }
+                RawResolution::Unresolved => Resolution::Unresolved,
+            };
+            (span, resolution)
+        })
+        .collect();
+
+    Flattened {
+        program: Program {
             functions: out,
             imports,
         },
-        ScopeSummary { defs, bindings },
+        scopes: ScopeSummary { defs, bindings },
         warnings,
-    )
+        resolutions,
+    }
 }
 
 /// The assembler recorded `(code_offset, pma_line)`; compose with the
@@ -1049,5 +1171,95 @@ mod tests {
             .filter(|d| d.code == "undeclared-external")
             .count();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn flatten_records_a_resolution_per_call_site() {
+        // One call per line so each `name_span` has a hand-checkable
+        // column. Exercises every `Resolution` arm:
+        //   @helper()        -> Local (nested)
+        //   @ns::inner()     -> Local (qualified-internal)
+        //   @inner()         -> Unresolved (ns member not visible bare)
+        //   @ext()           -> ImportBinding (unaliased)
+        //   @ge()            -> ImportBinding (aliased std import)
+        //   @other::thing()  -> QualifiedExternal
+        //   @mystery()       -> Unresolved (bare undeclared external)
+        let src = "use ext;\nuse std::goToEnd as ge;\nnamespace ns { export inner() { right; } }\nexport main() {\n    helper() { left; }\n    @helper();\n    @ns::inner();\n    @inner();\n    @ext();\n    @ge();\n    @other::thing();\n    @mystery();\n}\n";
+        let a = analyze(src).unwrap();
+        assert_eq!(a.resolutions.len(), 7, "{:#?}", a.resolutions);
+
+        // Exact-span lookup (not just the start position): the brief's
+        // point is that each entry is keyed by the call's REAL
+        // `name_span`, so pin both ends.
+        let at = |call_span: Span| -> Resolution {
+            a.resolutions
+                .iter()
+                .find(|(span, _)| *span == call_span)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no resolution recorded at {call_span:?}: {:#?}",
+                        a.resolutions
+                    )
+                })
+                .1
+                .clone()
+        };
+
+        // "helper" name_span at its nested definition, line 5 cols 5..11.
+        assert_eq!(
+            at(Span::new(6, 6, 6, 12)), // "helper" in "@helper()"
+            Resolution::Local {
+                def_name_span: Span::new(5, 5, 5, 11)
+            }
+        );
+        // "inner" name_span at its namespace-level definition, line 3.
+        assert_eq!(
+            at(Span::new(7, 6, 7, 15)), // "ns::inner" in "@ns::inner()"
+            Resolution::Local {
+                def_name_span: Span::new(3, 23, 3, 28)
+            }
+        );
+        assert_eq!(at(Span::new(8, 6, 8, 11)), Resolution::Unresolved); // "inner" in "@inner()"
+        assert_eq!(
+            at(Span::new(9, 6, 9, 9)), // "ext" in "@ext()"
+            Resolution::ImportBinding {
+                use_span: Span::new(1, 5, 1, 8),
+                full_path: "ext".to_string(),
+            }
+        );
+        assert_eq!(
+            at(Span::new(10, 6, 10, 8)), // "ge" in "@ge()"
+            Resolution::ImportBinding {
+                use_span: Span::new(2, 5, 2, 17),
+                full_path: "std::goToEnd".to_string(),
+            }
+        );
+        assert_eq!(
+            at(Span::new(11, 6, 11, 18)), // "other::thing" in "@other::thing()"
+            Resolution::QualifiedExternal {
+                full_path: "other::thing".to_string(),
+            }
+        );
+        assert_eq!(at(Span::new(12, 6, 12, 13)), Resolution::Unresolved); // "mystery" in "@mystery()"
+
+        // Pure side channel: the existing undeclared-external warnings
+        // (one per bare-miss name: "inner", "mystery") still fire.
+        let undeclared = a
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "undeclared-external")
+            .count();
+        assert_eq!(undeclared, 2, "{:#?}", a.diagnostics);
+    }
+
+    #[test]
+    fn resolution_table_is_a_pure_side_channel() {
+        // Same source, compiled through the full pipeline: object bytes,
+        // pma text, and diagnostics are unaffected by the resolution
+        // table's existence — it rides alongside, nothing reads it here.
+        let src = "use ext;\nuse std::goToEnd as ge;\nnamespace ns { export inner() { right; } }\nexport main() {\n    helper() { left; }\n    @helper();\n    @ns::inner();\n    @inner();\n    @ext();\n    @ge();\n    @other::thing();\n    @mystery();\n}\n";
+        let out = compile(src, CompileOptions::default()).unwrap();
+        assert!(out.pma.contains(".func main"));
+        assert!(out.pma.contains(".func ns::inner"));
     }
 }
