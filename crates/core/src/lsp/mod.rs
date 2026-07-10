@@ -105,7 +105,7 @@ pub struct SemToken {
 
 /// The seam a language plugs into the framework through (docs/lsp.md).
 /// Core's server loop (a later task) drives every LSP-visible behavior
-/// exclusively through this trait — it carries no `.pmc`/architecture
+/// exclusively through this trait — it carries no language- or architecture-specific
 /// knowledge itself.
 pub trait LanguageService {
     fn language_id(&self) -> &'static str;
@@ -134,8 +134,8 @@ pub trait LanguageService {
 
 /// A deterministic toy [`LanguageService`] fixture, exercised by this
 /// crate's own tests and by the server-loop tests in later tasks
-/// (docs/lsp.md). Speaks a made-up "fake" language only — no `.pmc` or
-/// architecture knowledge leaks in here.
+/// (docs/lsp.md). Speaks a made-up "fake" language only — no language- or
+/// architecture-specific knowledge leaks in here.
 #[cfg(test)]
 pub(crate) mod fake {
     use super::{

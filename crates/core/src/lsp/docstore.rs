@@ -62,9 +62,9 @@ mod tests {
     #[test]
     fn test_open_and_get() {
         let mut store = DocStore::new();
-        store.open("file:///a.pmc", 1, "let x = 5;".to_string());
+        store.open("file:///a.fake", 1, "let x = 5;".to_string());
 
-        let doc = store.get("file:///a.pmc");
+        let doc = store.get("file:///a.fake");
         assert!(doc.is_some());
         let doc = doc.unwrap();
         assert_eq!(doc.version, 1);
@@ -74,10 +74,10 @@ mod tests {
     #[test]
     fn test_change_replaces_text_and_version() {
         let mut store = DocStore::new();
-        store.open("file:///a.pmc", 1, "old".to_string());
-        store.change("file:///a.pmc", 2, "new".to_string());
+        store.open("file:///a.fake", 1, "old".to_string());
+        store.change("file:///a.fake", 2, "new".to_string());
 
-        let doc = store.get("file:///a.pmc").unwrap();
+        let doc = store.get("file:///a.fake").unwrap();
         assert_eq!(doc.version, 2);
         assert_eq!(doc.text, "new");
     }
@@ -85,40 +85,40 @@ mod tests {
     #[test]
     fn test_close_removes_document() {
         let mut store = DocStore::new();
-        store.open("file:///a.pmc", 1, "text".to_string());
-        assert!(store.get("file:///a.pmc").is_some());
+        store.open("file:///a.fake", 1, "text".to_string());
+        assert!(store.get("file:///a.fake").is_some());
 
-        store.close("file:///a.pmc");
-        assert!(store.get("file:///a.pmc").is_none());
+        store.close("file:///a.fake");
+        assert!(store.get("file:///a.fake").is_none());
     }
 
     #[test]
     fn test_uris_sorted() {
         let mut store = DocStore::new();
-        store.open("file:///c.pmc", 1, "".to_string());
-        store.open("file:///a.pmc", 1, "".to_string());
-        store.open("file:///b.pmc", 1, "".to_string());
+        store.open("file:///c.fake", 1, "".to_string());
+        store.open("file:///a.fake", 1, "".to_string());
+        store.open("file:///b.fake", 1, "".to_string());
 
         let uris = store.uris();
         assert_eq!(
             uris,
-            vec!["file:///a.pmc", "file:///b.pmc", "file:///c.pmc"]
+            vec!["file:///a.fake", "file:///b.fake", "file:///c.fake"]
         );
     }
 
     #[test]
     fn test_change_on_unknown_uri_is_noop() {
         let mut store = DocStore::new();
-        store.open("file:///a.pmc", 1, "text".to_string());
+        store.open("file:///a.fake", 1, "text".to_string());
 
         // Change on unknown URI should not panic and should be a no-op
-        store.change("file:///unknown.pmc", 99, "new".to_string());
+        store.change("file:///unknown.fake", 99, "new".to_string());
 
         // Original document unchanged
-        assert_eq!(store.get("file:///a.pmc").unwrap().version, 1);
-        assert_eq!(store.get("file:///a.pmc").unwrap().text, "text");
+        assert_eq!(store.get("file:///a.fake").unwrap().version, 1);
+        assert_eq!(store.get("file:///a.fake").unwrap().text, "text");
 
         // Unknown URI still not in store
-        assert!(store.get("file:///unknown.pmc").is_none());
+        assert!(store.get("file:///unknown.fake").is_none());
     }
 }

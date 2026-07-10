@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn did_change_text_document_params_deserializes_ignoring_unknown_fields() {
         let payload = json!({
-            "textDocument": {"uri": "file:///a.pmc", "version": 3, "extra": "ignored"},
+            "textDocument": {"uri": "file:///a.fake", "version": 3, "extra": "ignored"},
             "contentChanges": [{"text": "new body"}],
             "somethingClientSpecific": {"nested": true},
         });
@@ -431,7 +431,7 @@ mod tests {
             got,
             DidChangeTextDocumentParams {
                 text_document: VersionedTextDocumentIdentifier {
-                    uri: "file:///a.pmc".to_string(),
+                    uri: "file:///a.fake".to_string(),
                     version: 3,
                 },
                 content_changes: vec![TextDocumentContentChangeEvent {
@@ -444,12 +444,12 @@ mod tests {
     #[test]
     fn file_event_round_trips_type_field() {
         let event = FileEvent {
-            uri: "file:///a.pmc".to_string(),
+            uri: "file:///a.fake".to_string(),
             typ: 2,
         };
 
         let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value, json!({"uri": "file:///a.pmc", "type": 2}));
+        assert_eq!(value, json!({"uri": "file:///a.fake", "type": 2}));
 
         let back: FileEvent = serde_json::from_value(value).unwrap();
         assert_eq!(back, event);
