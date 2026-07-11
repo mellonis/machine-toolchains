@@ -9,7 +9,7 @@
     "type": "git",
     "url": "https://github.com/mellonis/machine-toolchains"
   },
-  "engines": { "vscode": "^1.106.0" },
+  "engines": { "vscode": "^1.91.0" },
   "categories": ["Programming Languages"],
   "main": "./out/extension.js",
   "activationEvents": ["onLanguage:pmc", "onTaskType:pmt"],
@@ -41,7 +41,7 @@
       "fileLocation": ["autoDetect", "${workspaceFolder}"],
       "severity": "warning",
       "pattern": {
-        "regexp": "^(.+?):(\\d+):(\\d+): (error|warning|lint): (.+?)(?: \\[([a-z-]+)\\])?$",
+        "regexp": "^(?:pmt: )?(.+?):(\\d+):(\\d+): (error|warning|lint): (.+?)(?: \\[([a-z-]+)\\])?$",
         "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5, "code": 6
       }
     }],
@@ -61,7 +61,7 @@
   },
   "dependencies": { "vscode-languageclient": "^10.1.0" },
   "devDependencies": {
-    "@types/node": "^20.0.0", "@types/vscode": "^1.106.0",
+    "@types/node": "^20.0.0", "@types/vscode": "^1.91.0",
     "@vscode/vsce": "^3.9.2", "typescript": "^5.9.0"
   }
 }
