@@ -12,12 +12,12 @@ use std::time::SystemTime;
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, LanguageService, SemToken, ServiceDiagnostic, ServiceSeverity,
-    SymbolNode,
+    SymbolNode, SymbolNodeKind,
 };
 
 use crate::compiler::{Analysis, CompileError, ScopeSummary, analyze_staged};
 use crate::config;
-use crate::cst::Cst;
+use crate::cst::{BodyKind, Cst, FunctionCst, TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 
@@ -72,14 +72,12 @@ impl PmcLanguageService {
 /// piece of staleness (`scopes_for_completion`).
 struct DocState {
     /// The document's current text, verbatim from the framework.
-    #[allow(dead_code)] // consumer: format() (LSP plan 2, Task 8)
     text: String,
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
     #[allow(dead_code)] // consumer: completion() (LSP plan 2, Task 10)
     tokens: Option<Vec<Token>>,
     /// CST of the current text (`None` when lexing or parsing failed).
-    #[allow(dead_code)] // consumer: document_symbols() (LSP plan 2, Task 8)
     cst: Option<Cst>,
     /// Post-parse analysis of the current text (`None` when any stage
     /// failed).
@@ -227,6 +225,50 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
     out
 }
 
+/// Walks one CST item list — the file level or a [`crate::cst::NamespaceCst`]'s
+/// own `items` — into document symbols (docs/lsp.md (document symbols),
+/// CST-tier). Comments and imports are skipped; a reopened namespace
+/// block stays a separate sibling because the CST already keeps it apart
+/// (it never merges same-name blocks the way the AST does). Each node's
+/// `span`/`selection_span` are the CST's own extent/name spans, copied
+/// verbatim.
+fn cst_symbols(items: &[TopItem]) -> Vec<SymbolNode> {
+    items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            TopKind::Comment(_) | TopKind::Import(_) => None,
+            TopKind::Namespace(ns) => Some(SymbolNode {
+                name: ns.name.clone(),
+                kind: SymbolNodeKind::Namespace,
+                span: ns.span,
+                selection_span: ns.name_span,
+                children: cst_symbols(&ns.items),
+            }),
+            TopKind::Function(f) => Some(function_symbol(f)),
+        })
+        .collect()
+}
+
+/// One function's symbol (top-level or nested). Children are its
+/// `BodyKind::Nested` functions, recursively; labels and statements are
+/// never emitted as symbols.
+fn function_symbol(f: &FunctionCst) -> SymbolNode {
+    SymbolNode {
+        name: f.name.clone(),
+        kind: SymbolNodeKind::Function,
+        span: f.span,
+        selection_span: f.name_span,
+        children: f
+            .body
+            .iter()
+            .filter_map(|item| match &item.kind {
+                BodyKind::Nested(nested) => Some(function_symbol(nested)),
+                _ => None,
+            })
+            .collect(),
+    }
+}
+
 impl LanguageService for PmcLanguageService {
     fn language_id(&self) -> &'static str {
         "pmc"
@@ -351,16 +393,24 @@ impl LanguageService for PmcLanguageService {
         Vec::new() // Task 11: quickfixes from the retained lint fixes.
     }
 
-    fn document_symbols(&mut self, _uri: &str) -> Option<Vec<SymbolNode>> {
-        None // Task 8: CST outline.
+    fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
+        // CST-tier: answered as long as parsing succeeded, even if a
+        // later stage (duplicate-binding check, `ir::lower`) fatals.
+        let state = self.docs.get(uri)?;
+        let cst = state.cst.as_ref()?;
+        Some(cst_symbols(&cst.items))
     }
 
     fn semantic_tokens(&mut self, _uri: &str) -> Option<Vec<SemToken>> {
         None // Task 12: resolution-aware token stream.
     }
 
-    fn format(&mut self, _uri: &str) -> Option<String> {
-        None // Task 8: fmt::format over the stored text.
+    fn format(&mut self, uri: &str) -> Option<String> {
+        // The DOCSTORE's text (docs/lsp.md (format seam)): the framework
+        // diffs the returned text against exactly what `did_update` last
+        // received, never a re-read from disk or a stale revision.
+        let state = self.docs.get(uri)?;
+        crate::fmt::format(&state.text).ok()
     }
 }
 
@@ -402,6 +452,18 @@ mod tests {
 
     /// Both `leading-zeros` and `unused-label` fire on the `007:` label.
     const TWO_FINDINGS_FIXTURE: &str = "main() {\n007: right;\n}\n";
+
+    /// Two `namespace a { … }` blocks (a REOPENED namespace, not merged —
+    /// the CST keeps reopened blocks as separate siblings) plus a
+    /// top-level `main` with a nested `helper` and a LABELED statement
+    /// (`5: right;`) — proves labels never become symbols, rather than
+    /// vacuously passing because none are present.
+    const SYMBOLS_FIXTURE: &str = "namespace a {\n    f() {\n        right;\n    }\n}\n\nnamespace a {\n    g() {\n        right;\n    }\n}\n\nmain() {\n    helper() {\n        right;\n    }\n    5: right;\n}\n";
+
+    /// Valid but not canonically formatted (`right;` isn't indented) — a
+    /// clean parse whose `fmt::format` output differs from the input, so
+    /// equality with a direct `fmt::format` call isn't vacuous.
+    const UNFORMATTED_FIXTURE: &str = "main() {\nright;\n}\n";
 
     #[test]
     fn advertises_the_pmc_language_surface() {
@@ -714,5 +776,127 @@ mod tests {
         );
         assert_eq!(uri_to_path("untitled:Untitled-1"), None);
         assert_eq!(uri_to_path("https://example.com/x.pmc"), None);
+    }
+
+    #[test]
+    fn document_symbols_walks_reopened_namespaces_and_nested_functions() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", SYMBOLS_FIXTURE);
+
+        let symbols = service
+            .document_symbols("untitled:Untitled-1")
+            .expect("CST present on a clean parse");
+
+        assert_eq!(
+            symbols,
+            vec![
+                SymbolNode {
+                    name: "a".to_string(),
+                    kind: SymbolNodeKind::Namespace,
+                    span: Span::new(1, 1, 5, 2),
+                    selection_span: Span::new(1, 11, 1, 12),
+                    children: vec![SymbolNode {
+                        name: "f".to_string(),
+                        kind: SymbolNodeKind::Function,
+                        span: Span::new(2, 5, 4, 6),
+                        selection_span: Span::new(2, 5, 2, 6),
+                        children: vec![],
+                    }],
+                },
+                // The reopened `a` is a SEPARATE sibling, not merged into
+                // the first.
+                SymbolNode {
+                    name: "a".to_string(),
+                    kind: SymbolNodeKind::Namespace,
+                    span: Span::new(7, 1, 11, 2),
+                    selection_span: Span::new(7, 11, 7, 12),
+                    children: vec![SymbolNode {
+                        name: "g".to_string(),
+                        kind: SymbolNodeKind::Function,
+                        span: Span::new(8, 5, 10, 6),
+                        selection_span: Span::new(8, 5, 8, 6),
+                        children: vec![],
+                    }],
+                },
+                SymbolNode {
+                    name: "main".to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: Span::new(13, 1, 18, 2),
+                    selection_span: Span::new(13, 1, 13, 5),
+                    // `helper` is a child of `main`, not a sibling; its
+                    // own trailing `right;` statement contributes no
+                    // symbol (labels/statements are never emitted).
+                    children: vec![SymbolNode {
+                        name: "helper".to_string(),
+                        kind: SymbolNodeKind::Function,
+                        span: Span::new(14, 5, 16, 6),
+                        selection_span: Span::new(14, 5, 14, 11),
+                        children: vec![],
+                    }],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn document_symbols_still_answered_on_a_post_parse_fatal() {
+        // `goto 99` parses fine (a well-formed statement); it's the
+        // undefined-label check in `ir::lower` that fails, well past the
+        // CST stage — document_symbols is CST-tier and must not care.
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", "main() {\nright;\ngoto 99;\n}\n");
+        assert_eq!(diags.len(), 1, "sanity: the fatal published, {diags:?}");
+        assert_eq!(diags[0].code, Some("undefined-label"));
+
+        let symbols = service
+            .document_symbols("untitled:Untitled-1")
+            .expect("CST-tier symbols survive a post-parse fatal");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "main");
+        assert_eq!(symbols[0].kind, SymbolNodeKind::Function);
+        assert!(symbols[0].children.is_empty());
+    }
+
+    #[test]
+    fn document_symbols_none_when_parsing_failed() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", "main( {");
+        assert_eq!(service.document_symbols("untitled:Untitled-1"), None);
+    }
+
+    #[test]
+    fn format_matches_a_direct_fmt_format_call() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", UNFORMATTED_FIXTURE);
+
+        let via_service = service
+            .format("untitled:Untitled-1")
+            .expect("valid source formats");
+        let direct = crate::fmt::format(UNFORMATTED_FIXTURE).expect("valid source formats");
+        assert_eq!(via_service, direct, "the single-source contract");
+        // The fixture really was unformatted, so this isn't a vacuous
+        // equality check.
+        assert_ne!(via_service, UNFORMATTED_FIXTURE);
+    }
+
+    #[test]
+    fn format_returns_none_on_a_parse_error() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", "main( {");
+        assert_eq!(service.format("untitled:Untitled-1"), None);
+    }
+
+    #[test]
+    fn format_of_already_formatted_source_is_byte_identical() {
+        // The framework's empty-edit path: formatting a document already
+        // in canonical form must round-trip to the exact same bytes.
+        let canonical = crate::fmt::format(UNFORMATTED_FIXTURE).expect("valid source formats");
+
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", &canonical);
+        let reformatted = service
+            .format("untitled:Untitled-1")
+            .expect("already-canonical source formats");
+        assert_eq!(reformatted, canonical);
     }
 }
