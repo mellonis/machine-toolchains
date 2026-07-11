@@ -142,7 +142,7 @@ form versus stayed far.
 ## `pmt lint`
 
 ```
-USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]]
+USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]] [--no-config]
 
 PATH is a .pmc file or a directory; directories are walked recursively
 for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
@@ -157,6 +157,7 @@ FLAGS:
                   the report and exit code reflect what REMAINS
   --force         with --fix: also apply the gated fixes (deletions and
                   rewrites whose diagnosis may have another reading)
+  --no-config     ignore pmt.json project files
 ```
 
 PATH is a `.pmc` file or a directory. Directories are walked
@@ -172,6 +173,18 @@ stderr — as a fatal compile-error line with its bracketed code
 (`pmt compile` (compile errors)) — and the batch continues. Exit
 codes: 0 = every file clean, 1 = findings or errors anywhere (tool
 errors are also 1).
+
+For each input file, `pmt lint` also discovers a `pmt.json` project
+file by walking up from that file's directory (nearest ancestor wins,
+never a cascade — `docs/lint.md`) and unions its allow-list with any
+`--allow` flags. `--no-config` skips that discovery for every file, so
+the run is governed by `--allow` alone. A `pmt.json` that fails to
+parse or validate is a per-file fatal, exactly like a `.pmc` file that
+fails to parse: reported on stderr as `PATH/pmt.json: error: MESSAGE`,
+the file it would have configured is skipped, and the batch continues.
+This differs from an unknown code named directly by `--allow`, which is
+a whole-tool error (that flag applies to the entire run, not to one
+input file, so there is no single file to skip).
 
 `--fix` applies safe fixes in place and lints the result again — the
 report and exit code reflect what remains. `--fix --force` also

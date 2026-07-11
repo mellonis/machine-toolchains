@@ -570,6 +570,99 @@ fn lint_batch_survives_a_fatal_file_and_still_fails() {
 }
 
 #[test]
+fn lint_pmt_json_allow_suppresses_a_finding() {
+    let dir = scratch("lint_config_allow");
+    std::fs::write(
+        dir.join("pmt.json"),
+        r#"{"lint":{"allow":["unused-label"]}}"#,
+    )
+    .unwrap();
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() {\n5: right;\n}\n").unwrap();
+
+    let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0, "pmt.json's allow-list suppresses the finding");
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn lint_pmt_json_allow_unions_with_allow_flag() {
+    let dir = scratch("lint_config_union");
+    std::fs::write(
+        dir.join("pmt.json"),
+        r#"{"lint":{"allow":["unused-label"]}}"#,
+    )
+    .unwrap();
+    let src = dir.join("prog.pmc");
+    // Two distinct findings: unused-label (file-suppressed) and
+    // leading-zeros (flag-suppressed) — both must disappear together.
+    std::fs::write(&src, "main() {\n5: right;\n007: left;\n    goto 007;\n}\n").unwrap();
+
+    let out = execute(&args(&[
+        "lint",
+        src.to_str().unwrap(),
+        "--allow",
+        "leading-zeros",
+    ]))
+    .unwrap();
+    assert_eq!(
+        out.code, 0,
+        "file allow ∪ flag allow must suppress both findings"
+    );
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn lint_no_config_flag_ignores_pmt_json() {
+    let dir = scratch("lint_config_no_config");
+    std::fs::write(
+        dir.join("pmt.json"),
+        r#"{"lint":{"allow":["unused-label"]}}"#,
+    )
+    .unwrap();
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() {\n5: right;\n}\n").unwrap();
+
+    let out = execute(&args(&["lint", src.to_str().unwrap(), "--no-config"])).unwrap();
+    assert_eq!(out.code, 1, "--no-config ignores pmt.json entirely");
+    assert!(out.stdout.contains("label 5 is never referenced"));
+}
+
+#[test]
+fn lint_invalid_pmt_json_is_a_per_file_error_and_batch_continues() {
+    let dir = scratch("lint_config_invalid");
+    std::fs::create_dir_all(dir.join("bad")).unwrap();
+    std::fs::create_dir_all(dir.join("good")).unwrap();
+    // A typo'd top-level key: `lints` instead of `lint`.
+    std::fs::write(dir.join("bad/pmt.json"), r#"{"lints":{}}"#).unwrap();
+    std::fs::write(dir.join("bad/skip.pmc"), "main() { right; }\n").unwrap();
+    // No pmt.json under good/ — this file lints on its own, proving the
+    // batch continues past the bad config rather than aborting whole-tool.
+    std::fs::write(dir.join("good/prog.pmc"), "main() {\n9: right;\n}\n").unwrap();
+
+    let out = execute(&args(&[
+        "lint",
+        dir.join("bad/skip.pmc").to_str().unwrap(),
+        dir.join("good/prog.pmc").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    let bad_config = dir.join("bad/pmt.json");
+    assert!(
+        out.stderr.contains(bad_config.to_str().unwrap()),
+        "stderr names the pmt.json path: {}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("error:"));
+    assert!(out.stderr.contains("unknown key `lints`"));
+    // The file the bad config would have configured is skipped entirely.
+    assert!(!out.stdout.contains("skip.pmc"));
+    // The batch continues: good/prog.pmc (no config of its own) still
+    // lints, and its finding shows up.
+    assert!(out.stdout.contains("label 9 is never referenced"));
+}
+
+#[test]
 fn fix_applies_safe_tier_only_and_force_unlocks_deletions() {
     let dir = scratch("lint_fix");
     let src = dir.join("prog.pmc");

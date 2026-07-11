@@ -10,6 +10,43 @@ findings only — compile warnings stay on `pmt compile`.
 Suppress a rule with `--allow CODE` (repeatable). Unknown codes are an
 error, so a typo cannot silently disable linting.
 
+## Project file: `pmt.json`
+
+A repository can carry its own allow-list in a `pmt.json` file, so the
+suppressions a team has agreed on travel with the source instead of
+living only in shell aliases or CI flags. The schema is deliberately
+tiny — today it holds nothing but the lint allow-list:
+
+```json
+{
+  "lint": {
+    "allow": ["unused-label", "leading-zeros"]
+  }
+}
+```
+
+An empty object (`{}`) is valid — an empty allow-list. Validation is
+strict: any top-level key other than `lint`, any key under `lint` other
+than `allow`, a non-array `allow`, a non-string entry in `allow`, or an
+`allow` entry naming no rule in the catalog (below) is a hard error
+naming the file and the offending key or code. A typo in a project file
+must not silently do nothing, the same posture `--allow` already takes
+on the command line.
+
+`pmt lint` locates the file per input by walking up from that file's
+directory through its ancestors and reading the FIRST `pmt.json` it
+finds — nearest wins, and a `pmt.json` further up the tree is never
+merged in, even when the nearer one exists. Two input files linted in
+the same run may therefore end up governed by two different project
+files, or by none. `--no-config` (`docs/cli.md`) skips this discovery
+altogether, for CI invocations that want purely flag-driven behavior.
+
+Wherever more than one source can name an allow-list for a file — the
+discovered `pmt.json`, `--allow` flags on the command line, and (in an
+editor session) the language server's own lint settings — the effective
+list is their UNION: any one of them suppressing a code suppresses it,
+and none of them can un-suppress a code another source disabled.
+
 ## Fixes
 
 Findings may carry a machine-applicable fix, shown as an indented hint.

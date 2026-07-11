@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 
 use mtc_core::diagnostics::{Applicability, Diagnostic};
 
+use crate::config;
 use crate::lint::{LintError, LintOptions, apply_fixes, lint as lint_source};
 
 use super::{Args, CliOutput};
 
 const LINT_USAGE: &str = "\
-USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]]
+USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]] [--no-config]
 
 PATH is a .pmc file or a directory; directories are walked recursively
 for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
@@ -28,6 +29,8 @@ FLAGS:
                   the report and exit code reflect what REMAINS
   --force         with --fix: also apply the gated fixes (deletions and
                   rewrites whose diagnosis may have another reading)
+  --no-config     ignore pmt.json project files (docs/lint.md
+                  (project file))
 ";
 
 pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
@@ -43,6 +46,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
         .collect();
     let fix = args.flag("--fix");
     let force = args.flag("--force");
+    let no_config = args.flag("--no-config");
     if force && !fix {
         return Err(format!("--force requires --fix\n\n{LINT_USAGE}"));
     }
@@ -63,13 +67,35 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut any = false;
-    for file in &files {
+    'files: for file in &files {
+        // Per-file project config (docs/lint.md (project file)): the
+        // nearest `pmt.json` ancestor, unless suppressed wholesale by
+        // `--no-config`. A bad config is a per-file fatal — unlike a bad
+        // `--allow` flag below, which aborts the whole run.
+        let mut effective_allow = allow.clone();
+        if !no_config && let Some(config_path) = file.parent().and_then(config::discover) {
+            match config::load(&config_path) {
+                Ok(project) => {
+                    for code in project.allow {
+                        if !effective_allow.contains(&code) {
+                            effective_allow.push(code);
+                        }
+                    }
+                }
+                Err(e) => {
+                    any = true;
+                    let _ = writeln!(stderr, "{}: error: {}", e.path().display(), e.detail());
+                    continue 'files;
+                }
+            }
+        }
+
         let source =
             fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
         match lint_source(
             &source,
             LintOptions {
-                allow: allow.clone(),
+                allow: effective_allow.clone(),
             },
         ) {
             Ok(report) => {
@@ -98,7 +124,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
                         match lint_source(
                             &outcome.fixed_source,
                             LintOptions {
-                                allow: allow.clone(),
+                                allow: effective_allow.clone(),
                             },
                         ) {
                             Ok(rerun) => rerun.diagnostics,

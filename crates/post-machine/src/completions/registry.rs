@@ -314,6 +314,7 @@ fn lint_spec() -> CommandSpec {
                 .repeatable(),
             FlagSpec::boolean("--fix", "apply fixes"),
             FlagSpec::boolean("--force", "overwrite without confirmation").requires("--fix"),
+            FlagSpec::boolean("--no-config", "ignore pmt.json project files"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
