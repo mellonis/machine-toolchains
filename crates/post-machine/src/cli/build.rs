@@ -205,8 +205,16 @@ pub(super) fn asm(raw: &[String]) -> Result<CliOutput, String> {
     let input = Path::new(input);
     let source =
         fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
-    let object = crate::asm::assemble(&source, with_debug)
-        .map_err(|e| format!("{}: {e}", input.display()))?;
+    let object = crate::asm::assemble(&source, with_debug).map_err(|e| {
+        format!(
+            "{}:{}:{}: error: {} [{}]",
+            input.display(),
+            e.span.start.line,
+            e.span.start.col,
+            e.kind,
+            e.kind.code()
+        )
+    })?;
     let target = out_path(input, explicit_out, "pmo");
     fs::write(&target, object.to_bytes())
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;

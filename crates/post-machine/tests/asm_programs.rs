@@ -80,12 +80,12 @@ fn forced_short_and_explicit_far_forms() {
 #[test]
 fn errors_carry_lines() {
     let e = assemble(".func f\n        wr\n", false).unwrap_err();
-    assert_eq!(e.line, 2);
+    assert_eq!(e.span.start.line, 2);
 }
 
 #[test]
 fn short_call_by_name_is_rejected() {
     let e = assemble(".func f\n        call.s  g\n", false).unwrap_err();
     assert!(matches!(e.kind, mtc_core::asm::AsmErrorKind::BadOperand(_)));
-    assert_eq!(e.line, 2);
+    assert_eq!(e.span.start.line, 2);
 }

@@ -35,12 +35,16 @@ impl AsmToken {
     }
 }
 
+// Unicode-aware, matching the legacy parser's `is_ident`/`is_symbol_name`
+// (they used `char::is_alphabetic`/`is_alphanumeric`) so identifiers like
+// `идиВКонец` still tokenize as a single Word. Label-name tightening to
+// ASCII lives in lower.rs, not here.
 fn is_word_start(c: char) -> bool {
-    c.is_ascii_alphabetic() || c == '_' || c == '.'
+    c.is_alphabetic() || c == '_' || c == '.'
 }
 
 fn is_word_cont(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == '.'
+    c.is_alphanumeric() || c == '_' || c == '.'
 }
 
 /// Scans a `Word` starting at `start`, which must be either a
@@ -354,6 +358,16 @@ mod tests {
                 comment("; тест", 1, 6, 6),
             ]
         );
+    }
+
+    #[test]
+    fn unicode_identifiers_tokenize_as_a_single_word() {
+        // Legacy acceptance: non-ASCII letters are word characters, so a
+        // Unicode function name is one Word, not a run of Junk. Guards the
+        // contract at the layer where it lives (a downstream pipeline test
+        // otherwise catches this only three layers up).
+        let tokens = lex_line("идиВКонец", 1);
+        assert_eq!(tokens, vec![word("идиВКонец", 1, 1, 9)]);
     }
 
     #[test]

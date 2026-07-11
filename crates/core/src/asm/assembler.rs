@@ -4,32 +4,40 @@
 
 use std::collections::HashMap;
 
-use super::parser::{SourceFunction, SourceItem, SourceOperand, parse};
+use super::lower::{SourceFunction, SourceItem, SourceOperand, lower};
 use super::syntax::{ArchSyntax, Flow};
 use super::{AsmError, AsmErrorKind};
+use crate::diagnostics::Span;
 use crate::formats::object::{BlobDebug, ObjectFile, Relocation, Symbol, SymbolDef};
 use crate::vm::{Operand, OperandKind, encode_operand};
 
-fn err(line: usize, kind: AsmErrorKind) -> AsmError {
-    AsmError { line, kind }
+fn err(span: Span, kind: AsmErrorKind) -> AsmError {
+    AsmError { span, kind }
 }
 
-/// One instruction after operand classification, before layout.
+/// One instruction after operand classification, before layout. Each
+/// slot carries the spans a later-phase diagnostic points at: the item
+/// span for the debug line, and — where a symbol/label name is the
+/// subject of a possible error — that name's own span.
 enum Slot {
     Fixed {
-        line: usize,
+        span: Span,
         bytes: Vec<u8>,
     },
     Jump {
-        line: usize,
+        span: Span,
+        /// The jump target name's span (UnknownLabel / short-offset).
+        target_span: Span,
         far: u8,
         short: Option<u8>,
         forced_short: bool,
         target: String,
     },
-    /// A symbol site — call or `jmp @name`: far opcode + 4-byte hole + relocation.
+    /// A symbol site — call or `jmp @name`: far opcode + 4-byte hole +
+    /// relocation. `symbol_span` doubles as the debug-line source (the
+    /// operand shares the instruction's line).
     Call {
-        line: usize,
+        symbol_span: Span,
         opcode: u8,
         symbol: String,
     },
@@ -57,7 +65,7 @@ pub fn assemble(
     source: &str,
     with_debug: bool,
 ) -> Result<ObjectFile, AsmError> {
-    let functions = parse(syntax, source)?;
+    let functions = lower(&super::cst::parse_asm_cst(source), syntax)?;
 
     let mut symbols: Vec<Symbol> = functions
         .iter()
@@ -116,36 +124,36 @@ fn assemble_function(
     let mut slots: Vec<Slot> = Vec::new();
     let mut label_slot: HashMap<String, usize> = HashMap::new();
     for item in &function.items {
-        let (line, labels) = match item {
-            SourceItem::Instr { line, labels, .. } | SourceItem::RawByte { line, labels, .. } => {
-                (*line, labels)
+        let (span, labels) = match item {
+            SourceItem::Instr { span, labels, .. } | SourceItem::RawByte { span, labels, .. } => {
+                (*span, labels)
             }
         };
         for label in labels {
-            if label_slot.insert(label.clone(), slots.len()).is_some() {
-                return Err(err(line, AsmErrorKind::DuplicateLabel(label.clone())));
+            if label_slot.insert(label.name.clone(), slots.len()).is_some() {
+                return Err(err(
+                    label.span,
+                    AsmErrorKind::DuplicateLabel(label.name.clone()),
+                ));
             }
         }
         match item {
-            SourceItem::RawByte { line, value, .. } => {
+            SourceItem::RawByte { value, .. } => {
                 slots.push(Slot::Fixed {
-                    line: *line,
+                    span,
                     bytes: vec![*value],
                 });
             }
             SourceItem::Instr {
-                line,
-                opcode,
-                operand,
-                ..
+                opcode, operand, ..
             } => {
                 let entry = syntax
                     .by_opcode(*opcode)
-                    .expect("parser guarantees known opcode");
+                    .expect("lowering guarantees known opcode");
                 match (&entry.operand, operand) {
                     (OperandKind::None, SourceOperand::None) => {
                         slots.push(Slot::Fixed {
-                            line: *line,
+                            span,
                             bytes: vec![*opcode],
                         });
                     }
@@ -156,16 +164,16 @@ fn assemble_function(
                             .collect();
                         let encoded = sym
                             .and_then(|s| encode_operand(&Operand::Symbols(s)))
-                            .map_err(|m| err(*line, AsmErrorKind::EncodeError(m)))?;
+                            .map_err(|m| err(span, AsmErrorKind::EncodeError(m)))?;
                         let mut bytes = vec![*opcode];
                         bytes.extend(encoded);
-                        slots.push(Slot::Fixed { line: *line, bytes });
+                        slots.push(Slot::Fixed { span, bytes });
                     }
                     (OperandKind::RelI8 | OperandKind::RelI32, SourceOperand::SymbolName(name)) => {
                         match entry.flow {
                             Flow::Call => {
                                 return Err(err(
-                                    *line,
+                                    span,
                                     AsmErrorKind::BadOperand(
                                         "call operands are already symbols; drop the `@`",
                                     ),
@@ -174,21 +182,21 @@ fn assemble_function(
                             Flow::Jump => {
                                 if entry.operand == OperandKind::RelI8 {
                                     return Err(err(
-                                        *line,
+                                        span,
                                         AsmErrorKind::BadOperand(
                                             "jmp.s width is linker-selected; write jmp @name",
                                         ),
                                     ));
                                 }
                                 slots.push(Slot::Call {
-                                    line: *line,
+                                    symbol_span: name.span,
                                     opcode: *opcode,
-                                    symbol: name.clone(),
+                                    symbol: name.name.clone(),
                                 });
                             }
                             _ => {
                                 return Err(err(
-                                    *line,
+                                    span,
                                     AsmErrorKind::BadOperand(
                                         "conditional jumps take labels, not symbols",
                                     ),
@@ -200,16 +208,16 @@ fn assemble_function(
                         if syntax.is_call(*opcode) {
                             if entry.operand == OperandKind::RelI8 {
                                 return Err(err(
-                                    *line,
+                                    span,
                                     AsmErrorKind::BadOperand(
                                         "call.s width is linker-selected; write call",
                                     ),
                                 ));
                             }
                             slots.push(Slot::Call {
-                                line: *line,
+                                symbol_span: name.span,
                                 opcode: *opcode,
-                                symbol: name.clone(),
+                                symbol: name.name.clone(),
                             });
                         } else {
                             // Is this the short half of a pair (forced) or a
@@ -218,28 +226,27 @@ fn assemble_function(
                                 syntax.relax_pairs.iter().find(|p| p.short == *opcode);
                             if let Some(pair) = far_of_short {
                                 slots.push(Slot::Jump {
-                                    line: *line,
+                                    span,
+                                    target_span: name.span,
                                     far: pair.far,
                                     short: Some(*opcode),
                                     forced_short: true,
-                                    target: name.clone(),
+                                    target: name.name.clone(),
                                 });
                             } else {
                                 slots.push(Slot::Jump {
-                                    line: *line,
+                                    span,
+                                    target_span: name.span,
                                     far: *opcode,
                                     short: syntax.short_of(*opcode),
                                     forced_short: false,
-                                    target: name.clone(),
+                                    target: name.name.clone(),
                                 });
                             }
                         }
                     }
                     _ => {
-                        return Err(err(
-                            *line,
-                            AsmErrorKind::BadOperand("operand kind mismatch"),
-                        ));
+                        return Err(err(span, AsmErrorKind::BadOperand("operand kind mismatch")));
                     }
                 }
             }
@@ -263,18 +270,18 @@ fn assemble_function(
             starts.push(addr);
             addr += slot.size(is_far[i]);
         }
-        let resolve = |name: &str, line: usize| -> Result<u32, AsmError> {
+        let resolve = |name: &str, span: Span| -> Result<u32, AsmError> {
             label_slot
                 .get(name)
                 .map(|&i| starts[i])
-                .ok_or_else(|| err(line, AsmErrorKind::UnknownLabel(name.to_string())))
+                .ok_or_else(|| err(span, AsmErrorKind::UnknownLabel(name.to_string())))
         };
 
         let mut grew = false;
         for (i, slot) in slots.iter().enumerate() {
             if let Slot::Jump {
-                line,
                 target,
+                target_span,
                 forced_short,
                 ..
             } = slot
@@ -283,12 +290,12 @@ fn assemble_function(
                     continue;
                 }
                 let end = starts[i] + slot.size(false);
-                let target_addr = resolve(target, *line)?;
+                let target_addr = resolve(target, *target_span)?;
                 let off = i64::from(target_addr) - i64::from(end);
                 if i8::try_from(off).is_err() {
                     if *forced_short {
                         return Err(err(
-                            *line,
+                            *target_span,
                             AsmErrorKind::ShortOffsetOutOfRange {
                                 target: target.clone(),
                             },
@@ -305,25 +312,27 @@ fn assemble_function(
             let mut relocs = Vec::new();
             let mut lines = Vec::new();
             for (i, slot) in slots.iter().enumerate() {
+                // The MO debug section stores a source line (docs/formats.md
+                // (MO)); an operand shares its instruction's line, so a
+                // Call reads its symbol_span's line.
                 lines.push((
                     starts[i],
                     match slot {
-                        Slot::Fixed { line, .. }
-                        | Slot::Jump { line, .. }
-                        | Slot::Call { line, .. } => *line as u32,
+                        Slot::Fixed { span, .. } | Slot::Jump { span, .. } => span.start.line,
+                        Slot::Call { symbol_span, .. } => symbol_span.start.line,
                     },
                 ));
                 match slot {
                     Slot::Fixed { bytes, .. } => blob.extend_from_slice(bytes),
                     Slot::Jump {
-                        line,
+                        target_span,
                         far,
                         short,
                         target,
                         ..
                     } => {
                         let end = starts[i] + slot.size(is_far[i]);
-                        let off = i64::from(resolve(target, *line)?) - i64::from(end);
+                        let off = i64::from(resolve(target, *target_span)?) - i64::from(end);
                         if is_far[i] {
                             blob.push(*far);
                             blob.extend((off as i32).to_le_bytes());
@@ -509,6 +518,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::UnknownLabel(ref l) if l == "NOWHERE"));
+    }
+
+    #[test]
+    fn duplicate_label_points_at_the_second_occurrence() {
+        let e = assemble(
+            &test_syntax(),
+            0x7E,
+            ".func f\nL:      nop\nL:      nop\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::DuplicateLabel(ref l) if l == "L"));
+        assert_eq!(e.span, crate::diagnostics::Span::new(3, 1, 3, 2));
+    }
+
+    #[test]
+    fn unknown_label_points_at_the_jump_operand() {
+        let e = assemble(
+            &test_syntax(),
+            0x7E,
+            ".func f\n        jmp NOWHERE\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::UnknownLabel(ref l) if l == "NOWHERE"));
+        assert_eq!(e.span, crate::diagnostics::Span::new(2, 13, 2, 20));
     }
 
     #[test]
