@@ -288,15 +288,6 @@ pub(crate) struct AnalysisOutput {
     pub ir: IrProgram,
     pub diagnostics: Vec<Diagnostic>,
     pub scopes: ScopeSummary,
-    /// Per-call-site resolution, keyed by the call's `name_span`. A pure
-    /// side channel — nothing here influences codegen, mangling, or
-    /// warnings; it exists for a future LSP's go-to-definition / hover.
-    /// `analyze_staged` (LSP plan 2, Task 4) computes its own resolution
-    /// table on a separate pipeline rather than reading this one — this
-    /// field stays read only by `analyze()`'s own tests, which is why
-    /// the allow stays even after Task 4 landed.
-    #[allow(dead_code)]
-    pub resolutions: Vec<(Span, Resolution)>,
 }
 
 /// lex → parse → duplicate-binding check → flatten → lower. Stops before
@@ -309,7 +300,7 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         program,
         scopes,
         warnings: vis,
-        resolutions,
+        resolutions: _,
     } = flatten(parsed);
     let (ir, mut diagnostics) = crate::ir::lower(&program)?;
     diagnostics.extend(vis);
@@ -319,7 +310,6 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         ir,
         diagnostics,
         scopes,
-        resolutions,
     })
 }
 
@@ -1288,7 +1278,8 @@ mod tests {
         //   @other::thing()  -> QualifiedExternal
         //   @mystery()       -> Unresolved (bare undeclared external)
         let src = "use ext;\nuse std::goToEnd as ge;\nnamespace ns { export inner() { right; } }\nexport main() {\n    helper() { left; }\n    @helper();\n    @ns::inner();\n    @inner();\n    @ext();\n    @ge();\n    @other::thing();\n    @mystery();\n}\n";
-        let a = analyze(src).unwrap();
+        let staged = analyze_staged(src);
+        let a = staged.analysis.expect("the pipeline succeeded");
         assert_eq!(a.resolutions.len(), 7, "{:#?}", a.resolutions);
 
         // Exact-span lookup (not just the start position): the brief's
@@ -1348,11 +1339,11 @@ mod tests {
         // Pure side channel: the existing undeclared-external warnings
         // (one per bare-miss name: "inner", "mystery") still fire.
         let undeclared = a
-            .diagnostics
+            .warnings
             .iter()
             .filter(|d| d.code == "undeclared-external")
             .count();
-        assert_eq!(undeclared, 2, "{:#?}", a.diagnostics);
+        assert_eq!(undeclared, 2, "{:#?}", a.warnings);
     }
 
     #[test]
@@ -1406,7 +1397,6 @@ mod tests {
 
         assert_eq!(analysis.ast, a.ast);
         assert_eq!(analysis.warnings, a.diagnostics);
-        assert_eq!(analysis.resolutions, a.resolutions);
         assert_eq!(analysis.scopes.defs, a.scopes.defs);
         assert_eq!(analysis.scopes.bindings, a.scopes.bindings);
     }
