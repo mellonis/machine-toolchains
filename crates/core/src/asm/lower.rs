@@ -57,15 +57,17 @@ fn err(span: Span, kind: AsmErrorKind) -> AsmError {
     AsmError { span, kind }
 }
 
-/// Label grammar: `[A-Za-z_][A-Za-z0-9_]*`. Stricter than symbol names —
-/// no `.` and no `::` (docs/formats.md (assembly text)).
+/// Label grammar: a letter or `_`, then letters, digits, `_`. Letters
+/// follow the Unicode reading (`char::is_alphabetic`), consistent with
+/// function names; the tightening over symbol names is dots and `::`
+/// only (docs/formats.md (assembly text)).
 fn is_label_name(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        Some(c) if c.is_alphabetic() || c == '_' => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Symbol names: `::`-separated namespace segments, then a dotted
@@ -97,7 +99,7 @@ pub(crate) fn lower(cst: &AsmCst, syntax: &ArchSyntax) -> Result<Vec<SourceFunct
         match &item.kind {
             AsmItemKind::Comment(_) => {}
             AsmItemKind::Raw(raw) => return Err(err(raw.span, AsmErrorKind::RawLine)),
-            AsmItemKind::Func(func) => lower_func(func, &mut functions, &mut pending)?,
+            AsmItemKind::Func(func) => lower_func(func, &mut functions, &pending)?,
             AsmItemKind::Line(line) => lower_line(line, syntax, &mut functions, &mut pending)?,
         }
     }
@@ -115,7 +117,7 @@ pub(crate) fn lower(cst: &AsmCst, syntax: &ArchSyntax) -> Result<Vec<SourceFunct
 fn lower_func(
     func: &FuncCst,
     functions: &mut Vec<SourceFunction>,
-    pending: &mut [SpannedName],
+    pending: &[SpannedName],
 ) -> Result<(), AsmError> {
     // A label immediately before a `.func` binds to nothing (legacy: the
     // first check in the `.func` branch, before the name is parsed).
@@ -590,6 +592,23 @@ L1:     nop
         let e = lower_src(".func f\nfoo.bar:  nop\n").unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::Syntax(_)));
         assert_eq!(e.span, Span::new(2, 1, 2, 8)); // `foo.bar`
+    }
+
+    #[test]
+    fn unicode_labels_still_accepted() {
+        // The label tightening is dots and `::` ONLY — letters keep the
+        // legacy Unicode reading (`is_alphabetic`), consistent with
+        // function names.
+        let src = ".func f\nметка:  nop\n        jmp метка\n";
+        let funcs = lower_src(src).unwrap();
+        match &funcs[0].items[0] {
+            SourceItem::Instr { labels, .. } => {
+                assert_eq!(label_names(labels), vec!["метка"]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // And the jump target resolves end-to-end through the assembler.
+        crate::asm::assemble(&test_syntax(), 0x7E, src, false).unwrap();
     }
 
     #[test]
