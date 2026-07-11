@@ -23,6 +23,7 @@ SUBCOMMANDS:
   run          execute a .pmx on a tape
   tape         build/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
+  lsp          run the LSP server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
@@ -342,6 +343,30 @@ each function's control-flow graph as a Mermaid `flowchart TD`; block
 contents (labels, ops, terminal instruction) become node text, `check`
 terminators become a pair of `MF`/`!MF` edges. `--function NAME` restricts
 output to one function.
+
+## `pmt lsp`
+
+```
+USAGE: pmt lsp
+
+Run the LSP server for .pmc on stdio until the client exits.
+Exit code: 0 after shutdown/exit, 1 on exit without shutdown.
+```
+
+Runs a Language Server Protocol server for `.pmc` on stdio: `pmt lsp`
+is the only subcommand that hands real stdio to library code — every
+protocol frame goes over stdin/stdout, exactly as the LSP spec's base
+protocol requires. It serves publish diagnostics (compile fatals,
+compile warnings, and lint findings, merged and sorted), completions,
+go-to-definition (including into a materialized copy of the standard
+library), quickfix code actions from lint's fixes, semantic tokens, a
+document-symbol outline, and whole-document formatting identical to
+`pmt fmt`. The process exit code follows the LSP lifecycle: `0` after
+the client sends `shutdown` then `exit`; `1` if `exit` arrives without
+a prior `shutdown`, or if the client disconnects without sending
+either. See `docs/lsp.md` for the capabilities table, editor wiring
+samples, and the configuration and materialized-standard-library
+details.
 
 ## `pmt completions`
 

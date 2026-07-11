@@ -9,7 +9,10 @@ generator without that language, and a machine without a compiler — and
 adds the piece none of them attempted: a linker, with separate compilation
 and libraries. See `docs/history.md` for the full lineage, including the
 two 2002-era programs (`Sum.pms`/`Ty.pms`) this project still carries as
-golden tests.
+golden tests. `pmt lsp` runs a Language Server Protocol server for `.pmc`
+on stdio, wired into any LSP-capable editor, with diagnostics, completions,
+go-to-definition, quickfixes, semantic tokens, an outline, and formatting
+backed by the same compiler and linter the CLI uses.
 
 ## Build
 
@@ -87,6 +90,8 @@ Full flag reference: `docs/cli.md`.
   with `--fix`.
 - `docs/fmt.md` — the canonical `.pmc` layout via `pmt fmt`, with
   `--check` and stdin.
+- `docs/lsp.md` — the `pmt lsp` language server: capabilities, editor
+  wiring, and configuration.
 - `docs/stdlib.md` — the standard library's routine roster and linking
   semantics.
 - `docs/history.md` — where this design comes from.

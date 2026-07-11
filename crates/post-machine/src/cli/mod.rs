@@ -6,6 +6,7 @@ mod completions;
 mod fmt;
 mod inspect;
 mod lint;
+mod lsp;
 mod run;
 
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -42,6 +43,7 @@ SUBCOMMANDS:
   run          execute a .pmx on a tape
   tape         build/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
+  lsp          run the LSP server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
@@ -76,6 +78,7 @@ pub fn execute_with(
         Some("tape") => inspect::tape(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
+        Some("lsp") => lsp::lsp(&args[1..]),
         Some("completions") => completions::completions(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }

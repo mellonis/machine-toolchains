@@ -732,6 +732,37 @@ fn lint_exclude_is_component_based_not_string_prefix() {
 }
 
 #[test]
+fn lsp_help_prints_usage_without_touching_stdio() {
+    let out = execute(&args(&["lsp", "--help"])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.contains("USAGE: pmt lsp"), "{}", out.stdout);
+    assert!(
+        out.stdout
+            .contains("Exit code: 0 after shutdown/exit, 1 on exit without shutdown."),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn lsp_rejects_extra_arguments() {
+    // Bare `pmt lsp` (no args) would hand real stdio to the server loop
+    // and block this test process waiting for a client — never invoke
+    // it here. An extra positional is rejected before that happens.
+    let err = execute(&args(&["lsp", "extra-arg"])).unwrap_err();
+    assert!(err.contains("lsp takes no arguments"), "{err}");
+}
+
+#[test]
+fn top_level_help_lists_lsp() {
+    let out = execute(&[]).unwrap();
+    assert!(
+        out.stdout
+            .contains("  lsp          run the LSP server on stdio")
+    );
+}
+
+#[test]
 fn completions_zsh_emits_a_compdef_script() {
     let out = execute(&args(&["completions", "zsh"])).unwrap();
     assert_eq!(out.code, 0);

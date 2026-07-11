@@ -35,7 +35,6 @@ pub(crate) struct PmcLanguageService {
 }
 
 impl PmcLanguageService {
-    #[allow(dead_code)] // consumer: cli/lsp.rs (LSP plan 2, Task 13)
     pub(crate) fn new() -> Self {
         PmcLanguageService {
             docs: HashMap::new(),
@@ -1052,5 +1051,235 @@ mod tests {
             .format("untitled:Untitled-1")
             .expect("already-canonical source formats");
         assert_eq!(reformatted, canonical);
+    }
+
+    // --- End-to-end scripted session (docs/lsp.md's "Testing" section,
+    // service bullet 8): the REAL service driven through core's blocking
+    // server loop over in-memory pipes, exactly as `pmt lsp` drives it
+    // over stdio — the CLI subcommand (`cli/lsp.rs`) differs only in
+    // which reader/writer it hands to `mtc_core::lsp::server::run`. ----
+
+    /// Frames each of `client_messages` (`mtc_core::lsp::transport::
+    /// write_message`) into an in-memory buffer, drives the real server
+    /// loop against `service`, and decodes every framed response back to
+    /// JSON. Mirrors plan 1's `run_session` test helper in
+    /// `crates/core/src/lsp/server.rs`, reimplemented locally because
+    /// that helper is `#[cfg(test)]`-private to core.
+    fn run_session(
+        client_messages: &[serde_json::Value],
+        service: &mut PmcLanguageService,
+    ) -> (Vec<serde_json::Value>, i32) {
+        use mtc_core::lsp::transport::{read_message, write_message};
+
+        let mut input = Vec::new();
+        for msg in client_messages {
+            write_message(&mut input, &msg.to_string()).expect("write into a Vec cannot fail");
+        }
+
+        let mut output = Vec::new();
+        let mut reader = &input[..];
+        let exit_code = mtc_core::lsp::server::run(
+            &mut reader,
+            &mut output,
+            service,
+            mtc_core::lsp::server::ServerIdentity {
+                name: "pmt lsp",
+                version: "0.0.0-test",
+            },
+        );
+
+        let mut out_reader = &output[..];
+        let mut outputs = Vec::new();
+        while let Some(payload) = read_message(&mut out_reader).expect("recorded output frames") {
+            outputs.push(serde_json::from_str(&payload).expect("recorded output is valid json"));
+        }
+        (outputs, exit_code)
+    }
+
+    #[test]
+    fn e2e_scripted_session_through_the_real_server_loop() {
+        use mtc_core::diagnostics::{Edit as CoreEdit, Fix};
+
+        // `goto 99` is the first (and only) fatal — `undefined-label` —
+        // parse-clean; label `5` and `use unused;` sit dormant behind
+        // it, invisible until the fatal is fixed (post-parse analysis
+        // never runs while it stands).
+        const BAD: &str = "main() {\n5: right;\ngoto 99;\n}\nuse unused;\n";
+        // The fatal fixed (the `goto 99;` statement removed): label `5`
+        // is now an `unused-label` lint finding and `use unused;` an
+        // `unused-import` compile warning — byte-identical to
+        // `WARNING_AND_LINT_FIXTURE` by construction.
+        const FIXED: &str = WARNING_AND_LINT_FIXTURE;
+
+        let uri = "file:///e2e.pmc";
+        let mut service = PmcLanguageService::new();
+
+        fn init(id: i64) -> serde_json::Value {
+            json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": {}})
+        }
+        fn open(uri: &str, text: &str) -> serde_json::Value {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {"textDocument": {"uri": uri, "languageId": "pmc", "version": 1, "text": text}},
+            })
+        }
+        fn change(uri: &str, version: i32, text: &str) -> serde_json::Value {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didChange",
+                "params": {"textDocument": {"uri": uri, "version": version}, "contentChanges": [{"text": text}]},
+            })
+        }
+
+        // initialize -> didOpen the bad file: exactly one fatal,
+        // undefined-label, at the `99` token.
+        let (outputs, _) = run_session(&[init(1), open(uri, BAD)], &mut service);
+        assert_eq!(outputs.len(), 2, "{outputs:?}");
+        assert!(outputs[0]["result"]["capabilities"].is_object());
+        assert_eq!(outputs[1]["method"], "textDocument/publishDiagnostics");
+        let diags = outputs[1]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0]["code"], json!("undefined-label"));
+        assert_eq!(
+            diags[0]["range"],
+            json!({
+                "start": {"line": 2, "character": 5},
+                "end": {"line": 2, "character": 7},
+            }),
+            "char-precise span on the `99` token"
+        );
+
+        // didChange fixing the fatal, then a codeAction request on the
+        // lint finding's span: warnings + lint both publish, and the
+        // one quickfix comes back.
+        let (outputs, _) = run_session(
+            &[
+                init(1),
+                open(uri, BAD),
+                change(uri, 2, FIXED),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/codeAction",
+                    "params": {
+                        "textDocument": {"uri": uri},
+                        "range": {
+                            "start": {"line": 1, "character": 0},
+                            "end": {"line": 1, "character": 2},
+                        },
+                    },
+                }),
+            ],
+            &mut service,
+        );
+        assert_eq!(outputs.len(), 4, "{outputs:?}");
+        let diags = outputs[2]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert_eq!(diags[0]["code"], json!("unused-label"));
+        assert_eq!(diags[0]["source"], json!("pmt lint"));
+        assert_eq!(diags[1]["code"], json!("unused-import"));
+        assert_eq!(diags[1]["source"], json!("pmt"));
+
+        // Apply the returned quickfix client-side (byte-for-byte, the
+        // way a real client applies a `WorkspaceEdit`).
+        let actions: Vec<mtc_core::lsp::types::CodeAction> =
+            serde_json::from_value(outputs[3]["result"].clone()).unwrap();
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].title, "remove the label prefix '5:'");
+        let edit = actions[0].edit.changes.get(uri).unwrap()[0].clone();
+        let span = mtc_core::lsp::position::range_to_span(FIXED, edit.range.clone());
+        let synthetic = Diagnostic {
+            code: "unused-label",
+            span,
+            message: String::new(),
+            fix: Some(Fix {
+                description: actions[0].title.clone(),
+                applicability: Applicability::MaybeIncorrect,
+                edits: vec![CoreEdit {
+                    span,
+                    replacement: edit.new_text.clone(),
+                }],
+            }),
+        };
+        let outcome = crate::lint::apply_fixes(FIXED, &[synthetic]);
+        assert_eq!((outcome.applied, outcome.skipped), (1, 0));
+        let after_quickfix = outcome.fixed_source;
+        assert_eq!(after_quickfix, "main() {\n right;\n}\nuse unused;\n");
+
+        // The remaining script in one continuous session: replay up to
+        // the quickfix, apply it via didChange, confirm the diagnostics
+        // shrink, round-trip formatting, then shut down cleanly.
+        let (outputs, exit_code) = run_session(
+            &[
+                init(1),
+                open(uri, BAD),
+                change(uri, 2, FIXED),
+                change(uri, 3, &after_quickfix),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "textDocument/formatting",
+                    "params": {"textDocument": {"uri": uri}},
+                }),
+                json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+                json!({"jsonrpc": "2.0", "method": "exit"}),
+            ],
+            &mut service,
+        );
+
+        // init, publish(open), publish(change#1), publish(change#2),
+        // formatting response, shutdown response — exit produces none.
+        assert_eq!(outputs.len(), 6, "{outputs:?}");
+
+        // Diagnostics shrink: the unused-label finding is gone, only the
+        // unused-import compile warning remains.
+        let diags = outputs[3]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0]["code"], json!("unused-import"));
+
+        // Formatting round-trip: one whole-document edit, matching
+        // `fmt::format` directly.
+        let edits: Vec<mtc_core::lsp::types::TextEdit> =
+            serde_json::from_value(outputs[4]["result"].clone()).unwrap();
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        let canonical = crate::fmt::format(&after_quickfix).expect("valid source formats");
+        assert_ne!(
+            after_quickfix, canonical,
+            "sanity: the fixture really was unformatted"
+        );
+        assert_eq!(edits[0].new_text, canonical);
+
+        // shutdown -> exit: clean lifecycle exit code.
+        assert_eq!(outputs[5]["id"], json!(4));
+        assert_eq!(outputs[5]["result"], serde_json::Value::Null);
+        assert_eq!(exit_code, 0);
+    }
+
+    /// Spec acceptance: opening the embedded stdlib under the server
+    /// yields zero diagnostics, a full semantic-token stream, and a
+    /// format-no-op — the same fmt-clean/lint-clean dogfood lock
+    /// `pmt fmt`/`pmt lint`'s own test suites hold this file to
+    /// (`tests/fmt_programs.rs`, `tests/lint_programs.rs`), now proven
+    /// through the LSP surface as well.
+    #[test]
+    fn dogfood_the_embedded_stdlib_is_clean_tokenized_and_format_stable() {
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:stdlib-dogfood";
+
+        let diags = service.did_update(uri, crate::stdlib::SOURCE);
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let tokens = service.semantic_tokens(uri);
+        assert!(matches!(&tokens, Some(t) if !t.is_empty()), "{tokens:?}");
+
+        let formatted = service
+            .format(uri)
+            .expect("the embedded stdlib parses cleanly");
+        assert_eq!(
+            formatted,
+            crate::stdlib::SOURCE,
+            "the embedded stdlib is fmt-clean by construction"
+        );
     }
 }

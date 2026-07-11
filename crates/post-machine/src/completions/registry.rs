@@ -447,6 +447,14 @@ fn ir_graph_spec() -> CommandSpec {
     }
 }
 
+fn lsp_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["lsp"]),
+        positional: Positional::None,
+        flags: vec![FlagSpec::boolean("--help", "show subcommand help")],
+    }
+}
+
 fn completions_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["completions"]),
@@ -474,6 +482,7 @@ fn top_level_help(name: &str) -> &'static str {
         "run" => "execute a .pmx on a tape",
         "tape" => "build/show .pmt tape-block snapshots",
         "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
+        "lsp" => "run the LSP server on stdio",
         "completions" => "emit a shell completion script (zsh; bash/fish follow-on)",
         _ => "",
     }
@@ -519,8 +528,8 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing master's real, currently-dispatched CLI
-/// surface: 10 top-level subcommands (`compile`/`asm`/`link`/`lint`/
-/// `fmt`/`dis`/`tape`/`run`/`ir`, the latter two nested) plus
+/// surface: 11 top-level subcommands (`compile`/`asm`/`link`/`lint`/
+/// `fmt`/`dis`/`tape`/`run`/`ir`/`lsp`, `tape` and `ir` nested) plus
 /// `completions` itself. `build` (issue-tracked) is deliberately absent
 /// — see the design doc for the entry it'll need.
 pub fn registry() -> Registry {
@@ -535,6 +544,7 @@ pub fn registry() -> Registry {
         tape_show_spec(),
         run_spec(),
         ir_graph_spec(),
+        lsp_spec(),
         completions_spec(),
     ];
     let root = root_spec(&commands);
@@ -602,6 +612,7 @@ mod tests {
                 "tape",
                 "run",
                 "ir",
+                "lsp",
                 "completions"
             ]
         );

@@ -54,6 +54,7 @@ const EXPECTED_TOP_LEVEL: &[&str] = &[
     "run",
     "tape",
     "ir",
+    "lsp",
     "completions",
 ];
 
@@ -124,9 +125,19 @@ fn top_level_subcommands_match_the_maintained_list_cli_help_and_the_real_parser(
     }
 
     // Parser probe: the real dispatcher must accept each one — i.e. NOT
-    // the `execute_with` catch-all's "unknown subcommand" error.
+    // the `execute_with` catch-all's "unknown subcommand" error. `lsp`
+    // is special-cased to `--help`: a bare `pmt lsp` hands real stdio to
+    // the LSP server loop and would block this test process waiting for
+    // a client that will never connect (docs/cli.md (pmt lsp)) — `pmt
+    // lsp --help` still proves the real dispatcher recognizes it as a
+    // known subcommand without ever touching stdio.
     for name in &expected {
-        let out = execute(&args(&[name]));
+        let probe: Vec<String> = if name == "lsp" {
+            args(&["lsp", "--help"])
+        } else {
+            args(&[name])
+        };
+        let out = execute(&probe);
         let unknown_subcommand =
             matches!(&out, Err(message) if message.contains("unknown subcommand"));
         assert!(
