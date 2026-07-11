@@ -7,7 +7,10 @@ import com.intellij.openapi.startup.ProjectActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 private const val NOTIFICATION_GROUP_ID = "ru.mellonis.pmc"
 private const val MIN_TESTED_PMT = "0.1.0"
@@ -51,16 +54,36 @@ class PmtVersionCheck : ProjectActivity {
     private fun runPmtVersion(pmtPath: String): String? {
         return try {
             val process = ProcessBuilder(pmtPath, "--version").redirectErrorStream(true).start()
-            val text = process.inputStream.bufferedReader().readText()
-            // Bounded wait: a misconfigured `pmtPath` pointing at a
+            // Drain stdout on a background thread instead of blocking here:
+            // reading synchronously would block until the child closes
+            // stdout, so a misconfigured `pmtPath` pointing at a
             // non-terminating process (or a shell wrapper that never
-            // exits) must not hang the startup activity forever.
+            // exits) would hold the pipe open and the waitFor timeout below
+            // would never be reached. `waitFor` is what actually bounds
+            // this call; on timeout the process is force-killed and this
+            // future is simply abandoned — `destroyForcibly` closes the
+            // child's stdout, so the abandoned reader hits EOF and its
+            // background thread exits on its own; nothing joins it either
+            // way.
+            val outputFuture = CompletableFuture.supplyAsync {
+                process.inputStream.bufferedReader().readText()
+            }
             if (!process.waitFor(VERSION_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 process.destroyForcibly()
                 return null
             }
-            text
+            // The process has already exited, so stdout is closed and the
+            // drain above finishes essentially immediately; this timeout is
+            // defensive, not load-bearing.
+            outputFuture.get(VERSION_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         } catch (e: IOException) {
+            null
+        } catch (e: TimeoutException) {
+            null
+        } catch (e: ExecutionException) {
+            null
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
             null
         }
     }

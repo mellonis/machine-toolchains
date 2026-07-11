@@ -1,5 +1,6 @@
 package ru.mellonis.pmc
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.ui.components.JBTextField
@@ -89,6 +90,14 @@ class PmtSettingsConfigurable : Configurable {
                 .thenAccept { item ->
                     item?.workspaceService?.didChangeConfiguration(DidChangeConfigurationParams(settings))
                 }
+                .exceptionally {
+                    LOG.warn("pmt lsp configuration push failed", it)
+                    null
+                }
         }
+    }
+
+    private companion object {
+        val LOG = Logger.getInstance(PmtSettingsConfigurable::class.java)
     }
 }
