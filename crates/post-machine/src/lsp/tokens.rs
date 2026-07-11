@@ -52,7 +52,7 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
         .collect();
 
     let mut out = Vec::new();
-    walk_items(&cst.items, &resolutions, &mut out);
+    walk_items(&cst.items, &resolutions, &state.text, &mut out);
     out.sort_by_key(|token| token.span.start);
     debug_assert!(
         out.windows(2)
@@ -63,10 +63,13 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
 }
 
 /// One file/namespace-level item list, recursively (namespace blocks
-/// nest their own `items`).
+/// nest their own `items`). `text` is the document's own source
+/// (threaded down to `label_def_span`, which derives the declaration
+/// span from the written digits rather than the parser's span).
 fn walk_items(
     items: &[TopItem],
     resolutions: &BTreeMap<Span, &Resolution>,
+    text: &str,
     out: &mut Vec<SemToken>,
 ) {
     for item in items {
@@ -83,9 +86,9 @@ fn walk_items(
                     token_type: TOKEN_TYPE_NAMESPACE,
                     modifiers: MODIFIER_DECLARATION,
                 });
-                walk_items(&ns.items, resolutions, out);
+                walk_items(&ns.items, resolutions, text, out);
             }
-            TopKind::Function(f) => walk_function(f, resolutions, out),
+            TopKind::Function(f) => walk_function(f, resolutions, text, out),
         }
     }
 }
@@ -96,6 +99,7 @@ fn walk_items(
 fn walk_function(
     f: &FunctionCst,
     resolutions: &BTreeMap<Span, &Resolution>,
+    text: &str,
     out: &mut Vec<SemToken>,
 ) {
     out.push(SemToken {
@@ -106,8 +110,8 @@ fn walk_function(
     for item in &f.body {
         match &item.kind {
             BodyKind::Comment(_) => {}
-            BodyKind::Statement(stmt) => walk_statement(stmt, resolutions, out),
-            BodyKind::Nested(nested) => walk_function(nested, resolutions, out),
+            BodyKind::Statement(stmt) => walk_statement(stmt, resolutions, text, out),
+            BodyKind::Nested(nested) => walk_function(nested, resolutions, text, out),
         }
     }
 }
@@ -117,11 +121,12 @@ fn walk_function(
 fn walk_statement(
     stmt: &StatementCst,
     resolutions: &BTreeMap<Span, &Resolution>,
+    text: &str,
     out: &mut Vec<SemToken>,
 ) {
     for label in &stmt.labels {
         out.push(SemToken {
-            span: label_def_span(label.span),
+            span: label_def_span(label.span, text),
             token_type: TOKEN_TYPE_NUMBER,
             modifiers: MODIFIER_DECLARATION,
         });
@@ -193,18 +198,40 @@ fn number_reference(span: Span) -> SemToken {
     }
 }
 
-/// `Label.span` minus its trailing colon: the label grammar's own
-/// contract is "the number's start to the colon's END" (`crate::parser::Label`),
-/// so the span's last character is always the `:` — trimming one column
-/// off the end always lands exactly on the number's own end, whether or
-/// not the author spaced the colon (`1 :` is legal).
-fn label_def_span(span: Span) -> Span {
+/// The label declaration's own token span: just the digits, never the
+/// parser's `Label.span`. `Label.span` runs from the number's start to
+/// the colon's END and (per `crate::parser::Label`) spans any interior
+/// whitespace before that colon — `1 :` is legal `.pmc`, and there the
+/// span covers `"1 "`, one column past the digit. Trimming a fixed one
+/// column off the end (the old approach) only undoes the colon itself;
+/// it leaves any interior space in when the colon is spaced, and
+/// `Label.value` can't be used to reconstruct the digit count either
+/// (leading zeros like `007` collapse to the `u32` value `7`). So the
+/// declaration span is derived straight from the source text: start at
+/// `span.start`, and walk forward while the text is an ASCII digit.
+fn label_def_span(span: Span, text: &str) -> Span {
+    let len = digit_run_len(text, span.start);
     Span::new(
         span.start.line,
         span.start.col,
-        span.end.line,
-        span.end.col - 1,
+        span.start.line,
+        span.start.col + len,
     )
+}
+
+/// The number of consecutive ASCII-digit characters in `text` starting
+/// at `pos` (1-based line/col, char-indexed to match the lexer's own
+/// counting). Lines are split on `'\n'`; `pos` is always a label's
+/// number start, so the line exists and the digit run is non-empty by
+/// construction, but the walk is written generally regardless.
+fn digit_run_len(text: &str, pos: Pos) -> u32 {
+    let Some(line) = text.lines().nth((pos.line - 1) as usize) else {
+        return 0;
+    };
+    line.chars()
+        .skip((pos.col - 1) as usize)
+        .take_while(|c| c.is_ascii_digit())
+        .count() as u32
 }
 
 /// A `use` path's per-segment tokens: every segment but the last is
@@ -442,6 +469,48 @@ mod tests {
             .collect();
         assert_eq!(label_tokens.len(), 1, "{tokens:?}");
         assert_eq!(label_tokens[0].span, Span::new(2, 1, 2, 2));
+    }
+
+    #[test]
+    fn label_definition_token_covers_only_the_digit_before_a_spaced_colon() {
+        // `1 : right;` — `Label.span` covers "1 :" (number start through
+        // the colon's end, INCLUDING the interior space: cols 1..4). The
+        // declaration token must cover only the digit run "1" (cols
+        // 1..2), never the space before the colon.
+        let fixture = "main() {\n1 : right;\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, fixture);
+
+        let tokens = service.semantic_tokens(URI).expect("clean parse");
+        let label_tokens: Vec<&SemToken> = tokens
+            .iter()
+            .filter(|t| t.token_type == TOKEN_TYPE_NUMBER && t.modifiers == MODIFIER_DECLARATION)
+            .collect();
+        assert_eq!(label_tokens.len(), 1, "{tokens:?}");
+        assert_eq!(label_tokens[0].span, Span::new(2, 1, 2, 2));
+    }
+
+    #[test]
+    fn label_definition_token_covers_the_full_leading_zero_digit_run() {
+        // Two cases in one fixture, covering multi-digit runs on both
+        // sides of the spaced/unspaced split: `10 :` (spaced, no leading
+        // zero — cols 1..3 are the digits, the token must stop at col 3
+        // and NOT include the space or colon) and `007:` (unspaced,
+        // leading zeros — `Label.value` collapses `007` to `7`, so the
+        // span must come from the source text's digit run, cols 1..4,
+        // not from reconstructing digits out of the value).
+        let fixture = "main() {\n10 : right;\n007: left;\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, fixture);
+
+        let tokens = service.semantic_tokens(URI).expect("clean parse");
+        let label_tokens: Vec<&SemToken> = tokens
+            .iter()
+            .filter(|t| t.token_type == TOKEN_TYPE_NUMBER && t.modifiers == MODIFIER_DECLARATION)
+            .collect();
+        assert_eq!(label_tokens.len(), 2, "{tokens:?}");
+        assert_eq!(label_tokens[0].span, Span::new(2, 1, 2, 3), "`10 :`");
+        assert_eq!(label_tokens[1].span, Span::new(3, 1, 3, 4), "`007:`");
     }
 
     #[test]
