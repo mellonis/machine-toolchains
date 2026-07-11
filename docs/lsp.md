@@ -101,13 +101,16 @@ args = ["lsp"]
 
 ### Editor shells
 
-This repository is intended to ship ready-made editor integrations —
-a VS Code extension and a JetBrains plugin, both thin shells over
-`pmt lsp` plus the standalone build/lint/format commands — as a
-follow-on to this server. Until they land, the wiring above talks to
-the same binary those shells will launch, so nothing here is
-provisional: upgrading later to a shipped shell changes only the
-launch mechanics, never the server's behavior.
+This repository ships two ready-made editor integrations under
+`editors/`: a VS Code extension (`editors/vscode/`) and a JetBrains
+plugin (`editors/jetbrains/`), both thin shells over `pmt lsp` plus
+the standalone build/lint/format commands. Both are sideload-only —
+built locally from source, with no marketplace listing — and each
+directory's `README.md` carries its own install, build, and sideload
+instructions plus a manual test checklist. The wiring above talks to
+the same binary those shells launch, so nothing here is
+shell-specific: a generic client and a shipped shell differ only in
+launch mechanics, never in the server's behavior.
 
 ## Position encoding
 
@@ -128,7 +131,10 @@ embedded source to a per-version cache path —
 `$XDG_CACHE_HOME/pmt/<version>/std.pmc`, falling back to `~/.cache` on
 Unix or `%LOCALAPPDATA%` on Windows — and points definitions at spans
 inside that file. The write self-heals: a missing or edited copy is
-rewritten from the embedded source on the next demand. Any IO failure
+checked and rewritten when the server next starts (once per server
+run) — the check itself is memoized for the process's lifetime, so a
+copy edited or deleted mid-session is not re-detected until the next
+launch. Any IO failure
 along the way (an unwritable cache directory, for instance) degrades
 go-to-definition on `std::` targets to `null` rather than pointing at
 a file that doesn't exist; nothing else in the session is affected.
