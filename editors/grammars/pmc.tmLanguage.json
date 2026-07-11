@@ -1,0 +1,71 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "PMC",
+  "scopeName": "source.pmc",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#keywords" },
+    { "include": "#commands" },
+    { "include": "#call" },
+    { "include": "#definition" },
+    { "include": "#label" },
+    { "include": "#number" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.pmc", "match": "//.*$" },
+        { "name": "comment.block.pmc", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.import.pmc", "match": "\\buse\\b" },
+        {
+          "match": "\\b(namespace)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.namespace.pmc" },
+            "2": { "name": "entity.name.namespace.pmc" }
+          }
+        },
+        { "name": "storage.modifier.pmc", "match": "\\bexport\\b" },
+        { "name": "keyword.other.as.pmc", "match": "\\bas\\b" }
+      ]
+    },
+    "commands": {
+      "patterns": [
+        { "name": "keyword.control.pmc", "match": "\\b(goto|check|halt)\\b" },
+        { "name": "support.function.builtin.pmc", "match": "\\b(left|right|mark|unmark)\\b" },
+        { "name": "keyword.other.debugger.pmc", "match": "\\bdebugger\\b" }
+      ]
+    },
+    "call": {
+      "match": "(@)\\s*([A-Za-z_][A-Za-z0-9_]*(?:\\s*::\\s*[A-Za-z_][A-Za-z0-9_]*)*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.call.pmc" },
+        "2": { "name": "entity.name.function.call.pmc" }
+      }
+    },
+    "definition": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\(\\)\\s*\\{)",
+      "captures": { "1": { "name": "entity.name.function.pmc" } }
+    },
+    "label": {
+      "match": "(?:^|(?<=[;{,:]))\\s*(\\d+)\\s*(:)",
+      "captures": {
+        "1": { "name": "entity.name.label.pmc" },
+        "2": { "name": "punctuation.separator.label.pmc" }
+      }
+    },
+    "number": { "name": "constant.numeric.pmc", "match": "\\b\\d+\\b" },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.namespace.pmc", "match": "::" },
+        { "name": "keyword.operator.return.pmc", "match": "!" },
+        { "name": "punctuation.terminator.pmc", "match": ";" },
+        { "name": "punctuation.separator.comma.pmc", "match": "," }
+      ]
+    }
+  }
+}

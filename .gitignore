@@ -1,3 +1,11 @@
 /target
 /.superpowers/
 .DS_Store
+
+# editor-shell build outputs (plan 3)
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/syntaxes/
+editors/vscode/*.vsix
+editors/jetbrains/.gradle/
+editors/jetbrains/build/
