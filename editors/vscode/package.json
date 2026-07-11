@@ -1,0 +1,67 @@
+{
+  "name": "pmc",
+  "displayName": "PMC (Post machine toolchain)",
+  "description": "Language support for .pmc via pmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
+  "version": "0.1.0",
+  "publisher": "mellonis",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mellonis/machine-toolchains"
+  },
+  "engines": { "vscode": "^1.106.0" },
+  "categories": ["Programming Languages"],
+  "main": "./out/extension.js",
+  "activationEvents": ["onLanguage:pmc", "onTaskType:pmt"],
+  "contributes": {
+    "languages": [{
+      "id": "pmc", "extensions": [".pmc"], "aliases": ["PMC"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "pmc", "scopeName": "source.pmc",
+      "path": "./syntaxes/pmc.tmLanguage.json"
+    }],
+    "configuration": {
+      "title": "pmt",
+      "properties": {
+        "pmt.path": {
+          "type": "string", "default": "pmt",
+          "description": "Path to the pmt binary."
+        },
+        "pmt.lint.allow": {
+          "type": "array", "items": { "type": "string" }, "default": [],
+          "description": "Lint codes to allow (merged by union with pmt.json)."
+        }
+      }
+    },
+    "problemMatchers": [{
+      "name": "pmt",
+      "owner": "pmt",
+      "fileLocation": ["autoDetect", "${workspaceFolder}"],
+      "severity": "warning",
+      "pattern": {
+        "regexp": "^(.+?):(\\d+):(\\d+): (error|warning|lint): (.+?)(?: \\[([a-z-]+)\\])?$",
+        "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5, "code": 6
+      }
+    }],
+    "taskDefinitions": [{
+      "type": "pmt",
+      "required": ["command"],
+      "properties": {
+        "command": { "type": "string", "enum": ["compile", "lint", "fmt-check"] },
+        "file": { "type": "string" }
+      }
+    }]
+  },
+  "scripts": {
+    "copy-grammar": "node scripts/copy-grammar.js",
+    "compile": "npm run copy-grammar && tsc -p .",
+    "package": "npm run compile && vsce package"
+  },
+  "dependencies": { "vscode-languageclient": "^10.1.0" },
+  "devDependencies": {
+    "@types/node": "^20.0.0", "@types/vscode": "^1.106.0",
+    "@vscode/vsce": "^3.9.2", "typescript": "^5.9.0"
+  }
+}
