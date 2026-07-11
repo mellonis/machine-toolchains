@@ -166,10 +166,10 @@ main() {
 }
 ```
 
-- [ ] **Open** `check.pmc`. Confirm a squiggle on the `debugger;` line (the
+- [x] **Open** `check.pmc`. Confirm a squiggle on the `debugger;` line (the
       `leftover-debugger` lint finding) — diagnostics are live on open, no
       manual trigger needed.
-- [ ] **Completion**: on a new line inside `main`, type `@g`. Confirm
+- [x] **Completion**: on a new line inside `main`, type `@g`. Confirm
       `goToEnd` and `std::goToEnd` appear in the completion list. (A bare
       `@` with nothing typed after it is itself a lexical error and won't
       show candidates — type at least one more character. If the list
@@ -178,15 +178,15 @@ main() {
       After observing the completion popup, **undo the typed text** to
       restore a parse-clean state before continuing — only completions
       tolerate a broken parse; the following steps need valid syntax.
-- [ ] **Go-to-definition**: invoke it on `goToEnd`, either in
+- [x] **Go-to-definition**: invoke it on `goToEnd`, either in
       `use std::goToEnd;` or inside the `@goToEnd()` call. Confirm it jumps
       into a materialized copy of the standard library — a cached
       `std.pmc` outside this workspace, not a file you're editing — landing
       on `export goToEnd() {`. See `docs/lsp.md` in this repository for
       where that cache lives.
-- [ ] **Task — lint**: run the `pmt lint` task. Confirm the Problems panel
+- [x] **Task — lint**: run the `pmt lint` task. Confirm the Problems panel
       populates with the `leftover-debugger` finding.
-- [ ] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
+- [x] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
       open and the `leftover-debugger` finding still showing (previous
       step), create a `pmt.json` file next to it containing
       `{"lint": {"allow": ["leftover-debugger"]}}` (schema:
@@ -196,24 +196,24 @@ main() {
       on the on-disk file, not the `pmt.lint.allow` setting. Delete
       `pmt.json` and confirm the squiggle returns before continuing — the
       steps below need the finding present again.
-- [ ] **Task — fmt-check, and its caveat**: run the `pmt fmt-check` task.
+- [x] **Task — fmt-check, and its caveat**: run the `pmt fmt-check` task.
       `check(1,2)` is missing its canonical space, so the task fails
       (non-zero exit, visible in the terminal) — but confirm the Problems
       panel does **not** gain an entry for it, per the caveat above.
-- [ ] **Quickfix**: on the `debugger;` squiggle, open the lightbulb / Quick
+- [x] **Quickfix**: on the `debugger;` squiggle, open the lightbulb / Quick
       Fix menu and apply the fix. This one is gated (equivalent to
       `pmt lint --fix --force`), so it may show as a secondary, not the
       single default action — confirm the `debugger;` statement is deleted
       either way.
-- [ ] **Format-on-save**: with `editor.formatOnSave` enabled for `.pmc` (or
+- [x] **Format-on-save**: with `editor.formatOnSave` enabled for `.pmc` (or
       run **Format Document**), confirm `check(1,2)` becomes `check(1, 2)`
       and nothing else changes — formatting is layout-only.
-- [ ] **Task — compile, with a fatal**: break the file (e.g. delete the
+- [x] **Task — compile, with a fatal**: break the file (e.g. delete the
       closing `)` so the line reads `check(1, 2;`), save, and run the
       `pmt compile` task. Confirm the Problems panel shows exactly one
       fatal entry carrying its bracketed code (`[unexpected-token]`).
       Undo the edit.
-- [ ] **Dogfood — the embedded standard library**: open
+- [x] **Dogfood — the embedded standard library**: open
       `crates/post-machine/src/stdlib/std.pmc` from this repository
       directly (not the go-to-definition-materialized cache copy from
       earlier). Confirm **zero diagnostics**, that semantic tokens are

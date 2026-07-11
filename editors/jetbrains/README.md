@@ -158,7 +158,7 @@ main() {
 }
 ```
 
-- [ ] **Coloring — check this FIRST.** Open `check.pmc`. Confirm syntax
+- [x] **Coloring — check this FIRST.** Open `check.pmc`. Confirm syntax
       colors appear (keywords, the `@` call, the label, the comment
       punctuation if you add one) rather than plain uncolored text. This
       is the one part of the shell that was compile-verified only, never
@@ -169,10 +169,10 @@ main() {
       that bridge needs attention before anything below is worth testing
       — see the comment next to `editorHighlighterProvider` in
       `src/main/resources/META-INF/plugin.xml`.
-- [ ] **Squiggles**: confirm a warning underline on the `debugger;` line
+- [x] **Squiggles**: confirm a warning underline on the `debugger;` line
       (the `leftover-debugger` lint finding) — diagnostics are live on
       open, no manual trigger needed.
-- [ ] **Completion**: on a new line inside `main`, type `@g`. Confirm
+- [x] **Completion**: on a new line inside `main`, type `@g`. Confirm
       `goToEnd` and `std::goToEnd` appear in the completion popup. (A bare
       `@` with nothing typed after it is itself a lexical error and won't
       show candidates — type at least one more character. If the list
@@ -181,30 +181,30 @@ main() {
       After observing the popup, **undo the typed text** to restore a
       parse-clean state before continuing — only completions tolerate a
       broken parse; the following steps need valid syntax.
-- [ ] **Go-to-definition**: invoke it (Go to Declaration) on `goToEnd`,
+- [x] **Go-to-definition**: invoke it (Go to Declaration) on `goToEnd`,
       either in `use std::goToEnd;` or inside the `@goToEnd()` call.
       Confirm it jumps into a materialized copy of the standard library —
       a cached `std.pmc` outside this project, not a file you're editing —
       landing on `export goToEnd() {`. See `docs/lsp.md` in this
       repository for where that cache lives.
-- [ ] **Quickfix**: on the `debugger;` squiggle, open the intention menu
+- [x] **Quickfix**: on the `debugger;` squiggle, open the intention menu
       (Alt+Enter / ⌥Enter) and apply the fix. This one is gated
       (equivalent to `pmt lint --fix --force`), so it may show as a
       secondary, not the single default action — confirm the
       `debugger;` statement is deleted either way. **Undo** the fix
       afterward to restore `debugger;` — the allow-list step below needs
       the finding present again.
-- [ ] **Reformat**: Code → Reformat Code. Confirm `check(1,2)` becomes
+- [x] **Reformat**: Code → Reformat Code. Confirm `check(1,2)` becomes
       `check(1, 2)` and nothing else changes — formatting is layout-only,
       and it won't touch the (now-restored) `debugger;` line.
-- [ ] **Settings allow-list live-suppress**: open Settings | Tools | pmt,
+- [x] **Settings allow-list live-suppress**: open Settings | Tools | pmt,
       add `leftover-debugger` to the lint allow-list, and apply. Confirm
       the squiggle on `debugger;` disappears in the still-open file
       *without* reopening it or restarting the IDE. Remove
       `leftover-debugger` from the allow-list and apply again to confirm
       the squiggle comes back, then leave the field empty (the default)
       when you're done.
-- [ ] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
+- [x] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
       open and `debugger;` squiggled again (previous step left it that
       way), create a `pmt.json` file next to it containing
       `{"lint": {"allow": ["leftover-debugger"]}}` (schema: `docs/lint.md`
@@ -230,7 +230,17 @@ main() {
       arguments `check.pmx --tape " * *"`, and run it. Confirm the console
       shows the run's tape output and the process's exit code (0 = the
       program executed `stp`, 2 = `hlt`, 3 = a trap — see `docs/cli.md`).
-- [ ] **Dogfood — the embedded standard library**: open
+
+/Users/mellonis/.cargo/bin/pmt run check.pmx --tape " * *"
+outcome: Halted
+steps 12, core tacts 32, stall tacts 8 (total 40)
+origin 1, head 2
+|* *|
+^
+
+Process finished with exit code 2
+
+- [x] **Dogfood — the embedded standard library**: open
       `crates/post-machine/src/stdlib/std.pmc` from this repository
       directly (not the go-to-definition-materialized cache copy from
       earlier). Confirm **zero diagnostics**, that semantic tokens are
