@@ -23,6 +23,7 @@ use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 
 mod complete;
 mod navigate;
+mod tokens;
 
 pub(crate) struct PmcLanguageService {
     docs: HashMap<String, DocState>,
@@ -277,6 +278,16 @@ fn function_symbol(f: &FunctionCst) -> SymbolNode {
     }
 }
 
+/// Semantic-token legend indices/bits (Task 12, `tokens.rs`) — the ONLY
+/// spellings the emitter uses for legend positions; kept in lockstep
+/// with `token_legend()`'s arrays just below by the drift-guard test in
+/// `tokens.rs`.
+const TOKEN_TYPE_NAMESPACE: u32 = 0;
+const TOKEN_TYPE_FUNCTION: u32 = 1;
+const TOKEN_TYPE_NUMBER: u32 = 2;
+const MODIFIER_DECLARATION: u32 = 1 << 0;
+const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 1;
+
 impl LanguageService for PmcLanguageService {
     fn language_id(&self) -> &'static str {
         "pmc"
@@ -431,8 +442,9 @@ impl LanguageService for PmcLanguageService {
         Some(cst_symbols(&cst.items))
     }
 
-    fn semantic_tokens(&mut self, _uri: &str) -> Option<Vec<SemToken>> {
-        None // Task 12: resolution-aware token stream.
+    fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
+        let state = self.docs.get(uri)?;
+        tokens::semantic_tokens(state)
     }
 
     fn format(&mut self, uri: &str) -> Option<String> {
