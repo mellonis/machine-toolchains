@@ -1,0 +1,718 @@
+//! The `.pmc` language service: implements `mtc_core::lsp::LanguageService`
+//! over the real compiler pipeline (docs/lsp.md). Owns per-document staged
+//! state, the three-channel diagnostic merge (fatal / compile warnings /
+//! lint findings), and both configuration channels (`pmt.json` project
+//! files and IDE settings). Library-only — rendering and stdio belong to
+//! the CLI (docs/cli.md (thin-renderer rule)).
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use mtc_core::diagnostics::{Diagnostic, Pos, Span};
+use mtc_core::lsp::{
+    Action, Candidate, DefTarget, LanguageService, SemToken, ServiceDiagnostic, ServiceSeverity,
+    SymbolNode,
+};
+
+use crate::compiler::{Analysis, CompileError, ScopeSummary, analyze_staged};
+use crate::config;
+use crate::cst::Cst;
+use crate::lexer::{Token, TokenKind};
+use crate::lint::{LintContext, LintError, run_rules, validate_allow};
+
+pub(crate) struct PmcLanguageService {
+    docs: HashMap<String, DocState>,
+    /// IDE-settings allow-list: `None` = never configured; `Ok` = valid
+    /// codes; `Err` = human-readable reason (surfaces as invalid-config).
+    ide_allow: Option<Result<Vec<String>, String>>,
+    /// `pmt.json` parse cache keyed by winner path; (mtime, outcome).
+    config_cache: HashMap<PathBuf, (SystemTime, Result<Vec<String>, String>)>,
+}
+
+impl PmcLanguageService {
+    #[allow(dead_code)] // consumer: cli/lsp.rs (LSP plan 2, Task 13)
+    pub(crate) fn new() -> Self {
+        PmcLanguageService {
+            docs: HashMap::new(),
+            ide_allow: None,
+            config_cache: HashMap::new(),
+        }
+    }
+
+    /// The project-file channel for one analysis: the parsed outcome of
+    /// the discovered `pmt.json`, through the mtime cache — reused only
+    /// while the file's mtime is unchanged, else re-loaded and re-cached.
+    /// Errors come back as the full display string (path + reason), ready
+    /// to be an `invalid-config` message.
+    fn project_allow(&mut self, winner: &Path) -> Result<Vec<String>, String> {
+        let mtime = std::fs::metadata(winner).and_then(|m| m.modified()).ok();
+        if let Some(mtime) = mtime
+            && let Some((cached, outcome)) = self.config_cache.get(winner)
+            && *cached == mtime
+        {
+            return outcome.clone();
+        }
+        let outcome = match config::load(winner) {
+            Ok(project) => Ok(project.allow),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Some(mtime) = mtime {
+            // No stat (file racing in and out of existence) → no cache
+            // entry: there is no mtime to key staleness on.
+            self.config_cache
+                .insert(winner.to_path_buf(), (mtime, outcome.clone()));
+        }
+        outcome
+    }
+}
+
+/// Per-document staged state (docs/lsp.md (staged analysis)): each
+/// pipeline stage's outcome for the CURRENT text, plus the one sanctioned
+/// piece of staleness (`scopes_for_completion`).
+struct DocState {
+    /// The document's current text, verbatim from the framework.
+    #[allow(dead_code)] // consumer: format() (LSP plan 2, Task 8)
+    text: String,
+    /// WithComments token stream of the current text; `None` only when
+    /// lexing itself failed.
+    #[allow(dead_code)] // consumer: completion() (LSP plan 2, Task 10)
+    tokens: Option<Vec<Token>>,
+    /// CST of the current text (`None` when lexing or parsing failed).
+    #[allow(dead_code)] // consumer: document_symbols() (LSP plan 2, Task 8)
+    cst: Option<Cst>,
+    /// Post-parse analysis of the current text (`None` when any stage
+    /// failed).
+    analysis: Option<Analysis>,
+    /// Lint findings, retained fixes included (the quickfix source);
+    /// `Some` exactly when `analysis` is — lint only runs over a
+    /// successful analysis.
+    lint: Option<Vec<Diagnostic>>,
+    /// The first (only) fatal, at whichever stage produced it.
+    fatal: Option<CompileError>,
+    /// Names-only staleness exception: last-good scopes survive a failed
+    /// re-analysis so completion candidates stay useful mid-edit.
+    #[allow(dead_code)] // consumer: completion() (LSP plan 2, Task 10)
+    scopes_for_completion: Option<ScopeSummary>,
+    /// invalid-config messages that applied to this analysis (0..=2
+    /// entries: project file first, then IDE settings).
+    config_errors: Vec<String>,
+}
+
+/// `file:` URIs → percent-decoded filesystem path; any other scheme
+/// (`untitled:` buffers, …) → `None`. An authority component
+/// (`file://localhost/x`) is skipped — editors emit the empty-authority
+/// `file:///x` form, but the spelled-out host is legal URI syntax.
+fn uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    Some(PathBuf::from(percent_decode(path)?))
+}
+
+/// Hand-rolled percent-decoding: `%XX` hex pairs become bytes; malformed
+/// escapes pass through literally. `None` only when the decoded bytes are
+/// not UTF-8 (no `PathBuf` to build portably).
+fn percent_decode(s: &str) -> Option<String> {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push(hi * 16 + lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Set-union append: codes already present are not duplicated (the same
+/// contains-check `pmt lint` uses when folding project config into
+/// `--allow`).
+fn union_into(dst: &mut Vec<String>, src: &[String]) {
+    for code in src {
+        if !dst.contains(code) {
+            dst.push(code.clone());
+        }
+    }
+}
+
+/// Parses the IDE channel's `lint.allow` value: an array of known rule
+/// codes, or a human-readable reason why not.
+fn parse_ide_allow(value: &serde_json::Value) -> Result<Vec<String>, String> {
+    const SHAPE: &str = "`lint.allow` must be an array of strings";
+    let arr = value.as_array().ok_or_else(|| SHAPE.to_string())?;
+    let mut codes = Vec::with_capacity(arr.len());
+    for item in arr {
+        codes.push(item.as_str().ok_or_else(|| SHAPE.to_string())?.to_string());
+    }
+    match validate_allow(&codes) {
+        Ok(()) => Ok(codes),
+        Err(LintError::UnknownAllowCode(code)) => {
+            Err(format!("unknown lint rule `{code}` in lint.allow"))
+        }
+        Err(other) => unreachable!("validate_allow only returns UnknownAllowCode: {other}"),
+    }
+}
+
+/// The merged diagnostic set for one document (docs/lsp.md
+/// (diagnostics)): invalid-config warnings first, then either the one
+/// fatal or the span-ordered merge of compile warnings (source `"pmt"`)
+/// and lint findings (source `"pmt lint"`).
+fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
+    let mut out: Vec<ServiceDiagnostic> = state
+        .config_errors
+        .iter()
+        .map(|message| ServiceDiagnostic {
+            span: Span::point(1, 1),
+            severity: ServiceSeverity::Warning,
+            source: "pmt",
+            code: Some("invalid-config"),
+            message: message.clone(),
+        })
+        .collect();
+
+    if let Some(fatal) = &state.fatal {
+        // Exactly one Error, never a cascade. The message is the KIND's
+        // Display — the `line N:M:` prefix and bracketed code suffix are
+        // CLI renderings; the LSP client places the span and shows the
+        // code itself.
+        out.push(ServiceDiagnostic {
+            span: fatal.span,
+            severity: ServiceSeverity::Error,
+            source: "pmt",
+            code: Some(fatal.kind.code()),
+            message: fatal.kind.to_string(),
+        });
+        return out;
+    }
+
+    let mut findings: Vec<ServiceDiagnostic> = Vec::new();
+    if let Some(analysis) = &state.analysis {
+        findings.extend(analysis.warnings.iter().map(|d| ServiceDiagnostic {
+            span: d.span,
+            severity: ServiceSeverity::Warning,
+            source: "pmt",
+            code: Some(d.code),
+            message: d.message.clone(),
+        }));
+    }
+    if let Some(lint) = &state.lint {
+        findings.extend(lint.iter().map(|d| ServiceDiagnostic {
+            span: d.span,
+            severity: ServiceSeverity::Warning,
+            source: "pmt lint",
+            code: Some(d.code),
+            message: d.message.clone(),
+        }));
+    }
+    // Stable sort: equal starts keep the warnings-then-lint channel order.
+    findings.sort_by_key(|d| d.span.start);
+    out.extend(findings);
+    out
+}
+
+impl LanguageService for PmcLanguageService {
+    fn language_id(&self) -> &'static str {
+        "pmc"
+    }
+
+    fn trigger_characters(&self) -> &[char] {
+        &['@', ':']
+    }
+
+    fn token_legend(&self) -> (&'static [&'static str], &'static [&'static str]) {
+        (
+            &["namespace", "function", "number"],
+            &["declaration", "defaultLibrary"],
+        )
+    }
+
+    fn watched_globs(&self) -> &'static [&'static str] {
+        &["**/pmt.json"]
+    }
+
+    fn did_update(&mut self, uri: &str, text: &str) -> Vec<ServiceDiagnostic> {
+        // 1. Resolve config. The discovery re-runs EVERY analysis (a few
+        //    stats) — a newly created nearer pmt.json must win; only the
+        //    parse of the winner is cached (by mtime). Idempotent for the
+        //    same (uri, text): the framework's config/watched-file
+        //    republish sweeps re-invoke this freely.
+        let mut config_errors: Vec<String> = Vec::new();
+        let mut effective_allow: Vec<String> = Vec::new();
+
+        if let Some(path) = uri_to_path(uri)
+            && let Some(winner) = path.parent().and_then(config::discover)
+        {
+            match self.project_allow(&winner) {
+                Ok(codes) => union_into(&mut effective_allow, &codes),
+                // ConfigError's Display already names the path.
+                Err(message) => config_errors.push(message),
+            }
+        }
+        match &self.ide_allow {
+            None => {}
+            Some(Ok(codes)) => union_into(&mut effective_allow, codes),
+            Some(Err(reason)) => config_errors.push(format!("IDE settings: {reason}")),
+        }
+
+        // 2. Staged analysis; lint over a successful analysis only, with
+        //    the effective allow union of the valid config sources.
+        let staged = analyze_staged(text);
+        let lint = match (&staged.tokens, &staged.analysis) {
+            (Some(tokens), Some(analysis)) => {
+                // Comment trivia filtered out: exactly the
+                // WithoutComments stream the lint rules were written
+                // against.
+                let significant: Vec<Token> = tokens
+                    .iter()
+                    .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+                    .cloned()
+                    .collect();
+                let ctx = LintContext {
+                    source: text,
+                    tokens: &significant,
+                    ast: &analysis.ast,
+                    scopes: &analysis.scopes,
+                };
+                Some(run_rules(&ctx, &effective_allow))
+            }
+            _ => None,
+        };
+
+        // 3. Store the doc state; a failed re-analysis keeps the
+        //    previous last-good scopes (the names-only staleness
+        //    exception for completion).
+        let prev = self.docs.remove(uri);
+        let scopes_for_completion = match &staged.analysis {
+            Some(analysis) => Some(analysis.scopes.clone()),
+            None => prev.and_then(|d| d.scopes_for_completion),
+        };
+        let state = DocState {
+            text: text.to_string(),
+            tokens: staged.tokens,
+            cst: staged.cst,
+            analysis: staged.analysis,
+            lint,
+            fatal: staged.fatal,
+            scopes_for_completion,
+            config_errors,
+        };
+        let diagnostics = merged_diagnostics(&state);
+        self.docs.insert(uri.to_string(), state);
+        diagnostics
+    }
+
+    fn did_close(&mut self, uri: &str) {
+        // Drop everything, staleness included; the framework publishes
+        // the empty diagnostic set.
+        self.docs.remove(uri);
+    }
+
+    fn did_change_config(&mut self, settings: serde_json::Value) {
+        // Clients that forward whole configuration sections wrap the
+        // service's settings under a "pmt" key; unwrap when present.
+        let section = settings.get("pmt").unwrap_or(&settings);
+        // Only `lint.allow` is ours. Every other key is client-owned
+        // (binary path, trace switches, …) and deliberately ignored —
+        // strictness belongs to pmt.json. Missing entirely = the channel
+        // is unconfigured, not invalid. No republish from here: the
+        // framework re-runs did_update on every open doc after this call.
+        self.ide_allow = section
+            .get("lint")
+            .and_then(|lint| lint.get("allow"))
+            .map(parse_ide_allow);
+    }
+
+    fn completion(&mut self, _uri: &str, _pos: Pos) -> Vec<Candidate> {
+        Vec::new() // Task 10: four-context completions.
+    }
+
+    fn definition(&mut self, _uri: &str, _pos: Pos) -> Option<DefTarget> {
+        None // Task 9: resolution-table + materialized-std navigation.
+    }
+
+    fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {
+        Vec::new() // Task 11: quickfixes from the retained lint fixes.
+    }
+
+    fn document_symbols(&mut self, _uri: &str) -> Option<Vec<SymbolNode>> {
+        None // Task 8: CST outline.
+    }
+
+    fn semantic_tokens(&mut self, _uri: &str) -> Option<Vec<SemToken>> {
+        None // Task 12: resolution-aware token stream.
+    }
+
+    fn format(&mut self, _uri: &str) -> Option<String> {
+        None // Task 8: fmt::format over the stored text.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use serde_json::json;
+
+    use super::*;
+
+    /// A fresh scratch directory under `std::env::temp_dir()`, unique per
+    /// call (process id + an atomic counter — this crate has no tempfile
+    /// dependency, matching the zero-new-deps constraint). Mirrors
+    /// `config::tests::unique_tmp_dir`.
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("pmt-lsp-test-{label}-{}-{n}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_uri(path: &Path) -> String {
+        format!("file://{}", path.display())
+    }
+
+    /// One `unused-label` lint finding (label 5, never referenced) and
+    /// nothing else.
+    const UNUSED_LABEL_FIXTURE: &str = "main() {\n5: right;\n}\n";
+
+    /// `unused-label` (line 2, lint channel) AND `unused-import` (line 4,
+    /// compile-warning channel) — the channels interleave only if the
+    /// merge really sorts by span.
+    const WARNING_AND_LINT_FIXTURE: &str = "main() {\n5: right;\n}\nuse unused;\n";
+
+    /// Both `leading-zeros` and `unused-label` fire on the `007:` label.
+    const TWO_FINDINGS_FIXTURE: &str = "main() {\n007: right;\n}\n";
+
+    #[test]
+    fn advertises_the_pmc_language_surface() {
+        let service = PmcLanguageService::new();
+        assert_eq!(service.language_id(), "pmc");
+        assert_eq!(service.trigger_characters(), &['@', ':']);
+        assert_eq!(
+            service.token_legend(),
+            (
+                &["namespace", "function", "number"][..],
+                &["declaration", "defaultLibrary"][..]
+            )
+        );
+        assert_eq!(service.watched_globs(), &["**/pmt.json"]);
+    }
+
+    #[test]
+    fn parse_failure_yields_exactly_one_error_with_its_fatal_code() {
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", "main( {");
+
+        assert_eq!(diags.len(), 1, "one honest fatal, never a cascade");
+        let d = &diags[0];
+        assert_eq!(d.severity, ServiceSeverity::Error);
+        assert_eq!(d.source, "pmt");
+        assert_eq!(d.code, Some("unexpected-token"));
+        // The message is the KIND's own Display — no `line N:M:` prefix,
+        // no bracketed code suffix (both are CLI renderings).
+        assert_eq!(
+            d.message,
+            "expected `)` (functions take no parameters), found `{`"
+        );
+    }
+
+    #[test]
+    fn compile_warnings_and_lint_findings_merge_span_ordered() {
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", WARNING_AND_LINT_FIXTURE);
+
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        // The lint finding (line 2) precedes the compile warning (line 4):
+        // the two channels are merged by span, not concatenated.
+        assert_eq!(diags[0].code, Some("unused-label"));
+        assert_eq!(diags[0].source, "pmt lint");
+        assert_eq!(diags[0].severity, ServiceSeverity::Warning);
+        assert_eq!(diags[0].span, Span::new(2, 1, 2, 3));
+        assert_eq!(
+            diags[0].message,
+            "label 5 is never referenced (function 'main')"
+        );
+
+        assert_eq!(diags[1].code, Some("unused-import"));
+        assert_eq!(diags[1].source, "pmt");
+        assert_eq!(diags[1].severity, ServiceSeverity::Warning);
+        assert_eq!(diags[1].span.start.line, 4);
+        assert_eq!(diags[1].message, "unused import `unused`");
+    }
+
+    #[test]
+    fn undefined_label_is_a_single_char_precise_error() {
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", "main() {\nright;\ngoto 99;\n}\n");
+
+        assert_eq!(diags.len(), 1);
+        let d = &diags[0];
+        assert_eq!(d.severity, ServiceSeverity::Error);
+        assert_eq!(d.source, "pmt");
+        assert_eq!(d.code, Some("undefined-label"));
+        assert_eq!(d.message, "undefined label `99`");
+        // Char-precise: exactly the `99` target token, not the whole line.
+        assert_eq!(d.span, Span::new(3, 6, 3, 8));
+    }
+
+    #[test]
+    fn lint_fix_is_retained_in_doc_state() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", UNUSED_LABEL_FIXTURE);
+
+        let state = service.docs.get("untitled:Untitled-1").unwrap();
+        let lint = state.lint.as_ref().expect("lint ran (analysis succeeded)");
+        assert_eq!(lint.len(), 1);
+        assert_eq!(lint[0].code, "unused-label");
+        let fix = lint[0]
+            .fix
+            .as_ref()
+            .expect("the finding's Fix is retained for code actions");
+        assert_eq!(fix.description, "remove the label prefix '5:'");
+    }
+
+    #[test]
+    fn scopes_for_completion_survive_a_parse_broken_edit() {
+        let mut service = PmcLanguageService::new();
+        let clean = service.did_update("untitled:Untitled-1", "main() {\n1: right;\ngoto 1;\n}\n");
+        assert!(clean.is_empty(), "{clean:?}");
+
+        let broken = service.did_update("untitled:Untitled-1", "main( {");
+        assert_eq!(broken.len(), 1);
+
+        let state = service.docs.get("untitled:Untitled-1").unwrap();
+        assert!(
+            state.tokens.is_some(),
+            "lexing succeeded on the broken text"
+        );
+        assert!(state.cst.is_none());
+        assert!(state.analysis.is_none());
+        assert!(state.lint.is_none());
+        assert!(state.fatal.is_some());
+        let scopes = state
+            .scopes_for_completion
+            .as_ref()
+            .expect("last-good scopes survive the failed re-analysis");
+        assert_eq!(scopes.defs[&Vec::<String>::new()]["main"], "main");
+    }
+
+    #[test]
+    fn did_close_drops_the_state_and_its_staleness() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", UNUSED_LABEL_FIXTURE);
+        service.did_close("untitled:Untitled-1");
+        assert!(!service.docs.contains_key("untitled:Untitled-1"));
+
+        // Re-opening broken starts from scratch: no scopes leak across
+        // the close.
+        service.did_update("untitled:Untitled-1", "main( {");
+        let state = service.docs.get("untitled:Untitled-1").unwrap();
+        assert!(state.scopes_for_completion.is_none());
+    }
+
+    #[test]
+    fn project_config_suppresses_an_allowed_finding() {
+        let dir = unique_tmp_dir("suppress");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"lint":{"allow":["unused-label"]}}"#,
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let uri = file_uri(&dir.join("prog.pmc"));
+        let diags = service.did_update(&uri, UNUSED_LABEL_FIXTURE);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn rewritten_broken_config_surfaces_invalid_config_and_restores_findings() {
+        let dir = unique_tmp_dir("rewrite");
+        let config_path = dir.join("pmt.json");
+        fs::write(&config_path, r#"{"lint":{"allow":["unused-label"]}}"#).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let uri = file_uri(&dir.join("prog.pmc"));
+        assert!(service.did_update(&uri, UNUSED_LABEL_FIXTURE).is_empty());
+
+        // Rewrite with a broken schema and a guaranteed-newer mtime (the
+        // filesystem's own timestamp granularity is not to be trusted in
+        // a fast test).
+        let old_mtime = fs::metadata(&config_path).unwrap().modified().unwrap();
+        fs::write(&config_path, r#"{"lints":{}}"#).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&config_path)
+            .unwrap()
+            .set_modified(old_mtime + Duration::from_secs(2))
+            .unwrap();
+
+        let diags = service.did_update(&uri, UNUSED_LABEL_FIXTURE);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        // invalid-config first, at the document anchor position.
+        assert_eq!(diags[0].code, Some("invalid-config"));
+        assert_eq!(diags[0].severity, ServiceSeverity::Warning);
+        assert_eq!(diags[0].source, "pmt");
+        assert_eq!(diags[0].span, Span::point(1, 1));
+        assert!(
+            diags[0]
+                .message
+                .contains(&config_path.display().to_string()),
+            "names the pmt.json at fault: {}",
+            diags[0].message
+        );
+        assert!(
+            diags[0].message.contains("unknown key `lints`"),
+            "carries the reason: {}",
+            diags[0].message
+        );
+        // The finding is back: lint ran with the remaining sources.
+        assert_eq!(diags[1].code, Some("unused-label"));
+        assert_eq!(diags[1].source, "pmt lint");
+    }
+
+    #[test]
+    fn ide_settings_suppress_findings_bare_or_wrapped() {
+        // Bare section, as a client that sends the settings directly.
+        let mut bare = PmcLanguageService::new();
+        bare.did_change_config(json!({"lint": {"allow": ["unused-label"]}}));
+        assert!(
+            bare.did_update("untitled:Untitled-1", UNUSED_LABEL_FIXTURE)
+                .is_empty()
+        );
+
+        // Wrapped under "pmt", as a client that forwards whole sections.
+        let mut wrapped = PmcLanguageService::new();
+        wrapped.did_change_config(json!({"pmt": {"lint": {"allow": ["unused-label"]}}}));
+        assert!(
+            wrapped
+                .did_update("untitled:Untitled-1", UNUSED_LABEL_FIXTURE)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ide_unknown_code_yields_invalid_config_naming_ide_settings() {
+        let mut service = PmcLanguageService::new();
+        service.did_change_config(json!({"lint": {"allow": ["no-such"]}}));
+
+        let diags = service.did_update("untitled:Untitled-1", UNUSED_LABEL_FIXTURE);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert_eq!(diags[0].code, Some("invalid-config"));
+        assert_eq!(diags[0].severity, ServiceSeverity::Warning);
+        assert_eq!(diags[0].span, Span::point(1, 1));
+        assert!(
+            diags[0].message.starts_with("IDE settings: "),
+            "names the IDE channel: {}",
+            diags[0].message
+        );
+        assert!(diags[0].message.contains("no-such"), "{}", diags[0].message);
+        // The Err source contributed nothing to the allow union — the
+        // finding stays.
+        assert_eq!(diags[1].code, Some("unused-label"));
+    }
+
+    #[test]
+    fn missing_lint_allow_leaves_the_ide_channel_unconfigured() {
+        let mut service = PmcLanguageService::new();
+        // Other keys are client-owned and ignored; no lint.allow at all
+        // means UNCONFIGURED, not invalid.
+        service.did_change_config(json!({"pmt": {"path": "/usr/local/bin/pmt"}}));
+        assert!(service.ide_allow.is_none());
+
+        let diags = service.did_update("untitled:Untitled-1", UNUSED_LABEL_FIXTURE);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, Some("unused-label"));
+    }
+
+    #[test]
+    fn file_and_ide_allow_lists_union() {
+        let dir = unique_tmp_dir("union");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"lint":{"allow":["unused-label"]}}"#,
+        )
+        .unwrap();
+        let uri = file_uri(&dir.join("prog.pmc"));
+
+        // Control: the file alone suppresses only unused-label.
+        let mut file_only = PmcLanguageService::new();
+        let diags = file_only.did_update(&uri, TWO_FINDINGS_FIXTURE);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, Some("leading-zeros"));
+
+        // Union: file allows unused-label, IDE allows leading-zeros.
+        let mut union = PmcLanguageService::new();
+        union.did_change_config(json!({"lint": {"allow": ["leading-zeros"]}}));
+        let diags = union.did_update(&uri, TWO_FINDINGS_FIXTURE);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn untitled_uri_gets_no_project_config_and_no_error() {
+        // No path → no discovery, no invalid-config noise; the finding
+        // itself is untouched.
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", UNUSED_LABEL_FIXTURE);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].code, Some("unused-label"));
+        assert!(diags.iter().all(|d| d.code != Some("invalid-config")));
+    }
+
+    #[test]
+    fn did_update_is_idempotent_for_identical_input() {
+        // The framework's config/watched-file republish sweeps re-invoke
+        // did_update freely; same (uri, text) must give the same answer.
+        let dir = unique_tmp_dir("idempotent");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"lint":{"allow":["unused-label"]}}"#,
+        )
+        .unwrap();
+        let uri = file_uri(&dir.join("prog.pmc"));
+
+        let mut service = PmcLanguageService::new();
+        let first = service.did_update(&uri, TWO_FINDINGS_FIXTURE);
+        let second = service.did_update(&uri, TWO_FINDINGS_FIXTURE);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn uri_to_path_decodes_file_uris_and_rejects_other_schemes() {
+        assert_eq!(
+            uri_to_path("file:///a%20dir/prog.pmc"),
+            Some(PathBuf::from("/a dir/prog.pmc"))
+        );
+        assert_eq!(
+            uri_to_path("file:///caf%C3%A9.pmc"),
+            Some(PathBuf::from("/café.pmc"))
+        );
+        // An authority (host) is skipped, not folded into the path.
+        assert_eq!(
+            uri_to_path("file://localhost/x.pmc"),
+            Some(PathBuf::from("/x.pmc"))
+        );
+        assert_eq!(uri_to_path("untitled:Untitled-1"), None);
+        assert_eq!(uri_to_path("https://example.com/x.pmc"), None);
+    }
+}

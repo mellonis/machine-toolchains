@@ -257,7 +257,9 @@ pub struct CompileOutput {
 }
 
 /// flatten's per-scope name maps, retained for scope-aware lint rules
-/// instead of being discarded.
+/// instead of being discarded. `Clone` because the LSP's `DocState`
+/// keeps a last-good copy for completion staleness (docs/lsp.md).
+#[derive(Clone)]
 pub(crate) struct ScopeSummary {
     /// ns path -> (bare name -> full mangled name)
     pub defs: HashMap<Vec<String>, HashMap<String, String>>,
@@ -325,11 +327,11 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
 /// analysis)): the flattened AST, its scope summary, the merged warnings
 /// (ir diagnostics then flatten's visibility warnings — the same order
 /// `analyze()` produces), and the per-call-site resolution table.
-#[allow(dead_code)] // consumer: PmcLanguageService (LSP plan 2, Task 7)
 pub(crate) struct Analysis {
     pub ast: Program,
     pub scopes: ScopeSummary,
     pub warnings: Vec<Diagnostic>,
+    #[allow(dead_code)] // consumer: PmcLanguageService navigation (LSP plan 2, Task 9)
     pub resolutions: Vec<(Span, Resolution)>,
 }
 
@@ -337,7 +339,6 @@ pub(crate) struct Analysis {
 /// outcome, retained independently, so a document that fails partway
 /// through still serves whatever the earlier stages produced. `None`
 /// fields past the first failure; `fatal` carries that one error.
-#[allow(dead_code)] // consumer: PmcLanguageService (LSP plan 2, Task 7)
 pub(crate) struct StagedAnalysis {
     /// WithComments — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
@@ -358,7 +359,6 @@ pub(crate) struct StagedAnalysis {
 /// always runs through `ir::lower`, never stopping at `flatten`. The
 /// `IrProgram` itself is discarded once `ir::lower` has had its say: the
 /// LSP's tiers only need the flattened `Analysis`, not the CFG.
-#[allow(dead_code)] // consumer: PmcLanguageService (LSP plan 2, Task 7)
 pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
     let tokens = match crate::lexer::lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
