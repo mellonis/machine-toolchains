@@ -82,6 +82,9 @@ pub struct OperandToken {
     pub span: Span,
 }
 
+/// A trailing comment stays inside `text` and `span` — unlike Line and
+/// Func, which split it out into `trailing` — so the node remains one
+/// verbatim record of the unshapeable line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawCst {
     pub text: String,
@@ -629,6 +632,17 @@ L1:     rgt
         let raw = as_raw(&cst.items[0]);
         assert_eq!(raw.text, "A: 5");
         assert_eq!(raw.span, Span::new(1, 1, 1, 5));
+    }
+
+    #[test]
+    fn raw_line_with_trailing_comment_keeps_full_extent() {
+        // Unlike Line/Func, Raw does not split a trailing comment out:
+        // both text and span cover through the end of the comment.
+        let cst = parse_asm_cst("A: 5 ; note");
+        assert_eq!(cst.items.len(), 1);
+        let raw = as_raw(&cst.items[0]);
+        assert_eq!(raw.text, "A: 5 ; note");
+        assert_eq!(raw.span, Span::new(1, 1, 1, 12));
     }
 
     #[test]
