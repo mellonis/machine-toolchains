@@ -1,0 +1,38 @@
+<idea-plugin>
+    <id>ru.mellonis.pmc</id>
+    <name>PMC (Post machine toolchain)</name>
+    <vendor>mellonis</vendor>
+    <description>Language support for .pmc via pmt lsp (LSP4IJ): diagnostics,
+        completions, navigation, formatting, semantic tokens; pmt run configurations.</description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.redhat.devtools.lsp4ij</depends>
+    <depends>org.jetbrains.plugins.textmate</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType name="PMC" implementationClass="ru.mellonis.pmc.PmcFileType"
+                  fieldName="INSTANCE" extensions="pmc"/>
+        <textmate.bundleProvider implementation="ru.mellonis.pmc.PmcTextMateBundleProvider"/>
+        <!--
+          A plugin-registered fileType otherwise pre-empts TextMate's own
+          file-name-pattern-based coloring for the same extension (LSP4IJ's
+          Developer Guide, "File type mapping" vs "File name pattern
+          mapping": "using File type will override and disable the syntax
+          coloration with TextMate"). Wiring TextMate's own highlighter onto
+          our fileType by name keeps the fileType (needed below for
+          fileTypeMapping) while restoring the coloring. Precedent: this is
+          exactly how other LSP4IJ + TextMate + custom-fileType plugins
+          (e.g. the BAML JetBrains plugin) resolve the same conflict.
+        -->
+        <editorHighlighterProvider filetype="PMC"
+                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+        <notificationGroup id="ru.mellonis.pmc" displayType="BALLOON"/>
+        <postStartupActivity implementation="ru.mellonis.pmc.PmtVersionCheck"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+        <server id="pmtLsp" name="pmt lsp"
+                factoryClass="ru.mellonis.pmc.PmtLanguageServerFactory"/>
+        <fileTypeMapping fileType="PMC" serverId="pmtLsp" languageId="pmc"/>
+    </extensions>
+</idea-plugin>

@@ -9,3 +9,5 @@ editors/vscode/syntaxes/
 editors/vscode/*.vsix
 editors/jetbrains/.gradle/
 editors/jetbrains/build/
+editors/jetbrains/.kotlin/
+editors/jetbrains/.intellijPlatform/

@@ -1,0 +1,7 @@
+{
+  "name": "pmc",
+  "contributes": {
+    "languages": [{ "id": "pmc", "extensions": [".pmc"] }],
+    "grammars": [{ "language": "pmc", "scopeName": "source.pmc", "path": "./pmc.tmLanguage.json" }]
+  }
+}
