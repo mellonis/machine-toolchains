@@ -28,6 +28,10 @@
                                     implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
         <notificationGroup id="ru.mellonis.pmc" displayType="BALLOON"/>
         <postStartupActivity implementation="ru.mellonis.pmc.PmtVersionCheck"/>
+        <applicationService serviceImplementation="ru.mellonis.pmc.PmtSettings"/>
+        <applicationConfigurable groupId="tools" id="ru.mellonis.pmc.settings"
+                                  displayName="pmt" instance="ru.mellonis.pmc.PmtSettingsConfigurable"/>
+        <configurationType implementation="ru.mellonis.pmc.PmtRunConfigurationType"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">

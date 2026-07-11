@@ -7,9 +7,11 @@ import com.intellij.openapi.startup.ProjectActivity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 private const val NOTIFICATION_GROUP_ID = "ru.mellonis.pmc"
 private const val MIN_TESTED_PMT = "0.1.0"
+private const val VERSION_CHECK_TIMEOUT_SECONDS = 5L
 private val VERSION_LINE = Regex("""pmt (\d+)\.(\d+)\.(\d+)""")
 
 /**
@@ -46,13 +48,21 @@ class PmtVersionCheck : ProjectActivity {
         }
     }
 
-    private fun runPmtVersion(pmtPath: String): String? = try {
-        val process = ProcessBuilder(pmtPath, "--version").redirectErrorStream(true).start()
-        val text = process.inputStream.bufferedReader().readText()
-        process.waitFor()
-        text
-    } catch (e: IOException) {
-        null
+    private fun runPmtVersion(pmtPath: String): String? {
+        return try {
+            val process = ProcessBuilder(pmtPath, "--version").redirectErrorStream(true).start()
+            val text = process.inputStream.bufferedReader().readText()
+            // Bounded wait: a misconfigured `pmtPath` pointing at a
+            // non-terminating process (or a shell wrapper that never
+            // exits) must not hang the startup activity forever.
+            if (!process.waitFor(VERSION_CHECK_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return null
+            }
+            text
+        } catch (e: IOException) {
+            null
+        }
     }
 
     private fun older(found: List<Int>, min: List<Int>): Boolean {
