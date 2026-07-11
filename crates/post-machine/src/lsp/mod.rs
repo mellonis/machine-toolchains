@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use mtc_core::diagnostics::{Diagnostic, Pos, Span};
+use mtc_core::diagnostics::{Applicability, Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, LanguageService, SemToken, ServiceDiagnostic, ServiceSeverity,
     SymbolNode, SymbolNodeKind,
@@ -149,6 +149,13 @@ fn union_into(dst: &mut Vec<String>, src: &[String]) {
             dst.push(code.clone());
         }
     }
+}
+
+/// Half-open span overlap: `a.start < b.end && b.start < a.end` (`Pos` is
+/// `Ord`). Mirrors the fake service's helper in `mtc_core::lsp` — the
+/// contract is language-agnostic, only the caller differs.
+fn spans_overlap(a: Span, b: Span) -> bool {
+    a.start < b.end && b.start < a.end
 }
 
 /// Parses the IDE channel's `lint.allow` value: an array of known rule
@@ -394,8 +401,26 @@ impl LanguageService for PmcLanguageService {
         navigate::definition(state, uri, pos)
     }
 
-    fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {
-        Vec::new() // Task 11: quickfixes from the retained lint fixes.
+    fn code_actions(&mut self, uri: &str, span: Span) -> Vec<Action> {
+        // Analysis-tier: `lint` is `Some` exactly when analysis succeeded
+        // (empty `Vec` otherwise — no lint findings to offer quickfixes
+        // for, whether the document is unknown or the analysis fataled).
+        let Some(lint) = self.docs.get(uri).and_then(|state| state.lint.as_ref()) else {
+            return Vec::new();
+        };
+        lint.iter()
+            .filter_map(|d| {
+                let fix = d.fix.as_ref()?;
+                if !spans_overlap(d.span, span) {
+                    return None;
+                }
+                Some(Action {
+                    title: fix.description.clone(),
+                    preferred: matches!(fix.applicability, Applicability::MachineApplicable),
+                    edits: fix.edits.clone(),
+                })
+            })
+            .collect()
     }
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
@@ -556,6 +581,118 @@ mod tests {
             .as_ref()
             .expect("the finding's Fix is retained for code actions");
         assert_eq!(fix.description, "remove the label prefix '5:'");
+    }
+
+    #[test]
+    fn code_actions_maps_applicability_to_preferred_and_carries_the_fix() {
+        // Both `leading-zeros` (MachineApplicable) and `unused-label`
+        // (MaybeIncorrect) fire on the same `007:` label — one request
+        // span overlapping both proves the applicability → `preferred`
+        // mapping for each tier.
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+        service.did_update(uri, TWO_FINDINGS_FIXTURE);
+
+        // Overlaps both findings' spans (both start at line 2, col 1).
+        let actions = service.code_actions(uri, Span::new(2, 1, 2, 2));
+        assert_eq!(actions.len(), 2, "{actions:?}");
+
+        // RULES-table order (leading-zeros before unused-label), stable
+        // sort on equal span starts preserves it.
+        assert_eq!(actions[0].title, "rewrite '007' as '7'");
+        assert!(actions[0].preferred, "leading-zeros is MachineApplicable");
+        assert_eq!(
+            actions[0].edits,
+            vec![mtc_core::diagnostics::Edit {
+                span: Span::new(2, 1, 2, 4),
+                replacement: "7".to_string(),
+            }]
+        );
+
+        assert_eq!(actions[1].title, "remove the label prefix '7:'");
+        assert!(!actions[1].preferred, "unused-label is MaybeIncorrect");
+        assert_eq!(
+            actions[1].edits,
+            vec![mtc_core::diagnostics::Edit {
+                span: Span::new(2, 1, 2, 5),
+                replacement: String::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn code_actions_empty_when_the_request_span_does_not_overlap_the_finding() {
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+        service.did_update(uri, UNUSED_LABEL_FIXTURE);
+
+        // The finding's span is (2,1)-(2,3); this span sits entirely on
+        // line 1, so the half-open overlap check fails on both ends.
+        let actions = service.code_actions(uri, Span::new(1, 1, 1, 2));
+        assert!(actions.is_empty(), "{actions:?}");
+    }
+
+    #[test]
+    fn code_actions_edits_round_trip_makes_the_finding_disappear() {
+        use mtc_core::diagnostics::{Edit, Fix};
+
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+        service.did_update(uri, UNUSED_LABEL_FIXTURE);
+
+        let finding_span = Span::new(2, 1, 2, 3);
+        let actions = service.code_actions(uri, finding_span);
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        let action = &actions[0];
+        assert_eq!(action.title, "remove the label prefix '5:'");
+        assert!(!action.preferred);
+        assert_eq!(
+            action.edits,
+            vec![Edit {
+                span: finding_span,
+                replacement: String::new(),
+            }]
+        );
+
+        // Byte-apply the returned edits via the CLI's own fix-application
+        // helper (a synthetic Diagnostic wrapping the action's edits —
+        // `apply_fixes` only cares that a `Fix` is present).
+        let synthetic = Diagnostic {
+            code: "unused-label",
+            span: finding_span,
+            message: String::new(),
+            fix: Some(Fix {
+                description: action.title.clone(),
+                applicability: Applicability::MaybeIncorrect,
+                edits: action.edits.clone(),
+            }),
+        };
+        let outcome = crate::lint::apply_fixes(UNUSED_LABEL_FIXTURE, &[synthetic]);
+        assert_eq!((outcome.applied, outcome.skipped), (1, 0));
+        assert_eq!(outcome.fixed_source, "main() {\n right;\n}\n");
+
+        let diags = service.did_update(uri, &outcome.fixed_source);
+        assert!(
+            diags.iter().all(|d| d.code != Some("unused-label")),
+            "the finding is gone from the re-analyzed source: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn code_actions_empty_when_analysis_failed() {
+        // `goto 99` parses fine; it's the undefined-label check well past
+        // the CST stage (`ir::lower`) that fatals — a post-parse fatal,
+        // so `analysis` (and therefore `lint`) is `None`.
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+        let diags = service.did_update(uri, "main() {\nright;\ngoto 99;\n}\n");
+        assert_eq!(diags.len(), 1, "sanity: the fatal published, {diags:?}");
+        assert_eq!(diags[0].code, Some("undefined-label"));
+
+        // A wide span covering the whole document — would overlap a
+        // finding if `lint` had run at all.
+        let actions = service.code_actions(uri, Span::new(1, 1, 4, 2));
+        assert!(actions.is_empty(), "{actions:?}");
     }
 
     #[test]
