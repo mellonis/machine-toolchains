@@ -56,6 +56,13 @@ Reload the window (or restart VS Code) after installing or upgrading.
 | `pmt.path` | `pmt` | Path (or bare command resolved on `PATH`) to the `pmt` binary. The extension launches it as `pmt lsp` for the language server, and reuses the same path for the auto-provided tasks below. |
 | `pmt.lint.allow` | `[]` | Lint codes to suppress, forwarded to the server and kept live as you edit the setting. This list is union-merged with any `pmt.json` project file the server discovers for the open document — either source suppressing a code is enough to suppress it, and neither can un-suppress a code the other disables. See `docs/lint.md` in this repository for the rule catalog and the `pmt.json` schema. |
 
+`pmt.path` is read once, at activation — the extension does not watch
+it for live changes. After editing it, reload the window (Command
+Palette → **Developer: Reload Window**) for the new path to take
+effect, both for the language server and for the auto-provided tasks
+above. `pmt.lint.allow` has no such caveat — it pushes live, as the
+table says.
+
 ## Tasks
 
 The extension registers a task provider for the `pmt` task type. With a
@@ -174,6 +181,16 @@ main() {
       where that cache lives.
 - [ ] **Task — lint**: run the `pmt lint` task. Confirm the Problems panel
       populates with the `leftover-debugger` finding.
+- [ ] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
+      open and the `leftover-debugger` finding still showing (previous
+      step), create a `pmt.json` file next to it containing
+      `{"lint": {"allow": ["leftover-debugger"]}}` (schema:
+      `docs/lint.md` in this repository). Confirm the squiggle on
+      `debugger;` disappears **without touching any VS Code setting** —
+      this is the server's `workspace/didChangeWatchedFiles` watch firing
+      on the on-disk file, not the `pmt.lint.allow` setting. Delete
+      `pmt.json` and confirm the squiggle returns before continuing — the
+      steps below need the finding present again.
 - [ ] **Task — fmt-check, and its caveat**: run the `pmt fmt-check` task.
       `check(1,2)` is missing its canonical space, so the task fails
       (non-zero exit, visible in the terminal) — but confirm the Problems
@@ -191,6 +208,17 @@ main() {
       `pmt compile` task. Confirm the Problems panel shows exactly one
       fatal entry carrying its bracketed code (`[unexpected-token]`).
       Undo the edit.
+- [ ] **Dogfood — the embedded standard library**: open
+      `crates/post-machine/src/stdlib/std.pmc` from this repository
+      directly (not the go-to-definition-materialized cache copy from
+      earlier). Confirm **zero diagnostics**, that semantic tokens are
+      visible (coloring beyond what the TextMate grammar alone gave
+      `check.pmc` — e.g. call-site identifiers colored distinctly from
+      keywords), and that running **Format Document** is a **no-op** — no
+      diff, no dirty-buffer indicator — the checked-in file is already
+      canonically formatted. This is the editor-observed half of the
+      dogfood check that `cargo test -p mtc-post-machine --lib lsp`
+      already covers on the server side alone.
 
 ## License
 

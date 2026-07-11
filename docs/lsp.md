@@ -131,13 +131,13 @@ embedded source to a per-version cache path —
 `$XDG_CACHE_HOME/pmt/<version>/std.pmc`, falling back to `~/.cache` on
 Unix or `%LOCALAPPDATA%` on Windows — and points definitions at spans
 inside that file. The write self-heals: a missing or edited copy is
-checked and rewritten when the server next starts (once per server
-run) — the check itself is memoized for the process's lifetime, so a
-copy edited or deleted mid-session is not re-detected until the next
-launch. Any IO failure
-along the way (an unwritable cache directory, for instance) degrades
-go-to-definition on `std::` targets to `null` rather than pointing at
-a file that doesn't exist; nothing else in the session is affected.
+checked and rewritten on first demand (once per server run) — the
+check itself is memoized for the process's lifetime, so a copy edited
+or deleted mid-session is not re-detected until the next launch. Any
+IO failure along the way (an unwritable cache directory, for instance)
+degrades go-to-definition on `std::` targets to `null` rather than
+pointing at a file that doesn't exist; nothing else in the session is
+affected.
 
 ## Configuration
 

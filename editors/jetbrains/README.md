@@ -97,6 +97,12 @@ re-publishes diagnostics for its open documents immediately, so a
 previously-squiggled suppressed code clears without reopening the file or
 restarting anything.
 
+The binary path is different: it is read only when a `pmtLsp` server
+process starts, so editing it and applying the settings page has no
+effect on an already-running server. Restart the language server for the
+project (or restart the IDE) to pick up a new path — only the lint
+allow-list pushes live.
+
 ## Run configurations
 
 **Run → Edit Configurations… → +  → pmt** adds a thin `pmt <subcommand>`
@@ -191,6 +197,21 @@ main() {
       `leftover-debugger` from the allow-list and apply again to confirm
       the squiggle comes back, then leave the field empty (the default)
       when you're done.
+- [ ] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
+      open and `debugger;` squiggled again (previous step left it that
+      way), create a `pmt.json` file next to it containing
+      `{"lint": {"allow": ["leftover-debugger"]}}` (schema: `docs/lint.md`
+      in this repository). Confirm the squiggle disappears **without
+      touching Settings | Tools | pmt** — this exercises LSP4IJ's support
+      for the server's `workspace/didChangeWatchedFiles` registration,
+      which is unconfirmed for LSP4IJ 0.20.1 and is exactly what this
+      walk needs to probe. If nothing happens on the disk edit, the
+      fallback path is the server's own mtime re-check on the next edit
+      keystroke inside `check.pmc` — type and undo a character to force
+      one and see whether the squiggle clears then; if it still doesn't,
+      **record the failure** (which of the two paths didn't fire) rather
+      than silently moving on. Delete `pmt.json` and confirm the squiggle
+      returns before continuing.
 - [ ] **Run-config smoke**: produce a `.pmx` first — from a terminal (or
       a `compile`-subcommand run configuration plus a terminal `pmt link`
       call, per the run-configurations gap noted above), e.g.:
@@ -202,6 +223,17 @@ main() {
       arguments `check.pmx --tape " * *"`, and run it. Confirm the console
       shows the run's tape output and the process's exit code (0 = the
       program executed `stp`, 2 = `hlt`, 3 = a trap — see `docs/cli.md`).
+- [ ] **Dogfood — the embedded standard library**: open
+      `crates/post-machine/src/stdlib/std.pmc` from this repository
+      directly (not the go-to-definition-materialized cache copy from
+      earlier). Confirm **zero diagnostics**, that semantic tokens are
+      visible (coloring beyond what the bundled TextMate grammar alone
+      gave `check.pmc`), and that **Reformat Code** (Code → Reformat
+      Code) is a **no-op** — no diff, no dirty-buffer indicator — the
+      checked-in file is already canonically formatted. This is the
+      editor-observed half of the dogfood check that `cargo test -p
+      mtc-post-machine --lib lsp` already covers on the server side
+      alone.
 
 ## License
 
