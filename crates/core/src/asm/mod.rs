@@ -5,6 +5,7 @@
 mod assembler;
 pub(crate) mod decode;
 mod disassembler;
+pub(crate) mod lexer;
 mod parser;
 pub(crate) mod syntax;
 
