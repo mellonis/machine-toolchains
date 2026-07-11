@@ -29,8 +29,7 @@ FLAGS:
                   the report and exit code reflect what REMAINS
   --force         with --fix: also apply the gated fixes (deletions and
                   rewrites whose diagnosis may have another reading)
-  --no-config     ignore pmt.json project files (docs/lint.md
-                  (project file))
+  --no-config     ignore pmt.json project files
 ";
 
 pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {

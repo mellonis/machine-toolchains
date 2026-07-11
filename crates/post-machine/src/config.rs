@@ -37,7 +37,12 @@ pub(crate) enum ConfigError {
     /// documented shape (an object at the root, an object at `lint`, an
     /// array of strings at `lint.allow`) — shape errors are folded in
     /// here rather than given their own variant, since both are "this
-    /// document does not parse into a `pmt.json`".
+    /// document does not parse into a `pmt.json`". `message` carries
+    /// its own prefix at the construction site (`"invalid JSON: "` only
+    /// for a genuine `serde_json::from_str` syntax failure; a shape
+    /// complaint stands alone) — [`ConfigError::detail`] does not
+    /// impose one uniformly, since the two causes aren't the same kind
+    /// of wrong.
     Parse { path: PathBuf, message: String },
     /// A key outside the documented schema — at the root, or inside
     /// `lint`. A typo (`"lints"`, `"allowed"`) must not silently do
@@ -69,7 +74,14 @@ impl ConfigError {
     pub(crate) fn detail(&self) -> String {
         match self {
             ConfigError::Io { message, .. } => format!("cannot read: {message}"),
-            ConfigError::Parse { message, .. } => format!("invalid JSON: {message}"),
+            // `message` already carries whatever prefix fits its cause —
+            // `"invalid JSON: {serde error}"` for a genuine parse
+            // failure (baked in at the `serde_json::from_str` call
+            // site), or a bare shape complaint ("top-level value must
+            // be a JSON object", ...) for well-formed-but-wrong-shape
+            // documents. Prefixing here unconditionally would mislabel
+            // the shape case as a JSON syntax error it isn't.
+            ConfigError::Parse { message, .. } => message.clone(),
             ConfigError::UnknownKey { key, .. } => format!("unknown key `{key}`"),
             ConfigError::UnknownAllowCode { code, .. } => {
                 format!("unknown lint rule `{code}` in lint.allow")
@@ -93,7 +105,36 @@ impl std::error::Error for ConfigError {}
 /// same `pmt lint` run may end up with entirely different effective
 /// allow-lists, and that is by design (a subtree opts into its own
 /// config by having its own file).
+///
+/// `start` is absolutized first (`std::path::absolute` — a lexical
+/// operation, no filesystem access, no symlink resolution, and unlike
+/// `canonicalize` it does not require `start` to exist) before the walk
+/// begins. The CLI feeds paths as spelled, so `start` may be relative;
+/// walking `Path::parent()` on a relative path bottoms out at `Some("")`
+/// then `None` — the invocation directory, not the filesystem root —
+/// which would silently stop the search short of any `pmt.json` that
+/// lives above the process's cwd. An empty `start` (the caller's usual
+/// `file.parent()`, when `file` is a bare filename with no directory
+/// component — `Path::new("foo.pmc").parent()` is `Some("")`, not
+/// `None`) is treated as `.`/cwd rather than passed to
+/// `std::path::absolute` as-is, since `std::path::absolute("")` errors:
+/// bare-filename callers must still discover cwd's own `pmt.json`, the
+/// one case the pre-absolutization code got right.
 pub(crate) fn discover(start: &Path) -> Option<PathBuf> {
+    let start = if start.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        start
+    };
+    let abs_start = std::path::absolute(start).ok()?;
+    discover_from(&abs_start)
+}
+
+/// The nearest-ancestor walk itself, over an already-absolute `start`.
+/// Split out of [`discover`] so the absolutization step is unit-testable
+/// on its own (see `discover_relative_start_matches_absolutized_delegate`
+/// below) without needing a real filesystem tree above cwd.
+fn discover_from(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         let candidate = d.join("pmt.json");
@@ -116,7 +157,7 @@ pub(crate) fn load(path: &Path) -> Result<ProjectConfig, ConfigError> {
     })?;
     let value: Value = serde_json::from_str(&text).map_err(|e| ConfigError::Parse {
         path: path.to_path_buf(),
-        message: e.to_string(),
+        message: format!("invalid JSON: {e}"),
     })?;
     let root = value.as_object().ok_or_else(|| ConfigError::Parse {
         path: path.to_path_buf(),
@@ -220,6 +261,63 @@ mod tests {
         assert_eq!(discover(&dir), None);
     }
 
+    /// Pins the mechanism the bug report was about: a RELATIVE `start`
+    /// must not be handled any differently from its already-absolute
+    /// form. `discover` absolutizes internally then delegates to
+    /// `discover_from`; this asserts that delegation actually happens by
+    /// comparing `discover` on a relative path against `discover_from`
+    /// fed the same path pre-absolutized by hand — if `discover` ever
+    /// regressed to walking the relative path's own (short) `parent()`
+    /// chain instead, this would no longer hold in general (a relative
+    /// path's ancestor chain is a strict, shorter prefix of its
+    /// absolutized form's chain whenever cwd is not `/`).
+    #[test]
+    fn discover_relative_start_matches_absolutized_delegate() {
+        let relative = Path::new("some-nonexistent-relative-subdir");
+        let absolutized =
+            std::path::absolute(relative).expect("a plain relative path always absolutizes");
+        assert_eq!(discover(relative), discover_from(&absolutized));
+    }
+
+    /// The doc-comment claim in prose: `Path::parent()` on a relative
+    /// path bottoms out well short of the filesystem root (`Some("")`
+    /// then `None`), while the absolutized form keeps climbing. This is
+    /// the actual defect `discover_relative_start_matches_absolutized_delegate`
+    /// guards against — without absolutization, a relative `start` could
+    /// never reach a `pmt.json` living above cwd.
+    #[test]
+    fn relative_path_parent_chain_is_shorter_than_absolutized_chain() {
+        let relative = Path::new("some-nonexistent-relative-subdir");
+        assert_eq!(relative.parent(), Some(Path::new("")));
+        assert_eq!(relative.parent().unwrap().parent(), None);
+
+        let absolutized = std::path::absolute(relative).unwrap();
+        // The absolutized form has at least one more ancestor than the
+        // bare relative path did (cwd itself, at minimum) — this repo's
+        // test run is never rooted at `/`.
+        assert!(absolutized.parent().is_some());
+    }
+
+    /// The `cli/lint.rs` call site is `file.parent().and_then(discover)`,
+    /// and for a bare filename (no directory component, e.g. the PATH
+    /// argument `foo.pmc`) `Path::parent()` yields `Some("")`, not
+    /// `None` — so `discover` is routinely handed an EMPTY path, not
+    /// just a relative one. `std::path::absolute("")` errors
+    /// (`InvalidInput`), so absolutizing naively would make `discover`
+    /// return `None` even when cwd itself has a `pmt.json` — a
+    /// regression from the pre-absolutization behavior, which found
+    /// cwd's own `pmt.json` (just never climbed above it). This pins
+    /// that an empty `start` is treated exactly like an explicit cwd,
+    /// chdir-free: both sides absolutize to the identical path, so the
+    /// two calls must agree regardless of what cwd's ancestry contains.
+    #[test]
+    fn discover_treats_empty_start_as_cwd() {
+        assert_eq!(
+            discover(Path::new("")),
+            discover(&std::env::current_dir().unwrap())
+        );
+    }
+
     #[test]
     fn load_rejects_unparseable_json() {
         let dir = unique_tmp_dir("badjson");
@@ -227,6 +325,29 @@ mod tests {
         fs::write(&path, "{").unwrap();
         let err = load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }), "{err:?}");
+        // Reserved for genuine JSON syntax failures (Finding 2): the
+        // detail text is prefixed.
+        assert!(
+            err.detail().starts_with("invalid JSON: "),
+            "{}",
+            err.detail()
+        );
+    }
+
+    #[test]
+    fn load_rejects_wrong_shape_without_the_json_syntax_prefix() {
+        // Well-formed JSON, wrong shape: must NOT read as an "invalid
+        // JSON" complaint — the document parsed fine, it just isn't a
+        // `pmt.json`.
+        let dir = unique_tmp_dir("badshape");
+        let path = dir.join("pmt.json");
+        fs::write(&path, "[]").unwrap();
+        let err = load(&path).unwrap_err();
+        assert_eq!(
+            err.detail(),
+            "top-level value must be a JSON object",
+            "shape errors stand alone, no `invalid JSON:` prefix"
+        );
     }
 
     #[test]
