@@ -331,7 +331,6 @@ pub(crate) struct Analysis {
     pub ast: Program,
     pub scopes: ScopeSummary,
     pub warnings: Vec<Diagnostic>,
-    #[allow(dead_code)] // consumer: PmcLanguageService navigation (LSP plan 2, Task 9)
     pub resolutions: Vec<(Span, Resolution)>,
 }
 

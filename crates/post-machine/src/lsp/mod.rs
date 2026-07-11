@@ -21,6 +21,8 @@ use crate::cst::{BodyKind, Cst, FunctionCst, TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 
+mod navigate;
+
 pub(crate) struct PmcLanguageService {
     docs: HashMap<String, DocState>,
     /// IDE-settings allow-list: `None` = never configured; `Ok` = valid
@@ -385,8 +387,9 @@ impl LanguageService for PmcLanguageService {
         Vec::new() // Task 10: four-context completions.
     }
 
-    fn definition(&mut self, _uri: &str, _pos: Pos) -> Option<DefTarget> {
-        None // Task 9: resolution-table + materialized-std navigation.
+    fn definition(&mut self, uri: &str, pos: Pos) -> Option<DefTarget> {
+        let state = self.docs.get(uri)?;
+        navigate::definition(state, uri, pos)
     }
 
     fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {

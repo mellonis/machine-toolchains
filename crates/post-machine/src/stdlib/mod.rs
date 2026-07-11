@@ -47,17 +47,18 @@ pub fn object() -> &'static ObjectFile {
 /// One exported std routine, as declared in `SOURCE` (docs/lsp.md
 /// (navigation)) — the go-to-definition target for a `std::<name>` call
 /// site.
-#[allow(dead_code)] // consumer: PmcLanguageService::navigate (LSP plan 2, Task 9)
 pub(crate) struct RosterEntry {
     pub full_path: String,
     /// Span of the routine name token alone, in `SOURCE`.
     pub name_span: Span,
+    /// Read only by this module's own tests (`navigate::definition`
+    /// consumes `full_path`/`name_span` only).
+    #[allow(dead_code)]
     pub decl_line: u32,
 }
 
 /// Parses `SOURCE` once (lex → `parse_cst`, no hand parsing) into the
 /// roster of exported routines in the `std` namespace block.
-#[allow(dead_code)] // consumer: PmcLanguageService::navigate (LSP plan 2, Task 9)
 pub(crate) fn roster() -> &'static [RosterEntry] {
     static ROSTER: OnceLock<Vec<RosterEntry>> = OnceLock::new();
     ROSTER.get_or_init(|| {
@@ -93,7 +94,6 @@ pub(crate) fn roster() -> &'static [RosterEntry] {
 /// `~/.cache` on unix, `%LOCALAPPDATA%` on windows. `None` if the
 /// relevant environment variable(s) are unset — the materializer
 /// degrades to `None` rather than guessing a location.
-#[allow(dead_code)] // consumer: materialized_std_uri (below); also LSP plan 2, Task 9
 fn cache_root() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
@@ -115,7 +115,6 @@ fn is_uri_literal(byte: u8) -> bool {
 /// Builds a `file:` URI for an absolute path: forward slashes,
 /// percent-encoding every byte outside [`is_uri_literal`]. On windows,
 /// prefixes `file:///C:/...` (the extra `/` before the drive letter).
-#[allow(dead_code)] // consumer: materialize_into (below); also LSP plan 2, Task 9
 fn path_to_file_uri(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let normalized = if cfg!(windows) {
@@ -141,7 +140,6 @@ fn path_to_file_uri(path: &Path) -> String {
 /// file is absent or its bytes differ from `SOURCE` (self-heals a
 /// corrupted or stale cache file), then returns its `file:` URI. Any IO
 /// failure degrades to `None` (docs/lsp.md (materialized stdlib)).
-#[allow(dead_code)] // consumer: materialized_std_uri (below); also LSP plan 2, Task 9
 fn materialize_into(root: &Path) -> Option<String> {
     let dir = root.join("pmt").join(env!("CARGO_PKG_VERSION"));
     fs::create_dir_all(&dir).ok()?;
@@ -161,7 +159,6 @@ fn materialize_into(root: &Path) -> Option<String> {
 /// (materialized stdlib)). `None` if the cache root can't be located or
 /// any IO step fails — go-to-definition on `std::` calls then degrades
 /// to null rather than pointing at a file that doesn't exist.
-#[allow(dead_code)] // consumer: PmcLanguageService::navigate (LSP plan 2, Task 9)
 pub(crate) fn materialized_std_uri() -> Option<&'static str> {
     static URI: OnceLock<Option<String>> = OnceLock::new();
     URI.get_or_init(|| cache_root().and_then(|root| materialize_into(&root)))
