@@ -30,6 +30,11 @@ Any released `pmt` binary already on `PATH` works too — the extension only
 shells out to it; it never bundles or builds one itself. To point at a
 binary that isn't on `PATH`, set `pmt.path` to its full path (below).
 
+Note for macOS: VS Code launched from the Dock may not inherit your
+shell's `PATH` (symptom: the "pmt not found" error notification on
+activation). Set `pmt.path` to the absolute path — e.g.
+`~/.cargo/bin/pmt` — then reload the window.
+
 ## Build and sideload the extension
 
 From `editors/vscode`:

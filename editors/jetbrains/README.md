@@ -42,6 +42,13 @@ shells out to it; it never bundles or builds one itself. To point at a
 binary that isn't on `PATH`, set the binary path in Settings | Tools | pmt
 (below).
 
+Note for macOS: an IDE launched from the Dock or JetBrains Toolbox may
+not inherit your shell's `PATH` (symptom: a `Cannot run program "pmt"`
+error on opening a `.pmc` file, alongside the plugin's own "pmt not
+found" notification). Set the absolute path — e.g.
+`~/.cargo/bin/pmt` — in Settings | Tools | pmt instead of relying on
+`PATH`, then restart the IDE.
+
 ## Install LSP4IJ first
 
 This plugin depends on **LSP4IJ** ("LSP4IJ" by Red Hat, plugin id
