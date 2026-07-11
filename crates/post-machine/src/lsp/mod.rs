@@ -21,6 +21,7 @@ use crate::cst::{BodyKind, Cst, FunctionCst, TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 
+mod complete;
 mod navigate;
 
 pub(crate) struct PmcLanguageService {
@@ -77,7 +78,6 @@ struct DocState {
     text: String,
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
-    #[allow(dead_code)] // consumer: completion() (LSP plan 2, Task 10)
     tokens: Option<Vec<Token>>,
     /// CST of the current text (`None` when lexing or parsing failed).
     cst: Option<Cst>,
@@ -92,7 +92,6 @@ struct DocState {
     fatal: Option<CompileError>,
     /// Names-only staleness exception: last-good scopes survive a failed
     /// re-analysis so completion candidates stay useful mid-edit.
-    #[allow(dead_code)] // consumer: completion() (LSP plan 2, Task 10)
     scopes_for_completion: Option<ScopeSummary>,
     /// invalid-config messages that applied to this analysis (0..=2
     /// entries: project file first, then IDE settings).
@@ -383,8 +382,11 @@ impl LanguageService for PmcLanguageService {
             .map(parse_ide_allow);
     }
 
-    fn completion(&mut self, _uri: &str, _pos: Pos) -> Vec<Candidate> {
-        Vec::new() // Task 10: four-context completions.
+    fn completion(&mut self, uri: &str, pos: Pos) -> Vec<Candidate> {
+        match self.docs.get(uri) {
+            Some(state) => complete::completion(state, pos),
+            None => Vec::new(),
+        }
     }
 
     fn definition(&mut self, uri: &str, pos: Pos) -> Option<DefTarget> {
