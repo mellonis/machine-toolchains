@@ -39,8 +39,8 @@ npm install
 npm run package
 ```
 
-`npm run package` compiles the extension, copies in the shared `.pmc`
-TextMate grammar, and runs `vsce package`, producing `pmc-0.1.0.vsix` in
+`npm run package` copies in the shared `.pmc` TextMate grammar, compiles
+the extension, and runs `vsce package`, producing `pmc-0.1.0.vsix` in
 this directory. Install it into VS Code:
 
 ```sh
@@ -163,6 +163,9 @@ main() {
       show candidates — type at least one more character. If the list
       still doesn't appear, press Ctrl+Space to retrigger it — the editor
       may have cached the empty result from the moment right after `@`.)
+      After observing the completion popup, **undo the typed text** to
+      restore a parse-clean state before continuing — only completions
+      tolerate a broken parse; the following steps need valid syntax.
 - [ ] **Go-to-definition**: invoke it on `goToEnd`, either in
       `use std::goToEnd;` or inside the `@goToEnd()` call. Confirm it jumps
       into a materialized copy of the standard library — a cached
