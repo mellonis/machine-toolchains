@@ -27,7 +27,12 @@
 //!    with NO `::` chain (the zero-segment case of the same chain walk
 //!    context 2 uses — see [`walk_path_chain`]).
 //! 4. **Command position** — the cursor sits at a statement start, after
-//!    a label `Colon`, after a `Comma`, or right after `Ident("goto")`.
+//!    a label `Colon`, after a `Comma` sitting at PAREN DEPTH ZERO in
+//!    the current statement (a comma-group separator — see
+//!    [`comma_at_depth_zero`]), or right after `Ident("goto")`. A
+//!    `Comma` inside parens (`check(A, ▮`, the grammar's one
+//!    comma-in-parens construct) matches none of these and falls
+//!    through to no-context-match.
 //!
 //! No match → empty (cross-file namespaces are invisible by design —
 //! only this file's scopes and the embedded stdlib roster ever
@@ -99,7 +104,7 @@ pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
             TokenKind::Semi | TokenKind::LBrace | TokenKind::RBrace | TokenKind::Colon => {
                 return command_candidates(None, replace_span);
             }
-            TokenKind::Comma => {
+            TokenKind::Comma if comma_at_depth_zero(&sig, cursor_idx - 1) => {
                 let final_slot = is_final_slot(&sig, cursor_idx);
                 return command_candidates(Some(final_slot), replace_span);
             }
@@ -215,14 +220,55 @@ fn use_statement_start(sig: &[Token], cursor_idx: usize) -> bool {
     start < cursor_idx && matches!(&sig[start].kind, TokenKind::Ident(w) if w == "use")
 }
 
+/// Whether the `Comma` at `comma_idx` sits at PAREN DEPTH ZERO within
+/// its statement — a genuine command-GROUP separator — as opposed to an
+/// internal comma inside a command's own argument list (the only case
+/// in this grammar: `check(A, B)`'s arm-separating comma). Walks
+/// BACKWARD from `comma_idx` toward the nearest statement boundary
+/// (`Semi`/`LBrace`/`RBrace` seen at depth zero) or the stream start,
+/// tracking paren balance in reverse — `RParen` closes-early/`+1`,
+/// `LParen` opens-early/`-1`. An `LParen` that drives the running
+/// balance negative has no matching `RParen` between it and the comma,
+/// meaning the comma sits INSIDE that paren, not at the statement's top
+/// level. Reaching the boundary (or the stream start) with the balance
+/// still at zero means every paren seen along the way was already
+/// closed before the comma, so the comma IS a group separator. This is
+/// the entry gate `completion`'s `Comma` arm checks before treating the
+/// comma as a group slot at all — [`is_final_slot`] below is only ever
+/// reached once this has already returned `true`.
+fn comma_at_depth_zero(sig: &[Token], comma_idx: usize) -> bool {
+    let mut depth: i32 = 0;
+    let mut i = comma_idx;
+    while i > 0 {
+        i -= 1;
+        match sig[i].kind {
+            TokenKind::RParen => depth += 1,
+            TokenKind::LParen => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            TokenKind::Semi | TokenKind::LBrace | TokenKind::RBrace if depth == 0 => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    true // stream start reached with every paren along the way balanced
+}
+
 /// Whether the comma slot starting at `scan_from` is the group's FINAL
 /// slot: scanning forward, the next `Comma` or `Semi` seen AT PAREN
 /// DEPTH ZERO decides it — a `Semi` first means final, a `Comma` first
-/// means more items follow. Depth tracking is essential: a `check(a,
-/// b)`'s own arm-separating comma (or any call's future argument comma)
-/// must never be mistaken for a group-continuation comma. Running off
-/// the end without finding either (an unterminated statement mid-edit)
-/// defaults to final — the permissive choice.
+/// means more items follow. The ENTRY comma itself is already known to
+/// sit at depth zero — [`comma_at_depth_zero`] gates every call site —
+/// so this function's own forward depth tracking exists for what lies
+/// AHEAD in the same group: a later slot's own `check(a, b)` (or any
+/// future call's argument comma) must never be mistaken for the next
+/// group-continuation comma while scanning past it. Running off the end
+/// without finding either (an unterminated statement mid-edit) defaults
+/// to final — the permissive choice.
 fn is_final_slot(sig: &[Token], scan_from: usize) -> bool {
     let mut depth: i32 = 0;
     for t in &sig[scan_from..] {
@@ -790,6 +836,69 @@ mod tests {
                 ]
                 .map(str::to_string)
             )
+        );
+    }
+
+    #[test]
+    fn command_position_after_checks_own_internal_comma_offers_nothing() {
+        // `check(1, ▮!)` — the comma is `check`'s own arm separator,
+        // inside its parens, not a command-group separator. No context
+        // matches here (only a label number or `!` can parse), so the
+        // result must be EMPTY — never the 7 RESERVED command words.
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, COMMAND_FIXTURE);
+
+        let pos = pos_after(COMMAND_FIXTURE, "left, right, check(1, !);", 22);
+        let candidates = service.completion(URI, pos);
+
+        assert_eq!(candidates, Vec::new(), "{candidates:?}");
+    }
+
+    const COMMAND_UNTERMINATED_CHECK_FIXTURE: &str = "export main() {\n    check(1, ";
+
+    #[test]
+    fn command_position_after_checks_internal_comma_at_eof_offers_nothing() {
+        // Same shape as above but unterminated mid-edit — `check(1, ▮`
+        // at EOF, no closing `)`/`!`/`;` yet. `is_final_slot`'s forward
+        // scan would run straight off the end of the token stream if it
+        // were ever reached; the paren-depth gate must reject the comma
+        // before that scan starts at all.
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, COMMAND_UNTERMINATED_CHECK_FIXTURE);
+
+        let pos = pos_at_byte(
+            COMMAND_UNTERMINATED_CHECK_FIXTURE,
+            COMMAND_UNTERMINATED_CHECK_FIXTURE.len(),
+        );
+        let candidates = service.completion(URI, pos);
+
+        assert_eq!(candidates, Vec::new(), "{candidates:?}");
+    }
+
+    // `mark(5)` taking a successor mid-group is a parser-level
+    // GroupPosition error ("only the last command in a comma group may
+    // take a successor") — the CST fails to build, but lexing doesn't
+    // care, so `state.tokens` still populates (same staleness tier as
+    // `analyze_staged_parse_failure_keeps_tokens_but_not_cst`). Exists
+    // to exercise `comma_at_depth_zero`'s ACCEPT path through a
+    // genuinely balanced paren pair (`RParen` then `LParen` netting
+    // back to zero) — every other comma test here rejects via an
+    // unmatched `LParen`, which would also pass a cruder "reject if any
+    // LParen precedes the comma" implementation that this one must not.
+    const COMMAND_BALANCED_PARENS_FIXTURE: &str = "export main() {\n    mark(5), left, right;\n}\n";
+
+    #[test]
+    fn command_position_after_a_comma_following_a_balanced_paren_pair_still_offers_the_group() {
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, COMMAND_BALANCED_PARENS_FIXTURE);
+
+        let pos = pos_after(COMMAND_BALANCED_PARENS_FIXTURE, "mark(5), left, right;", 9);
+        let candidates = service.completion(URI, pos);
+
+        assert_eq!(
+            labels(&candidates),
+            BTreeSet::from(["left", "right", "mark", "unmark", "debugger"].map(str::to_string)),
+            "{candidates:?}"
         );
     }
 
