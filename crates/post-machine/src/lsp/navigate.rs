@@ -39,55 +39,60 @@ fn span_contains(span: Span, pos: Pos) -> bool {
 pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTarget> {
     let analysis = state.analysis.as_ref()?;
 
-    if let Some((_, resolution)) = analysis
+    if let Some((origin, resolution)) = analysis
         .resolutions
         .iter()
         .find(|(span, _)| span_contains(*span, pos))
     {
-        return resolve_call(uri, resolution);
+        return resolve_call(uri, resolution, *origin);
     }
 
     let cst = state.cst.as_ref()?;
 
     if let Some(function) = innermost_function(&cst.items, pos)
-        && let Some(value) = label_reference_at(function, pos)
+        && let Some((value, origin)) = label_reference_at(function, pos)
     {
         return label_span(function, value).map(|span| DefTarget {
             uri: uri.to_string(),
             span,
+            origin: Some(origin),
         });
     }
 
-    if let Some(full_path) = std_use_path_at(&cst.items, pos) {
-        return std_target(&full_path);
+    if let Some((full_path, origin)) = std_use_path_at(&cst.items, pos) {
+        return std_target(&full_path, origin);
     }
 
     None
 }
 
-/// Step 1's per-variant resolution.
-fn resolve_call(uri: &str, resolution: &Resolution) -> Option<DefTarget> {
+/// Step 1's per-variant resolution. `origin` is the call-site name span
+/// that `resolution` was keyed by (the reference under the cursor) —
+/// carried through to every arm's `DefTarget`.
+fn resolve_call(uri: &str, resolution: &Resolution, origin: Span) -> Option<DefTarget> {
     match resolution {
         Resolution::Local { def_name_span } => Some(DefTarget {
             uri: uri.to_string(),
             span: *def_name_span,
+            origin: Some(origin),
         }),
         Resolution::ImportBinding {
             use_span,
             full_path,
         } => {
             if full_path.starts_with("std::") {
-                std_target(full_path)
+                std_target(full_path, origin)
             } else {
                 Some(DefTarget {
                     uri: uri.to_string(),
                     span: *use_span,
+                    origin: Some(origin),
                 })
             }
         }
         Resolution::QualifiedExternal { full_path } => {
             if full_path.starts_with("std::") {
-                std_target(full_path)
+                std_target(full_path, origin)
             } else {
                 None
             }
@@ -98,13 +103,15 @@ fn resolve_call(uri: &str, resolution: &Resolution) -> Option<DefTarget> {
 
 /// A `std::…` full path through the materialized roster: a roster miss
 /// or a materializer IO failure both degrade to `None` (docs/lsp.md
-/// (materialized stdlib)).
-fn std_target(full_path: &str) -> Option<DefTarget> {
+/// (materialized stdlib)). `origin` is the reference span in the
+/// requesting document, carried through unconditionally.
+fn std_target(full_path: &str, origin: Span) -> Option<DefTarget> {
     let uri = materialized_std_uri()?;
     let entry = roster().iter().find(|e| e.full_path == full_path)?;
     Some(DefTarget {
         uri: uri.to_string(),
         span: entry.name_span,
+        origin: Some(origin),
     })
 }
 
@@ -145,15 +152,15 @@ fn deepest_nested(f: &FunctionCst, pos: Pos) -> &FunctionCst {
     f
 }
 
-/// The label value referenced at `pos`, if `pos` sits on one of
-/// `function`'s own Task 2 reference spans: `Item::Goto.label_span`,
-/// `Item::Check`'s `marked_span`/`blank_span` when that arm is a
-/// `CheckArm::Label`, or a `Successor::Label`'s `succ_label_span` on a
-/// builtin or a call. Only `function`'s OWN statements are examined —
-/// its nested children are a separate label scope, reached only by
-/// `innermost_function` descending into them for a `pos` that lands
-/// there.
-fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<u32> {
+/// The label value referenced at `pos`, plus the reference's own span
+/// (the origin), if `pos` sits on one of `function`'s own Task 2
+/// reference spans: `Item::Goto.label_span`, `Item::Check`'s
+/// `marked_span`/`blank_span` when that arm is a `CheckArm::Label`, or a
+/// `Successor::Label`'s `succ_label_span` on a builtin or a call. Only
+/// `function`'s OWN statements are examined — its nested children are a
+/// separate label scope, reached only by `innermost_function` descending
+/// into them for a `pos` that lands there.
+fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<(u32, Span)> {
     for item in &function.body {
         let BodyKind::Statement(stmt) = &item.kind else {
             continue;
@@ -164,7 +171,7 @@ fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<u32> {
                     label, label_span, ..
                 } => {
                     if span_contains(*label_span, pos) {
-                        return Some(*label);
+                        return Some((*label, *label_span));
                     }
                 }
                 Item::Check {
@@ -177,12 +184,12 @@ fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<u32> {
                     if let CheckArm::Label(value) = marked
                         && span_contains(*marked_span, pos)
                     {
-                        return Some(*value);
+                        return Some((*value, *marked_span));
                     }
                     if let CheckArm::Label(value) = blank
                         && span_contains(*blank_span, pos)
                     {
-                        return Some(*value);
+                        return Some((*value, *blank_span));
                     }
                 }
                 Item::Builtin {
@@ -198,7 +205,7 @@ fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<u32> {
                     if let Successor::Label(value) = succ
                         && span_contains(*span, pos)
                     {
-                        return Some(*value);
+                        return Some((*value, *span));
                     }
                 }
                 _ => {}
@@ -226,14 +233,15 @@ fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
 }
 
 /// Step 3: `pos` inside a `use std::…` path's span → its joined full
-/// path (`"std::goToEnd"`). Searched recursively through namespace
-/// blocks — imports are legal at any nesting level.
-fn std_use_path_at(items: &[TopItem], pos: Pos) -> Option<String> {
+/// path (`"std::goToEnd"`) plus the path's own span (`UsePath.span`),
+/// the origin. Searched recursively through namespace blocks — imports
+/// are legal at any nesting level.
+fn std_use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
     for item in items {
         match &item.kind {
             TopKind::Namespace(ns) => {
-                if let Some(path) = std_use_path_at(&ns.items, pos) {
-                    return Some(path);
+                if let Some(result) = std_use_path_at(&ns.items, pos) {
+                    return Some(result);
                 }
             }
             TopKind::Import(use_cst) => {
@@ -241,7 +249,7 @@ fn std_use_path_at(items: &[TopItem], pos: Pos) -> Option<String> {
                     if span_contains(path.span, pos)
                         && path.path.first().map(String::as_str) == Some("std")
                     {
-                        return Some(path.path.join("::"));
+                        return Some((path.path.join("::"), path.span));
                     }
                 }
             }
@@ -314,6 +322,20 @@ mod tests {
         pos_at_nth(src, anchor, 0)
     }
 
+    /// `pos_after(src, anchor, skip)` plus a `len_chars`-character span
+    /// from there — the origin span of a reference token embedded inside
+    /// a longer, uniquely-identifying anchor (e.g. the `"sib"` in
+    /// `"@sib()"`, skipping the `@`).
+    fn span_after(src: &str, anchor: &str, skip: usize, len_chars: usize) -> Span {
+        let start = pos_after(src, anchor, skip);
+        Span::new(
+            start.line,
+            start.col,
+            start.line,
+            start.col + len_chars as u32,
+        )
+    }
+
     fn pos_at_byte(src: &str, byte_idx: usize) -> Pos {
         let prefix = &src[..byte_idx];
         let line = prefix.matches('\n').count() as u32 + 1;
@@ -351,6 +373,7 @@ mod tests {
         let target = service.definition(URI, pos).expect("sib is local");
         assert_eq!(target.uri, URI);
         assert_eq!(target.span, span_of(NAV_FIXTURE, "sib"));
+        assert_eq!(target.origin, Some(span_after(NAV_FIXTURE, "@sib()", 1, 3)));
     }
 
     #[test]
@@ -362,6 +385,10 @@ mod tests {
         let target = service.definition(URI, pos).expect("helper is local");
         assert_eq!(target.uri, URI);
         assert_eq!(target.span, span_of(NAV_FIXTURE, "helper"));
+        assert_eq!(
+            target.origin,
+            Some(span_after(NAV_FIXTURE, "@helper()", 1, 6))
+        );
     }
 
     #[test]
@@ -375,6 +402,10 @@ mod tests {
             .expect("ns::inner is defined in this module");
         assert_eq!(target.uri, URI);
         assert_eq!(target.span, span_of(NAV_FIXTURE, "inner"));
+        assert_eq!(
+            target.origin,
+            Some(span_after(NAV_FIXTURE, "@ns::inner()", 1, 9))
+        );
     }
 
     #[test]
@@ -388,6 +419,7 @@ mod tests {
             .expect("ext is bound by a use import");
         assert_eq!(target.uri, URI);
         assert_eq!(target.span, span_of(NAV_FIXTURE, "ext"));
+        assert_eq!(target.origin, Some(span_after(NAV_FIXTURE, "@ext()", 1, 3)));
     }
 
     #[test]
@@ -409,6 +441,7 @@ mod tests {
             .find(|e| e.full_path == "std::goToEnd")
             .expect("goToEnd is in the roster");
         assert_eq!(target.span, entry.name_span);
+        assert_eq!(target.origin, Some(span_after(NAV_FIXTURE, "@ge()", 1, 2)));
     }
 
     #[test]
@@ -449,6 +482,10 @@ mod tests {
             .definition(URI, helper_goto)
             .expect("goto 1 inside helper");
         assert_eq!(helper_target.span, helper_label);
+        assert_eq!(
+            helper_target.origin,
+            Some(span_after(NAV_FIXTURE, "goto 1; }", 5, 1))
+        );
 
         // main's own `goto 1;` — must resolve to MAIN's label, never
         // helper's same-valued one (no cross-function leak).
@@ -458,6 +495,10 @@ mod tests {
             .expect("goto 1 inside main");
         assert_eq!(main_target.span, main_label);
         assert_ne!(main_target.span, helper_label);
+        assert_eq!(
+            main_target.origin,
+            Some(span_after(NAV_FIXTURE, "    goto 1;\n}", 9, 1))
+        );
     }
 
     #[test]
@@ -472,6 +513,10 @@ mod tests {
             .expect("right(2)'s successor references label 2, inside succ itself");
         assert_eq!(target.uri, URI);
         assert_eq!(target.span, succ_label);
+        assert_eq!(
+            target.origin,
+            Some(span_after(NAV_FIXTURE, "right(2)", 6, 1))
+        );
     }
 
     #[test]
@@ -486,6 +531,10 @@ mod tests {
             .expect("check's marked arm references label 1 in main");
         assert_eq!(target.uri, URI);
         assert_eq!(target.span, main_label);
+        assert_eq!(
+            target.origin,
+            Some(span_after(NAV_FIXTURE, "check(1, !);", 6, 1))
+        );
     }
 
     #[test]
@@ -504,6 +553,7 @@ mod tests {
             .find(|e| e.full_path == "std::goToEnd")
             .expect("goToEnd is in the roster");
         assert_eq!(target.span, entry.name_span);
+        assert_eq!(target.origin, Some(span_of(NAV_FIXTURE, "std::goToEnd")));
     }
 
     #[test]

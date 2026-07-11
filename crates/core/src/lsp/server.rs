@@ -27,7 +27,7 @@ use super::types::{
     DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams,
-    FileSystemWatcher, InitializeParams, InitializeResult, Location, Position,
+    FileSystemWatcher, InitializeParams, InitializeResult, Location, LocationLink, Position,
     PublishDiagnosticsParams, Range, Registration, RegistrationParams, SemanticTokens,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
     ServerInfoWire, TextDocumentPositionParams, TextDocumentSyncOptions, TextEdit, WireDiagnostic,
@@ -53,6 +53,12 @@ struct ServerState {
     shutdown: bool,
     next_request_id: i64,
     docs: DocStore,
+    /// `params.capabilities.textDocument.definition.linkSupport` from
+    /// `initialize`, read via a raw JSON pointer walk — the one client
+    /// capability this server reads. Gates whether `textDocument/definition`
+    /// may answer with `LocationLink` (sending one to a non-declaring
+    /// client is a protocol violation).
+    definition_link_support: bool,
 }
 
 impl ServerState {
@@ -62,6 +68,7 @@ impl ServerState {
             shutdown: false,
             next_request_id: 1,
             docs: DocStore::new(),
+            definition_link_support: false,
         }
     }
 }
@@ -316,6 +323,15 @@ fn handle_initialize(
         return;
     }
 
+    // The one client capability this server reads: everything else
+    // under `params.capabilities` stays unparsed and unread. Walked
+    // against the raw JSON before `params` is consumed below, since
+    // `InitializeParams` itself carries no capabilities field.
+    state.definition_link_support = params
+        .pointer("/capabilities/textDocument/definition/linkSupport")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
     let init_params: InitializeParams =
         serde_json::from_value(params).unwrap_or(InitializeParams {
             initialization_options: None,
@@ -557,6 +573,13 @@ fn handle_definition(
     let pos = position::pos_from_lsp(text, params.position);
 
     let result = match service.definition(&uri, pos) {
+        // A LocationLink is only valid to send when the client declared
+        // support for it; a target with no origin has nothing to put in
+        // originSelectionRange, so it falls back to a plain Location too.
+        Some(target) if state.definition_link_support && target.origin.is_some() => {
+            serde_json::to_value(vec![to_location_link(state, text, target)])
+                .expect("LocationLink[] is always serializable")
+        }
         Some(target) => serde_json::to_value(to_location(state, target))
             .expect("Location is always serializable"),
         None => serde_json::Value::Null,
@@ -564,17 +587,45 @@ fn handle_definition(
     respond_ok(writer, id, result);
 }
 
-/// Converts a `DefTarget` to a wire `Location` per its range-conversion
-/// contract (`DefTarget`'s doc): exact against the target's own text
-/// when it's open in the DocStore, else the char==UTF-16 identity.
-fn to_location(state: &ServerState, target: DefTarget) -> Location {
-    let range = match state.docs.get(&target.uri) {
+/// The wire `Range` for `target`'s span, per `DefTarget`'s documented
+/// range-conversion contract: exact against the target's own text when
+/// it's open in the DocStore, else the char==UTF-16 identity. Shared by
+/// both `to_location` and `to_location_link` — the two response shapes
+/// agree on where the target points, differing only in whether an origin
+/// range rides along.
+fn target_range(state: &ServerState, target: &DefTarget) -> Range {
+    match state.docs.get(&target.uri) {
         Some(doc) => position::span_to_range(&doc.text, target.span),
         None => span_to_range_identity(target.span),
-    };
+    }
+}
+
+/// Converts a `DefTarget` to a wire `Location`.
+fn to_location(state: &ServerState, target: DefTarget) -> Location {
+    let range = target_range(state, &target);
     Location {
         uri: target.uri,
         range,
+    }
+}
+
+/// Converts a `DefTarget` (with a known origin) to a wire `LocationLink`:
+/// `originSelectionRange` converts `target.origin` against
+/// `requesting_text` — the REQUESTING document's current text, not the
+/// target's — since the origin span lives in the document that sent the
+/// request. `targetRange`/`targetSelectionRange` are identical, both from
+/// `target.span` (the framework advertises no distinct "selection" vs
+/// "full extent" range for definitions).
+fn to_location_link(state: &ServerState, requesting_text: &str, target: DefTarget) -> LocationLink {
+    let range = target_range(state, &target);
+    let origin_selection_range = target
+        .origin
+        .map(|span| position::span_to_range(requesting_text, span));
+    LocationLink {
+        origin_selection_range,
+        target_uri: target.uri,
+        target_range: range.clone(),
+        target_selection_range: range,
     }
 }
 
@@ -1506,6 +1557,151 @@ mod tests {
         );
         assert_eq!(outputs[4]["id"], serde_json::json!(3));
         assert_eq!(outputs[4]["result"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn definition_with_link_support_returns_a_location_link_with_the_origin_range() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "capabilities": {
+                            "textDocument": {"definition": {"linkSupport": true}},
+                        },
+                    },
+                }),
+                did_open_message("file:///hit.fake", 1, "x def def"),
+                request_message(
+                    2,
+                    "textDocument/definition",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///hit.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[2]["result"],
+            serde_json::json!([
+                {
+                    "originSelectionRange": {
+                        "start": {"line": 0, "character": 2},
+                        "end": {"line": 0, "character": 5},
+                    },
+                    "targetUri": "file:///hit.fake",
+                    "targetRange": {
+                        "start": {"line": 0, "character": 2},
+                        "end": {"line": 0, "character": 5},
+                    },
+                    "targetSelectionRange": {
+                        "start": {"line": 0, "character": 2},
+                        "end": {"line": 0, "character": 5},
+                    },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn definition_with_link_support_but_no_origin_falls_back_to_a_plain_location() {
+        // A minimal service whose `definition` never sets an origin —
+        // exercises the fallback half of the `definition_link_support &&
+        // target.origin.is_some()` gate even though the client declared
+        // linkSupport. Mirrors `NoWatchService` above: this session sends
+        // no didOpen, so `handle_definition` converts positions against
+        // an unopened (empty) document — `doc_text` tolerates that — and
+        // only `definition` is ever called; everything else on the trait
+        // is `unimplemented!()`.
+        struct OriginNoneService;
+
+        impl LanguageService for OriginNoneService {
+            fn language_id(&self) -> &'static str {
+                "origin-none"
+            }
+            fn trigger_characters(&self) -> &[char] {
+                &[]
+            }
+            fn token_legend(&self) -> (&'static [&'static str], &'static [&'static str]) {
+                (&[], &[])
+            }
+            fn watched_globs(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn did_update(&mut self, _uri: &str, _text: &str) -> Vec<ServiceDiagnostic> {
+                unimplemented!()
+            }
+            fn did_close(&mut self, _uri: &str) {}
+            fn did_change_config(&mut self, _settings: serde_json::Value) {}
+            fn completion(&mut self, _uri: &str, _pos: Pos) -> Vec<Candidate> {
+                unimplemented!()
+            }
+            fn definition(&mut self, _uri: &str, _pos: Pos) -> Option<DefTarget> {
+                Some(DefTarget {
+                    uri: "file:///origin-none.fake".to_string(),
+                    span: Span::new(1, 1, 1, 4),
+                    origin: None,
+                })
+            }
+            fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {
+                unimplemented!()
+            }
+            fn document_symbols(&mut self, _uri: &str) -> Option<Vec<SymbolNode>> {
+                unimplemented!()
+            }
+            fn semantic_tokens(&mut self, _uri: &str) -> Option<Vec<crate::lsp::SemToken>> {
+                unimplemented!()
+            }
+            fn format(&mut self, _uri: &str) -> Option<String> {
+                unimplemented!()
+            }
+        }
+
+        let mut service = OriginNoneService;
+        let (outputs, _exit_code) = run_session(
+            &[
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "capabilities": {
+                            "textDocument": {"definition": {"linkSupport": true}},
+                        },
+                    },
+                }),
+                request_message(
+                    2,
+                    "textDocument/definition",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///origin-none.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[1]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[1]["result"],
+            serde_json::json!({
+                "uri": "file:///origin-none.fake",
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 3},
+                },
+            })
+        );
     }
 
     #[test]

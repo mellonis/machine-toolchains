@@ -30,6 +30,20 @@ pub struct Location {
     pub range: Range,
 }
 
+/// A `textDocument/definition` result item for clients that declare
+/// `textDocument.definition.linkSupport`: carries `originSelectionRange`
+/// so the client underlines exactly the span the server hit-tested,
+/// instead of guessing a word boundary from a plain `Location`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocationLink {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub origin_selection_range: Option<Range>,
+    pub target_uri: String,
+    pub target_range: Range,
+    pub target_selection_range: Range,
+}
+
 /// A textual edit applicable to a range. `new_text` is `newText` on the
 /// wire.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -226,8 +240,12 @@ pub struct PublishDiagnosticsParams {
     pub diagnostics: Vec<WireDiagnostic>,
 }
 
-/// Params for the `initialize` request. Client capabilities are
-/// deliberately unread — we never branch on them in v1.
+/// Params for the `initialize` request. This typed struct carries no
+/// capabilities field — client capabilities are deliberately unread here.
+/// The server loop reads exactly one flag out of the raw JSON before
+/// deserializing into this type (`textDocument.definition.linkSupport`,
+/// gating the `LocationLink` response shape); everything else about
+/// capabilities stays unread.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitializeParams {

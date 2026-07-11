@@ -32,6 +32,10 @@ diagnostics, the server offers:
 - **Go-to-definition** for local and nested functions, import
   bindings, qualified internal and external calls, label references,
   and standard-library routines (via the materialized copy below).
+  Clients that declare link support get a response scoped to the exact
+  reference span under the cursor, so the editor underlines only that
+  reference instead of guessing a word boundary; clients that don't
+  declare it get a plain location.
 - **Quickfix code actions** built from lint's machine-applicable and
   gated fixes, with the same preferred/not-preferred distinction as
   `pmt lint --fix` vs `--fix --force`.

@@ -68,6 +68,12 @@ pub struct Candidate {
 pub struct DefTarget {
     pub uri: String,
     pub span: Span,
+    /// The span of the reference the request hit, in the REQUESTING
+    /// document — becomes LocationLink.originSelectionRange for clients
+    /// that declare linkSupport, letting them underline exactly the
+    /// reference instead of guessing a word boundary. None → the
+    /// framework falls back to a plain Location response.
+    pub origin: Option<Span>,
 }
 
 /// A quickfix: edits apply to the requesting document.
@@ -273,6 +279,11 @@ pub(crate) mod fake {
                 .map(|span| DefTarget {
                     uri: uri.to_string(),
                     span,
+                    // The fake models no separate reference-vs-declaration
+                    // distinction, so the origin is the same occurrence —
+                    // enough to let framework tests exercise the
+                    // LocationLink response shape.
+                    origin: Some(span),
                 })
         }
 
@@ -456,6 +467,7 @@ mod tests {
             Some(DefTarget {
                 uri: "file:///a.fake".to_string(),
                 span: Span::new(1, 3, 1, 6),
+                origin: Some(Span::new(1, 3, 1, 6)),
             })
         );
     }
