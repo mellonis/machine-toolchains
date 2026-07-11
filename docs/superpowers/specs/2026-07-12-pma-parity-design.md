@@ -305,7 +305,9 @@ scope (like the `.pmc` service v1):
   currently-rejected input stays rejected with the same error kind (now
   spanned) — except where the label ruling makes the diagnosis more
   precise (dotted/namespaced text before `:` reports a bad label name
-  instead of an unknown mnemonic). The label-dots tightening is the one
+  instead of an unknown mnemonic), and except lines that are not
+  assembly-shaped at all (a leading non-word token, stray characters),
+  which now report `raw-line` instead of an unknown-mnemonic on garbage. The label-dots tightening is the one
   sanctioned acceptance delta, pinned by a dedicated test (`foo.bar:`
   rejected).
 - **Losslessness**: trivia-complete CST contract; byte-identical
