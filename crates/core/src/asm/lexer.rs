@@ -30,10 +30,6 @@ pub(crate) struct AsmToken {
 }
 
 impl AsmToken {
-    // Not called outside this file's tests yet — the CST parser
-    // (docs/formats.md (assembly text)) is the next task in the plan and
-    // is the intended first caller. Remove this allow when it lands.
-    #[allow(dead_code)]
     pub fn span(&self) -> Span {
         Span::new(self.line, self.col, self.line, self.col + self.len)
     }
@@ -92,12 +88,6 @@ fn scan_number(chars: &[char], start: usize) -> (String, usize) {
 }
 
 /// Tokenizes one line (no `\n` inside). Total — never fails.
-// Not called outside this file's tests yet — the CST parser
-// (docs/formats.md (assembly text)) is the next task in the plan and is
-// the intended first caller. Remove this allow when it lands (it also
-// covers the private scan helpers and the AsmToken/AsmTokenKind types
-// this function constructs).
-#[allow(dead_code)]
 pub(crate) fn lex_line(text: &str, line_no: u32) -> Vec<AsmToken> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();

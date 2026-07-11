@@ -3,6 +3,7 @@
 //! tables.
 
 mod assembler;
+pub mod cst;
 pub(crate) mod decode;
 mod disassembler;
 pub(crate) mod lexer;
