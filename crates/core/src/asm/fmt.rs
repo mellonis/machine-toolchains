@@ -115,6 +115,21 @@ fn own_line_comment_col(items: &[AsmItem], i: usize, seen_func: bool) -> usize {
 /// up with nothing to print after an own-line label (a long, bare,
 /// label-only line), the empty continuation is dropped rather than
 /// leaving a blank line behind.
+///
+/// A long label with NO instruction (a label-only line) is the one
+/// case where "own line" must NOT split the physical line further: if
+/// it carries a trailing comment, that comment stays on the label's
+/// own line (padded to [`COMMENT_COL`], or one space past the field
+/// when the field itself runs past that stop) rather than moving to a
+/// bare continuation line. A bare continuation reparses as an OWN-LINE
+/// comment (no label on that physical line), which the printer would
+/// then re-indent to [`MNEMONIC_COL`] on a second pass — an
+/// idempotence violation (`format(format(x)) != format(x)`). Keeping
+/// the comment on the label's line reparses to the identical
+/// label-with-trailing-comment shape, so pass 1 is already a fixed
+/// point. This only applies when `instr` is `None`: when an
+/// instruction follows, it owns the continuation line and the label
+/// line has nothing else to carry.
 fn print_line(out: &mut String, line: &LineCst) {
     let n = line.labels.len();
     for label in &line.labels[..n.saturating_sub(1)] {
@@ -125,7 +140,8 @@ fn print_line(out: &mut String, line: &LineCst) {
     let mut cur = String::new();
     if let Some(last) = line.labels.last() {
         let field = format!("{}:", last.name);
-        if field.chars().count() <= MAX_INLINE_LABEL_FIELD {
+        let fits_inline = field.chars().count() <= MAX_INLINE_LABEL_FIELD;
+        if fits_inline || line.instr.is_none() {
             cur.push_str(&field);
         } else {
             out.push_str(&field);
@@ -359,14 +375,17 @@ stp
         let expected = ".func f\nverylongname:\n";
         assert_eq!(format_asm(src).unwrap(), expected);
 
-        // Same, but with a trailing comment: the comment lands on the
-        // continuation line, padded straight from column 0 to 32 —
-        // there is no mnemonic/operand field on this line to occupy
-        // the intermediate stops.
+        // Same, but with a trailing comment: the comment stays on the
+        // LABEL's own line (padded from the field's end to col 32),
+        // not on a bare continuation line. A bare continuation would
+        // reparse as an own-line comment (no label on that physical
+        // line) and get re-indented to MNEMONIC_COL on a second pass —
+        // an idempotence violation. See `case5_idempotent_over_every_fixture`'s
+        // `"verylongname: ; note\n"` fixture for the pinned round-trip.
         let src_c = ".func f\nverylongname: ; note\n";
         let expected_c = format!(
-            ".func f\nverylongname:\n{}; note\n",
-            " ".repeat(COMMENT_COL)
+            ".func f\nverylongname:{}; note\n",
+            " ".repeat(COMMENT_COL - "verylongname:".chars().count())
         );
         assert_eq!(format_asm(src_c).unwrap(), expected_c);
     }
@@ -386,6 +405,8 @@ stp
             ".func f\n        nop\n        ; inside f\n        ret\n",
             ".func f\n        verylongmnem 1\n", // mnemonic overflows into the operand column
             ".func f\n        abcdefgh 1\n",     // mnemonic ends exactly at the operand column
+            ".func f\nverylongname: ; note\n",   // long label-only line with a trailing comment
+            ".func f\nverylongname: short: nop ; note\n", // multi-label variant: long non-last label + trailing comment on the short last label's instruction line
         ]
     }
 
