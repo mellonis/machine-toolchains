@@ -183,9 +183,10 @@ Fix (safe tier): remove the label.
 
 ### redundant-jump-to-next
 
-An unconditional jump whose target labels the immediately following
-item in the same function — fall-through already lands there, so the
-jump changes nothing. Fix (safe tier): remove the jump.
+An unconditional jump, or a conditional branch, whose target labels
+the immediately following item in the same function — fall-through
+already lands there either way, so the jump or branch changes
+nothing. Fix (safe tier): remove the jump or branch.
 
 ### line-too-long
 

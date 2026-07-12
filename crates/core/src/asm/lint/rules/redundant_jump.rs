@@ -1,8 +1,11 @@
-//! `redundant-jump-to-next` (docs/lint.md): a `Flow::Jump` item whose
-//! name operand targets the label bound to the immediately following
-//! item in the same function — fall-through already lands there, so
-//! the jump changes nothing. Arch-agnostic: arming is `Flow::Jump`, not
-//! any specific mnemonic (a forced-short jump form is just as inert).
+//! `redundant-jump-to-next` (docs/lint.md): a `Flow::Jump` or
+//! `Flow::Branch` item whose name operand targets the label bound to
+//! the immediately following item in the same function — fall-through
+//! already lands there, so an unconditional jump changes nothing and
+//! either outcome of a conditional branch lands on that same next
+//! instruction too. Arch-agnostic: arming is `Flow::Jump | Flow::Branch`,
+//! not any specific mnemonic (a forced-short jump/branch form is just
+//! as inert).
 
 use crate::asm::lint::AsmLintContext;
 use crate::asm::lint::rules::delete_instruction_edit_span;
@@ -25,7 +28,7 @@ pub(crate) fn check(ctx: &AsmLintContext, out: &mut Vec<Diagnostic>) {
             };
             if !matches!(
                 ctx.syntax.by_opcode(*opcode).map(|entry| entry.flow),
-                Some(Flow::Jump)
+                Some(Flow::Jump | Flow::Branch)
             ) {
                 continue;
             }
@@ -36,7 +39,7 @@ pub(crate) fn check(ctx: &AsmLintContext, out: &mut Vec<Diagnostic>) {
                 code: "redundant-jump-to-next",
                 span: *span,
                 message: format!(
-                    "jump to `{}` targets the next instruction — fall-through is identical",
+                    "jump/branch to `{}` targets the next instruction — fall-through is identical",
                     target.name
                 ),
                 fix: Some(Fix {
@@ -88,7 +91,7 @@ mod tests {
         assert_eq!(d[0].code, "redundant-jump-to-next");
         assert_eq!(
             d[0].message,
-            "jump to `L1` targets the next instruction — fall-through is identical"
+            "jump/branch to `L1` targets the next instruction — fall-through is identical"
         );
         assert_eq!(d[0].span.start.line, 2); // the whole `jmp L1` item
         let fix = d[0].fix.as_ref().unwrap();
@@ -112,10 +115,62 @@ mod tests {
     }
 
     #[test]
-    fn a_conditional_branch_to_the_next_instruction_is_not_flagged() {
-        // `br` is Flow::Branch, not Flow::Jump — out of scope for this rule.
+    fn a_conditional_branch_to_the_next_instruction_is_flagged() {
+        // `br` is Flow::Branch — either outcome of a conditional branch
+        // to its own fall-through lands on the same next instruction, so
+        // any Flow::Branch mnemonic hits this same arm; the rule keys on
+        // Flow, not spelling (mirrors forced_short_jump_mnemonics above).
         let d = findings(".func f\n        br L1\nL1:     stop\n");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "redundant-jump-to-next");
+        assert_eq!(
+            d[0].message,
+            "jump/branch to `L1` targets the next instruction — fall-through is identical"
+        );
+        let fix = d[0].fix.as_ref().unwrap();
+        assert_eq!(fix.applicability, Applicability::MachineApplicable);
+    }
+
+    #[test]
+    fn conditional_branch_over_one_instruction_is_not_flagged() {
+        let d = findings(".func f\n        br L2\n        nop\nL2:     stop\n");
         assert!(d.is_empty());
+    }
+
+    #[test]
+    fn labels_on_the_branch_line_survive_the_fix() {
+        // "L0:     br L1" — deleting only the instruction portion keeps
+        // "L0:" bound forward to whatever now follows it.
+        let src = ".func f\nL0:     br L1\nL1:     stop\n";
+        let d = findings(src);
+        assert_eq!(d.len(), 1);
+        let edit = &d[0].fix.as_ref().unwrap().edits[0];
+        // "L0:     br L1": `br` starts at col 9; the trimmed line ends
+        // at col 14 (`br L1` is 5 chars from col 9).
+        assert_eq!(edit.span, Span::new(2, 9, 2, 14));
+        assert_eq!(edit.replacement, "");
+
+        // Re-lowering the fixed source keeps L0 alive: as a label-only
+        // line it becomes pending and joins L1 on the very next
+        // instruction (`stop`) — the same target the deleted branch
+        // named, so both labels now bind to the one surviving item.
+        let fixed = format!(
+            "{}{}",
+            &src[..byte_of(src, edit.span.start)],
+            &src[byte_of(src, edit.span.end)..]
+        );
+        let syntax = test_syntax();
+        let funcs = lower(&parse_asm_cst(&fixed), &syntax).unwrap();
+        assert_eq!(funcs[0].items.len(), 1); // br is gone; only `stop` remains
+        match &funcs[0].items[0] {
+            SourceItem::Instr { labels, .. } => {
+                assert_eq!(
+                    labels.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+                    vec!["L0", "L1"]
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
