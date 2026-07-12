@@ -1530,11 +1530,19 @@ export main() {
                     "method": "textDocument/formatting",
                     "params": {"textDocument": {"uri": pma_uri}},
                 }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "textDocument/completion",
+                    // Line 3 ("stp"), touching its own word — context 1,
+                    // the full mnemonic+directive list.
+                    "params": {"textDocument": {"uri": pma_uri}, "position": {"line": 2, "character": 0}},
+                }),
             ],
             &mut pmc,
             &mut pma,
         );
-        assert_eq!(outputs.len(), 4, "{outputs:?}");
+        assert_eq!(outputs.len(), 5, "{outputs:?}");
 
         // initialize: the merged legend is pmc's 3 token types then
         // pma's 3, concatenated without dedup — proof both services
@@ -1595,6 +1603,25 @@ export main() {
             "sanity: the fixture really was unformatted"
         );
         assert_eq!(edits[0].new_text, canonical);
+
+        // completion on the .pma doc: the real pma service's
+        // operand-hint `detail` (the #25 fold-in) reaches the wire —
+        // the mapping itself is proven generically in core against a
+        // fake service; this is the one spot-check that the real
+        // service's candidates carry it through the real dual-service
+        // routing. `jm` hints a label operand; `nop` (no operand)
+        // carries no `detail` key at all.
+        let items = outputs[4]["result"].as_array().unwrap();
+        let jm = items
+            .iter()
+            .find(|c| c["label"] == json!("jm"))
+            .unwrap_or_else(|| panic!("no `jm` candidate: {items:?}"));
+        assert_eq!(jm["detail"], json!("jm <label>"));
+        let nop = items
+            .iter()
+            .find(|c| c["label"] == json!("nop"))
+            .unwrap_or_else(|| panic!("no `nop` candidate: {items:?}"));
+        assert!(nop.get("detail").is_none(), "{nop:?}");
     }
 
     #[test]

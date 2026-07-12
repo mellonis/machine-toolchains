@@ -32,8 +32,10 @@
 use std::collections::BTreeSet;
 
 use mtc_core::asm::cst::AsmItemKind;
+use mtc_core::asm::{Flow, SyntaxEntry};
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
+use mtc_core::vm::OperandKind;
 
 use crate::asm::pm1_syntax;
 
@@ -105,30 +107,85 @@ fn zero_span(pos: Pos) -> Span {
     }
 }
 
+/// A candidate with no `detail` — every context but the mnemonic list
+/// (labels, functions, and the `.byte`/`.func` directives, whose hints
+/// are set separately). `.pma` has no attribute grammar of its own, so
+/// `deprecated` stays false permanently, not just this round.
 fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candidate {
+    mk_candidate_with_detail(label, kind, replace_span, None)
+}
+
+fn mk_candidate_with_detail(
+    label: &str,
+    kind: CandidateKind,
+    replace_span: Span,
+    detail: Option<String>,
+) -> Candidate {
     Candidate {
         label: label.to_string(),
         kind,
         replace_span,
         insert_text: label.to_string(),
-        // Operand-hint `detail` is Task 5 (the #25 fold-in); `.pma` has
-        // no attribute grammar of its own, so `deprecated` stays false
-        // permanently, not just this round.
-        detail: None,
+        detail,
         deprecated: false,
     }
 }
 
+/// The operand-hint `detail` for a mnemonic candidate (the #25 fold-in;
+/// design spec, Candidate-reshape paragraph), derived from the entry's
+/// `OperandKind`/`Flow` alone — ONE mapping, so a future mnemonic added
+/// to `pm1_syntax()` gets a hint automatically rather than needing a
+/// per-mnemonic case here. `None`-operand entries (`nop`, `stp`, `ret`,
+/// ...) carry no hint; `SymbolVec` (`wr`) hints its index-list shape;
+/// `RelI8`/`RelI32` hints `<function>` for `Call` flow (`call`/
+/// `call.s`) and `<label>` for `Jump`/`Branch` flow (`jmp`/`jm`/`jnm`
+/// and their short forms) — the two reference kinds `operand_role`
+/// itself distinguishes. `FallThrough`/`Stop` never pair with a
+/// `RelI8`/`RelI32` operand in `pm1_syntax()` today; the arm stays
+/// `None` rather than unreachable so an arch addition that did pair
+/// them degrades to no hint instead of a panic.
+fn operand_hint_detail(entry: &SyntaxEntry) -> Option<String> {
+    match entry.operand {
+        OperandKind::None => None,
+        OperandKind::SymbolVec => Some(format!("{} <indices>", entry.mnemonic)),
+        OperandKind::RelI8 | OperandKind::RelI32 => match entry.flow {
+            Flow::Call => Some(format!("{} <function>", entry.mnemonic)),
+            Flow::Jump | Flow::Branch => Some(format!("{} <label>", entry.mnemonic)),
+            Flow::FallThrough | Flow::Stop => None,
+        },
+    }
+}
+
 /// Context 1: every `pm1_syntax()` mnemonic plus the `.byte`/`.func`
-/// directives — all Keyword-kind, sharing `replace_span`.
+/// directives — all Keyword-kind, sharing `replace_span`. Mnemonics
+/// carry their [`operand_hint_detail`]; the two directives carry their
+/// own fixed operand-hint strings (they have no `SyntaxEntry` of their
+/// own to derive one from).
 fn word_position_candidates(replace_span: Span) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = pm1_syntax()
         .entries
         .iter()
-        .map(|e| mk_candidate(e.mnemonic, CandidateKind::Keyword, replace_span))
+        .map(|e| {
+            mk_candidate_with_detail(
+                e.mnemonic,
+                CandidateKind::Keyword,
+                replace_span,
+                operand_hint_detail(e),
+            )
+        })
         .collect();
-    out.push(mk_candidate(".byte", CandidateKind::Keyword, replace_span));
-    out.push(mk_candidate(".func", CandidateKind::Keyword, replace_span));
+    out.push(mk_candidate_with_detail(
+        ".byte",
+        CandidateKind::Keyword,
+        replace_span,
+        Some(".byte <0..=255>".to_string()),
+    ));
+    out.push(mk_candidate_with_detail(
+        ".func",
+        CandidateKind::Keyword,
+        replace_span,
+        Some(".func <name> [local]".to_string()),
+    ));
     out
 }
 
@@ -326,5 +383,77 @@ mod tests {
 
         let pos = Pos { line: 2, col: 13 }; // past `stp`, in its (nonexistent) operand slot
         assert_eq!(service.completion(URI, pos), Vec::new());
+    }
+
+    /// The mnemonic-list candidate matching `label`, from a blank-line
+    /// (context 1) completion — every shape test below reads its
+    /// `detail` off this same full list rather than reaching for
+    /// `word_position_candidates` directly, proving the wiring the real
+    /// service exposes, not just the helper in isolation.
+    fn mnemonic_detail(label: &str) -> Option<String> {
+        let mut service = PmaLanguageService::new();
+        service.did_update(URI, "");
+        let candidates = service.completion(URI, Pos { line: 1, col: 1 });
+        match candidates.iter().find(|c| c.label == label) {
+            Some(c) => c.detail.clone(),
+            None => panic!("no `{label}` candidate in {candidates:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_flow_mnemonic_hints_a_label_operand() {
+        assert_eq!(mnemonic_detail("jm"), Some("jm <label>".to_string()));
+    }
+
+    #[test]
+    fn jump_flow_short_mnemonic_hints_a_label_operand() {
+        assert_eq!(mnemonic_detail("jmp.s"), Some("jmp.s <label>".to_string()));
+    }
+
+    #[test]
+    fn call_flow_mnemonic_hints_a_function_operand() {
+        assert_eq!(mnemonic_detail("call"), Some("call <function>".to_string()));
+    }
+
+    #[test]
+    fn symbol_vec_mnemonic_hints_an_indices_operand() {
+        assert_eq!(mnemonic_detail("wr"), Some("wr <indices>".to_string()));
+    }
+
+    #[test]
+    fn none_operand_mnemonic_carries_no_detail() {
+        assert_eq!(mnemonic_detail("nop"), None);
+    }
+
+    #[test]
+    fn directives_carry_their_own_fixed_detail() {
+        assert_eq!(
+            mnemonic_detail(".byte"),
+            Some(".byte <0..=255>".to_string())
+        );
+        assert_eq!(
+            mnemonic_detail(".func"),
+            Some(".func <name> [local]".to_string())
+        );
+    }
+
+    #[test]
+    fn label_and_function_candidates_carry_no_detail() {
+        // Context 2/4 (function) and context 3 (label) candidates are
+        // never mnemonics — `mk_candidate` alone builds them, and it
+        // never attaches a hint.
+        let mut service = PmaLanguageService::new();
+        let src = ".func f\nA: rgt\n        jm \n        call \n";
+        service.did_update(URI, src);
+
+        let label_pos = Pos { line: 3, col: 12 }; // `jm`'s operand slot
+        let label_candidates = service.completion(URI, label_pos);
+        assert_eq!(label_candidates.len(), 1, "{label_candidates:?}");
+        assert_eq!(label_candidates[0].detail, None);
+
+        let function_pos = Pos { line: 4, col: 14 }; // `call`'s operand slot
+        let function_candidates = service.completion(URI, function_pos);
+        assert_eq!(function_candidates.len(), 1, "{function_candidates:?}");
+        assert_eq!(function_candidates[0].detail, None);
     }
 }
