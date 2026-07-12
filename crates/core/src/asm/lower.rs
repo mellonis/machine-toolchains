@@ -10,14 +10,21 @@ use crate::diagnostics::Span;
 use crate::vm::OperandKind;
 
 /// A name paired with the source span it occupies.
+///
+/// `pub`, not `pub(crate)`: the lint layer's [`super::lint::AsmLintContext`]
+/// carries `&[SourceFunction]` on a `pub` field, and a public field's type
+/// must be at least as visible as the field itself (`private_interfaces`)
+/// — even though the defining `lower` module itself stays private to
+/// `asm` and its descendants, which is where every actual constructor
+/// and consumer of these types lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SpannedName {
+pub struct SpannedName {
     pub name: String,
     pub span: Span,
 }
 
 #[derive(Debug)]
-pub(crate) struct SourceFunction {
+pub struct SourceFunction {
     pub name: String,
     /// Pinned by this module's interface. Every function-name diagnostic
     /// (`bad function name`, `duplicate function`) is raised here at
@@ -30,7 +37,7 @@ pub(crate) struct SourceFunction {
 }
 
 #[derive(Debug)]
-pub(crate) enum SourceItem {
+pub enum SourceItem {
     Instr {
         span: Span,
         labels: Vec<SpannedName>,
@@ -45,7 +52,7 @@ pub(crate) enum SourceItem {
 }
 
 #[derive(Debug)]
-pub(crate) enum SourceOperand {
+pub enum SourceOperand {
     None,
     Ints(Vec<i64>),
     Name(SpannedName),

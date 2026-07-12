@@ -7,6 +7,7 @@ pub mod cst;
 pub(crate) mod decode;
 mod disassembler;
 pub(crate) mod lexer;
+pub mod lint;
 mod lower;
 pub(crate) mod syntax;
 
