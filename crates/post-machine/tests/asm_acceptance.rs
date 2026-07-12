@@ -11,8 +11,8 @@
 //! purely an assembler/disassembler-level construct (a raw byte the
 //! disassembler falls back to for undecoded gaps, or hand-written `.pma`).
 //! No `.pmc` source can reach it, so pinning it here would be vacuous;
-//! `crates/post-machine/tests/asm_programs.rs` already covers `.byte`
-//! acceptance and round-tripping at the assembler level directly.
+//! the core asm module's inline tests (`crates/core/src/asm/`) already
+//! cover `.byte` acceptance and round-tripping at the assembler level.
 
 use mtc_core::asm::AsmErrorKind;
 use mtc_post_machine::asm::{assemble, disassemble_object};
@@ -266,6 +266,15 @@ fn rejections_pin_kind_and_span_start() {
             "  0004:  21 05 00 00 00  call    0x0005 <goToEnd>\n".to_string(),
             AsmErrorKind::RawLine,
             (1, 3),
+        ),
+        (
+            // `A: 5` — a label followed by a bare number in the
+            // instruction-word slot is not assembly-shaped (the canonical
+            // `AsmErrorKind::RawLine` example).
+            "raw line: label followed by a bare number",
+            "A: 5\n".to_string(),
+            AsmErrorKind::RawLine,
+            (1, 1),
         ),
         (
             // A `jmp.s` forced past its short-offset range: pad the gap
