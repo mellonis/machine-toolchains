@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "PMA",
+  "comment": "PM-1 .pma assembly (docs/formats.md). Mnemonics mirror pm1_syntax() in crates/post-machine/src/asm/mod.rs; the drift guard in crates/post-machine/tests/editor_grammar.rs asserts coverage generated from that table. Mnemonic alternation is ordered longest-first so a `.s` short form (e.g. `jm.s`) is never shadowed by its bare prefix (`jm`) under Oniguruma's first-match alternation. `local` after `.func` is scoped storage.modifier. Labels use the pragmatic ASCII class `[A-Za-z_][A-Za-z0-9_]*` for highlighting even though the parser additionally accepts Unicode letters (docs/formats.md) — best-effort, not a full identifier class.",
+  "scopeName": "source.pma",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#funcDirective" },
+    { "include": "#byteDirective" },
+    { "include": "#label" },
+    { "include": "#mnemonics" },
+    { "include": "#symbol" },
+    { "include": "#number" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.semicolon.pma", "match": ";.*$" }
+      ]
+    },
+    "funcDirective": {
+      "match": "(\\.func)\\b\\s+([A-Za-z_][A-Za-z0-9_.:]*)(?:\\s+(local)\\b)?",
+      "captures": {
+        "1": { "name": "keyword.control.directive.pma" },
+        "2": { "name": "entity.name.function.pma" },
+        "3": { "name": "storage.modifier.pma" }
+      }
+    },
+    "byteDirective": {
+      "name": "keyword.control.directive.pma",
+      "match": "\\.byte\\b"
+    },
+    "mnemonics": {
+      "name": "keyword.other.mnemonic.pma",
+      "match": "\\b(call\\.s|jmp\\.s|jnm\\.s|call|jm\\.s|nop|stp|hlt|lft|rgt|jmp|jnm|ret|ent|brk|wr|jm)\\b"
+    },
+    "label": {
+      "match": "^[ \\t]*([A-Za-z_][A-Za-z0-9_]*)(:)",
+      "captures": {
+        "1": { "name": "entity.name.label.pma" },
+        "2": { "name": "punctuation.separator.label.pma" }
+      }
+    },
+    "symbol": {
+      "name": "variable.other.symbol.pma",
+      "match": "@[A-Za-z_][\\w.:]*"
+    },
+    "number": {
+      "name": "constant.numeric.pma",
+      "match": "-?\\d+"
+    }
+  }
+}
