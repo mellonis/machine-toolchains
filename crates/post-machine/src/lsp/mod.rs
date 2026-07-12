@@ -23,7 +23,11 @@ use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 
 mod complete;
 mod navigate;
+mod pma;
 mod tokens;
+
+#[allow(unused_imports)] // consumer: cli/lsp.rs (pma plan 3, Task 5)
+pub(crate) use pma::PmaLanguageService;
 
 pub(crate) struct PmcLanguageService {
     docs: HashMap<String, DocState>,
@@ -42,7 +46,23 @@ impl PmcLanguageService {
             config_cache: HashMap::new(),
         }
     }
+}
 
+/// Shared config-resolution machinery (docs/lsp.md (config channels)),
+/// reused by every service's `did_update` first step: the mtime-cached
+/// `pmt.json` lookup, then the two-channel union (project file, then
+/// IDE settings) into one effective allow-list + invalid-config
+/// messages. Borrows its two channels for the span of one `resolve`
+/// call rather than owning them as its own fields — each service keeps
+/// `ide_allow`/`config_cache` as its own state exactly as before this
+/// factoring (so existing field access, tests included, is untouched);
+/// only the resolution LOGIC is shared, not the data.
+struct ConfigResolver<'a> {
+    ide_allow: &'a Option<Result<Vec<String>, String>>,
+    config_cache: &'a mut HashMap<PathBuf, (SystemTime, Result<Vec<String>, String>)>,
+}
+
+impl ConfigResolver<'_> {
     /// The project-file channel for one analysis: the parsed outcome of
     /// the discovered `pmt.json`, through the mtime cache — reused only
     /// while the file's mtime is unchanged, else re-loaded and re-cached.
@@ -67,6 +87,31 @@ impl PmcLanguageService {
                 .insert(winner.to_path_buf(), (mtime, outcome.clone()));
         }
         outcome
+    }
+
+    /// Resolves one document's effective allow-list: the discovered
+    /// project file (if any) unioned with the IDE settings channel,
+    /// project first. Returns `(effective_allow, config_errors)` — every
+    /// service's `did_update` step 1 (docs/lsp.md (config channels)).
+    fn resolve(&mut self, uri: &str) -> (Vec<String>, Vec<String>) {
+        let mut config_errors: Vec<String> = Vec::new();
+        let mut effective_allow: Vec<String> = Vec::new();
+
+        if let Some(path) = uri_to_path(uri)
+            && let Some(winner) = path.parent().and_then(config::discover)
+        {
+            match self.project_allow(&winner) {
+                Ok(codes) => union_into(&mut effective_allow, &codes),
+                // ConfigError's Display already names the path.
+                Err(message) => config_errors.push(message),
+            }
+        }
+        match self.ide_allow {
+            None => {}
+            Some(Ok(codes)) => union_into(&mut effective_allow, codes),
+            Some(Err(reason)) => config_errors.push(format!("IDE settings: {reason}")),
+        }
+        (effective_allow, config_errors)
     }
 }
 
@@ -156,6 +201,27 @@ fn union_into(dst: &mut Vec<String>, src: &[String]) {
 /// contract is language-agnostic, only the caller differs.
 fn spans_overlap(a: Span, b: Span) -> bool {
     a.start < b.end && b.start < a.end
+}
+
+/// Lint findings whose span overlaps `span`, each turned into a quickfix
+/// `Action` — the `code_actions` conversion both `.pmc` and `.pma` share
+/// (docs/lsp.md (code actions)): only findings carrying a `Fix`
+/// contribute; `preferred` mirrors `Applicability::MachineApplicable`.
+fn actions_from_findings(findings: &[Diagnostic], span: Span) -> Vec<Action> {
+    findings
+        .iter()
+        .filter_map(|d| {
+            let fix = d.fix.as_ref()?;
+            if !spans_overlap(d.span, span) {
+                return None;
+            }
+            Some(Action {
+                title: fix.description.clone(),
+                preferred: matches!(fix.applicability, Applicability::MachineApplicable),
+                edits: fix.edits.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Parses the IDE channel's `lint.allow` value: an array of known rule
@@ -312,28 +378,17 @@ impl LanguageService for PmcLanguageService {
     }
 
     fn did_update(&mut self, uri: &str, text: &str) -> Vec<ServiceDiagnostic> {
-        // 1. Resolve config. The discovery re-runs EVERY analysis (a few
+        // 1. Resolve config — shared machinery (docs/lsp.md (config
+        //    channels)). The discovery re-runs EVERY analysis (a few
         //    stats) — a newly created nearer pmt.json must win; only the
         //    parse of the winner is cached (by mtime). Idempotent for the
         //    same (uri, text): the framework's config/watched-file
         //    republish sweeps re-invoke this freely.
-        let mut config_errors: Vec<String> = Vec::new();
-        let mut effective_allow: Vec<String> = Vec::new();
-
-        if let Some(path) = uri_to_path(uri)
-            && let Some(winner) = path.parent().and_then(config::discover)
-        {
-            match self.project_allow(&winner) {
-                Ok(codes) => union_into(&mut effective_allow, &codes),
-                // ConfigError's Display already names the path.
-                Err(message) => config_errors.push(message),
-            }
+        let (effective_allow, config_errors) = ConfigResolver {
+            ide_allow: &self.ide_allow,
+            config_cache: &mut self.config_cache,
         }
-        match &self.ide_allow {
-            None => {}
-            Some(Ok(codes)) => union_into(&mut effective_allow, codes),
-            Some(Err(reason)) => config_errors.push(format!("IDE settings: {reason}")),
-        }
+        .resolve(uri);
 
         // 2. Staged analysis; lint over a successful analysis only, with
         //    the effective allow union of the valid config sources.
@@ -422,19 +477,7 @@ impl LanguageService for PmcLanguageService {
         let Some(lint) = self.docs.get(uri).and_then(|state| state.lint.as_ref()) else {
             return Vec::new();
         };
-        lint.iter()
-            .filter_map(|d| {
-                let fix = d.fix.as_ref()?;
-                if !spans_overlap(d.span, span) {
-                    return None;
-                }
-                Some(Action {
-                    title: fix.description.clone(),
-                    preferred: matches!(fix.applicability, Applicability::MachineApplicable),
-                    edits: fix.edits.clone(),
-                })
-            })
-            .collect()
+        actions_from_findings(lint, span)
     }
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
