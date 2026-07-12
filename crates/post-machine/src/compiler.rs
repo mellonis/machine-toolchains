@@ -83,6 +83,18 @@ pub enum CompileErrorKind {
     SingleColonInPath,
     /// A command or call at top level (outside any function body).
     TopLevelStatement(String),
+    /// A doc/attention run (docs/language.md (doc lines)) not
+    /// immediately followed by a function declaration at its scope.
+    /// Span = the run's first line.
+    DanglingDocRun,
+    /// A `?` doc line appears after the run has already entered its `!`
+    /// block — interleaved, or the whole run written `!`-then-`?`.
+    DocLineOrder,
+    /// An attention line's leading `[ident]` names something other than
+    /// the v1 attribute vocabulary (`deprecated`).
+    UnknownAttribute(String),
+    /// A second `[deprecated]` attribute inside one run.
+    DuplicateAttribute,
 }
 
 impl CompileErrorKind {
@@ -114,6 +126,10 @@ impl CompileErrorKind {
             CompileErrorKind::KeywordInBody(_) => "keyword-in-body",
             CompileErrorKind::SingleColonInPath => "single-colon-in-path",
             CompileErrorKind::TopLevelStatement(_) => "top-level-statement",
+            CompileErrorKind::DanglingDocRun => "dangling-doc-run",
+            CompileErrorKind::DocLineOrder => "doc-line-order",
+            CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
+            CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
         }
     }
 }
@@ -209,6 +225,27 @@ impl std::fmt::Display for CompileErrorKind {
                     f,
                     "statements are not allowed at top level — commands and calls live inside function bodies (found {found})"
                 )
+            }
+            CompileErrorKind::DanglingDocRun => {
+                write!(
+                    f,
+                    "doc/attention run is not attached to a function declaration"
+                )
+            }
+            CompileErrorKind::DocLineOrder => {
+                write!(
+                    f,
+                    "doc lines (`?`) must come before attention lines (`!`) in a run"
+                )
+            }
+            CompileErrorKind::UnknownAttribute(name) => {
+                write!(
+                    f,
+                    "unknown attribute `[{name}]` — the only recognized attribute is `[deprecated]`"
+                )
+            }
+            CompileErrorKind::DuplicateAttribute => {
+                write!(f, "duplicate `[deprecated]` attribute in the same run")
             }
         }
     }
@@ -863,7 +900,7 @@ mod tests {
 
     #[test]
     fn error_codes_are_pairwise_distinct() {
-        // One representative kind per variant (all 19); `code()`'s match
+        // One representative kind per variant (all 23); `code()`'s match
         // is exhaustive over the enum, so this also pins that every
         // variant is accounted for.
         let kinds = [
@@ -895,8 +932,12 @@ mod tests {
             CompileErrorKind::KeywordInBody("use"),
             CompileErrorKind::SingleColonInPath,
             CompileErrorKind::TopLevelStatement("x".into()),
+            CompileErrorKind::DanglingDocRun,
+            CompileErrorKind::DocLineOrder,
+            CompileErrorKind::UnknownAttribute("x".into()),
+            CompileErrorKind::DuplicateAttribute,
         ];
-        assert_eq!(kinds.len(), 19);
+        assert_eq!(kinds.len(), 23);
         let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
     }

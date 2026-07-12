@@ -637,6 +637,30 @@ mod tests {
         assert_eq!((tokens[0].line, tokens[0].col, tokens[0].len), (1, 1, 1));
     }
 
+    /// WARM-UP pin (carry-over from the lexer's own review): the
+    /// minus-ONE-space rule's two boundaries. No space at all after the
+    /// sigil leaves the payload untouched; two spaces leave exactly one
+    /// behind — `strip_prefix` removes at most one leading space.
+    #[test]
+    fn doc_line_payload_strips_at_most_one_leading_space() {
+        let tokens = lex("?text").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::DocLine("text".into()));
+
+        let tokens = lex("?  text").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::DocLine(" text".into()));
+    }
+
+    /// WARM-UP pin: a doc line immediately after a `//` comment's own
+    /// line still lexes as `DocLine` — the comment's trailing `\n`
+    /// resets `at_line_start` exactly like any other newline, so the
+    /// `?` on the next line is still recognized as line-start.
+    #[test]
+    fn doc_line_after_a_comment_line_lexes_correctly() {
+        let tokens = lex("// x\n? y").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::DocLine("y".into()));
+        assert_eq!((tokens[0].line, tokens[0].col, tokens[0].len), (2, 1, 3));
+    }
+
     #[test]
     fn bang_inside_parens_is_unaffected_by_doc_lines() {
         // Pins the pre-existing successor/check-arm `!` lexing: mid-line

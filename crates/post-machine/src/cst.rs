@@ -68,7 +68,9 @@
 //! node as a [`TopKind::Comment`]/[`BodyKind::Comment`] item in the same
 //! `Vec`; a same-line trailing comment rides directly on the node it
 //! follows ([`UseCst::trailing`], [`StatementCst::trailing`]). There
-//! is no attachment pass — position IS the attachment. A future
+//! is no attachment pass — position IS the attachment (the one
+//! exception is [`FunctionCst::doc_run`], a REAL attachment pass over
+//! `?`/`!` lines — see that field's own doc). A future
 //! pretty-printer classifies each comment purely from this structure
 //! (design doc, "Comments = trivia-tokens native in the CST"):
 //!
@@ -247,6 +249,66 @@ pub struct FunctionCst {
     /// A comment on the SAME physical line as the closing `}` — e.g.
     /// `} // t`. `None` when absent.
     pub close_trailing: Option<Comment>,
+    /// The `?`/`!` run bound to this declaration (docs/language.md (doc
+    /// lines)), in source order; empty when the function is
+    /// undocumented. Unlike every other trivia field in this module,
+    /// this IS an attachment pass — `parse_cst` walks past blank lines,
+    /// ordinary comments, and the run's own order/attribute rules to
+    /// bind it to the NEXT `FunctionCst` at its scope (a run with
+    /// anything else next is a `DanglingDocRun` compile error, not a
+    /// silently dropped item). `lower_cst` ignores this field for now;
+    /// a later reduction copies it onto the AST as `FnDoc`.
+    pub doc_run: Vec<DocRunItem>,
+}
+
+/// One line of a [`FunctionCst::doc_run`], plus whether a blank line
+/// precedes it in source (same `blank_before` convention as every other
+/// CST item list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRunItem {
+    pub blank_before: bool,
+    pub kind: DocRunKind,
+}
+
+/// A doc/attention run's own line shapes (docs/language.md (doc lines)):
+/// a `?` doc line, a `!` attention line, or an ordinary comment
+/// interleaved within/after the run (module doc's "Comment placement"
+/// applies here too — position is still the attachment for a comment
+/// INSIDE a run; only the run's own binding to its `FunctionCst` is a
+/// real attachment pass, per [`FunctionCst::doc_run`]'s doc).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocRunKind {
+    /// A `?` line. `text` is the lexer's payload verbatim (raw text
+    /// after the sigil, minus one canonical leading space if present) —
+    /// unprocessed, so a pretty-printer reprints it byte-for-byte.
+    Doc { text: String, span: Span },
+    /// A `!` line. `attr` is `Some` when the payload opens with a valid
+    /// `[ident]` attribute (v1: only `[deprecated]` is accepted —
+    /// anything else is a parse-time `UnknownAttribute` error, so by
+    /// the time a `FunctionCst` exists, every `Some` here already named
+    /// `"deprecated"`). `text` is the FULL raw payload verbatim,
+    /// attribute prefix included when present — mirrors `Doc::text`'s
+    /// unprocessed-token convention; a consumer that only wants the
+    /// free-form message recovers it from `text` using `attr`'s own
+    /// span.
+    Attention {
+        attr: Option<AttrCst>,
+        text: String,
+        span: Span,
+    },
+    /// An ordinary `//`/`/* */` comment inside the run (between run
+    /// lines, or between the run's last line and the bound
+    /// declaration).
+    Comment(Comment),
+}
+
+/// An attention line's leading `[ident]` attribute (docs/language.md
+/// (doc lines)): v1 accepts exactly `"deprecated"`. `span` covers the
+/// identifier alone, not the surrounding brackets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrCst {
+    pub name: String,
+    pub span: Span,
 }
 
 /// One function-body item, plus whether a blank line precedes it in
@@ -377,6 +439,7 @@ mod tests {
                 body: vec![],
                 open_trailing: vec![],
                 close_trailing: None,
+                doc_run: vec![],
             }),
         };
         let standalone = BodyItem {
@@ -399,6 +462,7 @@ mod tests {
             body: vec![leading, labeled_statement, nested_fn, standalone],
             open_trailing: vec![],
             close_trailing: None,
+            doc_run: vec![],
         };
 
         let ns = NamespaceCst {
