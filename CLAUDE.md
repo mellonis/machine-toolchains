@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Rust toolchain for a Post machine: C-like `.pmc` language → optimizing compiler → assembler → linker → bus-accurate VM, all driven by one CLI (`pmt`). GPL-3.0-or-later. It completes work spread across four Delphi implementations (2002–2012); `docs/history.md` has the lineage. A future Turing toolchain (`tmt`, arch TM-1) is expected to reuse the arch-agnostic core — `docs/examples/brainfuck-utm.tma` is a speculative TM-1 assembly file validating that design, not runnable code.
 
+**Current state: v0.2.0 released 2026-07-12** (crates 0.2.0, `.pmc` language 0.3 with doc/attention lines + LSP hover, PM-1 `.pma` dialect 0.2, full `.pma` lint/fmt/LSP parity, both editor plugins at 0.1.2 attached to the GH release; ~1,050 tests). Roadmap (triaged on closed issue #2): next design round = #16 project manifest (+#11 `pmt build`), then #5 DAP; big arcs #8 tmt → #6 wasm → #7 async bus; small open: #22, #24; upstream watch: redhat-developer/lsp4ij#1612 (Cmd+hover underline).
+
 ## Commands
 
 ```
@@ -28,22 +30,24 @@ cargo test -p mtc-post-machine --test golden_programs regen -- --ignored
 
 `pmt` exit codes from `run`: 0 = program stopped (`stp`), 2 = halted (`hlt`), 3 = trapped. Full flag reference: `docs/cli.md`.
 
+Editor plugin builds live only under `editors/` (never repo root): `cd editors/vscode && npm run package` (vsix); `cd editors/jetbrains && JAVA_HOME=<a JetBrains IDE's bundled JBR> ./gradlew buildPlugin` (zip) — each README has specifics.
+
 ## Documentation authority
 
-`README.md` + `docs/` (language, isa, formats, cli, stdlib, history, lsp) are the durable references. The original design spec `docs/superpowers/specs/2026-07-04-post-machine-toolchain-design.md` is **FROZEN** — a historical record, no longer amended and no longer cited by code. Code comments cite the durable pages by page + parenthetical topic keyword, e.g. `docs/isa.md (timing model)`. Published content (README, `docs/`, code comments) is forge-agnostic: no issue/PR numbers, no hosting-provider URLs — describe substance in prose. Internal artifacts (`docs/superpowers/`, this file) are unrestricted.
+`README.md` + `CHANGELOG.md` + `docs/` (language, isa, formats, cli, lint, fmt, stdlib, history, lsp) are the durable references. The original design spec `docs/superpowers/specs/2026-07-04-post-machine-toolchain-design.md` is **FROZEN** — a historical record, no longer amended and no longer cited by code. Code comments cite the durable pages by page + parenthetical topic keyword, e.g. `docs/isa.md (timing model)`. Published content (README, `docs/`, code comments) is forge-agnostic: no issue/PR numbers, no hosting-provider URLs — describe substance in prose. Internal artifacts (`docs/superpowers/`, this file) are unrestricted.
 
 ## Architecture
 
 Two-crate workspace with a hard boundary:
 
-- **`crates/core` (`mtc-core`)** — arch-agnostic by contract: container formats (MO/MX/MT), the sans-I/O VM core + bus + driver + tape devices + `DebugSession`, the linker, the assembler/disassembler frameworks, and the language-agnostic LSP server framework (`core/src/lsp/`: transport, JSON-RPC, protocol types, position mapping, document store, server loop behind the `LanguageService` trait — fake-service tested, zero PM-1/.pmc knowledge). It carries **zero PM-1 knowledge**; its own tests run against a crate-private fake arch (`vm/arch.rs::test_arch`, arch id `0x7F`) to prove it.
-- **`crates/post-machine` (`mtc-post-machine`)** — everything PM-1: the arch module, the `.pmc` compiler pipeline, the optimizer, the embedded stdlib, and the `pmt` binary.
+- **`crates/core` (`mtc-core`)** — arch-agnostic by contract: container formats (MO/MX/MT), the sans-I/O VM core + bus + driver + tape devices + `DebugSession`, the linker, the assembler/disassembler frameworks (since the parity round: a total lossless assembly CST — `asm/{lexer,cst,lower}.rs`, spanned coded `AsmError` — plus arch-agnostic asm lint (`asm/lint/`, 5 rules driven by `Flow`/`break_opcode`) and the canonical-grid formatter `asm/fmt.rs`), and the language-agnostic LSP server framework (`core/src/lsp/`: transport, JSON-RPC, protocol types, position mapping, document store, multi-service server loop behind the `LanguageService` trait with per-URI language routing and capability merging — fake-service tested, zero PM-1/.pmc knowledge). It carries **zero PM-1 knowledge**; its own tests run against a crate-private fake arch (`vm/arch.rs::test_arch`, arch id `0x7F`) to prove it.
+- **`crates/post-machine` (`mtc-post-machine`)** — everything PM-1: the arch module, the `.pmc` compiler pipeline, the optimizer, the embedded stdlib, the `.pmc` lint/fmt layers, both `LanguageService` implementations (`lsp/` pmc + `lsp/pma/`), and the `pmt` binary.
 
 Dependencies are deliberately minimal: `serde`/`serde_json` only, `proptest` as a dev-dep. **No clap** — CLI arg parsing is hand-rolled.
 
 ### Pipeline and key types
 
-`.pmc` → `lexer.rs` (`Vec<Token>`) → `parser.rs` (recursive descent → `Program` AST) → `compiler.rs::compile(source, CompileOptions) -> CompileOutput` which internally runs duplicate-binding checks → flatten (name mangling + visibility) → `ir::lower` (`IrProgram`, a versioned per-function CFG) → `optimizer::optimize` (in-place) → `codegen::emit_program` (CFG → `.pma` text only) → core `asm::assemble` (`ObjectFile`). The IR is a **documented, versioned JSON artifact** (`IR_VERSION` in `ir.rs`), not an internal detail.
+`.pmc` → `lexer.rs` (`Vec<Token>`; grammar 0.3 incl. positional `?`/`!` doc-line tokens) → `parser.rs` (recursive descent; `parse` = `lower_cst ∘ parse_cst` over one lossless CST shared with fmt/LSP) → `compiler.rs::compile(source, CompileOptions) -> CompileOutput` which internally runs duplicate-binding checks → flatten (name mangling + visibility; also builds `Analysis.docs`, the qualified doc/deprecation map consumed by the `deprecated-call` lint, hover, and completion tags) → `ir::lower` (`IrProgram`, a versioned per-function CFG) → `optimizer::optimize` (in-place) → `codegen::emit_program` (CFG → `.pma` text only) → core `asm::assemble` (`ObjectFile`). The IR is a **documented, versioned JSON artifact** (`IR_VERSION` in `ir.rs`), not an internal detail.
 
 Then: core `linker::link(objects, libraries, LinkOptions) -> LinkOutput { executable, map, report }` → `vm::Machine::from_executable` → `run` / `DebugSession`.
 
@@ -52,7 +56,7 @@ Then: core `linker::link(objects, libraries, LinkOptions) -> LinkOutput { execut
 An architecture plugs into core through two tables, both living in the arch crate:
 
 1. `Arch` trait (`core/src/vm/arch.rs`) — `operand_kind(opcode)` + `lower(opcode, operand) -> Vec<MicroOp>`: the VM core executes micro-ops and **knows no opcodes**.
-2. `ArchSyntax` (`core/src/asm/mod.rs`) — mnemonic/relaxation tables for the assembler/disassembler. PM-1's is `pm1_syntax()` in `post-machine/src/asm/mod.rs`; short opcode = far `| 0x10`.
+2. `ArchSyntax` (`core/src/asm/mod.rs`) — mnemonic/relaxation tables for the assembler/disassembler, plus `break_opcode` (drives the arch-agnostic `leftover-debugger` lint). PM-1's is `pm1_syntax()` in `post-machine/src/asm/mod.rs`; short opcode = far `| 0x10`.
 
 ### VM model
 
@@ -81,7 +85,7 @@ An embedded `.pmc` string (`include_str!("std.pmc")`, 11 exported `std::` routin
 
 ### CLI (`post-machine/src/cli/`)
 
-**Thin-renderer rule: library code never prints.** Every stage returns a structured report (`CompileReport`, `LinkReport`, `OptReport`, `RunResult`); every byte of terminal output originates in `cli/` (rendered under `-v`), and errors flow as typed values. `bin/pmt.rs` is a shell around `cli::execute`. Ten subcommands split across `build.rs` (compile/asm/link), `inspect.rs` (dis/tape/ir), `run.rs` (run, incl. live `--trace`), `completions.rs` (completions), `lint.rs` (lint), `lsp.rs` (lsp — the LSP server on stdio; the only place real stdio is handed to the core server loop).
+**Thin-renderer rule: library code never prints.** Every stage returns a structured report (`CompileReport`, `LinkReport`, `OptReport`, `RunResult`); every byte of terminal output originates in `cli/` (rendered under `-v`), and errors flow as typed values. `bin/pmt.rs` is a shell around `cli::execute`. Eleven subcommands split across `build.rs` (compile/asm/link), `inspect.rs` (dis/tape/ir), `run.rs` (run, incl. live `--trace`), `completions.rs` (completions), `lint.rs` (lint — both languages by extension, shared allow namespace), `fmt.rs` (fmt — both languages, stdin via `-` with `--lang`), `lsp.rs` (lsp — the dual-language LSP server on stdio; the only place real stdio is handed to the core server loop).
 
 ### Shell completion (`post-machine/src/completions/`)
 
@@ -89,7 +93,7 @@ An embedded `.pmc` string (`include_str!("std.pmc")`, 11 exported `std::` routin
 
 ### Editor integration (`post-machine/src/lsp/`, `editors/`)
 
-`crates/post-machine/src/lsp/` is the `.pmc` `LanguageService` — the PM-1-aware half of the LSP surface (diagnostics, completions, go-to-definition, quickfixes, semantic tokens, formatting), running on top of core's language-agnostic framework above. `pmt.json` is the one project config file (nearest-ancestor discovery, `lint.allow`, union semantics with IDE settings — never a cascade) read by both the CLI and the server; schema in `docs/lint.md`. `editors/` ships a single-source TextMate grammar plus a VS Code extension and a JetBrains/LSP4IJ plugin, both sideload-only with a manual-checklist README; the node/gradle toolchains those need live only under `editors/`, never at the repo root.
+`crates/post-machine/src/lsp/` holds BOTH `LanguageService`s — `.pmc` (diagnostics, completions with qualified-name detail, go-to-definition, hover with deprecation/attention callouts, quickfixes, semantic tokens, formatting) and `.pma` (`lsp/pma/` — same features minus hover, completion detail = operand hints) — served by one `pmt lsp` process through core's multi-service routing. `pmt.json` is the one project config file (nearest-ancestor discovery, `lint.allow`, union semantics with IDE settings — never a cascade) read by both the CLI and the server; schema in `docs/lint.md`. `editors/` ships single-source TextMate grammars (pmc + pma, drift-guarded against the parser/`pm1_syntax()`) plus a VS Code extension and a JetBrains/LSP4IJ plugin (both 0.1.2, `pmt` floor 0.2.0 via `MIN_TESTED_PMT`), both sideload-only with a manual-checklist README and attached to GH releases; the node/gradle toolchains those need live only under `editors/`, never at the repo root. Known upstream limitation: JetBrains Cmd+hover may underline the whole file (LSP4IJ ignores `originSelectionRange` on TextMate-backed file types; reported upstream).
 
 ## Testing conventions
 
@@ -109,14 +113,20 @@ toolchain crates, the `.pmc` language (`PMC_LANG_VERSION`, an acceptance
 contract: pre-1.0 it is `0.N` and N bumps on ANY grammar change;
 major/minor axes activate at a declared 1.0; no patch digit — errata and
 implementation-conformance fixes never move it), the per-arch `.pma`
-dialects (same kind of contract; PM-1's is implicitly 0.1 until its
-first change introduces a constant), `IR_VERSION` (JSON encoding), and
-the container formats (MO/MX/MT). The toolchain version is never the
-carrier for a language version.
+dialects (same kind of contract; PM-1's is `PM1_PMA_DIALECT_VERSION`,
+born at 0.2 when labels tightened to dot-free), `IR_VERSION` (JSON
+encoding), and the container formats (MO/MX/MT). The toolchain version
+is never the carrier for a language version.
 
 Release notes open with a **version block** listing ALL of these spaces
 explicitly, stating `unchanged` where nothing moved — the block doubles
 as a compatibility matrix across releases. Component sections follow
-only where changes exist. A future `CHANGELOG.md` uses the same
+only where changes exist. `CHANGELOG.md` (first entry: v0.2.0) uses this
 structure in ref-free prose (published-docs policy); tracker links
 belong in GH release notes.
+
+Realized release flow (v0.2.0 precedent): docs audit first (per-page
+claim verification + citation-keyword resolution); bump both crates,
+both editor plugins, and their `MIN_TESTED_PMT` floors in one commit
+with the CHANGELOG entry; merge, tag `vX.Y.Z`, `gh release create` with
+the freshly built plugin artifacts attached.
