@@ -290,11 +290,12 @@ fn link_spec() -> CommandSpec {
     }
 }
 
-/// A `.pmc`-filtered `FileHint` that ALSO accepts directories (`lint`
-/// walks directories recursively for `*.pmc`, docs/lint.md).
-fn pmc_or_dir() -> FileHint {
+/// A `.pmc`/`.pma`-filtered `FileHint` that ALSO accepts directories
+/// (`lint` and `fmt` both walk directories recursively for `*.pmc` and
+/// `*.pma`, docs/lint.md / docs/cli.md).
+fn source_or_dir() -> FileHint {
     FileHint {
-        extensions: strings(&["pmc"]),
+        extensions: strings(&["pmc", "pma"]),
         dirs: true,
     }
 }
@@ -302,12 +303,12 @@ fn pmc_or_dir() -> FileHint {
 fn lint_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["lint"]),
-        positional: Positional::OneOrMore(PositionalHint::File(pmc_or_dir())),
+        positional: Positional::OneOrMore(PositionalHint::File(source_or_dir())),
         flags: vec![
             FlagSpec::value(
                 "--exclude",
                 "skip a path (repeatable)",
-                ValueHint::File(pmc_or_dir()),
+                ValueHint::File(source_or_dir()),
             )
             .repeatable(),
             FlagSpec::value("--allow", "allow a lint code (repeatable)", ValueHint::Text)
@@ -320,25 +321,30 @@ fn lint_spec() -> CommandSpec {
     }
 }
 
-/// Mirrors [`lint_spec`]: same positional shape (`.pmc` files/dirs,
-/// `--exclude` repeatable), plus `--check` (docs/cli.md (pmt fmt)). The
-/// `-` stdin form isn't a registry entry — it's a single bare token, not
-/// a completable path shape (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`,
-/// "CLI: pmt fmt").
+/// Mirrors [`lint_spec`]: same positional shape (`.pmc`/`.pma` files or
+/// dirs, `--exclude` repeatable), plus `--check` and `--lang` (docs/cli.md
+/// (pmt fmt)). The `-` stdin form isn't a registry entry — it's a single
+/// bare token, not a completable path shape
+/// (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "CLI: pmt fmt").
 fn fmt_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["fmt"]),
-        positional: Positional::OneOrMore(PositionalHint::File(pmc_or_dir())),
+        positional: Positional::OneOrMore(PositionalHint::File(source_or_dir())),
         flags: vec![
             FlagSpec::value(
                 "--exclude",
                 "skip a path (repeatable)",
-                ValueHint::File(pmc_or_dir()),
+                ValueHint::File(source_or_dir()),
             )
             .repeatable(),
             FlagSpec::boolean(
                 "--check",
                 "report without writing; exit 1 if any would change",
+            ),
+            FlagSpec::value(
+                "--lang",
+                "stdin language (pmc or pma)",
+                ValueHint::Choices(strings(&["pmc", "pma"])),
             ),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
@@ -477,7 +483,7 @@ fn top_level_help(name: &str) -> &'static str {
         "asm" => ".pma assembly -> .pmo object",
         "link" => ".pmo objects -> .pmx executable (+ .pmx.map sidecar)",
         "lint" => "lint .pmc/.pma sources (hygiene findings; docs/lint.md)",
-        "fmt" => "format .pmc sources in place (--check to preview; -)",
+        "fmt" => "format .pmc/.pma sources in place (--check to preview; -)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
         "run" => "execute a .pmx on a tape",
         "tape" => "build/show .pmt tape-block snapshots",

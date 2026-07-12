@@ -1148,7 +1148,7 @@ fn fmt_zero_match_path_is_an_error() {
     let dir = scratch("fmt_zero");
     std::fs::create_dir_all(dir.join("empty")).unwrap();
     let err = execute(&args(&["fmt", dir.join("empty").to_str().unwrap()])).unwrap_err();
-    assert!(err.contains("no .pmc files"));
+    assert!(err.contains("no .pmc or .pma files found"), "{err}");
 }
 
 #[test]
@@ -1199,4 +1199,195 @@ fn fmt_exclude_prunes_a_subtree_and_an_explicit_file() {
     assert!(out.stdout.contains("keep.pmc"));
     assert!(!out.stdout.contains("vendor"));
     assert!(!out.stdout.contains("skip.pmc"));
+}
+
+// --- `pmt fmt` routes `.pma` (plan 2, task 6): extension routing, the
+// `.pma` in-place writer, stdin `--lang`, and the per-file
+// unknown-extension error — the fmt-side mirror of the lint battery
+// above. ---
+
+#[test]
+fn fmt_mixed_dir_formats_both_pmc_and_pma() {
+    // Regression test for the live bug this task fixes: `collect_sources`
+    // (shared with `pmt lint`) already walked `.pma` files, but fmt's
+    // per-file loop used to run every collected file through the `.pmc`
+    // parser regardless of extension — a `.pma` in the batch failed with
+    // a `.pmc` lex error. Routing by extension fixes it; this dir mixes
+    // both languages to prove the fix and double as the regression net.
+    let dir = scratch("fmt_mixed_dir");
+    std::fs::write(dir.join("prog.pmc"), "main() { right; }").unwrap();
+    std::fs::write(dir.join("prog.pma"), ".func f\nL1 :  rgt\n jm L1\n").unwrap();
+
+    let out = execute(&args(&["fmt", dir.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("prog.pmc")).unwrap(),
+        "main() {\n    right;\n}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("prog.pma")).unwrap(),
+        ".func f\nL1:     rgt\n        jm      L1\n"
+    );
+}
+
+#[test]
+fn fmt_pma_only_dir_is_not_a_zero_match_error() {
+    // The extension-routed walk makes an all-`.pma` directory a valid
+    // fmt target on its own, with no `.pmc` file needed alongside.
+    let dir = scratch("fmt_pma_only_dir");
+    std::fs::write(dir.join("prog.pma"), ".func f\n        rgt\n").unwrap();
+
+    let out = execute(&args(&["fmt", dir.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0, "{}", out.stderr);
+}
+
+#[test]
+fn fmt_pma_writes_in_place_only_when_changed() {
+    let dir = scratch("fmt_pma_inplace");
+    let src = dir.join("prog.pma");
+    std::fs::write(&src, ".func f\nrgt\n").unwrap();
+
+    let out = execute(&args(&["fmt", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    let formatted = std::fs::read_to_string(&src).unwrap();
+    assert_eq!(formatted, ".func f\n        rgt\n");
+
+    // Idempotence: a second run on the now-canonical file must not touch
+    // it at all (no spurious mtime churn).
+    let before = std::fs::metadata(&src).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let out = execute(&args(&["fmt", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    let after = std::fs::metadata(&src).unwrap().modified().unwrap();
+    assert_eq!(
+        before, after,
+        "already-formatted .pma file must not be rewritten"
+    );
+}
+
+#[test]
+fn fmt_pma_check_reports_and_writes_nothing() {
+    let dir = scratch("fmt_pma_check");
+    let dirty = dir.join("dirty.pma");
+    let original = ".func f\nrgt\n";
+    std::fs::write(&dirty, original).unwrap();
+
+    let out = execute(&args(&["fmt", "--check", dirty.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    assert!(out.stdout.contains(dirty.to_str().unwrap()));
+    assert_eq!(
+        std::fs::read_to_string(&dirty).unwrap(),
+        original,
+        "never written"
+    );
+
+    let clean = dir.join("clean.pma");
+    std::fs::write(&clean, ".func f\n        rgt\n").unwrap();
+    let out = execute(&args(&["fmt", "--check", clean.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn fmt_dash_lang_pma_grids_a_scrambled_snippet() {
+    let out = run_pmt_stdin(
+        &["fmt", "-", "--lang", "pma"],
+        ".func f\nL1 :  rgt\n jm L1\n",
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        ".func f\nL1:     rgt\n        jm      L1\n"
+    );
+}
+
+#[test]
+fn fmt_dash_lang_defaults_to_pmc() {
+    // No `--lang` at all still formats stdin as `.pmc` — the default.
+    let out = run_pmt_stdin(&["fmt", "-", "--lang", "pmc"], "main() { right; }");
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "main() {\n    right;\n}\n"
+    );
+}
+
+#[test]
+fn fmt_dash_lang_rejects_an_unknown_value() {
+    let out = run_pmt_stdin(&["fmt", "-", "--lang", "bogus"], "main() { right; }");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("`--lang` takes pmc or pma"));
+}
+
+#[test]
+fn fmt_lang_with_paths_is_rejected() {
+    let dir = scratch("fmt_lang_with_paths");
+    let src = dir.join("prog.pmc");
+    std::fs::write(&src, "main() { right; }").unwrap();
+    let err = execute(&args(&["fmt", "--lang", "pmc", src.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("--lang applies to stdin (-) only"), "{err}");
+}
+
+#[test]
+fn fmt_explicit_unknown_extension_is_a_per_file_error_batch_continues() {
+    let dir = scratch("fmt_unknown_ext");
+    let bad = dir.join("foo.txt");
+    std::fs::write(&bad, "not a source file\n").unwrap();
+    let good = dir.join("good.pmc");
+    std::fs::write(&good, "main() { right; }").unwrap();
+
+    let out = execute(&args(&[
+        "fmt",
+        bad.to_str().unwrap(),
+        good.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "{}: error: unknown source extension (expected .pmc or .pma)",
+            bad.display()
+        )),
+        "{}",
+        out.stderr
+    );
+    // The batch continues past the bad extension: good.pmc still formats.
+    assert_eq!(
+        std::fs::read_to_string(&good).unwrap(),
+        "main() {\n    right;\n}\n"
+    );
+}
+
+#[test]
+fn fmt_pma_raw_line_is_a_per_file_error_on_stderr() {
+    let dir = scratch("fmt_pma_raw_line");
+    let bad = dir.join("listing.pma");
+    std::fs::write(&bad, "<goToEnd>\n").unwrap();
+    let good = dir.join("good.pma");
+    std::fs::write(&good, ".func f\nrgt\n").unwrap();
+
+    let out = execute(&args(&[
+        "fmt",
+        bad.to_str().unwrap(),
+        good.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "{}:1:1: error: not assembly text [raw-line]",
+            bad.display()
+        )),
+        "{}",
+        out.stderr
+    );
+    // The batch continues past the fatal file: good.pma still formats.
+    assert_eq!(
+        std::fs::read_to_string(&good).unwrap(),
+        ".func f\n        rgt\n"
+    );
 }

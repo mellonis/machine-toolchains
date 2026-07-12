@@ -440,10 +440,9 @@ mod tests {
     fn dirs_true_renders_a_zsh_alternative_of_glob_and_directory() {
         let script = render(&registry());
         // `lint` and `fmt` each have a positional and an `--exclude` that
-        // both accept a `.pmc` file OR a directory as a complete answer
-        // (design doc §6.1) — 2 commands x 2 sites = 4 occurrences.
-        let expected =
-            "_alternative \"files:file:_files -g \\\"*.pmc\\\"\" \"dirs:directory:_files -/\"";
+        // both accept a `.pmc`/`.pma` file OR a directory as a complete
+        // answer (design doc §6.1) — 2 commands x 2 sites = 4 occurrences.
+        let expected = "_alternative \"files:file:_files -g \\\"*.(pmc|pma)\\\"\" \"dirs:directory:_files -/\"";
         assert!(
             script.contains(expected),
             "missing dirs-aware _alternative: {script}"

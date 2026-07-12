@@ -1,14 +1,21 @@
-# Linting `.pmc` — `pmt lint`
+# Linting `.pmc`/`.pma` — `pmt lint`
 
-`pmt lint` reports hygiene findings the compiler deliberately does not
-warn about. It runs the compiler's analysis (through lowering, no code
-generation), applies the rule catalog below, and prints one finding per
-line as `FILE:LINE:COL: lint: MESSAGE`. Exit code 0 means every file is
-clean; 1 means findings (or errors) somewhere. Lint reports lint
-findings only — compile warnings stay on `pmt compile`.
+`pmt lint` reports hygiene findings the compiler and assembler
+deliberately do not warn about. Each input's extension picks its rule
+table: a `.pmc` file runs the compiler's analysis (through lowering, no
+code generation) against the pmc rule catalog below; a `.pma` file runs
+a full assemble against the arch-agnostic assembly rule catalog,
+further down this page, read against the PM-1 syntax. Either way, a
+finding prints as `FILE:LINE:COL: lint: MESSAGE`. Exit code 0 means
+every file is clean; 1 means findings (or errors) somewhere. Lint
+reports lint findings only — compile/assembly warnings, if any, stay on
+`pmt compile`/`pmt asm`.
 
-Suppress a rule with `--allow CODE` (repeatable). Unknown codes are an
-error, so a typo cannot silently disable linting.
+Suppress a rule with `--allow CODE` (repeatable). `--allow` draws from
+the UNION of both rule catalogs, so one allow-list works whether a run
+lints `.pmc`, `.pma`, or a batch mixing both — a pmc-only code named on
+a pma-only run (or vice versa) is accepted, just inert for that file.
+Unknown codes are an error, so a typo cannot silently disable linting.
 
 ## Project file: `pmt.json`
 
@@ -28,10 +35,13 @@ tiny — today it holds nothing but the lint allow-list:
 An empty object (`{}`) is valid — an empty allow-list. Validation is
 strict: any top-level key other than `lint`, any key under `lint` other
 than `allow`, a non-array `allow`, a non-string entry in `allow`, or an
-`allow` entry naming no rule in the catalog (below) is a hard error
+`allow` entry naming no rule in either catalog (below) is a hard error
 naming the file and the offending key or code. A typo in a project file
 must not silently do nothing, the same posture `--allow` already takes
-on the command line.
+on the command line. One `pmt.json` governs a directory regardless of
+which files under it are `.pmc` and which are `.pma` — its `allow`
+entries draw from the same union `--allow` does, so a single project
+file suppresses a code across both languages at once.
 
 `pmt lint` locates the file per input by walking up from that file's
 directory through its ancestors and reading the FIRST `pmt.json` it
@@ -58,7 +68,7 @@ fix can expose a new finding (deleting a redundant goto can leave its
 target label unused); the re-run reports it, and repeating `--fix
 --force` converges.
 
-## Rules
+## `.pmc` rules
 
 ### unused-label
 
@@ -147,3 +157,48 @@ Two definitions or bindings in the same scope whose names differ only
 under a confusability normalization (case, underscores, `1`/`l`,
 `i`/`l`, `0`/`o`): `sum_bits` vs `sumBits`, `fool` vs `foo1`. Reported
 at the later definition, naming the earlier one. No fix.
+
+## `.pma` rules
+
+These five rules live in the arch-agnostic assembly rule catalog and
+apply to every `.pma` input, read against the PM-1 syntax. They draw
+control-flow and opcode knowledge from the target architecture rather
+than from PM-1 specifically, so the same catalog is ready for a future
+second architecture with no rule-level changes.
+
+### unreachable-code
+
+An item with no label sitting right after an unconditional jump or
+stop — there is provably no fall-through path that reaches it. A
+conditional branch does not arm this rule (it may fall through); a
+label re-arms it, since a label is a fresh entry point reachable from
+wherever jumps to it. Report-only: deleting dead code is a judgment
+call the rule leaves to the author.
+
+### unused-label
+
+A label nothing in its function references through a jump or call
+operand. Function-scoped, the same scope label resolution itself uses.
+Fix (safe tier): remove the label.
+
+### redundant-jump-to-next
+
+An unconditional jump whose target labels the immediately following
+item in the same function — fall-through already lands there, so the
+jump changes nothing. Fix (safe tier): remove the jump.
+
+### line-too-long
+
+A source line longer than 80 characters (character count) — mirrors
+the `.pmc` rule of the same name. Report-only: `pmt fmt` enforces the
+canonical column grid (`docs/formats.md (assembly text)`), but
+rewrapping an overlong line is not part of that grid, so a line that's
+long stays reported after formatting.
+
+### leftover-debugger
+
+An instruction using the target architecture's declared debugger-break
+opcode — a forgotten debugging aid left in shipped source. This rule is
+silent for an architecture that declares no such opcode; PM-1 declares
+one (its `brk` instruction, `docs/isa.md`), so linting `.pma` picks it
+up automatically. Fix (requires `--force`): remove the instruction.

@@ -17,8 +17,8 @@ SUBCOMMANDS:
   compile      .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
   asm          .pma assembly -> .pmo object
   link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
-  lint         lint .pmc sources (hygiene findings; docs/lint.md)
-  fmt          format .pmc sources in place (--check to preview; -)
+  lint         lint .pmc/.pma sources (hygiene findings; docs/lint.md)
+  fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
   tape         build/show .pmt tape-block snapshots
@@ -169,8 +169,11 @@ form versus stayed far.
 ```
 USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]] [--no-config]
 
-PATH is a .pmc file or a directory; directories are walked recursively
-for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
+PATH is a .pmc or .pma file, or a directory; directories are walked
+recursively for *.pmc and *.pma (sorted order, symlinks not followed,
+dot-entries skipped). .pmc sources lint through the pmc rule table;
+.pma sources lint through core's arch-agnostic asm rule table over the
+PM-1 syntax. --allow CODE draws from the union of both tables.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -185,26 +188,37 @@ FLAGS:
   --no-config     ignore pmt.json project files
 ```
 
-PATH is a `.pmc` file or a directory. Directories are walked
-recursively for `*.pmc` in sorted order; symlinks are never followed
-and dot-entries (`.git`, editor scratch) are skipped. A PATH that
-yields no `.pmc` files is an error. `--exclude PATH` (repeatable)
-skips a file or prunes a directory subtree; paths are compared as
-spelled (no globs — the shell covers the include side), and exclusion
-wins even over explicitly listed files.
+PATH is a `.pmc` or `.pma` file, or a directory. Directories are walked
+recursively for `*.pmc` and `*.pma` in sorted order; symlinks are never
+followed and dot-entries (`.git`, editor scratch) are skipped. A PATH
+that yields no `.pmc`/`.pma` files is an error. `--exclude PATH`
+(repeatable) skips a file or prunes a directory subtree; paths are
+compared as spelled (no globs — the shell covers the include side), and
+exclusion wins even over explicitly listed files.
+
+Each file's extension picks its rule table: `.pmc` lints through the
+pmc-specific rules (`docs/lint.md`), `.pma` through core's
+arch-agnostic assembly rule table read against the PM-1 syntax
+(`docs/lint.md`'s `.pma` rule list). `--allow CODE` draws from the
+union of both tables, so one allow-list works across a batch mixing
+both languages. An explicitly listed file with neither extension is a
+per-file error (`PATH: error: unknown source extension (expected .pmc
+or .pma)`) and the batch continues — the directory walk itself never
+collects any other extension, so this only fires for a file named
+directly on the command line.
 
 Files lint independently: a file that fails to parse is reported on
-stderr — as a fatal compile-error line with its bracketed code
-(`pmt compile` (compile errors)) — and the batch continues. Exit
-codes: 0 = every file clean, 1 = findings or errors anywhere (tool
-errors are also 1).
+stderr — as a fatal error line with its bracketed code (`pmt compile`
+(compile errors) for `.pmc`, `pmt asm` (assembly errors) for `.pma`) —
+and the batch continues. Exit codes: 0 = every file clean, 1 = findings
+or errors anywhere (tool errors are also 1).
 
 For each input file, `pmt lint` also discovers a `pmt.json` project
 file by walking up from that file's directory (nearest ancestor wins,
 never a cascade — `docs/lint.md`) and unions its allow-list with any
 `--allow` flags. `--no-config` skips that discovery for every file, so
 the run is governed by `--allow` alone. A `pmt.json` that fails to
-parse or validate is a per-file fatal, exactly like a `.pmc` file that
+parse or validate is a per-file fatal, exactly like a source file that
 fails to parse: reported on stderr as `PATH/pmt.json: error: MESSAGE`,
 the file it would have configured is skipped, and the batch continues.
 This differs from an unknown code named directly by `--allow`, which is
@@ -222,12 +236,12 @@ behavior live in `docs/lint.md`.
 
 ```
 USAGE: pmt fmt PATH... [--exclude PATH]... [--check]
-       pmt fmt - [--check]
+       pmt fmt - [--check] [--lang pmc|pma]
 
-PATH is a .pmc file or a directory; directories are walked recursively
-for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
-`-` reads one .pmc from stdin and writes the result to stdout; it
-cannot be combined with PATH arguments.
+PATH is a .pmc or .pma file, or a directory; directories are walked
+recursively for *.pmc and *.pma (sorted order, symlinks not followed,
+dot-entries skipped). `-` reads one source from stdin and writes the
+result to stdout; it cannot be combined with PATH arguments.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -235,33 +249,47 @@ FLAGS:
   --check         do not write; with PATH..., list files that would be
                   reformatted and exit 1 if any would change; with -,
                   exit 1 if stdin would change (CI mode)
+  --lang LANG     stdin's language: pmc (default) or pma; applies to
+                  stdin (-) only — an error alongside PATH arguments,
+                  whose language always comes from the file extension
 ```
 
-PATH is a `.pmc` file or a directory, walked the same way as `pmt
-lint`'s batch: directories recurse for `*.pmc` in sorted order,
-symlinks are never followed, dot-entries are skipped, and `--exclude
-PATH` (repeatable, no globs) skips a file or prunes a subtree. Files
+PATH is a `.pmc` or `.pma` file, or a directory, walked the same way as
+`pmt lint`'s batch: directories recurse for `*.pmc` and `*.pma` in
+sorted order, symlinks are never followed, dot-entries are skipped, and
+`--exclude PATH` (repeatable, no globs) skips a file or prunes a
+subtree. Each file's extension picks its formatter: `.pmc` through the
+pmc pretty-printer (`docs/fmt.md`), `.pma` through core's canonical-grid
+printer (`docs/formats.md (assembly text)`). An explicitly listed file
+with neither extension is a per-file error (`PATH: error: unknown
+source extension (expected .pmc or .pma)`), same shape and same
+batch-continues behavior as `pmt lint`'s unknown-extension route. Files
 format independently: a file that fails to lex or parse is reported on
-stderr — as a fatal compile-error line with its bracketed code
-(`pmt compile` (compile errors)) — and the batch continues.
+stderr — as a fatal error line with its bracketed code (`pmt compile`
+(compile errors) for `.pmc`, `pmt asm` (assembly errors) for `.pma`) —
+and the batch continues.
 
 By default `pmt fmt` rewrites each file in place, and only when its
 formatted text differs from what's already on disk — an
 already-canonical file is never rewritten, so a clean tree sees no
 spurious modification times. `--check` writes nothing; instead it lists
 the path of every file whose formatted text would differ and exits 1 if
-any did, 0 otherwise — the CI-friendly mode. `-` reads one `.pmc` from
+any did, 0 otherwise — the CI-friendly mode. `-` reads one source from
 stdin and writes the formatted text to stdout instead of running a
-directory walk; it cannot be combined with `PATH` arguments. `- --check`
-mirrors the same semantics against stdin: nothing is written either way,
-and the exit code alone reports whether stdin would change.
+directory walk; it cannot be combined with `PATH` arguments. `--lang`
+picks stdin's language — `pmc` (the default) or `pma` — and is
+meaningless with `PATH` arguments, where the extension already decides;
+combining `--lang` with a `PATH` is an error. `- --check` mirrors the
+same semantics against stdin: nothing is written either way, and the
+exit code alone reports whether stdin would change.
 
 Exit codes: 0 = success (every input already canonical, or rewritten in
 place); 1 = under `--check`, at least one input would change, or a
-lex/parse error occurred anywhere in the batch. The canonical style
-itself — indentation, label/command alignment, comma-group layout,
-blank lines, comment handling, and the token-spacing table — is
-`docs/fmt.md`.
+lex/parse error occurred anywhere in the batch. The `.pmc` canonical
+style itself — indentation, label/command alignment, comma-group
+layout, blank lines, comment handling, and the token-spacing table — is
+`docs/fmt.md`; the `.pma` canonical grid is `docs/formats.md (assembly
+text)`.
 
 ## `pmt dis`
 

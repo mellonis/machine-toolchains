@@ -198,8 +198,9 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
 ///
 /// `pub(super)`: `cli/fmt.rs` shares this walk verbatim rather than
 /// duplicating it (docs/cli.md (pmt fmt) — identical batch model). `fmt`
-/// only knows `.pmc` today, so the `.pma` half of the widened walk is
-/// inert there until it grows an assembly formatter.
+/// routes each collected file by extension (`.pmc` through the pmc
+/// printer, `.pma` through core's canonical-grid printer), so the `.pma`
+/// half of the walk is fully live there, not inert.
 pub(super) fn collect_sources(
     path: &Path,
     excludes: &[PathBuf],
@@ -281,7 +282,11 @@ fn fix_and_relint(
 /// codes)). `kind` is `dyn Display` because the two routes bring
 /// different error kinds (pmc's `CompileErrorKind`, asm's
 /// `AsmErrorKind`) that share only the rendering contract.
-fn render_fatal(
+///
+/// `pub(super)`: `cli/fmt.rs` reuses this verbatim for its own per-file
+/// and stdin fatals rather than duplicating the rendering — its
+/// `.pmc`/`.pma` routes bring the same two error-kind shapes lint's do.
+pub(super) fn render_fatal(
     stderr: &mut String,
     file: &Path,
     span: Span,

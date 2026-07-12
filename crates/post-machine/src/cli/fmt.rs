@@ -5,27 +5,33 @@
 //! doc comment) — this module is the ONLY place that prints or touches
 //! the filesystem for the fmt surface, same discipline as
 //! [`super::lint`]. Batch model (`PATH...`) is IDENTICAL to `pmt lint`'s,
-//! so it shares [`super::lint::collect_pmc`] rather than duplicating the
-//! walk.
+//! so it shares [`super::lint::collect_sources`] rather than duplicating
+//! the walk; per-file extension routing (`.pmc` through the pmc printer,
+//! `.pma` through core's canonical-grid printer) mirrors `pmt lint`'s
+//! two-route dispatch, and the per-file fatal line reuses
+//! [`super::lint::render_fatal`].
 
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use mtc_core::asm::format_asm;
+use mtc_core::diagnostics::Span;
+
 use crate::fmt::format as format_source;
 
-use super::lint::collect_sources;
+use super::lint::{collect_sources, render_fatal};
 use super::{Args, CliOutput};
 
 const FMT_USAGE: &str = "\
 USAGE: pmt fmt PATH... [--exclude PATH]... [--check]
-       pmt fmt - [--check]
+       pmt fmt - [--check] [--lang pmc|pma]
 
-PATH is a .pmc file or a directory; directories are walked recursively
-for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
-`-` reads one .pmc from stdin and writes the result to stdout; it
-cannot be combined with PATH arguments.
+PATH is a .pmc or .pma file, or a directory; directories are walked
+recursively for *.pmc and *.pma (sorted order, symlinks not followed,
+dot-entries skipped). `-` reads one source from stdin and writes the
+result to stdout; it cannot be combined with PATH arguments.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -33,7 +39,38 @@ FLAGS:
   --check         do not write; with PATH..., list files that would be
                   reformatted and exit 1 if any would change; with -,
                   exit 1 if stdin would change (CI mode)
+  --lang LANG     stdin's language: pmc (default) or pma; applies to
+                  stdin (-) only — an error alongside PATH arguments,
+                  whose language always comes from the file extension
 ";
+
+/// stdin's language for `pmt fmt -`, defaulted from `--lang`
+/// (docs/cli.md (pmt fmt)). PATH batches never need this: each file's
+/// extension already says which formatter applies.
+#[derive(Clone, Copy)]
+enum Lang {
+    Pmc,
+    Pma,
+}
+
+fn parse_lang(value: Option<&str>) -> Result<Lang, String> {
+    match value {
+        None | Some("pmc") => Ok(Lang::Pmc),
+        Some("pma") => Ok(Lang::Pma),
+        Some(_) => Err(format!("`--lang` takes pmc or pma\n\n{FMT_USAGE}")),
+    }
+}
+
+/// Format one source through the language-appropriate formatter,
+/// collapsing the two distinct error types (`CompileError` for `.pmc`,
+/// `AsmError` for `.pma`) into one shape both call sites below render
+/// identically through [`render_fatal`].
+fn format_by_lang(source: &str, lang: Lang) -> Result<String, (Span, String, &'static str)> {
+    match lang {
+        Lang::Pmc => format_source(source).map_err(|e| (e.span, e.kind.to_string(), e.kind.code())),
+        Lang::Pma => format_asm(source).map_err(|e| (e.span, e.kind.to_string(), e.kind.code())),
+    }
+}
 
 pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
@@ -41,6 +78,7 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
         return Ok(CliOutput::ok(FMT_USAGE.into(), String::new()));
     }
     let check = args.flag("--check");
+    let lang = args.value("--lang")?;
     let excludes: Vec<PathBuf> = args
         .values("--exclude")?
         .into_iter()
@@ -54,7 +92,10 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
                 "`-` (stdin) cannot be combined with other paths\n\n{FMT_USAGE}"
             ));
         }
-        return fmt_stdin(check);
+        return fmt_stdin(check, parse_lang(lang.as_deref())?);
+    }
+    if lang.is_some() {
+        return Err(format!("--lang applies to stdin (-) only\n\n{FMT_USAGE}"));
     }
     if paths.is_empty() {
         return Err(format!(
@@ -67,7 +108,7 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
         let path = Path::new(p);
         let found = collect_sources(path, &excludes, &mut files)?;
         if found == 0 {
-            return Err(format!("{p}: no .pmc files found"));
+            return Err(format!("{p}: no .pmc or .pma files found"));
         }
     }
 
@@ -81,7 +122,23 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     for file in &files {
         let source =
             fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-        match format_source(&source) {
+        let lang = match file.extension().and_then(|x| x.to_str()) {
+            Some("pmc") => Lang::Pmc,
+            Some("pma") => Lang::Pma,
+            _ => {
+                // Only reachable for an explicitly listed file — the
+                // directory walk (`collect_sources`) only ever collects
+                // `.pmc`/`.pma` extensions (same shape as lint's route).
+                had_error = true;
+                let _ = writeln!(
+                    stderr,
+                    "{}: error: unknown source extension (expected .pmc or .pma)",
+                    file.display()
+                );
+                continue;
+            }
+        };
+        match format_by_lang(&source, lang) {
             Ok(formatted) => {
                 if formatted != source {
                     would_change = true;
@@ -93,18 +150,10 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
                     }
                 }
             }
-            Err(e) => {
+            Err((span, kind, code)) => {
                 // Per-file fatal: report, keep going (batch model, same as lint).
                 had_error = true;
-                let _ = writeln!(
-                    stderr,
-                    "{}:{}:{}: error: {} [{}]",
-                    file.display(),
-                    e.span.start.line,
-                    e.span.start.col,
-                    e.kind,
-                    e.kind.code()
-                );
+                render_fatal(&mut stderr, file, span, &kind, code);
             }
         }
     }
@@ -115,16 +164,17 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     })
 }
 
-/// `-`: read one `.pmc` from stdin, format it, write to stdout (or, under
-/// `--check`, write nothing and only signal via the exit code). A
-/// lex/parse error is a whole-tool error (single input, no batch to
-/// continue) — mirrors `cli/build.rs::compile`'s single-file fatal.
-fn fmt_stdin(check: bool) -> Result<CliOutput, String> {
+/// `-`: read one source from stdin (language selected by `lang`, default
+/// pmc), format it, write to stdout (or, under `--check`, write nothing
+/// and only signal via the exit code). A lex/parse error is a whole-tool
+/// error (single input, no batch to continue) — mirrors
+/// `cli/build.rs::compile`'s single-file fatal.
+fn fmt_stdin(check: bool, lang: Lang) -> Result<CliOutput, String> {
     let mut source = String::new();
     std::io::stdin()
         .read_to_string(&mut source)
         .map_err(|e| format!("cannot read stdin: {e}"))?;
-    match format_source(&source) {
+    match format_by_lang(&source, lang) {
         Ok(formatted) => {
             if check {
                 Ok(CliOutput {
@@ -136,12 +186,10 @@ fn fmt_stdin(check: bool) -> Result<CliOutput, String> {
                 Ok(CliOutput::ok(formatted, String::new()))
             }
         }
-        Err(e) => Err(format!(
-            "<stdin>:{}:{}: error: {} [{}]",
-            e.span.start.line,
-            e.span.start.col,
-            e.kind,
-            e.kind.code()
-        )),
+        Err((span, kind, code)) => {
+            let mut stderr = String::new();
+            render_fatal(&mut stderr, Path::new("<stdin>"), span, &kind, code);
+            Err(stderr.trim_end().to_string())
+        }
     }
 }

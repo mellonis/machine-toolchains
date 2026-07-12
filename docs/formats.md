@@ -139,9 +139,16 @@ L1:     rgt
 One instruction per line, `;` line comments. The **canonical column grid**
 emitted by `pmt compile -S` and `pmt dis` (and produced by `grid_line`):
 labels at column 0, mnemonics at column 8, operands at column 16, trailing
-spaces trimmed; the assembler's parser itself accepts any whitespace on
-input. `pmt dis` output is always valid assembler input — round-tripping
-through `asm` reproduces the original bytes exactly.
+comments at column 32, trailing spaces trimmed; the assembler's parser
+itself accepts any whitespace on input. A label field of 8 characters or
+more (the name plus its `:`) moves to its own line rather than sharing
+the instruction's line, so a long label never pushes the mnemonic column
+out of alignment; a field of 7 characters or fewer stays inline. `pmt dis`
+output is always valid assembler input — round-tripping through `asm`
+reproduces the original bytes exactly. `pmt fmt` (`docs/cli.md`) is the
+tool that enforces this grid on hand-written `.pma` source — `pmt compile
+-S` and `pmt dis` already emit it directly, so formatting their output is
+always a no-op.
 
 `pmt dis` accepts either binary. From a `.pmo`: real names come from the
 symbol table, code is shown per function, and call sites are named from
