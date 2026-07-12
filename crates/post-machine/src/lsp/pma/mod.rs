@@ -736,4 +736,28 @@ mod tests {
         let mut service = PmaLanguageService::new();
         assert_eq!(service.document_symbols("untitled:never-opened"), None);
     }
+
+    #[test]
+    fn two_lint_findings_out_of_rule_order_arrive_span_sorted() {
+        // `unreachable-code` (registered FIRST in `mtc_core::asm::lint::
+        // RULES`) fires at line 4's dead `nop`; `unused-label`
+        // (registered second) fires EARLIER, at line 2's `UNUSED`. Push
+        // order therefore disagrees with source order — mirrors
+        // `mtc_core::asm::lint::tests::findings_are_sorted_by_span_
+        // start_across_rules`, one layer up: `lint::lint` already
+        // returns its findings span-sorted (this module's doc comment
+        // on `merged_diagnostics`), and this pins that `did_update`
+        // hands that order straight through rather than re-shuffling it.
+        let mut service = PmaLanguageService::new();
+        let diags = service.did_update(
+            "untitled:Untitled-1",
+            ".func f\nUNUSED: nop\n        stp\n        nop\n",
+        );
+
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert_eq!(diags[0].code, Some("unused-label"));
+        assert_eq!(diags[0].span.start.line, 2);
+        assert_eq!(diags[1].code, Some("unreachable-code"));
+        assert_eq!(diags[1].span.start.line, 4);
+    }
 }

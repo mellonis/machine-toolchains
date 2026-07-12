@@ -527,6 +527,72 @@ stp
         assert_eq!(format_asm("").unwrap(), "");
     }
 
+    #[test]
+    fn blank_only_file_formats_to_empty() {
+        // Real blank/whitespace-only lines, not the empty string: every
+        // line tokenizes to nothing, so `parse_asm_cst` never produces an
+        // item and the print loop never runs — same end result as `""`,
+        // pinned here because it goes through a different code path
+        // (repeated `pending_blank` folding in `parse_asm_cst`, not the
+        // zero-line case).
+        let src = "\n\n   \n\t\n";
+        let out = format_asm(src).unwrap();
+        assert_eq!(out, "");
+        assert_eq!(format_asm(&out).unwrap(), out);
+    }
+
+    // -- Trailing whitespace on lines (item 4: pinned, not a renderer
+    // change — the printer rebuilds every line from CST tokens using the
+    // canonical column constants, so whitespace after the last real
+    // token on a physical line was never captured into any token in the
+    // first place and cannot survive into the output).
+
+    #[test]
+    fn trailing_whitespace_on_every_line_shape_formats_clean_and_idempotent() {
+        // Same content as `case3_seven_char_field_stays_inline`'s and
+        // `case1_doc_example_is_a_fixed_point`'s fixtures, but every
+        // physical line — the `.func` header, a plain instruction line,
+        // and an own-line comment — carries trailing spaces or a tab.
+        let src = ".func f  \nabcdef: nop\t\n        ; note   \n        stop  \n";
+        let expected = ".func f\nabcdef: nop\n        ; note\n        stop\n";
+        let once = format_asm(src).unwrap();
+        assert_eq!(once, expected);
+        assert!(
+            once.lines().all(|l| l == l.trim_end()),
+            "trailing whitespace survived: {once:?}"
+        );
+        let twice = format_asm(&once).unwrap();
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn trailing_whitespace_after_a_trailing_comment_is_stripped() {
+        // The comment token itself captures everything from `;` to the
+        // end of the physical line (lexer.rs), so trailing whitespace
+        // AFTER the comment text is part of the comment token's text —
+        // `print_line`'s `cur.trim_end()` is what drops it, not the
+        // lexer failing to capture it.
+        let src = ".func f\n        wr      1 ; c   \n";
+        let expected = ".func f\n        wr      1               ; c\n";
+        assert_eq!(format_asm(src).unwrap(), expected);
+    }
+
+    // -- Comment-only file (item 5): no `.func` anywhere, so every
+    // own-line comment is TOP_COL regardless of its original indentation
+    // (`own_line_comment_col`'s `!seen_func` branch) — pinned separately
+    // from the function-body/preamble comment-placement tests above,
+    // none of which cover a file with zero functions.
+
+    #[test]
+    fn comment_only_file_prints_every_comment_at_top_level_col_0() {
+        let src = "; first\n    ; indented, but still top-level\n; last\n";
+        let expected = "; first\n; indented, but still top-level\n; last\n";
+        let once = format_asm(src).unwrap();
+        assert_eq!(once, expected);
+        let twice = format_asm(&once).unwrap();
+        assert_eq!(twice, once);
+    }
+
     // -- Own-line comment placement (unpinned by the 11 enumerated
     // cases, but part of the printing-rule list — a judgment call
     // documented on `own_line_comment_col`) --------------------------

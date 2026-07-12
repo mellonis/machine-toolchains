@@ -172,4 +172,20 @@ mod tests {
         let a = d.iter().find(|d| d.message.contains('A')).unwrap();
         assert_eq!(a.fix.as_ref().unwrap().edits[0].span, Span::new(2, 1, 2, 4));
     }
+
+    #[test]
+    fn label_only_line_with_the_instruction_on_the_next_line_falls_back_to_through_colon() {
+        // "UNUSED:" alone on its own line, `nop` on the NEXT line — the
+        // label-only line carries no instr, no further label, and no
+        // trailing comment of its own, so `edit_span`'s `next_token_col`
+        // search comes up empty and the fallback (label span + colon)
+        // is what fires, not a span that reaches onto the next line.
+        let d = findings(".func f\nUNUSED:\n        nop\n        stop\n");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "unused-label");
+        let fix = d[0].fix.as_ref().unwrap();
+        assert_eq!(fix.edits.len(), 1);
+        assert_eq!(fix.edits[0].span, Span::new(2, 1, 2, 8));
+        assert_eq!(fix.edits[0].replacement, "");
+    }
 }

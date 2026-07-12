@@ -1286,17 +1286,32 @@ mod tests {
         }
         fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
             let text = self.texts.get(uri).map(String::as_str).unwrap_or("");
-            Some(
-                first_line_spans(text, "kw")
+            let mut tokens: Vec<SemToken> = first_line_spans(text, "kw")
+                .into_iter()
+                .map(|span| SemToken {
+                    span,
+                    // local "kw" type index, local "deprecated" bit.
+                    token_type: 0,
+                    modifiers: 1 << 0,
+                })
+                .collect();
+            // A second trigger for the OTHER local modifier bit
+            // ("declaration", local bit 1) — the down-shift remap
+            // direction (`semantic_tokens_local_declaration_bit_remaps_
+            // down_to_merged_bit_zero` below) has nothing to key off
+            // without it; "kw"'s fixed bit-0 modifier only ever exercises
+            // the up-shift.
+            tokens.extend(
+                first_line_spans(text, "old")
                     .into_iter()
                     .map(|span| SemToken {
                         span,
-                        // local "kw" type index, local "deprecated" bit.
                         token_type: 0,
-                        modifiers: 1 << 0,
-                    })
-                    .collect(),
-            )
+                        // local "declaration" bit.
+                        modifiers: 1 << 1,
+                    }),
+            );
+            Some(tokens)
         }
         fn format(&mut self, uri: &str) -> Option<String> {
             let text = self.texts.get(uri)?;
@@ -2549,6 +2564,32 @@ mod tests {
         assert_eq!(outputs[1]["params"]["diagnostics"][0]["source"], "fake2");
     }
 
+    /// (2b) Neither languageId NOR the URI extension matches ANY service
+    /// — `bind_service`'s final fallback (the `eprintln!`-noted branch,
+    /// distinct from (2) above, which still resolves through the
+    /// extension match). Routing is observed the same way as elsewhere
+    /// in this block: through which service's `did_update` produced the
+    /// published diagnostic, not by trying to capture the stderr note.
+    #[test]
+    fn unmatched_language_id_and_extension_falls_back_to_service_zero() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                // "plaintext" matches no languageId; ".unknown" matches
+                // no service's extensions() either.
+                did_open_message_lang("file:///x.unknown", "plaintext", 1, "bad"),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs.len(), 2);
+        // Service 0 (FakeService, source "fake") reacted to "bad";
+        // FakeService2 only ever reports under source "fake2".
+        assert_eq!(outputs[1]["params"]["diagnostics"][0]["source"], "fake");
+    }
+
     /// (3) completion/definition/formatting all follow the binding.
     #[test]
     fn feature_requests_follow_the_document_binding() {
@@ -2668,6 +2709,40 @@ mod tests {
         assert_eq!(
             outputs[2]["result"]["data"],
             serde_json::json!([0, 0, 2, 1, 2])
+        );
+    }
+
+    /// (5b) The reverse remap direction from (5): FakeService2's local
+    /// bit 1 ("declaration") relocates DOWN to merged bit 0 — service
+    /// 0's own "declaration" already claimed merged bit 0
+    /// (`modifier_maps[1] == [1, 0]`, documented on `FakeService2`
+    /// above), so service 2's HIGHER local bit collapses onto the
+    /// LOWER merged bit. (5) only ever exercises the up-shift (local
+    /// bit 0 -> merged bit 1); this pins the other direction.
+    #[test]
+    fn semantic_tokens_local_declaration_bit_remaps_down_to_merged_bit_zero() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message_lang("file:///d.f2", "fake2", 1, "old"),
+                request_message(
+                    2,
+                    "textDocument/semanticTokens/full",
+                    serde_json::json!({"textDocument": {"uri": "file:///d.f2"}}),
+                ),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        // Local (type 0 "kw", modifier bit 1 "declaration") relocates to
+        // merged (type 0+offset₁=1, bit1 -> merged bit0 = 0b1=1). "old"
+        // spans cols 1..4 -> packed [dLine, dStart, len, type, mods].
+        assert_eq!(
+            outputs[2]["result"]["data"],
+            serde_json::json!([0, 0, 3, 1, 1])
         );
     }
 

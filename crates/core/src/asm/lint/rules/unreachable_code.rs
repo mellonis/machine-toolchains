@@ -148,4 +148,21 @@ mod tests {
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].span.start.line, 3);
     }
+
+    #[test]
+    fn call_does_not_arm() {
+        // `call` is `Flow::Call`, neither `Stop` nor `Jump` — it may
+        // return and fall through, so the unlabeled instruction right
+        // after it stays reachable. (`g` need not resolve to a real
+        // function: this rule reads `SourceFunction`/`ArchSyntax` only,
+        // never the assembler's label table.)
+        let d = findings(".func f\n        call g\n        nop\n        stop\n");
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn empty_function_body_yields_no_finding_and_does_not_panic() {
+        let d = findings(".func f\n");
+        assert!(d.is_empty());
+    }
 }

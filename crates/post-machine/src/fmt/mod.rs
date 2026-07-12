@@ -1862,4 +1862,33 @@ mod tests {
         let twice = format(&once).unwrap();
         assert_eq!(twice, once, "not idempotent for {src:?}");
     }
+
+    // -- #19 review carry-over: a leading-zero spelling survives outside
+    // a label DEFINITION too — a CHECK ARM and a SUCCESSOR are both
+    // number-carrying operands rendered through `render_check_arm`/
+    // `render_successor`, the same written-text discipline pinned for
+    // labels by `leading_zero_label_preserves_spelling_and_aligns_by_\
+    // written_width` (crates/post-machine/tests/fmt_programs.rs). Parse
+    // + format only, deliberately NOT added to `SIMPLE`
+    // (crates/post-machine/tests/fmt_programs.rs) — that corpus also
+    // feeds the O0/O1 execution suites, and these numbers need not
+    // resolve to a real label for a syntax-only printer test.
+
+    #[test]
+    fn leading_zero_check_arm_preserves_spelling() {
+        assert_eq!(
+            format("f() { check(007, !); }").unwrap(),
+            "f() {\n    check(007, !);\n}\n"
+        );
+    }
+
+    #[test]
+    fn leading_zero_successor_preserves_spelling() {
+        // Both successor-bearing shapes: a builtin's explicit successor
+        // (`right(008)`) and a call's successor (`@f(008)`).
+        assert_eq!(
+            format("f() { right(008); @f(008); }").unwrap(),
+            "f() {\n    right(008);\n    @f(008);\n}\n"
+        );
+    }
 }

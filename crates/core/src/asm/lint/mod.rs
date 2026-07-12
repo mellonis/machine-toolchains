@@ -68,6 +68,8 @@ mod tests {
     use super::*;
     use crate::asm::AsmErrorKind;
     use crate::asm::syntax::fixture::test_syntax;
+    use crate::asm::syntax::{ArchSyntax, Flow, SyntaxEntry};
+    use crate::vm::OperandKind;
 
     #[test]
     fn clean_program_yields_no_findings() {
@@ -140,6 +142,46 @@ mod tests {
         let filtered = lint(&syntax, src, &["unused-label".to_string()]).unwrap();
         assert!(filtered.iter().all(|d| d.code != "unused-label"));
         assert_eq!(filtered.len() + 1, all.len());
+    }
+
+    /// `test_syntax()` plus a `dbg` opcode wired as the debugger break —
+    /// added locally here (not in the shared fixture, which keeps
+    /// `break_opcode: None` by contract), mirroring
+    /// `rules::leftover_debugger::tests::debugger_syntax`. This module has
+    /// no shared test-support module either, so the helper is duplicated
+    /// rather than imported.
+    fn debugger_syntax() -> ArchSyntax {
+        let mut syntax = test_syntax();
+        syntax.entries.push(SyntaxEntry {
+            opcode: 0x0F,
+            mnemonic: "dbg",
+            operand: OperandKind::None,
+            flow: Flow::FallThrough,
+        });
+        syntax.break_opcode = Some(0x0F);
+        syntax
+    }
+
+    #[test]
+    fn line_too_long_finding_runs_through_the_full_lint_entry_point() {
+        // End-to-end through `lint()`, not just the rule's own unit
+        // tests — mirrors `redundant_jump_finding_runs_through_the_full_
+        // lint_entry_point`.
+        let syntax = test_syntax();
+        let long = format!(";{}", "x".repeat(89)); // 1 + 89 = 90 chars
+        let src = format!("{long}\n.func f\n        stop\n");
+        let report = lint(&syntax, &src, &[]).unwrap();
+        assert!(report.iter().any(|d| d.code == "line-too-long"));
+    }
+
+    #[test]
+    fn leftover_debugger_finding_runs_through_the_full_lint_entry_point() {
+        // Needs a syntax fixture that actually declares a break opcode
+        // (`test_syntax()` alone never fires this rule) — the local
+        // `debugger_syntax()` helper above.
+        let syntax = debugger_syntax();
+        let report = lint(&syntax, ".func f\n        dbg\n        stop\n", &[]).unwrap();
+        assert!(report.iter().any(|d| d.code == "leftover-debugger"));
     }
 
     #[test]

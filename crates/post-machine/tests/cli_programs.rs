@@ -839,6 +839,44 @@ fn lint_pma_fix_removes_unused_label_and_reruns_clean() {
 }
 
 #[test]
+fn lint_pma_fix_leaves_a_gated_leftover_debugger_and_force_removes_it() {
+    // `leftover-debugger` is the gated (MaybeIncorrect) `.pma` rule —
+    // mirrors `fix_applies_safe_tier_only_and_force_unlocks_deletions`
+    // (the `.pmc` side's safe-vs-gated split) for the asm route's own
+    // gated fix, through the same `--fix`/`--fix --force` batch loop.
+    let dir = scratch("lint_pma_leftover_debugger");
+    let src = dir.join("prog.pma");
+    let original = ".func f\n        brk\n        stp\n";
+    std::fs::write(&src, original).unwrap();
+
+    // Plain `--fix`: the `brk` is gated, left in place, still reported
+    // with the force hint.
+    let out = execute(&args(&["lint", src.to_str().unwrap(), "--fix"])).unwrap();
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert_eq!(
+        std::fs::read_to_string(&src).unwrap(),
+        original,
+        "gated fix NOT applied"
+    );
+    assert!(
+        out.stdout
+            .contains("fix (requires --force): remove the debugger break"),
+        "{}",
+        out.stdout
+    );
+
+    // `--fix --force`: the `brk` goes; re-lint (a separate run) is clean.
+    let out = execute(&args(&["lint", src.to_str().unwrap(), "--fix", "--force"])).unwrap();
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let fixed = std::fs::read_to_string(&src).unwrap();
+    assert!(!fixed.contains("brk"), "{fixed}");
+
+    let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
 fn lint_allow_unreachable_code_is_accepted_and_suppresses_on_pma() {
     let dir = scratch("lint_pma_allow_union");
     let src = dir.join("prog.pma");
