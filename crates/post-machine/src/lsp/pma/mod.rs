@@ -51,7 +51,6 @@ pub(crate) struct PmaLanguageService {
 }
 
 impl PmaLanguageService {
-    #[allow(dead_code)] // consumer: cli/lsp.rs (pma plan 3, Task 5)
     pub(crate) fn new() -> Self {
         PmaLanguageService {
             docs: HashMap::new(),

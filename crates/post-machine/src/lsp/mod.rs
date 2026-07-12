@@ -26,7 +26,6 @@ mod navigate;
 mod pma;
 mod tokens;
 
-#[allow(unused_imports)] // consumer: cli/lsp.rs (pma plan 3, Task 5)
 pub(crate) use pma::PmaLanguageService;
 
 pub(crate) struct PmcLanguageService {
@@ -1143,6 +1142,154 @@ mod tests {
             outputs.push(serde_json::from_str(&payload).expect("recorded output is valid json"));
         }
         (outputs, exit_code)
+    }
+
+    /// Same shape as `run_session`, but drives BOTH real services through
+    /// one server — pmc first, pma second, byte-for-byte the slice
+    /// `cli/lsp.rs` builds (docs/lsp.md, multi-service routing) — so a
+    /// test built on this proves the exact wiring `pmt lsp` runs, not
+    /// just the framework's mux exercised against fakes.
+    fn run_dual_session(
+        client_messages: &[serde_json::Value],
+        pmc: &mut PmcLanguageService,
+        pma: &mut PmaLanguageService,
+    ) -> (Vec<serde_json::Value>, i32) {
+        use mtc_core::lsp::transport::{read_message, write_message};
+
+        let mut input = Vec::new();
+        for msg in client_messages {
+            write_message(&mut input, &msg.to_string()).expect("write into a Vec cannot fail");
+        }
+
+        let mut output = Vec::new();
+        let mut reader = &input[..];
+        let mut services: [&mut dyn mtc_core::lsp::LanguageService; 2] = [pmc, pma];
+        let exit_code = mtc_core::lsp::server::run(
+            &mut reader,
+            &mut output,
+            &mut services,
+            mtc_core::lsp::server::ServerIdentity {
+                name: "pmt lsp",
+                version: "0.0.0-test",
+            },
+        );
+
+        let mut out_reader = &output[..];
+        let mut outputs = Vec::new();
+        while let Some(payload) = read_message(&mut out_reader).expect("recorded output frames") {
+            outputs.push(serde_json::from_str(&payload).expect("recorded output is valid json"));
+        }
+        (outputs, exit_code)
+    }
+
+    /// The dual-service session `pmt lsp` actually runs (docs/lsp.md,
+    /// multi-service routing + capability merge): initialize merges both
+    /// legends, a `.pma` document routes to the pma service and its
+    /// `unused-label` lint finding publishes, a `.pmc` document opened in
+    /// the SAME session still routes to the pmc service and its own
+    /// two-channel diagnostic set is unaffected, and formatting the `.pma`
+    /// document returns `format_asm`'s canonical grid — not a
+    /// re-implementation.
+    #[test]
+    fn e2e_dual_service_session_routes_pmc_and_pma_through_one_server() {
+        // Valid PM-1 assembly, one unused label, deliberately NOT in the
+        // canonical grid (`L1:` isn't column-aligned with `rgt`/`stp`) so
+        // the trailing formatting assertion is a real transformation, not
+        // an identity.
+        const PMA_UNUSED_LABEL: &str = ".func main\nL1: rgt\nstp\n";
+
+        let pma_uri = "file:///e2e.pma";
+        let pmc_uri = "file:///e2e.pmc";
+        let mut pmc = PmcLanguageService::new();
+        let mut pma = PmaLanguageService::new();
+
+        fn init(id: i64) -> serde_json::Value {
+            json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": {}})
+        }
+        fn open(uri: &str, language_id: &str, text: &str) -> serde_json::Value {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "textDocument/didOpen",
+                "params": {"textDocument": {"uri": uri, "languageId": language_id, "version": 1, "text": text}},
+            })
+        }
+
+        let (outputs, _) = run_dual_session(
+            &[
+                init(1),
+                open(pma_uri, "pma", PMA_UNUSED_LABEL),
+                open(pmc_uri, "pmc", WARNING_AND_LINT_FIXTURE),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "textDocument/formatting",
+                    "params": {"textDocument": {"uri": pma_uri}},
+                }),
+            ],
+            &mut pmc,
+            &mut pma,
+        );
+        assert_eq!(outputs.len(), 4, "{outputs:?}");
+
+        // initialize: the merged legend is pmc's 3 token types then
+        // pma's 3, concatenated without dedup — proof both services
+        // registered, pmc first, exactly as `cli/lsp.rs` builds the slice.
+        let legend_types: Vec<&str> =
+            outputs[0]["result"]["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
+        assert_eq!(
+            legend_types,
+            vec![
+                "namespace",
+                "function",
+                "number",
+                "function",
+                "variable",
+                "number"
+            ],
+            "{legend_types:?}"
+        );
+
+        // didOpen .pma -> bound to the pma service: its unused-label
+        // finding publishes under `pmt lint`.
+        assert_eq!(outputs[1]["params"]["uri"], json!(pma_uri));
+        let pma_diags = outputs[1]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(pma_diags.len(), 1, "{pma_diags:?}");
+        assert_eq!(pma_diags[0]["code"], json!("unused-label"));
+        assert_eq!(pma_diags[0]["source"], json!("pmt lint"));
+        assert!(
+            pma_diags[0]["message"].as_str().unwrap().contains("L1"),
+            "{:?}",
+            pma_diags[0]
+        );
+
+        // didOpen .pmc in the SAME session -> still bound to the pmc
+        // service: its own two-channel diagnostic set (lint + compile
+        // warning) flows unaffected by the pma document sharing the
+        // server — `unused-import` has no pma counterpart, so its
+        // presence alone proves the pmc backend answered.
+        assert_eq!(outputs[2]["params"]["uri"], json!(pmc_uri));
+        let pmc_diags = outputs[2]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(pmc_diags.len(), 2, "{pmc_diags:?}");
+        assert_eq!(pmc_diags[0]["code"], json!("unused-label"));
+        assert_eq!(pmc_diags[1]["code"], json!("unused-import"));
+        assert_eq!(pmc_diags[1]["source"], json!("pmt"));
+
+        // formatting the .pma doc: the exact grid `format_asm` itself
+        // produces, not a re-implementation.
+        let edits: Vec<mtc_core::lsp::types::TextEdit> =
+            serde_json::from_value(outputs[3]["result"].clone()).unwrap();
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        let canonical = mtc_core::asm::format_asm(PMA_UNUSED_LABEL).expect("valid source formats");
+        assert_ne!(
+            PMA_UNUSED_LABEL, canonical,
+            "sanity: the fixture really was unformatted"
+        );
+        assert_eq!(edits[0].new_text, canonical);
     }
 
     #[test]

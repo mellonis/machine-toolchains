@@ -1,14 +1,16 @@
-# The `.pmc` language server — `pmt lsp`
+# The `pmt lsp` language server
 
-`pmt lsp` runs a Language Server Protocol server for `.pmc` on stdio,
-built on the exact same lexer, parser, compiler, optimizer-free
-analysis, and linter the CLI uses. Nothing the server reports is a
-re-implementation: a diagnostic, a quickfix, or a formatted document is
-the same answer `pmt compile`/`pmt lint`/`pmt fmt` would give for the
-same source. See `docs/cli.md` (`pmt lsp`) for the subcommand's flags,
-stdio contract, and lifecycle exit codes.
+`pmt lsp` runs one Language Server Protocol server, on stdio, for both
+`.pmc` and `.pma` — built on the exact same lexer, parser,
+compiler/assembler, optimizer-free analysis, and linter the CLI uses
+for each. Nothing the server reports is a re-implementation: a
+diagnostic, a quickfix, or a formatted document is the same answer
+`pmt compile`/`pmt lint`/`pmt fmt` would give for the same source. See
+`docs/cli.md` (`pmt lsp`) for the subcommand's flags, stdio contract,
+and lifecycle exit codes; see **Languages** below for how the two
+languages share the one process.
 
-## What it serves
+## What `.pmc` serves
 
 `.pmc` has no project model — `use` binds a name that resolves at link
 time, never at compile time — so each open document is a complete,
@@ -46,7 +48,9 @@ diagnostics, the server offers:
   nested functions as children.
 - **Whole-document formatting**, identical to `pmt fmt`.
 
-`.pma` (the assembler dialect) is not served by this milestone.
+`.pma`, the assembler dialect, is served by the same process, through
+its own service — see **Languages** below for its feature table and
+for how the server picks which service answers a given document.
 
 ## Capabilities
 
@@ -69,6 +73,78 @@ A handler panic is caught per request: it never takes the session
 down, degrades that one answer to an internal error, and the next
 message is served normally.
 
+## Languages
+
+One process, one stdio connection, two independent language services:
+`.pmc` (above) and `.pma`, the assembler dialect. Each service owns
+its own per-document state and answers only for the documents bound to
+it — opening a `.pmc` file never perturbs a `.pma` session, or vice
+versa, and editing or closing one never republishes the other's
+diagnostics.
+
+### Routing
+
+A freshly opened document binds to exactly one service, once, on
+`textDocument/didOpen`; every later message for that URI —
+`didChange`, `didClose`, any feature request — is served by whichever
+service it bound to. This multi-service routing tries, in order: the
+client's own `languageId` (an exact match against `pmc` or `pma`),
+then the URI's file extension (`.pmc` or `.pma`) when the languageId
+matches neither service, and finally the `.pmc` service as a
+last-resort default — a document neither identifier recognizes still
+gets *some* answer instead of silence. A client that always reports an
+accurate `languageId` never falls through past the first check.
+
+### Capability merge
+
+`initialize` answers with one merged capability set, not two: every
+feature either service supports is advertised once, through the
+capability merge this section describes. The semantic-tokens legend is
+the concrete shape of it: `.pmc` registers its own token types
+(`namespace`, `function`, `number`) and modifiers, `.pma` registers its
+own (`function`, `variable`, `number`) and modifiers, and the merged
+legend concatenates the two type lists in registration order — `.pmc`'s
+block first, `.pma`'s second, six entries total, no deduplication —
+while the modifier lists dedup-union by name (`declaration` and
+`defaultLibrary` collapse to one bit apiece, since both services
+happen to name the same two). Every token a service emits is relocated
+from its own local legend index into this shared index space before it
+reaches the wire, so a client sees one consistent legend for the whole
+session regardless of which document it's asking about. Trigger
+characters and watched globs merge the same way, as an ordered,
+deduplicated union.
+
+### What `.pma` serves
+
+`.pma` has the same "no project model" shape as `.pmc` — every open
+document is a complete, independently analyzable unit. Its own
+analysis has two tiers rather than `.pmc`'s three: a total CST (every
+line parses into *something*, so completions, go-to-definition,
+document symbols, and semantic tokens all answer even over a document
+that fails to assemble) and a fatal-or-lint split built on the same
+assembler and linter `pmt asm`/`pmt lint` use.
+
+| Feature | Needs | Degrades to (when the tier fails) |
+|---|---|---|
+| Diagnostics: fatal error | the total CST | one error — a semantic assemble failure, or the structural `raw-line` code for a line that isn't assembly-shaped at all — honest and singular |
+| Diagnostics: lint findings | a clean assemble (no fatal) | omitted — the fatal is the only entry; unlike `.pmc`, there is no separate compile-warning channel |
+| Completions | the total CST at the cursor's line | empty list on no context match |
+| Go-to-definition | the total CST (the operand token under the cursor) | `null` |
+| Quickfix code actions | a clean assemble (lint ran) | empty list |
+| Semantic tokens | the total CST | answers for any known document — no resolution tier to gate on |
+| Document symbols | the total CST | answers for any known document — functions and their labels resolve structurally |
+| Whole-document formatting | no `raw-line` in the source | `null` — the only structural gate; any other semantic error (an unknown mnemonic, say) still formats |
+
+### Shared configuration
+
+Both services read the same `pmt.json` (see **Configuration** below)
+and the same IDE-settings channel — there is no per-language config
+file or override. A `lint.allow` entry applies uniformly no matter
+which language's rule table it names: the allow-list is validated
+against the union of `.pmc`'s and `.pma`'s rule codes, so a
+`.pma`-only code (or a `.pmc`-only one) never errors as unknown just
+because the document currently open happens to be the other language.
+
 ## Wiring a generic LSP client
 
 Any client that speaks LSP 3.17 over stdio can launch `pmt lsp`
@@ -77,15 +153,15 @@ directly — no special client extension is required. Two examples:
 ### Neovim (`vim.lsp.config` / `vim.lsp.enable`, 0.11+)
 
 ```lua
-vim.lsp.config.pmc = {
+vim.lsp.config.pmt = {
   cmd = { "pmt", "lsp" },
-  filetypes = { "pmc" },
+  filetypes = { "pmc", "pma" },
   root_markers = { "pmt.json", ".git" },
 }
-vim.lsp.enable("pmc")
+vim.lsp.enable("pmt")
 
--- Recognize the extension (no bundled filetype plugin ships yet):
-vim.filetype.add({ extension = { pmc = "pmc" } })
+-- Recognize both extensions (no bundled filetype plugin ships yet):
+vim.filetype.add({ extension = { pmc = "pmc", pma = "pma" } })
 ```
 
 ### Helix (`languages.toml`)
@@ -95,6 +171,13 @@ vim.filetype.add({ extension = { pmc = "pmc" } })
 name = "pmc"
 scope = "source.pmc"
 file-types = ["pmc"]
+roots = ["pmt.json"]
+language-servers = ["pmt-lsp"]
+
+[[language]]
+name = "pma"
+scope = "source.pma"
+file-types = ["pma"]
 roots = ["pmt.json"]
 language-servers = ["pmt-lsp"]
 
@@ -145,9 +228,10 @@ affected.
 
 ## Configuration
 
-`.pmc` projects have exactly one config file, `pmt.json`, read by both
-the CLI and the server — see `docs/lint.md` for its schema, discovery
-rule (nearest ancestor wins, never a cascade), and union semantics.
+A project has exactly one config file, `pmt.json`, read by both the
+CLI and the server for either language — see `docs/lint.md` for its
+schema, discovery rule (nearest ancestor wins, never a cascade), and
+union semantics.
 The server adds one more source on top: IDE settings, forwarded over
 the standard LSP configuration channel (`initializationOptions` at
 startup, live afterward) as `{ "lint": { "allow": [...] } }`, or the
