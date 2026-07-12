@@ -31,15 +31,16 @@ use super::types::{
     DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams,
-    FileSystemWatcher, InitializeParams, InitializeResult, Location, LocationLink, Position,
-    PublishDiagnosticsParams, Range, Registration, RegistrationParams, SemanticTokens,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, ServerCapabilities,
-    ServerInfoWire, TextDocumentPositionParams, TextDocumentSyncOptions, TextEdit, WireDiagnostic,
-    WorkspaceEdit, completion_item_kind, diagnostic_severity, symbol_kind,
+    FileSystemWatcher, Hover, InitializeParams, InitializeResult, Location, LocationLink,
+    MarkupContent, Position, PublishDiagnosticsParams, Range, Registration, RegistrationParams,
+    SemanticTokens, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    ServerCapabilities, ServerInfoWire, TextDocumentPositionParams, TextDocumentSyncOptions,
+    TextEdit, WireDiagnostic, WorkspaceEdit, completion_item_kind, completion_item_tag,
+    diagnostic_severity, diagnostic_tag, symbol_kind,
 };
 use super::{
-    Action, Candidate, CandidateKind, DefTarget, SemToken, ServiceDiagnostic, ServiceSeverity,
-    SymbolNode, SymbolNodeKind,
+    Action, Candidate, CandidateKind, DefTarget, HoverContent, SemToken, ServiceDiagnostic,
+    ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
 use crate::diagnostics::{Pos, Span};
 
@@ -320,6 +321,7 @@ fn handle_request(
         }
         "textDocument/completion" => handle_completion(state, writer, services, id, params),
         "textDocument/definition" => handle_definition(state, writer, services, id, params),
+        "textDocument/hover" => handle_hover(state, writer, services, id, params),
         "textDocument/codeAction" => handle_code_action(state, writer, services, id, params),
         "textDocument/documentSymbol" => {
             handle_document_symbol(state, writer, services, id, params)
@@ -656,6 +658,9 @@ fn to_wire_diagnostic(text: &str, diagnostic: &ServiceDiagnostic) -> WireDiagnos
         code: diagnostic.code.map(|code| code.to_string()),
         source: Some(diagnostic.source.to_string()),
         message: diagnostic.message.clone(),
+        tags: diagnostic
+            .deprecated
+            .then(|| vec![diagnostic_tag::DEPRECATED]),
     }
 }
 
@@ -730,6 +735,10 @@ fn to_completion_item(text: &str, candidate: Candidate) -> CompletionItem {
             CandidateKind::Keyword => completion_item_kind::KEYWORD,
             CandidateKind::Value => completion_item_kind::VALUE,
         }),
+        detail: candidate.detail,
+        tags: candidate
+            .deprecated
+            .then(|| vec![completion_item_tag::DEPRECATED]),
         text_edit: Some(TextEdit {
             range: position::span_to_range(text, candidate.replace_span),
             new_text: candidate.insert_text,
@@ -829,6 +838,49 @@ fn pos_to_position_identity(pos: Pos) -> Position {
     Position {
         line: pos.line.saturating_sub(1),
         character: pos.col.saturating_sub(1),
+    }
+}
+
+fn handle_hover(
+    state: &ServerState,
+    writer: &mut dyn std::io::Write,
+    services: &mut [&mut dyn LanguageService],
+    id: &Id,
+    params: serde_json::Value,
+) {
+    let Ok(params) = serde_json::from_value::<TextDocumentPositionParams>(params) else {
+        respond_err(
+            writer,
+            Some(id),
+            error_codes::INVALID_PARAMS,
+            "invalid hover params",
+        );
+        return;
+    };
+    let uri = params.text_document.uri;
+    let text = doc_text(state, &uri);
+    let pos = position::pos_from_lsp(text, params.position);
+    let idx = state.bindings.get(&uri).copied().unwrap_or(0);
+
+    let result = match services[idx].hover(&uri, pos) {
+        Some(content) => {
+            serde_json::to_value(to_hover(text, content)).expect("Hover is always serializable")
+        }
+        None => serde_json::Value::Null,
+    };
+    respond_ok(writer, id, result);
+}
+
+/// Converts a `HoverContent` to its wire shape: plain-text `contents`
+/// (v1 carries no markdown — docs/lsp.md) and `range` converted against
+/// the REQUESTING document's current text.
+fn to_hover(text: &str, content: HoverContent) -> Hover {
+    Hover {
+        contents: MarkupContent {
+            kind: "plaintext".to_string(),
+            value: content.text,
+        },
+        range: position::span_to_range(text, content.span),
     }
 }
 
@@ -1080,6 +1132,7 @@ fn build_initialize_result(
                 trigger_characters: merge_trigger_characters(services),
             },
             definition_provider: true,
+            hover_provider: true,
             document_formatting_provider: true,
             document_symbol_provider: true,
             code_action_provider: CodeActionOptions {
@@ -1247,6 +1300,7 @@ mod tests {
                     source: "fake2",
                     code: Some("boo-word"),
                     message: format!("boo (fake2 rev {})", self.config_revision),
+                    deprecated: false,
                 })
                 .collect()
         }
@@ -1265,6 +1319,8 @@ mod tests {
                     end: pos,
                 },
                 insert_text: "beta".to_string(),
+                detail: None,
+                deprecated: false,
             }]
         }
         fn definition(&mut self, uri: &str, _pos: Pos) -> Option<DefTarget> {
@@ -1277,6 +1333,12 @@ mod tests {
                     span,
                     origin: None,
                 })
+        }
+        // The `null`-shape half of the hover wire contract (docs/lsp.md):
+        // `FakeService`'s `hover` is an unconditional `Some`, so a routing
+        // test needs a second, bound service that always answers `None`.
+        fn hover(&mut self, _uri: &str, _pos: Pos) -> Option<HoverContent> {
+            None
         }
         fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {
             Vec::new()
@@ -1438,6 +1500,9 @@ mod tests {
         );
 
         assert_eq!(outputs.len(), 1);
+        // This is a deliberate byte-identity pin (docs/lsp.md); this
+        // task's ONLY change to it is the added `"hoverProvider": true`
+        // line — every other key is unchanged from before hover shipped.
         assert_eq!(
             outputs[0],
             serde_json::json!({
@@ -1449,6 +1514,7 @@ mod tests {
                         "textDocumentSync": {"openClose": true, "change": 1},
                         "completionProvider": {"triggerCharacters": ["."]},
                         "definitionProvider": true,
+                        "hoverProvider": true,
                         "documentFormattingProvider": true,
                         "documentSymbolProvider": true,
                         "codeActionProvider": {"codeActionKinds": ["quickfix"]},
@@ -1542,6 +1608,13 @@ mod tests {
                 _uri: &str,
                 _pos: crate::diagnostics::Pos,
             ) -> Option<crate::lsp::DefTarget> {
+                unimplemented!()
+            }
+            fn hover(
+                &mut self,
+                _uri: &str,
+                _pos: crate::diagnostics::Pos,
+            ) -> Option<crate::lsp::HoverContent> {
                 unimplemented!()
             }
             fn code_actions(
@@ -2082,6 +2155,9 @@ mod tests {
                     origin: None,
                 })
             }
+            fn hover(&mut self, _uri: &str, _pos: Pos) -> Option<HoverContent> {
+                unimplemented!()
+            }
             fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {
                 unimplemented!()
             }
@@ -2133,6 +2209,179 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn hover_routes_to_the_bound_service_and_renders_both_shapes() {
+        // `FakeService`'s `hover` is an unconditional canned `Some`;
+        // `FakeService2`'s is an unconditional `None` — a single session
+        // binding one document to each proves both the wire shape AND
+        // that hover routes through the per-URI binding like every other
+        // feature request, not just service 0.
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "hi"),
+                did_open_message_lang("file:///b.f2", "fake2", 1, "hi"),
+                request_message(
+                    2,
+                    "textDocument/hover",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                request_message(
+                    3,
+                    "textDocument/hover",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///b.f2"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[3]["id"], serde_json::json!(2));
+        assert_eq!(
+            outputs[3]["result"],
+            serde_json::json!({
+                "contents": {"kind": "plaintext", "value": "fake hover text"},
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 0},
+                },
+            })
+        );
+        assert_eq!(outputs[4]["id"], serde_json::json!(3));
+        assert_eq!(outputs[4]["result"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn deprecated_diagnostics_and_tagged_candidates_carry_their_wire_fields() {
+        // A minimal service purpose-built to prove the two new wire
+        // mappings in one session: a deprecated `ServiceDiagnostic`
+        // publishes `"tags":[2]` (a non-deprecated one has no `tags` key
+        // at all) and a `Candidate` with `detail`/`deprecated` reaches
+        // completion's wire shape with `detail` + `"tags":[1]` (one with
+        // neither omits both keys).
+        struct TagsService;
+
+        impl LanguageService for TagsService {
+            fn language_id(&self) -> &'static str {
+                "tags"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &[".tags"]
+            }
+            fn trigger_characters(&self) -> &[char] {
+                &[]
+            }
+            fn token_legend(&self) -> (&'static [&'static str], &'static [&'static str]) {
+                (&[], &[])
+            }
+            fn watched_globs(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn did_update(&mut self, _uri: &str, _text: &str) -> Vec<ServiceDiagnostic> {
+                vec![
+                    ServiceDiagnostic {
+                        span: Span::new(1, 1, 1, 4),
+                        severity: ServiceSeverity::Warning,
+                        source: "tags",
+                        code: Some("deprecated-word"),
+                        message: "call to deprecated function 'old'".to_string(),
+                        deprecated: true,
+                    },
+                    ServiceDiagnostic {
+                        span: Span::new(1, 5, 1, 8),
+                        severity: ServiceSeverity::Warning,
+                        source: "tags",
+                        code: Some("plain-word"),
+                        message: "plain".to_string(),
+                        deprecated: false,
+                    },
+                ]
+            }
+            fn did_close(&mut self, _uri: &str) {}
+            fn did_change_config(&mut self, _settings: serde_json::Value) {}
+            fn completion(&mut self, _uri: &str, pos: Pos) -> Vec<Candidate> {
+                vec![
+                    Candidate {
+                        label: "old".to_string(),
+                        kind: CandidateKind::Function,
+                        replace_span: Span {
+                            start: pos,
+                            end: pos,
+                        },
+                        insert_text: "old".to_string(),
+                        detail: Some("ns::old".to_string()),
+                        deprecated: true,
+                    },
+                    Candidate {
+                        label: "plain".to_string(),
+                        kind: CandidateKind::Value,
+                        replace_span: Span {
+                            start: pos,
+                            end: pos,
+                        },
+                        insert_text: "plain".to_string(),
+                        detail: None,
+                        deprecated: false,
+                    },
+                ]
+            }
+            fn definition(&mut self, _uri: &str, _pos: Pos) -> Option<DefTarget> {
+                unimplemented!()
+            }
+            fn hover(&mut self, _uri: &str, _pos: Pos) -> Option<HoverContent> {
+                unimplemented!()
+            }
+            fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {
+                unimplemented!()
+            }
+            fn document_symbols(&mut self, _uri: &str) -> Option<Vec<SymbolNode>> {
+                unimplemented!()
+            }
+            fn semantic_tokens(&mut self, _uri: &str) -> Option<Vec<SemToken>> {
+                unimplemented!()
+            }
+            fn format(&mut self, _uri: &str) -> Option<String> {
+                unimplemented!()
+            }
+        }
+
+        let mut service = TagsService;
+        let (outputs, _exit) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message_lang("file:///a.tags", "tags", 1, "anything"),
+                request_message(
+                    2,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.tags"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        let diagnostics = outputs[1]["params"]["diagnostics"].as_array().unwrap();
+        assert_eq!(diagnostics[0]["tags"], serde_json::json!([2]));
+        assert!(diagnostics[1].get("tags").is_none(), "{:?}", diagnostics[1]);
+
+        let items = outputs[2]["result"].as_array().unwrap();
+        assert_eq!(items[0]["detail"], serde_json::json!("ns::old"));
+        assert_eq!(items[0]["tags"], serde_json::json!([1]));
+        assert!(items[1].get("detail").is_none(), "{:?}", items[1]);
+        assert!(items[1].get("tags").is_none(), "{:?}", items[1]);
     }
 
     #[test]

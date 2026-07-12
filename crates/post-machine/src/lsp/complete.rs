@@ -134,6 +134,10 @@ fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candida
         kind,
         replace_span,
         insert_text: label.to_string(),
+        // `detail`/`deprecated` wiring is Task 4 (`Analysis.docs`-backed);
+        // this task only adds the fields mechanically.
+        detail: None,
+        deprecated: false,
     }
 }
 

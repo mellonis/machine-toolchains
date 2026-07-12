@@ -32,6 +32,9 @@ pub struct ServiceDiagnostic {
     pub source: &'static str,
     pub code: Option<&'static str>,
     pub message: String,
+    /// Renders as `DiagnosticTag.Deprecated` (wire `"tags":[2]`) when
+    /// true; the field is omitted from the wire entirely when false.
+    pub deprecated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,12 @@ pub struct Candidate {
     pub kind: CandidateKind,
     pub replace_span: Span,
     pub insert_text: String,
+    /// Short extra text shown alongside the label (wire `detail`); `None`
+    /// omits the field entirely.
+    pub detail: Option<String>,
+    /// Renders as `CompletionItemTag.Deprecated` (wire `"tags":[1]`) when
+    /// true; the field is omitted from the wire entirely when false.
+    pub deprecated: bool,
 }
 
 /// Definition target; `uri` may name a document other than the requester
@@ -109,6 +118,14 @@ pub struct SemToken {
     pub modifiers: u32,
 }
 
+/// The result of a `hover` request: plain-text content (no markdown
+/// interpretation in v1) plus the span it describes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverContent {
+    pub text: String,
+    pub span: Span,
+}
+
 /// The seam a language plugs into the framework through (docs/lsp.md).
 /// Core's server loop (a later task) drives every LSP-visible behavior
 /// exclusively through this trait — it carries no language- or architecture-specific
@@ -134,6 +151,8 @@ pub trait LanguageService {
     fn did_change_config(&mut self, settings: serde_json::Value);
     fn completion(&mut self, uri: &str, pos: Pos) -> Vec<Candidate>;
     fn definition(&mut self, uri: &str, pos: Pos) -> Option<DefTarget>;
+    /// Plain-text content at `pos`, or `None` (nothing to show).
+    fn hover(&mut self, uri: &str, pos: Pos) -> Option<HoverContent>;
     fn code_actions(&mut self, uri: &str, span: Span) -> Vec<Action>;
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>>;
     fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>>;
@@ -148,8 +167,8 @@ pub trait LanguageService {
 #[cfg(test)]
 pub(crate) mod fake {
     use super::{
-        Action, Candidate, CandidateKind, DefTarget, LanguageService, ServiceDiagnostic,
-        ServiceSeverity, SymbolNode, SymbolNodeKind,
+        Action, Candidate, CandidateKind, DefTarget, HoverContent, LanguageService,
+        ServiceDiagnostic, ServiceSeverity, SymbolNode, SymbolNodeKind,
     };
     use crate::diagnostics::{Edit, Pos, Span};
     use crate::lsp::SemToken;
@@ -243,6 +262,7 @@ pub(crate) mod fake {
                     source: "fake",
                     code: Some("bad-word"),
                     message: format!("bad word (config rev {})", self.config_revision),
+                    deprecated: false,
                 })
                 .collect()
         }
@@ -275,6 +295,8 @@ pub(crate) mod fake {
                     end: pos,
                 },
                 insert_text: "alpha".to_string(),
+                detail: None,
+                deprecated: false,
             }]
         }
 
@@ -292,6 +314,21 @@ pub(crate) mod fake {
                     // LocationLink response shape.
                     origin: Some(span),
                 })
+        }
+
+        /// A canned, unconditional `Some` (docs/lsp.md) — enough to let
+        /// the server-loop hover tests exercise the wire shape without the
+        /// fixture needing any content-dependent logic; the `null` half of
+        /// that contract is exercised by a service whose `hover` answers
+        /// `None` instead (server-loop tests, not this fixture).
+        fn hover(&mut self, _uri: &str, pos: Pos) -> Option<HoverContent> {
+            Some(HoverContent {
+                text: "fake hover text".to_string(),
+                span: Span {
+                    start: pos,
+                    end: pos,
+                },
+            })
         }
 
         fn code_actions(&mut self, uri: &str, span: Span) -> Vec<Action> {
@@ -385,6 +422,7 @@ mod tests {
                     source: "fake",
                     code: Some("bad-word"),
                     message: "bad word (config rev 0)".to_string(),
+                    deprecated: false,
                 },
                 ServiceDiagnostic {
                     span: Span::new(1, 5, 1, 8),
@@ -392,6 +430,7 @@ mod tests {
                     source: "fake",
                     code: Some("bad-word"),
                     message: "bad word (config rev 0)".to_string(),
+                    deprecated: false,
                 },
             ]
         );
@@ -460,6 +499,8 @@ mod tests {
                     end: pos
                 },
                 insert_text: "alpha".to_string(),
+                detail: None,
+                deprecated: false,
             }]
         );
     }
@@ -488,6 +529,23 @@ mod tests {
         assert_eq!(
             service.definition("file:///a.fake", Pos { line: 1, col: 1 }),
             None
+        );
+    }
+
+    #[test]
+    fn hover_returns_the_canned_content_at_the_cursor() {
+        let mut service = FakeService::new();
+        let pos = Pos { line: 2, col: 4 };
+
+        assert_eq!(
+            service.hover("file:///a.fake", pos),
+            Some(HoverContent {
+                text: "fake hover text".to_string(),
+                span: Span {
+                    start: pos,
+                    end: pos,
+                },
+            })
         );
     }
 

@@ -28,8 +28,8 @@ use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, pa
 use mtc_core::asm::{AsmError, Flow, SyntaxEntry, format_asm, lint};
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
-    Action, Candidate, DefTarget, LanguageService, SemToken, ServiceDiagnostic, ServiceSeverity,
-    SymbolNode, SymbolNodeKind,
+    Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
+    ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
 use mtc_core::vm::OperandKind;
 
@@ -96,6 +96,9 @@ fn merged_diagnostics(state: &PmaDocState) -> Vec<ServiceDiagnostic> {
             source: "pmt",
             code: Some("invalid-config"),
             message: message.clone(),
+            // `.pma` has no attribute grammar, so no channel here is
+            // ever deprecation-tagged.
+            deprecated: false,
         })
         .collect();
 
@@ -111,6 +114,7 @@ fn merged_diagnostics(state: &PmaDocState) -> Vec<ServiceDiagnostic> {
             source: "pmt",
             code: Some(fatal.kind.code()),
             message: fatal.kind.to_string(),
+            deprecated: false,
         });
         return out;
     }
@@ -121,6 +125,7 @@ fn merged_diagnostics(state: &PmaDocState) -> Vec<ServiceDiagnostic> {
         source: "pmt lint",
         code: Some(d.code),
         message: d.message.clone(),
+        deprecated: false,
     }));
     out
 }
@@ -211,6 +216,12 @@ impl LanguageService for PmaLanguageService {
     fn definition(&mut self, uri: &str, pos: Pos) -> Option<DefTarget> {
         let state = self.docs.get(uri)?;
         navigate::definition(state, uri, pos)
+    }
+
+    // `.pma` has no doc/attention-line grammar of its own — hover stays
+    // `None` permanently, not just this round (docs/lsp.md; design spec).
+    fn hover(&mut self, _uri: &str, _pos: Pos) -> Option<HoverContent> {
+        None
     }
 
     fn code_actions(&mut self, uri: &str, span: Span) -> Vec<Action> {

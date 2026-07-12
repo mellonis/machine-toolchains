@@ -111,6 +111,11 @@ fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candida
         kind,
         replace_span,
         insert_text: label.to_string(),
+        // Operand-hint `detail` is Task 5 (the #25 fold-in); `.pma` has
+        // no attribute grammar of its own, so `deprecated` stays false
+        // permanently, not just this round.
+        detail: None,
+        deprecated: false,
     }
 }
 

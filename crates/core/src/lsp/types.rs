@@ -74,6 +74,9 @@ pub struct WireDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub source: Option<String>,
     pub message: String,
+    /// See `diagnostic_tag`; omitted entirely when there are none.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tags: Option<Vec<u32>>,
 }
 
 /// The legend for semantic-token indices: parallel index-to-name tables
@@ -108,6 +111,23 @@ pub struct CodeActionOptions {
     pub code_action_kinds: Vec<String>,
 }
 
+/// `MarkupContent` restricted to the plain-text kind this server always
+/// sends (v1: no markdown rendering — docs/lsp.md).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarkupContent {
+    pub kind: String,
+    pub value: String,
+}
+
+/// Result of `textDocument/hover`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Hover {
+    pub contents: MarkupContent,
+    pub range: Range,
+}
+
 /// `semanticTokensProvider` capability options.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +145,7 @@ pub struct ServerCapabilities {
     pub text_document_sync: TextDocumentSyncOptions,
     pub completion_provider: CompletionOptions,
     pub definition_provider: bool,
+    pub hover_provider: bool,
     pub document_formatting_provider: bool,
     pub document_symbol_provider: bool,
     pub code_action_provider: CodeActionOptions,
@@ -151,6 +172,11 @@ pub struct CompletionItem {
     /// See `completion_item_kind`.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub kind: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub detail: Option<String>,
+    /// See `completion_item_tag`; omitted entirely when there are none.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub tags: Option<Vec<u32>>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub text_edit: Option<TextEdit>,
 }
@@ -367,6 +393,11 @@ pub mod diagnostic_severity {
     pub const WARNING: u32 = 2;
 }
 
+/// `Diagnostic.tags` values (LSP 3.17), bounded to what the server emits.
+pub mod diagnostic_tag {
+    pub const DEPRECATED: u32 = 2;
+}
+
 /// `CompletionItem.kind` values (LSP 3.17), bounded to what the server
 /// emits.
 pub mod completion_item_kind {
@@ -374,6 +405,12 @@ pub mod completion_item_kind {
     pub const MODULE: u32 = 9;
     pub const VALUE: u32 = 12;
     pub const KEYWORD: u32 = 14;
+}
+
+/// `CompletionItem.tags` values (LSP 3.17), bounded to what the server
+/// emits.
+pub mod completion_item_tag {
+    pub const DEPRECATED: u32 = 1;
 }
 
 /// `DocumentSymbol.kind` values (LSP 3.17), bounded to what the server
@@ -400,6 +437,7 @@ mod tests {
                 trigger_characters: vec!["@".to_string()],
             },
             definition_provider: true,
+            hover_provider: true,
             document_formatting_provider: true,
             document_symbol_provider: true,
             code_action_provider: CodeActionOptions {
@@ -422,6 +460,7 @@ mod tests {
                 "textDocumentSync": {"openClose": true, "change": 1},
                 "completionProvider": {"triggerCharacters": ["@"]},
                 "definitionProvider": true,
+                "hoverProvider": true,
                 "documentFormattingProvider": true,
                 "documentSymbolProvider": true,
                 "codeActionProvider": {"codeActionKinds": ["quickfix"]},
@@ -515,6 +554,7 @@ mod tests {
             code: None,
             source: None,
             message: "oops".to_string(),
+            tags: None,
         };
 
         let got = serde_json::to_value(&diag).unwrap();
@@ -527,6 +567,61 @@ mod tests {
                 },
                 "message": "oops",
             })
+        );
+    }
+
+    #[test]
+    fn wire_diagnostic_with_the_deprecated_tag_serializes_the_tags_array() {
+        let diag = WireDiagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: None,
+            code: None,
+            source: None,
+            message: "old".to_string(),
+            tags: Some(vec![diagnostic_tag::DEPRECATED]),
+        };
+
+        let got = serde_json::to_value(&diag).unwrap();
+        assert_eq!(got["tags"], json!([2]));
+    }
+
+    #[test]
+    fn completion_item_with_no_detail_or_tags_omits_both_keys() {
+        let item = CompletionItem {
+            label: "alpha".to_string(),
+            kind: None,
+            detail: None,
+            tags: None,
+            text_edit: None,
+        };
+
+        let got = serde_json::to_value(&item).unwrap();
+        assert_eq!(got, json!({"label": "alpha"}));
+    }
+
+    #[test]
+    fn completion_item_with_detail_and_deprecated_tag_serializes_both() {
+        let item = CompletionItem {
+            label: "old".to_string(),
+            kind: None,
+            detail: Some("ns::old".to_string()),
+            tags: Some(vec![completion_item_tag::DEPRECATED]),
+            text_edit: None,
+        };
+
+        let got = serde_json::to_value(&item).unwrap();
+        assert_eq!(
+            got,
+            json!({"label": "old", "detail": "ns::old", "tags": [1]})
         );
     }
 

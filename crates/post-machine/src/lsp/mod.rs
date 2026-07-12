@@ -11,8 +11,8 @@ use std::time::SystemTime;
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Pos, Span};
 use mtc_core::lsp::{
-    Action, Candidate, DefTarget, LanguageService, SemToken, ServiceDiagnostic, ServiceSeverity,
-    SymbolNode, SymbolNodeKind,
+    Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
+    ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
 
 use crate::compiler::{Analysis, CompileError, ScopeSummary, analyze_staged};
@@ -255,6 +255,9 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
             source: "pmt",
             code: Some("invalid-config"),
             message: message.clone(),
+            // Deprecation tagging is Task 4's `deprecated-call` wiring;
+            // every other finding channel stays untagged here.
+            deprecated: false,
         })
         .collect();
 
@@ -269,6 +272,7 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
             source: "pmt",
             code: Some(fatal.kind.code()),
             message: fatal.kind.to_string(),
+            deprecated: false,
         });
         return out;
     }
@@ -281,6 +285,7 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
             source: "pmt",
             code: Some(d.code),
             message: d.message.clone(),
+            deprecated: false,
         }));
     }
     if let Some(lint) = &state.lint {
@@ -290,6 +295,7 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
             source: "pmt lint",
             code: Some(d.code),
             message: d.message.clone(),
+            deprecated: false,
         }));
     }
     // Stable sort: equal starts keep the warnings-then-lint channel order.
@@ -468,6 +474,13 @@ impl LanguageService for PmcLanguageService {
     fn definition(&mut self, uri: &str, pos: Pos) -> Option<DefTarget> {
         let state = self.docs.get(uri)?;
         navigate::definition(state, uri, pos)
+    }
+
+    // consumer: pmc hover (next task) — the framework-level plumbing
+    // (trait method, wire shape) lands this task; real content (call
+    // sites, declarations, `use` paths, `Analysis.docs`) is Task 4.
+    fn hover(&mut self, _uri: &str, _pos: Pos) -> Option<HoverContent> {
+        None
     }
 
     fn code_actions(&mut self, uri: &str, span: Span) -> Vec<Action> {
