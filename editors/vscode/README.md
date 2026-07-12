@@ -271,7 +271,8 @@ UNUSED: nop
       label (the `unused-label` lint finding). Open the lightbulb / Quick
       Fix menu and apply the fix — unlike `.pmc`'s gated `leftover-debugger`
       fix, this one is machine-applicable, so it should be the single
-      default action. Confirm the `UNUSED: nop` line is deleted.
+      default action. Confirm only the `UNUSED:` label is removed, leaving
+      `nop` behind (and the warning disappears).
 - [ ] **Go-to-definition**: invoke it on the `L1` operand in `jm L1`
       (inside `goToEnd`). Confirm it jumps to the `L1:` label definition
       on the line directly above, in the same file — `.pma` has no
