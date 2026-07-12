@@ -257,7 +257,7 @@ main() {
       steps 12, core tacts 32, stall tacts 8 (total 40)
       origin 1, head 2
       |* *|
-       ^
+        ^
 
       Process finished with exit code 2
       ```
