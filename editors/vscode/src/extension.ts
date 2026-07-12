@@ -14,7 +14,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const serverOptions: ServerOptions = { command: pmtPath, args: ['lsp'] };
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ language: 'pmc' }],
+    documentSelector: [{ language: 'pmc' }, { language: 'pma' }],
     // Forwards the whole `pmt` section as workspace/didChangeConfiguration
     // ({ settings: { pmt: {...} } }) at startup and live on change — the
     // server unwraps the `pmt` key.
@@ -57,13 +57,18 @@ class PmtTaskProvider implements vscode.TaskProvider {
   constructor(private pmtPath: string) {}
   provideTasks(): vscode.Task[] {
     const doc = vscode.window.activeTextEditor?.document;
-    if (!doc || doc.languageId !== 'pmc') { return []; }
+    if (!doc || (doc.languageId !== 'pmc' && doc.languageId !== 'pma')) { return []; }
     const file = doc.uri.fsPath;
-    return [
-      this.task('compile', ['compile', file], file),
+    const tasks = [
       this.task('lint', ['lint', file], file),
       this.task('fmt-check', ['fmt', '--check', file], file),
     ];
+    // `compile` stays .pmc-only — a .pma file assembles via `pmt asm`,
+    // which this v1 task provider doesn't offer (see the README).
+    if (doc.languageId === 'pmc') {
+      tasks.unshift(this.task('compile', ['compile', file], file));
+    }
+    return tasks;
   }
   resolveTask(task: vscode.Task): vscode.Task | undefined {
     const def = task.definition as unknown as vscode.TaskDefinition & { command: string; file?: string };

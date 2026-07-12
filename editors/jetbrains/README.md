@@ -252,6 +252,80 @@ Process finished with exit code 2
       mtc-post-machine --lib lsp` already covers on the server side
       alone.
 
+### `.pma` checklist
+
+`pmt lsp` serves `.pma`, the PM-1 assembly dialect, through the same
+process and connection as `.pmc` above (`docs/lsp.md`, "Languages") — walk
+this checklist in the same IDE session as the `.pmc` one above, without
+restarting the IDE, so the last step below has something to confirm. The
+`PmaFileType`/`editorHighlighterProvider`/`fileTypeMapping` wiring in
+`plugin.xml` is new and, like `.pmc`'s coloring bridge above, has only
+been compile-verified, never observed at runtime — check coloring first.
+
+Create a second scratch file, e.g. `check.pma`:
+
+```pma
+.func goToEnd
+L1: rgt
+    jm L1
+    lft
+    ret
+
+.func main
+    call goToEnd
+UNUSED: nop
+    rgt
+    wr 1
+    stp
+```
+
+- [ ] **Coloring — check this FIRST.** Open `check.pma`. Confirm syntax
+      colors appear (the `.func` directive, mnemonics, the `L1`/`UNUSED`
+      labels, a `;` comment if you add one) rather than plain uncolored
+      text — the same `editorHighlighterProvider`-restores-TextMate bridge
+      as `.pmc`, now wired for the `PMA` file type too. If colors are
+      missing, that bridge needs attention before anything below is worth
+      testing.
+- [ ] **Typo mnemonic**: change `jm L1` to `jpm L1`. Confirm a warning
+      underline on `jpm` carrying the `unknown-mnemonic` code. **Undo**
+      the typo back to `jm L1` before continuing — per `docs/lsp.md`, a
+      fatal error hides lint findings entirely on the `.pma` side (no
+      separate compile-warning channel), so the next step needs a clean
+      assemble to have anything to show.
+- [ ] **Unused label + quickfix**: confirm a warning underline on the
+      `UNUSED:` label (the `unused-label` lint finding). Open the
+      intention menu (Alt+Enter / ⌥Enter) and apply the fix — unlike
+      `.pmc`'s gated `leftover-debugger` fix, this one is machine-
+      applicable, so it should be the single default action. Confirm the
+      `UNUSED: nop` line is deleted.
+- [ ] **Go-to-definition**: invoke it (Go to Declaration) on the `L1`
+      operand in `jm L1` (inside `goToEnd`). Confirm it jumps to the `L1:`
+      label definition on the line directly above, in the same file —
+      `.pma` has no external/materialized target the way `.pmc`'s
+      `std::` calls do.
+- [ ] **Outline**: open the Structure tool window (⌘7 / Alt+7, or **File
+      Structure…**). Confirm it shows `goToEnd` and `main` as functions,
+      each containing its labels as children (`L1` under `goToEnd`;
+      `UNUSED` under `main`, until the previous step deleted it).
+- [ ] **Reformat**: Code → Reformat Code. Confirm the file snaps to the
+      canonical column grid — labels at column 0, mnemonics at column 8,
+      operands at column 16 (`docs/formats.md`, "assembly text") — turning
+      the scratch file's loose indentation into aligned columns.
+- [ ] **Raw-line paste**: replace the `stp` line with this
+      `pmt dis --listing`-shaped row (address, raw hex bytes, resolved
+      call target — not reassembleable input):
+      ```
+        0004:  21 05 00 00 00  call    0x0005 <goToEnd>
+      ```
+      Confirm a fatal error with the `raw-line` code — the line isn't
+      assembly-shaped at all. Undo the paste to restore `stp`.
+- [ ] **`.pmc` still works**: switch back to (or reopen) `check.pmc` from
+      the checklist above, still in this same project/session. Confirm
+      its diagnostics (the `leftover-debugger` squiggle) are still live —
+      opening and editing `.pma` documents never perturbed the `.pmc`
+      service, per `docs/lsp.md`'s "one process, two independent language
+      services."
+
 ## License
 
 GPL-3.0-or-later, same as the rest of this repository (see `LICENSE`).

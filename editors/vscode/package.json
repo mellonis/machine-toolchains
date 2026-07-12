@@ -2,7 +2,7 @@
   "name": "pmc",
   "displayName": "PMC (Post machine toolchain)",
   "description": "Language support for .pmc via pmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "mellonis",
   "license": "GPL-3.0-or-later",
   "repository": {
@@ -12,15 +12,21 @@
   "engines": { "vscode": "^1.91.0" },
   "categories": ["Programming Languages"],
   "main": "./out/extension.js",
-  "activationEvents": ["onLanguage:pmc", "onTaskType:pmt"],
+  "activationEvents": ["onLanguage:pmc", "onLanguage:pma", "onTaskType:pmt"],
   "contributes": {
     "languages": [{
       "id": "pmc", "extensions": [".pmc"], "aliases": ["PMC"],
       "configuration": "./language-configuration.json"
+    }, {
+      "id": "pma", "extensions": [".pma"], "aliases": ["PMA"],
+      "configuration": "./language-configuration-pma.json"
     }],
     "grammars": [{
       "language": "pmc", "scopeName": "source.pmc",
       "path": "./syntaxes/pmc.tmLanguage.json"
+    }, {
+      "language": "pma", "scopeName": "source.pma",
+      "path": "./syntaxes/pma.tmLanguage.json"
     }],
     "configuration": {
       "title": "pmt",

@@ -29,12 +29,16 @@ dependencies {
     }
 }
 
-// Single-sourcing: the shared grammar rides into the bundle dir at build —
-// no second copy is ever committed. See
+// Single-sourcing: the shared grammars ride into their bundle dirs at
+// build — no second copy is ever committed. See
 // docs/superpowers/plans/2026-07-10-lsp-plan3-editor-shells.md.
 tasks.processResources {
     from("../grammars") {
         include("pmc.tmLanguage.json")
         into("textmate/pmc")
+    }
+    from("../grammars") {
+        include("pma.tmLanguage.json")
+        into("textmate/pma")
     }
 }

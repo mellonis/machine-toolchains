@@ -12,6 +12,8 @@
     <extensions defaultExtensionNs="com.intellij">
         <fileType name="PMC" implementationClass="ru.mellonis.pmc.PmcFileType"
                   fieldName="INSTANCE" extensions="pmc"/>
+        <fileType name="PMA" implementationClass="ru.mellonis.pmc.PmaFileType"
+                  fieldName="INSTANCE" extensions="pma"/>
         <textmate.bundleProvider implementation="ru.mellonis.pmc.PmcTextMateBundleProvider"/>
         <!--
           A plugin-registered fileType otherwise pre-empts TextMate's own
@@ -26,6 +28,8 @@
         -->
         <editorHighlighterProvider filetype="PMC"
                                     implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+        <editorHighlighterProvider filetype="PMA"
+                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
         <notificationGroup id="ru.mellonis.pmc" displayType="BALLOON"/>
         <postStartupActivity implementation="ru.mellonis.pmc.PmtVersionCheck"/>
         <applicationService serviceImplementation="ru.mellonis.pmc.PmtSettings"/>
@@ -38,5 +42,6 @@
         <server id="pmtLsp" name="pmt lsp"
                 factoryClass="ru.mellonis.pmc.PmtLanguageServerFactory"/>
         <fileTypeMapping fileType="PMC" serverId="pmtLsp" languageId="pmc"/>
+        <fileTypeMapping fileType="PMA" serverId="pmtLsp" languageId="pma"/>
     </extensions>
 </idea-plugin>

@@ -1,22 +1,24 @@
 # PMC — Post-machine toolchain support for VS Code
 
 Language support for `.pmc`, the C-like source language of the Post-machine
-toolchain in this repository. This extension is a thin client: it launches
-`pmt lsp` and renders whatever the server reports — diagnostics, completions,
-go-to-definition, quickfixes, semantic tokens, document symbols, and
-formatting — over the standard Language Server Protocol. Nothing here is a
-reimplementation; every answer comes from the same compiler, linter, and
-formatter the `pmt` command-line tool uses.
+toolchain in this repository, and `.pma`, its PM-1 assembly dialect. This
+extension is a thin client: it launches `pmt lsp` and renders whatever the
+server reports — diagnostics, completions, go-to-definition, quickfixes,
+semantic tokens, document symbols, and formatting — over the standard
+Language Server Protocol. Nothing here is a reimplementation; every answer
+comes from the same compiler, assembler, linter, and formatter the `pmt`
+command-line tool uses. `.pma` support is currently syntax highlighting +
+the full `pmt lsp` surface + the `lint`/`fmt-check` tasks below — see the
+Tasks section for the one gap (`compile`) that's `.pmc`-only.
 
 ## Requirements
 
 - A `pmt` binary reachable on `PATH`, or pointed to with the `pmt.path`
   setting (below).
-- This extension is version 0.1.0. It has been tested against `pmt` 0.1.0;
+- This extension is version 0.1.1. It has been tested against `pmt` 0.1.0;
   on activation it runs `pmt --version` and shows a warning (not a hard
   failure) if the binary reports something older. The extension's own
-  version number and the tested `pmt` version are independent numbers that
-  happen to both read 0.1.0 today.
+  version number and the tested `pmt` version are independent numbers.
 
 ## Install the server
 
@@ -45,11 +47,11 @@ npm run package
 ```
 
 `npm run package` copies in the shared `.pmc` TextMate grammar, compiles
-the extension, and runs `vsce package`, producing `pmc-0.1.0.vsix` in
+the extension, and runs `vsce package`, producing `pmc-0.1.1.vsix` in
 this directory. Install it into VS Code:
 
 ```sh
-code --install-extension pmc-0.1.0.vsix
+code --install-extension pmc-0.1.1.vsix
 ```
 
 Reload the window (or restart VS Code) after installing or upgrading.
@@ -79,6 +81,11 @@ The extension registers a task provider for the `pmt` task type. With a
 | `pmt compile` | `pmt compile <file>` |
 | `pmt lint` | `pmt lint <file>` |
 | `pmt fmt-check` | `pmt fmt --check <file>` |
+
+With a `.pma` file open, only `pmt lint` and `pmt fmt-check` are offered.
+`pmt compile` stays `.pmc`-only — a `.pma` file assembles via `pmt asm`,
+not `pmt compile`, and driving that from the task provider is out of this
+v1's scope; assemble it from a terminal instead.
 
 All three are wired to the bundled `$pmt` problem matcher, which parses
 `FILE:LINE:COL: SEVERITY: MESSAGE [code]` lines (`error`, `warning`, or
@@ -224,6 +231,73 @@ main() {
       canonically formatted. This is the editor-observed half of the
       dogfood check that `cargo test -p mtc-post-machine --lib lsp`
       already covers on the server side alone.
+
+### `.pma` checklist
+
+`pmt lsp` serves `.pma`, the PM-1 assembly dialect, through the same
+process and connection as `.pmc` above (`docs/lsp.md`, "Languages") — walk
+this checklist in the same editor session as the `.pmc` one above, without
+restarting the extension, so the last step below has something to confirm.
+
+Create a second scratch file, e.g. `check.pma`:
+
+```pma
+.func goToEnd
+L1: rgt
+    jm L1
+    lft
+    ret
+
+.func main
+    call goToEnd
+UNUSED: nop
+    rgt
+    wr 1
+    stp
+```
+
+- [ ] **Open** `check.pma`. Confirm syntax colors appear (the `.func`
+      directive, mnemonics, the `L1`/`UNUSED` labels, a `;` comment if you
+      add one) — this is the shared TextMate grammar
+      (`editors/grammars/pma.tmLanguage.json`), copied in by
+      `copy-grammar.js` alongside the `.pmc` one.
+- [ ] **Typo mnemonic**: change `jm L1` to `jpm L1`. Confirm a squiggle on
+      `jpm` carrying the `unknown-mnemonic` code. **Undo** the typo back to
+      `jm L1` before continuing — per `docs/lsp.md`, a fatal error hides
+      lint findings entirely (no separate compile-warning channel on the
+      `.pma` side), so the next step needs a clean assemble to have
+      anything to show.
+- [ ] **Unused label + quickfix**: confirm a warning on the `UNUSED:`
+      label (the `unused-label` lint finding). Open the lightbulb / Quick
+      Fix menu and apply the fix — unlike `.pmc`'s gated `leftover-debugger`
+      fix, this one is machine-applicable, so it should be the single
+      default action. Confirm the `UNUSED: nop` line is deleted.
+- [ ] **Go-to-definition**: invoke it on the `L1` operand in `jm L1`
+      (inside `goToEnd`). Confirm it jumps to the `L1:` label definition
+      on the line directly above, in the same file — `.pma` has no
+      external/materialized target the way `.pmc`'s `std::` calls do.
+- [ ] **Outline**: open the Outline view (or **Go to Symbol in
+      Editor…**). Confirm it shows `goToEnd` and `main` as functions, each
+      containing its labels as children (`L1` under `goToEnd`; `UNUSED`
+      under `main`, until the previous step deleted it).
+- [ ] **Format Document**: run it. Confirm the file snaps to the
+      canonical column grid — labels at column 0, mnemonics at column 8,
+      operands at column 16 (`docs/formats.md`, "assembly text") — turning
+      the scratch file's loose indentation into aligned columns.
+- [ ] **Raw-line paste**: replace the `stp` line with this
+      `pmt dis --listing`-shaped row (address, raw hex bytes, resolved
+      call target — not reassembleable input):
+      ```
+        0004:  21 05 00 00 00  call    0x0005 <goToEnd>
+      ```
+      Confirm a fatal error with the `raw-line` code — the line isn't
+      assembly-shaped at all. Undo the paste to restore `stp`.
+- [ ] **`.pmc` still works**: switch back to (or reopen) `check.pmc` from
+      the checklist above, still in this same window/session. Confirm its
+      diagnostics (the `leftover-debugger` squiggle) are still live —
+      opening and editing `.pma` documents never perturbed the `.pmc`
+      service, per `docs/lsp.md`'s "one process, two independent language
+      services."
 
 ## License
 
