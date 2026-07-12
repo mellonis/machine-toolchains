@@ -22,8 +22,12 @@ pub const RESERVED: [&str; 8] = [
 /// No patch digit — spec-text corrections are errata;
 /// implementation-conformance fixes live in the crate changelog. The
 /// sigil-adjacency, reserved-path, and empty-builtin-parens tightenings
-/// made this 0.2 (the v1 grammar is retroactively 0.1).
-pub const PMC_LANG_VERSION: &str = "0.2";
+/// made this 0.2 (the v1 grammar is retroactively 0.1). Doc lines (`?`)
+/// and attention lines (`!`) — plus the accompanying acceptance change
+/// that a line-leading `!` is always an attention line, never a
+/// successor — made this 0.3 (docs/language.md "Doc lines and attention
+/// lines").
+pub const PMC_LANG_VERSION: &str = "0.3";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -2801,5 +2805,48 @@ main() { right; }
     fn undocumented_function_has_no_doc() {
         let prog = parse_src("main() { right; }").unwrap();
         assert_eq!(prog.functions[0].doc, None);
+    }
+
+    // WARM-UP pins (T3 review carry-overs, Task 4): `reduce_doc_run`
+    // edge shapes not exercised by any T3 test.
+
+    /// A run made of nothing but empty `?` lines is still non-empty at
+    /// the CST level (bare sigils were written), so `Function.doc` is
+    /// `Some` — but every `FnDoc` field is empty, since an empty `?`
+    /// line only ever closes a paragraph, never starts one.
+    #[test]
+    fn fn_doc_a_run_of_only_empty_doc_lines_is_some_with_every_field_empty() {
+        let prog = parse_src("?\n?\nmain() { right; }").unwrap();
+        assert_eq!(
+            prog.functions[0].doc,
+            Some(FnDoc {
+                paragraphs: vec![],
+                attention: vec![],
+                deprecated: None,
+            })
+        );
+    }
+
+    /// TWO consecutive empty `?` lines between paragraphs collapse the
+    /// same as one: the paragraph-flush check guards on `current` being
+    /// non-empty, so the second empty line finds nothing left to flush
+    /// and is a no-op — no stray empty paragraph appears between "a" and
+    /// "b".
+    #[test]
+    fn fn_doc_a_double_empty_separator_still_yields_exactly_two_paragraphs() {
+        let prog = parse_src("? a\n?\n?\n? b\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["a", "b"]);
+    }
+
+    /// Whitespace between `[deprecated]`'s closing `]` and its message is
+    /// trimmed, not preserved verbatim: `reduce_doc_run` slices past `]`
+    /// and calls `.trim()`, so two (or more) interior spaces collapse
+    /// away just like a single one would.
+    #[test]
+    fn fn_doc_deprecated_message_trims_whitespace_after_the_attribute() {
+        let prog = parse_src("! [deprecated]  two spaces\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.deprecated, Some("two spaces".to_string()));
     }
 }

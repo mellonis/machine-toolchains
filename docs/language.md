@@ -1,6 +1,6 @@
 # The `.pmc` language reference
 
-The `.pmc` language version is **0.2** (pre-1.0: the version is `0.N` and `N`
+The `.pmc` language version is **0.3** (pre-1.0: the version is `0.N` and `N`
 bumps on any grammar change; at a declared 1.0 the axes activate — major =
 breaking acceptance change, minor = additive syntax; no patch digit —
 spec-text corrections are errata, implementation-conformance fixes live in
@@ -189,6 +189,108 @@ segments from nesting segments; the separators alone are enough. This
 grammar is shared with `.pmo` symbol names and `.pma` `.func`/call operands
 (`docs/formats.md (assembly text)`).
 
+## Doc lines and attention lines
+
+A line whose first non-whitespace character is `?` or `!` lexes as one
+token — a **doc line** or an **attention line** — consuming the rest of
+the line as raw text. The rule is purely positional (first
+non-whitespace column of the line), independent of where in the grammar
+that line falls. Such a line is legal only at **item position** — top
+level, or directly inside a function body, the same positions a function
+declaration or a statement can start — where it begins a run (below).
+Anywhere else a line starts with `?` or `!`, the token still lexes that
+way, but it is then a compile error wherever it surfaces — most notably
+a successor or check-arm `!` wrapped onto its own line (see "Acceptance
+change" below). `!` that is NOT the first non-whitespace character of
+its line is unaffected — it stays the ordinary successor/check-arm token
+(see Statements above); `?` that is not line-leading is still a lex
+error, exactly as before this grammar existed.
+
+```c
+? Move the head right to the first blank cell.
+? Leaves the head parked one cell past the last mark.
+! [deprecated] use goToBlank instead
+goToEnd() {
+ 1: right;
+    check(1, 2);
+ 2: left;
+}
+```
+
+### Run shape and attachment
+
+A **run** is at most two contiguous blocks, in a fixed order: an
+optional `?` block, then an optional `!` block (at least one line
+total). A `?` line reached after the run has already entered its `!`
+block — whether by interleaving the two sigils or by writing the whole
+run backwards, `!` lines before `?` lines — is a compile error.
+
+The run binds to the NEXT function declaration at the same scope,
+including a nested function declared inside a body. Blank lines and
+ordinary comments (`//` or `/* ... */`) may appear within the run and
+between the run's last line and the declaration without breaking the
+attachment. A run not immediately followed by a function declaration —
+end of scope, a plain statement, `use`, `namespace`, or anything else
+that isn't a function declaration — is a compile error, reported at the
+run's own first line. Namespaces and `use` imports cannot be documented
+in v1; a run written before one is dangling like any other non-function
+target.
+
+```c
+main() {
+    ? binds to step — blank lines and comments between the run
+    ? and the declaration don't break the attachment
+
+    // a comment is fine here too
+    step() { right; }
+    @step();
+}
+```
+
+### The `[deprecated]` attribute
+
+An attention line optionally starts with a bracketed identifier,
+`! [ident] rest of the line`; without one, the whole line is free prose.
+v1 accepts exactly one attribute name, `deprecated` — any other
+bracketed identifier is a compile error at the identifier's own span.
+Everything after the closing `]` is the attribute's message, with
+leading and trailing whitespace trimmed (the message may be empty). At
+most one `[deprecated]` line may appear in a run; a second is a compile
+error, reported at the second occurrence. A bracket that doesn't sit at
+the very start of the line's text (`! see [deprecated] docs`) is not an
+attribute at all — the whole line is bare prose.
+
+### Paragraph semantics and prose
+
+Consecutive `?` lines join, in order, into one paragraph, separated by a
+single space; an empty `?` line ends the current paragraph without
+starting an empty one, so leading, trailing, and repeated empty `?`
+lines are all absorbed with no blank paragraphs left behind. Doc and
+attention text is plain prose: v1 does not interpret markdown or any
+other markup inside it — the text is stored and carried verbatim, so a
+markdown subset could be declared for a later version without any
+grammar change.
+
+### Acceptance change: a line-leading `!` is always an attention line
+
+The sigil rule keys only on a line's first non-whitespace column, not on
+whether a paren group is still open, so a `!` that starts its own line
+is an attention line even inside a hand-wrapped multi-line call:
+
+```c
+// no longer accepted — the `!` starts its own line
+check(
+    1,
+    !
+);
+```
+
+This shape used to parse as `check`'s return arm; as of 0.3 it is a
+parse error, because a line-leading `!` is positionally an attention
+line regardless of context. Keeping the successor on the same line as a
+preceding token — `1, !` rather than a bare `!` alone on its own line —
+avoids the sigil rule entirely and keeps the successor legal.
+
 ## Optimization
 
 **Fall-through layout is a baseline, not a pass:** even at `-O0`, the code
@@ -254,3 +356,13 @@ See `docs/formats.md (IR JSON)` for the JSON shape and version number.
   (`left();`) becoming a syntax error — parens on a builtin, if present,
   must carry a successor. Call parens (`@f();`) are unaffected by the
   last one.
+- **0.3** — adds `?` doc lines and `!` attention lines as real grammar
+  (see "Doc lines and attention lines" above): a run of `?` lines
+  followed by `!` lines binds to the next function declaration,
+  `[deprecated]` is the v1 attribute vocabulary, and four new compile
+  errors enforce run order, attachment, and the attribute vocabulary.
+  Bundled into the same version bump is one acceptance change to
+  existing syntax: a `!` that starts its own line is now always an
+  attention line, never a successor or check-arm return — a
+  hand-wrapped multi-line call that put the closing `!` on its own
+  line, previously legal, is now a parse error.
