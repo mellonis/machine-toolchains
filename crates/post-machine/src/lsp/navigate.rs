@@ -9,7 +9,7 @@
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::DefTarget;
 
-use crate::compiler::Resolution;
+use crate::compiler::{Analysis, Resolution};
 use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
 use crate::parser::{CheckArm, Item, Successor};
 use crate::stdlib::{materialized_std_uri, roster};
@@ -59,7 +59,7 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
         });
     }
 
-    if let Some((full_path, origin)) = std_use_path_at(&cst.items, pos) {
+    if let Some((full_path, origin)) = use_path_at(&cst.items, pos) {
         return std_target(&full_path, origin);
     }
 
@@ -101,11 +101,19 @@ fn resolve_call(uri: &str, resolution: &Resolution, origin: Span) -> Option<DefT
     }
 }
 
-/// A `std::…` full path through the materialized roster: a roster miss
-/// or a materializer IO failure both degrade to `None` (docs/lsp.md
-/// (materialized stdlib)). `origin` is the reference span in the
-/// requesting document, carried through unconditionally.
+/// A `std::…` full path through the materialized roster: a non-`std`
+/// path, a roster miss, or a materializer IO failure all degrade to
+/// `None` (docs/lsp.md (materialized stdlib)). `origin` is the
+/// reference span in the requesting document, carried through
+/// unconditionally. The `std::` guard matters now that [`use_path_at`]
+/// returns EVERY path, not just std-prefixed ones (hover's own use of
+/// it, below) — without it, a local (non-std) path would still miss
+/// (the roster has no non-std entries) but only after paying for a
+/// materialization attempt first.
 fn std_target(full_path: &str, origin: Span) -> Option<DefTarget> {
+    if !full_path.starts_with("std::") {
+        return None;
+    }
     let uri = materialized_std_uri()?;
     let entry = roster().iter().find(|e| e.full_path == full_path)?;
     Some(DefTarget {
@@ -232,23 +240,27 @@ fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
     None
 }
 
-/// Step 3: `pos` inside a `use std::…` path's span → its joined full
-/// path (`"std::goToEnd"`) plus the path's own span (`UsePath.span`),
-/// the origin. Searched recursively through namespace blocks — imports
-/// are legal at any nesting level.
-fn std_use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
+/// Step 3: `pos` inside a `use …` path's span → its joined full path
+/// (`"std::goToEnd"`, `"ns::helper"`) plus the path's own span
+/// (`UsePath.span`), the origin. Searched recursively through namespace
+/// blocks — imports are legal at any nesting level. Every path is
+/// returned, not just `std::…` ones: [`definition`]'s own caller
+/// ([`std_target`]) already degrades a non-std path to `None` on its
+/// own (the roster lookup misses), and hover's caller (`mod.rs`) looks
+/// up whatever qualified name comes back in `Analysis.docs` — local
+/// paths included — so filtering by `std` here would just be a second,
+/// redundant gate duplicating that miss.
+fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
     for item in items {
         match &item.kind {
             TopKind::Namespace(ns) => {
-                if let Some(result) = std_use_path_at(&ns.items, pos) {
+                if let Some(result) = use_path_at(&ns.items, pos) {
                     return Some(result);
                 }
             }
             TopKind::Import(use_cst) => {
                 for path in &use_cst.paths {
-                    if span_contains(path.span, pos)
-                        && path.path.first().map(String::as_str) == Some("std")
-                    {
+                    if span_contains(path.span, pos) {
                         return Some((path.path.join("::"), path.span));
                     }
                 }
@@ -257,6 +269,82 @@ fn std_use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
         }
     }
     None
+}
+
+/// Hover's own position→target resolution (docs/lsp.md (hover)): the
+/// documented target's fully-qualified name — `Analysis.docs`' own key
+/// form — plus the origin span of the reference under the cursor.
+/// Shares every WALK [`definition`] uses (the resolution table, and
+/// [`use_path_at`] above) instead of re-walking the CST a second time;
+/// only the OUTPUT shape differs (a name here, a `DefTarget` location
+/// there). Step order:
+///
+/// 1. a resolution-table entry whose span contains `pos` (a call site),
+///    resolved to a name via [`resolution_qualified_name`];
+/// 2. failing that, a function's OWN declaration name — hover-only
+///    (`definition` never needs to resolve a position sitting ON a
+///    definition: the location IS the definition already). Every
+///    flattened function's `name` IS the qualified form `Analysis.docs`
+///    is keyed by, and its `name_span` survives flatten unchanged;
+/// 3. failing that, a `use …` path segment, via [`use_path_at`] —
+///    generalized beyond std, since a qualified name is enough for a
+///    doc lookup even when there's no on-disk location to jump to;
+/// 4. otherwise `None`.
+///
+/// Analysis-tier, same as `definition`: every query degrades to `None`
+/// once `DocState::analysis` is `None`. Doc-map lookup, the
+/// content-emptiness gate, and rendering are `mod.rs`'s job — this
+/// function only ever answers a NAME, never doc content.
+pub(super) fn hover_target(state: &DocState, pos: Pos) -> Option<(String, Span)> {
+    let analysis = state.analysis.as_ref()?;
+
+    if let Some((origin, resolution)) = analysis
+        .resolutions
+        .iter()
+        .find(|(span, _)| span_contains(*span, pos))
+    {
+        let name = resolution_qualified_name(analysis, resolution)?;
+        return Some((name, *origin));
+    }
+
+    if let Some(f) = analysis
+        .ast
+        .functions
+        .iter()
+        .find(|f| span_contains(f.name_span, pos))
+    {
+        return Some((f.name.clone(), f.name_span));
+    }
+
+    let cst = state.cst.as_ref()?;
+    use_path_at(&cst.items, pos)
+}
+
+/// The fully-qualified name a step-1 [`Resolution`] ultimately names —
+/// as opposed to [`resolve_call`]'s go-to-definition SHAPE (a
+/// `DefTarget` location). `Resolution::Local` only carries
+/// `def_name_span` (a name would be redundant with the `DefTarget.span`
+/// a go-to-definition query needs — see `compiler.rs::flatten`'s
+/// post-pass comment); hover needs the NAME instead, recovered by a
+/// plain linear scan over this document's own flattened functions —
+/// small, no caching warranted, and exactly mirrors the CONTAINS scan
+/// `hover_target`'s step 2 already does, just with span EQUALITY
+/// instead (the target IS some function's own `name_span`, exactly).
+/// `ImportBinding`/`QualifiedExternal` already carry the qualified
+/// string verbatim (mangling never touches an external path);
+/// `Unresolved` has no target at all.
+fn resolution_qualified_name(analysis: &Analysis, resolution: &Resolution) -> Option<String> {
+    match resolution {
+        Resolution::Local { def_name_span } => analysis
+            .ast
+            .functions
+            .iter()
+            .find(|f| f.name_span == *def_name_span)
+            .map(|f| f.name.clone()),
+        Resolution::ImportBinding { full_path, .. } => Some(full_path.clone()),
+        Resolution::QualifiedExternal { full_path } => Some(full_path.clone()),
+        Resolution::Unresolved => None,
+    }
 }
 
 #[cfg(test)]

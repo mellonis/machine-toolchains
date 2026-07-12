@@ -38,7 +38,7 @@
 //! only this file's scopes and the embedded stdlib roster ever
 //! contribute a candidate).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
@@ -46,7 +46,7 @@ use mtc_core::lsp::{Candidate, CandidateKind};
 use crate::compiler::ScopeSummary;
 use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
-use crate::parser::RESERVED;
+use crate::parser::{FnDoc, RESERVED};
 use crate::stdlib::roster;
 
 use super::DocState;
@@ -72,11 +72,12 @@ pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
         let Some(scopes) = names_roster(state) else {
             return Vec::new();
         };
+        let docs = state.analysis.as_ref().map(|a| &a.docs);
         let (segments, _) = walk_path_chain(&sig, cursor_idx);
         return if segments.is_empty() {
             use_roots(scopes, replace_span)
         } else {
-            member_candidates(scopes, &segments, replace_span)
+            member_candidates(scopes, &segments, docs, replace_span)
         };
     }
 
@@ -91,7 +92,8 @@ pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
             let Some(scopes) = names_roster(state) else {
                 return Vec::new();
             };
-            member_candidates(scopes, &segments, replace_span)
+            let docs = state.analysis.as_ref().map(|a| &a.docs);
+            member_candidates(scopes, &segments, docs, replace_span)
         };
     }
 
@@ -128,16 +130,50 @@ fn names_roster(state: &DocState) -> Option<&ScopeSummary> {
         .or(state.scopes_for_completion.as_ref())
 }
 
+/// A candidate with nothing extra to say: Module/Keyword/Value kinds,
+/// and the one Function case where no qualified name is cheaply known
+/// (nested defs — see `call_candidates`' own comment). `detail` is
+/// always `None`, `deprecated` always `false`.
 fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candidate {
     Candidate {
         label: label.to_string(),
         kind,
         replace_span,
         insert_text: label.to_string(),
-        // `detail`/`deprecated` wiring is Task 4 (`Analysis.docs`-backed);
-        // this task only adds the fields mechanically.
         detail: None,
         deprecated: false,
+    }
+}
+
+/// A `Function` candidate whose target's qualified name is ALREADY
+/// known at the call site (a `ScopeSummary` map's VALUE, or a roster
+/// entry's own `full_path` — never recomputed here, per the design
+/// doc's "nothing invented"): `detail` is that qualified name when it
+/// differs from the bare `label` (a cross-namespace candidate), `None`
+/// when they're the same (an unnamespaced top-level candidate — nothing
+/// to add). `deprecated` is `Analysis.docs`' own tag, keyed by the same
+/// qualified name; `false` when `docs` is unavailable (stale-scopes
+/// completion, docs/lsp.md (staged analysis)) or the name isn't
+/// documented at all — both fall out of `Option::and_then` naturally,
+/// no special-casing (std candidates included: `docs` never has a
+/// `std::…` key yet, so they're always `deprecated: false` until a
+/// later task teaches this lookup about the stdlib).
+fn mk_function_candidate(
+    label: &str,
+    qualified: &str,
+    docs: Option<&HashMap<String, FnDoc>>,
+    replace_span: Span,
+) -> Candidate {
+    let deprecated = docs
+        .and_then(|docs| docs.get(qualified))
+        .is_some_and(|doc| doc.deprecated.is_some());
+    Candidate {
+        label: label.to_string(),
+        kind: CandidateKind::Function,
+        replace_span,
+        insert_text: label.to_string(),
+        detail: (qualified != label).then(|| qualified.to_string()),
+        deprecated,
     }
 }
 
@@ -358,8 +394,15 @@ fn push_deepest_nested<'a>(f: &'a FunctionCst, pos: Pos, chain: &mut Vec<&'a Fun
 /// the exact path (Function kind) plus child namespaces exactly one
 /// segment deeper, derived the same way `use_roots` derives roots
 /// (Module kind). Sorted by label for a deterministic result — the
-/// underlying maps are hash-ordered.
-fn member_candidates(scopes: &ScopeSummary, path: &[String], replace_span: Span) -> Vec<Candidate> {
+/// underlying maps are hash-ordered. `docs` (`None` when analysis
+/// itself is stale/absent) backs every Function candidate's
+/// `detail`/`deprecated` — see `mk_function_candidate`.
+fn member_candidates(
+    scopes: &ScopeSummary,
+    path: &[String],
+    docs: Option<&HashMap<String, FnDoc>>,
+    replace_span: Span,
+) -> Vec<Candidate> {
     if path.len() == 1 && path[0] == "std" {
         let mut out: Vec<Candidate> = roster()
             .iter()
@@ -368,7 +411,7 @@ fn member_candidates(scopes: &ScopeSummary, path: &[String], replace_span: Span)
                     .full_path
                     .strip_prefix("std::")
                     .unwrap_or(&entry.full_path);
-                mk_candidate(name, CandidateKind::Function, replace_span)
+                mk_function_candidate(name, &entry.full_path, docs, replace_span)
             })
             .collect();
         out.sort_by(|a, b| a.label.cmp(&b.label));
@@ -377,8 +420,8 @@ fn member_candidates(scopes: &ScopeSummary, path: &[String], replace_span: Span)
 
     let mut out: Vec<Candidate> = Vec::new();
     if let Some(defs) = scopes.defs.get(path) {
-        for name in defs.keys() {
-            out.push(mk_candidate(name, CandidateKind::Function, replace_span));
+        for (name, full) in defs {
+            out.push(mk_function_candidate(name, full, docs, replace_span));
         }
     }
     let mut children: BTreeSet<&str> = BTreeSet::new();
@@ -423,6 +466,7 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     let Some(scopes) = names_roster(state) else {
         return Vec::new();
     };
+    let docs = state.analysis.as_ref().map(|a| &a.docs);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<Candidate> = Vec::new();
 
@@ -430,6 +474,10 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     // outward, hoisted (a function's OWN direct BodyKind::Nested
     // children, regardless of their position relative to `pos`).
     // Unavailable without a CST — skipped, not substituted, per spec.
+    // `mk_candidate` (not `mk_function_candidate`): a nested function's
+    // mangled dot-name isn't cheaply known here without redoing
+    // flatten's own dot-mangling walk — "nothing invented" leaves it
+    // detail-less/undeprecated rather than reconstructing it.
     if let Some(cst) = &state.cst {
         let chain = enclosing_function_chain(&cst.items, pos);
         for f in chain.iter().rev() {
@@ -458,26 +506,29 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     for k in (0..=ns_path.len()).rev() {
         let prefix = &ns_path[..k];
         if let Some(defs) = scopes.defs.get(prefix) {
-            for name in defs.keys() {
+            for (name, full) in defs {
                 if seen.insert(name.clone()) {
-                    out.push(mk_candidate(name, CandidateKind::Function, replace_span));
+                    out.push(mk_function_candidate(name, full, docs, replace_span));
                 }
             }
         }
         if let Some(bindings) = scopes.bindings.get(prefix) {
-            for name in bindings.keys() {
+            for (name, (_, full)) in bindings {
                 if seen.insert(name.clone()) {
-                    out.push(mk_candidate(name, CandidateKind::Function, replace_span));
+                    out.push(mk_function_candidate(name, full, docs, replace_span));
                 }
             }
         }
     }
 
-    // (c) the std roster, as qualified paths.
+    // (c) the std roster, as qualified paths — label already IS the
+    // qualified name here, so `detail` comes back `None` by
+    // construction (nothing to add beyond the label itself).
     for entry in roster() {
-        out.push(mk_candidate(
+        out.push(mk_function_candidate(
             &entry.full_path,
-            CandidateKind::Function,
+            &entry.full_path,
+            docs,
             replace_span,
         ));
     }
@@ -648,6 +699,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn call_position_top_level_candidate_carries_no_detail_when_qualified_equals_label() {
+        // `sib` is unnamespaced and top-level: its fully-qualified name
+        // (`compiler.rs::full_name` on an empty ns path) IS its bare
+        // label — `detail` must be `None`, not `Some("sib")`.
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, CALL_TOP_FIXTURE);
+
+        let pos = pos_after(CALL_TOP_FIXTURE, "@sib()", 1);
+        let candidates = service.completion(URI, pos);
+
+        let sib = candidates
+            .iter()
+            .find(|c| c.label == "sib")
+            .expect("sib is offered");
+        assert_eq!(sib.detail, None, "{sib:?}");
+        assert!(!sib.deprecated, "{sib:?}");
+    }
+
     const CALL_INNER_SHADOWS_FIXTURE: &str =
         "foo() { right; }\nexport main() {\n    foo() { left; }\n    @foo();\n}\n";
 
@@ -777,6 +847,53 @@ mod tests {
         let candidates = service.completion(URI, pos);
 
         assert_eq!(labels(&candidates), BTreeSet::from(["helper".to_string()]));
+    }
+
+    // `old` is documented and `! [deprecated]`; `fresh` is documented but
+    // not deprecated — one fixture proving both the `deprecated` tag AND
+    // the cross-namespace `detail` independently, via two different
+    // candidates from the SAME `member_candidates` call.
+    const QUALIFIED_NS_DOC_FIXTURE: &str = "\
+namespace ns {
+?old thing.
+! [deprecated] use other.
+export old() { right; }
+export fresh() { right; }
+}
+export main() {
+    @ns::x();
+}
+";
+
+    #[test]
+    fn qualified_call_candidate_for_a_deprecated_function_is_tagged() {
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, QUALIFIED_NS_DOC_FIXTURE);
+
+        let pos = pos_after(QUALIFIED_NS_DOC_FIXTURE, "ns::x()", 4);
+        let candidates = service.completion(URI, pos);
+
+        let old = candidates
+            .iter()
+            .find(|c| c.label == "old")
+            .expect("old is offered");
+        assert!(old.deprecated, "{old:?}");
+    }
+
+    #[test]
+    fn qualified_call_candidate_carries_the_cross_namespace_qualified_detail() {
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, QUALIFIED_NS_DOC_FIXTURE);
+
+        let pos = pos_after(QUALIFIED_NS_DOC_FIXTURE, "ns::x()", 4);
+        let candidates = service.completion(URI, pos);
+
+        let fresh = candidates
+            .iter()
+            .find(|c| c.label == "fresh")
+            .expect("fresh is offered");
+        assert_eq!(fresh.detail, Some("ns::fresh".to_string()));
+        assert!(!fresh.deprecated, "{fresh:?}");
     }
 
     // --- Command position (context 4) ---

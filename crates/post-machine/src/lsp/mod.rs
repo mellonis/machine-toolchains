@@ -20,6 +20,7 @@ use crate::config;
 use crate::cst::{BodyKind, Cst, FunctionCst, TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
+use crate::parser::FnDoc;
 
 mod complete;
 mod navigate;
@@ -295,13 +296,52 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
             source: "pmt lint",
             code: Some(d.code),
             message: d.message.clone(),
-            deprecated: false,
+            // `deprecated-call` is the one tagged code (docs/lsp.md
+            // (tags)); every other lint finding stays untagged.
+            deprecated: d.code == "deprecated-call",
         }));
     }
     // Stable sort: equal starts keep the warnings-then-lint channel order.
     findings.sort_by_key(|d| d.span.start);
     out.extend(findings);
     out
+}
+
+/// One documented function's hover body (docs/lsp.md (hover)): plain
+/// text, paragraphs blank-line separated, then a `deprecated[: MSG]`
+/// line, then each attention prose line as its own `note: ` line — a
+/// blank line between the three GROUPS (paragraphs / deprecated /
+/// attention), never markdown. `None` when the doc has nothing to show
+/// at all — the CONTENT-EMPTINESS gate (docs/superpowers/specs/
+/// 2026-07-12-pmc-doc-lines-attributes-design.md): an empty-`?`-only
+/// run reduces to `Some(FnDoc)` with every field empty, and `doc.is_some()`
+/// alone is NOT sufficient to show a hover — that must never surface as
+/// a blank popup.
+fn render_doc(doc: &FnDoc) -> Option<String> {
+    if doc.paragraphs.is_empty() && doc.attention.is_empty() && doc.deprecated.is_none() {
+        return None;
+    }
+    let mut sections: Vec<String> = Vec::new();
+    if !doc.paragraphs.is_empty() {
+        sections.push(doc.paragraphs.join("\n\n"));
+    }
+    if let Some(message) = &doc.deprecated {
+        sections.push(if message.is_empty() {
+            "deprecated".to_string()
+        } else {
+            format!("deprecated: {message}")
+        });
+    }
+    if !doc.attention.is_empty() {
+        sections.push(
+            doc.attention
+                .iter()
+                .map(|line| format!("note: {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+    }
+    Some(sections.join("\n\n"))
 }
 
 /// Walks one CST item list — the file level or a [`crate::cst::NamespaceCst`]'s
@@ -476,11 +516,16 @@ impl LanguageService for PmcLanguageService {
         navigate::definition(state, uri, pos)
     }
 
-    // consumer: pmc hover (next task) — the framework-level plumbing
-    // (trait method, wire shape) lands this task; real content (call
-    // sites, declarations, `use` paths, `Analysis.docs`) is Task 4.
-    fn hover(&mut self, _uri: &str, _pos: Pos) -> Option<HoverContent> {
-        None
+    fn hover(&mut self, uri: &str, pos: Pos) -> Option<HoverContent> {
+        // Position→qualified-name resolution is navigate.rs's job
+        // (shares definition's own walks — docs/lsp.md (hover)); the
+        // doc-map lookup, content-emptiness gate, and rendering are
+        // ours.
+        let state = self.docs.get(uri)?;
+        let (name, origin) = navigate::hover_target(state, pos)?;
+        let doc = state.analysis.as_ref()?.docs.get(&name)?;
+        let text = render_doc(doc)?;
+        Some(HoverContent { text, span: origin })
     }
 
     fn code_actions(&mut self, uri: &str, span: Span) -> Vec<Action> {
@@ -542,6 +587,45 @@ mod tests {
         format!("file://{}", path.display())
     }
 
+    /// 1-based (line, col) of the first byte of `anchor`'s occurrence in
+    /// `src`, plus a `skip` char offset into the anchor — mirrors
+    /// `navigate.rs`'s/`complete.rs`'s own copy (house convention: no
+    /// shared test-support module, each file defines its own local
+    /// helpers).
+    fn pos_after(src: &str, anchor: &str, skip: usize) -> Pos {
+        let start = src
+            .find(anchor)
+            .unwrap_or_else(|| panic!("{anchor:?} not found in fixture"));
+        pos_at_byte(src, start + skip)
+    }
+
+    fn pos_at_byte(src: &str, byte_idx: usize) -> Pos {
+        let prefix = &src[..byte_idx];
+        let line = prefix.matches('\n').count() as u32 + 1;
+        let col = match prefix.rfind('\n') {
+            Some(nl) => prefix[nl + 1..].chars().count() as u32 + 1,
+            None => prefix.chars().count() as u32 + 1,
+        };
+        Pos { line, col }
+    }
+
+    /// The `len_chars`-character span starting `skip` characters into
+    /// `anchor`'s first occurrence — for pulling a specific sub-token's
+    /// span out of a longer, uniquely-identifying anchor.
+    fn span_after(src: &str, anchor: &str, skip: usize, len_chars: usize) -> Span {
+        let start = pos_after(src, anchor, skip);
+        Span::new(
+            start.line,
+            start.col,
+            start.line,
+            start.col + len_chars as u32,
+        )
+    }
+
+    fn span_of(src: &str, anchor: &str) -> Span {
+        span_after(src, anchor, 0, anchor.chars().count())
+    }
+
     /// One `unused-label` lint finding (label 5, never referenced) and
     /// nothing else.
     const UNUSED_LABEL_FIXTURE: &str = "main() {\n5: right;\n}\n";
@@ -553,6 +637,52 @@ mod tests {
 
     /// Both `leading-zeros` and `unused-label` fire on the `007:` label.
     const TWO_FINDINGS_FIXTURE: &str = "main() {\n007: right;\n}\n";
+
+    /// One `deprecated-call` finding (lint channel, line 4) AND one
+    /// `unused-import` finding (compile-warning channel, line 5) — a
+    /// MIXED fixture proving the tag applies to the deprecated-call
+    /// finding alone, not to every finding the merge produces.
+    const DEPRECATED_DIAG_FIXTURE: &str = "?old fn.\n! [deprecated] use newFn instead.\nold() { right; }\nmain() { @old(); }\nuse unused;\n";
+
+    /// Every hover-relevant shape in one document: a namespaced,
+    /// documented, two-paragraph, two-attention-line function (`ns::doc`,
+    /// imported by its bare name via `use ns::doc;`); a deprecated
+    /// function WITH a message (`oldWithMsg`); a deprecated function
+    /// WITHOUT one (`oldBare`, a bare `! [deprecated]` line); an
+    /// EMPTY-content doc (`emptyDoc`, a lone blank `?` line — reduces to
+    /// `Some(FnDoc)` with every field empty, the content-emptiness
+    /// gate's own fixture); and a plain UNDOCUMENTED function (`plain`,
+    /// no doc run at all). `main` calls every one of them so `flatten`'s
+    /// reachability pass never turns any of this into an unused-function
+    /// warning.
+    const HOVER_FIXTURE: &str = "\
+namespace ns {
+?Documented helper.
+?
+?Second paragraph line one.
+?second paragraph line two.
+!important note one.
+!important note two.
+export doc() { right; }
+}
+use ns::doc;
+?deprecated with message.
+! [deprecated] use doc instead.
+oldWithMsg() { right; }
+?deprecated no message.
+! [deprecated]
+oldBare() { right; }
+?
+emptyDoc() { right; }
+plain() { right; }
+export main() {
+    @doc();
+    @oldWithMsg();
+    @oldBare();
+    @plain();
+    @emptyDoc();
+}
+";
 
     /// Two `namespace a { … }` blocks (a REOPENED namespace, not merged —
     /// the CST keeps reopened blocks as separate siblings) plus a
@@ -628,7 +758,9 @@ mod tests {
     fn deprecated_call_finding_flows_through_the_staged_lint_path() {
         // Proves `LintContext.docs` (Analysis.docs, wired through the
         // LSP's staged path) reaches `deprecated-call` the same way the
-        // library `lint()` entry does — no tags yet (a later task).
+        // library `lint()` entry does. The `deprecated: true` tag itself
+        // is `deprecated_call_diagnostic_is_tagged_others_are_not`,
+        // below.
         let mut service = PmcLanguageService::new();
         let src = "?old function.\n! [deprecated] use newFn instead.\nold() { right; }\nmain() { @old(); }\n";
         let diags = service.did_update("untitled:Untitled-1", src);
@@ -645,6 +777,143 @@ mod tests {
             "call to deprecated function 'old': use newFn instead."
         );
     }
+
+    #[test]
+    fn deprecated_call_diagnostic_is_tagged_others_are_not() {
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", DEPRECATED_DIAG_FIXTURE);
+
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert_eq!(diags[0].code, Some("deprecated-call"));
+        assert!(diags[0].deprecated, "{diags:?}");
+        assert_eq!(diags[1].code, Some("unused-import"));
+        assert!(!diags[1].deprecated, "{diags:?}");
+    }
+
+    // --- Hover ---
+
+    #[test]
+    fn hover_on_a_call_site_renders_paragraphs_and_attention_notes() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Hover-1", HOVER_FIXTURE);
+
+        let pos = pos_after(HOVER_FIXTURE, "@doc();", 1);
+        let hover = service
+            .hover("untitled:Hover-1", pos)
+            .expect("doc is documented");
+
+        assert_eq!(
+            hover.text,
+            "Documented helper.\n\n\
+             Second paragraph line one. second paragraph line two.\n\n\
+             note: important note one.\n\
+             note: important note two."
+        );
+        assert_eq!(hover.span, span_after(HOVER_FIXTURE, "@doc();", 1, 3));
+    }
+
+    #[test]
+    fn hover_on_a_declaration_name_uses_its_own_doc() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Hover-1", HOVER_FIXTURE);
+
+        let pos = pos_after(HOVER_FIXTURE, "export doc() { right; }", 7);
+        let hover = service
+            .hover("untitled:Hover-1", pos)
+            .expect("doc's own declaration name resolves to its own doc");
+
+        assert_eq!(
+            hover.text,
+            "Documented helper.\n\n\
+             Second paragraph line one. second paragraph line two.\n\n\
+             note: important note one.\n\
+             note: important note two."
+        );
+        assert_eq!(
+            hover.span,
+            span_after(HOVER_FIXTURE, "export doc() { right; }", 7, 3)
+        );
+    }
+
+    #[test]
+    fn hover_on_a_use_path_segment_resolves_to_the_documented_function() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Hover-1", HOVER_FIXTURE);
+
+        let pos = pos_after(HOVER_FIXTURE, "use ns::doc;", 8);
+        let hover = service
+            .hover("untitled:Hover-1", pos)
+            .expect("the use path segment resolves to ns::doc's own doc");
+
+        assert_eq!(
+            hover.text,
+            "Documented helper.\n\n\
+             Second paragraph line one. second paragraph line two.\n\n\
+             note: important note one.\n\
+             note: important note two."
+        );
+        // The origin is the WHOLE joined path's span (`UsePath.span`),
+        // not just the clicked segment — mirrors `navigate.rs`'s own
+        // std-path precedent.
+        assert_eq!(hover.span, span_of(HOVER_FIXTURE, "ns::doc"));
+    }
+
+    #[test]
+    fn hover_deprecated_with_message_carries_the_callout() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Hover-1", HOVER_FIXTURE);
+
+        let pos = pos_after(HOVER_FIXTURE, "@oldWithMsg();", 1);
+        let hover = service
+            .hover("untitled:Hover-1", pos)
+            .expect("oldWithMsg is documented");
+
+        assert_eq!(
+            hover.text,
+            "deprecated with message.\n\ndeprecated: use doc instead."
+        );
+    }
+
+    #[test]
+    fn hover_deprecated_without_message_carries_the_bare_callout() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Hover-1", HOVER_FIXTURE);
+
+        let pos = pos_after(HOVER_FIXTURE, "@oldBare();", 1);
+        let hover = service
+            .hover("untitled:Hover-1", pos)
+            .expect("oldBare is documented");
+
+        assert_eq!(hover.text, "deprecated no message.\n\ndeprecated");
+    }
+
+    #[test]
+    fn hover_on_an_undocumented_function_is_none() {
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Hover-1", HOVER_FIXTURE);
+
+        let pos = pos_after(HOVER_FIXTURE, "@plain();", 1);
+        assert_eq!(service.hover("untitled:Hover-1", pos), None);
+    }
+
+    #[test]
+    fn hover_on_an_empty_content_doc_is_none() {
+        // `emptyDoc`'s doc run is a single BLANK `?` line: it reduces to
+        // `Some(FnDoc { paragraphs: [], attention: [], deprecated: None })`
+        // — `doc.is_some()` alone would wrongly show an empty popup; the
+        // content-emptiness gate must catch this specifically.
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Hover-1", HOVER_FIXTURE);
+
+        let pos = pos_after(HOVER_FIXTURE, "@emptyDoc();", 1);
+        assert_eq!(service.hover("untitled:Hover-1", pos), None);
+    }
+
+    // Hover on a `std::` call: SKIPPED — `Analysis.docs` only covers
+    // this document's OWN functions; `std::` docs are pinned in the
+    // stdlib task, which teaches the embedded stdlib's `?` lines and
+    // wires this same `hover_target` → `Analysis.docs` path to look
+    // them up too.
 
     #[test]
     fn undefined_label_is_a_single_char_precise_error() {
