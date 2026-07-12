@@ -19,12 +19,11 @@ the VS Code extension.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.0. It has been tested against `pmt` 0.1.0; on
+- This plugin is version 0.1.1. It has been tested against `pmt` 0.1.0; on
   startup it runs `pmt --version` and shows a warning notification (not a
   hard failure) if the binary reports something older, or an error
   notification if the binary can't be found at all. The plugin's own
-  version number and the tested `pmt` version are independent numbers
-  that happen to both read 0.1.0 today.
+  version number and the tested `pmt` version are independent numbers.
 - Built and verified against **LSP4IJ 0.20.1** on an IntelliJ Platform
   2024.3 baseline (IntelliJ IDEA Community works — no Ultimate-only APIs
   are used).
@@ -78,11 +77,11 @@ for example `RustRover.app`. Any JDK 17 or newer on `PATH`/`JAVA_HOME`
 works equally well; the bundled JBR is just a JDK most JetBrains-IDE
 users already have on disk without a separate install.)
 
-`buildPlugin` produces `build/distributions/pmc-0.1.0.zip`. Install it:
+`buildPlugin` produces `build/distributions/pmc-0.1.1.zip`. Install it:
 
 1. Settings → Plugins → the ⚙ (gear) icon in the top-right of the
    Plugins page → **Install Plugin from Disk…**
-2. Pick `build/distributions/pmc-0.1.0.zip`.
+2. Pick `build/distributions/pmc-0.1.1.zip`.
 3. Restart the IDE when prompted.
 
 This works on Community editions — the plugin is built against the
@@ -279,40 +278,45 @@ UNUSED: nop
     stp
 ```
 
-- [ ] **Coloring — check this FIRST.** Open `check.pma`. Confirm syntax
+- [x] **Coloring — check this FIRST.** Open `check.pma`. Confirm syntax
       colors appear (the `.func` directive, mnemonics, the `L1`/`UNUSED`
       labels, a `;` comment if you add one) rather than plain uncolored
       text — the same `editorHighlighterProvider`-restores-TextMate bridge
       as `.pmc`, now wired for the `PMA` file type too. If colors are
       missing, that bridge needs attention before anything below is worth
       testing.
-- [ ] **Typo mnemonic**: change `jm L1` to `jpm L1`. Confirm a warning
+- [x] **Typo mnemonic**: change `jm L1` to `jpm L1`. Confirm a warning
       underline on `jpm` carrying the `unknown-mnemonic` code. **Undo**
       the typo back to `jm L1` before continuing — per `docs/lsp.md`, a
       fatal error hides lint findings entirely on the `.pma` side (no
       separate compile-warning channel), so the next step needs a clean
       assemble to have anything to show.
-- [ ] **Unused label + quickfix**: confirm a warning underline on the
+- [x] **Unused label + quickfix**: confirm a warning underline on the
       `UNUSED:` label (the `unused-label` lint finding). Open the
       intention menu (Alt+Enter / ⌥Enter) and apply the fix — unlike
       `.pmc`'s gated `leftover-debugger` fix, this one is machine-
       applicable, so it should be the single default action. Confirm only
       the `UNUSED:` label is removed, leaving `nop` behind (and the
       warning disappears).
-- [ ] **Go-to-definition**: invoke it (Go to Declaration) on the `L1`
+- [x] **Go-to-definition**: invoke it (Go to Declaration) on the `L1`
       operand in `jm L1` (inside `goToEnd`). Confirm it jumps to the `L1:`
       label definition on the line directly above, in the same file —
       `.pma` has no external/materialized target the way `.pmc`'s
-      `std::` calls do.
-- [ ] **Outline**: open the Structure tool window (⌘7 / Alt+7, or **File
+      `std::` calls do. Known limitation: the Cmd/Ctrl+hover underline
+      may span the whole document rather than just the identifier — the
+      server sends a word-precise origin span, but LSP4IJ does not yet
+      use it for the underline on TextMate-backed file types (reported
+      upstream). The jump itself landing on the definition is what this
+      item verifies.
+- [x] **Outline**: open the Structure tool window (⌘7 / Alt+7, or **File
       Structure…**). Confirm it shows `goToEnd` and `main` as functions,
       each containing its labels as children (`L1` under `goToEnd`;
       `UNUSED` under `main`, until the previous step deleted it).
-- [ ] **Reformat**: Code → Reformat Code. Confirm the file snaps to the
+- [x] **Reformat**: Code → Reformat Code. Confirm the file snaps to the
       canonical column grid — labels at column 0, mnemonics at column 8,
       operands at column 16 (`docs/formats.md`, "assembly text") — turning
       the scratch file's loose indentation into aligned columns.
-- [ ] **Raw-line paste**: replace the `stp` line with this
+- [x] **Raw-line paste**: replace the `stp` line with this
       `pmt dis --listing`-shaped row (address, raw hex bytes, resolved
       call target — not reassembleable input):
       ```
@@ -320,7 +324,7 @@ UNUSED: nop
       ```
       Confirm a fatal error with the `raw-line` code — the line isn't
       assembly-shaped at all. Undo the paste to restore `stp`.
-- [ ] **`.pmc` still works**: switch back to (or reopen) `check.pmc` from
+- [x] **`.pmc` still works**: switch back to (or reopen) `check.pmc` from
       the checklist above, still in this same project/session. Confirm
       its diagnostics (the `leftover-debugger` squiggle) are still live —
       opening and editing `.pma` documents never perturbed the `.pmc`
