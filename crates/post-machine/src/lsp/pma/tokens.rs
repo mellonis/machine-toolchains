@@ -191,6 +191,30 @@ L1:     rgt
     }
 
     #[test]
+    fn byte_directive_operand_is_a_number_token() {
+        // `.byte` is a synthetic directive with no `pm1_syntax()` entry —
+        // the `.byte` half of `emit_line`'s is_numeric split, pinned
+        // separately from the SymbolVec half `wr 1` covers in the doc
+        // example above.
+        let mut service = PmaLanguageService::new();
+        let src = ".func f\n        .byte   42\n        stp\n";
+        service.did_update(URI, src);
+
+        let tokens = service.semantic_tokens(URI).expect("total CST");
+        assert_eq!(
+            tokens,
+            vec![
+                tok(
+                    Span::new(1, 7, 1, 8),
+                    TOKEN_TYPE_FUNCTION,
+                    MODIFIER_DECLARATION
+                ),
+                tok(Span::new(2, 17, 2, 19), TOKEN_TYPE_NUMBER, 0),
+            ]
+        );
+    }
+
+    #[test]
     fn an_unresolved_call_name_emits_no_token() {
         let mut service = PmaLanguageService::new();
         let src = ".func f\n        call    missing\n";

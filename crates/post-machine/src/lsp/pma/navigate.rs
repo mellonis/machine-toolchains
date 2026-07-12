@@ -93,6 +93,24 @@ mod tests {
     }
 
     #[test]
+    fn bare_jmp_label_operand_resolves_like_a_branch_label() {
+        // `jmp L1` — Flow::Jump with a BARE operand goes through the
+        // same OperandRole::Label arm `jm`/`jnm` do (a bare jump target
+        // is a label; only `@name` makes a jump a function symbol,
+        // docs/formats.md (symbol jumps)) — pinned separately so the
+        // Jump half of the shared match arm isn't test-dead.
+        let mut service = PmaLanguageService::new();
+        let src = ".func f\nL1: rgt\n        jmp     L1\n";
+        service.did_update(URI, src);
+
+        let pos = Pos { line: 3, col: 18 }; // inside `jmp L1`'s operand
+        let target = service.definition(URI, pos).expect("L1 is defined in f");
+        assert_eq!(target.uri, URI);
+        assert_eq!(target.span, Span::new(2, 1, 2, 3));
+        assert_eq!(target.origin, Some(Span::new(3, 17, 3, 19)));
+    }
+
+    #[test]
     fn call_operand_resolves_to_the_func_directives_name_span() {
         let mut service = PmaLanguageService::new();
         service.did_update(URI, NAV_FIXTURE);
