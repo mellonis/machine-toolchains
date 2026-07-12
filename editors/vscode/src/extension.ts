@@ -4,7 +4,7 @@ import {
   LanguageClient, LanguageClientOptions, ServerOptions,
 } from 'vscode-languageclient/node';
 
-const MIN_TESTED_PMT = '0.1.0';
+const MIN_TESTED_PMT = '0.2.0';
 let client: LanguageClient | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {

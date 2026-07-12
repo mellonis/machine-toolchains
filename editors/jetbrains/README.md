@@ -22,7 +22,7 @@ see the `.pma` checklist below for its own manual walkthrough.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.1. It has been tested against `pmt` 0.1.0; on
+- This plugin is version 0.1.2. It has been tested against `pmt` 0.2.0; on
   startup it runs `pmt --version` and shows a warning notification (not a
   hard failure) if the binary reports something older, or an error
   notification if the binary can't be found at all. The plugin's own
@@ -80,11 +80,11 @@ for example `RustRover.app`. Any JDK 17 or newer on `PATH`/`JAVA_HOME`
 works equally well; the bundled JBR is just a JDK most JetBrains-IDE
 users already have on disk without a separate install.)
 
-`buildPlugin` produces `build/distributions/pmc-0.1.1.zip`. Install it:
+`buildPlugin` produces `build/distributions/pmc-0.1.2.zip`. Install it:
 
 1. Settings → Plugins → the ⚙ (gear) icon in the top-right of the
    Plugins page → **Install Plugin from Disk…**
-2. Pick `build/distributions/pmc-0.1.1.zip`.
+2. Pick `build/distributions/pmc-0.1.2.zip`.
 3. Restart the IDE when prompted.
 
 This works on Community editions — the plugin is built against the

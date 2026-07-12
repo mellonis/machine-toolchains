@@ -16,7 +16,7 @@ tasks below — see the Tasks section for the one gap (`compile`) that's
 
 - A `pmt` binary reachable on `PATH`, or pointed to with the `pmt.path`
   setting (below).
-- This extension is version 0.1.1. It has been tested against `pmt` 0.1.0;
+- This extension is version 0.1.2. It has been tested against `pmt` 0.2.0;
   on activation it runs `pmt --version` and shows a warning (not a hard
   failure) if the binary reports something older. The extension's own
   version number and the tested `pmt` version are independent numbers.
@@ -49,10 +49,10 @@ npm run package
 
 `npm run package` copies in the shared `.pmc` and `.pma` TextMate
 grammars, compiles the extension, and runs `vsce package`, producing
-`pmc-0.1.1.vsix` in this directory. Install it into VS Code:
+`pmc-0.1.2.vsix` in this directory. Install it into VS Code:
 
 ```sh
-code --install-extension pmc-0.1.1.vsix
+code --install-extension pmc-0.1.2.vsix
 ```
 
 Reload the window (or restart VS Code) after installing or upgrading.

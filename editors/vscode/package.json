@@ -2,7 +2,7 @@
   "name": "pmc",
   "displayName": "PMC (Post machine toolchain)",
   "description": "Language support for .pmc via pmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "mellonis",
   "license": "GPL-3.0-or-later",
   "repository": {

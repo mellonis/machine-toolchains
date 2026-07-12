@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
 private const val NOTIFICATION_GROUP_ID = "ru.mellonis.pmc"
-private const val MIN_TESTED_PMT = "0.1.0"
+private const val MIN_TESTED_PMT = "0.2.0"
 private const val VERSION_CHECK_TIMEOUT_SECONDS = 5L
 private val VERSION_LINE = Regex("""pmt (\d+)\.(\d+)\.(\d+)""")
 
