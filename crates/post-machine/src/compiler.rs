@@ -325,6 +325,10 @@ pub(crate) struct AnalysisOutput {
     pub ir: IrProgram,
     pub diagnostics: Vec<Diagnostic>,
     pub scopes: ScopeSummary,
+    /// Every documented function's [`FnDoc`], keyed by its fully-qualified
+    /// flattened name — the same map `Analysis.docs` carries for the
+    /// staged pipeline. `lint()`'s `LintContext` reads it from here.
+    pub docs: HashMap<String, FnDoc>,
 }
 
 /// lex → parse → duplicate-binding check → flatten → lower. Stops before
@@ -338,7 +342,7 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         scopes,
         warnings: vis,
         resolutions: _,
-        docs: _,
+        docs,
     } = flatten(parsed);
     let (ir, mut diagnostics) = crate::ir::lower(&program)?;
     diagnostics.extend(vis);
@@ -348,6 +352,7 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         ir,
         diagnostics,
         scopes,
+        docs,
     })
 }
 
@@ -363,11 +368,9 @@ pub(crate) struct Analysis {
     /// Every documented function's [`FnDoc`], keyed by the SAME
     /// fully-qualified name `flatten` mangles onto `Function::name`
     /// (nested dot-mangling, namespace `::` paths). Undocumented
-    /// functions are absent, not present with an empty `FnDoc`
-    /// (docs/superpowers/specs/2026-07-12-pmc-doc-lines-attributes-design.md).
-    /// Read only by this module's own tests until the `deprecated-call`
-    /// lint rule and hover (a later task) become its real consumers.
-    #[allow(dead_code)]
+    /// functions are absent, not present with an empty `FnDoc`. Read by
+    /// the `deprecated-call` lint rule via `LintContext.docs`; hover (a
+    /// later task) is a future consumer.
     pub docs: HashMap<String, FnDoc>,
 }
 

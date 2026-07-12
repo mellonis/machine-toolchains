@@ -407,6 +407,7 @@ impl LanguageService for PmcLanguageService {
                     tokens: &significant,
                     ast: &analysis.ast,
                     scopes: &analysis.scopes,
+                    docs: &analysis.docs,
                 };
                 Some(run_rules(&ctx, &effective_allow))
             }
@@ -608,6 +609,28 @@ mod tests {
         assert_eq!(diags[1].severity, ServiceSeverity::Warning);
         assert_eq!(diags[1].span.start.line, 4);
         assert_eq!(diags[1].message, "unused import `unused`");
+    }
+
+    #[test]
+    fn deprecated_call_finding_flows_through_the_staged_lint_path() {
+        // Proves `LintContext.docs` (Analysis.docs, wired through the
+        // LSP's staged path) reaches `deprecated-call` the same way the
+        // library `lint()` entry does — no tags yet (a later task).
+        let mut service = PmcLanguageService::new();
+        let src = "?old function.\n! [deprecated] use newFn instead.\nold() { right; }\nmain() { @old(); }\n";
+        let diags = service.did_update("untitled:Untitled-1", src);
+
+        let found: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some("deprecated-call"))
+            .collect();
+        assert_eq!(found.len(), 1, "{diags:?}");
+        assert_eq!(found[0].source, "pmt lint");
+        assert_eq!(found[0].severity, ServiceSeverity::Warning);
+        assert_eq!(
+            found[0].message,
+            "call to deprecated function 'old': use newFn instead."
+        );
     }
 
     #[test]

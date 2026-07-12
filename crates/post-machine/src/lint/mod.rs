@@ -8,11 +8,13 @@ pub mod rules;
 
 pub use fixes::{FixOutcome, apply_fixes};
 
+use std::collections::HashMap;
+
 use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::compiler::{self, CompileError, ScopeSummary};
 use crate::lexer::Token;
-use crate::parser::Program;
+use crate::parser::{FnDoc, Program};
 
 #[derive(Debug, Clone, Default)]
 pub struct LintOptions {
@@ -61,6 +63,10 @@ pub(crate) struct LintContext<'a> {
     /// (`std::api.helper`); statement/item shapes are untouched.
     pub ast: &'a Program,
     pub scopes: &'a ScopeSummary,
+    /// Every documented function's [`FnDoc`], keyed by the same
+    /// fully-qualified name carried on `ast`'s `Function::name` /
+    /// `Item::Call::name` (`Analysis.docs`/`AnalysisOutput.docs`).
+    pub docs: &'a HashMap<String, FnDoc>,
 }
 
 /// A lint rule: reads the analysis context, pushes any findings.
@@ -79,6 +85,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("shadowed-import", rules::shadowed_import::check),
     ("non-camel-case", rules::non_camel_case::check),
     ("confusable-names", rules::confusable_names::check),
+    ("deprecated-call", rules::deprecated_call::check),
 ];
 
 /// `--allow` codes must each name a real rule (typo protection), over the
@@ -123,6 +130,7 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
         tokens: &analysis.tokens,
         ast: &analysis.ast,
         scopes: &analysis.scopes,
+        docs: &analysis.docs,
     };
     let diagnostics = run_rules(&ctx, &options.allow);
     Ok(LintReport { diagnostics })
@@ -223,6 +231,7 @@ main() {
             tokens: &analysis.tokens,
             ast: &analysis.ast,
             scopes: &analysis.scopes,
+            docs: &analysis.docs,
         };
 
         let all = run_rules(&ctx, &[]);

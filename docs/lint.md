@@ -158,6 +158,15 @@ under a confusability normalization (case, underscores, `1`/`l`,
 `i`/`l`, `0`/`o`): `sum_bits` vs `sumBits`, `fool` vs `foo1`. Reported
 at the later definition, naming the earlier one. No fix.
 
+### deprecated-call
+
+A call whose target carries a `[deprecated]` doc attribute
+(`docs/language.md`). The message is the attribute's own text when it
+carries one, appended after the finding's headline. Recursion is not
+exempt — a deprecated function calling itself is reported like any
+other caller. No fix: there is no mechanical rewrite for "stop calling
+this".
+
 ## `.pma` rules
 
 These five rules live in the arch-agnostic assembly rule catalog and
