@@ -221,6 +221,14 @@ fn describe(kind: &TokenKind) -> String {
         // `lex_with(_, LexMode::WithoutComments)`), which never emits
         // this variant, so this arm is unreachable in practice.
         TokenKind::Comment(_) => "a comment".into(),
+        // Doc/attention lines are semantic tokens the lexer emits on
+        // BOTH modes (docs/language.md (doc lines)), so — unlike
+        // Comment above — this parser DOES see them. Attaching a run to
+        // its declaration is a later grammar addition; until then one
+        // reaching here is just an unexpected token, described like any
+        // other stray token in item position.
+        TokenKind::DocLine(_) => "a doc line".into(),
+        TokenKind::AttentionLine(_) => "an attention line".into(),
     }
 }
 
@@ -2062,5 +2070,25 @@ main() {
         assert!(m.contains("successor"), "got: {m}");
         // Calls are unaffected: `@f()` stays legal, no error at all.
         assert!(parse_src("f() { } main() { @f(); }").is_ok());
+    }
+
+    /// INTERIM CONTRACT, to be replaced once run attachment is wired
+    /// (docs/language.md (doc lines)): this parser has no notion of a
+    /// doc/attention run yet, so a `?`/`!` line reaching it — at top
+    /// level or in a function body — is just an unexpected token,
+    /// exactly like any other stray token in item position.
+    #[test]
+    fn doc_and_attention_lines_are_unexpected_tokens_until_runs_are_wired() {
+        let m = err_msg("? not attached to anything yet\nmain() { right; }");
+        assert!(
+            m.contains("expected a function name, found a doc line"),
+            "got: {m}"
+        );
+
+        let m = err_msg("main() {\n! not a command\nright;\n}");
+        assert!(
+            m.contains("expected a command, found an attention line"),
+            "got: {m}"
+        );
     }
 }

@@ -27,6 +27,16 @@ pub enum TokenKind {
     /// `lex_with(_, LexMode::WithoutComments)`) never emits this variant,
     /// so callers on the default path see an unchanged token stream.
     Comment(Comment),
+    /// `?` as the first non-whitespace character of a line — a doc line
+    /// (docs/language.md (doc lines)). Payload is the raw text after the
+    /// sigil, minus ONE leading space if present (canonical), verbatim
+    /// otherwise. Semantic, not trivia: emitted in both [`LexMode`]s.
+    DocLine(String),
+    /// `!` as the first non-whitespace character of a line — an
+    /// attention line (docs/language.md (doc lines)). Same payload rule
+    /// as [`TokenKind::DocLine`]. `!` anywhere else on a line still lexes
+    /// as [`TokenKind::Bang`].
+    AttentionLine(String),
 }
 
 /// Which delimiter pair produced a [`Comment`].
@@ -152,6 +162,39 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
         let own_line = cur.at_line_start;
         if c.is_whitespace() {
             cur.bump();
+            continue;
+        }
+        // Positional doc/attention lines (docs/language.md (doc lines)):
+        // `?`/`!` as the first non-whitespace character of a line consume
+        // to end of line as one token. `own_line` is the same
+        // line-start flag `Comment::own_line` reads below — a `?`/`!`
+        // anywhere else on a line falls through unchanged (`!` lexes as
+        // `Bang` via the `single` match further down; `?` reaches the
+        // catch-all "unexpected character" error at the bottom of this
+        // loop, exactly as before this rule existed).
+        if own_line && (c == '?' || c == '!') {
+            cur.bump();
+            let mut raw = String::new();
+            while let Some(nc) = cur.peek() {
+                if nc == '\n' {
+                    break;
+                }
+                raw.push(nc);
+                cur.bump();
+            }
+            let len = 1 + raw.chars().count() as u32;
+            let text = raw.strip_prefix(' ').unwrap_or(&raw).to_string();
+            let kind = if c == '?' {
+                TokenKind::DocLine(text)
+            } else {
+                TokenKind::AttentionLine(text)
+            };
+            tokens.push(Token {
+                kind,
+                line,
+                col,
+                len,
+            });
             continue;
         }
         if c == '/' {
@@ -568,5 +611,80 @@ mod tests {
         let tokens = lex("@qq()").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::At);
         assert_eq!(tokens[1].kind, TokenKind::Ident("qq".into()));
+    }
+
+    #[test]
+    fn doc_line_lexes_at_the_start_of_a_line() {
+        let tokens = lex("? doc text").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::DocLine("doc text".into()));
+        assert_eq!((tokens[0].line, tokens[0].col, tokens[0].len), (1, 1, 10));
+    }
+
+    #[test]
+    fn attention_line_lexes_at_indent_with_the_sigil_column() {
+        let tokens = lex("    ! [deprecated] msg").unwrap();
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::AttentionLine("[deprecated] msg".into())
+        );
+        assert_eq!((tokens[0].line, tokens[0].col, tokens[0].len), (1, 5, 18));
+    }
+
+    #[test]
+    fn bare_doc_sigil_has_an_empty_payload() {
+        let tokens = lex("?").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::DocLine("".into()));
+        assert_eq!((tokens[0].line, tokens[0].col, tokens[0].len), (1, 1, 1));
+    }
+
+    #[test]
+    fn bang_inside_parens_is_unaffected_by_doc_lines() {
+        // Pins the pre-existing successor/check-arm `!` lexing: mid-line
+        // `!` stays TokenKind::Bang exactly as before doc/attention lines
+        // existed (docs/language.md (doc lines)).
+        assert_eq!(
+            kinds("right(!);"),
+            vec![
+                TokenKind::Ident("right".into()),
+                TokenKind::LParen,
+                TokenKind::Bang,
+                TokenKind::RParen,
+                TokenKind::Semi,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn question_mark_mid_line_still_errors() {
+        // Pins the pre-existing lex error: only a LINE-START `?` is a doc
+        // line (docs/language.md (doc lines)); anywhere else it is still
+        // today's "unexpected character" error.
+        let e = lex("x ? y").unwrap_err();
+        assert_eq!((e.span.start.line, e.span.start.col), (1, 3));
+        assert!(
+            matches!(e.kind, CompileErrorKind::Lex(ref m) if m.contains("unexpected character `?`")),
+            "{e:?}"
+        );
+    }
+
+    #[test]
+    fn doc_and_attention_lines_emit_in_both_lex_modes() {
+        // Semantic, not trivia (docs/language.md (doc lines)): unlike
+        // Comment, both LexMode variants emit these tokens.
+        let src = "? doc\n! attn";
+        for mode in [LexMode::WithoutComments, LexMode::WithComments] {
+            let tokens = lex_with(src, mode).unwrap();
+            assert_eq!(
+                tokens[0].kind,
+                TokenKind::DocLine("doc".into()),
+                "mode {mode:?}"
+            );
+            assert_eq!(
+                tokens[1].kind,
+                TokenKind::AttentionLine("attn".into()),
+                "mode {mode:?}"
+            );
+        }
     }
 }
