@@ -1,0 +1,37 @@
+name: audit
+
+# Dependency vulnerability audit (RustSec advisory database).
+# Runs when the dependency set changes and weekly, so new advisories
+# against unchanged dependencies still surface between pushes.
+# Dependabot alerts cover the same database on GitHub's side; this gate
+# fails fast in CI instead of waiting on the alerts tab.
+
+on:
+  push:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/*/Cargo.toml"
+      - ".github/workflows/audit.yml"
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Cargo.lock
+        run: cargo audit
