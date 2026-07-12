@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mtc_core::diagnostics::{Applicability, Diagnostic};
+use mtc_core::diagnostics::{Applicability, Diagnostic, Span};
 
 use crate::config;
 use crate::lint::{LintError, LintOptions, apply_fixes, lint as lint_source};
@@ -70,7 +70,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
         let path = Path::new(p);
         let found = collect_sources(path, &excludes, &mut files)?;
         if found == 0 {
-            return Err(format!("{p}: no .pmc files found"));
+            return Err(format!("{p}: no .pmc or .pma files found"));
         }
     }
 
@@ -112,26 +112,16 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
             ) {
                 Ok(report) => {
                     let diags = if fix {
-                        // Mask fixes outside the allowed tier, apply,
-                        // rewrite, then re-lint: the report reflects
-                        // what REMAINS.
-                        let masked = mask_gated_fixes(&report.diagnostics, force);
-                        let outcome = apply_fixes(&source, &masked);
-                        if outcome.applied > 0 {
-                            fs::write(file, &outcome.fixed_source)
-                                .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
-                            match lint_source(
-                                &outcome.fixed_source,
+                        fix_and_relint(file, &source, report.diagnostics, force, |fixed| {
+                            lint_source(
+                                fixed,
                                 LintOptions {
                                     allow: effective_allow.clone(),
                                 },
-                            ) {
-                                Ok(rerun) => rerun.diagnostics,
-                                Err(e) => return Err(e.to_string()),
-                            }
-                        } else {
-                            report.diagnostics
-                        }
+                            )
+                            .map(|rerun| rerun.diagnostics)
+                            .map_err(|e| e.to_string())
+                        })?
                     } else {
                         report.diagnostics
                     };
@@ -143,15 +133,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
                 Err(LintError::Compile(e)) => {
                     // Per-file fatal: report, keep going (batch model).
                     any = true;
-                    let _ = writeln!(
-                        stderr,
-                        "{}:{}:{}: error: {} [{}]",
-                        file.display(),
-                        e.span.start.line,
-                        e.span.start.col,
-                        e.kind,
-                        e.kind.code()
-                    );
+                    render_fatal(&mut stderr, file, e.span, &e.kind, e.kind.code());
                 }
                 Err(e @ LintError::UnknownAllowCode(_)) => return Err(e.to_string()),
             },
@@ -169,22 +151,10 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
                 match mtc_core::asm::lint::lint(&syntax, &source, &effective_allow) {
                     Ok(report) => {
                         let diags = if fix {
-                            let masked = mask_gated_fixes(&report, force);
-                            let outcome = apply_fixes(&source, &masked);
-                            if outcome.applied > 0 {
-                                fs::write(file, &outcome.fixed_source)
-                                    .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
-                                match mtc_core::asm::lint::lint(
-                                    &syntax,
-                                    &outcome.fixed_source,
-                                    &effective_allow,
-                                ) {
-                                    Ok(rerun) => rerun,
-                                    Err(e) => return Err(e.to_string()),
-                                }
-                            } else {
-                                report
-                            }
+                            fix_and_relint(file, &source, report, force, |fixed| {
+                                mtc_core::asm::lint::lint(&syntax, fixed, &effective_allow)
+                                    .map_err(|e| e.to_string())
+                            })?
                         } else {
                             report
                         };
@@ -198,15 +168,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
                         // same shape as the pmc route's fatal compile
                         // error above).
                         any = true;
-                        let _ = writeln!(
-                            stderr,
-                            "{}:{}:{}: error: {} [{}]",
-                            file.display(),
-                            e.span.start.line,
-                            e.span.start.col,
-                            e.kind,
-                            e.kind.code()
-                        );
+                        render_fatal(&mut stderr, file, e.span, &e.kind, e.kind.code());
                     }
                 }
             }
@@ -286,6 +248,55 @@ pub(super) fn collect_sources(
         }
     }
     Ok(found)
+}
+
+/// The `--fix` flow shared by both language routes: mask fixes outside
+/// the allowed tier, apply, rewrite the file when anything applied, then
+/// re-lint via `relint` — the report (and exit code) reflect what
+/// REMAINS. When nothing applied, the original findings stand and the
+/// file is never written. A re-lint failure is a whole-run tool error
+/// (`Err` out of `lint()`), not a per-file one: `--fix` just wrote the
+/// file, so a source that no longer lints means the fix itself broke
+/// the parse-preserving contract (`lint::fixes`'s module comment) — a
+/// tool bug, not a user batch condition.
+fn fix_and_relint(
+    file: &Path,
+    source: &str,
+    diagnostics: Vec<Diagnostic>,
+    force: bool,
+    relint: impl FnOnce(&str) -> Result<Vec<Diagnostic>, String>,
+) -> Result<Vec<Diagnostic>, String> {
+    let masked = mask_gated_fixes(&diagnostics, force);
+    let outcome = apply_fixes(source, &masked);
+    if outcome.applied == 0 {
+        return Ok(diagnostics);
+    }
+    fs::write(file, &outcome.fixed_source)
+        .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+    relint(&outcome.fixed_source)
+}
+
+/// The per-file fatal line, shared by both language routes:
+/// `{file}:{line}:{col}: error: {kind} [{code}]` (docs/cli.md (error
+/// codes)). `kind` is `dyn Display` because the two routes bring
+/// different error kinds (pmc's `CompileErrorKind`, asm's
+/// `AsmErrorKind`) that share only the rendering contract.
+fn render_fatal(
+    stderr: &mut String,
+    file: &Path,
+    span: Span,
+    kind: &dyn std::fmt::Display,
+    code: &str,
+) {
+    let _ = writeln!(
+        stderr,
+        "{}:{}:{}: error: {} [{}]",
+        file.display(),
+        span.start.line,
+        span.start.col,
+        kind,
+        code
+    );
 }
 
 /// Mask fixes outside the allowed tier ("requires --force") before

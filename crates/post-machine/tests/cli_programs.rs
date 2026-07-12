@@ -565,7 +565,7 @@ fn lint_zero_match_path_is_an_error() {
     let dir = scratch("lint_zero");
     std::fs::create_dir_all(dir.join("empty")).unwrap();
     let err = execute(&args(&["lint", dir.join("empty").to_str().unwrap()])).unwrap_err();
-    assert!(err.contains("no .pmc files"));
+    assert!(err.contains("no .pmc or .pma files found"), "{err}");
 }
 
 #[test]
