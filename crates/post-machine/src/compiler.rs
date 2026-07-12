@@ -15,7 +15,7 @@ use crate::cst::Cst;
 use crate::ir::IrProgram;
 use crate::lexer::{LexMode, Token};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
-use crate::parser::Program;
+use crate::parser::{FnDoc, Program};
 
 /// Fatal compile error at a real source span (1-based, char-counted,
 /// end-exclusive; see mtc_core::diagnostics).
@@ -338,6 +338,7 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         scopes,
         warnings: vis,
         resolutions: _,
+        docs: _,
     } = flatten(parsed);
     let (ir, mut diagnostics) = crate::ir::lower(&program)?;
     diagnostics.extend(vis);
@@ -359,6 +360,15 @@ pub(crate) struct Analysis {
     pub scopes: ScopeSummary,
     pub warnings: Vec<Diagnostic>,
     pub resolutions: Vec<(Span, Resolution)>,
+    /// Every documented function's [`FnDoc`], keyed by the SAME
+    /// fully-qualified name `flatten` mangles onto `Function::name`
+    /// (nested dot-mangling, namespace `::` paths). Undocumented
+    /// functions are absent, not present with an empty `FnDoc`
+    /// (docs/superpowers/specs/2026-07-12-pmc-doc-lines-attributes-design.md).
+    /// Read only by this module's own tests until the `deprecated-call`
+    /// lint rule and hover (a later task) become its real consumers.
+    #[allow(dead_code)]
+    pub docs: HashMap<String, FnDoc>,
 }
 
 /// The LSP's pipeline entry (docs/lsp.md (staged analysis)): every stage's
@@ -422,6 +432,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         scopes,
         warnings: vis,
         resolutions,
+        docs,
     } = flatten(program);
     match crate::ir::lower(&program) {
         Ok((_ir, mut warnings)) => {
@@ -434,6 +445,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
                     scopes,
                     warnings,
                     resolutions,
+                    docs,
                 }),
                 fatal: None,
             }
@@ -536,13 +548,15 @@ fn full_name(ns: &[String], name: &str) -> String {
 }
 
 /// flatten's full output: the mangled program, per-scope name maps (for
-/// lint), the visibility warnings, and the per-call-site resolution
-/// table (for a future LSP).
+/// lint), the visibility warnings, the per-call-site resolution table
+/// (for a future LSP), and the qualified doc map (for a future
+/// `deprecated-call` lint rule and hover).
 struct Flattened {
     program: crate::parser::Program,
     scopes: ScopeSummary,
     warnings: Vec<Diagnostic>,
     resolutions: Vec<(Span, Resolution)>,
+    docs: HashMap<String, FnDoc>,
 }
 
 /// Flatten definitions and resolve calls (docs/language.md (visibility)):
@@ -557,6 +571,10 @@ struct Flattened {
 /// imports, unused functions) are produced here. Every call site also
 /// records a [`Resolution`] into the returned table — a pure side
 /// channel that does not influence mangling, warnings, or codegen.
+/// Every documented function's [`FnDoc`] is also copied into `docs`,
+/// keyed by the exact fully-qualified `name` this pass just mangled
+/// onto it — the doc map's qualification piggybacks on mangling instead
+/// of recomputing it.
 fn flatten(program: crate::parser::Program) -> Flattened {
     use crate::parser::{Function, Item, Program};
     use std::collections::{HashSet, VecDeque};
@@ -823,6 +841,14 @@ fn flatten(program: crate::parser::Program) -> Flattened {
     // names are unique, so this map is exact.
     let def_name_span_by_mangled: HashMap<&str, Span> =
         out.iter().map(|f| (f.name.as_str(), f.name_span)).collect();
+    // Doc-map qualification piggybacks on the mangling `emit` already did
+    // — `f.name` IS the fully-qualified name by this point (nested
+    // dot-mangling, namespace `::` paths). Undocumented functions
+    // (`f.doc == None`) are simply absent from the map.
+    let docs: HashMap<String, FnDoc> = out
+        .iter()
+        .filter_map(|f| f.doc.clone().map(|doc| (f.name.clone(), doc)))
+        .collect();
     let resolutions: Vec<(Span, Resolution)> = raw_resolutions
         .into_iter()
         .map(|(span, raw)| {
@@ -857,6 +883,7 @@ fn flatten(program: crate::parser::Program) -> Flattened {
         scopes: ScopeSummary { defs, bindings },
         warnings,
         resolutions,
+        docs,
     }
 }
 
@@ -1396,6 +1423,78 @@ mod tests {
         let out = compile(src, CompileOptions::default()).unwrap();
         assert!(out.pma.contains(".func main"));
         assert!(out.pma.contains(".func ns::inner"));
+    }
+
+    #[test]
+    fn flatten_qualifies_docs_by_the_same_fully_mangled_name_it_computes() {
+        // Four documented shapes: top-level, top-level NESTED
+        // (dot-mangled, no `::` prefix), namespaced, and namespaced
+        // nested (dot-mangled onto the namespaced name) — plus one
+        // undocumented top-level function and a bare `main`, which must
+        // both stay absent from the map.
+        let src = "\
+? top-level doc
+export documented() { right; }
+
+undocumented() { left; }
+
+parent() {
+? top-level nested doc
+    child() { right; }
+    right;
+}
+
+namespace ns {
+? namespaced doc
+export inner() {
+? nested doc
+! [deprecated] use outer instead
+    nested_helper() { right; }
+    right;
+}
+}
+
+main() { mark; }
+";
+        let staged = analyze_staged(src);
+        let a = staged.analysis.expect("the pipeline succeeded");
+
+        assert_eq!(
+            a.docs
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>(),
+            [
+                "documented",
+                "parent.child",
+                "ns::inner",
+                "ns::inner.nested_helper"
+            ]
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+            "{:#?}",
+            a.docs
+        );
+
+        let top = &a.docs["documented"];
+        assert_eq!(top.paragraphs, vec!["top-level doc".to_string()]);
+        assert!(top.attention.is_empty());
+        assert_eq!(top.deprecated, None);
+
+        let top_nested = &a.docs["parent.child"];
+        assert_eq!(
+            top_nested.paragraphs,
+            vec!["top-level nested doc".to_string()]
+        );
+        assert_eq!(top_nested.deprecated, None);
+
+        let ns_fn = &a.docs["ns::inner"];
+        assert_eq!(ns_fn.paragraphs, vec!["namespaced doc".to_string()]);
+        assert_eq!(ns_fn.deprecated, None);
+
+        let nested = &a.docs["ns::inner.nested_helper"];
+        assert_eq!(nested.paragraphs, vec!["nested doc".to_string()]);
+        assert_eq!(nested.deprecated, Some("use outer instead".to_string()));
     }
 
     #[test]

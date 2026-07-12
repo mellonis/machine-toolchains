@@ -85,6 +85,37 @@ pub struct Function {
     /// full symbol joins namespaces with `::` and nesting with `.` —
     /// `std::api.helper`.
     pub ns: Vec<String>,
+    /// The bound `?`/`!` run (`docs/superpowers/specs/
+    /// 2026-07-12-pmc-doc-lines-attributes-design.md`), reduced from
+    /// [`crate::cst::FunctionCst::doc_run`] by [`lower_cst`]. `None` for
+    /// an undocumented function (an empty `doc_run`); every compiler
+    /// pass past `lower_cst` ignores this field — `flatten` copies it
+    /// into `Analysis.docs`, keyed by the same fully-qualified name it
+    /// already computes, and nothing downstream reads it off `Function`
+    /// again.
+    pub doc: Option<FnDoc>,
+}
+
+/// One function's reduced doc/attention run (docs/superpowers/specs/
+/// 2026-07-12-pmc-doc-lines-attributes-design.md): paragraphs from `?`
+/// lines, bare-prose `!` lines, and the `[deprecated]` attribute's
+/// message, with spans and raw sigil/attribute text dropped — a future
+/// hover/lint consumer reads this shape, not the CST's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FnDoc {
+    /// `?` lines, reduced: consecutive lines join into one paragraph
+    /// separated by a single space; an empty `?` line splits paragraphs;
+    /// leading/trailing empty `?` lines produce no empty paragraph.
+    pub paragraphs: Vec<String>,
+    /// Bare-prose `!` lines (no `[attr]` prefix), verbatim, in source
+    /// order. The `[deprecated]` line is NOT included here — it is
+    /// reduced into `deprecated` instead.
+    pub attention: Vec<String>,
+    /// `Some(message)` when a `! [deprecated] …` line is present (`""`
+    /// when the line carries no message past the attribute); `None`
+    /// otherwise. At most one such line can exist — a second is a parse
+    /// error (`DuplicateAttribute`) before an AST is ever built.
+    pub deprecated: Option<String>,
 }
 
 /// A label prefix `N:` — the span runs from the number's start to the
@@ -331,7 +362,8 @@ fn lower_items(
 /// body order) and, like the pre-C1 parser, carry an EMPTY `ns` — flatten
 /// resolves nesting through the top-level ancestor. `exported` is copied
 /// from the CST (the caller stamped top-level `main`'s auto-export);
-/// nested functions are never exported.
+/// nested functions are never exported. `doc` is [`reduce_doc_run`] over
+/// the CST's bound `doc_run`.
 fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
     let mut body = Vec::new();
     let mut nested = Vec::new();
@@ -357,7 +389,64 @@ fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
         local: false,
         nested,
         ns: ns.to_vec(),
+        doc: reduce_doc_run(&f.doc_run),
     }
+}
+
+/// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`] — `None` for an
+/// empty run (undocumented). `DocRunKind::Comment` items are transparent:
+/// they contribute nothing and never split a paragraph, matching the
+/// design doc's "comments/blanks don't participate" rule for the run's
+/// own order check. A `?` line's text is the join key; an EMPTY `?` line
+/// (the lexer's bare-sigil payload) closes the current paragraph without
+/// emitting an empty one, so leading/trailing/repeated blanks are all
+/// absorbed. An attention line with `attr.name == "deprecated"` (at most
+/// one — a second is rejected at parse time, before any `FunctionCst`
+/// exists) is excluded from `attention`; its message is the FULL raw
+/// payload's text after the attribute's closing `]`, trimmed — finding
+/// `]` in `text` directly is equivalent to (and simpler than) mapping
+/// `attr.span.end` back into the string, since `parse_attr` only
+/// recognizes `[ident]` at the payload's very start.
+fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
+    if doc_run.is_empty() {
+        return None;
+    }
+    let mut paragraphs = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    let mut attention = Vec::new();
+    let mut deprecated = None;
+    for item in doc_run {
+        match &item.kind {
+            DocRunKind::Doc { text, .. } => {
+                if text.is_empty() {
+                    if !current.is_empty() {
+                        paragraphs.push(current.join(" "));
+                        current.clear();
+                    }
+                } else {
+                    current.push(text.as_str());
+                }
+            }
+            DocRunKind::Attention { attr, text, .. } => match attr {
+                Some(a) if a.name == "deprecated" => {
+                    let close = text.find(']').expect(
+                        "parser: a `deprecated`-tagged attention line always has a closing `]`",
+                    );
+                    deprecated = Some(text[close + 1..].trim().to_string());
+                }
+                _ => attention.push(text.clone()),
+            },
+            DocRunKind::Comment(_) => {}
+        }
+    }
+    if !current.is_empty() {
+        paragraphs.push(current.join(" "));
+    }
+    Some(FnDoc {
+        paragraphs,
+        attention,
+        deprecated,
+    })
 }
 
 /// A comment token lifted out of the stream during [`parse_cst`]'s split,
@@ -2471,19 +2560,32 @@ main() { right; }
         assert!(matches!(main.body[3].kind, BodyKind::Statement(_)));
     }
 
-    /// The C1 parity guard (`parse == lower_cst ∘ parse_cst`) exercised
-    /// on an actual documented program, not just argued from `parse`'s
-    /// own definition: `lower_cst` ignores `doc_run` entirely in this
-    /// task (Task 3's reduction lands later), so a documented function
-    /// must lower to the exact same `Program` as its undocumented twin —
-    /// the twin is padded with blank lines so `main`'s own line/col
-    /// (which DOES belong in the AST) line up too, isolating the
-    /// comparison to "does `doc_run` leak into `lower_cst`'s output".
+    /// The C1 parity guard (`parse == lower_cst ∘ parse_cst`) exercised on
+    /// an actual documented program, not just argued from `parse`'s own
+    /// definition. Task 3 lands the `doc_run` → `FnDoc` reduction, so a
+    /// documented function no longer lowers to the exact same `Program`
+    /// as its undocumented twin — `doc` is now the one field that
+    /// differs. Isolates the comparison to "does the reduction leak
+    /// anything ELSE into the rest of the AST": strip `doc` back off the
+    /// documented function and the two programs must match exactly (the
+    /// twin is padded with blank lines so `main`'s own line/col line up
+    /// too).
     #[test]
-    fn documented_function_lowers_identically_to_its_undocumented_twin() {
+    fn documented_function_lowers_to_its_undocumented_twin_plus_a_doc() {
         let doc = parse_src("? doc\n! [deprecated] msg\nmain() { right; }").unwrap();
         let bare = parse_src("\n\nmain() { right; }").unwrap();
-        assert_eq!(doc, bare);
+        assert_eq!(bare.functions[0].doc, None);
+        assert_eq!(
+            doc.functions[0].doc,
+            Some(FnDoc {
+                paragraphs: vec!["doc".to_string()],
+                attention: vec![],
+                deprecated: Some("msg".to_string()),
+            })
+        );
+        let mut doc_stripped = doc;
+        doc_stripped.functions[0].doc = None;
+        assert_eq!(doc_stripped, bare);
     }
 
     #[test]
@@ -2576,6 +2678,29 @@ main() { right; }
         assert_eq!((e.span.start.line, e.span.start.col), (1, 4));
     }
 
+    /// WARM-UP pin (T2 review carry-over): `parse_attr`'s column math
+    /// (`docs/superpowers/specs/2026-07-12-pmc-doc-lines-attributes-design.md`)
+    /// is char-counted throughout (`Token::len`, `text.chars().count()`),
+    /// never byte-counted — a non-ASCII payload AFTER the attribute
+    /// (`café`, where `é` is one `char` but two UTF-8 bytes) must not
+    /// perturb the attribute name's own span, since nothing about
+    /// `[xx]`'s position depends on what follows it.
+    #[test]
+    fn unknown_attribute_span_is_char_counted_past_a_non_ascii_payload() {
+        let e = parse_src("! [xx] café\nmain() { right; }").unwrap_err();
+        assert!(matches!(e.kind, CompileErrorKind::UnknownAttribute(ref n) if n == "xx"));
+        assert_eq!(e.kind.code(), "unknown-attribute");
+        assert_eq!(
+            (
+                e.span.start.line,
+                e.span.start.col,
+                e.span.end.line,
+                e.span.end.col
+            ),
+            (1, 4, 1, 6)
+        );
+    }
+
     #[test]
     fn duplicate_deprecated_attribute_is_rejected_at_the_second_occurrence() {
         let e = parse_src("! [deprecated] first\n! [deprecated] second\nmain() { right; }")
@@ -2583,5 +2708,98 @@ main() { right; }
         assert!(matches!(e.kind, CompileErrorKind::DuplicateAttribute));
         assert_eq!(e.kind.code(), "duplicate-attribute");
         assert_eq!((e.span.start.line, e.span.start.col), (2, 4));
+    }
+
+    // Task 3: the `doc_run` → `FnDoc` reduction lowered onto
+    // `Function::doc`. `Analysis.docs`'s qualification (top-level,
+    // nested dot-mangled, namespaced) is covered in `compiler.rs`'s
+    // tests; these pin the CST -> AST reduction itself.
+
+    #[test]
+    fn fn_doc_paragraphs_join_with_a_single_space_and_split_on_an_empty_doc_line() {
+        let prog =
+            parse_src("? line one\n? line two\n?\n? second para\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["line one line two", "second para"]);
+        assert!(doc.attention.is_empty());
+        assert_eq!(doc.deprecated, None);
+    }
+
+    #[test]
+    fn fn_doc_leading_and_trailing_empty_doc_lines_produce_no_empty_paragraphs() {
+        let prog = parse_src("?\n?\n? doc\n?\n?\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["doc"]);
+    }
+
+    #[test]
+    fn fn_doc_attention_prose_is_captured_verbatim_in_order() {
+        let prog = parse_src("! first note\n! second note\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert!(doc.paragraphs.is_empty());
+        assert_eq!(doc.attention, vec!["first note", "second note"]);
+        assert_eq!(doc.deprecated, None);
+    }
+
+    // WARM-UP pin (1) (T2 review carry-over): a bracket that doesn't sit
+    // at the payload's very start is NOT an attribute — `parse_attr`
+    // already returns `None` for it (first char isn't `[`), and the
+    // whole line is bare prose that lands verbatim in `attention`.
+    #[test]
+    fn fn_doc_attention_bracket_mid_prose_has_no_attr_and_lands_verbatim() {
+        let tokens = lex("! see [deprecated] docs\nmain() { right; }").unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let TopKind::Function(f) = &cst.items[0].kind else {
+            panic!("expected a function item");
+        };
+        let DocRunKind::Attention { attr, .. } = &f.doc_run[0].kind else {
+            panic!("expected an attention line");
+        };
+        assert!(attr.is_none(), "bracket mid-prose is not an attribute");
+
+        let prog = lower_cst(&cst);
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.attention, vec!["see [deprecated] docs"]);
+        assert_eq!(doc.deprecated, None);
+    }
+
+    #[test]
+    fn fn_doc_deprecated_message_captured_with_and_without_a_message() {
+        let prog = parse_src("! [deprecated] use goToStart instead\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.deprecated, Some("use goToStart instead".to_string()));
+        assert!(doc.attention.is_empty());
+
+        let prog = parse_src("! [deprecated]\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.deprecated, Some(String::new()));
+    }
+
+    #[test]
+    fn fn_doc_deprecated_line_is_excluded_from_attention_while_bare_prose_survives() {
+        let prog =
+            parse_src("! note one\n! [deprecated] use bar instead\n! note two\nmain() { right; }")
+                .unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.attention, vec!["note one", "note two"]);
+        assert_eq!(doc.deprecated, Some("use bar instead".to_string()));
+    }
+
+    #[test]
+    fn fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph() {
+        use crate::lexer::{LexMode, lex_with};
+        let src =
+            "? first\n// mid comment\n? second\n// trailing comment before fn\nmain() { right; }";
+        let tokens = lex_with(src, LexMode::WithComments).unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let prog = lower_cst(&cst);
+        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["first second"]);
+    }
+
+    #[test]
+    fn undocumented_function_has_no_doc() {
+        let prog = parse_src("main() { right; }").unwrap();
+        assert_eq!(prog.functions[0].doc, None);
     }
 }
