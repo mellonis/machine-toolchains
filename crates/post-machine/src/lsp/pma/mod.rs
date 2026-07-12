@@ -157,8 +157,8 @@ impl LanguageService for PmaLanguageService {
     }
 
     fn did_update(&mut self, uri: &str, text: &str) -> Vec<ServiceDiagnostic> {
-        // 1. Resolve config — shared machinery (docs/lsp.md (config
-        //    channels)), identical union semantics to `.pmc`.
+        // 1. Resolve config — shared machinery (docs/lsp.md
+        //    (configuration)), identical union semantics to `.pmc`.
         let (effective_allow, config_errors) = ConfigResolver {
             ide_allow: &self.ide_allow,
             config_cache: &mut self.config_cache,
@@ -219,7 +219,9 @@ impl LanguageService for PmaLanguageService {
     }
 
     // `.pma` has no doc/attention-line grammar of its own — hover stays
-    // `None` permanently, not just this round (docs/lsp.md; design spec).
+    // `None` permanently, not just this round (docs/lsp.md) — the design
+    // spec this round shipped from only said "this round"; the stronger,
+    // permanent framing is docs/lsp.md's own call.
     fn hover(&mut self, _uri: &str, _pos: Pos) -> Option<HoverContent> {
         None
     }
@@ -247,8 +249,8 @@ impl LanguageService for PmaLanguageService {
     }
 
     fn format(&mut self, uri: &str) -> Option<String> {
-        // The DOCSTORE's text (docs/lsp.md (format seam)): same
-        // single-source contract as `.pmc`.
+        // Whole-document formatting (docs/lsp.md (formatting)): reads the
+        // DOCSTORE's text, same single-source contract as `.pmc`.
         let state = self.docs.get(uri)?;
         format_asm(&state.text).ok()
     }

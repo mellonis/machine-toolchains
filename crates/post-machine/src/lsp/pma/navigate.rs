@@ -1,4 +1,4 @@
-//! Go-to-definition (docs/lsp.md (navigation)) for `.pma`: the operand
+//! Go-to-definition (docs/lsp.md (go-to-definition)) for `.pma`: the operand
 //! token under the cursor, resolved from the total CST — never gated on
 //! `fatal`/`lint` (docs/formats.md (assembly text); total CST), so a
 //! reference resolves even elsewhere on a document that fails to

@@ -46,7 +46,9 @@ The initial tape contents are **not** embedded in a `.pmx` — they are
 supplied to the VM at run time (`pmt run app.pmx --tape "..*..***" --head 2`,
 or a loaded `.pmt`, or via the API directly). `entry offset` is validated to
 be inside the code section, and the loader additionally checks that byte is
-`ent` before running (`docs/isa.md`). The linker guarantees the entry symbol is literally `main`, which is what lets a bare executable's disassembly name the entry root `main`.
+`ent` before running (`docs/isa.md`). The linker guarantees the
+**`.pmx entry`** symbol is literally `main`, which is what lets a bare
+executable's disassembly name the entry root `main`.
 
 ## `.pmo` — object file
 
@@ -231,7 +233,6 @@ versioned JSON document: `IR_VERSION = 3`.
     {
       "name": "goToEnd",
       "line": 1,
-      "local": false,
       "blocks": [
         {
           "id": 0,
@@ -241,7 +242,8 @@ versioned JSON document: `IR_VERSION = 3`.
           "term": { "kind": "check", "marked": 0, "blank": 1 },
           "term_line": 1
         }
-      ]
+      ],
+      "local": false
     }
   ]
 }

@@ -1,12 +1,12 @@
 # The `pmt` command-line tool
 
-`pmt` is a thin renderer over the toolchain's library API: library code
-never prints, and every stage returns a structured report (compiler
-warnings and an optimizer report; the linker's dropped-functions and
-relaxation report); `pmt -v` on the relevant subcommand renders that report
-as text. This is why the CLI mirrors the library shape so closely, and why
-a future embedder can consume `compile`/`assemble`/`link`/`disassemble`/
-`Machine` directly without going through a subprocess at all.
+`pmt` follows the **thin-renderer rule**: library code never prints, and
+every stage returns a structured report (compiler warnings and an
+optimizer report; the linker's dropped-functions and relaxation report);
+`pmt -v` on the relevant subcommand renders that report as text. This is
+why the CLI mirrors the library shape so closely, and why a future
+embedder can consume `compile`/`assemble`/`link`/`disassemble`/`Machine`
+directly without going through a subprocess at all.
 
 ```
 pmt — Post-machine toolchain
@@ -80,12 +80,13 @@ repeating it is an unknown-flag error.
 ### Compile errors
 
 A fatal compile error stops the compile and renders as
-`FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed suffix is a
-stable kebab-case code identifying the error kind — every fatal
-rendering carries it, wherever the fatal surfaces (`pmt compile`
-itself, and the per-file fatal lines of `pmt lint` and `pmt fmt`).
-Codes are permanent identifiers: they never change meaning and are
-safe to match in scripts and editor integrations.
+`FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed suffix is one of
+this page's **error codes** — a stable kebab-case identifier for the
+error kind — every fatal rendering carries it, wherever the fatal
+surfaces (`pmt compile` itself, and the per-file fatal lines of
+`pmt lint` and `pmt fmt`). Codes are permanent identifiers: they never
+change meaning and are safe to match in scripts and editor
+integrations.
 
 | Code | Meaning |
 |---|---|
@@ -108,6 +109,10 @@ safe to match in scripts and editor integrations.
 | `keyword-in-body` | `use` or `namespace` inside a function body — imports and namespaces live at file or namespace level. |
 | `single-colon-in-path` | A single `:` in a name path where the `::` separator was meant. |
 | `top-level-statement` | A command or call at top level — statements live inside function bodies. |
+| `dangling-doc-run` | A doc/attention run (`docs/language.md` (doc lines)) not immediately followed by a function declaration at its scope. |
+| `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block — interleaved, or the whole run written `!`-then-`?`. |
+| `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
+| `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
 
 ## `pmt asm`
 

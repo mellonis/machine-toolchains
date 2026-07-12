@@ -1,15 +1,18 @@
 # PMC — Post-machine toolchain support for JetBrains IDEs
 
 Language support for `.pmc`, the C-like source language of the Post-machine
-toolchain in this repository. This plugin is a thin client on top of
+toolchain in this repository, and `.pma`, its PM-1 assembly dialect. This
+plugin is a thin client on top of
 [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij): it launches
 `pmt lsp` and renders whatever the server reports — diagnostics,
-completions, go-to-definition, quickfixes, semantic tokens, document
-symbols, and formatting — over the standard Language Server Protocol.
-Nothing here is a reimplementation; every answer comes from the same
-compiler, linter, and formatter the `pmt` command-line tool uses. Syntax
-coloring comes from a bundled TextMate grammar, shared byte-for-byte with
-the VS Code extension.
+completions, hover, go-to-definition, quickfixes, semantic tokens,
+document symbols, and formatting — over the standard Language Server
+Protocol. Nothing here is a reimplementation; every answer comes from the
+same compiler, assembler, linter, and formatter the `pmt` command-line
+tool uses. Syntax coloring comes from a bundled TextMate grammar, shared
+byte-for-byte with the VS Code extension. `.pma` support is syntax
+highlighting plus the full `pmt lsp` surface plus run configurations —
+see the `.pma` checklist below for its own manual walkthrough.
 
 ## Requirements
 
@@ -103,11 +106,12 @@ re-publishes diagnostics for its open documents immediately, so a
 previously-squiggled suppressed code clears without reopening the file or
 restarting anything.
 
-The binary path is different: it is read only when a `pmtLsp` server
-process starts, so editing it and applying the settings page has no
-effect on an already-running server. Restart the language server for the
-project (or restart the IDE) to pick up a new path — only the lint
-allow-list pushes live.
+The binary path is different: the language server reads it only when a
+`pmtLsp` process starts, so editing it and applying the settings page has
+no effect on an already-running server (restart the language server for
+the project, or restart the IDE, to pick up a new path there). Run
+configurations read the current path fresh on every run, so no restart is
+needed for those.
 
 ## Run configurations
 
@@ -247,16 +251,16 @@ main() {
       arguments `check.pmx --tape " * *"`, and run it. Confirm the console
       shows the run's tape output and the process's exit code (0 = the
       program executed `stp`, 2 = `hlt`, 3 = a trap — see `docs/cli.md`).
+      ```text
+      /Users/mellonis/.cargo/bin/pmt run check.pmx --tape " * *"
+      outcome: Halted
+      steps 12, core tacts 32, stall tacts 8 (total 40)
+      origin 1, head 2
+      |* *|
+       ^
 
-/Users/mellonis/.cargo/bin/pmt run check.pmx --tape " * *"
-outcome: Halted
-steps 12, core tacts 32, stall tacts 8 (total 40)
-origin 1, head 2
-|* *|
-^
-
-Process finished with exit code 2
-
+      Process finished with exit code 2
+      ```
 - [x] **Dogfood — the embedded standard library**: open
       `crates/post-machine/src/stdlib/std.pmc` from this repository
       directly (not the go-to-definition-materialized cache copy from
@@ -303,7 +307,7 @@ UNUSED: nop
       as `.pmc`, now wired for the `PMA` file type too. If colors are
       missing, that bridge needs attention before anything below is worth
       testing.
-- [x] **Typo mnemonic**: change `jm L1` to `jpm L1`. Confirm a warning
+- [x] **Typo mnemonic**: change `jm L1` to `jpm L1`. Confirm an error
       underline on `jpm` carrying the `unknown-mnemonic` code. **Undo**
       the typo back to `jm L1` before continuing — per `docs/lsp.md`, a
       fatal error hides lint findings entirely on the `.pma` side (no

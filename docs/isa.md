@@ -120,16 +120,22 @@ entry point is just that number. Loading:
 4. initialize `IP := entry offset`, the return stack empty, and latch
    `MF := (tape.read() == 1)` (this latch is tact-free — it is loading,
    not execution);
-5. verify `code[IP]` is `ent` (a corrupt entry point traps before the
-   first step);
+5. verify `code[IP]` is `ent` (a corrupt entry point is rejected before a
+   `Machine` exists — `LoadError::EntryNotEntryMarker`, or
+   `FormatError::Malformed` if the entry offset itself is out of bounds —
+   distinct from the runtime `Trap` taxonomy below, since no instruction
+   ever executes);
 6. run.
 
 ## Instruction set
 
 Byte-addressed, variable-length: 1-byte opcode plus an optional immediate.
-Jump and call operands are **IP-relative to the end of the instruction** —
-position-independent code, which keeps the linker to pure layout plus
-patching.
+**Control flow** — `jmp`/`jmp.s` (unconditional), `jm`/`jm.s`/`jnm`/`jnm.s`
+(conditional on MF), and `call`/`call.s`/`ret` — is the family of opcodes
+that can move IP anywhere other than the next instruction; everything else
+always falls through. Jump and call operands are **IP-relative to the end
+of the instruction** — position-independent code, which keeps the linker
+to pure layout plus patching.
 
 | Opcode | Mnemonic | Operand | Meaning |
 |---|---|---|---|
@@ -167,8 +173,8 @@ table rows — they decode to "invalid" or "reserved").
 - **Width selection:** intra-function jumps are relaxed by the
   assembler/compiler back end (iterate until sizes stabilize). `call`
   width is decided by **linker relaxation**: lay out with far calls, then
-  iteratively shrink calls whose targets land within ±127 to `call.s`,
-  re-patching until stable (`pmt link --no-relax` disables this).
+  iteratively shrink calls whose targets fit a signed byte (-128..127) to
+  `call.s`, re-patching until stable (`pmt link --no-relax` disables this).
 
 ## Timing model (tacts)
 
@@ -190,8 +196,7 @@ the `ent` check is a real code-bus read at the target address).
 executes, and the tact counter runs for the device's full price (no
 pipeline hides the latency). Accounting splits into *core tacts*
 (fetch/execute/stack) and *stall tacts* (waiting on the device); both are
-reported in run stats and via the debug API, which also exposes whether
-the core is `running` or stalled on a device.
+reported in run stats (`RunStats`, via `DebugSession::stats()`).
 
 ## Execution
 

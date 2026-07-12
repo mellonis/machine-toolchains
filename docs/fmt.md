@@ -144,6 +144,42 @@ past 80 characters, that one line falls back to a single space instead
 (and may then be reported by `line-too-long`); the rest of the run stays
 aligned.
 
+## Doc and attention runs
+
+A `?`/`!` run (`docs/language.md`, doc lines and attention lines) prints
+directly above the function declaration it binds to, at that
+declaration's own indent — column 0 for a top-level function, body
+indent for a nested one, the same indent the header line itself prints
+at. Each run line is sigil, then exactly one canonical space, then its
+text verbatim; an empty line collapses to the bare sigil with no
+trailing space, the paragraph-break notation for a run of `?` lines. The
+canonical space is the only thing normalized — the text itself is a
+token like any other and is never touched, so a `[deprecated]`
+attribute's `! [deprecated] message` shape carries straight through with
+no special-casing. There is no wrapping: a run line over 80 characters
+stays as written and is `line-too-long`'s business (`docs/lint.md`), not
+fmt's — the same split this page draws for any single unbreakable
+command.
+
+```c
+? Moves the head one cell to the right.
+?
+? Then checks whether it landed on a mark.
+! [deprecated] use goToMark instead
+step() {
+    right;
+    check(1, !);
+}
+```
+
+An ordinary comment interleaved inside a run prints under the Comments
+rule above, at the run's own indent. Blank lines inside a run follow the
+same collapse-to-one policy as everywhere else. The gap before the whole
+run (between a prior declaration and this one's run) and the gap between
+the run's last line and the declaration it binds to are two independent
+blanks, each the author's own to keep or omit — fmt neither forces nor
+removes either beyond the standard collapse.
+
 ## Spacing
 
 Canonical intra-statement spacing, independent of what the source wrote:
@@ -167,7 +203,7 @@ mandatory pair of call parens (`@f();`) is left exactly as written.
 
 ```
 pmt fmt PATH... [--exclude PATH]... [--check]
-pmt fmt -       [--check]
+pmt fmt -       [--check] [--lang pmc|pma]
 ```
 
 By default `pmt fmt` rewrites each file in place, and only when its
@@ -175,9 +211,10 @@ formatted text differs from what's on disk — an already-formatted file
 is never rewritten, so running fmt does not churn file modification
 times across a clean tree. `--check` writes nothing: it lists the path
 of every file whose formatted text would differ, and exits 1 if any
-did (0 if none did) — the CI-friendly mode. `-` reads one `.pmc` from
-stdin and writes the formatted text to stdout, for editors without an
-LSP hooked up and for shell pipelines or git filters; `-` cannot be
+did (0 if none did) — the CI-friendly mode. `-` reads one source from
+stdin — `.pmc` by default, or `.pma` under `--lang pma` (`docs/cli.md`)
+— and writes the formatted text to stdout, for editors without an LSP
+hooked up and for shell pipelines or git filters; `-` cannot be
 combined with `PATH` arguments. `- --check` mirrors the same semantics
 against stdin: nothing is written either way, and the exit code alone
 says whether the input would change.

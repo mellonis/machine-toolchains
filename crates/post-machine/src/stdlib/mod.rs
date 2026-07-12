@@ -8,7 +8,7 @@
 //! overriding std routines.
 //!
 //! The [`roster`] and [`materialized_std_uri`] below serve the LSP's
-//! go-to-definition on `std::` calls (docs/lsp.md (navigation)): the
+//! go-to-definition on `std::` calls (docs/lsp.md (go-to-definition)): the
 //! roster locates each exported routine's name token in `SOURCE`, and
 //! the materializer writes `SOURCE` to a real file on disk once per
 //! toolchain version so an editor has something to open. [`docs`]
@@ -50,8 +50,8 @@ pub fn object() -> &'static ObjectFile {
 }
 
 /// One exported std routine, as declared in `SOURCE` (docs/lsp.md
-/// (navigation)) — the go-to-definition target for a `std::<name>` call
-/// site.
+/// (go-to-definition)) — the go-to-definition target for a `std::<name>`
+/// call site.
 pub(crate) struct RosterEntry {
     pub full_path: String,
     /// Span of the routine name token alone, in `SOURCE`.
@@ -161,7 +161,8 @@ fn path_to_file_uri(path: &Path) -> String {
 /// Writes `SOURCE` to `<root>/pmt/<CARGO_PKG_VERSION>/std.pmc` if the
 /// file is absent or its bytes differ from `SOURCE` (self-heals a
 /// corrupted or stale cache file), then returns its `file:` URI. Any IO
-/// failure degrades to `None` (docs/lsp.md (materialized stdlib)).
+/// failure degrades to `None` (docs/lsp.md (materialized standard
+/// library)).
 fn materialize_into(root: &Path) -> Option<String> {
     let dir = root.join("pmt").join(env!("CARGO_PKG_VERSION"));
     fs::create_dir_all(&dir).ok()?;
@@ -178,9 +179,9 @@ fn materialize_into(root: &Path) -> Option<String> {
 
 /// The embedded `std.pmc`, written once per toolchain version to
 /// `<cache>/pmt/<version>/std.pmc`, as a `file:` URI (docs/lsp.md
-/// (materialized stdlib)). `None` if the cache root can't be located or
-/// any IO step fails — go-to-definition on `std::` calls then degrades
-/// to null rather than pointing at a file that doesn't exist.
+/// (materialized standard library)). `None` if the cache root can't be
+/// located or any IO step fails — go-to-definition on `std::` calls then
+/// degrades to null rather than pointing at a file that doesn't exist.
 pub(crate) fn materialized_std_uri() -> Option<&'static str> {
     static URI: OnceLock<Option<String>> = OnceLock::new();
     URI.get_or_init(|| cache_root().and_then(|root| materialize_into(&root)))

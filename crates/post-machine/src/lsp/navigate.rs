@@ -1,4 +1,4 @@
-//! Go-to-definition (docs/lsp.md (navigation)): resolves a document
+//! Go-to-definition (docs/lsp.md (go-to-definition)): resolves a document
 //! position to a [`DefTarget`] through a four-step resolution order —
 //! the resolution table (a call's name), a label reference (`goto` /
 //! `check` / a labeled successor), a `use std::…` path, else `None`.
@@ -38,7 +38,7 @@ fn resolve_at(analysis: &Analysis, pos: Pos) -> Option<(Span, &Resolution)> {
 }
 
 /// The definition target for `pos` in `uri`'s current document
-/// (docs/lsp.md (navigation)):
+/// (docs/lsp.md (go-to-definition)):
 ///
 /// 1. a resolution-table entry whose span contains `pos` (the call name
 ///    under the cursor) — resolved per its [`Resolution`] variant,
@@ -112,7 +112,7 @@ fn resolve_call(uri: &str, resolution: &Resolution, origin: Span) -> Option<DefT
 
 /// A `std::…` full path through the materialized roster: a non-`std`
 /// path, a roster miss, or a materializer IO failure all degrade to
-/// `None` (docs/lsp.md (materialized stdlib)). `origin` is the
+/// `None` (docs/lsp.md (materialized standard library)). `origin` is the
 /// reference span in the requesting document, carried through
 /// unconditionally. The `std::` guard matters now that [`use_path_at`]
 /// returns EVERY path, not just std-prefixed ones (hover's own use of

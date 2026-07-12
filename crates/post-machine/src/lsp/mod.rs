@@ -48,7 +48,7 @@ impl PmcLanguageService {
     }
 }
 
-/// Shared config-resolution machinery (docs/lsp.md (config channels)),
+/// Shared config-resolution machinery (docs/lsp.md (configuration)),
 /// reused by every service's `did_update` first step: the mtime-cached
 /// `pmt.json` lookup, then the two-channel union (project file, then
 /// IDE settings) into one effective allow-list + invalid-config
@@ -92,7 +92,7 @@ impl ConfigResolver<'_> {
     /// Resolves one document's effective allow-list: the discovered
     /// project file (if any) unioned with the IDE settings channel,
     /// project first. Returns `(effective_allow, config_errors)` — every
-    /// service's `did_update` step 1 (docs/lsp.md (config channels)).
+    /// service's `did_update` step 1 (docs/lsp.md (configuration)).
     fn resolve(&mut self, uri: &str) -> (Vec<String>, Vec<String>) {
         let mut config_errors: Vec<String> = Vec::new();
         let mut effective_allow: Vec<String> = Vec::new();
@@ -423,8 +423,8 @@ impl LanguageService for PmcLanguageService {
     }
 
     fn did_update(&mut self, uri: &str, text: &str) -> Vec<ServiceDiagnostic> {
-        // 1. Resolve config — shared machinery (docs/lsp.md (config
-        //    channels)). The discovery re-runs EVERY analysis (a few
+        // 1. Resolve config — shared machinery (docs/lsp.md
+        //    (configuration)). The discovery re-runs EVERY analysis (a few
         //    stats) — a newly created nearer pmt.json must win; only the
         //    parse of the winner is cached (by mtime). Idempotent for the
         //    same (uri, text): the framework's config/watched-file
@@ -562,9 +562,10 @@ impl LanguageService for PmcLanguageService {
     }
 
     fn format(&mut self, uri: &str) -> Option<String> {
-        // The DOCSTORE's text (docs/lsp.md (format seam)): the framework
-        // diffs the returned text against exactly what `did_update` last
-        // received, never a re-read from disk or a stale revision.
+        // Whole-document formatting (docs/lsp.md (formatting)): reads the
+        // DOCSTORE's text — the framework diffs the returned text against
+        // exactly what `did_update` last received, never a re-read from
+        // disk or a stale revision.
         let state = self.docs.get(uri)?;
         crate::fmt::format(&state.text).ok()
     }
@@ -1434,11 +1435,11 @@ export main() {
         assert_eq!(reformatted, canonical);
     }
 
-    // --- End-to-end scripted session (docs/lsp.md's "Testing" section,
-    // service bullet 8): the REAL service driven through core's blocking
-    // server loop over in-memory pipes, exactly as `pmt lsp` drives it
-    // over stdio — the CLI subcommand (`cli/lsp.rs`) differs only in
-    // which reader/writer it hands to `mtc_core::lsp::server::run`. ----
+    // --- End-to-end scripted session: the REAL service driven through
+    // core's blocking server loop over in-memory pipes, exactly as
+    // `pmt lsp` drives it over stdio — the CLI subcommand (`cli/lsp.rs`)
+    // differs only in which reader/writer it hands to
+    // `mtc_core::lsp::server::run`. ----
 
     /// Frames each of `client_messages` (`mtc_core::lsp::transport::
     /// write_message`) into an in-memory buffer, drives the real server

@@ -3,13 +3,14 @@
 Language support for `.pmc`, the C-like source language of the Post-machine
 toolchain in this repository, and `.pma`, its PM-1 assembly dialect. This
 extension is a thin client: it launches `pmt lsp` and renders whatever the
-server reports — diagnostics, completions, go-to-definition, quickfixes,
-semantic tokens, document symbols, and formatting — over the standard
-Language Server Protocol. Nothing here is a reimplementation; every answer
-comes from the same compiler, assembler, linter, and formatter the `pmt`
-command-line tool uses. `.pma` support is currently syntax highlighting +
-the full `pmt lsp` surface + the `lint`/`fmt-check` tasks below — see the
-Tasks section for the one gap (`compile`) that's `.pmc`-only.
+server reports — diagnostics, completions, hover, go-to-definition,
+quickfixes, semantic tokens, document symbols, and formatting — over the
+standard Language Server Protocol. Nothing here is a reimplementation;
+every answer comes from the same compiler, assembler, linter, and
+formatter the `pmt` command-line tool uses. `.pma` support is currently
+syntax highlighting + the full `pmt lsp` surface + the `lint`/`fmt-check`
+tasks below — see the Tasks section for the one gap (`compile`) that's
+`.pmc`-only.
 
 ## Requirements
 
@@ -46,9 +47,9 @@ npm install
 npm run package
 ```
 
-`npm run package` copies in the shared `.pmc` TextMate grammar, compiles
-the extension, and runs `vsce package`, producing `pmc-0.1.1.vsix` in
-this directory. Install it into VS Code:
+`npm run package` copies in the shared `.pmc` and `.pma` TextMate
+grammars, compiles the extension, and runs `vsce package`, producing
+`pmc-0.1.1.vsix` in this directory. Install it into VS Code:
 
 ```sh
 code --install-extension pmc-0.1.1.vsix

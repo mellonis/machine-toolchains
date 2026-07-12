@@ -8,9 +8,9 @@ tests. All eleven routines take no arguments and share one vocabulary: a
 
 ## Roster
 
-Every routine's precondition and postcondition below is the normative
-contract — it is copied verbatim from the doc comments in
-`crates/post-machine/src/stdlib/std.pmc`, which is itself the source of
+Every routine's precondition and postcondition below mirrors the `?` doc
+lines in `crates/post-machine/src/stdlib/std.pmc` — the text an editor
+surfaces on hover for a `std::` call — which is itself the source of
 truth these are compiled from. Under `--strict-cells`
 (`docs/isa.md (execution)`), a routine that writes assumes its stated
 precondition holds: `eraseSection` and the `remove*` routines only unmark
@@ -27,8 +27,8 @@ its immediate new edge cell).
 | `goToBegin()` | head on a mark of a section | head on the section's FIRST mark; tape unchanged. |
 | `goToMarkRight()` | a mark exists strictly right of the head | head on the nearest such mark; tape unchanged. |
 | `goToMarkLeft()` | a mark exists strictly left of the head | head on the nearest such mark; tape unchanged. |
-| `goToBlankRight()` | a blank exists strictly right of the head (always true off a finite tape's sections) | head on the nearest such blank. |
-| `goToBlankLeft()` | a blank exists strictly left of the head | head on the nearest such blank. |
+| `goToBlankRight()` | a blank exists strictly right of the head (always true off a finite tape's sections) | head on the nearest such blank; tape unchanged. |
+| `goToBlankLeft()` | a blank exists strictly left of the head | head on the nearest such blank; tape unchanged. |
 | `eraseSection()` | head on a mark of a section | section erased; head on the first cell right of where the section was. |
 | `appendMark()` | head on a mark of a section | section grown by one mark on the right; head on the new (last) mark. |
 | `prependMark()` | head on a mark of a section | section grown by one mark on the left; head on the new (first) mark. |

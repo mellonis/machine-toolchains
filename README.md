@@ -9,10 +9,11 @@ generator without that language, and a machine without a compiler — and
 adds the piece none of them attempted: a linker, with separate compilation
 and libraries. See `docs/history.md` for the full lineage, including the
 two 2002-era programs (`Sum.pms`/`Ty.pms`) this project still carries as
-golden tests. `pmt lsp` runs a Language Server Protocol server for `.pmc`
-on stdio, wired into any LSP-capable editor, with diagnostics, completions,
-go-to-definition, quickfixes, semantic tokens, an outline, and formatting
-backed by the same compiler and linter the CLI uses.
+golden tests. `pmt lsp` runs one Language Server Protocol server, on stdio,
+for both `.pmc` and `.pma`, wired into any LSP-capable editor, with
+diagnostics, completions, hover, go-to-definition, quickfixes, semantic
+tokens, an outline, and formatting — backed by the same compiler,
+assembler, and linter the CLI uses.
 
 ## Build
 
@@ -80,15 +81,16 @@ Full flag reference: `docs/cli.md`.
 ## Documentation
 
 - `docs/language.md` — the `.pmc` source language: structure, statements,
-  visibility/namespaces/imports, optimization, and the IR artifact.
+  visibility/namespaces/imports, doc lines and attention lines,
+  optimization, the IR artifact, and the grammar-version history.
 - `docs/isa.md` — the PM-1 processor: registers, buses, the opcode table,
   timing, execution, and the debug API.
 - `docs/formats.md` — the binary/text container formats: `.pmo`, `.pmx`,
   `.pmt`, `.pma`, the `.pmx.map` sidecar, and IR JSON.
 - `docs/cli.md` — every `pmt` subcommand and flag.
-- `docs/lint.md` — hygiene findings over `.pmc` sources via `pmt lint`,
-  with `--fix`.
-- `docs/fmt.md` — the canonical `.pmc` layout via `pmt fmt`, with
+- `docs/lint.md` — hygiene findings over `.pmc` and `.pma` sources via
+  `pmt lint`, with `--fix`.
+- `docs/fmt.md` — the canonical `.pmc`/`.pma` layout via `pmt fmt`, with
   `--check` and stdin.
 - `docs/lsp.md` — the `pmt lsp` language server: capabilities, editor
   wiring, and configuration.
@@ -112,10 +114,13 @@ A two-crate Cargo workspace:
   test architecture to prove that.
 - `crates/post-machine` (library + the `pmt` binary) — the PM-1
   architecture module, the `.pmc` compiler and optimizer, the standard
-  library, and the `pmt` CLI itself. The CLI is a thin renderer: library
-  code never prints, so every stage above is usable directly from Rust
-  (or, one day, from another front end) without going through a
-  subprocess.
+  library, the lint/fmt/completions/language-server surface, and the `pmt`
+  CLI itself. The CLI is a thin renderer: library code never prints, so
+  every stage above is usable directly from Rust (or, one day, from
+  another front end) without going through a subprocess.
+- `editors/` — ready-made editor integrations built on `pmt lsp`: a VS
+  Code extension and a JetBrains/LSP4IJ plugin, both sideload-only with
+  their own README-documented install and build steps.
 
 ## Tests
 
@@ -125,8 +130,9 @@ cargo test --workspace
 
 runs everything: unit tests co-located in both crates, integration tests
 under each crate's `tests/` directory (format/relaxation round-trips,
-compiler and linker end-to-end programs, golden ports of the historic
-`Sum.pms`/`Ty.pms`, optimizer equivalence checks), and property tests for
-container round-trips. `cargo clippy --workspace --all-targets -- -D
-warnings` and `cargo fmt --check` are the other two quality gates this
-workspace holds itself to.
+compiler/assembler/linker end-to-end programs, golden ports of the
+historic `Sum.pms`/`Ty.pms`, optimizer equivalence checks, lint and fmt
+rule coverage, and the editor-facing surfaces — completions and grammar),
+and property tests for container round-trips. `cargo clippy --workspace
+--all-targets -- -D warnings` and `cargo fmt --check` are the other two
+quality gates this workspace holds itself to.

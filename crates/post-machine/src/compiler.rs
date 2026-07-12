@@ -304,7 +304,7 @@ pub(crate) struct ScopeSummary {
     pub bindings: HashMap<Vec<String>, HashMap<String, (usize, String)>>,
 }
 
-/// How flatten resolved one call site (docs/lsp.md (navigation)).
+/// How flatten resolved one call site (docs/lsp.md (go-to-definition)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Resolution {
     /// A function this module defines (incl. nested and qualified-internal).

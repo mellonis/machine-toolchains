@@ -37,7 +37,7 @@ target was actually the start of a function before jumping to it. PM-1's
 target byte is an `ent`) is this toolchain's answer to that gap: call
 safety the 2007 generation's stack never had.
 
-**`PMProcessor`.** A machine with no compiler of its own: programs were
+**`PMProcessor`, 2012.** A machine with no compiler of its own: programs were
 inspected and understood primarily through disassembly, not written
 against a high-level source language — the disassembler-first mindset
 this toolchain's own `pmt dis` (with its recursive-descent function
@@ -82,9 +82,10 @@ lineage. It exists because of this project's hardware-realizability
 requirement (`docs/isa.md`): a real machine has a fault-code register and
 a HALT line, and `hlt` is a program deliberately asserting that same fault
 path itself, as opposed to a trap the processor raises involuntarily. A
-matching `abortState` sentinel is, as of this writing, being designed for
-the `turing-machine-js` library, to give that lineage's abnormal endings
-the same first-class status `hlt` gives this one.
+matching `abortState` sentinel has since shipped in the
+`turing-machine-js` library (v7.1.0), prompted directly by this
+toolchain's `stp`/`hlt` distinction, giving that lineage's abnormal
+endings the same first-class status `hlt` gives this one.
 
 This distinction matters more here than it would elsewhere because a
 2-symbol Post machine has no in-band error channel: its entire alphabet is

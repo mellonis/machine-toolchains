@@ -19,7 +19,9 @@
 //! design doc's "Comments = trivia-tokens native in the CST" + "Trailing
 //! comments", the general blank-line policy (preserve / collapse runs /
 //! never force, see [`top_wants_blank_before`] / [`body_wants_blank_before`]),
-//! grouped `use` lists (see [`print_use`]), the verbatim `export` keyword
+//! doc/attention runs printed at their bound declaration's own indent, one
+//! canonical space after the sigil (see [`print_doc_run`]), grouped `use`
+//! lists (see [`print_use`]), the verbatim `export` keyword
 //! (see [`FunctionCst::has_export`]), and — Task 8b's own contribution —
 //! the spacing-table/spaced-form/hygiene/edge-case tests in this module's
 //! own `tests` submodule. That last part needed no renderer change for

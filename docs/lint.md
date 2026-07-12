@@ -70,7 +70,7 @@ target label unused); the re-run reports it, and repeating `--fix
 
 ## `.pmc` rules
 
-### unused-label
+### unused-label (`.pmc`)
 
 A label is unused iff nothing in its function references it: no `goto`,
 no check arm, no command successor. Labels cost zero bytes in the
@@ -90,7 +90,7 @@ call silently resolves to the local function while the `use` line
 suggests the external. Cross-scope shadowing (inner over outer) is legal
 layering and is not flagged. No fix: renaming either side is plausible.
 
-### redundant-jump-to-next
+### redundant-jump-to-next (`.pmc`)
 
 A `goto N;` statement, or a `(N)` successor, whose target labels the
 lexically next statement — fall-through is identical. Fix (requires
@@ -107,7 +107,7 @@ are its only pure mid-function return. Fix (requires `--force`,
 standalone statements only): replace with `goto N`. A group-final check
 is report-only — `goto` cannot appear in comma groups.
 
-### leftover-debugger
+### leftover-debugger (`.pmc`)
 
 A `debugger` statement in source. Builds strip breakpoints with
 `--strip-debugger`, and an un-stripped `brk` is an optimizer
@@ -122,7 +122,7 @@ A function named `main` inside a namespace is not the program entry
 it silently becomes an ordinary local function. No fix: rename it or
 move it out.
 
-### line-too-long
+### line-too-long (`.pmc`)
 
 A line longer than 80 characters (character count). Report-only: where
 to break a statement is layout policy, a formatter's job — `pmt fmt`
@@ -184,20 +184,20 @@ label re-arms it, since a label is a fresh entry point reachable from
 wherever jumps to it. Report-only: deleting dead code is a judgment
 call the rule leaves to the author.
 
-### unused-label
+### unused-label (`.pma`)
 
 A label nothing in its function references through a jump or call
 operand. Function-scoped, the same scope label resolution itself uses.
 Fix (safe tier): remove the label.
 
-### redundant-jump-to-next
+### redundant-jump-to-next (`.pma`)
 
 An unconditional jump, or a conditional branch, whose target labels
 the immediately following item in the same function — fall-through
 already lands there either way, so the jump or branch changes
 nothing. Fix (safe tier): remove the jump or branch.
 
-### line-too-long
+### line-too-long (`.pma`)
 
 A source line longer than 80 characters (character count) — mirrors
 the `.pmc` rule of the same name. Report-only: `pmt fmt` enforces the
@@ -205,7 +205,7 @@ canonical column grid (`docs/formats.md (assembly text)`), but
 rewrapping an overlong line is not part of that grid, so a line that's
 long stays reported after formatting.
 
-### leftover-debugger
+### leftover-debugger (`.pma`)
 
 An instruction using the target architecture's declared debugger-break
 opcode — a forgotten debugging aid left in shipped source. This rule is

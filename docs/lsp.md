@@ -59,8 +59,8 @@ for how the server picks which service answers a given document.
 ## Capabilities
 
 Every feature answers from the document's current text or degrades
-predictably — never a stale position, never a resolution-free guess.
-Three analysis tiers gate what a feature can answer:
+predictably — never a stale position, never a resolution-free guess. A
+staged analysis gates what a feature can answer, in three tiers:
 
 | Feature | Needs | Degrades to (when the tier fails) |
 |---|---|---|
@@ -74,9 +74,30 @@ Three analysis tiers gate what a feature can answer:
 | Document symbols | a successful parse (CST only) | `null` |
 | Formatting | a successful parse (CST only) | `null` — the parse error is already on screen as a diagnostic |
 
-A handler panic is caught per request: it never takes the session
-down, degrades that one answer to an internal error, and the next
-message is served normally.
+### Runtime model
+
+`pmt lsp` is a blocking server loop: it reads Content-Length-framed
+JSON-RPC messages off stdin, dispatches each against the bound
+language service(s), and enforces the LSP lifecycle —
+initialize/initialized/shutdown/exit gating, unknown-method handling,
+and decode-error responses. Document sync (`didOpen`/`didChange`/
+`didClose`) drives the per-document store and republishes diagnostics
+through one shared publish path — the same path the config- and
+watched-file-triggered republish-all sweeps use. Feature requests
+(completion, definition, code actions, document symbols, semantic
+tokens, formatting) convert the bound service's output to wire types
+at the position-encoding boundary (**Position encoding**, below).
+
+### Error containment
+
+A handler panic is caught per request: the routed call runs under
+`catch_unwind`, so one bad handler can't take the session down. A
+panicking request answers `INTERNAL_ERROR` carrying the panic's own
+text (no response can have been written yet — every handler either
+panics or writes exactly one response, never both); a panicking
+notification produces no output beyond a concise stderr line. Either
+way the loop always continues, and the next message is served
+normally.
 
 ## Hover
 
