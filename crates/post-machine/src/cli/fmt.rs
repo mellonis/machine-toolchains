@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fmt::format as format_source;
 
-use super::lint::collect_pmc;
+use super::lint::collect_sources;
 use super::{Args, CliOutput};
 
 const FMT_USAGE: &str = "\
@@ -65,7 +65,7 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     let mut files: Vec<PathBuf> = Vec::new();
     for p in &paths {
         let path = Path::new(p);
-        let found = collect_pmc(path, &excludes, &mut files)?;
+        let found = collect_sources(path, &excludes, &mut files)?;
         if found == 0 {
             return Err(format!("{p}: no .pmc files found"));
         }

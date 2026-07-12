@@ -16,8 +16,11 @@ use super::{Args, CliOutput};
 const LINT_USAGE: &str = "\
 USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]] [--no-config]
 
-PATH is a .pmc file or a directory; directories are walked recursively
-for *.pmc (sorted order, symlinks not followed, dot-entries skipped).
+PATH is a .pmc or .pma file, or a directory; directories are walked
+recursively for *.pmc and *.pma (sorted order, symlinks not followed,
+dot-entries skipped). .pmc sources lint through the pmc rule table;
+.pma sources lint through core's arch-agnostic asm rule table over the
+PM-1 syntax. --allow CODE draws from the union of both tables.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -38,6 +41,14 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
         return Ok(CliOutput::ok(LINT_USAGE.into(), String::new()));
     }
     let allow = args.values("--allow")?;
+    // Up front, over the union (docs/lint.md): a typo'd `--allow` aborts
+    // the whole run before any file is touched. Per-file config merges
+    // (`pmt.json`) are validated separately at load time
+    // (`config::load`); this only covers the flag's own codes. Without
+    // this, a batch made entirely of unknown-extension files would never
+    // reach either route's lazy `validate_allow` call and a bad flag
+    // would silently go unnoticed.
+    crate::lint::validate_allow(&allow).map_err(|e| e.to_string())?;
     let excludes: Vec<PathBuf> = args
         .values("--exclude")?
         .into_iter()
@@ -57,7 +68,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     let mut files: Vec<PathBuf> = Vec::new();
     for p in &paths {
         let path = Path::new(p);
-        let found = collect_pmc(path, &excludes, &mut files)?;
+        let found = collect_sources(path, &excludes, &mut files)?;
         if found == 0 {
             return Err(format!("{p}: no .pmc files found"));
         }
@@ -91,69 +102,125 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
 
         let source =
             fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-        match lint_source(
-            &source,
-            LintOptions {
-                allow: effective_allow.clone(),
-            },
-        ) {
-            Ok(report) => {
-                let diags = if fix {
-                    // Mask fixes outside the allowed tier, apply, rewrite,
-                    // then re-lint: the report reflects what REMAINS.
-                    let masked: Vec<Diagnostic> = report
-                        .diagnostics
-                        .iter()
-                        .cloned()
-                        .map(|mut d| {
-                            let gated = matches!(
-                                d.fix.as_ref().map(|f| &f.applicability),
-                                Some(Applicability::MaybeIncorrect)
-                            );
-                            if gated && !force {
-                                d.fix = None;
+
+        match file.extension().and_then(|x| x.to_str()) {
+            Some("pmc") => match lint_source(
+                &source,
+                LintOptions {
+                    allow: effective_allow.clone(),
+                },
+            ) {
+                Ok(report) => {
+                    let diags = if fix {
+                        // Mask fixes outside the allowed tier, apply,
+                        // rewrite, then re-lint: the report reflects
+                        // what REMAINS.
+                        let masked = mask_gated_fixes(&report.diagnostics, force);
+                        let outcome = apply_fixes(&source, &masked);
+                        if outcome.applied > 0 {
+                            fs::write(file, &outcome.fixed_source)
+                                .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+                            match lint_source(
+                                &outcome.fixed_source,
+                                LintOptions {
+                                    allow: effective_allow.clone(),
+                                },
+                            ) {
+                                Ok(rerun) => rerun.diagnostics,
+                                Err(e) => return Err(e.to_string()),
                             }
-                            d
-                        })
-                        .collect();
-                    let outcome = apply_fixes(&source, &masked);
-                    if outcome.applied > 0 {
-                        fs::write(file, &outcome.fixed_source)
-                            .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
-                        match lint_source(
-                            &outcome.fixed_source,
-                            LintOptions {
-                                allow: effective_allow.clone(),
-                            },
-                        ) {
-                            Ok(rerun) => rerun.diagnostics,
-                            Err(e) => return Err(e.to_string()),
+                        } else {
+                            report.diagnostics
                         }
                     } else {
                         report.diagnostics
+                    };
+                    if !diags.is_empty() {
+                        any = true;
                     }
-                } else {
-                    report.diagnostics
-                };
-                if !diags.is_empty() {
-                    any = true;
+                    render_findings(&mut stdout, file, &diags);
                 }
-                render_findings(&mut stdout, file, &diags);
+                Err(LintError::Compile(e)) => {
+                    // Per-file fatal: report, keep going (batch model).
+                    any = true;
+                    let _ = writeln!(
+                        stderr,
+                        "{}:{}:{}: error: {} [{}]",
+                        file.display(),
+                        e.span.start.line,
+                        e.span.start.col,
+                        e.kind,
+                        e.kind.code()
+                    );
+                }
+                Err(e @ LintError::UnknownAllowCode(_)) => return Err(e.to_string()),
+            },
+            Some("pma") => {
+                // Cheap per-file re-check (the `--allow` set was already
+                // validated once, on whichever file the batch reaches
+                // first — a bad `--allow` still aborts before any file
+                // is written): `mtc_core::asm::lint::lint` does not
+                // validate allow codes itself, so this crate owns it,
+                // same as the pmc route above.
+                if let Err(e) = crate::lint::validate_allow(&effective_allow) {
+                    return Err(e.to_string());
+                }
+                let syntax = crate::asm::pm1_syntax();
+                match mtc_core::asm::lint::lint(&syntax, &source, &effective_allow) {
+                    Ok(report) => {
+                        let diags = if fix {
+                            let masked = mask_gated_fixes(&report, force);
+                            let outcome = apply_fixes(&source, &masked);
+                            if outcome.applied > 0 {
+                                fs::write(file, &outcome.fixed_source)
+                                    .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
+                                match mtc_core::asm::lint::lint(
+                                    &syntax,
+                                    &outcome.fixed_source,
+                                    &effective_allow,
+                                ) {
+                                    Ok(rerun) => rerun,
+                                    Err(e) => return Err(e.to_string()),
+                                }
+                            } else {
+                                report
+                            }
+                        } else {
+                            report
+                        };
+                        if !diags.is_empty() {
+                            any = true;
+                        }
+                        render_findings(&mut stdout, file, &diags);
+                    }
+                    Err(e) => {
+                        // Per-file fatal: report, keep going (batch model,
+                        // same shape as the pmc route's fatal compile
+                        // error above).
+                        any = true;
+                        let _ = writeln!(
+                            stderr,
+                            "{}:{}:{}: error: {} [{}]",
+                            file.display(),
+                            e.span.start.line,
+                            e.span.start.col,
+                            e.kind,
+                            e.kind.code()
+                        );
+                    }
+                }
             }
-            Err(LintError::Compile(e)) => {
-                // Per-file fatal: report, keep going (batch model).
+            _ => {
+                // Only reachable for an explicitly listed file — the
+                // directory walk (`collect_sources`) only ever collects
+                // `.pmc`/`.pma` extensions.
                 any = true;
                 let _ = writeln!(
                     stderr,
-                    "{}:{}:{}: error: {} [{}]",
-                    file.display(),
-                    e.span.start.line,
-                    e.span.start.col,
-                    e.kind,
-                    e.kind.code()
+                    "{}: error: unknown source extension (expected .pmc or .pma)",
+                    file.display()
                 );
             }
-            Err(e @ LintError::UnknownAllowCode(_)) => return Err(e.to_string()),
         }
     }
     Ok(CliOutput {
@@ -163,13 +230,15 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     })
 }
 
-/// Walk one PATH argument. Returns how many `.pmc` files the PATH
+/// Walk one PATH argument. Returns how many `.pmc`/`.pma` files the PATH
 /// yielded BEFORE exclusion (zero = the caller's typo error); excluded
 /// files are counted but not collected — an excluded PATH is not a typo.
 ///
 /// `pub(super)`: `cli/fmt.rs` shares this walk verbatim rather than
-/// duplicating it (docs/cli.md (pmt fmt) — identical batch model).
-pub(super) fn collect_pmc(
+/// duplicating it (docs/cli.md (pmt fmt) — identical batch model). `fmt`
+/// only knows `.pmc` today, so the `.pma` half of the widened walk is
+/// inert there until it grows an assembly formatter.
+pub(super) fn collect_sources(
     path: &Path,
     excludes: &[PathBuf],
     out: &mut Vec<PathBuf>,
@@ -208,8 +277,8 @@ pub(super) fn collect_pmc(
             continue;
         }
         if meta.is_dir() {
-            found += collect_pmc(&child, excludes, out)?;
-        } else if child.extension().is_some_and(|x| x == "pmc") {
+            found += collect_sources(&child, excludes, out)?;
+        } else if child.extension().is_some_and(|x| x == "pmc" || x == "pma") {
             found += 1;
             if !excluded(&child) {
                 out.push(child);
@@ -217,6 +286,26 @@ pub(super) fn collect_pmc(
         }
     }
     Ok(found)
+}
+
+/// Mask fixes outside the allowed tier ("requires --force") before
+/// `apply_fixes` — shared between the `.pmc` and `.pma` routes since a
+/// `Fix`'s applicability tier is language-blind.
+fn mask_gated_fixes(diagnostics: &[Diagnostic], force: bool) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .cloned()
+        .map(|mut d| {
+            let gated = matches!(
+                d.fix.as_ref().map(|f| &f.applicability),
+                Some(Applicability::MaybeIncorrect)
+            );
+            if gated && !force {
+                d.fix = None;
+            }
+            d
+        })
+        .collect()
 }
 
 /// `{file}:{line}:{col}: lint: {message}` plus an indented fix-hint line;

@@ -81,13 +81,19 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("confusable-names", rules::confusable_names::check),
 ];
 
-/// `--allow` codes must each name a real rule (typo protection). Split out
+/// `--allow` codes must each name a real rule (typo protection), over the
+/// UNION of this crate's `.pmc` rule table and core's `.pma` asm rule
+/// table (`mtc_core::asm::lint::RULES`): a `pmt.json` shared by both
+/// languages carries one `lint.allow` list, so a `.pma`-only code must
+/// not error when validated for a `.pmc` file, and vice versa. Split out
 /// of `lint()` so the LSP (a future `PmcLanguageService`) can validate an
 /// IDE-settings or `pmt.json` allow-list up front, independently of
 /// running the rules over any particular analysis.
 pub(crate) fn validate_allow(codes: &[String]) -> Result<(), LintError> {
     for code in codes {
-        if !RULES.iter().any(|(c, _)| c == code) {
+        let known = RULES.iter().any(|(c, _)| c == code)
+            || mtc_core::asm::lint::RULES.iter().any(|(c, _)| c == code);
+        if !known {
             return Err(LintError::UnknownAllowCode(code.clone()));
         }
     }
@@ -185,6 +191,20 @@ mod tests {
         assert!(validate_allow(&[]).is_ok());
         let err = validate_allow(&["no-such-rule".to_string()]).unwrap_err();
         assert!(matches!(err, LintError::UnknownAllowCode(ref c) if c == "no-such-rule"));
+    }
+
+    #[test]
+    fn validate_allow_also_accepts_asm_only_codes() {
+        // "unreachable-code" names no pmc rule — it's asm-only
+        // (`mtc_core::asm::lint::RULES`). A pmt.json shared by both
+        // languages must not choke on it while validating for `.pmc`.
+        assert!(!RULES.iter().any(|(c, _)| *c == "unreachable-code"));
+        assert!(
+            mtc_core::asm::lint::RULES
+                .iter()
+                .any(|(c, _)| *c == "unreachable-code")
+        );
+        assert!(validate_allow(&["unreachable-code".to_string()]).is_ok());
     }
 
     #[test]

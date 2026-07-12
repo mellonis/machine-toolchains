@@ -476,7 +476,7 @@ fn top_level_help(name: &str) -> &'static str {
         "compile" => ".pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)",
         "asm" => ".pma assembly -> .pmo object",
         "link" => ".pmo objects -> .pmx executable (+ .pmx.map sidecar)",
-        "lint" => "lint .pmc sources (hygiene findings; docs/lint.md)",
+        "lint" => "lint .pmc/.pma sources (hygiene findings; docs/lint.md)",
         "fmt" => "format .pmc sources in place (--check to preview; -)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
         "run" => "execute a .pmx on a tape",

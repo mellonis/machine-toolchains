@@ -746,6 +746,198 @@ fn lint_exclude_is_component_based_not_string_prefix() {
     assert!(!out.stdout.contains("vendor/a.pmc") && !out.stdout.contains("vendor\\a.pmc"));
 }
 
+// --- `pmt lint` routes `.pma` (plan 2, task 5): extension routing over
+// the union of the pmc and asm rule tables. ---
+
+#[test]
+fn lint_mixed_dir_lints_both_pmc_and_pma() {
+    let dir = scratch("lint_mixed_dir");
+    std::fs::write(dir.join("prog.pmc"), "main() {\n5: right;\n}\n").unwrap();
+    std::fs::write(dir.join("prog.pma"), ".func f\nUNUSED: nop\n        stp\n").unwrap();
+
+    let out = execute(&args(&["lint", dir.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stdout.contains("label 5 is never referenced"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("label `UNUSED` is never referenced (function `f`)"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn lint_explicit_unknown_extension_is_a_per_file_error_batch_continues() {
+    let dir = scratch("lint_unknown_ext");
+    let bad = dir.join("foo.txt");
+    std::fs::write(&bad, "not a source file\n").unwrap();
+    let good = dir.join("good.pmc");
+    std::fs::write(&good, "main() {\n5: right;\n}\n").unwrap();
+
+    let out = execute(&args(&[
+        "lint",
+        bad.to_str().unwrap(),
+        good.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "{}: error: unknown source extension (expected .pmc or .pma)",
+            bad.display()
+        )),
+        "{}",
+        out.stderr
+    );
+    // The batch continues past the bad extension: good.pmc still lints.
+    assert!(out.stdout.contains("label 5 is never referenced"));
+}
+
+#[test]
+fn lint_bad_allow_aborts_up_front_even_for_an_all_unknown_extension_batch() {
+    // Regression: the unknown-extension route never calls
+    // `validate_allow` itself (nothing there is language-specific to
+    // check against). Without an up-front validation ahead of the file
+    // loop, a batch made entirely of unknown-extension files would never
+    // reach either route's per-file `validate_allow` call, and a bad
+    // `--allow` would go unnoticed instead of aborting the run.
+    let dir = scratch("lint_bad_allow_unknown_ext");
+    std::fs::write(dir.join("foo.txt"), "not a source file\n").unwrap();
+
+    let err = execute(&args(&[
+        "lint",
+        dir.join("foo.txt").to_str().unwrap(),
+        "--allow",
+        "nonsense",
+    ]))
+    .unwrap_err();
+    assert!(err.contains("nonsense"));
+}
+
+#[test]
+fn lint_pma_fix_removes_unused_label_and_reruns_clean() {
+    let dir = scratch("lint_pma_fix");
+    let src = dir.join("prog.pma");
+    std::fs::write(&src, ".func f\nUNUSED: nop\n        stp\n").unwrap();
+
+    // unused-label is machine-applicable on the asm side too — plain
+    // `--fix` (no `--force`) removes it, same tier as pmc's.
+    let out = execute(&args(&["lint", src.to_str().unwrap(), "--fix"])).unwrap();
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    let fixed = std::fs::read_to_string(&src).unwrap();
+    assert!(!fixed.contains("UNUSED"), "{fixed}");
+
+    // A genuinely separate re-run confirms the file on disk is clean,
+    // not just the in-flight re-lint inside the --fix invocation.
+    let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn lint_allow_unreachable_code_is_accepted_and_suppresses_on_pma() {
+    let dir = scratch("lint_pma_allow_union");
+    let src = dir.join("prog.pma");
+    std::fs::write(&src, ".func f\n        stp\n        nop\n").unwrap();
+
+    let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    assert!(out.stdout.contains("unreachable code"), "{}", out.stdout);
+
+    let out = execute(&args(&[
+        "lint",
+        src.to_str().unwrap(),
+        "--allow",
+        "unreachable-code",
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0, "{}", out.stdout);
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn lint_allow_pmc_only_code_is_accepted_on_a_pma_only_run() {
+    // "non-camel-case" names no asm rule — it's pmc-only. The union
+    // validator must still accept it even when the batch is all `.pma`.
+    let dir = scratch("lint_pma_allow_pmc_code");
+    let src = dir.join("prog.pma");
+    std::fs::write(&src, ".func f\n        stp\n").unwrap();
+
+    let out = execute(&args(&[
+        "lint",
+        src.to_str().unwrap(),
+        "--allow",
+        "non-camel-case",
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn lint_allow_nonsense_still_aborts_the_whole_run() {
+    let dir = scratch("lint_pma_allow_nonsense");
+    let src = dir.join("prog.pma");
+    std::fs::write(&src, ".func f\n        stp\n").unwrap();
+
+    let err = execute(&args(&[
+        "lint",
+        src.to_str().unwrap(),
+        "--allow",
+        "nonsense",
+    ]))
+    .unwrap_err();
+    assert!(err.contains("nonsense"));
+}
+
+#[test]
+fn lint_pma_raw_line_is_a_per_file_error_on_stderr() {
+    let dir = scratch("lint_pma_raw_line");
+    let bad = dir.join("listing.pma");
+    std::fs::write(&bad, "<goToEnd>\n").unwrap();
+    let good = dir.join("good.pma");
+    std::fs::write(&good, ".func f\n        stp\n").unwrap();
+
+    let out = execute(&args(&[
+        "lint",
+        bad.to_str().unwrap(),
+        good.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr.contains(&format!(
+            "{}:1:1: error: not assembly text [raw-line]",
+            bad.display()
+        )),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn lint_pmt_json_allow_merges_for_pma_identically_to_pmc() {
+    let dir = scratch("lint_pma_config_allow");
+    std::fs::write(
+        dir.join("pmt.json"),
+        r#"{"lint":{"allow":["unused-label"]}}"#,
+    )
+    .unwrap();
+    let src = dir.join("prog.pma");
+    std::fs::write(&src, ".func f\nUNUSED: nop\n        stp\n").unwrap();
+
+    let out = execute(&args(&["lint", src.to_str().unwrap()])).unwrap();
+    assert_eq!(
+        out.code, 0,
+        "pmt.json's allow-list suppresses the finding on .pma exactly as on .pmc"
+    );
+    assert!(out.stdout.is_empty());
+}
+
 #[test]
 fn lsp_help_prints_usage_without_touching_stdio() {
     let out = execute(&args(&["lsp", "--help"])).unwrap();
