@@ -6,6 +6,7 @@ mod assembler;
 pub mod cst;
 pub(crate) mod decode;
 mod disassembler;
+pub mod fmt;
 pub(crate) mod lexer;
 pub mod lint;
 mod lower;
@@ -15,6 +16,7 @@ pub use assembler::assemble;
 pub use disassembler::{
     disassemble_executable, disassemble_object, grid_line, listing_executable, listing_line,
 };
+pub use fmt::format_asm;
 pub use syntax::{ArchSyntax, Flow, RelaxPair, SyntaxEntry};
 
 use crate::diagnostics::Span;

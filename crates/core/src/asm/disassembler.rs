@@ -9,17 +9,34 @@ use crate::formats::executable::Executable;
 use crate::formats::object::{ObjectFile, SymbolDef};
 use crate::linker::MapFile;
 
-/// Canonical .pma grid (docs/formats.md (assembly text)): label col 0, mnemonic col 8, operand col 16; trailing spaces trimmed.
+/// Canonical .pma grid (docs/formats.md (assembly text)): label col 0,
+/// mnemonic col 8, operand col 16; trailing spaces trimmed. A label
+/// field (name + `:`) of 8+ chars would touch the mnemonic column with
+/// no separating space, so it moves to its own line instead — the
+/// return value has no trailing newline (callers already append one)
+/// but may contain an interior one.
 pub fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
-    let label_field = match label {
-        Some(l) => format!("{l}:"),
-        None => String::new(),
-    };
-    let mut line = format!("{label_field:<8}{mnemonic:<8}{operand}");
-    while line.ends_with(' ') {
-        line.pop();
+    fn instr_line(mnemonic: &str, operand: &str) -> String {
+        let mut line = format!("{:<8}{mnemonic:<8}{operand}", "");
+        while line.ends_with(' ') {
+            line.pop();
+        }
+        line
     }
-    line
+    match label {
+        Some(l) if l.chars().count() + 1 >= 8 => {
+            format!("{l}:\n{}", instr_line(mnemonic, operand))
+        }
+        Some(l) => {
+            let label_field = format!("{l}:");
+            let mut line = format!("{label_field:<8}{mnemonic:<8}{operand}");
+            while line.ends_with(' ') {
+                line.pop();
+            }
+            line
+        }
+        None => instr_line(mnemonic, operand),
+    }
 }
 
 /// `.byte` fallback: one directive per byte, the label (if any) attached
@@ -409,6 +426,35 @@ mod tests {
     use crate::asm::syntax::{Flow, RelaxPair, SyntaxEntry};
     use crate::formats::executable::Executable;
     use crate::vm::OperandKind;
+
+    #[test]
+    fn grid_line_long_label_own_line() {
+        // Case 11: an 8+-char label field moves to its own line, the
+        // instruction line follows with no label.
+        assert_eq!(
+            grid_line(Some("verylongname"), "nop", ""),
+            "verylongname:\n        nop"
+        );
+        assert_eq!(
+            grid_line(Some("verylongname"), "wr", "1, 2"),
+            "verylongname:\n        wr      1, 2"
+        );
+    }
+
+    #[test]
+    fn grid_line_seven_char_field_stays_inline() {
+        // "abcdef:" is exactly 7 chars — the largest field that still
+        // fits before the mnemonic column.
+        assert_eq!(grid_line(Some("abcdef"), "nop", ""), "abcdef: nop");
+    }
+
+    #[test]
+    fn grid_line_short_labels_are_unchanged_vs_today() {
+        assert_eq!(grid_line(Some("L1"), "rgt", ""), "L1:     rgt");
+        assert_eq!(grid_line(Some("L0001"), "nop", ""), "L0001:  nop");
+        assert_eq!(grid_line(None, "wr", "1"), "        wr      1");
+        assert_eq!(grid_line(None, "stop", ""), "        stop");
+    }
 
     #[test]
     fn object_disassembly_uses_canonical_grid() {
