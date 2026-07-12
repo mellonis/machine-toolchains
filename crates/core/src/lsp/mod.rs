@@ -115,6 +115,9 @@ pub struct SemToken {
 /// knowledge itself.
 pub trait LanguageService {
     fn language_id(&self) -> &'static str;
+    /// File extensions (with dot) this service claims — the mux's fallback
+    /// when a client sends an unexpected languageId.
+    fn extensions(&self) -> &'static [&'static str];
     fn trigger_characters(&self) -> &[char];
     /// (token types, token modifiers) — the legend advertised in capabilities.
     fn token_legend(&self) -> (&'static [&'static str], &'static [&'static str]);
@@ -205,6 +208,10 @@ pub(crate) mod fake {
     impl LanguageService for FakeService {
         fn language_id(&self) -> &'static str {
             "fake"
+        }
+
+        fn extensions(&self) -> &'static [&'static str] {
+            &[".fake"]
         }
 
         fn trigger_characters(&self) -> &[char] {
@@ -355,6 +362,7 @@ mod tests {
     fn advertises_the_fake_language_surface() {
         let service = FakeService::new();
         assert_eq!(service.language_id(), "fake");
+        assert_eq!(service.extensions(), &[".fake"]);
         assert_eq!(service.trigger_characters(), &['.']);
         assert_eq!(
             service.token_legend(),

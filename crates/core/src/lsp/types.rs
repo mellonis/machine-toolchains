@@ -437,6 +437,31 @@ mod tests {
     }
 
     #[test]
+    fn did_open_text_document_params_deserializes_the_language_id() {
+        let payload = json!({
+            "textDocument": {
+                "uri": "file:///a.fake",
+                "languageId": "fake",
+                "version": 1,
+                "text": "body",
+            },
+        });
+
+        let got: DidOpenTextDocumentParams = serde_json::from_value(payload).unwrap();
+        assert_eq!(
+            got,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: "file:///a.fake".to_string(),
+                    language_id: "fake".to_string(),
+                    version: 1,
+                    text: "body".to_string(),
+                },
+            }
+        );
+    }
+
+    #[test]
     fn did_change_text_document_params_deserializes_ignoring_unknown_fields() {
         let payload = json!({
             "textDocument": {"uri": "file:///a.fake", "version": 3, "extra": "ignored"},

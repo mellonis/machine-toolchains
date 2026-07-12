@@ -1087,6 +1087,9 @@ mod tests {
             fn language_id(&self) -> &'static str {
                 "none"
             }
+            fn extensions(&self) -> &'static [&'static str] {
+                &[]
+            }
             fn trigger_characters(&self) -> &[char] {
                 &[]
             }
@@ -1626,6 +1629,9 @@ mod tests {
         impl LanguageService for OriginNoneService {
             fn language_id(&self) -> &'static str {
                 "origin-none"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &[]
             }
             fn trigger_characters(&self) -> &[char] {
                 &[]

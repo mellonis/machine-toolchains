@@ -292,6 +292,10 @@ impl LanguageService for PmcLanguageService {
         "pmc"
     }
 
+    fn extensions(&self) -> &'static [&'static str] {
+        &[".pmc"]
+    }
+
     fn trigger_characters(&self) -> &[char] {
         &['@', ':']
     }
@@ -510,6 +514,7 @@ mod tests {
     fn advertises_the_pmc_language_surface() {
         let service = PmcLanguageService::new();
         assert_eq!(service.language_id(), "pmc");
+        assert_eq!(service.extensions(), &[".pmc"]);
         assert_eq!(service.trigger_characters(), &['@', ':']);
         assert_eq!(
             service.token_legend(),
