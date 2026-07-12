@@ -7,52 +7,54 @@
 // append/prepend mark only blank cells when preconditions hold.
 
 namespace std {
-    // pre: head on a mark of a section. post: head on the section's
-    // LAST mark; tape unchanged. (The historic Sum.pms pair.)
+    ? Moves the head to the last mark of the section it starts on.
+    ? The head must begin on a mark; the tape itself is left unchanged.
     export goToEnd() {
      1: right;
         check(1, 3);
      3: left;
     }
 
-    // pre: head on a mark of a section. post: head on the section's
-    // FIRST mark; tape unchanged.
+    ? Moves the head to the first mark of the section it starts on.
+    ? The head must begin on a mark; the tape itself is left unchanged.
     export goToBegin() {
      1: left;
         check(1, 3);
      3: right;
     }
 
-    // pre: a mark exists strictly right of the head. post: head on the
-    // nearest such mark; tape unchanged.
+    ? Moves the head right to the nearest marked cell. A mark must
+    ? exist somewhere to the right; the tape itself is left unchanged.
     export goToMarkRight() {
      1: right;
         check(!, 1);
     }
 
-    // pre: a mark exists strictly left of the head. post: head on the
-    // nearest such mark; tape unchanged.
+    ? Moves the head left to the nearest marked cell. A mark must
+    ? exist somewhere to the left; the tape itself is left unchanged.
     export goToMarkLeft() {
      1: left;
         check(!, 1);
     }
 
-    // pre: a blank exists strictly right of the head (always true off a
-    // finite tape's sections). post: head on the nearest such blank.
+    ? Moves the head right to the nearest blank cell. A blank must
+    ? exist somewhere to the right (always true off a finite
+    ? section); the tape itself is left unchanged.
     export goToBlankRight() {
      1: right;
         check(1, !);
     }
 
-    // pre: a blank exists strictly left of the head. post: head on the
-    // nearest such blank.
+    ? Moves the head left to the nearest blank cell. A blank must
+    ? exist somewhere to the left; the tape itself is left unchanged.
     export goToBlankLeft() {
      1: left;
         check(1, !);
     }
 
-    // pre: head on a mark of a section. post: section erased; head on
-    // the first cell right of where the section was.
+    ? Erases every mark of the section the head starts on, left to
+    ? right from the first mark. The head must begin on a mark; it
+    ? ends one cell past the section's original end, all now blank.
     export eraseSection() {
         @goToBegin();
      2: unmark;
@@ -60,34 +62,34 @@ namespace std {
         check(2, !);
     }
 
-    // pre: head on a mark of a section. post: section grown by one mark
-    // on the right; head on the new (last) mark.
+    ? Grows the section by one mark on the right. The head must begin
+    ? on a mark of the section; it ends on the newly appended mark.
     export appendMark() {
         @goToEnd();
         right;
         mark(!);
     }
 
-    // pre: head on a mark of a section. post: section grown by one mark
-    // on the left; head on the new (first) mark.
+    ? Grows the section by one mark on the left. The head must begin
+    ? on a mark of the section; it ends on the newly prepended mark.
     export prependMark() {
         @goToBegin();
         left;
         mark(!);
     }
 
-    // pre: head on a mark of a section. post: last mark removed; head
-    // one cell left of the removed mark (the new last mark, or a blank
-    // if the section had one mark).
+    ? Removes the section's last mark. The head must begin on a mark
+    ? of the section; it ends one cell left of the removed mark — the
+    ? new last mark, or a blank if the section had only one mark.
     export removeLastMark() {
         @goToEnd();
         unmark;
         left(!);
     }
 
-    // pre: head on a mark of a section. post: first mark removed; head
-    // one cell right of the removed mark (the new first mark, or a
-    // blank if the section had one mark).
+    ? Removes the section's first mark. The head must begin on a mark
+    ? of the section; it ends one cell right of the removed mark — the
+    ? new first mark, or a blank if the section had only one mark.
     export removeFirstMark() {
         @goToBegin();
         unmark;

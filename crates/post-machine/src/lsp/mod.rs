@@ -520,10 +520,20 @@ impl LanguageService for PmcLanguageService {
         // Position→qualified-name resolution is navigate.rs's job
         // (shares definition's own walks — docs/lsp.md (hover)); the
         // doc-map lookup, content-emptiness gate, and rendering are
-        // ours.
+        // ours. `name` falls back to the embedded stdlib's own doc map
+        // (`crate::stdlib::docs()`) when this document's own analysis
+        // misses — the only way it CAN miss for a `std::…` name, since
+        // that map holds only functions THIS document flattened. No
+        // `std::` guard needed on the fallback: `stdlib::docs()` has no
+        // non-`std::` keys, so a local, non-std miss just misses again.
         let state = self.docs.get(uri)?;
         let (name, origin) = navigate::hover_target(state, pos)?;
-        let doc = state.analysis.as_ref()?.docs.get(&name)?;
+        let doc = state
+            .analysis
+            .as_ref()?
+            .docs
+            .get(&name)
+            .or_else(|| crate::stdlib::docs().get(&name))?;
         let text = render_doc(doc)?;
         Some(HoverContent { text, span: origin })
     }
@@ -909,11 +919,30 @@ export main() {
         assert_eq!(service.hover("untitled:Hover-1", pos), None);
     }
 
-    // Hover on a `std::` call: SKIPPED — `Analysis.docs` only covers
-    // this document's OWN functions; `std::` docs are pinned in the
-    // stdlib task, which teaches the embedded stdlib's `?` lines and
-    // wires this same `hover_target` → `Analysis.docs` path to look
-    // them up too.
+    #[test]
+    fn hover_on_a_std_call_reads_the_embedded_stdlibs_own_doc() {
+        // This document's own `Analysis.docs` never carries a `std::…`
+        // key (std entries are external, never flattened locally) — the
+        // fallback to `crate::stdlib::docs()` in `hover()` is what makes
+        // this resolve at all. `goToEnd`'s doc is one paragraph, so the
+        // rendered text IS its first (only) paragraph, matching the
+        // stdlib task's brief.
+        let mut service = PmcLanguageService::new();
+        const SRC: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        service.did_update("untitled:Hover-Std", SRC);
+
+        let pos = pos_after(SRC, "std::goToEnd", 6);
+        let hover = service
+            .hover("untitled:Hover-Std", pos)
+            .expect("std::goToEnd is documented in the embedded stdlib");
+
+        assert_eq!(
+            hover.text,
+            "Moves the head to the last mark of the section it starts on. \
+             The head must begin on a mark; the tape itself is left unchanged."
+        );
+        assert_eq!(hover.span, span_of(SRC, "std::goToEnd"));
+    }
 
     #[test]
     fn undefined_label_is_a_single_char_precise_error() {
@@ -1505,6 +1534,12 @@ export main() {
 
         let pma_uri = "file:///e2e.pma";
         let pmc_uri = "file:///e2e.pmc";
+        // A THIRD document, opened later in the SAME session (T4's
+        // review follow-up): proves hover reaches the wire through the
+        // real dual-service server loop, not just the direct
+        // `service.hover(...)` calls the unit tests above exercise.
+        let hover_uri = "file:///e2e-hover.pmc";
+        let hover_pos = pos_after(HOVER_FIXTURE, "@doc();", 1);
         let mut pmc = PmcLanguageService::new();
         let mut pma = PmaLanguageService::new();
 
@@ -1538,11 +1573,25 @@ export main() {
                     // the full mnemonic+directive list.
                     "params": {"textDocument": {"uri": pma_uri}, "position": {"line": 2, "character": 0}},
                 }),
+                // Appended last so every index above stays unchanged.
+                open(hover_uri, "pmc", HOVER_FIXTURE),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "textDocument/hover",
+                    "params": {
+                        "textDocument": {"uri": hover_uri},
+                        "position": {
+                            "line": hover_pos.line - 1,
+                            "character": hover_pos.col - 1,
+                        },
+                    },
+                }),
             ],
             &mut pmc,
             &mut pma,
         );
-        assert_eq!(outputs.len(), 5, "{outputs:?}");
+        assert_eq!(outputs.len(), 7, "{outputs:?}");
 
         // initialize: the merged legend is pmc's 3 token types then
         // pma's 3, concatenated without dedup — proof both services
@@ -1622,6 +1671,25 @@ export main() {
             .find(|c| c["label"] == json!("nop"))
             .unwrap_or_else(|| panic!("no `nop` candidate: {items:?}"));
         assert!(nop.get("detail").is_none(), "{nop:?}");
+
+        // didOpen the hover doc: bound to the pmc service like `pmc_uri`
+        // above, still routed correctly with THREE documents live.
+        assert_eq!(outputs[5]["params"]["uri"], json!(hover_uri));
+
+        // hover on `@doc();`: the exact plaintext `render_doc` produces
+        // (`hover_on_a_call_site_renders_paragraphs_and_attention_notes`'s
+        // own assertion), reached through the real JSON-RPC server loop
+        // instead of a direct `service.hover(...)` call.
+        assert_eq!(outputs[6]["result"]["contents"]["kind"], json!("plaintext"));
+        assert_eq!(
+            outputs[6]["result"]["contents"]["value"],
+            json!(
+                "Documented helper.\n\n\
+                 Second paragraph line one. second paragraph line two.\n\n\
+                 note: important note one.\n\
+                 note: important note two."
+            )
+        );
     }
 
     #[test]

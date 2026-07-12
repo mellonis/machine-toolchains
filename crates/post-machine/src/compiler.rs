@@ -369,8 +369,11 @@ pub(crate) struct Analysis {
     /// fully-qualified name `flatten` mangles onto `Function::name`
     /// (nested dot-mangling, namespace `::` paths). Undocumented
     /// functions are absent, not present with an empty `FnDoc`. Read by
-    /// the `deprecated-call` lint rule via `LintContext.docs`; hover (a
-    /// later task) is a future consumer.
+    /// the `deprecated-call` lint rule via `LintContext.docs`, and by
+    /// hover (`lsp::mod::hover`, docs/lsp.md (hover)) — for a `std::…`
+    /// name this map always misses; hover falls back to
+    /// `crate::stdlib::docs()`, the same map built from THIS field over
+    /// the embedded stdlib's own analysis.
     pub docs: HashMap<String, FnDoc>,
 }
 

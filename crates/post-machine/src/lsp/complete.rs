@@ -156,9 +156,13 @@ fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candida
 /// qualified name; `false` when `docs` is unavailable (stale-scopes
 /// completion, docs/lsp.md (staged analysis)) or the name isn't
 /// documented at all — both fall out of `Option::and_then` naturally,
-/// no special-casing (std candidates included: `docs` never has a
-/// `std::…` key yet, so they're always `deprecated: false` until a
-/// later task teaches this lookup about the stdlib).
+/// no special-casing (std candidates included: `docs` here is always
+/// the REQUESTING document's own map, which never carries a `std::…`
+/// key — a `std::` name always misses and reads `false`. This is a
+/// deliberate scope stop, not a gap: hover's own `std::` lookup falls
+/// back to `crate::stdlib::docs()`, but the embedded stdlib ships
+/// nothing deprecated, so wiring that same fallback in here would add
+/// an unexercised path with no observable behavior to pin).
 fn mk_function_candidate(
     label: &str,
     qualified: &str,
@@ -910,8 +914,10 @@ export outer() {
     fn qualified_call_std_members_carry_their_qualified_detail_and_no_tag() {
         // The std branch of `member_candidates`: label is the bare
         // routine name, `detail` its full `std::` path (they always
-        // differ); never deprecated — `Analysis.docs` has no `std::…`
-        // keys yet (pinned in the stdlib task).
+        // differ); never deprecated — `docs` here is the requesting
+        // document's own map, which never carries a `std::…` key (see
+        // `mk_function_candidate`'s doc comment), and the embedded
+        // stdlib ships nothing deprecated regardless.
         let mut service = PmcLanguageService::new();
         service.did_update(URI, QUALIFIED_STD_FIXTURE);
 

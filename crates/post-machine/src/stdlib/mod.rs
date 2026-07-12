@@ -11,8 +11,13 @@
 //! go-to-definition on `std::` calls (docs/lsp.md (navigation)): the
 //! roster locates each exported routine's name token in `SOURCE`, and
 //! the materializer writes `SOURCE` to a real file on disk once per
-//! toolchain version so an editor has something to open.
+//! toolchain version so an editor has something to open. [`docs`]
+//! serves hover (docs/lsp.md (hover)): the embedded stdlib's own
+//! `Analysis.docs` map, keyed the same `std::<name>` way `roster`'s
+//! `full_path` is, since a requesting document's own analysis never
+//! contains std entries (`std::` calls are external to it).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -20,11 +25,11 @@ use std::sync::OnceLock;
 use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
 
-use crate::compiler::{CompileOptions, compile};
+use crate::compiler::{CompileOptions, analyze_staged, compile};
 use crate::cst::TopKind;
 use crate::lexer::lex;
 use crate::optimizer::OptLevel;
-use crate::parser::parse_cst;
+use crate::parser::{FnDoc, parse_cst};
 
 pub const SOURCE: &str = include_str!("std.pmc");
 
@@ -87,6 +92,23 @@ pub(crate) fn roster() -> &'static [RosterEntry] {
             }
         }
         entries
+    })
+}
+
+/// The embedded stdlib's own doc map, keyed by the same fully-qualified
+/// `std::<name>` form [`roster`] uses (docs/lsp.md (hover)): runs the
+/// real staged-analysis path — the SAME one every requesting document
+/// goes through — over `SOURCE`, once per process. Hover on a `std::`
+/// call site falls back to this map when the requesting document's own
+/// `Analysis.docs` misses (it always does for a `std::` name — that map
+/// only ever holds THIS document's own flattened functions).
+pub(crate) fn docs() -> &'static HashMap<String, FnDoc> {
+    static DOCS: OnceLock<HashMap<String, FnDoc>> = OnceLock::new();
+    DOCS.get_or_init(|| {
+        analyze_staged(SOURCE)
+            .analysis
+            .expect("the embedded stdlib analyzes")
+            .docs
     })
 }
 

@@ -31,6 +31,10 @@ diagnostics, the server offers:
   members and the standard library), at statement/label/comma-group
   position (the reserved command words and, after `goto `, the
   enclosing function's labels).
+- **Hover** on a call site, a `use` path segment, or a function's own
+  declaration name, rendering that function's `?`/`!` documentation
+  (`docs/language.md (doc lines and attention lines)`) — see **Hover**
+  below for the exact content shape.
 - **Go-to-definition** for local and nested functions, import
   bindings, qualified internal and external calls, label references,
   and standard-library routines (via the materialized copy below).
@@ -63,6 +67,7 @@ Three analysis tiers gate what a feature can answer:
 | Diagnostics: fatal error | the source lexes | one error at the failing stage, honest and singular |
 | Diagnostics: compile warnings + lint findings | a full successful analysis | omitted — the fatal is the only entry |
 | Completions | tokens/CST for cursor context | candidate *names* may fall back to the last successful analysis, so completion stays useful mid-edit — the one sanctioned staleness exception |
+| Hover | a full successful analysis (the resolution table) | `null` |
 | Go-to-definition | a full successful analysis (the resolution table) | `null` |
 | Code actions (quickfixes) | a full successful analysis (lint ran) | empty list |
 | Semantic tokens | a full successful analysis (resolution-aware) | `null` — clients keep the previous tokens or static grammar coloring |
@@ -72,6 +77,92 @@ Three analysis tiers gate what a feature can answer:
 A handler panic is caught per request: it never takes the session
 down, degrades that one answer to an internal error, and the next
 message is served normally.
+
+## Hover
+
+`textDocument/hover` answers on `.pmc` for a call site, a `use` path
+segment that resolves to a documented function, or a function's own
+declaration name — whichever the cursor sits on, resolved through the
+same walks go-to-definition uses. Content is always plain text
+(`MarkupContent.kind: "plaintext"`) — v1 renders no markdown, matching
+the `?`/`!` grammar's own plain-prose rule
+(`docs/language.md (doc lines and attention lines)`).
+
+A hover body is up to three groups, blank-line separated, in this fixed
+order:
+
+1. **Paragraphs** — every `?`-line paragraph, in source order, each
+   already blank-line separated from the next.
+2. **Deprecation callout** — present only when the function carries a
+   `[deprecated]` attention line: `deprecated` alone, or `deprecated:
+   MESSAGE` when the attribute carried one.
+3. **Attention notes** — every bare-prose `!` line (the `[deprecated]`
+   line itself excluded — it already surfaced as the callout above),
+   each rendered as its own `note: TEXT` line.
+
+**Content-emptiness rule:** a function with none of the three groups —
+undocumented, or documented with only blank `?` lines (they still parse
+to a doc record, but every field reduces to empty) — answers `null`
+rather than an empty popup. Hover never surfaces on the mere presence of
+a doc record; it surfaces on there being something to show.
+
+A `std::` call resolves through the embedded standard library's own
+analysis, run once per process the same way every requesting document's
+own analysis runs, since a requesting document's analysis only ever
+holds ITS OWN functions — a plain in-memory lookup, unlike
+go-to-definition's on-disk materialization (below), because hover has
+text to render rather than a location to open.
+
+`.pma` never answers hover: `hoverProvider` is still advertised as one
+merged capability (Capability merge, below covers this in general), but
+the dialect has no doc/attention-line grammar of its own, so every
+`.pma` hover request returns `null` — permanently, not as a version-1
+placeholder.
+
+## Tags
+
+Two LSP tag surfaces mark a reference to a deprecated function. Both are
+additive fields, omitted from the wire entirely rather than sent as an
+explicit negative:
+
+- **`deprecated-call` diagnostics** (`docs/lint.md`) carry
+  `DiagnosticTag.Deprecated` (wire `"tags":[2]`), so a client renders
+  the finding's range struck through. Every other diagnostic code, on
+  either service, is untagged.
+- **Completion candidates** resolving to a deprecated function carry
+  `CompletionItemTag.Deprecated` (wire `"tags":[1]`), so a client
+  renders the item struck through in the completion list.
+
+`.pma` has no `[deprecated]`-equivalent attribute grammar, so every
+`.pma` diagnostic and candidate stays untagged permanently — the same
+permanence `.pma`'s hover has, above.
+
+## Completion detail
+
+Either service may attach a short `detail` string to a completion
+candidate (wire `detail`), omitted entirely when there is nothing worth
+adding: the shared rule is "nothing invented" — `detail` only ever
+carries information the service already has cheaply in hand, never a
+guess or a derived label.
+
+- **`.pmc`** sets `detail` to the candidate's fully-qualified name — a
+  scope mapping's own value, a standard-library roster entry's own
+  path, or a nested function's dot-mangled name reapplied from the same
+  formula flatten uses — whenever it differs from the bare `label`
+  already shown in the list (a cross-namespace or nested candidate); an
+  unnamespaced top-level candidate has nothing to add and carries no
+  `detail` at all.
+- **`.pma`** sets `detail` to an operand hint on every mnemonic
+  candidate that takes an operand, derived from the mnemonic's own
+  operand kind and control-flow role rather than a per-mnemonic table:
+  a symbol-vector operand (`wr`) hints its index-list shape (`wr
+  <indices>`); a relative-address operand hints `<function>` on a
+  call-flow mnemonic (`call`, `call.s`) and `<label>` on a jump- or
+  branch-flow one (`jmp`, `jm`, `jnm`, and their short `.s` forms). A
+  no-operand mnemonic (`nop`, `stp`, `ret`, and the rest) carries no
+  `detail`. The `.byte`/`.func` directives carry their own fixed hints
+  (`.byte <0..=255>`, `.func <name> [local]`) — they have no mnemonic
+  operand table entry of their own to derive one from.
 
 ## Languages
 

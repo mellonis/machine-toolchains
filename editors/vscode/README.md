@@ -191,6 +191,24 @@ main() {
       `std.pmc` outside this workspace, not a file you're editing — landing
       on `export goToEnd() {`. See `docs/lsp.md` in this repository for
       where that cache lives.
+- [ ] **Hover**: hover over `goToEnd`, either in `use std::goToEnd;` or
+      inside `@goToEnd();`. Confirm a tooltip appears with the routine's
+      documentation text ("Moves the head to the last mark of the
+      section it starts on…") — this is a `std::` call, so the text
+      comes from the embedded standard library's own analysis, not this
+      file's (`docs/lsp.md`, "Hover"). Then temporarily add a deprecated
+      function above `main`, plus a call to it inside `main`:
+      ```pmc
+      ? Old helper, kept for the walk.
+      ! [deprecated] use goToEnd instead.
+      old() { right; }
+      ```
+      (`@old();` as a new line inside `main`). Confirm hovering `old` —
+      its declaration, or the new `@old();` call site — shows a
+      `deprecated: use goToEnd instead.` line under the doc text, and
+      that the `@old();` call site itself renders struck through (the
+      `deprecated-call` lint finding's `DiagnosticTag`). Undo both
+      edits to restore the base scratch file before continuing.
 - [x] **Task — lint**: run the `pmt lint` task. Confirm the Problems panel
       populates with the `leftover-debugger` finding.
 - [x] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
