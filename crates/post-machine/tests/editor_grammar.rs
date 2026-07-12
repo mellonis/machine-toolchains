@@ -24,12 +24,14 @@ fn textmate_grammar_is_valid_and_covers_the_reserved_words() {
 /// so a future mnemonic addition to the arch table fails this test until
 /// the grammar catches up.
 ///
-/// Coverage is checked against `text` with JSON's doubled backslashes
-/// (`\\.` — how JSON encodes a single regex-escaped `\.`) collapsed to
-/// one, so dotted mnemonics like `jm.s` are found as a contiguous
-/// substring even though the grammar correctly escapes the `.` for
-/// Oniguruma. This does not weaken the guard: the grammar must still
-/// spell every mnemonic, escaped or not, somewhere in the file.
+/// Coverage is checked against the specific repository pattern that must
+/// carry each word — NOT the whole file text. A whole-file check is
+/// blind to a deletion whenever the word also appears in prose (the
+/// grammar's top-level `comment` field mentions `jm.s`, `.func`, and
+/// `local`), so it would stay green with the actual pattern gutted.
+/// Each parsed pattern string has its regex escapes (`\.`, `\b`)
+/// stripped so a dotted mnemonic like `jm.s` is found as a contiguous
+/// substring of the alternation it must live in.
 #[test]
 fn pma_grammar_is_valid_and_covers_pm1_mnemonics() {
     let path = concat!(
@@ -39,18 +41,29 @@ fn pma_grammar_is_valid_and_covers_pm1_mnemonics() {
     let text = std::fs::read_to_string(path).expect("shared pma grammar exists");
     let json: serde_json::Value = serde_json::from_str(&text).expect("pma grammar is valid JSON");
     assert_eq!(json["scopeName"], "source.pma");
-    let unescaped = text.replace("\\\\", "");
+    let pattern = |rule: &str| {
+        json["repository"][rule]["match"]
+            .as_str()
+            .unwrap_or_else(|| panic!("pma grammar has a `{rule}` match pattern"))
+            .replace('\\', "")
+    };
+    let mnemonics = pattern("mnemonics");
     for entry in mtc_post_machine::asm::pm1_syntax().entries {
         assert!(
-            unescaped.contains(entry.mnemonic),
-            "pma grammar misses mnemonic `{}`",
+            mnemonics.contains(entry.mnemonic),
+            "pma mnemonics pattern misses `{}`",
             entry.mnemonic
         );
     }
-    for word in [".func", ".byte", "local"] {
+    let func_directive = pattern("funcDirective");
+    for word in [".func", "local"] {
         assert!(
-            unescaped.contains(word),
-            "pma grammar misses keyword `{word}`"
+            func_directive.contains(word),
+            "pma funcDirective pattern misses `{word}`"
         );
     }
+    assert!(
+        pattern("byteDirective").contains(".byte"),
+        "pma byteDirective pattern misses `.byte`"
+    );
 }
