@@ -9,24 +9,37 @@
 //! `mtc_core::asm::lint::lint` alone gives both the fatal gate (a lower or
 //! assemble failure) and the lint findings, in one call.
 //!
-//! `completion`/`definition`/`document_symbols`/`semantic_tokens` are
-//! stubbed here (`None`/empty) — a later task fills them in over the CST.
+//! `completion`/`definition`/`document_symbols`/`semantic_tokens` all read
+//! straight off the total `AsmCst` (`complete.rs`/`navigate.rs`/`tokens.rs`;
+//! `document_symbols` stays inline here, mirroring the `.pmc` service's own
+//! placement) — never gated on `fatal`/`lint`, so every one of them still
+//! answers over a document that fails to assemble (docs/lsp.md; total CST).
+//! `AsmCst` is flat (no per-function nesting the way `.pmc`'s `Cst` has,
+//! and `AsmComment` alone carries no line of its own) — [`item_lines`] and
+//! [`enclosing_function_range`] below recover the per-line/per-function
+//! structure every feature module needs from that flat shape.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use mtc_core::asm::cst::{AsmCst, parse_asm_cst};
-use mtc_core::asm::{AsmError, format_asm, lint};
+use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, parse_asm_cst};
+use mtc_core::asm::{AsmError, Flow, SyntaxEntry, format_asm, lint};
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, LanguageService, SemToken, ServiceDiagnostic, ServiceSeverity,
-    SymbolNode,
+    SymbolNode, SymbolNodeKind,
 };
+use mtc_core::vm::OperandKind;
 
 use crate::asm::pm1_syntax;
 
 use super::{ConfigResolver, actions_from_findings, parse_ide_allow};
+
+mod complete;
+mod navigate;
+mod tokens;
 
 pub(crate) struct PmaLanguageService {
     docs: HashMap<String, PmaDocState>,
@@ -57,7 +70,6 @@ struct PmaDocState {
     text: String,
     /// Total: every text parses into a CST (docs/formats.md (assembly
     /// text)) — Raw items mark the lines that are not assembly-shaped.
-    #[allow(dead_code)] // consumer: document_symbols()/semantic_tokens() (pma plan 3, Task 4)
     cst: AsmCst,
     /// The one fatal, when `lower`/`assemble` refused the file.
     fatal: Option<AsmError>,
@@ -190,12 +202,16 @@ impl LanguageService for PmaLanguageService {
             .map(parse_ide_allow);
     }
 
-    fn completion(&mut self, _uri: &str, _pos: Pos) -> Vec<Candidate> {
-        Vec::new()
+    fn completion(&mut self, uri: &str, pos: Pos) -> Vec<Candidate> {
+        match self.docs.get(uri) {
+            Some(state) => complete::completion(state, pos),
+            None => Vec::new(),
+        }
     }
 
-    fn definition(&mut self, _uri: &str, _pos: Pos) -> Option<DefTarget> {
-        None
+    fn definition(&mut self, uri: &str, pos: Pos) -> Option<DefTarget> {
+        let state = self.docs.get(uri)?;
+        navigate::definition(state, uri, pos)
     }
 
     fn code_actions(&mut self, uri: &str, span: Span) -> Vec<Action> {
@@ -208,12 +224,16 @@ impl LanguageService for PmaLanguageService {
         actions_from_findings(lint, span)
     }
 
-    fn document_symbols(&mut self, _uri: &str) -> Option<Vec<SymbolNode>> {
-        None
+    fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
+        // CST-tier (total): answered for any known document, broken or
+        // not — `.pma` has no post-CST analysis stage to gate on.
+        let state = self.docs.get(uri)?;
+        Some(document_symbols(&state.text, &state.cst))
     }
 
-    fn semantic_tokens(&mut self, _uri: &str) -> Option<Vec<SemToken>> {
-        None
+    fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
+        let state = self.docs.get(uri)?;
+        Some(tokens::semantic_tokens(state))
     }
 
     fn format(&mut self, uri: &str) -> Option<String> {
@@ -221,6 +241,229 @@ impl LanguageService for PmaLanguageService {
         // single-source contract as `.pmc`.
         let state = self.docs.get(uri)?;
         format_asm(&state.text).ok()
+    }
+}
+
+/// Semantic-token legend indices/bits (`tokens.rs`) — the ONLY spellings
+/// the emitter uses for legend positions; kept in lockstep with
+/// `token_legend()`'s arrays above. Distinct from `.pmc`'s own constants
+/// of the same name (that legend orders `function` at index 1; this one
+/// at index 0) — each service's constants stay local to its own module,
+/// never shared across the two languages.
+const TOKEN_TYPE_FUNCTION: u32 = 0;
+const TOKEN_TYPE_VARIABLE: u32 = 1;
+const TOKEN_TYPE_NUMBER: u32 = 2;
+const MODIFIER_DECLARATION: u32 = 1 << 0;
+// `defaultLibrary` sits in the legend for cross-service symmetry with
+// `.pmc` (docs/lsp.md (semantic tokens)) but `.pma` has no stdlib-call
+// notion of its own — `tokens.rs` never emits this bit.
+#[allow(dead_code)]
+const MODIFIER_DEFAULT_LIBRARY: u32 = 1 << 1;
+
+/// One CST item paired with its 1-based source line. `AsmCst` is flat
+/// (docs/formats.md (assembly text)) and every item but `Comment` already
+/// carries its own line inside a `Span` — `AsmComment` is the one shape
+/// with no line of its own (just `col`). Recovered instead by zipping
+/// `cst.items` against the source's own non-blank lines, in order: exactly
+/// one item per non-blank line is `parse_asm_cst`'s own invariant
+/// (enforced by `cst.rs`'s `total_and_every_nonblank_line_becomes_an_item`
+/// proptest), so the two sequences always line up.
+fn item_lines(text: &str, cst: &AsmCst) -> Vec<u32> {
+    let lines: Vec<u32> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.chars().any(|c| c != ' ' && c != '\t'))
+        .map(|(i, _)| i as u32 + 1)
+        .collect();
+    debug_assert_eq!(
+        lines.len(),
+        cst.items.len(),
+        "parse_asm_cst's own invariant: one item per non-blank line"
+    );
+    lines
+}
+
+/// The item at source `line`, if any (`None` on a blank line, a line past
+/// the end of the document, or — since `Comment` carries no line of its
+/// own and is matched by position here rather than content — a line that
+/// turned out to hold nothing else). `lines` is `item_lines`'s parallel
+/// per-item line vector.
+fn item_at_line<'a>(cst: &'a AsmCst, lines: &[u32], line: u32) -> Option<&'a AsmItem> {
+    cst.items
+        .iter()
+        .zip(lines)
+        .find(|&(_, &l)| l == line)
+        .map(|(item, _)| item)
+}
+
+/// The `.func` item enclosing source `line`, plus the half-open index
+/// range of `cst.items` holding its own body — the items between it and
+/// the next `Func` (exclusive of both). The flat `AsmCst` carries no
+/// per-function grouping of its own; this recovers it by walking to the
+/// LAST `Func` item whose own line is `<= line` (items arrive in source
+/// order, so once a `Func`'s line exceeds the target, every later one
+/// does too). `line` past the last function in the document still
+/// resolves to that trailing function — there is no next `.func` to have
+/// left it for.
+fn enclosing_function_range<'a>(
+    cst: &'a AsmCst,
+    lines: &[u32],
+    line: u32,
+) -> Option<(&'a FuncCst, Range<usize>)> {
+    let mut found: Option<(&FuncCst, usize)> = None;
+    for (i, item) in cst.items.iter().enumerate() {
+        if lines[i] > line {
+            break;
+        }
+        if let AsmItemKind::Func(f) = &item.kind {
+            found = Some((f, i));
+        }
+    }
+    let (f, idx) = found?;
+    let end = cst.items[idx + 1..]
+        .iter()
+        .position(|it| matches!(it.kind, AsmItemKind::Func(_)))
+        .map_or(cst.items.len(), |rel| idx + 1 + rel);
+    Some((f, idx + 1..end))
+}
+
+/// Every `.func` name declared anywhere in the document (exported and
+/// local alike — visibility narrows what a DIFFERENT file may reference,
+/// not what this file's own editor tooling should offer/highlight over
+/// it), sorted and deduplicated.
+fn doc_function_names(cst: &AsmCst) -> BTreeSet<&str> {
+    doc_functions(cst).map(|f| f.name.as_str()).collect()
+}
+
+/// Every `FuncCst` declared anywhere in the document, in source order.
+fn doc_functions(cst: &AsmCst) -> impl Iterator<Item = &FuncCst> {
+    cst.items.iter().filter_map(|item| match &item.kind {
+        AsmItemKind::Func(f) => Some(f),
+        _ => None,
+    })
+}
+
+/// Which reference kind an operand's raw, trimmed `text` plays for a
+/// resolved mnemonic `entry`, per docs/formats.md (assembly text) (symbol
+/// jumps): `@name` is always a function-symbol reference (only the
+/// RelI8/RelI32 operand kinds `jmp`/`jm`/`jnm`/`call` and their short
+/// forms share); a bare (non-`@`) name is a LABEL for `Jump`/`Branch` flow
+/// and a FUNCTION for `Call` flow — `call`'s bare operand already IS the
+/// symbol, unprefixed ("call operands are already symbols; drop the `@`",
+/// docs/formats.md). `None` for any other operand kind (`.byte`'s raw
+/// byte, `wr`'s `SymbolVec`) — neither ever references a label or
+/// function, and for an unknown mnemonic (no `entry` to classify against
+/// at all, the caller never reaches this function).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperandRole {
+    Label,
+    Function,
+}
+
+fn operand_role(entry: &SyntaxEntry, text: &str) -> Option<OperandRole> {
+    if !matches!(entry.operand, OperandKind::RelI8 | OperandKind::RelI32) {
+        return None;
+    }
+    if text.starts_with('@') {
+        return Some(OperandRole::Function);
+    }
+    match entry.flow {
+        Flow::Jump | Flow::Branch => Some(OperandRole::Label),
+        Flow::Call => Some(OperandRole::Function),
+        _ => None,
+    }
+}
+
+/// An operand's own NAME span — `operand.span` itself for a bare name,
+/// or `operand.span` minus its leading `@` for a symbol reference. Every
+/// consumer of a [`OperandRole::Function`] operand (completion's replace
+/// span, a semantic token, a definition's origin span) points at the
+/// name, never the sigil — mirroring `.pmc`'s own call-site spans, which
+/// likewise never include its `@` trigger character.
+fn name_span(operand: &OperandToken) -> Span {
+    if operand.text.starts_with('@') {
+        Span::new(
+            operand.span.start.line,
+            operand.span.start.col + 1,
+            operand.span.end.line,
+            operand.span.end.col,
+        )
+    } else {
+        operand.span
+    }
+}
+
+/// Document symbols (docs/lsp.md (document symbols), CST-tier): one
+/// [`SymbolNode`] per `.func` item — kind `Function`, span from the
+/// `.func` line through the last item before the next `Func` (or the
+/// document's end) — with that function's own labels as `Function`
+/// children (core's `SymbolNodeKind` has no separate `Label` variant;
+/// reusing `Function` for both is the accepted mapping, not a widening of
+/// the enum). Total over the CST: answered even when the document does
+/// not assemble.
+fn document_symbols(text: &str, cst: &AsmCst) -> Vec<SymbolNode> {
+    let lines = item_lines(text, cst);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < cst.items.len() {
+        let AsmItemKind::Func(f) = &cst.items[i].kind else {
+            i += 1;
+            continue;
+        };
+        let end = cst.items[i + 1..]
+            .iter()
+            .position(|it| matches!(it.kind, AsmItemKind::Func(_)))
+            .map_or(cst.items.len(), |rel| i + 1 + rel);
+        let last_end = if end > i + 1 {
+            item_end_pos(&cst.items[end - 1], lines[end - 1])
+        } else {
+            f.span.end
+        };
+        let children = cst.items[i + 1..end]
+            .iter()
+            .filter_map(|it| match &it.kind {
+                AsmItemKind::Line(l) => Some(&l.labels),
+                _ => None,
+            })
+            .flatten()
+            .map(|label| SymbolNode {
+                name: label.name.clone(),
+                kind: SymbolNodeKind::Function,
+                span: label.span,
+                selection_span: label.span,
+                children: Vec::new(),
+            })
+            .collect();
+        out.push(SymbolNode {
+            name: f.name.clone(),
+            kind: SymbolNodeKind::Function,
+            span: Span::new(
+                f.span.start.line,
+                f.span.start.col,
+                last_end.line,
+                last_end.col,
+            ),
+            selection_span: f.name_span,
+            children,
+        });
+        i = end;
+    }
+    out
+}
+
+/// An item's own end position — every variant but `Comment` already
+/// carries one in its own `Span`; `Comment` is reconstructed from its
+/// `col` plus its own character length, paired with the `line` the
+/// caller already recovered via [`item_lines`].
+fn item_end_pos(item: &AsmItem, line: u32) -> Pos {
+    match &item.kind {
+        AsmItemKind::Func(f) => f.span.end,
+        AsmItemKind::Line(l) => l.span.end,
+        AsmItemKind::Raw(r) => r.span.end,
+        AsmItemKind::Comment(c) => Pos {
+            line,
+            col: c.col + c.text.chars().count() as u32,
+        },
     }
 }
 
@@ -271,6 +514,18 @@ mod tests {
     /// indentation `format_asm` normalizes.
     const SCRAMBLED_FIXTURE: &str = ".func f\nL1 :  rgt\n stp\n";
 
+    /// One unknown mnemonic (`bogus`) inside an otherwise open function —
+    /// a fatal (Task 4's "total CST" fixture: parsing still succeeds, so
+    /// CST-tier features answer regardless).
+    const UNKNOWN_MNEMONIC_FIXTURE: &str = ".func f\n        bogus\n";
+
+    /// Two functions, `f` (exported) then `g` (local), each declaring its
+    /// own `L1` label — same name in both, proving per-function grouping
+    /// rather than a doc-wide label list. `f`'s `L1` is referenced (`jm
+    /// L1`); `g`'s is not — irrelevant here (`document_symbols` is
+    /// CST-tier, never gated on lint).
+    const SYMBOLS_FIXTURE: &str = ".func f\nL1: rgt\njm L1\nret\n.func g local\nL1: nop\nret\n";
+
     #[test]
     fn advertises_the_pma_language_surface() {
         let service = PmaLanguageService::new();
@@ -297,7 +552,7 @@ mod tests {
     #[test]
     fn unknown_mnemonic_yields_one_error_with_its_word_span() {
         let mut service = PmaLanguageService::new();
-        let diags = service.did_update("untitled:Untitled-1", ".func f\n        bogus\n");
+        let diags = service.did_update("untitled:Untitled-1", UNKNOWN_MNEMONIC_FIXTURE);
 
         assert_eq!(diags.len(), 1, "{diags:?}");
         let d = &diags[0];
@@ -408,5 +663,78 @@ mod tests {
         // The finding is back: lint ran with the remaining sources.
         assert_eq!(diags[1].code, Some("unused-label"));
         assert_eq!(diags[1].source, "pmt lint");
+    }
+
+    #[test]
+    fn document_symbols_is_functions_with_their_own_labels_as_children() {
+        let mut service = PmaLanguageService::new();
+        service.did_update("untitled:Untitled-1", SYMBOLS_FIXTURE);
+
+        let symbols = service
+            .document_symbols("untitled:Untitled-1")
+            .expect("CST present on any known document");
+
+        assert_eq!(
+            symbols,
+            vec![
+                SymbolNode {
+                    name: "f".to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: Span::new(1, 1, 4, 4), // `.func f` through `f`'s `ret`
+                    selection_span: Span::new(1, 7, 1, 8),
+                    children: vec![SymbolNode {
+                        name: "L1".to_string(),
+                        kind: SymbolNodeKind::Function,
+                        span: Span::new(2, 1, 2, 3),
+                        selection_span: Span::new(2, 1, 2, 3),
+                        children: vec![],
+                    }],
+                },
+                SymbolNode {
+                    name: "g".to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: Span::new(5, 1, 7, 4), // `.func g local` through `g`'s `ret`
+                    selection_span: Span::new(5, 7, 5, 8),
+                    children: vec![SymbolNode {
+                        name: "L1".to_string(),
+                        kind: SymbolNodeKind::Function,
+                        span: Span::new(6, 1, 6, 3),
+                        selection_span: Span::new(6, 1, 6, 3),
+                        children: vec![],
+                    }],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn document_symbols_still_answered_on_a_document_that_fails_to_assemble() {
+        // `bogus` is an unknown mnemonic — `did_update` publishes a
+        // fatal — but `parse_asm_cst` is total: `f` still shows up with
+        // its full extent and no children (no labels on the broken line).
+        let mut service = PmaLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", UNKNOWN_MNEMONIC_FIXTURE);
+        assert_eq!(diags.len(), 1, "sanity: the fatal published, {diags:?}");
+        assert_eq!(diags[0].code, Some("unknown-mnemonic"));
+
+        let symbols = service
+            .document_symbols("untitled:Untitled-1")
+            .expect("CST-tier symbols survive a fatal");
+        assert_eq!(
+            symbols,
+            vec![SymbolNode {
+                name: "f".to_string(),
+                kind: SymbolNodeKind::Function,
+                span: Span::new(1, 1, 2, 14), // through the `bogus` word's own end
+                selection_span: Span::new(1, 7, 1, 8),
+                children: vec![],
+            }]
+        );
+    }
+
+    #[test]
+    fn document_symbols_none_for_an_unknown_document() {
+        let mut service = PmaLanguageService::new();
+        assert_eq!(service.document_symbols("untitled:never-opened"), None);
     }
 }
