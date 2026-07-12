@@ -1083,10 +1083,11 @@ mod tests {
 
         let mut output = Vec::new();
         let mut reader = &input[..];
+        let mut services: [&mut dyn mtc_core::lsp::LanguageService; 1] = [service];
         let exit_code = mtc_core::lsp::server::run(
             &mut reader,
             &mut output,
-            service,
+            &mut services,
             mtc_core::lsp::server::ServerIdentity {
                 name: "pmt lsp",
                 version: "0.0.0-test",

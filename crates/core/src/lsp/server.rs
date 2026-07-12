@@ -1,16 +1,20 @@
 //! Blocking LSP server loop (docs/lsp.md "Runtime model"): reads
 //! Content-Length-framed JSON-RPC messages off `reader`, dispatches them
-//! against a [`LanguageService`], and enforces the LSP lifecycle —
-//! initialize/initialized/shutdown/exit gating, unknown-method handling,
-//! and decode-error responses. Document sync (didOpen/didChange/
-//! didClose) drives the `DocStore` and republishes diagnostics through
-//! one `publish` helper; the same helper powers the config- and
-//! watched-file-triggered republish-all sweeps. Feature requests
-//! (completion, definition, code actions, document symbols, semantic
-//! tokens, formatting) convert trait output to wire types via
-//! `position`. Every dispatched message runs under `catch_unwind` so a
-//! panicking handler can't take the whole session down (docs/lsp.md
-//! "Error containment").
+//! against one or more [`LanguageService`]s, and enforces the LSP
+//! lifecycle — initialize/initialized/shutdown/exit gating,
+//! unknown-method handling, and decode-error responses. When several
+//! services share one stdio endpoint (docs/lsp.md, multi-service
+//! routing), initialize merges their capabilities and each document
+//! binds to exactly one service on didOpen so later messages route
+//! deterministically; a lone service degenerates to a dedicated server.
+//! Document sync (didOpen/didChange/didClose) drives the `DocStore` and
+//! republishes diagnostics through one `publish` helper; the same helper
+//! powers the config- and watched-file-triggered republish-all sweeps.
+//! Feature requests (completion, definition, code actions, document
+//! symbols, semantic tokens, formatting) convert the bound service's
+//! output to wire types via `position`. Every dispatched message runs
+//! under `catch_unwind` so a panicking handler can't take the whole
+//! session down (docs/lsp.md "Error containment").
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -34,8 +38,8 @@ use super::types::{
     WorkspaceEdit, completion_item_kind, diagnostic_severity, symbol_kind,
 };
 use super::{
-    Action, Candidate, CandidateKind, DefTarget, ServiceDiagnostic, ServiceSeverity, SymbolNode,
-    SymbolNodeKind,
+    Action, Candidate, CandidateKind, DefTarget, SemToken, ServiceDiagnostic, ServiceSeverity,
+    SymbolNode, SymbolNodeKind,
 };
 use crate::diagnostics::{Pos, Span};
 
@@ -59,6 +63,24 @@ struct ServerState {
     /// may answer with `LocationLink` (sending one to a non-declaring
     /// client is a protocol violation).
     definition_link_support: bool,
+    /// Which service (by index into `services`) owns each open URI
+    /// (docs/lsp.md, multi-service routing). Bound on didOpen by
+    /// languageId → extension → service 0; every later request or
+    /// notification on that URI routes through the binding; didClose
+    /// removes it. An unbound URI routes to service 0 (`unwrap_or(0)`) —
+    /// which reproduces the single-service "not-open" behavior exactly,
+    /// since a lone service is always index 0.
+    bindings: HashMap<String, usize>,
+    /// Per-service semantic-token-legend remap tables, built once at
+    /// initialize from the merged legend (docs/lsp.md, capability merge).
+    /// `type_offsets[i]` is service `i`'s base index in the concatenated
+    /// `tokenTypes`; `modifier_maps[i][b]` is the merged bit that service
+    /// `i`'s local modifier bit `b` relocates to in the dedup-union
+    /// `tokenModifiers`. For a single service both are identities
+    /// (`type_offsets == [0]`, `modifier_maps == [[0, 1, …]]`), so wire
+    /// output stays byte-identical.
+    type_offsets: Vec<u32>,
+    modifier_maps: Vec<Vec<u32>>,
 }
 
 impl ServerState {
@@ -69,6 +91,9 @@ impl ServerState {
             next_request_id: 1,
             docs: DocStore::new(),
             definition_link_support: false,
+            bindings: HashMap::new(),
+            type_offsets: Vec::new(),
+            modifier_maps: Vec::new(),
         }
     }
 }
@@ -82,10 +107,17 @@ enum Signal {
 /// Blocking server loop; returns the process exit code per the LSP
 /// lifecycle (0 after shutdown→exit, 1 on exit without shutdown, and 1
 /// on EOF/transport failure — a dead client must not hang the process).
+///
+/// Serves one or more [`LanguageService`]s behind a single stdio endpoint
+/// (docs/lsp.md, multi-service routing): the initialize handshake merges
+/// their capabilities, and every document is bound to exactly one service
+/// on didOpen so later requests route deterministically. A single-service
+/// call (`&mut [&mut service]`) is behaviorally identical to a dedicated
+/// server — the merge maps degenerate to identities.
 pub fn run(
     reader: &mut dyn std::io::BufRead,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     identity: ServerIdentity,
 ) -> i32 {
     let mut state = ServerState::new();
@@ -115,7 +147,7 @@ pub fn run(
             }
         };
 
-        match dispatch(&mut state, writer, service, identity, message) {
+        match dispatch(&mut state, writer, services, identity, message) {
             Signal::Continue => {}
             Signal::Exit => return if state.shutdown { 0 } else { 1 },
         }
@@ -142,7 +174,7 @@ pub fn run(
 fn dispatch(
     state: &mut ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     identity: ServerIdentity,
     message: Message,
 ) -> Signal {
@@ -151,7 +183,7 @@ fn dispatch(
             let outcome = {
                 let _suppress = SuppressPanicOutput::new();
                 panic::catch_unwind(AssertUnwindSafe(|| {
-                    handle_request(state, writer, service, identity, &id, &method, params);
+                    handle_request(state, writer, services, identity, &id, &method, params);
                 }))
             };
             if let Err(payload) = outcome {
@@ -165,7 +197,7 @@ fn dispatch(
             let outcome = {
                 let _suppress = SuppressPanicOutput::new();
                 panic::catch_unwind(AssertUnwindSafe(|| {
-                    handle_notification(state, writer, service, &method, params)
+                    handle_notification(state, writer, services, &method, params)
                 }))
             };
             match outcome {
@@ -266,14 +298,14 @@ impl Drop for SuppressPanicOutput {
 fn handle_request(
     state: &mut ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     identity: ServerIdentity,
     id: &Id,
     method: &str,
     params: serde_json::Value,
 ) {
     match method {
-        "initialize" => handle_initialize(state, writer, service, identity, id, params),
+        "initialize" => handle_initialize(state, writer, services, identity, id, params),
         _ if !state.initialized => {
             respond_err(
                 writer,
@@ -286,14 +318,16 @@ fn handle_request(
             state.shutdown = true;
             respond_ok(writer, id, serde_json::Value::Null);
         }
-        "textDocument/completion" => handle_completion(state, writer, service, id, params),
-        "textDocument/definition" => handle_definition(state, writer, service, id, params),
-        "textDocument/codeAction" => handle_code_action(state, writer, service, id, params),
-        "textDocument/documentSymbol" => handle_document_symbol(state, writer, service, id, params),
-        "textDocument/semanticTokens/full" => {
-            handle_semantic_tokens(state, writer, service, id, params)
+        "textDocument/completion" => handle_completion(state, writer, services, id, params),
+        "textDocument/definition" => handle_definition(state, writer, services, id, params),
+        "textDocument/codeAction" => handle_code_action(state, writer, services, id, params),
+        "textDocument/documentSymbol" => {
+            handle_document_symbol(state, writer, services, id, params)
         }
-        "textDocument/formatting" => handle_formatting(state, writer, service, id, params),
+        "textDocument/semanticTokens/full" => {
+            handle_semantic_tokens(state, writer, services, id, params)
+        }
+        "textDocument/formatting" => handle_formatting(state, writer, services, id, params),
         _ => {
             respond_err(
                 writer,
@@ -308,7 +342,7 @@ fn handle_request(
 fn handle_initialize(
     state: &mut ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     identity: ServerIdentity,
     id: &Id,
     params: serde_json::Value,
@@ -336,16 +370,121 @@ fn handle_initialize(
         serde_json::from_value(params).unwrap_or(InitializeParams {
             initialization_options: None,
         });
+    // initializationOptions reach every service — config is not scoped to
+    // a document, so every service must see it (mirrors the
+    // didChangeConfiguration broadcast below).
     if let Some(options) = init_params.initialization_options {
-        service.did_change_config(options);
+        for service in services.iter_mut() {
+            service.did_change_config(options.clone());
+        }
     }
 
     state.initialized = true;
 
-    let result = build_initialize_result(service, identity);
+    let merged = merge_legend(services);
+    let result = build_initialize_result(services, &merged, identity);
     let result_value =
         serde_json::to_value(result).expect("InitializeResult is always serializable");
+    // Retain the per-service remap tables for the whole session: every
+    // semantic-tokens response relocates the bound service's local indices
+    // into the merged legend's index space through these.
+    state.type_offsets = merged.type_offsets;
+    state.modifier_maps = merged.modifier_maps;
     respond_ok(writer, id, result_value);
+}
+
+/// The merged semantic-token legend plus the per-service remap tables
+/// (docs/lsp.md, capability merge). `token_types` is the ordered
+/// concatenation of every service's types (NOT deduped — see
+/// `merge_legend`); `token_modifiers` is their ordered dedup-union.
+struct MergedLegend {
+    token_types: Vec<String>,
+    token_modifiers: Vec<String>,
+    /// `type_offsets[i]` = service `i`'s base index in `token_types`.
+    type_offsets: Vec<u32>,
+    /// `modifier_maps[i][b]` = the merged bit that service `i`'s local
+    /// modifier bit `b` maps to.
+    modifier_maps: Vec<Vec<u32>>,
+}
+
+/// Builds the merged semantic-token legend and the remap tables the
+/// server uses to relocate each service's tokens into the merged index
+/// space (docs/lsp.md, capability merge).
+///
+/// The two axes are treated **asymmetrically, deliberately**: token TYPES
+/// are concatenated without dedup (a type index is just a legend entry;
+/// duplicate names across services are legal LSP and keep the per-service
+/// offset a trivial running length), while token MODIFIERS are
+/// dedup-unioned (they are bit positions in a 32-bit-wide set — a scarce
+/// resource — so two services naming the same modifier must share one
+/// bit).
+fn merge_legend(services: &[&mut dyn LanguageService]) -> MergedLegend {
+    let mut token_types: Vec<String> = Vec::new();
+    let mut token_modifiers: Vec<String> = Vec::new();
+    let mut type_offsets: Vec<u32> = Vec::with_capacity(services.len());
+    let mut modifier_maps: Vec<Vec<u32>> = Vec::with_capacity(services.len());
+
+    for service in services.iter() {
+        let (types, modifiers) = service.token_legend();
+
+        // Types: this service's block starts where the concatenation
+        // currently ends; then append all of them verbatim.
+        type_offsets.push(token_types.len() as u32);
+        token_types.extend(types.iter().map(|name| (*name).to_string()));
+
+        // Modifiers: each local bit maps to the merged bit for its name —
+        // reusing an existing merged bit when the name is already present.
+        let mut map = Vec::with_capacity(modifiers.len());
+        for name in modifiers.iter() {
+            let merged_bit = match token_modifiers.iter().position(|existing| existing == name) {
+                Some(pos) => pos as u32,
+                None => {
+                    token_modifiers.push((*name).to_string());
+                    (token_modifiers.len() - 1) as u32
+                }
+            };
+            map.push(merged_bit);
+        }
+        modifier_maps.push(map);
+    }
+
+    MergedLegend {
+        token_types,
+        token_modifiers,
+        type_offsets,
+        modifier_maps,
+    }
+}
+
+/// Ordered dedup-union of every service's trigger characters, first-seen
+/// order preserved (docs/lsp.md, capability merge). One service's set is
+/// returned unchanged, keeping the single-service capability byte-identical.
+fn merge_trigger_characters(services: &[&mut dyn LanguageService]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for service in services.iter() {
+        for character in service.trigger_characters() {
+            let text = character.to_string();
+            if !out.contains(&text) {
+                out.push(text);
+            }
+        }
+    }
+    out
+}
+
+/// Ordered dedup-union of every service's watched globs, first-seen order
+/// preserved (docs/lsp.md, capability merge).
+fn merge_watched_globs(services: &[&mut dyn LanguageService]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for service in services.iter() {
+        for glob in service.watched_globs() {
+            let text = (*glob).to_string();
+            if !out.contains(&text) {
+                out.push(text);
+            }
+        }
+    }
+    out
 }
 
 /// Notifications carry no response; the return value is the loop
@@ -353,7 +492,7 @@ fn handle_initialize(
 fn handle_notification(
     state: &mut ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     method: &str,
     params: serde_json::Value,
 ) -> Signal {
@@ -363,18 +502,23 @@ fn handle_notification(
         // handled above.
         _ if !state.initialized => Signal::Continue,
         "initialized" => {
-            send_register_capability(state, writer, service);
+            send_register_capability(state, writer, services);
             Signal::Continue
         }
         "textDocument/didOpen" => {
             if let Ok(params) = serde_json::from_value::<DidOpenTextDocumentParams>(params) {
                 let uri = params.text_document.uri;
+                // Bind the document to a service now; every later message
+                // on this URI routes through the binding (docs/lsp.md,
+                // multi-service routing).
+                let idx = bind_service(services, &uri, &params.text_document.language_id);
+                state.bindings.insert(uri.clone(), idx);
                 state.docs.open(
                     &uri,
                     params.text_document.version,
                     params.text_document.text,
                 );
-                publish(state, writer, service, &uri);
+                publish(state, writer, services, &uri);
             }
             Signal::Continue
         }
@@ -387,33 +531,43 @@ fn handle_notification(
                         .docs
                         .change(&uri, params.text_document.version, change.text);
                 }
-                publish(state, writer, service, &uri);
+                publish(state, writer, services, &uri);
             }
             Signal::Continue
         }
         "textDocument/didClose" => {
             if let Ok(params) = serde_json::from_value::<DidCloseTextDocumentParams>(params) {
                 let uri = params.text_document.uri;
+                // Route the close to the bound service BEFORE dropping the
+                // binding, then unbind — a later request on this URI is
+                // now "not open" and routes to service 0.
+                let idx = state.bindings.get(&uri).copied().unwrap_or(0);
                 state.docs.close(&uri);
-                service.did_close(&uri);
-                publish(state, writer, service, &uri);
+                services[idx].did_close(&uri);
+                state.bindings.remove(&uri);
+                publish(state, writer, services, &uri);
             }
             Signal::Continue
         }
         "workspace/didChangeConfiguration" => {
             if let Ok(params) = serde_json::from_value::<DidChangeConfigurationParams>(params) {
-                service.did_change_config(params.settings);
-                republish_all(state, writer, service);
+                // Config is not document-scoped: broadcast to every service,
+                // then re-run each open document through its bound service.
+                for service in services.iter_mut() {
+                    service.did_change_config(params.settings.clone());
+                }
+                republish_all(state, writer, services);
             }
             Signal::Continue
         }
         // No config parsing here — core stays language-agnostic; the
         // service re-reads its own config/watched sources during
         // `did_update`. This notification exists only to trigger the
-        // same republish-all sweep.
+        // same republish-all sweep (each open document through its bound
+        // service).
         "workspace/didChangeWatchedFiles" => {
             if serde_json::from_value::<DidChangeWatchedFilesParams>(params).is_ok() {
-                republish_all(state, writer, service);
+                republish_all(state, writer, services);
             }
             Signal::Continue
         }
@@ -423,22 +577,51 @@ fn handle_notification(
     }
 }
 
+/// Chooses the service a freshly opened document binds to (docs/lsp.md,
+/// multi-service routing): languageId exact match first, then a
+/// URI-suffix match against each service's `extensions()`, finally
+/// service 0 with a stderr note. Never a hard error — a wrong-language
+/// binding still yields *some* diagnostics, which beats silence, and a
+/// lone service always resolves to index 0 regardless.
+fn bind_service(services: &[&mut dyn LanguageService], uri: &str, language_id: &str) -> usize {
+    if let Some(idx) = services
+        .iter()
+        .position(|service| service.language_id() == language_id)
+    {
+        return idx;
+    }
+    if let Some(idx) = services
+        .iter()
+        .position(|service| service.extensions().iter().any(|ext| uri.ends_with(ext)))
+    {
+        return idx;
+    }
+    // eprintln! is this loop's one sanctioned side channel (docs/lsp.md,
+    // multi-service routing): stderr never collides with the stdio
+    // protocol stream on stdout.
+    eprintln!(
+        "lsp server: no service claims languageId '{language_id}' or the extension of '{uri}'; binding to service 0"
+    );
+    0
+}
+
 /// Publishes `uri`'s complete diagnostic set. The single path every
-/// (re)publish goes through (didOpen/didChange above; Task 9's
-/// config/watched-files republish sweeps reuse it directly by calling
-/// it once per open document). Looks the document up in the store
-/// itself: when open, re-runs `service.did_update` against its current
-/// text and publishes with its version; when absent (post-didClose),
+/// (re)publish goes through (didOpen/didChange above; the
+/// config/watched-files republish sweeps reuse it once per open
+/// document). Looks the document up in the store itself: when open,
+/// re-runs the *bound* service's `did_update` against its current text
+/// and publishes with its version; when absent (post-didClose),
 /// publishes an empty set with the version omitted.
 fn publish(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     uri: &str,
 ) {
     let (version, diagnostics) = match state.docs.get(uri) {
         Some(doc) => {
-            let diagnostics = service
+            let idx = state.bindings.get(uri).copied().unwrap_or(0);
+            let diagnostics = services[idx]
                 .did_update(uri, &doc.text)
                 .iter()
                 .map(|diagnostic| to_wire_diagnostic(&doc.text, diagnostic))
@@ -478,16 +661,17 @@ fn to_wire_diagnostic(text: &str, diagnostic: &ServiceDiagnostic) -> WireDiagnos
 
 /// Re-publishes diagnostics for every open document, in URI-sorted
 /// order — the sweep both `workspace/didChangeConfiguration` and
-/// `workspace/didChangeWatchedFiles` trigger. Core has no opinion on
-/// what changed; the service re-reads its own config/watched-file
-/// sources from inside `did_update` itself.
+/// `workspace/didChangeWatchedFiles` trigger. Each document flows through
+/// its own bound service (`publish` resolves the binding per URI). Core
+/// has no opinion on what changed; the service re-reads its own
+/// config/watched-file sources from inside `did_update` itself.
 fn republish_all(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
 ) {
     for uri in state.docs.uris() {
-        publish(state, writer, service, &uri);
+        publish(state, writer, services, &uri);
     }
 }
 
@@ -507,7 +691,7 @@ fn doc_text<'a>(state: &'a ServerState, uri: &str) -> &'a str {
 fn handle_completion(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     id: &Id,
     params: serde_json::Value,
 ) {
@@ -523,8 +707,9 @@ fn handle_completion(
     let uri = params.text_document.uri;
     let text = doc_text(state, &uri);
     let pos = position::pos_from_lsp(text, params.position);
+    let idx = state.bindings.get(&uri).copied().unwrap_or(0);
 
-    let items: Vec<CompletionItem> = service
+    let items: Vec<CompletionItem> = services[idx]
         .completion(&uri, pos)
         .into_iter()
         .map(|candidate| to_completion_item(text, candidate))
@@ -555,7 +740,7 @@ fn to_completion_item(text: &str, candidate: Candidate) -> CompletionItem {
 fn handle_definition(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     id: &Id,
     params: serde_json::Value,
 ) {
@@ -571,8 +756,9 @@ fn handle_definition(
     let uri = params.text_document.uri;
     let text = doc_text(state, &uri);
     let pos = position::pos_from_lsp(text, params.position);
+    let idx = state.bindings.get(&uri).copied().unwrap_or(0);
 
-    let result = match service.definition(&uri, pos) {
+    let result = match services[idx].definition(&uri, pos) {
         // A LocationLink is only valid to send when the client declared
         // support for it; a target with no origin has nothing to put in
         // originSelectionRange, so it falls back to a plain Location too.
@@ -649,7 +835,7 @@ fn pos_to_position_identity(pos: Pos) -> Position {
 fn handle_code_action(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     id: &Id,
     params: serde_json::Value,
 ) {
@@ -665,8 +851,9 @@ fn handle_code_action(
     let uri = params.text_document.uri;
     let text = doc_text(state, &uri);
     let span = position::range_to_span(text, params.range);
+    let idx = state.bindings.get(&uri).copied().unwrap_or(0);
 
-    let actions: Vec<CodeAction> = service
+    let actions: Vec<CodeAction> = services[idx]
         .code_actions(&uri, span)
         .into_iter()
         .map(|action| to_code_action(&uri, text, action))
@@ -701,7 +888,7 @@ fn to_code_action(uri: &str, text: &str, action: Action) -> CodeAction {
 fn handle_document_symbol(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     id: &Id,
     params: serde_json::Value,
 ) {
@@ -716,8 +903,9 @@ fn handle_document_symbol(
     };
     let uri = params.text_document.uri;
     let text = doc_text(state, &uri);
+    let idx = state.bindings.get(&uri).copied().unwrap_or(0);
 
-    let result = match service.document_symbols(&uri) {
+    let result = match services[idx].document_symbols(&uri) {
         Some(nodes) => {
             let symbols: Vec<DocumentSymbol> = nodes
                 .into_iter()
@@ -750,7 +938,7 @@ fn to_document_symbol(text: &str, node: SymbolNode) -> DocumentSymbol {
 fn handle_semantic_tokens(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     id: &Id,
     params: serde_json::Value,
 ) {
@@ -765,10 +953,26 @@ fn handle_semantic_tokens(
     };
     let uri = params.text_document.uri;
     let text = doc_text(state, &uri);
+    let idx = state.bindings.get(&uri).copied().unwrap_or(0);
+    let type_offset = state.type_offsets.get(idx).copied().unwrap_or(0);
 
-    let result = match service.semantic_tokens(&uri) {
+    let result = match services[idx].semantic_tokens(&uri) {
         Some(tokens) => {
-            let data = position::pack_semantic_tokens(text, &tokens);
+            // Relocate each token from the bound service's local legend
+            // into the merged legend's index space before wire packing
+            // (docs/lsp.md, capability merge). For a single service the
+            // maps are identities, so `remapped == tokens` and the packed
+            // bytes match a dedicated server exactly.
+            let modifier_map = state
+                .modifier_maps
+                .get(idx)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let remapped: Vec<SemToken> = tokens
+                .iter()
+                .map(|token| remap_token(*token, type_offset, modifier_map))
+                .collect();
+            let data = position::pack_semantic_tokens(text, &remapped);
             serde_json::to_value(SemanticTokens { data })
                 .expect("SemanticTokens is always serializable")
         }
@@ -777,10 +981,44 @@ fn handle_semantic_tokens(
     respond_ok(writer, id, result);
 }
 
+/// Relocates one service-local [`SemToken`] into the merged legend's
+/// index space (docs/lsp.md, capability merge): the type index shifts by
+/// the service's concatenation offset; each set modifier bit moves to the
+/// merged bit its per-service map names.
+///
+/// A modifier bit set beyond the service's declared modifier count is an
+/// impossible token for a well-behaved service — it advertised N
+/// modifiers yet set bit ≥ N. Such a bit is **masked off** (dropped)
+/// rather than passed through: passing it through would corrupt an
+/// unrelated merged bit (the merged legend is at least as wide), while
+/// masking loses only the already-meaningless bit. `debug_assert` turns
+/// the service bug into a test-build panic; release builds silently mask.
+fn remap_token(token: SemToken, type_offset: u32, modifier_map: &[u32]) -> SemToken {
+    let mut modifiers = 0u32;
+    for bit in 0..u32::BITS {
+        if token.modifiers & (1 << bit) == 0 {
+            continue;
+        }
+        match modifier_map.get(bit as usize) {
+            Some(&merged_bit) => modifiers |= 1 << merged_bit,
+            None => debug_assert!(
+                false,
+                "semantic token modifier bit {bit} exceeds the service's {} declared modifiers",
+                modifier_map.len()
+            ),
+        }
+    }
+    SemToken {
+        span: token.span,
+        token_type: token.token_type + type_offset,
+        modifiers,
+    }
+}
+
 fn handle_formatting(
     state: &ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
     id: &Id,
     params: serde_json::Value,
 ) {
@@ -795,8 +1033,9 @@ fn handle_formatting(
     };
     let uri = params.text_document.uri;
     let text = doc_text(state, &uri);
+    let idx = state.bindings.get(&uri).copied().unwrap_or(0);
 
-    let result = match service.format(&uri) {
+    let result = match services[idx].format(&uri) {
         None => serde_json::Value::Null,
         Some(formatted) if formatted == text => {
             serde_json::to_value(Vec::<TextEdit>::new()).expect("empty TextEdit[] is serializable")
@@ -826,11 +1065,10 @@ fn handle_formatting(
 }
 
 fn build_initialize_result(
-    service: &mut dyn LanguageService,
+    services: &[&mut dyn LanguageService],
+    merged: &MergedLegend,
     identity: ServerIdentity,
 ) -> InitializeResult {
-    let (token_types, token_modifiers) = service.token_legend();
-
     InitializeResult {
         capabilities: ServerCapabilities {
             position_encoding: "utf-16".to_string(),
@@ -839,11 +1077,7 @@ fn build_initialize_result(
                 change: 1,
             },
             completion_provider: CompletionOptions {
-                trigger_characters: service
-                    .trigger_characters()
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect(),
+                trigger_characters: merge_trigger_characters(services),
             },
             definition_provider: true,
             document_formatting_provider: true,
@@ -853,8 +1087,8 @@ fn build_initialize_result(
             },
             semantic_tokens_provider: SemanticTokensOptions {
                 legend: SemanticTokensLegend {
-                    token_types: token_types.iter().map(|s| s.to_string()).collect(),
-                    token_modifiers: token_modifiers.iter().map(|s| s.to_string()).collect(),
+                    token_types: merged.token_types.clone(),
+                    token_modifiers: merged.token_modifiers.clone(),
                 },
                 full: true,
             },
@@ -867,14 +1101,15 @@ fn build_initialize_result(
 }
 
 /// Sends the `client/registerCapability` request for
-/// `workspace/didChangeWatchedFiles`, skipped entirely when the service
-/// advertises no globs to watch.
+/// `workspace/didChangeWatchedFiles`, skipped entirely when no service
+/// advertises any glob to watch. Watches the ordered dedup-union of every
+/// service's globs (docs/lsp.md, capability merge).
 fn send_register_capability(
     state: &mut ServerState,
     writer: &mut dyn std::io::Write,
-    service: &mut dyn LanguageService,
+    services: &mut [&mut dyn LanguageService],
 ) {
-    let globs = service.watched_globs();
+    let globs = merge_watched_globs(services);
     if globs.is_empty() {
         return;
     }
@@ -885,7 +1120,7 @@ fn send_register_capability(
     let watchers = globs
         .iter()
         .map(|glob| FileSystemWatcher {
-            glob_pattern: (*glob).to_string(),
+            glob_pattern: glob.clone(),
         })
         .collect();
     let params = RegistrationParams {
@@ -926,6 +1161,149 @@ mod tests {
         version: "0.0.0-test",
     };
 
+    /// A second toy service for the multi-service routing + capability-merge
+    /// tests. It is deliberately built to OVERLAP `FakeService`'s legend so
+    /// the merge's two asymmetric rules are observable:
+    ///
+    /// - its token TYPES include `"function"` (shared with `FakeService`),
+    ///   so the merged `tokenTypes` list carries `"function"` **twice** —
+    ///   proving types are concatenated, never deduped;
+    /// - its token MODIFIERS include `"declaration"` (shared with
+    ///   `FakeService`) listed AFTER its own `"deprecated"`, so the merged
+    ///   `tokenModifiers` list carries `"declaration"` **once** and this
+    ///   service's local bits remap non-trivially (`[deprecated→1,
+    ///   declaration→0]`) — proving modifiers are dedup-unioned and the
+    ///   per-service bit map is real.
+    ///
+    /// (The task brief sketched this service's legend as
+    /// `(["kw","number"], ["deprecated"])`, but `FakeService` is pinned to
+    /// types `["function"]` / modifiers `["declaration"]` by a byte-identity
+    /// test, so a sketch with no shared names could not distinguish dedup
+    /// from no-dedup. The concrete names here are chosen to share exactly
+    /// one type and one modifier with `FakeService`, which is what actually
+    /// exercises the merge.)
+    ///
+    /// Its diagnostics/completions/etc. are tagged `"fake2"` so a response's
+    /// content reveals which service produced it — that is how the routing
+    /// tests assert the binding was honored.
+    struct FakeService2 {
+        texts: HashMap<String, String>,
+        config_revision: u32,
+    }
+
+    impl FakeService2 {
+        fn new() -> Self {
+            FakeService2 {
+                texts: HashMap::new(),
+                config_revision: 0,
+            }
+        }
+    }
+
+    /// Single-line, char-precise occurrences of `needle` on the first line
+    /// of `text` — enough for the compact fixtures the merge tests use.
+    fn first_line_spans(text: &str, needle: &str) -> Vec<Span> {
+        let needle: Vec<char> = needle.chars().collect();
+        let line = text.split('\n').next().unwrap_or("");
+        let chars: Vec<char> = line.chars().collect();
+        let mut spans = Vec::new();
+        let mut i = 0;
+        while i + needle.len() <= chars.len() {
+            if chars[i..i + needle.len()] == needle[..] {
+                let start = (i + 1) as u32;
+                spans.push(Span::new(1, start, 1, start + needle.len() as u32));
+                i += needle.len();
+            } else {
+                i += 1;
+            }
+        }
+        spans
+    }
+
+    impl LanguageService for FakeService2 {
+        fn language_id(&self) -> &'static str {
+            "fake2"
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &[".f2"]
+        }
+        fn trigger_characters(&self) -> &[char] {
+            // '@' is unique; '.' overlaps FakeService, so the union dedups it.
+            &['@', '.']
+        }
+        fn token_legend(&self) -> (&'static [&'static str], &'static [&'static str]) {
+            (&["kw", "function"], &["deprecated", "declaration"])
+        }
+        fn watched_globs(&self) -> &'static [&'static str] {
+            &["**/fake2.json"]
+        }
+        fn did_update(&mut self, uri: &str, text: &str) -> Vec<ServiceDiagnostic> {
+            self.texts.insert(uri.to_string(), text.to_string());
+            first_line_spans(text, "boo")
+                .into_iter()
+                .map(|span| ServiceDiagnostic {
+                    span,
+                    severity: ServiceSeverity::Warning,
+                    source: "fake2",
+                    code: Some("boo-word"),
+                    message: format!("boo (fake2 rev {})", self.config_revision),
+                })
+                .collect()
+        }
+        fn did_close(&mut self, uri: &str) {
+            self.texts.remove(uri);
+        }
+        fn did_change_config(&mut self, _settings: serde_json::Value) {
+            self.config_revision += 1;
+        }
+        fn completion(&mut self, _uri: &str, pos: Pos) -> Vec<Candidate> {
+            vec![Candidate {
+                label: "beta".to_string(),
+                kind: CandidateKind::Keyword,
+                replace_span: Span {
+                    start: pos,
+                    end: pos,
+                },
+                insert_text: "beta".to_string(),
+            }]
+        }
+        fn definition(&mut self, uri: &str, _pos: Pos) -> Option<DefTarget> {
+            let text = self.texts.get(uri)?;
+            first_line_spans(text, "ref")
+                .into_iter()
+                .next()
+                .map(|span| DefTarget {
+                    uri: uri.to_string(),
+                    span,
+                    origin: None,
+                })
+        }
+        fn code_actions(&mut self, _uri: &str, _span: Span) -> Vec<Action> {
+            Vec::new()
+        }
+        fn document_symbols(&mut self, _uri: &str) -> Option<Vec<SymbolNode>> {
+            None
+        }
+        fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
+            let text = self.texts.get(uri).map(String::as_str).unwrap_or("");
+            Some(
+                first_line_spans(text, "kw")
+                    .into_iter()
+                    .map(|span| SemToken {
+                        span,
+                        // local "kw" type index, local "deprecated" bit.
+                        token_type: 0,
+                        modifiers: 1 << 0,
+                    })
+                    .collect(),
+            )
+        }
+        fn format(&mut self, uri: &str) -> Option<String> {
+            let text = self.texts.get(uri)?;
+            Some(text.to_uppercase())
+        }
+    }
+
     fn initialize_message(id: i64) -> serde_json::Value {
         serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "initialize", "params": {}})
     }
@@ -938,6 +1316,26 @@ mod tests {
                 "textDocument": {
                     "uri": uri,
                     "languageId": "fake",
+                    "version": version,
+                    "text": text,
+                },
+            },
+        })
+    }
+
+    fn did_open_message_lang(
+        uri: &str,
+        language_id: &str,
+        version: i32,
+        text: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": language_id,
                     "version": version,
                     "text": text,
                 },
@@ -989,6 +1387,15 @@ mod tests {
         client_messages: &[serde_json::Value],
         service: &mut dyn LanguageService,
     ) -> (Vec<serde_json::Value>, i32) {
+        run_session_multi(client_messages, &mut [service])
+    }
+
+    /// The multi-service driver: same as `run_session` but over a slice of
+    /// services, for the routing/capability-merge tests below.
+    fn run_session_multi(
+        client_messages: &[serde_json::Value],
+        services: &mut [&mut dyn LanguageService],
+    ) -> (Vec<serde_json::Value>, i32) {
         let mut input = Vec::new();
         for msg in client_messages {
             transport::write_message(&mut input, &msg.to_string())
@@ -997,7 +1404,7 @@ mod tests {
 
         let mut output = Vec::new();
         let mut reader = &input[..];
-        let exit_code = run(&mut reader, &mut output, service, TEST_IDENTITY);
+        let exit_code = run(&mut reader, &mut output, services, TEST_IDENTITY);
 
         (decode_output_frames(&output), exit_code)
     }
@@ -1264,8 +1671,9 @@ mod tests {
         let mut reader = &raw[..];
         let mut output = Vec::new();
         let mut service = FakeService::new();
+        let mut services: [&mut dyn LanguageService; 1] = [&mut service];
 
-        let exit_code = run(&mut reader, &mut output, &mut service, TEST_IDENTITY);
+        let exit_code = run(&mut reader, &mut output, &mut services, TEST_IDENTITY);
 
         assert_eq!(exit_code, 1);
         assert!(output.is_empty());
@@ -1329,7 +1737,8 @@ mod tests {
         let mut output = Vec::new();
         let mut reader = &input[..];
         let mut service = FakeService::new();
-        let exit_code = run(&mut reader, &mut output, &mut service, TEST_IDENTITY);
+        let mut services: [&mut dyn LanguageService; 1] = [&mut service];
+        let exit_code = run(&mut reader, &mut output, &mut services, TEST_IDENTITY);
         let outputs = decode_output_frames(&output);
 
         assert_eq!(outputs.len(), 2);
@@ -1352,7 +1761,8 @@ mod tests {
         let mut output = Vec::new();
         let mut reader = &input[..];
         let mut service = FakeService::new();
-        let exit_code = run(&mut reader, &mut output, &mut service, TEST_IDENTITY);
+        let mut services: [&mut dyn LanguageService; 1] = [&mut service];
+        let exit_code = run(&mut reader, &mut output, &mut services, TEST_IDENTITY);
         let outputs = decode_output_frames(&output);
 
         assert_eq!(outputs.len(), 2);
@@ -2087,5 +2497,290 @@ mod tests {
         assert_eq!(outputs[9]["id"], serde_json::json!(5));
         assert_eq!(outputs[9]["result"], serde_json::Value::Null);
         assert_eq!(exit_code, 0);
+    }
+
+    // --- Multi-service routing + capability merge (docs/lsp.md) ---------
+    //
+    // These drive two services — service 0 = `FakeService` ("fake"),
+    // service 1 = `FakeService2` ("fake2") — and assert each behavior on
+    // the wire. Test (8) (single-service byte-identity) is proven both by
+    // every single-service test above still passing unchanged through the
+    // slice-based `run`, and by `single_service_capabilities_are_byte_\
+    // identical_to_a_dedicated_server` below.
+
+    /// (1) Two didOpens bind by languageId; each didOpen's publish runs the
+    /// *bound* service's `did_update`, revealed by the diagnostic source.
+    #[test]
+    fn two_did_opens_route_did_update_to_the_bound_service() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message_lang("file:///a.fake", "fake", 1, "bad"),
+                did_open_message_lang("file:///b.f2", "fake2", 1, "boo"),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[1]["params"]["uri"], "file:///a.fake");
+        assert_eq!(outputs[1]["params"]["diagnostics"][0]["source"], "fake");
+        assert_eq!(outputs[2]["params"]["uri"], "file:///b.f2");
+        assert_eq!(outputs[2]["params"]["diagnostics"][0]["source"], "fake2");
+        assert_eq!(outputs[2]["params"]["diagnostics"][0]["code"], "boo-word");
+    }
+
+    /// (2) An unknown languageId falls back to the URI-extension match.
+    #[test]
+    fn unknown_language_id_falls_back_to_the_extension_binding() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                // "plaintext" matches no service's languageId; ".f2" does.
+                did_open_message_lang("file:///foo.f2", "plaintext", 1, "boo"),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[1]["params"]["diagnostics"][0]["source"], "fake2");
+    }
+
+    /// (3) completion/definition/formatting all follow the binding.
+    #[test]
+    fn feature_requests_follow_the_document_binding() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message_lang("file:///b.f2", "fake2", 1, "x ref"),
+                request_message(
+                    2,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///b.f2"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                request_message(
+                    3,
+                    "textDocument/definition",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///b.f2"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                request_message(
+                    4,
+                    "textDocument/formatting",
+                    serde_json::json!({"textDocument": {"uri": "file:///b.f2"}}),
+                ),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs.len(), 5);
+        // completion → FakeService2's "beta".
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(outputs[2]["result"][0]["label"], "beta");
+        // definition → FakeService2 finds "ref" (cols 3..6 → 0-based 2..5).
+        assert_eq!(outputs[3]["id"], serde_json::json!(3));
+        assert_eq!(outputs[3]["result"]["uri"], "file:///b.f2");
+        assert_eq!(outputs[3]["result"]["range"]["start"]["character"], 2);
+        // formatting → FakeService2 uppercases the whole document.
+        assert_eq!(outputs[4]["id"], serde_json::json!(4));
+        assert_eq!(outputs[4]["result"][0]["newText"], "X REF");
+    }
+
+    /// (4) initialize merges trigger characters (dedup-union) and the
+    /// semantic-token legend (types concatenated, modifiers dedup-unioned).
+    #[test]
+    fn initialize_merges_trigger_characters_and_the_token_legend() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(&[initialize_message(1)], &mut [&mut s1, &mut s2]);
+
+        let caps = &outputs[0]["result"]["capabilities"];
+        // '.' shared → deduped; '@' unique; first-seen order.
+        assert_eq!(
+            caps["completionProvider"]["triggerCharacters"],
+            serde_json::json!([".", "@"])
+        );
+        // Types concatenated, NOT deduped — "function" appears twice.
+        assert_eq!(
+            caps["semanticTokensProvider"]["legend"]["tokenTypes"],
+            serde_json::json!(["function", "kw", "function"])
+        );
+        // Modifiers dedup-unioned — "declaration" appears once.
+        assert_eq!(
+            caps["semanticTokensProvider"]["legend"]["tokenModifiers"],
+            serde_json::json!(["declaration", "deprecated"])
+        );
+    }
+
+    /// The watched-globs union rides `initialized`'s registerCapability.
+    #[test]
+    fn initialized_registers_the_union_of_watched_globs() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs[1]["method"], "client/registerCapability");
+        assert_eq!(
+            outputs[1]["params"]["registrations"][0]["registerOptions"]["watchers"],
+            serde_json::json!([{"globPattern": "**/fake.json"}, {"globPattern": "**/fake2.json"}])
+        );
+    }
+
+    /// (5) A SemToken from service 1 arrives on the wire with its type
+    /// index and modifier bits relocated into the merged legend.
+    #[test]
+    fn semantic_tokens_from_the_second_service_are_remapped_on_the_wire() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message_lang("file:///c.f2", "fake2", 1, "kw"),
+                request_message(
+                    2,
+                    "textDocument/semanticTokens/full",
+                    serde_json::json!({"textDocument": {"uri": "file:///c.f2"}}),
+                ),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        // Local (type 0 "kw", modifiers 0b1 "deprecated") relocates to
+        // merged (type 0+offset₁=1, bit0→merged bit1 = 0b10=2). "kw" spans
+        // cols 1..3 → packed [dLine, dStart, len, type, mods].
+        assert_eq!(
+            outputs[2]["result"]["data"],
+            serde_json::json!([0, 0, 2, 1, 2])
+        );
+    }
+
+    /// (6) didChangeConfiguration broadcasts to every service — both open
+    /// documents republish with their own service's bumped revision.
+    #[test]
+    fn did_change_configuration_broadcasts_to_every_service() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message_lang("file:///a.fake", "fake", 1, "bad"),
+                did_open_message_lang("file:///b.f2", "fake2", 1, "boo"),
+                notification_message(
+                    "workspace/didChangeConfiguration",
+                    serde_json::json!({"settings": {"n": 1}}),
+                ),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        // init, publish(a rev0), publish(b rev0), then URI-sorted
+        // republishes (a.fake before b.f2) with each service's rev 1.
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[3]["params"]["uri"], "file:///a.fake");
+        assert_eq!(
+            outputs[3]["params"]["diagnostics"][0]["message"],
+            "bad word (config rev 1)"
+        );
+        assert_eq!(outputs[4]["params"]["uri"], "file:///b.f2");
+        assert_eq!(
+            outputs[4]["params"]["diagnostics"][0]["message"],
+            "boo (fake2 rev 1)"
+        );
+    }
+
+    /// (7) didClose removes the binding — a later request on that URI is
+    /// "not open" and routes to service 0, flipping "beta" back to "alpha".
+    #[test]
+    fn did_close_unbinds_and_later_requests_route_to_service_zero() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message_lang("file:///b.f2", "fake2", 1, "hi"),
+                request_message(
+                    2,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///b.f2"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                did_close_message("file:///b.f2"),
+                request_message(
+                    3,
+                    "textDocument/completion",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///b.f2"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        // While bound → FakeService2's "beta"; after close → service 0's
+        // "alpha".
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(outputs[2]["result"][0]["label"], "beta");
+        assert_eq!(outputs[4]["id"], serde_json::json!(3));
+        assert_eq!(outputs[4]["result"][0]["label"], "alpha");
+    }
+
+    /// (8) A single-service wrap is byte-identical to a dedicated server:
+    /// identity merge maps leave the legend un-merged and the semantic
+    /// tokens' wire bytes unchanged.
+    #[test]
+    fn single_service_capabilities_are_byte_identical_to_a_dedicated_server() {
+        let mut service = FakeService::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "fn one\nfn two"),
+                request_message(
+                    2,
+                    "textDocument/semanticTokens/full",
+                    serde_json::json!({"textDocument": {"uri": "file:///a.fake"}}),
+                ),
+            ],
+            &mut [&mut service],
+        );
+
+        let caps = &outputs[0]["result"]["capabilities"];
+        assert_eq!(
+            caps["completionProvider"]["triggerCharacters"],
+            serde_json::json!(["."])
+        );
+        assert_eq!(
+            caps["semanticTokensProvider"]["legend"]["tokenTypes"],
+            serde_json::json!(["function"])
+        );
+        assert_eq!(
+            caps["semanticTokensProvider"]["legend"]["tokenModifiers"],
+            serde_json::json!(["declaration"])
+        );
+        // Identical to the pre-change `semantic_tokens_returns_packed_data_
+        // for_two_fn_occurrences` expectation.
+        assert_eq!(
+            outputs[2]["result"]["data"],
+            serde_json::json!([0, 0, 2, 0, 1, 1, 0, 2, 0, 1])
+        );
     }
 }

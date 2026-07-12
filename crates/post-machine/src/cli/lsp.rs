@@ -20,10 +20,15 @@ pub(super) fn lsp(raw: &[String]) -> Result<CliOutput, String> {
     let mut service = crate::lsp::PmcLanguageService::new();
     let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout();
+    // Single service today; the framework's `run` takes a service slice so
+    // a second language can plug in later (full dual wiring is a later
+    // task). One service means identity capability-merge maps, so this is
+    // byte-for-byte a dedicated `.pmc` server.
+    let mut services: [&mut dyn mtc_core::lsp::LanguageService; 1] = [&mut service];
     let code = mtc_core::lsp::server::run(
         &mut stdin,
         &mut stdout,
-        &mut service,
+        &mut services,
         mtc_core::lsp::server::ServerIdentity {
             name: "pmt lsp",
             version: env!("CARGO_PKG_VERSION"),
