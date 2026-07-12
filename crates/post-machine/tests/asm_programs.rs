@@ -5,7 +5,7 @@ use mtc_core::formats::object::SymbolDef;
 use mtc_core::vm::{InfiniteTape, Machine, Outcome, RunOptions};
 use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::arch::opcodes::*;
-use mtc_post_machine::asm::{assemble, disassemble_object};
+use mtc_post_machine::asm::{assemble, disassemble_object, pm1_syntax};
 
 /// The docs/formats.md (assembly text) sample, verbatim.
 const SPEC_SAMPLE: &str = "\
@@ -88,4 +88,9 @@ fn short_call_by_name_is_rejected() {
     let e = assemble(".func f\n        call.s  g\n", false).unwrap_err();
     assert!(matches!(e.kind, mtc_core::asm::AsmErrorKind::BadOperand(_)));
     assert_eq!(e.span.start.line, 2);
+}
+
+#[test]
+fn pm1_syntax_has_break_opcode() {
+    assert_eq!(pm1_syntax().break_opcode, Some(0x0E));
 }

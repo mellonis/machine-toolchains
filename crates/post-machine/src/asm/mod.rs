@@ -144,6 +144,7 @@ pub fn pm1_syntax() -> ArchSyntax {
             },
         ],
         entry_opcode: ENT,
+        break_opcode: Some(BRK),
     }
 }
 

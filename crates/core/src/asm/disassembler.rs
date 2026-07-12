@@ -775,6 +775,7 @@ START:  nop
             ],
             relax_pairs: vec![],
             entry_opcode: 0x0D,
+            break_opcode: None,
         }
     }
 

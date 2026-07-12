@@ -29,6 +29,9 @@ pub struct ArchSyntax {
     pub entries: Vec<SyntaxEntry>,
     pub relax_pairs: Vec<RelaxPair>,
     pub entry_opcode: u8,
+    /// The debugger-break opcode, when the arch has one (drives the
+    /// leftover-debugger lint; None = rule silent).
+    pub break_opcode: Option<u8>,
 }
 
 impl ArchSyntax {
@@ -128,6 +131,7 @@ pub(crate) mod fixture {
                 short: 0x30,
             }],
             entry_opcode: 0x0E,
+            break_opcode: None,
         }
     }
 }
