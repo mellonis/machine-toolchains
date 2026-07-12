@@ -63,8 +63,8 @@
 
 use crate::compiler::CompileError;
 use crate::cst::{
-    BodyItem, BodyKind, CommaItem, Cst, FunctionCst, NamespaceCst, StatementCst, TopItem, TopKind,
-    UseCst, UsePath,
+    BodyItem, BodyKind, CommaItem, Cst, DocRunItem, DocRunKind, FunctionCst, NamespaceCst,
+    StatementCst, TopItem, TopKind, UseCst, UsePath,
 };
 use crate::lexer::{Comment, CommentKind, LexMode, lex_with};
 use crate::parser::{Builtin, CheckArm, Item, Label, Successor, parse_cst};
@@ -118,17 +118,40 @@ fn print_top_items(out: &mut String, items: &[TopItem], indent: usize) {
 /// carry a trailing blank's `blank_before`, so nothing further is needed
 /// for that edge.
 fn top_wants_blank_before(items: &[TopItem], i: usize) -> bool {
-    i > 0 && items[i].blank_before
+    i > 0 && top_item_leads_with_blank(&items[i])
+}
+
+/// A documented function repurposes its wrapping [`TopItem`]'s own
+/// `blank_before` (`parser.rs`'s `Parser::doc_run` doc): once a run is
+/// attached, that field stops meaning "blank before this item" and
+/// starts meaning "blank between the run's last line and the
+/// declaration" — [`print_function`] reads it (threaded in by its
+/// caller) for exactly that gap. The blank-before-the-WHOLE-UNIT
+/// decision this function makes moves to the run's own first line,
+/// `doc_run[0].blank_before`, instead.
+fn top_item_leads_with_blank(item: &TopItem) -> bool {
+    match &item.kind {
+        TopKind::Function(f) if !f.doc_run.is_empty() => f.doc_run[0].blank_before,
+        _ => item.blank_before,
+    }
 }
 
 /// Same rule as [`top_wants_blank_before`], scoped to a function body.
 fn body_wants_blank_before(items: &[BodyItem], i: usize) -> bool {
-    i > 0 && items[i].blank_before
+    i > 0 && body_item_leads_with_blank(&items[i])
+}
+
+/// [`top_item_leads_with_blank`]'s counterpart for a [`BodyItem`].
+fn body_item_leads_with_blank(item: &BodyItem) -> bool {
+    match &item.kind {
+        BodyKind::Nested(f) if !f.doc_run.is_empty() => f.doc_run[0].blank_before,
+        _ => item.blank_before,
+    }
 }
 
 fn print_top_item(out: &mut String, item: &TopItem, indent: usize) {
     match &item.kind {
-        TopKind::Function(f) => print_function(out, f, indent),
+        TopKind::Function(f) => print_function(out, f, indent, item.blank_before),
         TopKind::Comment(c) => print_comment(out, c, indent),
         TopKind::Namespace(ns) => print_namespace(out, ns, indent),
         TopKind::Import(use_cst) => print_use(out, use_cst, indent),
@@ -264,7 +287,23 @@ fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
 /// unlike a mid-comma-group leading comment ([`layout_leading`]), there
 /// is no "stays inline" case here. `f.close_trailing` rides the closing
 /// `}` the same way a statement's `trailing` rides its `;`.
-fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
+///
+/// **Doc/attention run** (design doc
+/// `2026-07-12-pmc-doc-lines-attributes-design.md`, "fmt"): `f.doc_run`
+/// prints first, at THIS call's own `indent` (col 0 top level, body
+/// indent when nested — the same `indent` the header itself prints at,
+/// so a run always sits directly above its bound declaration). `blank_
+/// before_decl` is the caller-threaded, repurposed wrapping-item
+/// `blank_before` (see [`top_item_leads_with_blank`] /
+/// [`body_item_leads_with_blank`]) — the gap between the run's last line
+/// and the header; it's meaningless (and ignored) when `doc_run` is
+/// empty, since then it was already spent by the caller placing the
+/// blank before this whole call.
+fn print_function(out: &mut String, f: &FunctionCst, indent: usize, blank_before_decl: bool) {
+    print_doc_run(out, &f.doc_run, indent);
+    if !f.doc_run.is_empty() && blank_before_decl {
+        out.push('\n');
+    }
     let pad = " ".repeat(indent);
     out.push_str(&pad);
     if f.has_export {
@@ -318,6 +357,51 @@ fn print_function(out: &mut String, f: &FunctionCst, indent: usize) {
     out.push('\n');
 }
 
+/// A [`FunctionCst::doc_run`] (docs/language.md (doc lines); design doc
+/// `2026-07-12-pmc-doc-lines-attributes-design.md`, "fmt"): each item at
+/// the bound declaration's own `indent`. A `?`/`!` line prints as the
+/// sigil alone when its stored `text` is empty (a paragraph break for
+/// `?`; the design doc's rule is symmetric for `!`, which never carries
+/// a meaningfully empty payload but costs nothing to handle the same
+/// way) — otherwise sigil + one space + `text` verbatim, which IS the
+/// canonical form: the lexer already stripped one optional leading space
+/// from `text` (`lexer.rs`'s `DocLine`/`AttentionLine` doc), so this
+/// reprint is the one-space-normalized form regardless of how the author
+/// spaced it. `DocRunKind::Attention::text` carries any `[attr]` prefix
+/// verbatim, so the `! [deprecated] message` shape falls out with no
+/// special-casing. An interleaved ordinary comment prints under the
+/// existing [`print_comment`] rule. Blank lines are each item's own
+/// `blank_before` (spec "Blank lines" — same collapse-to-one policy as
+/// everywhere else); index 0's `blank_before` is read by the CALLER
+/// instead (the blank-before-the-whole-unit decision — see
+/// [`top_item_leads_with_blank`] / [`body_item_leads_with_blank`]), so
+/// this loop only places blanks BETWEEN run items.
+fn print_doc_run(out: &mut String, run: &[DocRunItem], indent: usize) {
+    let pad = " ".repeat(indent);
+    for (i, item) in run.iter().enumerate() {
+        if i > 0 && item.blank_before {
+            out.push('\n');
+        }
+        match &item.kind {
+            DocRunKind::Doc { text, .. } => print_doc_run_line(out, &pad, '?', text),
+            DocRunKind::Attention { text, .. } => print_doc_run_line(out, &pad, '!', text),
+            DocRunKind::Comment(c) => print_comment(out, c, indent),
+        }
+    }
+}
+
+/// One `?`/`!` line's canonical form: `sigil` alone when `text` is
+/// empty, else `sigil` + one space + `text` verbatim.
+fn print_doc_run_line(out: &mut String, pad: &str, sigil: char, text: &str) {
+    out.push_str(pad);
+    out.push(sigil);
+    if !text.is_empty() {
+        out.push(' ');
+        out.push_str(text);
+    }
+    out.push('\n');
+}
+
 fn print_body_item(
     out: &mut String,
     item: &BodyItem,
@@ -327,7 +411,7 @@ fn print_body_item(
 ) {
     match &item.kind {
         BodyKind::Statement(s) => print_statement(out, s, code, trailing_spacing),
-        BodyKind::Nested(f) => print_function(out, f, indent),
+        BodyKind::Nested(f) => print_function(out, f, indent, item.blank_before),
         BodyKind::Comment(c) => print_comment(out, c, indent),
     }
 }
@@ -1890,5 +1974,126 @@ mod tests {
             format("f() { right(008); @f(008); }").unwrap(),
             "f() {\n    right(008);\n    @f(008);\n}\n"
         );
+    }
+
+    // -- fmt build Task 1: doc/attention runs
+    // (`docs/superpowers/specs/2026-07-12-pmc-doc-lines-attributes-\
+    // design.md`, "fmt") -----------------------------------------------
+    //
+    // Printing rules under test: a run's own lines print immediately
+    // above the bound declaration, at the declaration's OWN indent
+    // (`crates/post-machine/tests/fmt_programs.rs` carries the corpus-
+    // level partner fixtures — same shapes, feeding the objective-guard
+    // idempotence/behaviour/comment-fidelity/token-spelling sweep).
+
+    /// The canonical shape (also in the corpus, `fmt_programs.rs`
+    /// `SIMPLE`): a two-paragraph top-level doc (an empty `?` line is the
+    /// paragraph break) + a `[deprecated]` attention line with a
+    /// message, then a nested function with its own one-line doc,
+    /// printed at the nested (body) indent. Already fmt-clean.
+    const CANONICAL_DOC_RUN: &str = "? Adds one to the accumulator, wrapping through cell 007 as a sentinel.\n?\n? Steps the head by calling the nested helper below.\n! [deprecated] use addTwoAndKeep instead\nexport addOne() {\n    ? Moves the head one cell to the right.\n    step() {\n        right;\n    }\n    @step();\n}\n";
+
+    #[test]
+    fn canonical_doc_run_top_level_and_nested_reprints_byte_identically() {
+        assert_eq!(format(CANONICAL_DOC_RUN).unwrap(), CANONICAL_DOC_RUN);
+    }
+
+    #[test]
+    fn scrambled_doc_run_spacing_normalizes_to_canonical() {
+        // Every `?`/`!` line's canonical single space scrambled: dropped
+        // where present (`?Adds…`, `![deprecated]…`), added as a bare
+        // trailing space on the empty paragraph-break line (`? `) — the
+        // lexer's one-leading-space-stripped rule already stores the
+        // SAME text either way (`parser.rs`'s
+        // `doc_run_round_trips_and_keeps_text_verbatim`), so fmt must
+        // reprint the canonical single-space form regardless.
+        let scrambled = "?Adds one to the accumulator, wrapping through cell 007 as a sentinel.\n? \n?Steps the head by calling the nested helper below.\n![deprecated] use addTwoAndKeep instead\nexport addOne() {\n    ?Moves the head one cell to the right.\n    step() {\n        right;\n    }\n    @step();\n}\n";
+        assert_eq!(format(scrambled).unwrap(), CANONICAL_DOC_RUN);
+    }
+
+    #[test]
+    fn empty_doc_line_prints_bare_sigil_as_a_paragraph_break() {
+        let src = "? First paragraph.\n?\n? Second paragraph.\nmain() {\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn attention_bare_prose_prints_verbatim() {
+        let src = "! internal use only, not part of the public surface\nmain() {\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn doc_run_binds_to_a_nested_function_at_its_own_indent() {
+        let src =
+            "main() {\n    ? step one\n    step() {\n        right;\n    }\n    @step();\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn comment_inside_a_doc_run_prints_under_existing_comment_rules() {
+        let src = "? first\n// mid comment\n? second\nmain() {\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn doc_run_blank_line_run_collapses_to_one() {
+        // Two blank source lines between doc paragraphs (as opposed to
+        // an empty `?` line, pinned separately above) collapse to one,
+        // same policy as everywhere else (spec "Blank lines").
+        let src = "? first\n\n\n\n? second\nmain() {\n    right;\n}\n";
+        let expected = "? first\n\n? second\nmain() {\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), expected);
+    }
+
+    #[test]
+    fn doc_run_blank_line_before_declaration_preserved() {
+        // A blank line between the run's last line and the bound
+        // declaration is a DIFFERENT gap from blank lines inside the run
+        // (`parser.rs`'s `doc_run` doc: the bound item's own
+        // `blank_before` is repurposed for exactly this gap once a run
+        // is attached) — round trips byte-identically either way.
+        let src = "? doc\n\nmain() {\n    right;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn doc_run_blank_line_before_the_whole_run_preserved() {
+        // The blank line separating a previous sibling declaration from
+        // the NEXT one's run is carried on the run's own first item
+        // (`doc_run[0].blank_before`), not on the bound `FunctionCst`'s
+        // wrapping item — `top_item_leads_with_blank` reads it from
+        // there instead.
+        let src = "f() {\n    right;\n}\n\n? doc for g\ng() {\n    left;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn doc_run_blank_before_run_and_before_declaration_both_preserved() {
+        // Both gaps (before the run, and between the run and the
+        // declaration) present in the same source, independently.
+        let src = "f() {\n    right;\n}\n\n? doc for g\n\ng() {\n    left;\n}\n";
+        assert_eq!(format(src).unwrap(), src);
+    }
+
+    #[test]
+    fn idempotent_on_doc_run_shapes() {
+        for src in [
+            CANONICAL_DOC_RUN.to_string(),
+            "? First paragraph.\n?\n? Second paragraph.\nmain() {\n    right;\n}\n".to_string(),
+            "! internal use only, not part of the public surface\nmain() {\n    right;\n}\n"
+                .to_string(),
+            "main() {\n    ? step one\n    step() {\n        right;\n    }\n    @step();\n}\n"
+                .to_string(),
+            "? first\n// mid comment\n? second\nmain() {\n    right;\n}\n".to_string(),
+            "? first\n\n\n\n? second\nmain() {\n    right;\n}\n".to_string(),
+            "? doc\n\nmain() {\n    right;\n}\n".to_string(),
+            "f() {\n    right;\n}\n\n? doc for g\ng() {\n    left;\n}\n".to_string(),
+            "f() {\n    right;\n}\n\n? doc for g\n\ng() {\n    left;\n}\n".to_string(),
+        ] {
+            let once = format(&src).unwrap();
+            let twice = format(&once).unwrap();
+            assert_eq!(twice, once, "not idempotent for {src:?}");
+        }
     }
 }

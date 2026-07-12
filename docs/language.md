@@ -267,9 +267,11 @@ single space; an empty `?` line ends the current paragraph without
 starting an empty one, so leading, trailing, and repeated empty `?`
 lines are all absorbed with no blank paragraphs left behind. Doc and
 attention text is plain prose: v1 does not interpret markdown or any
-other markup inside it — the text is stored and carried verbatim, so a
-markdown subset could be declared for a later version without any
-grammar change.
+other markup inside it — the text is stored and carried verbatim (one
+leading space directly after the sigil is canonical and stripped when
+present, so `? foo` and `?foo` store identical text; any further
+whitespace is part of the payload), so a markdown subset could be
+declared for a later version without any grammar change.
 
 ### Acceptance change: a line-leading `!` is always an attention line
 

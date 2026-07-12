@@ -197,6 +197,36 @@ const SIMPLE: &[&str] = &[
     // job (docs/fmt.md, docs/lint.md). Right-aligns by the WRITTEN
     // width of "007:" (4 chars), not the canonical value's width.
     "main() {\n    007: right;\n    goto 007;\n}\n",
+    // fmt build Task 1 (`docs/superpowers/specs/2026-07-12-pmc-doc-lines-\
+    // attributes-design.md`, "fmt"): the canonical doc/attention-run
+    // shape — a top-level function documented with a two-paragraph doc
+    // (an empty `?` line breaks the paragraph) and a `[deprecated]`
+    // attention line with a message, plus a nested function with its own
+    // one-line doc, run printed at the nested indent. Already fmt-clean
+    // (byte-identical round trip pinned locally in `fmt::tests`); doubles
+    // as the token-spelling guard's doc-text coverage (`007` embedded in
+    // the first paragraph, `zero_token_changes_over_every_fixture` below
+    // proves the digits inside prose are untouched, same discipline as
+    // the leading-zero label case above but for a `String` payload
+    // instead of a `Number`).
+    "? Adds one to the accumulator, wrapping through cell 007 as a sentinel.\n?\n? Steps the head by calling the nested helper below.\n! [deprecated] use addTwoAndKeep instead\nexport addOne() {\n    ? Moves the head one cell to the right.\n    step() {\n        right;\n    }\n    @step();\n}\n",
+    // fmt build Task 1: the same run, but every `?`/`!` line's canonical
+    // single space is scrambled (dropped where present, added as a bare
+    // trailing space on the empty paragraph-break line) — the lexer's
+    // one-leading-space-stripped rule (`docs/language.md` (doc lines))
+    // already normalizes this to the SAME stored text as the canonical
+    // entry above, so fmt's output is expected to be byte-identical to
+    // it (pinned directly in `fmt::tests::scrambled_doc_run_spacing_\
+    // normalizes_to_canonical`); listed here too so the corpus-wide
+    // idempotence/behaviour/comment-fidelity/token-spelling checks cover
+    // the scrambled INPUT shape as well, not just the already-canonical
+    // one.
+    "?Adds one to the accumulator, wrapping through cell 007 as a sentinel.\n? \n?Steps the head by calling the nested helper below.\n![deprecated] use addTwoAndKeep instead\nexport addOne() {\n    ?Moves the head one cell to the right.\n    step() {\n        right;\n    }\n    @step();\n}\n",
+    // fmt build Task 1: an ordinary `//` comment interleaved inside a doc
+    // run — prints under the existing comment rules (design doc's fmt
+    // section), widening `comment_fidelity` to actually exercise a doc
+    // run (the two entries above carry no `//`/`/* */` trivia at all).
+    "? first\n// mid comment\n? second\nmain() {\n    right;\n}\n",
 ];
 
 /// `SIMPLE` entries paired with a label equal to their own source (the
