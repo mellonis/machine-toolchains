@@ -410,7 +410,11 @@ fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
 /// payload's text after the attribute's closing `]`, trimmed — finding
 /// `]` in `text` directly is equivalent to (and simpler than) mapping
 /// `attr.span.end` back into the string, since `parse_attr` only
-/// recognizes `[ident]` at the payload's very start.
+/// recognizes `[ident]` at the payload's very start. An EMPTY bare `!`
+/// line (no attribute, no text) contributes nothing to `attention` — the
+/// same "an empty line carries no content" rule the `?` side already
+/// applies — so a lone bare `!` can't leave `FnDoc` with a single empty
+/// attention entry and no other content.
 fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
     if doc_run.is_empty() {
         return None;
@@ -438,6 +442,7 @@ fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
                     );
                     deprecated = Some(text[close + 1..].trim().to_string());
                 }
+                _ if text.is_empty() => {}
                 _ => attention.push(text.clone()),
             },
             DocRunKind::Comment(_) => {}
@@ -2734,6 +2739,23 @@ main() { right; }
         let prog = parse_src("?\n?\n? doc\n?\n?\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["doc"]);
+    }
+
+    #[test]
+    fn fn_doc_run_of_only_empty_lines_yields_content_empty_doc() {
+        // A lone empty `?` line and a lone empty `!` line, together: the
+        // `?` side already drops an empty doc line without emitting an
+        // empty paragraph; this pins the mirrored rule for `!` — an empty
+        // attention line contributes nothing either, so a run built from
+        // nothing but blanks reduces to a content-empty `FnDoc` (no
+        // paragraphs, no attention, no deprecation) rather than an
+        // `attention: [""]` entry that would otherwise render as a
+        // note-only hover popup with nothing in it.
+        let prog = parse_src("?\n!\nmain() { right; }").unwrap();
+        let doc = prog.functions[0].doc.as_ref().expect("run is non-empty");
+        assert!(doc.paragraphs.is_empty());
+        assert!(doc.attention.is_empty());
+        assert_eq!(doc.deprecated, None);
     }
 
     #[test]
