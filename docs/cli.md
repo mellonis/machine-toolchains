@@ -29,11 +29,14 @@ SUBCOMMANDS:
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 ```
 
-`pmt --version` prints two lines: `pmt <VERSION>` (the toolchain crate's own
-version) and `pmc language <VERSION>` (the `.pmc` language acceptance-contract
-version — `docs/language.md`). The two numbers move on independent axes: a
-crate release with no grammar change repeats the same language-version line,
-while the language version only bumps when the grammar itself changes.
+`pmt --version` prints three lines: `pmt <VERSION>` (the toolchain crate's
+own version), `pmc language <VERSION>` (the `.pmc` language
+acceptance-contract version — `docs/language.md`), and
+`pma dialect (pm-1) <VERSION>` (the PM-1 `.pma` dialect version —
+`docs/formats.md (assembly text)`). The three numbers move on independent
+axes: a crate release with no grammar change repeats the same
+language-version and dialect-version lines, and each of the two grammar
+versions only bumps when its own grammar changes.
 
 Every flag below appears verbatim in the corresponding subcommand's
 `--help` text; this page is a reference, not a paraphrase.
@@ -114,6 +117,27 @@ USAGE: pmt asm INPUT.pma [-o OUT.pmo] [-g]
 
 Assembles hand-written or disassembled `.pma` text into a `.pmo` object;
 `-g` records the label/line debug section (`docs/formats.md`).
+
+### Assembly errors
+
+A fatal assembly error stops the assemble and renders the same shape as a
+compile error: `FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed code
+is a stable kebab-case identifier — permanent, safe to match in scripts
+and editor integrations, same contract as `pmt compile` (compile errors)
+above.
+
+| Code | Meaning |
+|---|---|
+| `syntax` | The line doesn't parse as an instruction, directive, or label — malformed function header, junk after a modifier, a dangling label at the end of a function, and similar structural defects. |
+| `unknown-mnemonic` | The instruction word isn't in the PM-1 mnemonic table. |
+| `outside-function` | Code or a label appears before any `.func` line. |
+| `duplicate-function` | The same function name is declared twice. |
+| `duplicate-label` | The same label is declared twice in one function. |
+| `unknown-label` | A branch or jump names a label the function never declares. |
+| `bad-operand` | An operand doesn't fit its instruction's shape — wrong count, wrong kind (a number where a name is required), or a malformed `@name`. |
+| `short-offset-out-of-range` | A `.s`-suffixed short form's target is too far away to encode; use the far form or let the linker relax it. |
+| `encode-error` | The operand encodes to a value the container format can't represent. |
+| `raw-line` | The line isn't assembly-shaped at all — a disassembly listing row or similar text that doesn't belong in `.pma` input. |
 
 ## `pmt link`
 

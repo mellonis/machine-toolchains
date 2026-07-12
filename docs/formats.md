@@ -117,6 +117,11 @@ CLI: `pmt tape build " * * *" --head 3 -o in.pmt`, `pmt tape show in.pmt`,
 
 ## `.pma` — assembly text
 
+The PM-1 `.pma` dialect version is **0.2** (pre-1.0: the version is `0.N`
+and `N` bumps on any grammar change, the same acceptance-contract shape as
+the `.pmc` language version in `docs/language.md`). See "Dialect version
+history" below for what each version changed.
+
 ```asm
 .func goToEnd                   ; emits ent, defines symbol
 L1:     rgt
@@ -168,10 +173,21 @@ into another function's middle that lands on no known root falls back to
 lines and in jump/call operands — accept `::`-separated segments of
 dotted identifiers (`std::api.helper`: the namespace part is everything
 before the LAST `::`, the function-nesting part is everything after;
-`docs/language.md (symbol grammar)`). **Labels are colon-free** — the
-label grammar does not accept `::` or `.`, which is what lets the parser
-tell a label (`L1:`) apart from a namespaced/nested symbol reference
-without ambiguity.
+`docs/language.md (symbol grammar)`). **Labels are letters, digits, and
+underscores only** — Unicode letters are legal (matching identifiers
+elsewhere in the toolchain), but the label grammar does not accept `::`
+or `.`, which is what lets the parser tell a label (`L1:`) apart from a
+namespaced/nested symbol reference without ambiguity.
+
+### Dialect version history
+
+- **0.1** — the v1 toolchain's dialect; the retroactive baseline the
+  version scheme measures from.
+- **0.2** — one tightening: label names dropped `.` and `::` from their
+  accepted characters, leaving letters, digits, and underscores (Unicode
+  letters still legal). Symbol names in `.func` and jump/call operands are
+  unaffected — the dotted/`::`-segmented grammar above still applies to
+  them.
 
 ## `.pmx.map` — link-time sidecar
 

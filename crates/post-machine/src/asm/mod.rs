@@ -8,6 +8,11 @@ use mtc_core::vm::OperandKind;
 
 use crate::arch::opcodes::*;
 
+/// PM-1 `.pma` dialect version — an acceptance contract (docs/formats.md
+/// (assembly text)): pre-1.0 it is 0.N and N bumps on ANY grammar
+/// change. 0.2: labels tightened to letters/digits/underscore.
+pub const PM1_PMA_DIALECT_VERSION: &str = "0.2";
+
 pub fn pm1_syntax() -> ArchSyntax {
     use Flow::{Branch, Call as CallF, FallThrough as FT, Jump, Stop};
     use OperandKind::{None as N, RelI8, RelI32, SymbolVec};

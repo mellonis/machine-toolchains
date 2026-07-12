@@ -63,9 +63,10 @@ pub fn execute_with(
         None | Some("--help") | Some("-h") => Ok(CliOutput::ok(USAGE.into(), String::new())),
         Some("--version") => Ok(CliOutput::ok(
             format!(
-                "pmt {}\npmc language {}\n",
+                "pmt {}\npmc language {}\npma dialect (pm-1) {}\n",
                 env!("CARGO_PKG_VERSION"),
-                crate::parser::PMC_LANG_VERSION
+                crate::parser::PMC_LANG_VERSION,
+                crate::asm::PM1_PMA_DIALECT_VERSION
             ),
             String::new(),
         )),

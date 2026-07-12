@@ -17,6 +17,7 @@ pub mod optimizer;
 pub mod parser;
 pub mod stdlib;
 
+pub use asm::PM1_PMA_DIALECT_VERSION;
 pub use compiler::{
     CompileError, CompileErrorKind, CompileOptions, CompileOutput, CompileReport, compile,
 };

@@ -37,6 +37,21 @@ fn version_reports_the_language_version() {
     assert_eq!(mtc_post_machine::PMC_LANG_VERSION, "0.2");
 }
 
+#[test]
+fn version_reports_exactly_three_lines() {
+    let out = execute(&args(&["--version"])).unwrap();
+    assert_eq!(
+        out.stdout,
+        format!(
+            "pmt {}\npmc language {}\npma dialect (pm-1) {}\n",
+            env!("CARGO_PKG_VERSION"),
+            mtc_post_machine::PMC_LANG_VERSION,
+            mtc_post_machine::PM1_PMA_DIALECT_VERSION
+        )
+    );
+    assert_eq!(mtc_post_machine::PM1_PMA_DIALECT_VERSION, "0.2");
+}
+
 const HELLO: &str = "main() { 1: mark; 2: right; 3: mark(!); }";
 
 #[test]
