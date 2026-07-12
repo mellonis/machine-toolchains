@@ -401,14 +401,14 @@ output to one function.
 ```
 USAGE: pmt lsp
 
-Run the LSP server for .pmc on stdio until the client exits.
+Run the LSP server for .pmc and .pma on stdio until the client exits.
 Exit code: 0 after shutdown/exit, 1 on exit without shutdown.
 ```
 
-Runs a Language Server Protocol server for `.pmc` on stdio: `pmt lsp`
-is the only subcommand that hands real stdio to library code — every
-protocol frame goes over stdin/stdout, exactly as the LSP spec's base
-protocol requires. It serves publish diagnostics (compile fatals,
+Runs one Language Server Protocol server for both `.pmc` and `.pma` on
+stdio: `pmt lsp` is the only subcommand that hands real stdio to
+library code — every protocol frame goes over stdin/stdout, exactly as
+the LSP spec's base protocol requires. It serves publish diagnostics (compile fatals,
 compile warnings, and lint findings, merged and sorted), completions,
 go-to-definition (including into a materialized copy of the standard
 library), quickfix code actions from lint's fixes, semantic tokens, a
