@@ -541,8 +541,10 @@ fn check_duplicate_bindings(program: &crate::parser::Program) -> Result<(), Comp
 /// The full symbol name of a top-level function: namespaces join with
 /// `::` (`std::api`); un-namespaced names have no `::`. Function
 /// nesting appends `.` segments later (`std::api.helper`) — every
-/// symbol self-decomposes at the last `::`.
-fn full_name(ns: &[String], name: &str) -> String {
+/// symbol self-decomposes at the last `::`. `pub(crate)`: the LSP's
+/// completion layer reuses this exact formula (never a re-derivation)
+/// to qualify nested-def candidates against `Analysis.docs`' keys.
+pub(crate) fn full_name(ns: &[String], name: &str) -> String {
     if ns.is_empty() {
         name.to_string()
     } else {

@@ -24,6 +24,19 @@ fn span_contains(span: Span, pos: Pos) -> bool {
     pos >= span.start && pos < span.end
 }
 
+/// Step 1's shared scan — the ONE place a position is hit-tested
+/// against the resolution table: the entry whose call-site span
+/// contains `pos`, as `(origin span, resolution)`. Both [`definition`]
+/// and [`hover_target`] start here; only what they DO with the hit
+/// differs (a `DefTarget` location vs a qualified name).
+fn resolve_at(analysis: &Analysis, pos: Pos) -> Option<(Span, &Resolution)> {
+    analysis
+        .resolutions
+        .iter()
+        .find(|(span, _)| span_contains(*span, pos))
+        .map(|(span, resolution)| (*span, resolution))
+}
+
 /// The definition target for `pos` in `uri`'s current document
 /// (docs/lsp.md (navigation)):
 ///
@@ -39,12 +52,8 @@ fn span_contains(span: Span, pos: Pos) -> bool {
 pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTarget> {
     let analysis = state.analysis.as_ref()?;
 
-    if let Some((origin, resolution)) = analysis
-        .resolutions
-        .iter()
-        .find(|(span, _)| span_contains(*span, pos))
-    {
-        return resolve_call(uri, resolution, *origin);
+    if let Some((origin, resolution)) = resolve_at(analysis, pos) {
+        return resolve_call(uri, resolution, origin);
     }
 
     let cst = state.cst.as_ref()?;
@@ -279,8 +288,9 @@ fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
 /// only the OUTPUT shape differs (a name here, a `DefTarget` location
 /// there). Step order:
 ///
-/// 1. a resolution-table entry whose span contains `pos` (a call site),
-///    resolved to a name via [`resolution_qualified_name`];
+/// 1. a resolution-table entry whose span contains `pos` (a call site)
+///    — the shared [`resolve_at`] scan — resolved to a name via
+///    [`resolution_qualified_name`];
 /// 2. failing that, a function's OWN declaration name — hover-only
 ///    (`definition` never needs to resolve a position sitting ON a
 ///    definition: the location IS the definition already). Every
@@ -298,13 +308,9 @@ fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
 pub(super) fn hover_target(state: &DocState, pos: Pos) -> Option<(String, Span)> {
     let analysis = state.analysis.as_ref()?;
 
-    if let Some((origin, resolution)) = analysis
-        .resolutions
-        .iter()
-        .find(|(span, _)| span_contains(*span, pos))
-    {
+    if let Some((origin, resolution)) = resolve_at(analysis, pos) {
         let name = resolution_qualified_name(analysis, resolution)?;
-        return Some((name, *origin));
+        return Some((name, origin));
     }
 
     if let Some(f) = analysis

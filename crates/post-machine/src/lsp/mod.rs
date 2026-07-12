@@ -256,8 +256,8 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
             source: "pmt",
             code: Some("invalid-config"),
             message: message.clone(),
-            // Deprecation tagging is Task 4's `deprecated-call` wiring;
-            // every other finding channel stays untagged here.
+            // Only lint's `deprecated-call` findings are ever tagged
+            // (the lint channel below); config warnings never are.
             deprecated: false,
         })
         .collect();

@@ -43,7 +43,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
 
-use crate::compiler::ScopeSummary;
+use crate::compiler::{ScopeSummary, full_name};
 use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::parser::{FnDoc, RESERVED};
@@ -130,10 +130,9 @@ fn names_roster(state: &DocState) -> Option<&ScopeSummary> {
         .or(state.scopes_for_completion.as_ref())
 }
 
-/// A candidate with nothing extra to say: Module/Keyword/Value kinds,
-/// and the one Function case where no qualified name is cheaply known
-/// (nested defs — see `call_candidates`' own comment). `detail` is
-/// always `None`, `deprecated` always `false`.
+/// A candidate with nothing extra to say — Module/Keyword/Value kinds
+/// (every Function candidate goes through `mk_function_candidate`
+/// below). `detail` is always `None`, `deprecated` always `false`.
 fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candidate {
     Candidate {
         label: label.to_string(),
@@ -145,13 +144,15 @@ fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candida
     }
 }
 
-/// A `Function` candidate whose target's qualified name is ALREADY
-/// known at the call site (a `ScopeSummary` map's VALUE, or a roster
-/// entry's own `full_path` — never recomputed here, per the design
-/// doc's "nothing invented"): `detail` is that qualified name when it
-/// differs from the bare `label` (a cross-namespace candidate), `None`
-/// when they're the same (an unnamespaced top-level candidate — nothing
-/// to add). `deprecated` is `Analysis.docs`' own tag, keyed by the same
+/// A `Function` candidate carrying its target's qualified name — a
+/// `ScopeSummary` map's VALUE, a roster entry's own `full_path`, or
+/// (nested defs) flatten's own mangling formula reapplied over the
+/// enclosing chain; never an invented derivation of the caller's own
+/// (design-doc rule: "nothing invented"): `detail` is that qualified
+/// name when it differs from the bare `label` (a cross-namespace or
+/// nested candidate), `None` when they're the same (an unnamespaced
+/// top-level candidate — nothing to add). `deprecated` is
+/// `Analysis.docs`' own tag, keyed by the same
 /// qualified name; `false` when `docs` is unavailable (stale-scopes
 /// completion, docs/lsp.md (staged analysis)) or the name isn't
 /// documented at all — both fall out of `Option::and_then` naturally,
@@ -470,24 +471,42 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<Candidate> = Vec::new();
 
+    // The enclosing namespace path, shared by (a)'s qualified-name
+    // reconstruction and (b)'s prefix walk. Falls back to the top-level
+    // scope ([]) when the CST is unavailable.
+    let ns_path: Vec<String> = state
+        .cst
+        .as_ref()
+        .map(|cst| enclosing_ns_path(&cst.items, pos))
+        .unwrap_or_default();
+
     // (a) nested defs of the enclosing function chain, innermost
     // outward, hoisted (a function's OWN direct BodyKind::Nested
     // children, regardless of their position relative to `pos`).
     // Unavailable without a CST — skipped, not substituted, per spec.
-    // `mk_candidate` (not `mk_function_candidate`): a nested function's
-    // mangled dot-name isn't cheaply known here without redoing
-    // flatten's own dot-mangling walk — "nothing invented" leaves it
-    // detail-less/undeprecated rather than reconstructing it.
+    // Each chain level's qualified name is rebuilt with flatten's OWN
+    // formula — `compiler::full_name` for the top level, then a `.`
+    // segment per nesting level (`compiler.rs::flatten`'s `emit`) —
+    // never a re-derivation, so a nested candidate's qualified name
+    // matches `Analysis.docs`' key exactly.
     if let Some(cst) = &state.cst {
         let chain = enclosing_function_chain(&cst.items, pos);
-        for f in chain.iter().rev() {
+        let mut quals: Vec<String> = Vec::with_capacity(chain.len());
+        for (i, f) in chain.iter().enumerate() {
+            quals.push(match i {
+                0 => full_name(&ns_path, &f.name),
+                _ => format!("{}.{}", quals[i - 1], f.name),
+            });
+        }
+        for (f, qual) in chain.iter().zip(&quals).rev() {
             for item in &f.body {
                 if let BodyKind::Nested(nested) = &item.kind
                     && seen.insert(nested.name.clone())
                 {
-                    out.push(mk_candidate(
+                    out.push(mk_function_candidate(
                         &nested.name,
-                        CandidateKind::Function,
+                        &format!("{qual}.{}", nested.name),
+                        docs,
                         replace_span,
                     ));
                 }
@@ -496,13 +515,7 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     }
 
     // (b) per enclosing namespace prefix, longest first: that level's
-    // defs, then its bindings. Falls back to the top-level scope ([])
-    // when the CST is unavailable.
-    let ns_path: Vec<String> = state
-        .cst
-        .as_ref()
-        .map(|cst| enclosing_ns_path(&cst.items, pos))
-        .unwrap_or_default();
+    // defs, then its bindings.
     for k in (0..=ns_path.len()).rev() {
         let prefix = &ns_path[..k];
         if let Some(defs) = scopes.defs.get(prefix) {
@@ -718,6 +731,64 @@ mod tests {
         assert!(!sib.deprecated, "{sib:?}");
     }
 
+    // `old` is a documented, `! [deprecated]` NESTED function — its
+    // `Analysis.docs` key is the dot-mangled `main.old`, reachable only
+    // if branch (a) rebuilds the qualified name with flatten's formula.
+    const CALL_NESTED_DOC_FIXTURE: &str = "\
+export main() {
+    ?old helper.
+    ! [deprecated] use fresh.
+    old() { right; }
+    fresh() { right; }
+    @x();
+}
+";
+
+    #[test]
+    fn call_position_nested_deprecated_candidate_is_tagged() {
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, CALL_NESTED_DOC_FIXTURE);
+
+        let pos = pos_after(CALL_NESTED_DOC_FIXTURE, "@x()", 1);
+        let candidates = service.completion(URI, pos);
+
+        let old = candidates
+            .iter()
+            .find(|c| c.label == "old")
+            .expect("old is offered");
+        assert!(old.deprecated, "{old:?}");
+        assert_eq!(old.detail, Some("main.old".to_string()));
+    }
+
+    // A nested function inside a NAMESPACED top-level function — the
+    // qualified name crosses both mangling axes (`::` then `.`), so the
+    // detail proves branch (a) seeds the chain with `full_name` (the ns
+    // path), not just the bare top-level name.
+    const CALL_NESTED_NS_FIXTURE: &str = "\
+namespace ns {
+export outer() {
+    helper() { right; }
+    @x();
+}
+}
+";
+
+    #[test]
+    fn call_position_nested_candidate_detail_is_the_dot_mangled_qualified_name() {
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, CALL_NESTED_NS_FIXTURE);
+
+        let pos = pos_after(CALL_NESTED_NS_FIXTURE, "@x()", 1);
+        let candidates = service.completion(URI, pos);
+
+        let helper = candidates
+            .iter()
+            .find(|c| c.label == "helper")
+            .expect("helper is offered");
+        assert_eq!(helper.detail, Some("ns::outer.helper".to_string()));
+        assert!(!helper.deprecated, "{helper:?}");
+    }
+
     const CALL_INNER_SHADOWS_FIXTURE: &str =
         "foo() { right; }\nexport main() {\n    foo() { left; }\n    @foo();\n}\n";
 
@@ -833,6 +904,26 @@ mod tests {
 
         assert_eq!(candidates.len(), 11, "{candidates:?}");
         assert!(candidates.iter().any(|c| c.label == "goToEnd"));
+    }
+
+    #[test]
+    fn qualified_call_std_members_carry_their_qualified_detail_and_no_tag() {
+        // The std branch of `member_candidates`: label is the bare
+        // routine name, `detail` its full `std::` path (they always
+        // differ); never deprecated — `Analysis.docs` has no `std::…`
+        // keys yet (pinned in the stdlib task).
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, QUALIFIED_STD_FIXTURE);
+
+        let pos = pos_after(QUALIFIED_STD_FIXTURE, "std::", 5);
+        let candidates = service.completion(URI, pos);
+
+        let go_to_end = candidates
+            .iter()
+            .find(|c| c.label == "goToEnd")
+            .expect("goToEnd is offered");
+        assert_eq!(go_to_end.detail, Some("std::goToEnd".to_string()));
+        assert!(candidates.iter().all(|c| !c.deprecated), "{candidates:?}");
     }
 
     const QUALIFIED_NS_FIXTURE: &str =
