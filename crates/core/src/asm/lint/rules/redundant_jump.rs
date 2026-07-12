@@ -1,11 +1,16 @@
 //! `redundant-jump-to-next` (docs/lint.md): a `Flow::Jump` or
 //! `Flow::Branch` item whose name operand targets the label bound to
 //! the immediately following item in the same function — fall-through
-//! already lands there, so an unconditional jump changes nothing and
-//! either outcome of a conditional branch lands on that same next
-//! instruction too. Arch-agnostic: arming is `Flow::Jump | Flow::Branch`,
-//! not any specific mnemonic (a forced-short jump/branch form is just
-//! as inert).
+//! already lands there, so an unconditional jump changes nothing and,
+//! provided `Branch` opcodes affect only control-flow selection — the
+//! same no-other-effect premise `Jump` already relies on — either
+//! outcome of a conditional branch lands on that same next instruction
+//! with no other observable difference. An opcode whose branch has
+//! effects beyond selecting its successor shouldn't be classified
+//! `Branch` (compare `Flow::Call`, the carve-out for side-effecting
+//! control transfer). Arch-agnostic: arming is `Flow::Jump |
+//! Flow::Branch`, not any specific mnemonic (a forced-short
+//! jump/branch form is just as inert).
 
 use crate::asm::lint::AsmLintContext;
 use crate::asm::lint::rules::delete_instruction_edit_span;
