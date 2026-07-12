@@ -26,7 +26,9 @@ pub type Rule = fn(&AsmLintContext, &mut Vec<Diagnostic>);
 pub const RULES: &[(&str, Rule)] = &[
     ("unreachable-code", rules::unreachable_code::check),
     ("unused-label", rules::unused_label::check),
-    // Task 3 appends: redundant-jump-to-next, line-too-long, leftover-debugger
+    ("redundant-jump-to-next", rules::redundant_jump::check),
+    ("line-too-long", rules::line_too_long::check),
+    ("leftover-debugger", rules::leftover_debugger::check),
 ];
 
 /// Lints one `.pma` source. Fatal gate: a full assemble — structural
@@ -72,6 +74,30 @@ mod tests {
         let syntax = test_syntax();
         let report = lint(&syntax, ".func f\n        stop\n", &[]).unwrap();
         assert!(report.is_empty());
+    }
+
+    #[test]
+    fn rules_table_carries_all_five_codes_in_plan_order() {
+        let codes: Vec<&str> = RULES.iter().map(|(code, _)| *code).collect();
+        assert_eq!(
+            codes,
+            vec![
+                "unreachable-code",
+                "unused-label",
+                "redundant-jump-to-next",
+                "line-too-long",
+                "leftover-debugger",
+            ]
+        );
+    }
+
+    #[test]
+    fn redundant_jump_finding_runs_through_the_full_lint_entry_point() {
+        // End-to-end through `lint()` (fatal gate + registry dispatch),
+        // not just the rule's own unit tests.
+        let syntax = test_syntax();
+        let report = lint(&syntax, ".func f\n        jmp L1\nL1:     stop\n", &[]).unwrap();
+        assert!(report.iter().any(|d| d.code == "redundant-jump-to-next"));
     }
 
     #[test]
