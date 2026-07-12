@@ -6,7 +6,10 @@ use mtc_core::diagnostics::Span;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
     Ident(String),
-    Number(u32),
+    /// The parsed value, plus the digits as WRITTEN (leading zeros
+    /// preserved) — a lossless printer needs the spelling, not just the
+    /// value (docs/fmt.md: fmt never touches a token).
+    Number(u32, String),
     At,
     Bang,
     Comma,
@@ -292,11 +295,12 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
             let value: u32 = digits
                 .parse()
                 .map_err(|_| err(line, col, format!("number `{digits}` is too large")))?;
+            let len = digits.len() as u32; // ASCII digits: bytes == chars
             tokens.push(Token {
-                kind: TokenKind::Number(value),
+                kind: TokenKind::Number(value, digits),
                 line,
                 col,
-                len: digits.len() as u32, // ASCII digits: bytes == chars
+                len,
             });
             continue;
         }
@@ -350,7 +354,7 @@ mod tests {
                 LParen,
                 RParen,
                 LBrace,
-                Number(1),
+                Number(1, "1".into()),
                 Colon,
                 Ident("right".into()),
                 LParen,
@@ -373,7 +377,7 @@ mod tests {
         assert_eq!((goto.line, goto.col), (3, 3));
         let seven = tokens
             .iter()
-            .find(|t| t.kind == TokenKind::Number(7))
+            .find(|t| t.kind == TokenKind::Number(7, "7".into()))
             .unwrap();
         assert_eq!((seven.line, seven.col), (3, 8));
     }
@@ -502,7 +506,11 @@ mod tests {
         );
         assert_eq!(
             kinds("1:"),
-            vec![TokenKind::Number(1), TokenKind::Colon, TokenKind::Eof]
+            vec![
+                TokenKind::Number(1, "1".into()),
+                TokenKind::Colon,
+                TokenKind::Eof
+            ]
         );
         // Greedy: `:::` is `::` then `:`.
         assert_eq!(

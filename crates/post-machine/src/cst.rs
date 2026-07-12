@@ -337,6 +337,7 @@ mod tests {
                 labels: vec![Label {
                     value: 1,
                     span: dummy_span,
+                    written: "1".into(),
                 }],
                 items: vec![CommaItem {
                     item: Item::Builtin {
@@ -344,6 +345,7 @@ mod tests {
                         succ: Successor::FallThrough,
                         succ_span: None,
                         succ_label_span: None,
+                        succ_label_written: None,
                         line: 3,
                     },
                     leading: vec![],

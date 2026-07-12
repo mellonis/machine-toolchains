@@ -24,10 +24,12 @@
 //! scoped to exactly that subset.
 //!
 //! Task 8b's own contribution needed no renderer changes: `parse_cst`
-//! only ever hands the printer the parsed VALUE (a label's number, a
-//! path's segments), never the author's original spacing, so the
+//! never hands the printer the author's original spacing (a path's
+//! segments print tight regardless of source spacing), so the
 //! spaced-form entries below normalize for free — they widen the
-//! corpus to PIN that, not to fix a gap.
+//! corpus to PIN that, not to fix a gap. (A number's own digits are a
+//! separate matter — the CST carries those as WRITTEN, leading zeros
+//! and all; see `zero_token_changes_over_every_fixture` below.)
 //!
 //! **`comment_fidelity` was VACUOUS through Task 6** — `SIMPLE` carried
 //! no comments, so `comment_texts(src)` was always `[]` on both sides.
@@ -145,8 +147,10 @@ const SIMPLE: &[&str] = &[
     // (fmt design doc §D).
     "export main() { right; }",
     // Task 8b §B: spaced-form normalization — a spaced label (`1 :
-    // right`) normalizes to tight (`1: right`) because the CST only
-    // ever stores the parsed VALUE, never the author's spacing.
+    // right`) normalizes to tight (`1: right`) because the CST never
+    // stores the author's interior spacing around `:` (the digits
+    // themselves are stored and reprinted as written, unaffected here
+    // since `1` has no leading zeros to preserve).
     "main() {\n1 : right;\n}\n",
     // Task 8b §B: a spaced path in both an import and a qualified call
     // (`std :: goToEnd`) normalizes to tight `std::goToEnd` the same
@@ -187,6 +191,12 @@ const SIMPLE: &[&str] = &[
     // last physical line, not both lines summed, when deciding whether
     // the five `mark`s that follow need to wrap.
     "main() { left, /* xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ny */ right, mark, mark, mark, mark, mark; }",
+    // Zero-token-changes (module doc "fmt changes no tokens, only
+    // layout"): a leading-zero label definition and its `goto` reference
+    // both keep their written spelling — fmt is not `leading-zeros`'s
+    // job (docs/fmt.md, docs/lint.md). Right-aligns by the WRITTEN
+    // width of "007:" (4 chars), not the canonical value's width.
+    "main() {\n    007: right;\n    goto 007;\n}\n",
 ];
 
 /// `SIMPLE` entries paired with a label equal to their own source (the
@@ -256,6 +266,54 @@ fn comment_fidelity() {
             "comment sequence diverged for {label:?}"
         );
     }
+}
+
+/// `TokenKind` sequence, comments stripped. Unlike a check that only
+/// compares each `Number`'s parsed VALUE, `TokenKind`'s derived
+/// `PartialEq` compares the whole variant — `Number` carries the raw
+/// digit text alongside the value, so `007` and `7` are UNEQUAL tokens
+/// here even though they parse to the same label. Mirrors the `.pma`
+/// fmt suite's kind+text guard (`crates/core/src/asm/fmt.rs`,
+/// "zero token changes").
+fn kinds(src: &str) -> Vec<TokenKind> {
+    lex_with(src, LexMode::WithoutComments)
+        .expect("lexes")
+        .into_iter()
+        .map(|t| t.kind)
+        .collect()
+}
+
+/// fmt's own zero-token-changes contract (docs/fmt.md: "fmt changes
+/// whitespace and comment placement only — it never touches a token"),
+/// checked over the whole corpus by SPELLING, not just parsed value —
+/// the class of bug this guards is a printer that re-derives a token's
+/// text from its parsed value instead of reprinting what the author
+/// wrote (leading zeros collapsing being the motivating case).
+#[test]
+fn zero_token_changes_over_every_fixture() {
+    for (label, src) in all_sources() {
+        let formatted = format(src).expect("formats");
+        assert_eq!(
+            kinds(src),
+            kinds(&formatted),
+            "token spelling changed for {label:?}"
+        );
+    }
+}
+
+/// A leading-zero label definition and its `goto` reference both keep
+/// `007` verbatim (docs/fmt.md, docs/lint.md), and the label
+/// right-aligns using the WRITTEN width ("007:", 4 chars) — command
+/// column 8, not the canonical value's width ("7:", 2 chars) — which
+/// would floor the column at 4.
+#[test]
+fn leading_zero_label_preserves_spelling_and_aligns_by_written_width() {
+    let src = "main() {\n    007: right;\n    goto 007;\n}\n";
+    let formatted = format(src).expect("formats");
+    assert_eq!(
+        formatted,
+        "main() {\n   007: right;\n        goto 007;\n}\n"
+    );
 }
 
 /// Task 11's dogfood lock (fmt design doc, Acceptance #1): the embedded

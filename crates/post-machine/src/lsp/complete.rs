@@ -148,7 +148,7 @@ fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candida
 /// context below keys on.
 fn prefix_anchor(sig: &[Token], pos: Pos) -> (Span, usize) {
     for (i, t) in sig.iter().enumerate() {
-        if matches!(t.kind, TokenKind::Ident(_) | TokenKind::Number(_)) {
+        if matches!(t.kind, TokenKind::Ident(_) | TokenKind::Number(_, _)) {
             let span = t.span();
             if pos >= span.start && pos <= span.end {
                 return (span, i);

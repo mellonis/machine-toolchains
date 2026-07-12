@@ -22,13 +22,19 @@
 //! grouped `use` lists (see [`print_use`]), the verbatim `export` keyword
 //! (see [`FunctionCst::has_export`]), and — Task 8b's own contribution —
 //! the spacing-table/spaced-form/hygiene/edge-case tests in this module's
-//! own `tests` submodule. That last part needed no renderer change:
-//! `parse_cst` only ever hands the printer the parsed VALUE (a label's
-//! `u32`, a path's `Vec<String>` segments), never the author's original
-//! spacing or line endings, so every item shape this printer covers was
-//! already canonical, and the full reprint (spaces + `\n` only, from the
-//! CST) already discards trailing whitespace / CRLF / tabs by
-//! construction — Task 8b's tests PIN that rather than fixing a gap.
+//! own `tests` submodule. That last part needed no renderer change for
+//! most shapes: `parse_cst` hands the printer the parsed VALUE (a path's
+//! `Vec<String>` segments), never the author's original spacing or line
+//! endings, so those item shapes were already canonical, and the full
+//! reprint (spaces + `\n` only, from the CST) already discards trailing
+//! whitespace / CRLF / tabs by construction — Task 8b's tests PIN that
+//! rather than fixing a gap. Numbers are the one exception: the CST also
+//! carries a number's WRITTEN spelling (leading zeros and all) alongside
+//! its parsed `u32`, and the printer emits that verbatim — see
+//! [`Label::written`](crate::parser::Label::written) and
+//! [`label_prefix_text`] — so a label's, `goto` target's, check arm's,
+//! or successor's digits are reprinted exactly as written, not
+//! re-derived from the parsed value.
 //! Task 9 points the objective-guard harness (`tests/fmt_programs.rs`) at
 //! the full corpus.
 //!
@@ -352,13 +358,15 @@ fn max_inline_label_prefix_width(body: &[BodyItem]) -> usize {
         .unwrap_or(0)
 }
 
-/// A statement's label prefix as printed: each label `N:`, joined by one
-/// space (spec "Intra-statement token spacing" → Label row), e.g. `1:` or
-/// the stacked `1: 2:`. Empty for an unlabeled statement.
+/// A statement's label prefix as printed: each label `N:` — `N` is the
+/// number as WRITTEN (leading zeros preserved, docs/fmt.md: fmt never
+/// touches a token), not re-derived from the parsed value — joined by
+/// one space (spec "Intra-statement token spacing" → Label row), e.g.
+/// `1:` or the stacked `1: 2:`. Empty for an unlabeled statement.
 fn label_prefix_text(labels: &[Label]) -> String {
     labels
         .iter()
-        .map(|l| format!("{}:", l.value))
+        .map(|l| format!("{}:", l.written))
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -788,31 +796,53 @@ fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
 }
 
 /// Canonical item text (spec "Intra-statement token spacing", full
-/// table). Since `parse_cst` only ever hands back the parsed VALUE
-/// (never the author's original spacing), this renderer produces the
-/// canonical (tight) form for every item shape it covers — spaced-form
-/// inputs like `1 : right` or `std :: goToEnd` normalize for free (see
-/// `tests` submodule, "Task 8b").
+/// table). `parse_cst` never hands back the author's original spacing,
+/// so this renderer produces the canonical (tight) form for every item
+/// shape it covers — spaced-form inputs like `1 : right` or
+/// `std :: goToEnd` normalize for free (see `tests` submodule,
+/// "Task 8b"). A number's WRITTEN spelling is the one thing NOT
+/// canonicalized here — `succ_label_written`/`marked_written`/
+/// `blank_written`/`label_written` are emitted verbatim (docs/fmt.md:
+/// fmt never touches a token).
 pub(crate) fn render_item(item: &Item) -> String {
     match item {
-        Item::Builtin { which, succ, .. } => {
+        Item::Builtin {
+            which,
+            succ,
+            succ_label_written,
+            ..
+        } => {
             format!(
                 "{}{}",
                 builtin_name(*which),
-                render_builtin_successor(*succ)
+                render_builtin_successor(*succ, succ_label_written.as_deref())
             )
         }
         Item::Debugger { .. } => "debugger".to_string(),
-        Item::Call { name, succ, .. } => format!("@{name}({})", render_successor(*succ)),
-        Item::Check { marked, blank, .. } => {
+        Item::Call {
+            name,
+            succ,
+            succ_label_written,
+            ..
+        } => format!(
+            "@{name}({})",
+            render_successor(*succ, succ_label_written.as_deref())
+        ),
+        Item::Check {
+            marked,
+            blank,
+            marked_written,
+            blank_written,
+            ..
+        } => {
             format!(
                 "check({}, {})",
-                render_check_arm(*marked),
-                render_check_arm(*blank)
+                render_check_arm(*marked, marked_written.as_deref()),
+                render_check_arm(*blank, blank_written.as_deref())
             )
         }
         Item::Halt { .. } => "halt".to_string(),
-        Item::Goto { label, .. } => format!("goto {label}"),
+        Item::Goto { label_written, .. } => format!("goto {label_written}"),
     }
 }
 
@@ -829,25 +859,35 @@ fn builtin_name(which: Builtin) -> &'static str {
 /// `left()` — empty builtin parens are a grammar-0.2 syntax error and can
 /// never occur); a call's parens are always present (mandatory, per the
 /// grammar), so [`Item::Call`] renders through [`render_successor`]
-/// directly instead.
-fn render_builtin_successor(succ: Successor) -> String {
+/// directly instead. `written` is the number's WRITTEN text
+/// (`Item::succ_label_written`), `Some` iff `succ` is `Successor::Label`.
+fn render_builtin_successor(succ: Successor, written: Option<&str>) -> String {
     match succ {
         Successor::FallThrough => String::new(),
-        _ => format!("({})", render_successor(succ)),
+        _ => format!("({})", render_successor(succ, written)),
     }
 }
 
-fn render_successor(succ: Successor) -> String {
+/// `written` is emitted verbatim for `Successor::Label` instead of
+/// re-deriving text from the parsed `u32` (docs/fmt.md: fmt never
+/// touches a token).
+fn render_successor(succ: Successor, written: Option<&str>) -> String {
     match succ {
         Successor::FallThrough => String::new(),
-        Successor::Label(n) => n.to_string(),
+        Successor::Label(_) => written
+            .expect("succ_label_written is Some whenever succ is Successor::Label")
+            .to_string(),
         Successor::Return => "!".to_string(),
     }
 }
 
-fn render_check_arm(arm: CheckArm) -> String {
+/// `written` is emitted verbatim for `CheckArm::Label`, same discipline
+/// as [`render_successor`].
+fn render_check_arm(arm: CheckArm, written: Option<&str>) -> String {
     match arm {
-        CheckArm::Label(n) => n.to_string(),
+        CheckArm::Label(_) => written
+            .expect("marked_written/blank_written is Some whenever the arm is CheckArm::Label")
+            .to_string(),
         CheckArm::Return => "!".to_string(),
     }
 }
@@ -1524,8 +1564,10 @@ mod tests {
     }
 
     // §B: spaced-form normalization — the grammar accepts extra
-    // whitespace around `:` and `::`; the printer always emits the
-    // parsed VALUE, so these normalize to tight without any renderer
+    // whitespace around `:` and `::`; the printer never reprints
+    // interior spacing (only a number's own digits, which the CST
+    // carries as written — see the module doc's "Numbers are the one
+    // exception"), so these normalize to tight without any renderer
     // change (pinned, not fixed).
 
     #[test]

@@ -89,10 +89,14 @@ pub struct Function {
 
 /// A label prefix `N:` — the span runs from the number's start to the
 /// colon's END, spanning any interior whitespace (spaced `1 :` is legal).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Label {
     pub value: u32,
     pub span: Span,
+    /// The number as WRITTEN — digits only, leading zeros preserved.
+    /// The printer emits this verbatim instead of re-deriving text from
+    /// `value` (docs/fmt.md: fmt never touches a token).
+    pub written: String,
 }
 
 /// One `;`-terminated statement: an optional run of labels, then one or
@@ -139,6 +143,12 @@ pub enum Item {
         /// The successor's number token span alone (inside the parens,
         /// number only); `Some` iff `succ` is `Successor::Label`.
         succ_label_span: Option<Span>,
+        /// The successor's number as WRITTEN (leading zeros preserved);
+        /// `Some` iff `succ` is `Successor::Label` — parallels
+        /// `succ_label_span`. The printer emits this verbatim instead of
+        /// re-deriving text from the `Successor::Label` payload
+        /// (docs/fmt.md: fmt never touches a token).
+        succ_label_written: Option<String>,
         line: u32,
     },
     Debugger {
@@ -154,6 +164,10 @@ pub enum Item {
         /// The successor's number token span alone (inside the parens,
         /// number only); `Some` iff `succ` is `Successor::Label`.
         succ_label_span: Option<Span>,
+        /// The successor's number as WRITTEN (leading zeros preserved);
+        /// `Some` iff `succ` is `Successor::Label` — parallels
+        /// `succ_label_span`.
+        succ_label_written: Option<String>,
         line: u32,
     },
     Check {
@@ -165,6 +179,12 @@ pub enum Item {
         marked_span: Span,
         /// The `blank` arm's own token span (a number or `!`).
         blank_span: Span,
+        /// The `marked` arm's number as WRITTEN (leading zeros
+        /// preserved); `Some` iff `marked` is `CheckArm::Label`.
+        marked_written: Option<String>,
+        /// The `blank` arm's number as WRITTEN; `Some` iff `blank` is
+        /// `CheckArm::Label`.
+        blank_written: Option<String>,
         line: u32,
     },
     Halt {
@@ -174,6 +194,10 @@ pub enum Item {
         label: u32,
         /// The target number token's span.
         label_span: Span,
+        /// The target number as WRITTEN (leading zeros preserved). The
+        /// printer emits this verbatim instead of re-deriving text from
+        /// `label` (docs/fmt.md: fmt never touches a token).
+        label_written: String,
         line: u32,
     },
 }
@@ -181,7 +205,7 @@ pub enum Item {
 fn describe(kind: &TokenKind) -> String {
     match kind {
         TokenKind::Ident(n) => format!("`{n}`"),
-        TokenKind::Number(v) => format!("`{v}`"),
+        TokenKind::Number(v, _) => format!("`{v}`"),
         TokenKind::At => "`@`".into(),
         TokenKind::Bang => "`!`".into(),
         TokenKind::Comma => "`,`".into(),
@@ -943,9 +967,10 @@ impl Parser<'_> {
             let mut last_colon_line: u32 = 0;
             loop {
                 let tok = self.peek().clone();
-                let TokenKind::Number(n) = tok.kind else {
+                let TokenKind::Number(n, written) = &tok.kind else {
                     break;
                 };
+                let (n, written) = (*n, written.clone());
                 self.bump();
                 let colon = self.peek().clone();
                 self.expect(&TokenKind::Colon, "`:` after a label number")?;
@@ -959,6 +984,7 @@ impl Parser<'_> {
                         start: tok.span().start,
                         end: colon.span().end,
                     },
+                    written,
                 });
             }
             if matches!(self.peek().kind, TokenKind::RBrace) {
@@ -1163,7 +1189,7 @@ impl Parser<'_> {
                 }
                 let lparen = self.peek().clone();
                 self.expect(&TokenKind::LParen, "`(` (user calls are written `@name()`)")?;
-                let (succ, succ_label_span) = self.successor()?;
+                let (succ, succ_label_span, succ_label_written) = self.successor()?;
                 let rparen = self.peek().clone();
                 self.expect(&TokenKind::RParen, "`)`")?;
                 Ok(Item::Call {
@@ -1178,6 +1204,7 @@ impl Parser<'_> {
                         end: rparen.span().end,
                     }),
                     succ_label_span,
+                    succ_label_written,
                     line: tok.line,
                 })
             }
@@ -1191,12 +1218,14 @@ impl Parser<'_> {
                     }
                     self.bump();
                     let target = self.peek().clone();
+                    let target_span = target.span();
                     match target.kind {
-                        TokenKind::Number(n) => {
+                        TokenKind::Number(n, written) => {
                             self.bump();
                             Ok(Item::Goto {
                                 label: n,
-                                label_span: target.span(),
+                                label_span: target_span,
+                                label_written: written,
                                 line: tok.line,
                             })
                         }
@@ -1207,9 +1236,9 @@ impl Parser<'_> {
                 "check" => {
                     self.bump();
                     self.expect(&TokenKind::LParen, "`(` after `check`")?;
-                    let (marked, marked_span) = self.check_arm()?;
+                    let (marked, marked_span, marked_written) = self.check_arm()?;
                     self.expect(&TokenKind::Comma, "`,` between check arms")?;
-                    let (blank, blank_span) = self.check_arm()?;
+                    let (blank, blank_span, blank_written) = self.check_arm()?;
                     let rparen = self.peek().clone();
                     self.expect(&TokenKind::RParen, "`)`")?;
                     Ok(Item::Check {
@@ -1221,6 +1250,8 @@ impl Parser<'_> {
                         },
                         marked_span,
                         blank_span,
+                        marked_written,
+                        blank_written,
                         line: tok.line,
                     })
                 }
@@ -1240,7 +1271,7 @@ impl Parser<'_> {
                         _ => Builtin::Unmark,
                     };
                     self.bump();
-                    let (succ, succ_span, succ_label_span) =
+                    let (succ, succ_span, succ_label_span, succ_label_written) =
                         if matches!(self.peek().kind, TokenKind::LParen) {
                             let lparen = self.peek().clone();
                             self.bump();
@@ -1261,7 +1292,7 @@ impl Parser<'_> {
                                     },
                                 });
                             }
-                            let (succ, succ_label_span) = self.successor()?;
+                            let (succ, succ_label_span, succ_label_written) = self.successor()?;
                             let rparen = self.peek().clone();
                             self.expect(&TokenKind::RParen, "`)`")?;
                             (
@@ -1271,15 +1302,17 @@ impl Parser<'_> {
                                     end: rparen.span().end,
                                 }),
                                 succ_label_span,
+                                succ_label_written,
                             )
                         } else {
-                            (Successor::FallThrough, None, None)
+                            (Successor::FallThrough, None, None, None)
                         };
                     Ok(Item::Builtin {
                         which,
                         succ,
                         succ_span,
                         succ_label_span,
+                        succ_label_written,
                         line: tok.line,
                     })
                 }
@@ -1299,34 +1332,39 @@ impl Parser<'_> {
 
     /// Inside `( … )`: empty → fall through, `N` → label, `!` → return.
     /// The second element of the result is the number token's own span,
-    /// `Some` iff the successor is `Successor::Label`.
-    fn successor(&mut self) -> Result<(Successor, Option<Span>), CompileError> {
+    /// the third is its WRITTEN text — both `Some` iff the successor is
+    /// `Successor::Label`.
+    fn successor(&mut self) -> Result<(Successor, Option<Span>, Option<String>), CompileError> {
         let t = self.peek().clone();
+        let t_span = t.span();
         match t.kind {
-            TokenKind::Number(n) => {
+            TokenKind::Number(n, written) => {
                 self.bump();
-                Ok((Successor::Label(n), Some(t.span())))
+                Ok((Successor::Label(n), Some(t_span), Some(written)))
             }
             TokenKind::Bang => {
                 self.bump();
-                Ok((Successor::Return, None))
+                Ok((Successor::Return, None, None))
             }
-            _ => Ok((Successor::FallThrough, None)), // the caller checks the `)`
+            _ => Ok((Successor::FallThrough, None, None)), // the caller checks the `)`
         }
     }
 
-    /// The second element of the result is the arm's own token span
-    /// (the number or the `!`), regardless of which arm shape it is.
-    fn check_arm(&mut self) -> Result<(CheckArm, Span), CompileError> {
+    /// The second element of the result is the arm's own token span (the
+    /// number or the `!`), regardless of which arm shape it is; the
+    /// third is the number's WRITTEN text, `Some` iff the arm is
+    /// `CheckArm::Label`.
+    fn check_arm(&mut self) -> Result<(CheckArm, Span, Option<String>), CompileError> {
         let t = self.peek().clone();
+        let t_span = t.span();
         match t.kind {
-            TokenKind::Number(n) => {
+            TokenKind::Number(n, written) => {
                 self.bump();
-                Ok((CheckArm::Label(n), t.span()))
+                Ok((CheckArm::Label(n), t_span, Some(written)))
             }
             TokenKind::Bang => {
                 self.bump();
-                Ok((CheckArm::Return, t.span()))
+                Ok((CheckArm::Return, t.span(), None))
             }
             _ => Err(Self::expected(&t, "a label number or `!`")),
         }

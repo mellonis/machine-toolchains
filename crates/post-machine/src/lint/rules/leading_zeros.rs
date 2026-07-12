@@ -11,7 +11,7 @@ use crate::lint::{LintContext, span_text};
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for tok in ctx.tokens {
-        let TokenKind::Number(value) = &tok.kind else {
+        let TokenKind::Number(value, _) = &tok.kind else {
             continue;
         };
         let text = span_text(ctx.source, tok.span());

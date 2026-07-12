@@ -1,7 +1,7 @@
 //! Lint integration: multi-rule ordering, --allow filtering, fix
 //! round-trips, the acceptance fixture, and the stdlib dogfood.
 
-use mtc_post_machine::{LintOptions, apply_fixes, lint};
+use mtc_post_machine::{LintOptions, apply_fixes, format, lint};
 
 const FIXTURE: &str = include_str!("lint/unused_labels.pmc");
 
@@ -64,6 +64,32 @@ fn allow_filters_a_rule_out() {
     )
     .unwrap();
     assert!(report.diagnostics.is_empty());
+}
+
+/// Interplay with fmt (docs/fmt.md, docs/lint.md): `leading-zeros` still
+/// owns the `007` -> `7` rewrite, and once it has run, the fixed source
+/// must be clean under `pmt fmt` too — no lingering `leading-zeros`
+/// finding, and fmt is a no-op on its own output.
+#[test]
+fn leading_zeros_fix_output_is_clean_under_fmt() {
+    let src = "main() {\n007: right;\n    goto 007;\n}\n";
+    let report = lint(src, LintOptions::default()).unwrap();
+    let outcome = apply_fixes(src, &report.diagnostics);
+    assert_eq!((outcome.applied, outcome.skipped), (2, 0));
+    assert!(!outcome.fixed_source.contains("007"));
+
+    let formatted = format(&outcome.fixed_source).expect("fixed source formats");
+    let relint = lint(&formatted, LintOptions::default()).unwrap();
+    assert!(
+        relint.diagnostics.iter().all(|d| d.code != "leading-zeros"),
+        "fmt reintroduced a leading-zeros finding: {:?}",
+        relint.diagnostics
+    );
+    assert_eq!(
+        format(&formatted).unwrap(),
+        formatted,
+        "fmt is not idempotent on the lint-fixed source"
+    );
 }
 
 #[test]
