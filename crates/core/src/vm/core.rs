@@ -36,7 +36,7 @@ pub struct Core<'a> {
     arch: &'a dyn Arch,
     ip: u32,
     instr_start: u32,
-    mf: bool,
+    mr: u32,
     phase: Phase,
     brk_pending: bool,
 }
@@ -47,7 +47,7 @@ impl<'a> Core<'a> {
             arch,
             ip: entry,
             instr_start: entry,
-            mf: false,
+            mr: 0,
             phase: Phase::FetchOpcode,
             brk_pending: false,
         }
@@ -65,12 +65,22 @@ impl<'a> Core<'a> {
     }
 
     pub fn mf(&self) -> bool {
-        self.mf
+        self.mr != 0
     }
 
     /// The driver latches initial MF from the tape before the first resume.
     pub fn set_mf(&mut self, mf: bool) {
-        self.mf = mf;
+        self.mr = u32::from(mf);
+    }
+
+    /// The match register (docs/isa.md (registers)): 0 = no row matched.
+    /// MF is formally `MR != 0`; PM-1 only ever sees 0/1 here.
+    pub fn mr(&self) -> u32 {
+        self.mr
+    }
+
+    pub fn set_mr(&mut self, mr: u32) {
+        self.mr = mr;
     }
 
     pub fn start(&mut self) -> CoreEvent {
@@ -194,7 +204,7 @@ impl<'a> Core<'a> {
                 _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
             },
             Pending::Latch { match_index } => match resp {
-                BusResponse::Symbol(s) => self.mf = s == match_index,
+                BusResponse::Symbol(s) => self.mr = u32::from(s == match_index),
                 BusResponse::Fault(fault) => return self.trap(Trap::Device { fault }),
                 _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
             },
@@ -256,7 +266,7 @@ impl<'a> Core<'a> {
                     continue;
                 }
                 MicroOp::JumpRelIf { off, when_match } => {
-                    if self.mf == when_match {
+                    if (self.mr != 0) == when_match {
                         match self.jump_target(off) {
                             Ok(t) => self.ip = t,
                             Err(trap) => return self.trap(trap),
@@ -598,5 +608,20 @@ mod tests {
         // Resuming past it (as `halt_and_brk_nop` does with a larger
         // budget) reaches Stopped normally — the ack path doesn't care
         // which retirement event preceded it.
+    }
+
+    /// MR is the general register; MF is its boolean view (spec: MF ≡ MR≠0).
+    #[test]
+    fn mr_generalizes_mf() {
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0);
+        assert_eq!(core.mr(), 0);
+        assert!(!core.mf());
+        core.set_mr(5);
+        assert!(core.mf());
+        core.set_mf(true);
+        assert_eq!(core.mr(), 1);
+        core.set_mf(false);
+        assert_eq!(core.mr(), 0);
     }
 }
