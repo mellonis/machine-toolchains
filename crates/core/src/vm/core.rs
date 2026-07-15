@@ -74,7 +74,7 @@ impl<'a> Core<'a> {
     }
 
     /// The match register (docs/isa.md (registers)): 0 = no row matched.
-    /// MF is formally `MR != 0`; PM-1 only ever sees 0/1 here.
+    /// MF is formally `MR != 0`; 1-bit-flag architectures only ever write 0/1 here.
     pub fn mr(&self) -> u32 {
         self.mr
     }
