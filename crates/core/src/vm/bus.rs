@@ -11,6 +11,7 @@ pub enum BusRequest {
     DeviceMoveRight { dev: u8 },
     DeviceRead { dev: u8 },
     DeviceWrite { dev: u8, index: u32 },
+    TableRead { addr: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub enum BusResponse {
     StackEmpty,
     Symbol(u32),
     Fault(DeviceFault),
+    OutOfTable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 //! (README (workspace layout): core is arch-agnostic by contract, and
 //! this trait is where PM-1-specific knowledge is supplied from outside).
 
-use super::trap::Trap;
+use super::trap::{RaisedTrapKind, Trap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperandKind {
@@ -46,6 +46,10 @@ pub enum MicroOp {
     },
     Call(i32),
     Ret,
+    /// Trap explicitly with a typed kind (the `trap #kind` instruction family).
+    Raise {
+        kind: RaisedTrapKind,
+    },
     Stop,
     Halt,
     Brk,
@@ -86,7 +90,8 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
 /// 0x06 right+latch | 0x07 wr(vec)+latch | 0x08 jmp rel8 | 0x09 jm rel32 |
 /// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to Nop) |
 /// 0x10 read dev0→slot0 + dev1→slot1 (probes TR latching) |
-/// 0x13 wr(vec) on dev 1 | 0x14 left on dev 1 (probes device-indexed tape micro-ops)
+/// 0x13 wr(vec) on dev 1 | 0x14 left on dev 1 (probes device-indexed tape micro-ops) |
+/// 0x15 raise unmapped-read | 0x16 raise unmapped-write (probes Raise micro-op)
 #[cfg(test)]
 pub(crate) mod test_arch {
     use super::*;
@@ -100,7 +105,7 @@ pub(crate) mod test_arch {
 
         fn operand_kind(&self, opcode: u8) -> Option<OperandKind> {
             match opcode {
-                0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14 => Some(OperandKind::None),
+                0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14..=0x16 => Some(OperandKind::None),
                 0x07 | 0x13 => Some(OperandKind::SymbolVec),
                 0x08 => Some(OperandKind::RelI8),
                 0x09 | 0x0A => Some(OperandKind::RelI32),
@@ -146,6 +151,12 @@ pub(crate) mod test_arch {
                     }]
                 }
                 (0x14, _) => vec![MicroOp::MoveLeft { dev: 1 }],
+                (0x15, _) => vec![MicroOp::Raise {
+                    kind: RaisedTrapKind::UnmappedRead,
+                }],
+                (0x16, _) => vec![MicroOp::Raise {
+                    kind: RaisedTrapKind::UnmappedWrite,
+                }],
                 _ => return Err(Trap::BadOperand { at: 0 }),
             })
         }

@@ -4,7 +4,7 @@
 
 use super::arch::{Arch, MicroOp, Operand, OperandKind};
 use super::bus::{BusRequest, BusResponse, CoreEvent};
-use super::trap::Trap;
+use super::trap::{RaisedTrapKind, Trap};
 
 enum Phase {
     FetchOpcode,
@@ -268,6 +268,13 @@ impl<'a> Core<'a> {
                     self.phase = Phase::Done;
                     return CoreEvent::Halted;
                 }
+                MicroOp::Raise { kind } => {
+                    let at = self.instr_start;
+                    return self.trap(match kind {
+                        RaisedTrapKind::UnmappedRead => Trap::UnmappedRead { at },
+                        RaisedTrapKind::UnmappedWrite => Trap::UnmappedWrite { at },
+                    });
+                }
                 MicroOp::MoveLeft { dev } => (BusRequest::DeviceMoveLeft { dev }, Pending::Move),
                 MicroOp::MoveRight { dev } => (BusRequest::DeviceMoveRight { dev }, Pending::Move),
                 MicroOp::Write { dev, index } => {
@@ -468,6 +475,14 @@ mod tests {
         assert_eq!(core.tr(), &[7, 9]);
     }
 
+    /// The Raise micro-op traps with the instruction's own address.
+    #[test]
+    fn raise_micro_op_traps_typed() {
+        // 0x15 = test-arch "raise unmapped-read".
+        let (ev, _) = run_fetch(&[0x15], 0);
+        assert_eq!(ev, Ev::Trapped(Trap::UnmappedRead { at: 0 }));
+    }
+
     /// Full scripted driver: code image + tiny stack + fake device log.
     /// Returns (final event, request log, mf).
     fn run_full(
@@ -509,6 +524,7 @@ mod tests {
                         Rq::DeviceMoveLeft { .. }
                         | Rq::DeviceMoveRight { .. }
                         | Rq::DeviceWrite { .. } => Rs::Ok,
+                        Rq::TableRead { .. } => Rs::OutOfTable,
                     };
                     ev = core.resume(resp);
                 }

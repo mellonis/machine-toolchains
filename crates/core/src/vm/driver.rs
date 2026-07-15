@@ -187,6 +187,8 @@ pub(crate) fn step_instruction(
                         },
                         None => BusResponse::Fault(DeviceFault::NoSuchDevice { dev }),
                     },
+                    // task 9 wires the real table ROM
+                    BusRequest::TableRead { .. } => BusResponse::OutOfTable,
                 };
                 if over_tacts(stats) {
                     return StepEvent::Finished(Outcome::Trapped(Trap::TactLimit));
