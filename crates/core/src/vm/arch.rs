@@ -23,12 +23,27 @@ pub enum Operand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicroOp {
-    MoveLeft { dev: u8 },
-    MoveRight { dev: u8 },
-    Write { dev: u8, index: u32 },
+    MoveLeft {
+        dev: u8,
+    },
+    MoveRight {
+        dev: u8,
+    },
+    Write {
+        dev: u8,
+        index: u32,
+    },
+    /// Latch the symbol under `dev`'s head into TR slot `slot`.
+    Read {
+        dev: u8,
+        slot: u8,
+    },
     LatchMatch(u32),
     JumpRel(i32),
-    JumpRelIf { off: i32, when_match: bool },
+    JumpRelIf {
+        off: i32,
+        when_match: bool,
+    },
     Call(i32),
     Ret,
     Stop,
@@ -70,7 +85,8 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
 /// 0x01 nop | 0x02 stop | 0x03 halt | 0x04 brk | 0x05 left+latch |
 /// 0x06 right+latch | 0x07 wr(vec)+latch | 0x08 jmp rel8 | 0x09 jm rel32 |
 /// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to Nop) |
-/// 0x14 left on dev 1 (probes device-indexed tape micro-ops)
+/// 0x10 read dev0→slot0 + dev1→slot1 (probes TR latching) |
+/// 0x13 wr(vec) on dev 1 | 0x14 left on dev 1 (probes device-indexed tape micro-ops)
 #[cfg(test)]
 pub(crate) mod test_arch {
     use super::*;
@@ -84,8 +100,8 @@ pub(crate) mod test_arch {
 
         fn operand_kind(&self, opcode: u8) -> Option<OperandKind> {
             match opcode {
-                0x01..=0x06 | 0x0B | 0x0E | 0x14 => Some(OperandKind::None),
-                0x07 => Some(OperandKind::SymbolVec),
+                0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14 => Some(OperandKind::None),
+                0x07 | 0x13 => Some(OperandKind::SymbolVec),
                 0x08 => Some(OperandKind::RelI8),
                 0x09 | 0x0A => Some(OperandKind::RelI32),
                 _ => None,
@@ -119,6 +135,16 @@ pub(crate) mod test_arch {
                 }
                 (0x0A, Operand::I32(o)) => vec![MicroOp::Call(*o)],
                 (0x0B, _) => vec![MicroOp::Ret],
+                (0x10, _) => vec![
+                    MicroOp::Read { dev: 0, slot: 0 },
+                    MicroOp::Read { dev: 1, slot: 1 },
+                ],
+                (0x13, Operand::Symbols(s)) if s.len() == 1 => {
+                    vec![MicroOp::Write {
+                        dev: 1,
+                        index: s[0],
+                    }]
+                }
                 (0x14, _) => vec![MicroOp::MoveLeft { dev: 1 }],
                 _ => return Err(Trap::BadOperand { at: 0 }),
             })

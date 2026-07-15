@@ -27,6 +27,7 @@ enum Pending {
     Move,
     Write,
     Latch { match_index: u32 },
+    ReadSlot { slot: u8 },
     EntCheck { target: u32 },
     Push { target: u32 },
     Pop,
@@ -37,6 +38,8 @@ pub struct Core<'a> {
     ip: u32,
     instr_start: u32,
     mr: u32,
+    tr: [u32; 16],
+    tr_len: u8,
     phase: Phase,
     brk_pending: bool,
 }
@@ -48,6 +51,8 @@ impl<'a> Core<'a> {
             ip: entry,
             instr_start: entry,
             mr: 0,
+            tr: [0; 16],
+            tr_len: 0,
             phase: Phase::FetchOpcode,
             brk_pending: false,
         }
@@ -81,6 +86,12 @@ impl<'a> Core<'a> {
 
     pub fn set_mr(&mut self, mr: u32) {
         self.mr = mr;
+    }
+
+    /// The tuple register: symbols latched by `Read` micro-ops this
+    /// instruction sequence. `MatchTable` compares rows against this prefix.
+    pub fn tr(&self) -> &[u32] {
+        &self.tr[..usize::from(self.tr_len)]
     }
 
     pub fn start(&mut self) -> CoreEvent {
@@ -208,6 +219,14 @@ impl<'a> Core<'a> {
                 BusResponse::Fault(fault) => return self.trap(Trap::Device { fault }),
                 _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
             },
+            Pending::ReadSlot { slot } => match resp {
+                BusResponse::Symbol(s) => {
+                    self.tr[usize::from(slot)] = s;
+                    self.tr_len = self.tr_len.max(slot + 1);
+                }
+                BusResponse::Fault(fault) => return self.trap(Trap::Device { fault }),
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
             Pending::EntCheck { target } => match resp {
                 BusResponse::Byte(b) if self.arch.is_entry_marker(b) => {
                     self.phase = Phase::Execute {
@@ -258,6 +277,14 @@ impl<'a> Core<'a> {
                     BusRequest::DeviceRead { dev: 0 },
                     Pending::Latch { match_index },
                 ),
+                MicroOp::Read { dev, slot } => {
+                    if slot >= 16 {
+                        return self.trap(Trap::BadOperand {
+                            at: self.instr_start,
+                        });
+                    }
+                    (BusRequest::DeviceRead { dev }, Pending::ReadSlot { slot })
+                }
                 MicroOp::JumpRel(off) => {
                     match self.jump_target(off) {
                         Ok(t) => self.ip = t,
@@ -415,6 +442,30 @@ mod tests {
         // 0x14 = test-arch "move left on dev 1"
         let (ev, _) = run_fetch(&[0x14], 0);
         assert_eq!(ev, Ev::Request(Rq::DeviceMoveLeft { dev: 1 }));
+    }
+
+    /// Read{dev, slot} latches device symbols into the TR bank.
+    #[test]
+    fn read_latches_into_tr() {
+        // 0x10 = test-arch "read dev0→slot0, dev1→slot1".
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0);
+        let mut ev = core.start();
+        // Serve CodeRead(0) → 0x10, then two DeviceReads with symbols 7 and 9.
+        ev = match ev {
+            Ev::Request(Rq::CodeRead { addr: 0 }) => core.resume(Rs::Byte(0x10)),
+            other => panic!("unexpected: {other:?}"),
+        };
+        ev = match ev {
+            Ev::Request(Rq::DeviceRead { dev: 0 }) => core.resume(Rs::Symbol(7)),
+            other => panic!("unexpected: {other:?}"),
+        };
+        ev = match ev {
+            Ev::Request(Rq::DeviceRead { dev: 1 }) => core.resume(Rs::Symbol(9)),
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert_eq!(ev, Ev::Step);
+        assert_eq!(core.tr(), &[7, 9]);
     }
 
     /// Full scripted driver: code image + tiny stack + fake device log.
