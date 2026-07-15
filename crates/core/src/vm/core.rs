@@ -249,10 +249,10 @@ impl<'a> Core<'a> {
                     self.phase = Phase::Done;
                     return CoreEvent::Halted;
                 }
-                MicroOp::MoveLeft => (BusRequest::DeviceMoveLeft { dev: 0 }, Pending::Move),
-                MicroOp::MoveRight => (BusRequest::DeviceMoveRight { dev: 0 }, Pending::Move),
-                MicroOp::Write(index) => {
-                    (BusRequest::DeviceWrite { dev: 0, index }, Pending::Write)
+                MicroOp::MoveLeft { dev } => (BusRequest::DeviceMoveLeft { dev }, Pending::Move),
+                MicroOp::MoveRight { dev } => (BusRequest::DeviceMoveRight { dev }, Pending::Move),
+                MicroOp::Write { dev, index } => {
+                    (BusRequest::DeviceWrite { dev, index }, Pending::Write)
                 }
                 MicroOp::LatchMatch(match_index) => (
                     BusRequest::DeviceRead { dev: 0 },
@@ -407,6 +407,14 @@ mod tests {
     fn entry_offset_is_respected() {
         let (_, fetched) = run_fetch(&[0x00, 0x00, 0x01], 2);
         assert_eq!(fetched, vec![2]);
+    }
+
+    /// Tape micro-ops carry their device index through to the bus.
+    #[test]
+    fn tape_micro_ops_are_device_indexed() {
+        // 0x14 = test-arch "move left on dev 1"
+        let (ev, _) = run_fetch(&[0x14], 0);
+        assert_eq!(ev, Ev::Request(Rq::DeviceMoveLeft { dev: 1 }));
     }
 
     /// Full scripted driver: code image + tiny stack + fake device log.

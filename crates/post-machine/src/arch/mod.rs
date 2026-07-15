@@ -64,11 +64,17 @@ impl Arch for Pm1 {
             STP => vec![MicroOp::Stop],
             HLT => vec![MicroOp::Halt],
             BRK => vec![MicroOp::Brk],
-            LFT => vec![MicroOp::MoveLeft, MicroOp::LatchMatch(MARK)],
-            RGT => vec![MicroOp::MoveRight, MicroOp::LatchMatch(MARK)],
+            LFT => vec![MicroOp::MoveLeft { dev: 0 }, MicroOp::LatchMatch(MARK)],
+            RGT => vec![MicroOp::MoveRight { dev: 0 }, MicroOp::LatchMatch(MARK)],
             WR => match operand {
                 Operand::Symbols(s) if s.len() == 1 => {
-                    vec![MicroOp::Write(s[0]), MicroOp::LatchMatch(MARK)]
+                    vec![
+                        MicroOp::Write {
+                            dev: 0,
+                            index: s[0],
+                        },
+                        MicroOp::LatchMatch(MARK),
+                    ]
                 }
                 _ => return Err(Trap::BadOperand { at: 0 }),
             },
@@ -152,15 +158,15 @@ mod tests {
         let a = Pm1;
         assert_eq!(
             a.lower(LFT, &Operand::None).unwrap(),
-            vec![MicroOp::MoveLeft, MicroOp::LatchMatch(1)]
+            vec![MicroOp::MoveLeft { dev: 0 }, MicroOp::LatchMatch(1)]
         );
         assert_eq!(
             a.lower(RGT, &Operand::None).unwrap(),
-            vec![MicroOp::MoveRight, MicroOp::LatchMatch(1)]
+            vec![MicroOp::MoveRight { dev: 0 }, MicroOp::LatchMatch(1)]
         );
         assert_eq!(
             a.lower(WR, &Operand::Symbols(vec![1])).unwrap(),
-            vec![MicroOp::Write(1), MicroOp::LatchMatch(1)]
+            vec![MicroOp::Write { dev: 0, index: 1 }, MicroOp::LatchMatch(1)]
         );
         assert_eq!(
             a.lower(JMP, &Operand::I32(-6)).unwrap(),

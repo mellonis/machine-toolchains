@@ -23,9 +23,9 @@ pub enum Operand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MicroOp {
-    MoveLeft,
-    MoveRight,
-    Write(u32),
+    MoveLeft { dev: u8 },
+    MoveRight { dev: u8 },
+    Write { dev: u8, index: u32 },
     LatchMatch(u32),
     JumpRel(i32),
     JumpRelIf { off: i32, when_match: bool },
@@ -69,7 +69,8 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
 /// Fake architecture for core tests — proves core is arch-agnostic.
 /// 0x01 nop | 0x02 stop | 0x03 halt | 0x04 brk | 0x05 left+latch |
 /// 0x06 right+latch | 0x07 wr(vec)+latch | 0x08 jmp rel8 | 0x09 jm rel32 |
-/// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to Nop)
+/// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to Nop) |
+/// 0x14 left on dev 1 (probes device-indexed tape micro-ops)
 #[cfg(test)]
 pub(crate) mod test_arch {
     use super::*;
@@ -83,7 +84,7 @@ pub(crate) mod test_arch {
 
         fn operand_kind(&self, opcode: u8) -> Option<OperandKind> {
             match opcode {
-                0x01..=0x06 | 0x0B | 0x0E => Some(OperandKind::None),
+                0x01..=0x06 | 0x0B | 0x0E | 0x14 => Some(OperandKind::None),
                 0x07 => Some(OperandKind::SymbolVec),
                 0x08 => Some(OperandKind::RelI8),
                 0x09 | 0x0A => Some(OperandKind::RelI32),
@@ -97,10 +98,16 @@ pub(crate) mod test_arch {
                 (0x02, _) => vec![MicroOp::Stop],
                 (0x03, _) => vec![MicroOp::Halt],
                 (0x04, _) => vec![MicroOp::Brk],
-                (0x05, _) => vec![MicroOp::MoveLeft, MicroOp::LatchMatch(1)],
-                (0x06, _) => vec![MicroOp::MoveRight, MicroOp::LatchMatch(1)],
+                (0x05, _) => vec![MicroOp::MoveLeft { dev: 0 }, MicroOp::LatchMatch(1)],
+                (0x06, _) => vec![MicroOp::MoveRight { dev: 0 }, MicroOp::LatchMatch(1)],
                 (0x07, Operand::Symbols(s)) if s.len() == 1 => {
-                    vec![MicroOp::Write(s[0]), MicroOp::LatchMatch(1)]
+                    vec![
+                        MicroOp::Write {
+                            dev: 0,
+                            index: s[0],
+                        },
+                        MicroOp::LatchMatch(1),
+                    ]
                 }
                 (0x07, _) => return Err(Trap::BadOperand { at: 0 }),
                 (0x08, Operand::I8(o)) => vec![MicroOp::JumpRel(i32::from(*o))],
@@ -112,6 +119,7 @@ pub(crate) mod test_arch {
                 }
                 (0x0A, Operand::I32(o)) => vec![MicroOp::Call(*o)],
                 (0x0B, _) => vec![MicroOp::Ret],
+                (0x14, _) => vec![MicroOp::MoveLeft { dev: 1 }],
                 _ => return Err(Trap::BadOperand { at: 0 }),
             })
         }
