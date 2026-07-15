@@ -119,11 +119,12 @@ impl<'a> Machine<'a> {
         // against the mark index 1.
         core.set_mf(device.read() == 1);
         let mut stack = ReturnStack::new(opts.stack_depth);
+        let mut devices: [&mut dyn Tape; 1] = [device];
         run(
             &mut core,
             &self.code,
             &mut stack,
-            device,
+            &mut devices,
             opts.profile,
             opts.limits,
         )

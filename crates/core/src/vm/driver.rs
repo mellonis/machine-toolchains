@@ -5,7 +5,7 @@
 use super::bus::{BusRequest, BusResponse, CoreEvent};
 use super::core::Core;
 use super::devices::Tape;
-use super::trap::Trap;
+use super::trap::{DeviceFault, Trap};
 
 #[derive(Debug)]
 pub struct ReturnStack {
@@ -110,7 +110,7 @@ pub(crate) fn step_instruction(
     core: &mut Core,
     code: &[u8],
     stack: &mut ReturnStack,
-    device: &mut dyn Tape,
+    devices: &mut [&mut dyn Tape],
     profile: TactProfile,
     limits: RunLimits,
     stats: &mut RunStats,
@@ -154,26 +154,38 @@ pub(crate) fn step_instruction(
                         }
                         None => BusResponse::StackEmpty,
                     },
-                    BusRequest::DeviceMoveLeft { .. } => {
-                        device.left();
-                        stats.stall_tacts += u64::from(profile.move_cost);
-                        BusResponse::Ok
-                    }
-                    BusRequest::DeviceMoveRight { .. } => {
-                        device.right();
-                        stats.stall_tacts += u64::from(profile.move_cost);
-                        BusResponse::Ok
-                    }
-                    BusRequest::DeviceRead { .. } => {
-                        stats.stall_tacts += u64::from(profile.read_cost);
-                        BusResponse::Symbol(device.read())
-                    }
-                    BusRequest::DeviceWrite { index, .. } => match device.write(index) {
-                        Ok(()) => {
-                            stats.stall_tacts += u64::from(profile.write_cost);
+                    BusRequest::DeviceMoveLeft { dev } => match devices.get_mut(dev as usize) {
+                        Some(device) => {
+                            device.left();
+                            stats.stall_tacts += u64::from(profile.move_cost);
                             BusResponse::Ok
                         }
-                        Err(fault) => BusResponse::Fault(fault),
+                        None => BusResponse::Fault(DeviceFault::NoSuchDevice { dev }),
+                    },
+                    BusRequest::DeviceMoveRight { dev } => match devices.get_mut(dev as usize) {
+                        Some(device) => {
+                            device.right();
+                            stats.stall_tacts += u64::from(profile.move_cost);
+                            BusResponse::Ok
+                        }
+                        None => BusResponse::Fault(DeviceFault::NoSuchDevice { dev }),
+                    },
+                    BusRequest::DeviceRead { dev } => match devices.get_mut(dev as usize) {
+                        Some(device) => {
+                            stats.stall_tacts += u64::from(profile.read_cost);
+                            BusResponse::Symbol(device.read())
+                        }
+                        None => BusResponse::Fault(DeviceFault::NoSuchDevice { dev }),
+                    },
+                    BusRequest::DeviceWrite { dev, index } => match devices.get_mut(dev as usize) {
+                        Some(device) => match device.write(index) {
+                            Ok(()) => {
+                                stats.stall_tacts += u64::from(profile.write_cost);
+                                BusResponse::Ok
+                            }
+                            Err(fault) => BusResponse::Fault(fault),
+                        },
+                        None => BusResponse::Fault(DeviceFault::NoSuchDevice { dev }),
                     },
                 };
                 if over_tacts(stats) {
@@ -207,7 +219,7 @@ pub fn run(
     core: &mut Core,
     code: &[u8],
     stack: &mut ReturnStack,
-    device: &mut dyn Tape,
+    devices: &mut [&mut dyn Tape],
     profile: TactProfile,
     limits: RunLimits,
 ) -> RunResult {
@@ -218,7 +230,7 @@ pub fn run(
             core,
             code,
             stack,
-            device,
+            devices,
             profile,
             limits,
             &mut stats,
@@ -254,7 +266,8 @@ mod tests {
         let mut core = Core::new(&arch, 0);
         let mut stack = ReturnStack::new(4);
         let mut tape = InfiniteTape::new();
-        let result = run(&mut core, code, &mut stack, &mut tape, profile, limits);
+        let mut devices: Vec<&mut dyn Tape> = vec![&mut tape];
+        let result = run(&mut core, code, &mut stack, &mut devices, profile, limits);
         (result, tape)
     }
 
@@ -402,5 +415,30 @@ mod tests {
         assert_eq!(s.entries(), &[7, 9]);
         assert_eq!(s.pop(), Some(9));
         assert_eq!(s.depth(), 1);
+    }
+
+    /// Device requests route by index; a missing device is a device fault.
+    #[test]
+    fn routes_devices_by_index() {
+        // 0x14 = test-arch "move left on dev 1"; only one device supplied.
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0);
+        let mut stack = ReturnStack::new(4);
+        let mut tape = InfiniteTape::new();
+        let mut devices: Vec<&mut dyn crate::vm::devices::Tape> = vec![&mut tape];
+        let r = run(
+            &mut core,
+            &[0x14, 0x02],
+            &mut stack,
+            &mut devices,
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        );
+        assert_eq!(
+            r.outcome,
+            Outcome::Trapped(Trap::Device {
+                fault: crate::vm::trap::DeviceFault::NoSuchDevice { dev: 1 }
+            })
+        );
     }
 }

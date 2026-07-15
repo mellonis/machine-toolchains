@@ -113,11 +113,12 @@ impl<'a> DebugSession<'a> {
             // mirrors Machine::run; PM-1 matches against mark index 1.
             self.core.set_mf(device.read() == 1);
         }
+        let mut devices: [&mut dyn Tape; 1] = [device];
         let event = step_instruction(
             &mut self.core,
             &self.code,
             &mut self.stack,
-            device,
+            &mut devices,
             self.profile,
             self.limits,
             &mut self.stats,

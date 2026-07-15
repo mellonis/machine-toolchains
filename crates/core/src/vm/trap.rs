@@ -5,6 +5,7 @@
 pub enum DeviceFault {
     IndexOutsideAlphabet { index: u32 },
     StrictCellViolation,
+    NoSuchDevice { dev: u8 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
