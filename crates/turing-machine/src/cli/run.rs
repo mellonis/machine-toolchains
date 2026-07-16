@@ -7,6 +7,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
+use mtc_core::formats::PROFILE_FRAMES;
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeBlockFile;
 use mtc_core::linker::MapFile;
@@ -34,6 +35,7 @@ LIMITS:
 OUTPUT:
   --trace             stream per-instruction listing lines to stderr, live,
                       each with post-state `; MF=<0|1> heads=[..]`
+                      (a frames-profile image also appends ` FR=<n>`)
   -v                  no extra effect yet (stats always print)
 
 EXIT CODE: 0 stopped | 2 halted (hlt) | 3 trapped | 1 tool error.
@@ -225,9 +227,16 @@ fn drive_traced(
             format!("  {ip:04x}:  <beyond code image>")
         };
         let heads: Vec<String> = devices.iter().map(|d| d.head().to_string()).collect();
+        // The frames profile appends the FR register after the heads segment;
+        // a base-profile image's line stays byte-identical (empty suffix).
+        let fr_suffix = if exe.profile == PROFILE_FRAMES {
+            format!(" FR={}", session.fr())
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             trace_out,
-            "{line}  ; MF={} heads=[{}]",
+            "{line}  ; MF={} heads=[{}]{fr_suffix}",
             u8::from(session.mf()),
             heads.join(", ")
         );

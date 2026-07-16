@@ -235,6 +235,12 @@ fn trace_streams_listing_lines_and_still_reports_the_outcome() {
         trace.contains("MF=") && trace.contains("heads=["),
         "trace shows post-state:\n{trace}"
     );
+    // Base-profile pin: the ` FR=<n>` suffix appears only under the frames
+    // profile, so a base-profile image's trace must never carry it.
+    assert!(
+        !trace.contains("FR="),
+        "base-profile trace must not carry the frames FR= suffix:\n{trace}"
+    );
 }
 
 #[test]
