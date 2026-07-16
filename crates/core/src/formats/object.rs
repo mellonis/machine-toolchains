@@ -10,12 +10,14 @@ pub const MAGIC_OBJECT: [u8; 3] = [b'M', b'O', 0x01];
 /// byte-for-byte.
 pub const OBJECT_FORMAT_VERSION_V2: u16 = 2;
 /// MO v3 adds generic-routine signatures, table blobs, table fixups, and
-/// declarative bound calls. Its serialization lands in a later task; the
-/// reader still gates on v2 until then.
+/// declarative bound calls. An object with any of those present serializes
+/// as v3 (see `is_v2_shape`); the reader accepts both v2 and v3.
 pub const OBJECT_FORMAT_VERSION_V3: u16 = 3;
 const CRC_OFFSET: usize = 7;
 const EXTERNAL_BLOB: u32 = 0xFFFF_FFFF;
 const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
+const FLAG_HAS_SIGNATURES: u8 = 0b0000_0010;
+const FLAG_HAS_TABLES: u8 = 0b0000_0100;
 
 /// In-memory object: symbols + code blobs + call relocations (+ optional
 /// per-blob debug info).
@@ -35,8 +37,8 @@ const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
 ///
 /// The four v3 fields (`signatures`, `table_blobs`, `table_fixups`,
 /// `bound_calls`) are absent in a v2-shape object — the shape PM-1's
-/// compiler emits. Their serialization lands in a later task; today only
-/// v2-shape objects (see `is_v2_shape`) may be serialized.
+/// compiler emits, serialized byte-for-byte as v2. When any is present the
+/// object serializes as v3 (see `is_v2_shape`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectFile {
     pub arch: u8,
@@ -194,8 +196,11 @@ impl ObjectFile {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        assert!(self.is_v2_shape(), "MO v3 emit lands in later tasks");
-        self.to_bytes_v2()
+        if self.is_v2_shape() {
+            self.to_bytes_v2()
+        } else {
+            self.to_bytes_v3()
+        }
     }
 
     fn to_bytes_v2(&self) -> Vec<u8> {
@@ -300,6 +305,189 @@ impl ObjectFile {
         out
     }
 
+    /// Serialize a v3-shape object: the v2 body through the debug section
+    /// (version field = 3, flags gaining `FLAG_HAS_SIGNATURES` /
+    /// `FLAG_HAS_TABLES` when the respective field is present), followed by
+    /// the v3 sections — per-blob signatures, per-blob table blobs, the
+    /// unconditional table-fixup section, and the unconditional bound-call
+    /// section. Read back by `from_bytes` in the same order.
+    fn to_bytes_v3(&self) -> Vec<u8> {
+        let mut pool = StringPool::new();
+        let symbol_names: Vec<u32> = self.symbols.iter().map(|s| pool.intern(&s.name)).collect();
+        let debug_label_names: Vec<Vec<u32>> = match &self.debug {
+            Some(per_blob) => per_blob
+                .iter()
+                .map(|d| d.labels.iter().map(|(n, _)| pool.intern(n)).collect())
+                .collect(),
+            None => Vec::new(),
+        };
+
+        let mut flags = 0u8;
+        if self.debug.is_some() {
+            flags |= FLAG_HAS_DEBUG;
+        }
+        if self.signatures.is_some() {
+            flags |= FLAG_HAS_SIGNATURES;
+        }
+        if self.table_blobs.is_some() {
+            flags |= FLAG_HAS_TABLES;
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC_OBJECT);
+        put_u16(&mut out, OBJECT_FORMAT_VERSION_V3);
+        out.push(self.arch);
+        out.push(flags);
+        put_u32(&mut out, 0); // crc placeholder
+
+        put_u32(
+            &mut out,
+            u32::try_from(pool.strings.len()).expect("string pool fits u32"),
+        );
+        for s in &pool.strings {
+            put_u16(&mut out, u16::try_from(s.len()).expect("string fits u16"));
+            out.extend_from_slice(s.as_bytes());
+        }
+
+        put_u32(
+            &mut out,
+            u32::try_from(self.symbols.len()).expect("symbol count fits u32"),
+        );
+        for (sym, &name_idx) in self.symbols.iter().zip(&symbol_names) {
+            put_u32(&mut out, name_idx);
+            match sym.def {
+                SymbolDef::Defined { blob } => {
+                    out.push(1);
+                    put_u32(&mut out, blob);
+                }
+                SymbolDef::Local { blob } => {
+                    out.push(2);
+                    put_u32(&mut out, blob);
+                }
+                SymbolDef::External => {
+                    out.push(0);
+                    put_u32(&mut out, EXTERNAL_BLOB);
+                }
+            }
+        }
+
+        put_u32(
+            &mut out,
+            u32::try_from(self.blobs.len()).expect("blob count fits u32"),
+        );
+        for blob in &self.blobs {
+            put_u32(&mut out, u32::try_from(blob.len()).expect("blob fits u32"));
+            out.extend_from_slice(blob);
+        }
+
+        put_u32(
+            &mut out,
+            u32::try_from(self.relocations.len()).expect("relocation count fits u32"),
+        );
+        for reloc in &self.relocations {
+            put_u32(&mut out, reloc.blob);
+            put_u32(&mut out, reloc.offset);
+            put_u32(&mut out, reloc.symbol);
+        }
+
+        if let Some(per_blob) = &self.debug {
+            debug_assert_eq!(
+                per_blob.len(),
+                self.blobs.len(),
+                "debug section must parallel blobs"
+            );
+            for (d, names) in per_blob.iter().zip(&debug_label_names) {
+                put_u32(
+                    &mut out,
+                    u32::try_from(d.labels.len()).expect("label count fits u32"),
+                );
+                for ((_, offset), &name_idx) in d.labels.iter().zip(names) {
+                    put_u32(&mut out, name_idx);
+                    put_u32(&mut out, *offset);
+                }
+                put_u32(
+                    &mut out,
+                    u32::try_from(d.lines.len()).expect("line count fits u32"),
+                );
+                for (code_offset, line) in &d.lines {
+                    put_u32(&mut out, *code_offset);
+                    put_u32(&mut out, *line);
+                }
+            }
+        }
+
+        // v3 sections, in the order the reader consumes them.
+        if let Some(sigs) = &self.signatures {
+            debug_assert_eq!(
+                sigs.len(),
+                self.blobs.len(),
+                "signatures must parallel blobs"
+            );
+            for sig in sigs {
+                debug_assert_eq!(
+                    sig.cardinalities.len(),
+                    sig.arity as usize,
+                    "cardinalities must have arity entries"
+                );
+                out.push(sig.arity);
+                for &c in &sig.cardinalities {
+                    put_u32(&mut out, c);
+                }
+            }
+        }
+
+        if let Some(tables) = &self.table_blobs {
+            debug_assert_eq!(
+                tables.len(),
+                self.blobs.len(),
+                "table blobs must parallel blobs"
+            );
+            for table in tables {
+                put_u32(
+                    &mut out,
+                    u32::try_from(table.len()).expect("table fits u32"),
+                );
+                out.extend_from_slice(table);
+            }
+        }
+
+        put_u32(
+            &mut out,
+            u32::try_from(self.table_fixups.len()).expect("fixup count fits u32"),
+        );
+        for fixup in &self.table_fixups {
+            put_u32(&mut out, fixup.blob);
+            put_u32(&mut out, fixup.offset);
+            put_u32(&mut out, fixup.table_offset);
+        }
+
+        put_u32(
+            &mut out,
+            u32::try_from(self.bound_calls.len()).expect("bound-call count fits u32"),
+        );
+        for call in &self.bound_calls {
+            put_u32(&mut out, call.blob);
+            put_u32(&mut out, call.offset);
+            put_u32(&mut out, call.symbol);
+            out.push(u8::try_from(call.binding.len()).expect("tape count fits u8"));
+            for tape in &call.binding {
+                out.push(tape.caller_tape);
+                put_u16(
+                    &mut out,
+                    u16::try_from(tape.pairs.len()).expect("pair count fits u16"),
+                );
+                for pair in &tape.pairs {
+                    put_u32(&mut out, pair.src);
+                    put_u32(&mut out, pair.dst);
+                    out.push(if pair.one_way { 1 } else { 0 });
+                }
+            }
+        }
+
+        stamp_crc(&mut out, CRC_OFFSET);
+        out
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
         if bytes.len() < 3 {
             return Err(FormatError::Truncated);
@@ -311,7 +499,7 @@ impl ObjectFile {
 
         let mut r = Reader::new(&bytes[3..]);
         let version = r.u16()?;
-        if !(1..=OBJECT_FORMAT_VERSION_V2).contains(&version) {
+        if !(1..=OBJECT_FORMAT_VERSION_V3).contains(&version) {
             return Err(FormatError::UnsupportedVersion(version));
         }
         let arch = r.u8()?;
@@ -382,6 +570,120 @@ impl ObjectFile {
             None
         };
 
+        // v3 sections. Pre-v3 objects must not claim v3 flags; v3 objects
+        // read the trailing sections written by `to_bytes_v3`.
+        let (signatures, table_blobs, table_fixups, bound_calls) =
+            if version >= OBJECT_FORMAT_VERSION_V3 {
+                let signatures = if flags & FLAG_HAS_SIGNATURES != 0 {
+                    let mut sigs = Vec::new();
+                    for _ in 0..blob_count {
+                        let arity = r.u8()?;
+                        if !(1..=16).contains(&arity) {
+                            return Err(FormatError::Malformed("signature arity out of range"));
+                        }
+                        let mut cardinalities = Vec::new();
+                        for _ in 0..arity {
+                            let c = r.u32()?;
+                            if c == 0 {
+                                return Err(FormatError::Malformed("zero cardinality"));
+                            }
+                            cardinalities.push(c);
+                        }
+                        sigs.push(RoutineSig {
+                            arity,
+                            cardinalities,
+                        });
+                    }
+                    Some(sigs)
+                } else {
+                    None
+                };
+
+                let table_blobs = if flags & FLAG_HAS_TABLES != 0 {
+                    let mut tables = Vec::new();
+                    for _ in 0..blob_count {
+                        let len = r.u32()? as usize;
+                        tables.push(r.bytes(len)?.to_vec());
+                    }
+                    Some(tables)
+                } else {
+                    None
+                };
+
+                let fixup_count = r.u32()? as usize;
+                let mut table_fixups = Vec::new();
+                for _ in 0..fixup_count {
+                    let blob = r.u32()?;
+                    let offset = r.u32()?;
+                    let table_offset = r.u32()?;
+                    if blob as usize >= blob_count {
+                        return Err(FormatError::Malformed(
+                            "table fixup blob index out of range",
+                        ));
+                    }
+                    table_fixups.push(TableFixup {
+                        blob,
+                        offset,
+                        table_offset,
+                    });
+                }
+
+                let bound_call_count = r.u32()? as usize;
+                let mut bound_calls = Vec::new();
+                for _ in 0..bound_call_count {
+                    let blob = r.u32()?;
+                    let offset = r.u32()?;
+                    let symbol = r.u32()?;
+                    let tape_count = r.u8()? as usize;
+                    if blob as usize >= blob_count {
+                        return Err(FormatError::Malformed("bound call blob index out of range"));
+                    }
+                    if symbol as usize >= symbol_count {
+                        return Err(FormatError::Malformed(
+                            "bound call symbol index out of range",
+                        ));
+                    }
+                    let mut binding = Vec::new();
+                    for _ in 0..tape_count {
+                        let caller_tape = r.u8()?;
+                        if caller_tape >= 16 {
+                            return Err(FormatError::Malformed("caller tape index out of range"));
+                        }
+                        let pair_count = r.u16()? as usize;
+                        let mut pairs = Vec::new();
+                        for _ in 0..pair_count {
+                            let src = r.u32()?;
+                            let dst = r.u32()?;
+                            let flags_byte = r.u8()?;
+                            if (flags_byte & !1) != 0 {
+                                return Err(FormatError::Malformed(
+                                    "bound call pair flags out of range",
+                                ));
+                            }
+                            pairs.push(MapPair {
+                                src,
+                                dst,
+                                one_way: flags_byte & 1 != 0,
+                            });
+                        }
+                        binding.push(TapeBinding { caller_tape, pairs });
+                    }
+                    bound_calls.push(BoundCall {
+                        blob,
+                        offset,
+                        symbol,
+                        binding,
+                    });
+                }
+
+                (signatures, table_blobs, table_fixups, bound_calls)
+            } else {
+                if flags & 0b110 != 0 {
+                    return Err(FormatError::Malformed("v3 flags in pre-v3 object"));
+                }
+                (None, None, Vec::new(), Vec::new())
+            };
+
         r.finish()?;
 
         let mut symbols = Vec::new();
@@ -431,11 +733,10 @@ impl ObjectFile {
             blobs,
             relocations,
             debug,
-            // v2-shape reader: v3 sections do not exist on the wire yet.
-            signatures: None,
-            table_blobs: None,
-            table_fixups: Vec::new(),
-            bound_calls: Vec::new(),
+            signatures,
+            table_blobs,
+            table_fixups,
+            bound_calls,
         })
     }
 }
@@ -591,5 +892,53 @@ mod tests {
         let bytes = obj.to_bytes();
         let back = ObjectFile::from_bytes(&bytes).unwrap();
         assert_eq!(back.symbols[0].name, "иди_в_конец");
+    }
+
+    fn sample_v3_sigs() -> ObjectFile {
+        let mut obj = sample();
+        obj.signatures = Some(vec![RoutineSig {
+            arity: 2,
+            cardinalities: vec![3, 128],
+        }]);
+        obj.table_blobs = Some(vec![vec![2, 1, 0, 1, 0x7F]]);
+        obj
+    }
+
+    #[test]
+    fn v3_signatures_and_tables_round_trip() {
+        let obj = sample_v3_sigs();
+        let bytes = obj.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 3);
+        assert_eq!(ObjectFile::from_bytes(&bytes).unwrap(), obj);
+    }
+
+    #[test]
+    fn v3_signature_arity_bounds_enforced() {
+        for bad_arity in [0u8, 17] {
+            let mut obj = sample_v3_sigs();
+            obj.signatures = Some(vec![RoutineSig {
+                arity: bad_arity,
+                cardinalities: vec![3; bad_arity as usize],
+            }]);
+            assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn v3_zero_cardinality_rejected() {
+        let mut obj = sample_v3_sigs();
+        obj.signatures = Some(vec![RoutineSig {
+            arity: 1,
+            cardinalities: vec![0],
+        }]);
+        assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn v2_file_still_loads_with_empty_v3_fields() {
+        let v2 = sample();
+        let back = ObjectFile::from_bytes(&v2.to_bytes()).unwrap();
+        assert!(back.signatures.is_none() && back.table_blobs.is_none());
+        assert!(back.table_fixups.is_empty() && back.bound_calls.is_empty());
     }
 }
