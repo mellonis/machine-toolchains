@@ -1,24 +1,60 @@
 //! `MX` executable container (docs/formats.md).
 
+use super::FormatError;
 use super::crc32::{stamp_crc, verify_crc};
 use super::io::{Reader, put_u16, put_u32};
-use super::{FORMAT_VERSION, FormatError};
 
 pub const MAGIC_EXECUTABLE: [u8; 3] = [b'M', b'X', 0x01];
 const CRC_OFFSET: usize = 7;
+
+pub const MX_FORMAT_VERSION_V1: u16 = 1;
+pub const MX_FORMAT_VERSION_V2: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Executable {
     pub arch: u8,
     pub entry: u32,
     pub code: Vec<u8>,
+    /// v2 header fields; the v1 code-only shape leaves them at defaults
+    /// (`tape_count: 1`, `profile: 0`, empty cardinalities, empty tables)
+    /// and serializes as version 1 (docs/formats.md).
+    pub tape_count: u8,
+    pub profile: u8,
+    pub alphabet_cardinalities: Vec<u32>,
+    pub tables: Vec<u8>,
 }
 
 impl Executable {
+    /// A version-1 code-only image (the shape PM-1 emits).
+    pub fn code_only(arch: u8, entry: u32, code: Vec<u8>) -> Self {
+        Self {
+            arch,
+            entry,
+            code,
+            tape_count: 1,
+            profile: 0,
+            alphabet_cardinalities: Vec::new(),
+            tables: Vec::new(),
+        }
+    }
+
+    /// True when the image carries no v2-only data and must serialize as v1.
+    fn is_v1_shape(&self) -> bool {
+        self.tape_count <= 1
+            && self.profile == 0
+            && self.alphabet_cardinalities.is_empty()
+            && self.tables.is_empty()
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
+        assert!(self.is_v1_shape(), "MX v2 emit lands in a later task");
+        self.to_bytes_v1()
+    }
+
+    fn to_bytes_v1(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(19 + self.code.len());
         out.extend_from_slice(&MAGIC_EXECUTABLE);
-        put_u16(&mut out, FORMAT_VERSION);
+        put_u16(&mut out, MX_FORMAT_VERSION_V1);
         out.push(self.arch);
         out.push(0); // flags
         put_u32(&mut out, 0); // crc placeholder
@@ -43,7 +79,7 @@ impl Executable {
 
         let mut r = Reader::new(&bytes[3..]);
         let version = r.u16()?;
-        if version != FORMAT_VERSION {
+        if version != MX_FORMAT_VERSION_V1 {
             return Err(FormatError::UnsupportedVersion(version));
         }
         let arch = r.u8()?;
@@ -57,7 +93,7 @@ impl Executable {
         if entry as usize >= code.len() {
             return Err(FormatError::Malformed("entry offset outside code"));
         }
-        Ok(Self { arch, entry, code })
+        Ok(Self::code_only(arch, entry, code))
     }
 }
 
@@ -67,11 +103,7 @@ mod tests {
     use crate::formats::{ARCH_PM1, FormatError};
 
     fn sample() -> Executable {
-        Executable {
-            arch: ARCH_PM1,
-            entry: 0,
-            code: vec![0x0D, 0x05, 0x02], // ent, rgt, stp
-        }
+        Executable::code_only(ARCH_PM1, 0, vec![0x0D, 0x05, 0x02]) // ent, rgt, stp
     }
 
     #[test]
@@ -136,6 +168,22 @@ mod tests {
             Executable::from_bytes(&bytes),
             Err(FormatError::Malformed("entry offset outside code"))
         ));
+    }
+
+    /// The v1 code-only shape must serialize byte-for-byte as before the
+    /// v2 refactor — this pins PM-1's .pmx output.
+    #[test]
+    fn code_only_is_byte_identical_v1() {
+        let exe = Executable::code_only(ARCH_PM1, 0, vec![0x0D, 0x05, 0x02]);
+        let bytes = exe.to_bytes();
+        // magic + version(1) + arch + flags + crc(4) + entry(4) + size(4) + code(3)
+        assert_eq!(&bytes[0..3], b"MX\x01");
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 1);
+        assert_eq!(bytes[5], ARCH_PM1);
+        assert_eq!(bytes[6], 0);
+        assert_eq!(u32::from_le_bytes(bytes[15..19].try_into().unwrap()), 3);
+        assert_eq!(bytes.len(), 19 + 3);
+        assert_eq!(Executable::from_bytes(&bytes).unwrap(), exe);
     }
 
     #[test]

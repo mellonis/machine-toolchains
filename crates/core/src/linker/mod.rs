@@ -134,11 +134,7 @@ pub fn link(
     let built = layout::build(syntax, &resolved.order, options.relax)?;
 
     Ok(LinkOutput {
-        executable: Executable {
-            arch,
-            entry: 0,
-            code: built.code,
-        },
+        executable: Executable::code_only(arch, 0, built.code),
         map: MapFile {
             arch,
             functions: built.functions,

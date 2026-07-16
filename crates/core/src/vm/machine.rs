@@ -169,17 +169,9 @@ mod tests {
     fn registry_resolves_arch_or_errors() {
         let mut registry = ArchRegistry::new();
         registry.register(Box::new(TestArch));
-        let exe = Executable {
-            arch: 0x7F,
-            entry: 0,
-            code: vec![0x0E, 0x02],
-        };
+        let exe = Executable::code_only(0x7F, 0, vec![0x0E, 0x02]);
         assert!(Machine::from_executable(&exe, &registry).is_ok());
-        let alien = Executable {
-            arch: 0x09,
-            entry: 0,
-            code: vec![0x0E, 0x02],
-        };
+        let alien = Executable::code_only(0x09, 0, vec![0x0E, 0x02]);
         assert_eq!(
             Machine::from_executable(&alien, &registry).unwrap_err(),
             LoadError::UnknownArch(0x09)

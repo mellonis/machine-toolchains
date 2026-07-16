@@ -11,7 +11,7 @@ proptest! {
         entry_seed in any::<u32>(),
     ) {
         let entry = entry_seed % code.len() as u32;
-        let exe = Executable { arch, entry, code };
+        let exe = Executable::code_only(arch, entry, code);
         let back = Executable::from_bytes(&exe.to_bytes()).unwrap();
         prop_assert_eq!(back, exe);
     }

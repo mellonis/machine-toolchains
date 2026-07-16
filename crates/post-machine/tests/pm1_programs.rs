@@ -19,11 +19,7 @@ fn registry() -> ArchRegistry {
 }
 
 fn machine_for(code: Vec<u8>) -> Executable {
-    Executable {
-        arch: ARCH_PM1,
-        entry: 0,
-        code,
-    }
+    Executable::code_only(ARCH_PM1, 0, code)
 }
 
 #[test]
@@ -185,20 +181,12 @@ fn step_limit_stops_the_infinite_loop() {
 #[test]
 fn loader_rejects_bad_entry_and_unknown_arch() {
     let reg = registry();
-    let bad_entry = Executable {
-        arch: ARCH_PM1,
-        entry: 0,
-        code: vec![RGT, STP],
-    };
+    let bad_entry = Executable::code_only(ARCH_PM1, 0, vec![RGT, STP]);
     assert_eq!(
         Machine::from_executable(&bad_entry, &reg).unwrap_err(),
         LoadError::EntryNotEntryMarker { at: 0 }
     );
-    let alien = Executable {
-        arch: 0x42,
-        entry: 0,
-        code: vec![ENT, STP],
-    };
+    let alien = Executable::code_only(0x42, 0, vec![ENT, STP]);
     assert_eq!(
         Machine::from_executable(&alien, &reg).unwrap_err(),
         LoadError::UnknownArch(0x42)

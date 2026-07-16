@@ -518,11 +518,7 @@ START:  nop
         // f at 0 calls g at 7: f = [0E][21 off=+1][02] (call end 6; 7-6=1),
         // g = [0E][0B].
         let code = vec![0x0E, 0x21, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
-        let exe = Executable {
-            arch: 0x7E,
-            entry: 0,
-            code,
-        };
+        let exe = Executable::code_only(0x7E, 0, code);
         let text = disassemble_executable(&syntax, &exe, None);
         assert!(text.contains(".func main")); // entry root is named main
         assert!(text.contains(".func func_0007"));
@@ -540,11 +536,7 @@ START:  nop
         let mut code = vec![0x0E, 0x21, 0x0E, 0x00, 0x00, 0x00, 0x02];
         code.extend(std::iter::repeat_n(0x01, 13)); // unreachable nops
         code.extend([0x0E, 0x0B]); // g at 20
-        let exe = Executable {
-            arch: 0x7E,
-            entry: 0,
-            code,
-        };
+        let exe = Executable::code_only(0x7E, 0, code);
         let text = disassemble_executable(&syntax, &exe, None);
         assert!(text.contains(".func main")); // entry root is named main
         assert!(text.contains(".func func_0014"));
@@ -564,11 +556,7 @@ START:  nop
         let syntax = test_syntax();
         // 0: ent | 1: br +1 -> 4 | 3: stop (fall-through, must be discovered) | 4: ret
         let code = vec![0x0E, 0x22, 0x01, 0x02, 0x0B];
-        let exe = Executable {
-            arch: 0x7E,
-            entry: 0,
-            code,
-        };
+        let exe = Executable::code_only(0x7E, 0, code);
         let text = disassemble_executable(&syntax, &exe, None);
         assert!(
             text.contains("stop"),
@@ -587,11 +575,7 @@ START:  nop
         let code = vec![
             0x0E, 0x21, 0x06, 0x00, 0x00, 0x00, 0x20, 0x02, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B,
         ];
-        let exe = Executable {
-            arch: 0x7E,
-            entry: 0,
-            code,
-        };
+        let exe = Executable::code_only(0x7E, 0, code);
         let text = disassemble_executable(&syntax, &exe, None);
         assert!(text.contains(".func func_000C"));
         assert!(text.contains("call    func_000C"));
@@ -621,11 +605,7 @@ START:  nop
         });
         // f at 0 short-calls g at 4: call.s at 1, end 3, off = +1.
         let code = vec![0x0E, 0x31, 0x01, 0x02, 0x0E, 0x0B];
-        let exe = Executable {
-            arch: 0x7E,
-            entry: 0,
-            code,
-        };
+        let exe = Executable::code_only(0x7E, 0, code);
         let text = disassemble_executable(&syntax, &exe, None);
         assert!(
             text.contains("call    func_0004"),
@@ -752,11 +732,7 @@ START:  nop
         // Same shape as `executable_disassembly_discovers_functions_by_traversal`:
         // f at 0 calls g at 7 (call end 6; 7-6=1), g = [0E][0B].
         let code = vec![0x0E, 0x21, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
-        let exe = Executable {
-            arch: 0x7E,
-            entry: 0,
-            code,
-        };
+        let exe = Executable::code_only(0x7E, 0, code);
 
         // `None` -> byte-identical to today's synthesized name (pinned).
         let text_no_map = disassemble_executable(&syntax, &exe, None);
@@ -829,11 +805,7 @@ START:  nop
     fn listing_renders_the_derived_golden() {
         use crate::linker::{MapFile, MapFunction};
         // 0: ent | 1: rgt | 2-3: wr 1 (0x06 0x81) | 4-5: jm.s -5 → 1 | 6: stp
-        let exe = Executable {
-            arch: 0x01,
-            entry: 0,
-            code: vec![0x0D, 0x05, 0x06, 0x81, 0x19, 0xFB, 0x02],
-        };
+        let exe = Executable::code_only(0x01, 0, vec![0x0D, 0x05, 0x06, 0x81, 0x19, 0xFB, 0x02]);
         let map = MapFile {
             arch: 0x01,
             functions: vec![MapFunction {
