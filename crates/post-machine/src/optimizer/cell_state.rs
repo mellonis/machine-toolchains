@@ -49,7 +49,16 @@ pub fn run(f: &mut IrFunction) -> u32 {
                     }
                     pending = Some(i);
                 }
-                IrOp::Lft { .. } | IrOp::Rgt { .. } | IrOp::Call { .. } | IrOp::Brk { .. } => {
+                // A fused write+move ends the window like a bare move: the
+                // move makes the pre-move cell tape-visible and shifts the
+                // head. Fully conservative — its own pre-move write is never
+                // tracked as a droppable pending store.
+                IrOp::Lft { .. }
+                | IrOp::Rgt { .. }
+                | IrOp::WrLft { .. }
+                | IrOp::WrRgt { .. }
+                | IrOp::Call { .. }
+                | IrOp::Brk { .. } => {
                     pending = None;
                 }
             }

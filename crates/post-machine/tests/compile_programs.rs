@@ -162,7 +162,7 @@ fn emitted_ir_is_a_versioned_json_artifact() {
     let json = out.ir.to_json();
     let back = IrProgram::from_json(&json).unwrap();
     assert_eq!(back, out.ir);
-    assert_eq!(back.version, 3);
+    assert_eq!(back.version, 4);
     assert_eq!(back.functions.len(), 3);
 }
 

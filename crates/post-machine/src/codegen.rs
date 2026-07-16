@@ -121,6 +121,8 @@ fn emit_function(f: &IrFunction, options: CodegenOptions, e: &mut Emitter) {
                 IrOp::Lft { line } => e.push(grid(None, "lft", ""), *line),
                 IrOp::Rgt { line } => e.push(grid(None, "rgt", ""), *line),
                 IrOp::Wr { index, line } => e.push(grid(None, "wr", &index.to_string()), *line),
+                IrOp::WrLft { index, line } => e.push(grid(None, "wrl", &index.to_string()), *line),
+                IrOp::WrRgt { index, line } => e.push(grid(None, "wrr", &index.to_string()), *line),
                 IrOp::Brk { line } => {
                     if !options.strip_debugger {
                         e.push(grid(None, "brk", ""), *line);

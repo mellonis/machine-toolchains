@@ -344,6 +344,13 @@ implementation detail. `pmt compile --emit-ir[=STAGE]` writes it to
 - `pmt ir graph FILE.ir.json [--function NAME]` renders the IR as a
   Mermaid flowchart, one per function (or a single named one).
 
+The artifact version tracks its op vocabulary. Version 4 adds two fused
+write+move ops — `wr_lft` and `wr_rgt` — each folding a write to the
+pre-move cell, a head move, and an MF latch into one instruction. They are
+optimizer-produced only (the fuse tape-ops pass at `-O1`); lowering and
+`-O0` never emit them, so the lowered and `-O0` IR carry the same op
+vocabulary as before.
+
 See `docs/formats.md (IR JSON)` for the JSON shape and version number.
 
 ## Grammar version history

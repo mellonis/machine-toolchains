@@ -11,7 +11,7 @@ use mtc_core::diagnostics::{Diagnostic, Span};
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::parser::{Builtin, CheckArm, Item, Program, Successor};
 
-pub const IR_VERSION: u32 = 3;
+pub const IR_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrProgram {
@@ -50,11 +50,38 @@ pub struct IrBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum IrOp {
-    Lft { line: u32 },
-    Rgt { line: u32 },
-    Wr { index: u32, line: u32 },
-    Brk { line: u32 },
-    Call { name: String, line: u32 },
+    Lft {
+        line: u32,
+    },
+    Rgt {
+        line: u32,
+    },
+    Wr {
+        index: u32,
+        line: u32,
+    },
+    /// Fused write-then-move-left: write `index` to the pre-move cell, step
+    /// the head left, and latch MF from the landed cell — all in one
+    /// instruction. Produced only by the fuse-tape-ops `-O1` pass; lowering
+    /// and `-O0` never emit it.
+    WrLft {
+        index: u32,
+        line: u32,
+    },
+    /// Fused write-then-move-right: the right-moving twin of `WrLft` — write
+    /// `index` to the pre-move cell, step the head right, latch MF from the
+    /// landed cell. Produced only by the fuse-tape-ops `-O1` pass.
+    WrRgt {
+        index: u32,
+        line: u32,
+    },
+    Brk {
+        line: u32,
+    },
+    Call {
+        name: String,
+        line: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +133,8 @@ impl IrFunction {
                     IrOp::Lft { .. } => "lft".into(),
                     IrOp::Rgt { .. } => "rgt".into(),
                     IrOp::Wr { index, .. } => format!("wr {index}"),
+                    IrOp::WrLft { index, .. } => format!("wrl {index}"),
+                    IrOp::WrRgt { index, .. } => format!("wrr {index}"),
                     IrOp::Brk { .. } => "brk".into(),
                     IrOp::Call { name, .. } => format!("call @{name}"),
                 });
@@ -582,7 +611,45 @@ mod tests {
         let (ir, _) = ir_of("main() { @go(); check(1, !); 1: mark(!); }");
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 3"));
+        assert!(json.contains("\"version\": 4"));
+    }
+
+    /// Fused IR ops encode into the JSON artifact and codegen emits the
+    /// fused mnemonics.
+    #[test]
+    fn fused_ops_encode_and_emit() {
+        let ir = IrProgram {
+            version: IR_VERSION,
+            functions: vec![IrFunction {
+                name: "f".into(),
+                line: 1,
+                blocks: vec![IrBlock {
+                    id: 0,
+                    labels: vec![],
+                    line: 1,
+                    ops: vec![
+                        IrOp::WrLft { index: 1, line: 1 },
+                        IrOp::WrRgt { index: 0, line: 2 },
+                    ],
+                    term: IrTerm::Return,
+                    term_line: 2,
+                }],
+                local: false,
+            }],
+        };
+
+        // IR JSON round-trips with the derived `wr_lft` / `wr_rgt` op tags.
+        let json = ir.to_json();
+        assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
+        assert!(json.contains("\"wr_lft\""), "{json}");
+        assert!(json.contains("\"wr_rgt\""), "{json}");
+
+        // Codegen emits the fused mnemonics (flatten the grid formatter's
+        // column padding so the mnemonic sits next to its operand).
+        let out = crate::codegen::emit_program(&ir, crate::codegen::CodegenOptions::default());
+        let flattened = out.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(flattened.contains("wrl 1"), "{}", out.text);
+        assert!(flattened.contains("wrr 0"), "{}", out.text);
     }
 
     #[test]

@@ -333,11 +333,11 @@ plain `dis`/`run`, but an unparsable *explicit* `--map` is an error).
 ## IR JSON
 
 `pmt compile --emit-ir` (`docs/language.md (the IR artifact)`) writes a
-versioned JSON document: `IR_VERSION = 3`.
+versioned JSON document: `IR_VERSION = 4`.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "functions": [
     {
       "name": "goToEnd",
@@ -359,7 +359,11 @@ versioned JSON document: `IR_VERSION = 3`.
 ```
 
 Per-op tags (`op` field, snake_case): `lft`, `rgt`, `wr` (carries `index`),
-`brk`, `call` (carries `name`) — each also carries its source `line`.
+`wr_lft` and `wr_rgt` (each carries `index`), `brk`, `call` (carries
+`name`) — each also carries its source `line`. `wr_lft` / `wr_rgt` are the
+fused write+move ops: a write to the pre-move cell, a head move, and an MF
+latch in one instruction. They are optimizer-produced only (the fuse
+tape-ops pass at `-O1`); lowering and `-O0` never emit them.
 Per-terminator tags (`kind` field, snake_case): `fall_through` (`to`),
 `goto` (`to`), `check` (`marked`, `blank`), `return`, `halt`, and
 `tail_call` (`name`) — the last is optimizer-produced only (never emitted

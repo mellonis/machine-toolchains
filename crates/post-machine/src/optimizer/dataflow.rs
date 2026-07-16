@@ -45,8 +45,13 @@ impl Fact {
 
 pub fn transfer_op(fact: Fact, op: &IrOp) -> Fact {
     match op {
-        // Moves couple MF to the (unknown) destination cell.
-        IrOp::Lft { .. } | IrOp::Rgt { .. } => Fact::Coupled(None),
+        // Moves — bare, or the tail of a fused write+move — couple MF to
+        // the (unknown) destination cell; a fused op's pre-move write is
+        // not the cell under the new head, so its post-op fact is identical
+        // to a bare move's.
+        IrOp::Lft { .. } | IrOp::Rgt { .. } | IrOp::WrLft { .. } | IrOp::WrRgt { .. } => {
+            Fact::Coupled(None)
+        }
         IrOp::Wr { index, .. } => Fact::Coupled(Some(*index)),
         // Opaque: callee clobbers head/cells, but preserves coupledness
         // (see module docs) — value knowledge only is lost.

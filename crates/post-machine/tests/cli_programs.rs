@@ -104,7 +104,7 @@ fn emit_ir_stage_last_wins_and_validates() {
     ]))
     .unwrap();
     let ir = fs::read_to_string(dir.join("hello.ir.json")).unwrap();
-    assert!(ir.contains("\"version\": 3"));
+    assert!(ir.contains("\"version\": 4"));
     let err = execute(&args(&[
         "compile",
         src.to_str().unwrap(),
@@ -161,7 +161,7 @@ fn bare_emit_ir_before_the_positional_does_not_eat_it() {
     assert_eq!(out.code, 0);
     assert!(dir.join("hello.pmo").exists());
     let ir = fs::read_to_string(dir.join("hello.ir.json")).unwrap();
-    assert!(ir.contains("\"version\": 3"));
+    assert!(ir.contains("\"version\": 4"));
 }
 
 #[test]
