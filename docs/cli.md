@@ -329,16 +329,53 @@ byte for byte, not to round-trip it.
 
 ```
 USAGE: pmt tape build " * * *" [--head N] [-o OUT.pmt]
+       pmt tape new --from APP.pmx [-o OUT.pmt]
+       pmt tape set IN.pmt (-o OUT.pmt | --in-place)
+                    [--tape N] [--cells PATTERN] [--origin N] [--head N]
        pmt tape show FILE.pmt
 
 build: cell characters are the PM-1 glyphs (space = blank, * = mark);
-the leftmost character is cell 0. show: renders any .pmt with its own
-alphabet.
+the leftmost character is cell 0. new: a blank template sized to the
+executable's tape count. set: clone IN.pmt, applying edits to tape N
+(default 0). show: renders any .pmt with its own alphabet.
 ```
 
-`build` writes with PM-1's default glyphs (`docs/formats.md`); `show`
-renders any `.pmt` using its own embedded alphabet, so it works for
-tapes built with a different glyph set.
+`build` writes a fresh snapshot from a glyph pattern using PM-1's default
+glyphs (`docs/formats.md`); `show` renders any `.pmt` using its own
+embedded alphabet, so it works for tapes built with a different glyph set.
+`new` and `set` author snapshots without hand-editing bytes: `new` mints a
+blank template shaped to a specific program, and `set` edits an existing
+snapshot in place or as a copy.
+
+**`tape new --from APP.pmx`:** writes a blank snapshot sized to the
+executable's tape count — one empty band per tape the image expects (v1
+images have exactly one), origin and head at 0, using PM-1's default
+glyphs. `--from` must be a `.pmx` image (magic-sniffed, `docs/formats.md`);
+anything else is an error. `-o` names the output (default `blank.pmt`).
+The result is the same shape `build` writes, minus the cells — a ready
+template to fill in with `set`.
+
+**`tape set IN.pmt`:** clone semantics. It reads `IN.pmt`, applies the
+requested edits to one band, and writes the result out; the source file is
+never modified unless you ask for it. Exactly one output destination is
+required — `-o OUT.pmt` writes a new file, `--in-place` writes back over
+`IN.pmt` — and the two are mutually exclusive. Supplying neither is an
+error: refusing the ambiguous case is what keeps `set` from silently
+clobbering the input. Any subset of the edit flags may be given; with none,
+`set` is a plain copy.
+
+Edits target the band selected by `--tape N` (default `0`); an index past
+the block's tape count is an error naming how many bands it has. `--origin`
+and `--head` take an `i64`, negatives included, and replace that band's
+origin and head. `--cells PATTERN` replaces the band's cells: each
+character of the pattern is resolved through *that band's effective
+alphabet* — its own embedded glyph table if it has one, otherwise the
+block's — mapping glyph to cell index, leftmost character as cell 0. This
+is the key difference from `build`, whose pattern is always the fixed
+space/`*` PM-1 glyphs: `set --cells` speaks whatever alphabet the target
+tape carries. A character not in that alphabet is an error listing the
+alphabet it was checked against. Only the flags you pass change; every
+other band and every unspecified field is copied through untouched.
 
 ## `pmt run`
 

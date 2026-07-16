@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Rust toolchain for a Post machine: C-like `.pmc` language → optimizing compiler → assembler → linker → bus-accurate VM, all driven by one CLI (`pmt`). GPL-3.0-or-later. It completes work spread across four Delphi implementations (2002–2012); `docs/history.md` has the lineage. A future Turing toolchain (`tmt`, arch TM-1) is expected to reuse the arch-agnostic core — `docs/examples/brainfuck-utm.tma` is a speculative TM-1 assembly file validating that design, not runnable code.
 
-**Current state: v0.2.0 released 2026-07-12** (crates 0.2.0, `.pmc` language 0.3 with doc/attention lines + LSP hover, PM-1 `.pma` dialect 0.2, full `.pma` lint/fmt/LSP parity, both editor plugins at 0.1.2 attached to the GH release; ~1,050 tests). Roadmap (triaged on closed issue #2): next design round = #16 project manifest (+#11 `pmt build`), then #5 DAP; big arcs #8 tmt → #6 wasm → #7 async bus; small open: #22, #24; upstream watch: redhat-developer/lsp4ij#1612 (Cmd+hover underline).
+**Current state: v0.2.0 released 2026-07-12** (crates 0.2.0, `.pmc` language 0.3 with doc/attention lines + LSP hover, PM-1 `.pma` dialect 0.3, full `.pma` lint/fmt/LSP parity, both editor plugins at 0.1.2 attached to the GH release; ~1,050 tests). Roadmap (triaged on closed issue #2): next design round = #16 project manifest (+#11 `pmt build`), then #5 DAP; big arcs #8 tmt → #6 wasm → #7 async bus; small open: #22, #24; upstream watch: redhat-developer/lsp4ij#1612 (Cmd+hover underline).
 
 ## Commands
 
@@ -64,7 +64,7 @@ An architecture plugs into core through two tables, both living in the arch crat
 
 ### Optimizer (`post-machine/src/optimizer/`)
 
-Eight passes, fixpoint-looped with a round cap: `inline` (program-level, runs first) then per-function `check_fold`, `jump_threading`, `cell_state`, `branch_fold`, `tail_call`, `tail_merge`, `dce`. Constraints that are contracts, not preferences:
+Nine passes, fixpoint-looped with a round cap: `inline` (program-level, runs first) then per-function `check_fold`, `jump_threading`, `cell_state`, `branch_fold`, `tail_call`, `tail_merge`, `dce`, `fuse_tape_ops`. Constraints that are contracts, not preferences:
 
 - **Pass order**: `tail_call` must run before `tail_merge` (return-chaining destroys tail-call's precondition). Stated in `optimizer/mod.rs`.
 - **MF-coupling soundness** (`optimizer/dataflow.rs`): after ≥1 tape op the match flag equals the cell at head; before any tape op it is the decoupled reset value. The `Uncoupled | Coupled(_)` lattice tracks this; check-edge refinement applies only on provably coupled paths.
