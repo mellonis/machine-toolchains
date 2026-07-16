@@ -7,6 +7,8 @@ pub(crate) mod io;
 /// Architecture ids carried in `MO`/`MX` headers. The formats layer
 /// stores them verbatim; only the VM's arch registry judges them.
 pub const ARCH_PM1: u8 = 0x01;
+/// TM-1, the multi-tape Turing architecture.
+pub const ARCH_TM1: u8 = 0x02;
 
 pub mod executable;
 pub mod object;

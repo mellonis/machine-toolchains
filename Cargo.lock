@@ -124,6 +124,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtc-turing-machine"
+version = "0.2.0"
+dependencies = [
+ "mtc-core",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"

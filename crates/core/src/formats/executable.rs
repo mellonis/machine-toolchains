@@ -185,7 +185,7 @@ impl Executable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::{ARCH_PM1, FormatError};
+    use crate::formats::{ARCH_PM1, ARCH_TM1, FormatError};
 
     fn sample() -> Executable {
         Executable::code_only(ARCH_PM1, 0, vec![0x0D, 0x05, 0x02]) // ent, rgt, stp
@@ -285,7 +285,7 @@ mod tests {
 
     fn sample_v2() -> Executable {
         Executable::sectioned(
-            0x02,             // arch (TM-1)
+            ARCH_TM1,         // arch (TM-1)
             0,                // entry
             vec![0x10, 0x02], // code (rd; stp — placeholder)
             vec![1, 1, 0, 5], // tables (a tiny match-table blob)
@@ -313,7 +313,7 @@ mod tests {
         let bytes = sample_v2().to_bytes();
         assert_eq!(&bytes[0..3], b"MX\x01");
         assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2); // version
-        assert_eq!(bytes[5], 0x02); // arch (TM-1)
+        assert_eq!(bytes[5], ARCH_TM1); // arch (TM-1)
         assert_eq!(bytes[6], 0); // flags
         // [7..11] crc
         assert_eq!(bytes[11], 2); // tape_count
