@@ -7,6 +7,7 @@ pub mod debug;
 pub mod devices;
 pub mod driver;
 pub mod machine;
+pub(crate) mod table;
 pub mod trap;
 
 pub use arch::{Arch, MicroOp, Operand, OperandKind, encode_operand};
