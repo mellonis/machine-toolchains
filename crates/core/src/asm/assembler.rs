@@ -163,6 +163,11 @@ pub fn assemble(
         object.table_blobs = Some(table_blobs);
         object.table_fixups = table_fixups;
     }
+    // `.routine` signatures ride the same v3 gate (docs/formats.md
+    // (MO)): lowering guarantees they parallel the functions — and so
+    // the blobs — when present; absent, the object keeps its v2 shape
+    // byte-for-byte.
+    object.signatures = lowered.signatures;
     Ok(object)
 }
 
@@ -1414,5 +1419,148 @@ D0: .targets MISSING
         assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
         let e = asm_fake(".func main\n        vmove\n").unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
+    }
+
+    // -- `.routine` signature directive ---------------------------------
+
+    use crate::formats::object::RoutineSig;
+
+    #[test]
+    fn routine_directive_populates_signatures() {
+        let obj = asm_fake(".routine main, tapes=2, alpha=(3, 5)\n.func main\n    stp\n").unwrap();
+        assert_eq!(
+            obj.signatures,
+            Some(vec![RoutineSig {
+                arity: 2,
+                cardinalities: vec![3, 5],
+            }])
+        );
+        // The signature is v3 data: the object leaves the v2 shape and
+        // round-trips through the container's FLAG_HAS_SIGNATURES path.
+        assert!(!obj.is_v2_shape());
+        let bytes = obj.to_bytes();
+        assert_eq!(
+            crate::formats::object::ObjectFile::from_bytes(&bytes).unwrap(),
+            obj
+        );
+    }
+
+    #[test]
+    fn routine_signatures_parallel_the_named_funcs_blob() {
+        // Signatures declared in the OPPOSITE order of the `.func`s:
+        // each lands at ITS function's blob index, not declaration order.
+        let src = "\
+.routine helper, tapes=1, alpha=(2)
+.routine main, tapes=2, alpha=(3, 5)
+.func main
+    stp
+.func helper
+    stp
+";
+        let obj = asm_fake(src).unwrap();
+        assert_eq!(
+            obj.signatures,
+            Some(vec![
+                RoutineSig {
+                    arity: 2,
+                    cardinalities: vec![3, 5],
+                },
+                RoutineSig {
+                    arity: 1,
+                    cardinalities: vec![2],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn duplicate_routine_for_one_function_is_bad_signature() {
+        let src = "\
+.routine main, tapes=1, alpha=(2)
+.routine main, tapes=1, alpha=(2)
+.func main
+    stp
+";
+        let e = asm_fake(src).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        assert_eq!(e.span, Span::new(2, 10, 2, 14)); // the second `main`
+    }
+
+    #[test]
+    fn routine_that_precedes_no_func_is_bad_signature() {
+        // Never defined at all…
+        let e = asm_fake(".routine ghost, tapes=1, alpha=(2)\n.func main\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        assert_eq!(e.span, Span::new(1, 10, 1, 15)); // `ghost`
+        // …and defined only BEFORE the directive: the must-precede rule.
+        let e = asm_fake(".func main\n    stp\n.routine main, tapes=1, alpha=(2)\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        assert_eq!(e.span, Span::new(3, 10, 3, 14));
+    }
+
+    #[test]
+    fn routine_arity_outside_1_to_16_is_bad_signature() {
+        let e = asm_fake(".routine main, tapes=0, alpha=(1)\n.func main\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        assert_eq!(e.span, Span::new(1, 22, 1, 23)); // the `0`
+        let e = asm_fake(".routine main, tapes=17, alpha=(1)\n.func main\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        // The bound itself is fine: 16 tapes assemble.
+        let src = format!(
+            ".routine main, tapes=16, alpha=({})\n.func main\n    stp\n",
+            vec!["2"; 16].join(", ")
+        );
+        assert!(asm_fake(&src).is_ok());
+    }
+
+    #[test]
+    fn routine_zero_cardinality_is_bad_signature() {
+        let e =
+            asm_fake(".routine main, tapes=2, alpha=(3, 0)\n.func main\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        assert_eq!(e.span, Span::new(1, 31, 1, 37)); // the `(3, 0)` group
+    }
+
+    #[test]
+    fn routine_alpha_length_must_equal_tapes() {
+        let e = asm_fake(".routine main, tapes=2, alpha=(3)\n.func main\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        assert_eq!(e.span, Span::new(1, 31, 1, 34)); // the `(3)` group
+    }
+
+    #[test]
+    fn signatures_are_all_or_none_per_file() {
+        // The MO signature section is parallel to the blobs, so a file
+        // that signs any function must sign every function.
+        let src = "\
+.routine main, tapes=1, alpha=(2)
+.func main
+    stp
+.func helper
+    stp
+";
+        let e = asm_fake(src).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSignature(_)), "{e}");
+        assert_eq!(e.span, Span::new(4, 7, 4, 13)); // `helper`, the unsigned one
+    }
+
+    #[test]
+    fn malformed_routine_line_reports_a_precise_syntax_error() {
+        for src in [
+            ".routine main\n",                          // fields missing
+            ".routine main, tapes=2\n",                 // alpha missing
+            ".routine main, tapes=02, alpha=(3, 5)\n",  // non-canonical number
+            ".routine main, tapes=2, alpha=()\n",       // empty alpha list
+            ".routine main, tapes=2, alpha=(3, 5) x\n", // junk after the list
+        ] {
+            let e = asm_fake(src).unwrap_err();
+            assert!(matches!(e.kind, AsmErrorKind::Syntax(_)), "{src:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn routine_in_tables_section_rejected() {
+        let e = asm_fake(".section tables\n.routine main, tapes=1, alpha=(2)\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadTable(_)), "{e}");
     }
 }

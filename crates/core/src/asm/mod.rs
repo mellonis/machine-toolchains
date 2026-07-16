@@ -70,6 +70,13 @@ pub enum AsmErrorKind {
     /// table, a dispatch target defined in no function, or dispatch
     /// targets that do not all live in the one owning function.
     UnknownTableLabel(String),
+    /// A `.routine` signature problem: a duplicate directive for one
+    /// function, a directive preceding no `.func` of its name, tapes
+    /// outside 1..=16, a zero alphabet cardinality, an alpha list whose
+    /// length differs from tapes, or a function left unsigned in a file
+    /// that signs any (the MO signature section is parallel to the
+    /// blobs — all or none). The carried string is the full message.
+    BadSignature(String),
 }
 
 impl AsmErrorKind {
@@ -94,6 +101,7 @@ impl AsmErrorKind {
             AsmErrorKind::BadTable(_) => "bad-table",
             AsmErrorKind::TableDiscipline(_) => "table-discipline",
             AsmErrorKind::UnknownTableLabel(_) => "unknown-table-label",
+            AsmErrorKind::BadSignature(_) => "bad-signature",
         }
     }
 }
@@ -123,6 +131,9 @@ impl std::fmt::Display for AsmErrorKind {
             AsmErrorKind::BadRept => write!(f, "empty `.rept` range (lo > hi)"),
             AsmErrorKind::BadSubstitution(m) => write!(f, "invalid substitution: {m}"),
             AsmErrorKind::UnknownTableLabel(l) => write!(f, "unknown table label `{l}`"),
+            // Signature messages are composed in full at the raise site
+            // (they usually name the function).
+            AsmErrorKind::BadSignature(m) => write!(f, "{m}"),
         }
     }
 }
@@ -197,8 +208,9 @@ mod tests {
             AsmErrorKind::BadTable("x"),
             AsmErrorKind::TableDiscipline("x"),
             AsmErrorKind::UnknownTableLabel("x".into()),
+            AsmErrorKind::BadSignature("x".into()),
         ];
-        assert_eq!(kinds.len(), 16);
+        assert_eq!(kinds.len(), 17);
         let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
     }

@@ -5,12 +5,13 @@
 
 use super::cst::{
     AsmCst, AsmItem, AsmItemKind, FuncCst, InstrCst, LabelCst, LineCst, OperandToken, ReptCst,
-    SectionCst, TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with,
+    RoutineDirectiveCst, SectionCst, TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with,
 };
 use super::subst::substitute;
 use super::syntax::ArchSyntax;
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
+use crate::formats::object::RoutineSig;
 use crate::vm::OperandKind;
 
 /// A name paired with the source span it occupies.
@@ -30,11 +31,9 @@ pub struct SpannedName {
 #[derive(Debug)]
 pub struct SourceFunction {
     pub name: String,
-    /// Pinned by this module's interface. Every function-name diagnostic
-    /// (`bad function name`, `duplicate function`) is raised here at
-    /// lowering from the CST, so the assembler reads only `name`; the
-    /// stored span has no downstream consumer this task.
-    #[allow(dead_code)]
+    /// The `.func` name's own span — what the all-or-none signature
+    /// diagnostic points at when this function is left unsigned in a
+    /// file that signs any.
     pub name_span: Span,
     pub local: bool,
     pub items: Vec<SourceItem>,
@@ -122,12 +121,18 @@ impl SourceTable {
 }
 
 /// Everything one lowered source file carries: the functions (code
-/// section) and the tables (`.section tables`). Cap-off dialects never
-/// produce tables — the CST never shapes the directives.
+/// section), the tables (`.section tables`), and the `.routine`
+/// signatures. Cap-off dialects never produce tables or signatures —
+/// the CST never shapes the directives.
 #[derive(Debug)]
 pub struct LoweredSource {
     pub functions: Vec<SourceFunction>,
     pub tables: Vec<SourceTable>,
+    /// Per-function signatures, parallel to `functions` when present.
+    /// `Some` iff the file declares any `.routine` — and then every
+    /// function carries one (all or none: the MO signature section is
+    /// parallel to the blobs, docs/formats.md (MO)).
+    pub signatures: Option<Vec<RoutineSig>>,
 }
 
 /// Which source section the lowering cursor is in. The default is code,
@@ -201,6 +206,13 @@ struct LowerCtx {
     /// items legal in the tables section, so nothing else can intervene
     /// (comments are trivia and do not close a run).
     run_open: bool,
+    /// `.routine` declarations not yet matched by their `.func`, in
+    /// source order. A directive attaches when its function is defined
+    /// (the must-precede rule); one still pending at end of input
+    /// precedes no `.func` of its name — an error.
+    pending_sigs: Vec<(SpannedName, RoutineSig)>,
+    /// Per-function signature slots, parallel to `functions`.
+    func_sigs: Vec<Option<RoutineSig>>,
 }
 
 pub(crate) fn lower_source(
@@ -214,6 +226,8 @@ pub(crate) fn lower_source(
         section: Section::Code,
         tables: Vec::new(),
         run_open: false,
+        pending_sigs: Vec::new(),
+        func_sigs: Vec::new(),
     };
 
     for item in &cst.items {
@@ -227,9 +241,45 @@ pub(crate) fn lower_source(
             AsmErrorKind::Syntax("label at end of function"),
         ));
     }
+    // A `.routine` still pending precedes no `.func` of its name —
+    // either the function does not exist or it was defined BEFORE the
+    // directive (the must-precede rule).
+    if let Some((name, _)) = ctx.pending_sigs.first() {
+        return Err(err(
+            name.span,
+            AsmErrorKind::BadSignature(format!(
+                "`.routine` precedes no `.func` named `{}`",
+                name.name
+            )),
+        ));
+    }
+    // All or none: the MO signature section parallels the blobs
+    // (docs/formats.md (MO)), so a file that signs any function must
+    // sign every function.
+    let signatures = if ctx.func_sigs.iter().any(Option::is_some) {
+        let mut sigs = Vec::with_capacity(ctx.func_sigs.len());
+        for (function, sig) in ctx.functions.iter().zip(ctx.func_sigs) {
+            match sig {
+                Some(sig) => sigs.push(sig),
+                None => {
+                    return Err(err(
+                        function.name_span,
+                        AsmErrorKind::BadSignature(format!(
+                            "function `{}` lacks a `.routine` signature",
+                            function.name
+                        )),
+                    ));
+                }
+            }
+        }
+        Some(sigs)
+    } else {
+        None
+    };
     Ok(LoweredSource {
         functions: ctx.functions,
         tables: ctx.tables,
+        signatures,
     })
 }
 
@@ -249,13 +299,93 @@ fn lower_item(
         AsmItemKind::Raw(raw) => return Err(err(raw.span, AsmErrorKind::RawLine)),
         AsmItemKind::Func(func) => lower_func(func, ctx)?,
         AsmItemKind::Line(line) => lower_line(line, syntax, ctx)?,
-        // Sections and table directives shape only under the opt-in caps;
-        // cap-off dialects (PM-1) never reach these arms.
+        // Sections, table directives, and `.routine` shape only under
+        // the opt-in caps; cap-off dialects (PM-1) never reach these arms.
         AsmItemKind::Section(s) => lower_section(s, ctx)?,
         AsmItemKind::TableDirective(d) => lower_table_directive(d, ctx)?,
         AsmItemKind::Rept(r) => lower_rept(r, syntax, source, ctx)?,
+        AsmItemKind::RoutineDirective(d) => lower_routine_directive(d, ctx)?,
     }
     Ok(())
+}
+
+/// `.routine <name>, tapes=<int>, alpha=(<int>, …)`: declares the named
+/// function's generic-routine signature (docs/formats.md (MO)). Rules:
+/// code section only; the directive must PRECEDE its `.func` in the
+/// same file, any distance — it attaches when the function is defined,
+/// and one still pending at end of input is reported there; one
+/// directive per function; tapes in 1..=16; the alpha list's length
+/// equals tapes; every cardinality at least 1.
+fn lower_routine_directive(d: &RoutineDirectiveCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    // A pending label cannot bind across a directive (same rule as the
+    // `.func` and `.section` boundaries).
+    if let Some(first) = ctx.pending.first() {
+        return Err(err(
+            first.span,
+            AsmErrorKind::Syntax("label at end of function"),
+        ));
+    }
+    if ctx.section == Section::Tables {
+        return Err(err(
+            d.span,
+            AsmErrorKind::BadTable("only table directives are allowed in the tables section"),
+        ));
+    }
+    if !(1..=16).contains(&d.tapes) {
+        return Err(err(
+            d.tapes_span,
+            AsmErrorKind::BadSignature("tapes must be 1..=16".to_string()),
+        ));
+    }
+    if d.alpha.len() != d.tapes as usize {
+        return Err(err(
+            d.alpha_span,
+            AsmErrorKind::BadSignature(format!(
+                "alpha lists {} cardinalities for tapes={}",
+                d.alpha.len(),
+                d.tapes
+            )),
+        ));
+    }
+    if d.alpha.contains(&0) {
+        return Err(err(
+            d.alpha_span,
+            AsmErrorKind::BadSignature("alphabet cardinalities are at least 1".to_string()),
+        ));
+    }
+    let already_pending = ctx.pending_sigs.iter().any(|(n, _)| n.name == d.name);
+    let already_attached = ctx
+        .functions
+        .iter()
+        .position(|f| f.name == d.name)
+        .is_some_and(|i| ctx.func_sigs[i].is_some());
+    if already_pending || already_attached {
+        return Err(err(
+            d.name_span,
+            AsmErrorKind::BadSignature(format!("duplicate `.routine` for `{}`", d.name)),
+        ));
+    }
+    ctx.pending_sigs.push((
+        SpannedName {
+            name: d.name.clone(),
+            span: d.name_span,
+        },
+        RoutineSig {
+            arity: d.tapes as u8,
+            cardinalities: d.alpha.clone(),
+        },
+    ));
+    Ok(())
+}
+
+/// Detaches the pending `.routine` signature for a function being
+/// defined, if one was declared. Called by BOTH `.func` lowering paths
+/// so the parallel `func_sigs` vector never falls out of step.
+fn take_pending_sig(ctx: &mut LowerCtx, name: &str) -> Option<RoutineSig> {
+    ctx.pending_sigs
+        .iter()
+        .position(|(n, _)| n.name == name)
+        .map(|i| ctx.pending_sigs.remove(i).1)
 }
 
 /// `.section NAME`: switches the section cursor and closes any open
@@ -552,6 +682,7 @@ fn body_item_span(item: &AsmItem) -> Option<Span> {
         AsmItemKind::Section(s) => Some(s.span),
         AsmItemKind::TableDirective(d) => Some(d.span),
         AsmItemKind::Rept(r) => Some(r.span),
+        AsmItemKind::RoutineDirective(d) => Some(d.span),
     }
 }
 
@@ -582,12 +713,14 @@ fn lower_func(func: &FuncCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
             AsmErrorKind::DuplicateFunction(func.name.clone()),
         ));
     }
+    let sig = take_pending_sig(ctx, &func.name);
     ctx.functions.push(SourceFunction {
         name: func.name.clone(),
         name_span: func.name_span,
         local: func.local,
         items: Vec::new(),
     });
+    ctx.func_sigs.push(sig);
     Ok(())
 }
 
@@ -641,6 +774,18 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
     // open-function check, matching the legacy `.func`-branch precedence.
     if instr.word == ".func" && line.labels.is_empty() {
         return lower_malformed_func(instr, ctx);
+    }
+
+    // A malformed `.routine` — the CST keeps it a Line when the
+    // directive is not structurally exact — gets a precise complaint
+    // instead of UnknownMnemonic. Only for dialects whose caps could
+    // shape one at all: with tables off the word is as unknown as any
+    // other, exactly as before the directive existed.
+    if instr.word == ".routine" && line.labels.is_empty() && syntax.caps.tables {
+        return Err(err(
+            instr.word_span,
+            AsmErrorKind::Syntax("`.routine` takes `<name>, tapes=<int>, alpha=(<int>, …)`"),
+        ));
     }
 
     // Outside any function an instruction is stray code — reported
@@ -729,12 +874,14 @@ fn lower_malformed_func(instr: &InstrCst, ctx: &mut LowerCtx) -> Result<(), AsmE
             AsmErrorKind::DuplicateFunction(name.to_string()),
         ));
     }
+    let sig = take_pending_sig(ctx, name);
     ctx.functions.push(SourceFunction {
         name: name.to_string(),
         name_span: word_span,
         local,
         items: Vec::new(),
     });
+    ctx.func_sigs.push(sig);
     Ok(())
 }
 

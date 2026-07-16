@@ -13,8 +13,8 @@
 //! 32 is the 1-based column 33 a `TrailingComment.col` would report.
 
 use super::cst::{
-    AsmItem, AsmItemKind, LabelCst, LineCst, OperandToken, ReptCst, SectionCst, TableDirectiveCst,
-    TableDirectiveKind, TrailingComment, parse_asm_cst_with,
+    AsmItem, AsmItemKind, LabelCst, LineCst, OperandToken, ReptCst, RoutineDirectiveCst,
+    SectionCst, TableDirectiveCst, TableDirectiveKind, TrailingComment, parse_asm_cst_with,
 };
 use super::syntax::AsmCaps;
 use super::{AsmError, AsmErrorKind};
@@ -104,6 +104,7 @@ pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> 
             AsmItemKind::Section(s) => print_section(&mut out, s),
             AsmItemKind::TableDirective(d) => print_table_directive(&mut out, d),
             AsmItemKind::Rept(r) => print_rept(&mut out, r, source),
+            AsmItemKind::RoutineDirective(r) => print_routine(&mut out, r),
         }
     }
     Ok(out)
@@ -217,6 +218,29 @@ fn print_fields(
         out.push_str(trimmed);
         out.push('\n');
     }
+}
+
+/// `.routine name, tapes=N, alpha=(c1, c2, …)` — a column-0 directive
+/// like `.func`, reconstructed from the parsed fields. The CST's
+/// structurally-exact gate admits only canonically spelled values, so
+/// the reconstruction changes no token's text; interior spacing
+/// normalizes to the `, ` convention (whitespace-only, per this
+/// printer's contract).
+fn print_routine(out: &mut String, r: &RoutineDirectiveCst) {
+    let alpha = r
+        .alpha
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut line = format!(".routine {}, tapes={}, alpha=({})", r.name, r.tapes, alpha);
+    let mut col = line.chars().count();
+    if let Some(tc) = &r.trailing {
+        pad_to(&mut line, &mut col, COMMENT_COL);
+        line.push_str(&tc.text);
+    }
+    out.push_str(line.trim_end());
+    out.push('\n');
 }
 
 /// `.section NAME` — a column-0 region marker, printed like `.func`
@@ -864,6 +888,25 @@ loop:   nop
         let once = format_asm_with(src, caps_all()).unwrap();
         let twice = format_asm_with(&once, caps_all()).unwrap();
         assert_eq!(twice, once, "not idempotent:\n{once}");
+    }
+
+    #[test]
+    fn routine_directive_normalizes_and_is_idempotent() {
+        // Tight interior spacing normalizes to the `, ` convention
+        // (whitespace-only — the structurally-exact gate admits only
+        // canonically spelled values, so no token text changes); the
+        // 36-char directive overflows COMMENT_COL, so the trailing
+        // comment gets the single overflow space.
+        let src = ".routine main,tapes=2,alpha=(3,5) ; sig\n";
+        let once = format_asm_with(src, caps_all()).unwrap();
+        assert_eq!(once, ".routine main, tapes=2, alpha=(3, 5) ; sig\n");
+        assert_eq!(format_asm_with(&once, caps_all()).unwrap(), once);
+    }
+
+    #[test]
+    fn routine_directive_already_canonical_is_verbatim() {
+        let src = ".routine main, tapes=2, alpha=(3, 5)\n.func main\n        stp\n";
+        assert_eq!(format_asm_with(src, caps_all()).unwrap(), src);
     }
 
     #[test]

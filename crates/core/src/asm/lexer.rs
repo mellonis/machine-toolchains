@@ -30,10 +30,12 @@ pub(crate) enum AsmTokenKind {
     LBrace,
     /// `}` (rept cap).
     RBrace,
-    /// `(` inside `{…}` (rept cap).
+    /// `(` (rept cap — any position; see [`caps_token`]).
     LParen,
-    /// `)` inside `{…}` (rept cap).
+    /// `)` (rept cap — any position; see [`caps_token`]).
     RParen,
+    /// `=` (tables cap; the `.routine` directive's `key=value` fields).
+    Eq,
     /// `*` inside `[…]` or `{…}` (vectors / rept caps).
     Star,
     /// `-` inside `[…]` or `{…}` (vectors / rept caps).
@@ -130,10 +132,15 @@ fn scan_number(chars: &[char], start: usize) -> (String, usize) {
 ///     vector markers `. < > - *` lex as `Dot`/`Lt`/`Gt`/`Dash`/`Star`.
 ///     Outside brackets nothing changes — `.func` still lexes as a Word.
 ///   * rept: `caps.rept` lets `{` open a brace depth and `}` close it;
-///     inside depth ≥ 1 the substitution operators `( ) + % - *` lex as
-///     `LParen`/`RParen`/`Plus`/`Percent`/`Dash`/`Star`.
+///     inside depth ≥ 1 the substitution operators `+ % - *` lex as
+///     `Plus`/`Percent`/`Dash`/`Star`. `(`/`)` lex as `LParen`/`RParen`
+///     at ANY position under the cap — they carry no meaning in the
+///     classic grammar, and the `.routine` directive's alpha list needs
+///     them outside any brace block.
+///   * tables: `caps.tables` lets `=` lex as `Eq` at any position (the
+///     `.routine` directive's `key=value` fields).
 ///
-/// With `AsmCaps::default()` (both off) every arm is dead and the caller
+/// With `AsmCaps::default()` (all off) every arm is dead and the caller
 /// falls through to the classic path, so the token stream is byte-identical.
 fn caps_token(
     c: char,
@@ -153,10 +160,11 @@ fn caps_token(
         '>' if in_vector => Some(AsmTokenKind::Gt),
         '-' if in_vector || in_rept => Some(AsmTokenKind::Dash),
         '*' if in_vector || in_rept => Some(AsmTokenKind::Star),
-        '(' if in_rept => Some(AsmTokenKind::LParen),
-        ')' if in_rept => Some(AsmTokenKind::RParen),
+        '(' if caps.rept => Some(AsmTokenKind::LParen),
+        ')' if caps.rept => Some(AsmTokenKind::RParen),
         '+' if in_rept => Some(AsmTokenKind::Plus),
         '%' if in_rept => Some(AsmTokenKind::Percent),
+        '=' if caps.tables => Some(AsmTokenKind::Eq),
         _ => None,
     }
 }
@@ -543,6 +551,7 @@ mod tests {
             | AsmTokenKind::Lt
             | AsmTokenKind::Gt
             | AsmTokenKind::Dot
+            | AsmTokenKind::Eq
             | AsmTokenKind::Junk(_) => 1,
         }
     }
@@ -595,5 +604,62 @@ mod tests {
         assert!(kinds.contains(&AsmTokenKind::Plus));
         assert!(kinds.contains(&AsmTokenKind::Percent));
         assert!(kinds.contains(&AsmTokenKind::RBrace));
+    }
+
+    #[test]
+    fn default_caps_keep_equals_junk() {
+        // Byte-compat pin for the `Eq` gate: with caps off, `=` lexes
+        // exactly as today — a Junk token, nothing else on the line
+        // disturbed.
+        let toks = lex_for_test("tapes=2", AsmCaps::default());
+        assert_eq!(
+            toks,
+            vec![
+                word("tapes", 1, 1, 5),
+                junk('=', 1, 6),
+                number("2", 1, 7, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn tables_cap_lexes_equals_as_eq() {
+        let caps = AsmCaps {
+            tables: true,
+            ..Default::default()
+        };
+        let toks = lex_for_test("tapes=2", caps);
+        assert_eq!(
+            toks,
+            vec![
+                word("tapes", 1, 1, 5),
+                AsmToken {
+                    kind: AsmTokenKind::Eq,
+                    line: 1,
+                    col: 6,
+                    len: 1,
+                },
+                number("2", 1, 7, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn rept_cap_lexes_parens_outside_braces() {
+        // `(`/`)` lex under the bare rept cap at ANY position — the
+        // `.routine` directive's alpha list carries them outside any
+        // `{…}` block. With the cap off they stay Junk (pinned below).
+        let caps = AsmCaps {
+            rept: true,
+            ..Default::default()
+        };
+        let kinds = kinds_for_test("alpha=(3,5)", caps);
+        assert!(kinds.contains(&AsmTokenKind::LParen));
+        assert!(kinds.contains(&AsmTokenKind::RParen));
+        assert!(kinds.contains(&AsmTokenKind::Junk('='))); // tables cap off
+
+        let off = kinds_for_test("alpha=(3,5)", AsmCaps::default());
+        assert!(off.contains(&AsmTokenKind::Junk('(')));
+        assert!(off.contains(&AsmTokenKind::Junk(')')));
     }
 }

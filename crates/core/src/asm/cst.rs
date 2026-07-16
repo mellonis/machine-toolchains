@@ -48,6 +48,15 @@ pub enum AsmItemKind {
     /// `.rept` degrades its header to a Line; a stray `.endr` shapes as a
     /// Line.
     Rept(ReptCst),
+    /// `.routine <name>, tapes=<int>, alpha=(<int>, …)` — a
+    /// generic-routine signature declaration (docs/formats.md (MO)),
+    /// shaped under [`AsmCaps::tables`] and only when structurally
+    /// exact; anything else starting `.routine` stays a Line (mirror
+    /// `.func`). Token gating in practice needs BOTH the tables and
+    /// rept caps: `=` lexes under tables, `(`/`)` under rept — with
+    /// either cap off some field character stays Junk and the line
+    /// shapes Raw.
+    RoutineDirective(RoutineDirectiveCst),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,6 +172,22 @@ pub struct ReptCst {
     pub trailing: Option<TrailingComment>,
     pub endr_span: Span,
     pub endr_trailing: Option<TrailingComment>,
+}
+
+/// `.routine <name>, tapes=<int>, alpha=(<int>, …)`. `span` covers the
+/// directive minus any trailing comment (mirror [`FuncCst`]); the field
+/// spans point at the tapes value and the whole `(..)` alpha group —
+/// the exact text lowering's signature diagnostics indicate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineDirectiveCst {
+    pub name: String,
+    pub name_span: Span,
+    pub tapes: u32,
+    pub tapes_span: Span,
+    pub alpha: Vec<u32>,
+    pub alpha_span: Span,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
 }
 
 /// Total: never fails. Uses the classic assembly grammar
@@ -429,6 +454,20 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
         });
     }
 
+    // `.routine <name>, tapes=<int>, alpha=(<int>, …)` (caps.tables):
+    // a no-label signature declaration, structurally exact only —
+    // anything else starting `.routine` stays a Line for lower to
+    // report precisely. In practice the directive needs the rept cap
+    // too: `=` lexes under caps.tables but `(`/`)` lex under caps.rept,
+    // so with rept off the parens stay Junk and the line shapes Raw
+    // before this branch is ever reached.
+    if caps.tables
+        && word_text(&body[0]) == Some(".routine")
+        && let Some(directive) = routine_directive(body, line_no, span, &trailing)
+    {
+        return AsmItemKind::RoutineDirective(directive);
+    }
+
     // Labels: leading repeated `Word Colon` pairs, regardless of the
     // word's grammar (`foo.bar:` / `std::x:` are label candidates —
     // lower.rs rejects bad names with a precise span).
@@ -516,6 +555,85 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
         span,
         trailing,
     })
+}
+
+/// Recognizes the exact `.routine` token shape after the leading word:
+///
+/// `Word(name) , Word(tapes) = Number , Word(alpha) = ( Number [, Number]* )`
+///
+/// Numbers must be canonically spelled u32s (no sign, no leading
+/// zeros): the printer reconstructs the directive from the PARSED
+/// values, and reprinting must not alter any token's text. `None` =
+/// not structurally exact; the caller degrades the line to a plain
+/// Line (mirror `.func`).
+fn routine_directive(
+    body: &[AsmToken],
+    line_no: u32,
+    span: Span,
+    trailing: &Option<TrailingComment>,
+) -> Option<RoutineDirectiveCst> {
+    let is = |t: &AsmToken, k: &AsmTokenKind| &t.kind == k;
+    let [
+        name_tok,
+        c1,
+        tapes_kw,
+        eq1,
+        tapes_tok,
+        c2,
+        alpha_kw,
+        eq2,
+        lparen,
+        rest @ ..,
+    ] = &body[1..]
+    else {
+        return None;
+    };
+    let name = word_text(name_tok)?;
+    if !is(c1, &AsmTokenKind::Comma)
+        || word_text(tapes_kw) != Some("tapes")
+        || !is(eq1, &AsmTokenKind::Eq)
+        || !is(c2, &AsmTokenKind::Comma)
+        || word_text(alpha_kw) != Some("alpha")
+        || !is(eq2, &AsmTokenKind::Eq)
+        || !is(lparen, &AsmTokenKind::LParen)
+    {
+        return None;
+    }
+    let (tapes, tapes_span) = canonical_u32(tapes_tok)?;
+    let [inner @ .., rparen] = rest else {
+        return None;
+    };
+    if !is(rparen, &AsmTokenKind::RParen) || inner.len().is_multiple_of(2) {
+        return None; // `()`, a trailing comma, or a doubled one
+    }
+    let mut alpha = Vec::with_capacity(inner.len() / 2 + 1);
+    for (i, tok) in inner.iter().enumerate() {
+        if i % 2 == 0 {
+            alpha.push(canonical_u32(tok)?.0);
+        } else if !is(tok, &AsmTokenKind::Comma) {
+            return None;
+        }
+    }
+    Some(RoutineDirectiveCst {
+        name: name.to_string(),
+        name_span: name_tok.span(),
+        tapes,
+        tapes_span,
+        alpha,
+        alpha_span: Span::new(line_no, lparen.col, line_no, rparen.col + rparen.len),
+        span,
+        trailing: trailing.clone(),
+    })
+}
+
+/// A `Number` token's value as a canonically spelled u32 — the spelling
+/// must equal the value's own rendering (rejects `-1`, `007`, overflow).
+fn canonical_u32(token: &AsmToken) -> Option<(u32, Span)> {
+    let AsmTokenKind::Number(text) = &token.kind else {
+        return None;
+    };
+    let value = text.parse::<u32>().ok()?;
+    (*text == value.to_string()).then(|| (value, token.span()))
 }
 
 /// The [`TableDirectiveKind`] a leading directive word names, or `None`
@@ -1105,6 +1223,52 @@ L1:     rgt
         let cst = parse_asm_cst_with(".endr\n", caps_all());
         assert!(matches!(&cst.items[0].kind, AsmItemKind::Line(l)
             if l.instr.as_ref().unwrap().word == ".endr"));
+    }
+
+    #[test]
+    fn shapes_routine_directive_with_field_spans() {
+        let src = ".routine main, tapes=2, alpha=(3, 5) ; sig\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let AsmItemKind::RoutineDirective(r) = &cst.items[0].kind else {
+            panic!("not a routine directive: {:?}", cst.items[0].kind)
+        };
+        assert_eq!(r.name, "main");
+        assert_eq!(r.name_span, Span::new(1, 10, 1, 14));
+        assert_eq!(r.tapes, 2);
+        assert_eq!(r.tapes_span, Span::new(1, 22, 1, 23));
+        assert_eq!(r.alpha, vec![3, 5]);
+        assert_eq!(r.alpha_span, Span::new(1, 31, 1, 37));
+        assert_eq!(r.span, Span::new(1, 1, 1, 37)); // excludes the comment
+        assert_eq!(trailing_text(&r.trailing), Some("; sig"));
+    }
+
+    #[test]
+    fn malformed_routine_directives_stay_lines() {
+        for src in [
+            ".routine main",                         // fields missing
+            ".routine main, tapes=2",                // alpha missing
+            ".routine main, tapes=x, alpha=(1)",     // not a number
+            ".routine main, tapes=02, alpha=(1, 1)", // non-canonical spelling
+            ".routine main, tapes=2, alpha=(1,)",    // trailing comma
+            ".routine main, tapes=2, alpha=()",      // empty list
+            ".routine main, tapes=2, alpha=(1) x",   // junk after the list
+        ] {
+            let cst = parse_asm_cst_with(src, caps_all());
+            assert!(
+                matches!(&cst.items[0].kind, AsmItemKind::Line(l)
+                    if l.instr.as_ref().unwrap().word == ".routine"),
+                "{src:?} must degrade to a Line: {:?}",
+                cst.items[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn default_caps_never_shape_routine() {
+        // Byte-compat: with caps off `=` (and the parens) stay Junk, so
+        // the line is Raw — exactly as before the directive existed.
+        let cst = parse_asm_cst(".routine main, tapes=2, alpha=(3, 5)\n");
+        assert!(matches!(&cst.items[0].kind, AsmItemKind::Raw(_)));
     }
 
     #[test]
