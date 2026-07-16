@@ -525,9 +525,9 @@ X:      stop
         let syntax = syntax_with_short_call();
         // Blob is all nops — the reloc's hole at offset 2 sits inside plain
         // instructions and no call opcode precedes it.
-        let obj = ObjectFile {
-            arch: 0x7E,
-            symbols: vec![
+        let obj = ObjectFile::v2(
+            0x7E,
+            vec![
                 Symbol {
                     name: "main".into(),
                     def: SymbolDef::Defined { blob: 0 },
@@ -537,14 +537,14 @@ X:      stop
                     def: SymbolDef::External,
                 },
             ],
-            blobs: vec![vec![0x0E, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02]],
-            relocations: vec![Relocation {
+            vec![vec![0x0E, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02]],
+            vec![Relocation {
                 blob: 0,
                 offset: 2,
                 symbol: 1,
             }],
-            debug: None,
-        };
+            None,
+        );
         // `go` must resolve so we reach layout: provide it via a library.
         let lib = {
             let s = ".func go\n        ret\n";
@@ -564,16 +564,16 @@ X:      stop
     fn blob_without_ent_prologue_is_malformed() {
         use crate::formats::object::{ObjectFile, Symbol, SymbolDef};
         let syntax = syntax_with_short_call();
-        let obj = ObjectFile {
-            arch: 0x7E,
-            symbols: vec![Symbol {
+        let obj = ObjectFile::v2(
+            0x7E,
+            vec![Symbol {
                 name: "main".into(),
                 def: SymbolDef::Defined { blob: 0 },
             }],
-            blobs: vec![vec![0x01, 0x02]], // nop, stop — no leading ent
-            relocations: vec![],
-            debug: None,
-        };
+            vec![vec![0x01, 0x02]], // nop, stop — no leading ent
+            vec![],
+            None,
+        );
         let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
         assert_eq!(
             e,
@@ -590,16 +590,16 @@ X:      stop
         let syntax = syntax_with_short_call();
         // [0E][30 FF][02]: jmp.s at 1 ends at 3, offset −1 → target 2 = the
         // middle of the jmp.s itself; boundaries are 0, 1, 3.
-        let obj = ObjectFile {
-            arch: 0x7E,
-            symbols: vec![Symbol {
+        let obj = ObjectFile::v2(
+            0x7E,
+            vec![Symbol {
                 name: "main".into(),
                 def: SymbolDef::Defined { blob: 0 },
             }],
-            blobs: vec![vec![0x0E, 0x30, 0xFF, 0x02]],
-            relocations: vec![],
-            debug: None,
-        };
+            vec![vec![0x0E, 0x30, 0xFF, 0x02]],
+            vec![],
+            None,
+        );
         let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
         assert_eq!(
             e,
@@ -616,19 +616,19 @@ X:      stop
         let syntax = syntax_with_short_call();
         // [0E][30 00][02]: a VALID jump (target 3 = the stop) so layout
         // succeeds — but the debug label at 2 points into the jmp.s.
-        let obj = ObjectFile {
-            arch: 0x7E,
-            symbols: vec![Symbol {
+        let obj = ObjectFile::v2(
+            0x7E,
+            vec![Symbol {
                 name: "main".into(),
                 def: SymbolDef::Defined { blob: 0 },
             }],
-            blobs: vec![vec![0x0E, 0x30, 0x00, 0x02]],
-            relocations: vec![],
-            debug: Some(vec![BlobDebug {
+            vec![vec![0x0E, 0x30, 0x00, 0x02]],
+            vec![],
+            Some(vec![BlobDebug {
                 labels: vec![("X".into(), 2)],
                 lines: vec![],
             }]),
-        };
+        );
         let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
         assert_eq!(
             e,
@@ -656,9 +656,9 @@ X:      stop
         use crate::formats::object::{ObjectFile, Relocation, Symbol, SymbolDef};
         let syntax = syntax_with_short_call();
         // [0E][22 xx][02]: br (Flow::Branch, RelI8) with a reloc hole at 2.
-        let obj = ObjectFile {
-            arch: 0x7E,
-            symbols: vec![
+        let obj = ObjectFile::v2(
+            0x7E,
+            vec![
                 Symbol {
                     name: "main".into(),
                     def: SymbolDef::Defined { blob: 0 },
@@ -668,14 +668,14 @@ X:      stop
                     def: SymbolDef::External,
                 },
             ],
-            blobs: vec![vec![0x0E, 0x22, 0x00, 0x02]],
-            relocations: vec![Relocation {
+            vec![vec![0x0E, 0x22, 0x00, 0x02]],
+            vec![Relocation {
                 blob: 0,
                 offset: 2,
                 symbol: 1,
             }],
-            debug: None,
-        };
+            None,
+        );
         let lib = assemble(&syntax, 0x7E, ".func g\n        ret\n", false).unwrap();
         let e = link(&syntax, &[obj], &[lib], LinkOptions::default()).unwrap_err();
         assert_eq!(

@@ -496,16 +496,16 @@ START:  nop
     fn unknown_byte_falls_back_to_byte_directive_and_round_trips() {
         let syntax = test_syntax();
         // Hand-build an object with an undecodable byte (0x55 not in table).
-        let obj = crate::formats::object::ObjectFile {
-            arch: 0x7E,
-            symbols: vec![crate::formats::object::Symbol {
+        let obj = crate::formats::object::ObjectFile::v2(
+            0x7E,
+            vec![crate::formats::object::Symbol {
                 name: "f".into(),
                 def: crate::formats::object::SymbolDef::Defined { blob: 0 },
             }],
-            blobs: vec![vec![0x0E, 0x55, 0x02]],
-            relocations: vec![],
-            debug: None,
-        };
+            vec![vec![0x0E, 0x55, 0x02]],
+            vec![],
+            None,
+        );
         let text = disassemble_object(&syntax, &obj);
         assert!(text.contains(".byte   85"));
         let back = assemble(&syntax, 0x7E, &text, false).unwrap();
@@ -659,17 +659,17 @@ START:  nop
     #[test]
     fn object_call_without_relocation_falls_back_to_bytes() {
         let syntax = test_syntax();
-        let obj = crate::formats::object::ObjectFile {
-            arch: 0x7E,
-            symbols: vec![crate::formats::object::Symbol {
+        let obj = crate::formats::object::ObjectFile::v2(
+            0x7E,
+            vec![crate::formats::object::Symbol {
                 name: "f".into(),
                 def: crate::formats::object::SymbolDef::Defined { blob: 0 },
             }],
             // ent, call with a PATCHED (non-hole) offset and NO reloc, stop
-            blobs: vec![vec![0x0E, 0x21, 0x02, 0x00, 0x00, 0x00, 0x02]],
-            relocations: vec![],
-            debug: None,
-        };
+            vec![vec![0x0E, 0x21, 0x02, 0x00, 0x00, 0x00, 0x02]],
+            vec![],
+            None,
+        );
         let text = disassemble_object(&syntax, &obj);
         assert!(
             text.contains(".byte   33"),

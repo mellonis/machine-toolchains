@@ -50,16 +50,16 @@ proptest! {
         offset_seed in any::<u32>(),
     ) {
         let offset = offset_seed % (blob.len() as u32 - 4);
-        let obj = ObjectFile {
-            arch: 1,
-            symbols: vec![
+        let obj = ObjectFile::v2(
+            1,
+            vec![
                 Symbol { name: name.clone(), def: SymbolDef::Defined { blob: 0 } },
                 Symbol { name: format!("{name}_ext"), def: SymbolDef::External },
             ],
-            blobs: vec![blob],
-            relocations: vec![Relocation { blob: 0, offset, symbol: 1 }],
-            debug: None,
-        };
+            vec![blob],
+            vec![Relocation { blob: 0, offset, symbol: 1 }],
+            None,
+        );
         let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
         prop_assert_eq!(back, obj);
     }

@@ -5,8 +5,14 @@ use super::crc32::{stamp_crc, verify_crc};
 use super::io::{Reader, put_u16, put_u32};
 
 pub const MAGIC_OBJECT: [u8; 3] = [b'M', b'O', 0x01];
-/// MO format version within epoch 0x01. v2 added symbol kind 2 (Local).
-pub const OBJECT_FORMAT_VERSION: u16 = 2;
+/// MO format version within epoch 0x01. v2 added symbol kind 2 (Local);
+/// it is what PM-1's compiler emits and what the v2-shape path serializes
+/// byte-for-byte.
+pub const OBJECT_FORMAT_VERSION_V2: u16 = 2;
+/// MO v3 adds generic-routine signatures, table blobs, table fixups, and
+/// declarative bound calls. Its serialization lands in a later task; the
+/// reader still gates on v2 until then.
+pub const OBJECT_FORMAT_VERSION_V3: u16 = 3;
 const CRC_OFFSET: usize = 7;
 const EXTERNAL_BLOB: u32 = 0xFFFF_FFFF;
 const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
@@ -26,6 +32,11 @@ const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
 ///   begin with their `ent` prologue;
 /// - `debug`, when present, parallels `blobs` one-to-one, with label and
 ///   line offsets on instruction boundaries.
+///
+/// The four v3 fields (`signatures`, `table_blobs`, `table_fixups`,
+/// `bound_calls`) are absent in a v2-shape object — the shape PM-1's
+/// compiler emits. Their serialization lands in a later task; today only
+/// v2-shape objects (see `is_v2_shape`) may be serialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectFile {
     pub arch: u8,
@@ -33,6 +44,18 @@ pub struct ObjectFile {
     pub blobs: Vec<Vec<u8>>,
     pub relocations: Vec<Relocation>,
     pub debug: Option<Vec<BlobDebug>>,
+    /// Per-blob generic-routine signature, parallel to `blobs` when present
+    /// (like `debug`). `None` for architectures without generic routines.
+    pub signatures: Option<Vec<RoutineSig>>,
+    /// Per-blob table blob (the mtc/djmp jump-table data), parallel to
+    /// `blobs` when present.
+    pub table_blobs: Option<Vec<Vec<u8>>>,
+    /// Operand holes referencing a blob's own table blob; rebased by the
+    /// linker into the final table section.
+    pub table_fixups: Vec<TableFixup>,
+    /// Declarative bound call sites (`call name [binding]`), the composition
+    /// engine's input.
+    pub bound_calls: Vec<BoundCall>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +91,54 @@ pub struct BlobDebug {
     pub lines: Vec<(u32, u32)>,
 }
 
+/// A generic routine's signature: its virtual tape arity and per-tape
+/// alphabet cardinality. Parallel to `blobs` when present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineSig {
+    pub arity: u8,               // 1..=16
+    pub cardinalities: Vec<u32>, // len == arity, each >= 1
+}
+
+/// An mtc/djmp operand hole: the u32 at `offset` inside `blob`'s code is
+/// an offset into that blob's OWN table blob; the linker rebases it into
+/// the final table section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableFixup {
+    pub blob: u32,
+    pub offset: u32,
+    pub table_offset: u32,
+}
+
+/// One caller-symbol → callee-symbol map entry. `one_way` = read-only
+/// (collapse allowed, excluded from write-back; the `=>` pairs of a tape
+/// binding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapPair {
+    pub src: u32,
+    pub dst: u32,
+    pub one_way: bool,
+}
+
+/// One virtual-tape binding at a call site: which caller tape feeds this
+/// callee tape, and the symbol map between their alphabets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TapeBinding {
+    pub caller_tape: u8, // < 16
+    pub pairs: Vec<MapPair>,
+}
+
+/// A declarative bound call site (`call name [binding]` in .tma): the
+/// composition engine's input. `offset` marks the call operand hole in
+/// `blob`, like a Relocation; `binding[k]` binds the callee's virtual
+/// tape k.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundCall {
+    pub blob: u32,
+    pub offset: u32,
+    pub symbol: u32,
+    pub binding: Vec<TapeBinding>,
+}
+
 /// Build-time string pool: dedups names, hands out u32 indices.
 struct StringPool {
     strings: Vec<String>,
@@ -90,7 +161,44 @@ impl StringPool {
 }
 
 impl ObjectFile {
+    /// Construct a v2-shape object: the four v3 fields absent
+    /// (`None`/`None`/empty/empty). This is what PM-1's compiler and the
+    /// assembler emit — `is_v2_shape` holds for the result.
+    pub fn v2(
+        arch: u8,
+        symbols: Vec<Symbol>,
+        blobs: Vec<Vec<u8>>,
+        relocations: Vec<Relocation>,
+        debug: Option<Vec<BlobDebug>>,
+    ) -> Self {
+        Self {
+            arch,
+            symbols,
+            blobs,
+            relocations,
+            debug,
+            signatures: None,
+            table_blobs: None,
+            table_fixups: Vec::new(),
+            bound_calls: Vec::new(),
+        }
+    }
+
+    /// True when no v3 data is present, so the object serializes byte-for-byte
+    /// as v2. Task-later v3 emit gates on the negation of this.
+    pub fn is_v2_shape(&self) -> bool {
+        self.signatures.is_none()
+            && self.table_blobs.is_none()
+            && self.table_fixups.is_empty()
+            && self.bound_calls.is_empty()
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
+        assert!(self.is_v2_shape(), "MO v3 emit lands in later tasks");
+        self.to_bytes_v2()
+    }
+
+    fn to_bytes_v2(&self) -> Vec<u8> {
         let mut pool = StringPool::new();
         let symbol_names: Vec<u32> = self.symbols.iter().map(|s| pool.intern(&s.name)).collect();
         let debug_label_names: Vec<Vec<u32>> = match &self.debug {
@@ -103,7 +211,7 @@ impl ObjectFile {
 
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC_OBJECT);
-        put_u16(&mut out, OBJECT_FORMAT_VERSION);
+        put_u16(&mut out, OBJECT_FORMAT_VERSION_V2);
         out.push(self.arch);
         out.push(if self.debug.is_some() {
             FLAG_HAS_DEBUG
@@ -203,7 +311,7 @@ impl ObjectFile {
 
         let mut r = Reader::new(&bytes[3..]);
         let version = r.u16()?;
-        if !(1..=OBJECT_FORMAT_VERSION).contains(&version) {
+        if !(1..=OBJECT_FORMAT_VERSION_V2).contains(&version) {
             return Err(FormatError::UnsupportedVersion(version));
         }
         let arch = r.u8()?;
@@ -323,6 +431,11 @@ impl ObjectFile {
             blobs,
             relocations,
             debug,
+            // v2-shape reader: v3 sections do not exist on the wire yet.
+            signatures: None,
+            table_blobs: None,
+            table_fixups: Vec::new(),
+            bound_calls: Vec::new(),
         })
     }
 }
@@ -333,9 +446,9 @@ mod tests {
     use crate::formats::{ARCH_PM1, FormatError};
 
     fn sample() -> ObjectFile {
-        ObjectFile {
-            arch: ARCH_PM1,
-            symbols: vec![
+        ObjectFile::v2(
+            ARCH_PM1,
+            vec![
                 Symbol {
                     name: "main".into(),
                     def: SymbolDef::Defined { blob: 0 },
@@ -346,14 +459,25 @@ mod tests {
                 },
             ],
             // ent, call <4-byte hole>, stp
-            blobs: vec![vec![0x0D, 0x0B, 0, 0, 0, 0, 0x02]],
-            relocations: vec![Relocation {
+            vec![vec![0x0D, 0x0B, 0, 0, 0, 0, 0x02]],
+            vec![Relocation {
                 blob: 0,
                 offset: 2,
                 symbol: 1,
             }],
-            debug: None,
-        }
+            None,
+        )
+    }
+
+    /// An object without v3 data serializes byte-for-byte as v2 — this
+    /// pins what PM-1's compiler emits.
+    #[test]
+    fn v2_shape_is_byte_identical_v2() {
+        let obj = sample(); // signatures/table_blobs None, fixups/bound_calls empty
+        let bytes = obj.to_bytes();
+        assert_eq!(&bytes[0..3], b"MO\x01");
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2);
+        assert_eq!(ObjectFile::from_bytes(&bytes).unwrap(), obj);
     }
 
     #[test]
@@ -377,9 +501,9 @@ mod tests {
         // Wire version field sits right after the 3-byte magic.
         assert_eq!(
             u16::from_le_bytes([bytes[3], bytes[4]]),
-            OBJECT_FORMAT_VERSION
+            OBJECT_FORMAT_VERSION_V2
         );
-        assert_eq!(OBJECT_FORMAT_VERSION, 2);
+        assert_eq!(OBJECT_FORMAT_VERSION_V2, 2);
         let back = ObjectFile::from_bytes(&bytes).unwrap();
         assert_eq!(back, obj);
     }
@@ -387,7 +511,7 @@ mod tests {
     #[test]
     fn version_1_bytes_are_still_accepted() {
         // Valid v2 bytes of an object WITHOUT locals, downgraded to v1: the
-        // reader must still accept it (1..=OBJECT_FORMAT_VERSION).
+        // reader must still accept it (1..=OBJECT_FORMAT_VERSION_V2).
         let mut bytes = sample().to_bytes();
         bytes[3..5].copy_from_slice(&1u16.to_le_bytes());
         crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);

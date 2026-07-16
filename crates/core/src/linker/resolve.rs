@@ -209,13 +209,7 @@ mod tests {
             blob.push(0x02);
             blobs.push(blob);
         }
-        ObjectFile {
-            arch,
-            symbols,
-            blobs,
-            relocations,
-            debug: None,
-        }
+        ObjectFile::v2(arch, symbols, blobs, relocations, None)
     }
 
     #[test]

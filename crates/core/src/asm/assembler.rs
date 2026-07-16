@@ -104,13 +104,7 @@ pub fn assemble(
         }
     }
 
-    Ok(ObjectFile {
-        arch: arch_id,
-        symbols,
-        blobs,
-        relocations,
-        debug,
-    })
+    Ok(ObjectFile::v2(arch_id, symbols, blobs, relocations, debug))
 }
 
 fn assemble_function(
