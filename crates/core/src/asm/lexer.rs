@@ -38,6 +38,11 @@ pub(crate) enum AsmTokenKind {
     Eq,
     /// `#` (tables cap; the `#N` immediate-operand prefix).
     Hash,
+    /// `->` (tables cap; a frame `.map` pair — a bidirectional map entry as
+    /// written). Two chars.
+    Arrow,
+    /// `=>` (tables cap; a frame `.map` pair marked one-way). Two chars.
+    FatArrow,
     /// `*` inside `[…]` or `{…}` (vectors / rept caps).
     Star,
     /// `-` inside `[…]` or `{…}` (vectors / rept caps).
@@ -194,6 +199,34 @@ pub(crate) fn lex_line(text: &str, line_no: u32, caps: AsmCaps) -> Vec<AsmToken>
         if c == ' ' || c == '\t' {
             pos += 1;
             col += 1;
+            continue;
+        }
+
+        // Two-char frame-map arrows (tables cap): `->` and `=>`. Checked
+        // before the single-char caps tokens so `=>` beats `=`(Eq) and
+        // `->` beats a negative-number/junk read. Not inside a vector
+        // bracket, where `-`/`>` are the move markers (`.map` pairs live in
+        // `(..)` parens, never `[..]`). Inert under `AsmCaps::default()`
+        // (the chars stay Junk, exactly as before frames existed).
+        if caps.tables
+            && bracket_depth == 0
+            && pos + 1 < n
+            && chars[pos + 1] == '>'
+            && (c == '-' || c == '=')
+        {
+            let kind = if c == '-' {
+                AsmTokenKind::Arrow
+            } else {
+                AsmTokenKind::FatArrow
+            };
+            tokens.push(AsmToken {
+                kind,
+                line: line_no,
+                col,
+                len: 2,
+            });
+            pos += 2;
+            col += 2;
             continue;
         }
 
@@ -558,6 +591,7 @@ mod tests {
             | AsmTokenKind::Eq
             | AsmTokenKind::Hash
             | AsmTokenKind::Junk(_) => 1,
+            AsmTokenKind::Arrow | AsmTokenKind::FatArrow => 2,
         }
     }
 
@@ -681,6 +715,60 @@ mod tests {
                 number("2", 1, 7, 1),
             ]
         );
+    }
+
+    #[test]
+    fn tables_cap_lexes_frame_map_arrows() {
+        // `->` and `=>` are two-char tokens under the tables cap — the frame
+        // `.map` pair grammar. `=>` must beat the single-char `=`(Eq).
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            ..Default::default()
+        };
+        let kinds = kinds_for_test("rmap=(2->1, 4=>0)", caps);
+        assert!(kinds.contains(&AsmTokenKind::Arrow), "{kinds:?}");
+        assert!(kinds.contains(&AsmTokenKind::FatArrow), "{kinds:?}");
+        // A bare `=` (no `>`) still lexes as Eq — `=>` is only the pair.
+        assert!(kinds.contains(&AsmTokenKind::Eq), "{kinds:?}");
+        // Exact span: in `rmap=(2->1)` the `->` sits at col 8, len 2 (after
+        // `rmap` `=` `(` `2`).
+        let toks = lex_for_test("rmap=(2->1)", caps);
+        assert_eq!(
+            toks[4],
+            AsmToken {
+                kind: AsmTokenKind::Arrow,
+                line: 1,
+                col: 8,
+                len: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn default_caps_keep_frame_arrows_junk() {
+        // Byte-compat pin: with the tables cap off, `->`/`=>` decompose into
+        // the same tokens as before frames existed (`-`/`=` never become
+        // arrows), so no pre-tables dialect sees them.
+        let kinds = kinds_for_test("2->1", AsmCaps::default());
+        assert!(kinds.contains(&AsmTokenKind::Junk('-')));
+        assert!(kinds.contains(&AsmTokenKind::Junk('>')));
+        assert!(!kinds.contains(&AsmTokenKind::Arrow));
+    }
+
+    #[test]
+    fn frame_arrows_do_not_disturb_move_vectors() {
+        // Inside a `[..]` move vector `-`/`>` stay the move markers even with
+        // the tables cap on — the arrow rule is bracket-depth gated.
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        let kinds = kinds_for_test("mov [-, >]", caps);
+        assert!(kinds.contains(&AsmTokenKind::Dash));
+        assert!(kinds.contains(&AsmTokenKind::Gt));
+        assert!(!kinds.contains(&AsmTokenKind::Arrow));
     }
 
     #[test]
