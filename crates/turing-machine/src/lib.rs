@@ -5,3 +5,6 @@
 //! shared match/dispatch table engine.
 
 pub mod arch;
+pub mod asm;
+
+pub use asm::{TM1_TMA_DIALECT_VERSION, tm1_syntax};
