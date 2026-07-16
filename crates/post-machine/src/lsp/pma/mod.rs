@@ -472,6 +472,12 @@ fn item_end_pos(item: &AsmItem, line: u32) -> Pos {
         AsmItemKind::Func(f) => f.span.end,
         AsmItemKind::Line(l) => l.span.end,
         AsmItemKind::Raw(r) => r.span.end,
+        // Opt-in caps nodes (sections, table directives, `.rept`): PM-1's
+        // caps are off, so `parse_asm_cst` never shapes these here, but
+        // each still carries a `span` whose end is its own end position.
+        AsmItemKind::Section(s) => s.span.end,
+        AsmItemKind::TableDirective(d) => d.span.end,
+        AsmItemKind::Rept(r) => r.span.end,
         AsmItemKind::Comment(c) => Pos {
             line,
             col: c.col + c.text.chars().count() as u32,

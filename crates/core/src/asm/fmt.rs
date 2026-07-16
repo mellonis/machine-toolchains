@@ -80,6 +80,29 @@ pub fn format_asm(source: &str) -> Result<String, AsmError> {
             }
             AsmItemKind::Line(l) => print_line(&mut out, l),
             AsmItemKind::Raw(_) => unreachable!("the structural gate above already refused"),
+            // Opt-in caps nodes: `format_asm` parses with
+            // `AsmCaps::default()`, so these never appear today. Task 5
+            // (the fmt round for the TM-1 assembly surface) implements
+            // their canonical grid printing; until then, refuse like a
+            // Raw line rather than emit nothing.
+            AsmItemKind::Section(s) => {
+                return Err(AsmError {
+                    span: s.span,
+                    kind: AsmErrorKind::RawLine,
+                });
+            }
+            AsmItemKind::TableDirective(d) => {
+                return Err(AsmError {
+                    span: d.span,
+                    kind: AsmErrorKind::RawLine,
+                });
+            }
+            AsmItemKind::Rept(r) => {
+                return Err(AsmError {
+                    span: r.span,
+                    kind: AsmErrorKind::RawLine,
+                });
+            }
         }
     }
     Ok(out)

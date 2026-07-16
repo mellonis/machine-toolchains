@@ -31,6 +31,23 @@ pub enum AsmItemKind {
     /// Not assembly-shaped (first token isn't a Word, or a Junk token
     /// is present). Lossless: the verbatim line text.
     Raw(RawCst),
+    /// `.section NAME` region marker — shaped only under
+    /// [`AsmCaps::tables`], and only when structurally exact (the
+    /// `.section` word plus one Word name); anything else starting
+    /// `.section` stays a Line, mirroring the `.func` degradation.
+    Section(SectionCst),
+    /// `.row [..]` / `.targets L1, ..` / `.target L` — shaped only under
+    /// [`AsmCaps::tables`]. A `.row` whose region is not a single
+    /// bracketed vector degrades to a Line (mirror `.func`).
+    TableDirective(TableDirectiveCst),
+    /// `.rept v, lo, hi` … `.endr` block — shaped only under
+    /// [`AsmCaps::rept`]. The body is kept AS WRITTEN (unexpanded).
+    /// Degradations (all mirror the malformed-`.func` path — the header
+    /// or delimiter stays a Line and lower reports the error): a nested
+    /// `.rept` inside a body does not open a block; an unterminated
+    /// `.rept` degrades its header to a Line; a stray `.endr` shapes as a
+    /// Line.
+    Rept(ReptCst),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +109,57 @@ pub struct RawCst {
     pub span: Span,
 }
 
+/// `.section NAME`. `span` covers the directive (the `.section` word
+/// through the name), excluding any trailing comment — mirroring
+/// [`FuncCst`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionCst {
+    pub name: String,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+/// Which table directive a [`TableDirectiveCst`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableDirectiveKind {
+    /// `.row [..]` — a vector row.
+    Row,
+    /// `.targets L1, L2, ..` — a list of target labels.
+    Targets,
+    /// `.target L` — a single target label.
+    Target,
+}
+
+/// `.row`/`.targets`/`.target`, optionally labeled (`Tfetch: .row [..]`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableDirectiveCst {
+    pub labels: Vec<LabelCst>,
+    pub kind: TableDirectiveKind,
+    /// `Row`: the whole bracketed vector as ONE verbatim `[..]` token
+    /// (the interior commas do not split it); `Targets`/`Target`: the
+    /// label-name operands, comma-split. The CST keeps the raw source
+    /// slices — parsing the contents happens at lower, a later task.
+    pub operands: Vec<OperandToken>,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+/// `.rept v, lo, hi` … `.endr`. `span` covers the `.rept` header line
+/// (excluding a trailing comment); the closing `.endr` is consumed but
+/// not stored — its own trailing comment, if any, is not retained (the
+/// struct has no slot for it). `body` holds the block's lines shaped AS
+/// WRITTEN — substitution markers `{…}` survive verbatim inside each
+/// item's operand text; expansion happens in a later task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReptCst {
+    pub var: String,
+    pub lo: i64,
+    pub hi: i64,
+    pub body: Vec<AsmItem>,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
 /// Total: never fails. Uses the classic assembly grammar
 /// (`AsmCaps::default()`); dialects with opt-in surface call
 /// [`parse_asm_cst_with`].
@@ -100,33 +168,186 @@ pub fn parse_asm_cst(source: &str) -> AsmCst {
 }
 
 /// Total: never fails. `caps` selects the per-dialect opt-in lexer
-/// surface (vector operands, `{…}` substitution). With
-/// `AsmCaps::default()` this is byte-identical to [`parse_asm_cst`].
+/// surface (vector operands, `{…}` substitution) and the matching
+/// shaping (sections, table directives, `.rept` blocks). With
+/// `AsmCaps::default()` this is byte-identical to [`parse_asm_cst`]:
+/// the block-opening below is gated on `caps.rept`, and `shape_line`'s
+/// section/table branches on `caps.tables`, so every added path is dead
+/// under default caps and the item sequence is unchanged.
 pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
+    let records = line_records(source, caps);
     let mut items: Vec<AsmItem> = Vec::new();
+    let mut i = 0;
+    while i < records.len() {
+        let rec = &records[i];
+        // A well-formed `.rept v, lo, hi` opens a block (`caps.rept`).
+        // The first bare `.endr` after it closes the block. There is no
+        // nesting: a `.rept` inside the body shapes through `shape_line`
+        // (which never opens a block), so it degrades to a Line and does
+        // not consume an `.endr`.
+        if caps.rept
+            && let Some(header) = rept_header(rec)
+        {
+            let rest = &records[i + 1..];
+            if let Some(off) = rest.iter().position(|r| is_endr(&r.tokens)) {
+                let body = shape_body(&rest[..off], caps);
+                items.push(AsmItem {
+                    blank_before: rec.blank_before,
+                    kind: AsmItemKind::Rept(ReptCst {
+                        var: header.var,
+                        lo: header.lo,
+                        hi: header.hi,
+                        body,
+                        span: header.span,
+                        trailing: header.trailing,
+                    }),
+                });
+                i += 1 + off + 1; // header + body + the closing `.endr`
+                continue;
+            }
+            // Unterminated `.rept`: no matching `.endr`. Degrade the
+            // header to a plain Line (mirror malformed-`.func`); the body
+            // lines then shape as ordinary top-level items on the
+            // following iterations, via the fall-through below.
+        }
+        items.push(AsmItem {
+            blank_before: rec.blank_before,
+            kind: shape_line(rec.line, &rec.tokens, rec.line_no, caps),
+        });
+        i += 1;
+    }
+    AsmCst { items }
+}
+
+/// One non-blank physical line, retained with its tokens for shaping.
+struct LineRecord<'a> {
+    line: &'a str,
+    tokens: Vec<AsmToken>,
+    line_no: u32,
+    blank_before: bool,
+}
+
+/// Splits `source` into one record per non-blank physical line, folding
+/// runs of blank lines into the next record's `blank_before` (leading
+/// file blanks set nothing — there is no record to precede). This is the
+/// same fold the pre-block loop did inline; pulling it out lets the
+/// shaper look ahead across lines for a `.rept` block's `.endr`.
+fn line_records(source: &str, caps: AsmCaps) -> Vec<LineRecord<'_>> {
+    let mut records: Vec<LineRecord<'_>> = Vec::new();
     let mut pending_blank = false;
     for (idx, line) in source.lines().enumerate() {
         let line_no = idx as u32 + 1;
         let tokens = lex_line(line, line_no, caps);
         if tokens.is_empty() {
-            // Runs of blanks fold to one bool on the next item; leading
-            // file blanks set nothing (there is no item to precede).
-            pending_blank = !items.is_empty();
+            pending_blank = !records.is_empty();
             continue;
         }
-        items.push(AsmItem {
+        records.push(LineRecord {
+            line,
+            tokens,
+            line_no,
             blank_before: pending_blank,
-            kind: shape_line(line, &tokens, line_no),
         });
         pending_blank = false;
     }
-    AsmCst { items }
+    records
+}
+
+/// Shapes a run of records into body items (used for a `.rept` body).
+/// Each record goes through `shape_line`, which never opens a block, so
+/// a nested `.rept` degrades to a Line here and the block's own `.endr`
+/// — already consumed by the caller as the terminator — never reaches
+/// this slice.
+fn shape_body(records: &[LineRecord<'_>], caps: AsmCaps) -> Vec<AsmItem> {
+    records
+        .iter()
+        .map(|rec| AsmItem {
+            blank_before: rec.blank_before,
+            kind: shape_line(rec.line, &rec.tokens, rec.line_no, caps),
+        })
+        .collect()
+}
+
+/// A parsed `.rept v, lo, hi` header (structurally exact only).
+struct ReptHeader {
+    var: String,
+    lo: i64,
+    hi: i64,
+    span: Span,
+    trailing: Option<TrailingComment>,
+}
+
+/// Recognizes a well-formed `.rept v, lo, hi` header line: leading word
+/// `.rept`, no labels, exactly three comma operands — a non-empty `var`
+/// name and two `i64` bounds. Anything else is `None` (the caller
+/// degrades it to a Line, mirroring malformed-`.func`). Name validity is
+/// left to lower, a later task; here we only need enough structure to
+/// know a block opens.
+fn rept_header(rec: &LineRecord<'_>) -> Option<ReptHeader> {
+    let (body, trailing) = split_trailing(&rec.tokens);
+    let [first, rest @ ..] = body else {
+        return None;
+    };
+    if word_text(first) != Some(".rept") {
+        return None;
+    }
+    let operands = operand_region(rec.line, rest, rec.line_no, first.col + first.len);
+    let [var, lo, hi] = operands.as_slice() else {
+        return None;
+    };
+    if var.text.is_empty() {
+        return None;
+    }
+    let lo = lo.text.parse::<i64>().ok()?;
+    let hi = hi.text.parse::<i64>().ok()?;
+    let last = body.last().expect("body starts with the `.rept` word");
+    Some(ReptHeader {
+        var: var.text.clone(),
+        lo,
+        hi,
+        span: Span::new(rec.line_no, first.col, rec.line_no, last.col + last.len),
+        trailing,
+    })
+}
+
+/// A bare `.endr` directive: leading word `.endr`, nothing after it but
+/// an optional trailing comment. A malformed `.endr` (junk operands) is
+/// not a closer — it degrades to a Line and the block reads as
+/// unterminated, again mirroring `.func`.
+fn is_endr(tokens: &[AsmToken]) -> bool {
+    let (body, _) = split_trailing(tokens);
+    matches!(body, [only] if word_text(only) == Some(".endr"))
+}
+
+/// Splits a trailing comment token off the end of a line's tokens; the
+/// returned body keeps every non-comment token. Shared by `shape_line`,
+/// the `.rept` header parse, and `.endr` detection.
+fn split_trailing(tokens: &[AsmToken]) -> (&[AsmToken], Option<TrailingComment>) {
+    match tokens {
+        [body @ .., last] if matches!(last.kind, AsmTokenKind::Comment(_)) => {
+            let AsmTokenKind::Comment(text) = &last.kind else {
+                unreachable!("guard matched Comment");
+            };
+            (
+                body,
+                Some(TrailingComment {
+                    text: text.clone(),
+                    col: last.col,
+                }),
+            )
+        }
+        _ => (tokens, None),
+    }
 }
 
 /// Shapes one non-blank line (docs/formats.md (assembly text) grammar:
 /// `label* [word operands] [; comment]`). Anything that does not fit
-/// falls back to Raw — never an error.
-fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32) -> AsmItemKind {
+/// falls back to Raw — never an error. `caps` gates the opt-in
+/// directive shaping (sections, table directives); block-spanning
+/// `.rept` is handled by the caller, so this only ever sees the `.rept`
+/// header (and any `.endr`) as an ordinary line, which is exactly the
+/// degradation nested/unterminated blocks rely on.
+fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> AsmItemKind {
     // Own-line comment. The lexer emits at most one Comment token,
     // always last, so a lone Comment is the whole line.
     if let [only] = tokens
@@ -148,21 +369,7 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32) -> AsmItemKind {
     }
 
     // Split off the trailing comment; `body` keeps at least tokens[0].
-    let (body, trailing) = match tokens {
-        [body @ .., last] if matches!(last.kind, AsmTokenKind::Comment(_)) => {
-            let AsmTokenKind::Comment(text) = &last.kind else {
-                unreachable!("guard matched Comment");
-            };
-            (
-                body,
-                Some(TrailingComment {
-                    text: text.clone(),
-                    col: last.col,
-                }),
-            )
-        }
-        _ => (tokens, None),
-    };
+    let (body, trailing) = split_trailing(tokens);
     let last = body.last().expect("first token is a Word, never Comment");
     // The item's span: the line's trimmed extent minus the comment.
     let span = Span::new(line_no, body[0].col, line_no, last.col + last.len);
@@ -187,6 +394,21 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32) -> AsmItemKind {
                 trailing,
             });
         }
+    }
+
+    // `.section NAME` (caps.tables): a no-label region marker, mirroring
+    // `.func` — structurally exact (`.section` + one Word name) only,
+    // else it stays a Line.
+    if caps.tables
+        && word_text(&body[0]) == Some(".section")
+        && let [_, name] = body
+        && let Some(name) = word_text(name)
+    {
+        return AsmItemKind::Section(SectionCst {
+            name: name.to_string(),
+            span,
+            trailing,
+        });
     }
 
     // Labels: leading repeated `Word Colon` pairs, regardless of the
@@ -222,6 +444,37 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32) -> AsmItemKind {
         // token no rule accepts; the line is not assembly-shaped.
         return raw_line(line, tokens, line_no);
     };
+
+    // Table directives (caps.tables): `.row`/`.targets`/`.target`,
+    // optionally labeled. `.row` captures its `[..]` vector as ONE
+    // verbatim operand (interior commas do not split); the others
+    // comma-split their label-name operands. A `.row` whose region is
+    // not a single bracketed vector degrades to a Line (mirror `.func`).
+    if caps.tables
+        && let Some(dir_kind) = table_directive_kind(word)
+    {
+        let region = &body[at + 1..];
+        let operands = match dir_kind {
+            TableDirectiveKind::Row => vector_operand(line, region, line_no).map(|op| vec![op]),
+            TableDirectiveKind::Targets | TableDirectiveKind::Target => Some(operand_region(
+                line,
+                region,
+                line_no,
+                word_token.col + word_token.len,
+            )),
+        };
+        if let Some(operands) = operands {
+            return AsmItemKind::TableDirective(TableDirectiveCst {
+                labels,
+                kind: dir_kind,
+                operands,
+                span,
+                trailing,
+            });
+        }
+        // `.row` without a bracketed vector — fall through to Line.
+    }
+
     let operands = operand_region(
         line,
         &body[at + 1..],
@@ -237,6 +490,46 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32) -> AsmItemKind {
         }),
         span,
         trailing,
+    })
+}
+
+/// The [`TableDirectiveKind`] a leading directive word names, or `None`
+/// for any other word.
+fn table_directive_kind(word: &str) -> Option<TableDirectiveKind> {
+    match word {
+        ".row" => Some(TableDirectiveKind::Row),
+        ".targets" => Some(TableDirectiveKind::Targets),
+        ".target" => Some(TableDirectiveKind::Target),
+        _ => None,
+    }
+}
+
+/// Captures a `.row`'s `[..]` region as one lossless [`OperandToken`]:
+/// the verbatim source slice from the opening `[` to the closing `]`.
+/// Requires `region` to begin with `LBracket` and end with `RBracket`
+/// (the bracket tokens exist only under `caps.vectors`); otherwise
+/// `None` and the caller degrades the line to a plain Line. The
+/// interior — including commas — is not interpreted here; lower parses
+/// it in a later task.
+fn vector_operand(line: &str, region: &[AsmToken], line_no: u32) -> Option<OperandToken> {
+    let [first, .., last] = region else {
+        return None;
+    };
+    if !matches!(first.kind, AsmTokenKind::LBracket) || !matches!(last.kind, AsmTokenKind::RBracket)
+    {
+        return None;
+    }
+    let start = first.col;
+    let end = last.col + last.len;
+    // Columns are char-counted (crate::diagnostics), so slice by chars.
+    let text: String = line
+        .chars()
+        .skip(start as usize - 1)
+        .take((end - start) as usize)
+        .collect();
+    Some(OperandToken {
+        text: text.trim().to_string(),
+        span: Span::new(line_no, start, line_no, end),
     })
 }
 
@@ -687,6 +980,93 @@ L1:     rgt
         let comment = as_comment(&cst.items[0]);
         assert_eq!(comment.text, "; note");
         assert_eq!(comment.col, 9);
+    }
+
+    // -- Opt-in caps: sections, table directives, `.rept` blocks --------
+
+    fn caps_all() -> AsmCaps {
+        AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        }
+    }
+
+    #[test]
+    fn shapes_sections_and_table_directives() {
+        let src = ".section tables\nTfetch: .row [1, *, *]\nDfetch: .targets A, B\n.section code\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        assert!(matches!(&cst.items[0].kind, AsmItemKind::Section(s) if s.name == "tables"));
+        assert!(matches!(&cst.items[1].kind, AsmItemKind::TableDirective(d)
+            if matches!(d.kind, TableDirectiveKind::Row) && d.labels[0].name == "Tfetch"));
+        assert!(matches!(&cst.items[2].kind, AsmItemKind::TableDirective(d)
+            if matches!(d.kind, TableDirectiveKind::Targets) && d.operands.len() == 2));
+        assert!(matches!(&cst.items[3].kind, AsmItemKind::Section(s) if s.name == "code"));
+    }
+
+    #[test]
+    fn rept_body_is_kept_verbatim() {
+        let src = ".rept v, 0, 2\nLinc{v}: nop\n.endr\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let AsmItemKind::Rept(r) = &cst.items[0].kind else {
+            panic!("not a rept")
+        };
+        assert_eq!((r.var.as_str(), r.lo, r.hi), ("v", 0, 2));
+        assert_eq!(r.body.len(), 1); // one line, unexpanded
+    }
+
+    #[test]
+    fn default_caps_shape_unchanged() {
+        // The same source under default caps: every unknown-directive line
+        // becomes Raw (via Junk) or a Line, exactly as before this task.
+        let cst = parse_asm_cst(".section tables\n");
+        assert!(!matches!(&cst.items[0].kind, AsmItemKind::Section(_)));
+    }
+
+    #[test]
+    fn row_vector_is_one_verbatim_operand_not_comma_split() {
+        // The interior commas of `[1, *, *]` must NOT split the operand:
+        // the whole bracketed slice is captured as a single lossless token.
+        let cst = parse_asm_cst_with(".row [1, *, *]\n", caps_all());
+        let AsmItemKind::TableDirective(d) = &cst.items[0].kind else {
+            panic!("not a table directive")
+        };
+        assert_eq!(d.operands.len(), 1);
+        assert_eq!(d.operands[0].text, "[1, *, *]");
+    }
+
+    #[test]
+    fn unterminated_rept_degrades_its_header_to_a_line() {
+        // No `.endr`: the `.rept` header degrades to a plain Line (mirror
+        // malformed-`.func`); no Rept node is produced.
+        let cst = parse_asm_cst_with(".rept v, 0, 2\nnop\n", caps_all());
+        assert!(
+            !cst.items
+                .iter()
+                .any(|it| matches!(it.kind, AsmItemKind::Rept(_)))
+        );
+    }
+
+    #[test]
+    fn stray_endr_without_open_rept_is_a_line() {
+        // `.endr` outside any `.rept` is not a block-closer here — it
+        // shapes as a plain Line (word `.endr`); lower rejects it.
+        let cst = parse_asm_cst_with(".endr\n", caps_all());
+        assert!(matches!(&cst.items[0].kind, AsmItemKind::Line(l)
+            if l.instr.as_ref().unwrap().word == ".endr"));
+    }
+
+    #[test]
+    fn nested_rept_degrades_the_inner_to_a_line_body_item() {
+        // The inner `.rept` does NOT open a nested block — it degrades to
+        // a Line body item; the first `.endr` closes the outer block.
+        let src = ".rept v, 0, 1\n.rept w, 0, 1\n.endr\n.endr\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let AsmItemKind::Rept(outer) = &cst.items[0].kind else {
+            panic!("outer not a rept")
+        };
+        assert!(matches!(&outer.body[0].kind, AsmItemKind::Line(l)
+            if l.instr.as_ref().unwrap().word == ".rept"));
     }
 
     proptest! {

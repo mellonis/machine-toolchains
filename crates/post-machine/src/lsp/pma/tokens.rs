@@ -29,7 +29,13 @@ pub(super) fn semantic_tokens(state: &PmaDocState) -> Vec<SemToken> {
         match &item.kind {
             AsmItemKind::Func(f) => emit_func(f, &mut out),
             AsmItemKind::Line(line) => emit_line(line, &syntax, &functions, &mut out),
-            AsmItemKind::Comment(_) | AsmItemKind::Raw(_) => {}
+            // Opt-in caps nodes never appear under PM-1's default caps;
+            // no semantic tokens to emit for them here.
+            AsmItemKind::Comment(_)
+            | AsmItemKind::Raw(_)
+            | AsmItemKind::Section(_)
+            | AsmItemKind::TableDirective(_)
+            | AsmItemKind::Rept(_) => {}
         }
     }
     out.sort_by_key(|t| t.span.start);

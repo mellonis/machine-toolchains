@@ -108,6 +108,30 @@ pub(crate) fn lower(cst: &AsmCst, syntax: &ArchSyntax) -> Result<Vec<SourceFunct
             AsmItemKind::Raw(raw) => return Err(err(raw.span, AsmErrorKind::RawLine)),
             AsmItemKind::Func(func) => lower_func(func, &mut functions, &pending)?,
             AsmItemKind::Line(line) => lower_line(line, syntax, &mut functions, &mut pending)?,
+            // Sections, table directives, and `.rept` blocks are shaped
+            // only under the opt-in caps; PM-1's caps are off, so these
+            // are unreachable through the real arch and reachable only by
+            // a fake-caps direct lower call. Lowering them lands in a
+            // later task — until then, a clear error rather than a silent
+            // drop.
+            AsmItemKind::Section(s) => {
+                return Err(err(
+                    s.span,
+                    AsmErrorKind::Syntax("sections lower in a later task"),
+                ));
+            }
+            AsmItemKind::TableDirective(d) => {
+                return Err(err(
+                    d.span,
+                    AsmErrorKind::Syntax("table directives lower in a later task"),
+                ));
+            }
+            AsmItemKind::Rept(r) => {
+                return Err(err(
+                    r.span,
+                    AsmErrorKind::Syntax("rept blocks lower in a later task"),
+                ));
+            }
         }
     }
 
