@@ -1,6 +1,6 @@
 //! PM-1 assembly: the docs/isa.md mnemonic table bound to the core framework.
 
-use mtc_core::asm::{ArchSyntax, AsmError, Flow, RelaxPair, SyntaxEntry};
+use mtc_core::asm::{ArchSyntax, AsmCaps, AsmError, Flow, RelaxPair, SyntaxEntry};
 use mtc_core::formats::ARCH_PM1;
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::ObjectFile;
@@ -160,6 +160,9 @@ pub fn pm1_syntax() -> ArchSyntax {
         ],
         entry_opcode: ENT,
         break_opcode: Some(BRK),
+        // PM-1 `.pma` uses the classic assembly grammar — no vector /
+        // substitution / table surface.
+        caps: AsmCaps::default(),
     }
 }
 

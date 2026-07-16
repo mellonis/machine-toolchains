@@ -17,7 +17,7 @@ pub use disassembler::{
     disassemble_executable, disassemble_object, grid_line, listing_executable, listing_line,
 };
 pub use fmt::format_asm;
-pub use syntax::{ArchSyntax, Flow, RelaxPair, SyntaxEntry};
+pub use syntax::{ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry};
 
 use crate::diagnostics::Span;
 

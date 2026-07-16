@@ -25,6 +25,18 @@ pub struct RelaxPair {
     pub short: u8,
 }
 
+/// Per-dialect syntax capabilities. Defaults = the classic surface
+/// (everything off) — the .pma dialect's acceptance is unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AsmCaps {
+    /// `.section` regions, `.row`/`.targets`/`.target` directives.
+    pub tables: bool,
+    /// `.rept v, lo, hi` … `.endr` with `{expr}` substitution.
+    pub rept: bool,
+    /// `[a, *, -, <, >, .]` vector operand tokens.
+    pub vectors: bool,
+}
+
 pub struct ArchSyntax {
     pub entries: Vec<SyntaxEntry>,
     pub relax_pairs: Vec<RelaxPair>,
@@ -32,6 +44,9 @@ pub struct ArchSyntax {
     /// The debugger-break opcode, when the arch has one (drives the
     /// leftover-debugger lint; None = rule silent).
     pub break_opcode: Option<u8>,
+    /// Opt-in lexer/parser surface for this dialect. Default (all off)
+    /// keeps the classic assembly grammar byte-for-byte.
+    pub caps: AsmCaps,
 }
 
 impl ArchSyntax {
@@ -132,6 +147,7 @@ pub(crate) mod fixture {
             }],
             entry_opcode: 0x0E,
             break_opcode: None,
+            caps: AsmCaps::default(),
         }
     }
 }

@@ -206,6 +206,7 @@ mod tests {
     use crate::asm::assembler::assemble;
     use crate::asm::disassembler::disassemble_object;
     use crate::asm::lexer::{AsmTokenKind, lex_line};
+    use crate::asm::syntax::AsmCaps;
     use crate::asm::syntax::fixture::test_syntax;
     use crate::diagnostics::Span;
 
@@ -435,7 +436,7 @@ stp
         source
             .lines()
             .enumerate()
-            .flat_map(|(i, line)| lex_line(line, i as u32 + 1))
+            .flat_map(|(i, line)| lex_line(line, i as u32 + 1, AsmCaps::default()))
             .map(|t| t.kind)
             .collect()
     }

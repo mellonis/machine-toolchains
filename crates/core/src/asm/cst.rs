@@ -4,6 +4,7 @@
 //! raw text. Validity checking lives in lower.rs, not here.
 
 use super::lexer::{AsmToken, AsmTokenKind, lex_line};
+use super::syntax::AsmCaps;
 use crate::diagnostics::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,13 +92,22 @@ pub struct RawCst {
     pub span: Span,
 }
 
-/// Total: never fails.
+/// Total: never fails. Uses the classic assembly grammar
+/// (`AsmCaps::default()`); dialects with opt-in surface call
+/// [`parse_asm_cst_with`].
 pub fn parse_asm_cst(source: &str) -> AsmCst {
+    parse_asm_cst_with(source, AsmCaps::default())
+}
+
+/// Total: never fails. `caps` selects the per-dialect opt-in lexer
+/// surface (vector operands, `{…}` substitution). With
+/// `AsmCaps::default()` this is byte-identical to [`parse_asm_cst`].
+pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
     let mut items: Vec<AsmItem> = Vec::new();
     let mut pending_blank = false;
     for (idx, line) in source.lines().enumerate() {
         let line_no = idx as u32 + 1;
-        let tokens = lex_line(line, line_no);
+        let tokens = lex_line(line, line_no, caps);
         if tokens.is_empty() {
             // Runs of blanks fold to one bool on the next item; leading
             // file blanks set nothing (there is no item to precede).

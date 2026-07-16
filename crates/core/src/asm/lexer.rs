@@ -2,6 +2,7 @@
 //! (assembly text)). Total: any input tokenizes; unknown characters
 //! become Junk tokens. Arch-agnostic — mnemonics are just Words here.
 
+use crate::asm::syntax::AsmCaps;
 use crate::diagnostics::Span;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +18,36 @@ pub(crate) enum AsmTokenKind {
     At,
     /// `;` to end of line, verbatim including the `;`.
     Comment(String),
+    // --- Capability-gated single-character tokens ---
+    // Emitted only when the owning cap is on (and, for the markers, only
+    // inside the relevant depth). With `AsmCaps::default()` these never
+    // appear: the characters fall through to `Junk`, exactly as before.
+    /// `[` (vectors cap).
+    LBracket,
+    /// `]` (vectors cap).
+    RBracket,
+    /// `{` (rept cap).
+    LBrace,
+    /// `}` (rept cap).
+    RBrace,
+    /// `(` inside `{…}` (rept cap).
+    LParen,
+    /// `)` inside `{…}` (rept cap).
+    RParen,
+    /// `*` inside `[…]` or `{…}` (vectors / rept caps).
+    Star,
+    /// `-` inside `[…]` or `{…}` (vectors / rept caps).
+    Dash,
+    /// `+` inside `{…}` (rept cap).
+    Plus,
+    /// `%` inside `{…}` (rept cap).
+    Percent,
+    /// `<` inside `[…]` (vectors cap).
+    Lt,
+    /// `>` inside `[…]` (vectors cap).
+    Gt,
+    /// `.` inside `[…]` (vectors cap).
+    Dot,
     /// Any character no other rule accepts (`<`, `>`, `"`, …).
     Junk(char),
 }
@@ -91,18 +122,87 @@ fn scan_number(chars: &[char], start: usize) -> (String, usize) {
     (chars[start..pos].iter().collect(), pos - start)
 }
 
-/// Tokenizes one line (no `\n` inside). Total — never fails.
-pub(crate) fn lex_line(text: &str, line_no: u32) -> Vec<AsmToken> {
+/// A capability-gated single-character token, or `None` if `c` is not
+/// gated on in the current context. Two depth rules drive it:
+///
+///   * vectors: `caps.vectors` lets `[` open a bracket depth (any `[`,
+///     no operand-position gate) and `]` close it; inside depth ≥ 1 the
+///     vector markers `. < > - *` lex as `Dot`/`Lt`/`Gt`/`Dash`/`Star`.
+///     Outside brackets nothing changes — `.func` still lexes as a Word.
+///   * rept: `caps.rept` lets `{` open a brace depth and `}` close it;
+///     inside depth ≥ 1 the substitution operators `( ) + % - *` lex as
+///     `LParen`/`RParen`/`Plus`/`Percent`/`Dash`/`Star`.
+///
+/// With `AsmCaps::default()` (both off) every arm is dead and the caller
+/// falls through to the classic path, so the token stream is byte-identical.
+fn caps_token(
+    c: char,
+    caps: AsmCaps,
+    bracket_depth: u32,
+    brace_depth: u32,
+) -> Option<AsmTokenKind> {
+    let in_vector = caps.vectors && bracket_depth > 0;
+    let in_rept = caps.rept && brace_depth > 0;
+    match c {
+        '[' if caps.vectors => Some(AsmTokenKind::LBracket),
+        ']' if caps.vectors => Some(AsmTokenKind::RBracket),
+        '{' if caps.rept => Some(AsmTokenKind::LBrace),
+        '}' if caps.rept => Some(AsmTokenKind::RBrace),
+        '.' if in_vector => Some(AsmTokenKind::Dot),
+        '<' if in_vector => Some(AsmTokenKind::Lt),
+        '>' if in_vector => Some(AsmTokenKind::Gt),
+        '-' if in_vector || in_rept => Some(AsmTokenKind::Dash),
+        '*' if in_vector || in_rept => Some(AsmTokenKind::Star),
+        '(' if in_rept => Some(AsmTokenKind::LParen),
+        ')' if in_rept => Some(AsmTokenKind::RParen),
+        '+' if in_rept => Some(AsmTokenKind::Plus),
+        '%' if in_rept => Some(AsmTokenKind::Percent),
+        _ => None,
+    }
+}
+
+/// Tokenizes one line (no `\n` inside). Total — never fails. `caps`
+/// selects the per-dialect opt-in surface; `AsmCaps::default()` is the
+/// classic assembly grammar (bracket/brace depths never open).
+pub(crate) fn lex_line(text: &str, line_no: u32, caps: AsmCaps) -> Vec<AsmToken> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let mut tokens = Vec::new();
     let mut pos = 0usize;
     let mut col: u32 = 1;
+    // Depths reset per line: vector operands `[…]` and `{…}` substitution
+    // never span a physical line. They open only under their cap (see
+    // `caps_token`); with default caps they stay 0 and gate nothing.
+    let mut bracket_depth: u32 = 0;
+    let mut brace_depth: u32 = 0;
 
     while pos < n {
         let c = chars[pos];
 
         if c == ' ' || c == '\t' {
+            pos += 1;
+            col += 1;
+            continue;
+        }
+
+        // Capability-gated tokens come before word/number scanning so an
+        // in-bracket `.` beats word-start and an in-context `-` beats a
+        // negative-number literal. Guarded on caps, so it is inert under
+        // `AsmCaps::default()`.
+        if let Some(kind) = caps_token(c, caps, bracket_depth, brace_depth) {
+            match kind {
+                AsmTokenKind::LBracket => bracket_depth += 1,
+                AsmTokenKind::RBracket => bracket_depth = bracket_depth.saturating_sub(1),
+                AsmTokenKind::LBrace => brace_depth += 1,
+                AsmTokenKind::RBrace => brace_depth = brace_depth.saturating_sub(1),
+                _ => {}
+            }
+            tokens.push(AsmToken {
+                kind,
+                line: line_no,
+                col,
+                len: 1,
+            });
             pos += 1;
             col += 1;
             continue;
@@ -187,6 +287,26 @@ pub(crate) fn lex_line(text: &str, line_no: u32) -> Vec<AsmToken> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    /// Two-arg shim shadowing the real `lex_line`: the classic-grammar
+    /// tests below (and the `proptest`) drive the default-caps path.
+    /// Capability tests reach the real entry via `super::lex_line`.
+    fn lex_line(text: &str, line_no: u32) -> Vec<AsmToken> {
+        super::lex_line(text, line_no, AsmCaps::default())
+    }
+
+    /// Lex a single line under the given caps, hitting the real entry.
+    fn lex_for_test(source: &str, caps: AsmCaps) -> Vec<AsmToken> {
+        super::lex_line(source, 1, caps)
+    }
+
+    /// The token kinds a single line lexes to under the given caps.
+    fn kinds_for_test(source: &str, caps: AsmCaps) -> Vec<AsmTokenKind> {
+        lex_for_test(source, caps)
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
+    }
 
     fn word(s: &str, line: u32, col: u32, len: u32) -> AsmToken {
         AsmToken {
@@ -410,7 +530,70 @@ mod tests {
             AsmTokenKind::Colon
             | AsmTokenKind::Comma
             | AsmTokenKind::At
+            | AsmTokenKind::LBracket
+            | AsmTokenKind::RBracket
+            | AsmTokenKind::LBrace
+            | AsmTokenKind::RBrace
+            | AsmTokenKind::LParen
+            | AsmTokenKind::RParen
+            | AsmTokenKind::Star
+            | AsmTokenKind::Dash
+            | AsmTokenKind::Plus
+            | AsmTokenKind::Percent
+            | AsmTokenKind::Lt
+            | AsmTokenKind::Gt
+            | AsmTokenKind::Dot
             | AsmTokenKind::Junk(_) => 1,
         }
+    }
+
+    #[test]
+    fn default_caps_keep_symbols_junk() {
+        let toks = lex_for_test("wr [1,*]", AsmCaps::default());
+        assert!(
+            toks.iter()
+                .any(|t| matches!(t.kind, AsmTokenKind::Junk('[')))
+        );
+    }
+
+    #[test]
+    fn vector_caps_tokenize_brackets_and_markers() {
+        let caps = AsmCaps {
+            vectors: true,
+            ..Default::default()
+        };
+        let kinds = kinds_for_test("wr [1, *, -, <, >, .]", caps);
+        assert!(kinds.contains(&AsmTokenKind::LBracket));
+        assert!(kinds.contains(&AsmTokenKind::Star));
+        assert!(kinds.contains(&AsmTokenKind::Dash));
+        assert!(kinds.contains(&AsmTokenKind::Lt));
+        assert!(kinds.contains(&AsmTokenKind::Gt));
+        assert!(kinds.contains(&AsmTokenKind::Dot));
+        assert!(kinds.contains(&AsmTokenKind::RBracket));
+    }
+
+    #[test]
+    fn dot_outside_vectors_still_words() {
+        let caps = AsmCaps {
+            vectors: true,
+            rept: true,
+            tables: true,
+        };
+        let toks = lex_for_test(".section tables", caps);
+        assert!(matches!(&toks[0].kind, AsmTokenKind::Word(w) if w == ".section"));
+    }
+
+    #[test]
+    fn rept_caps_tokenize_substitution() {
+        let caps = AsmCaps {
+            rept: true,
+            ..Default::default()
+        };
+        let kinds = kinds_for_test("Linc{(v+1)%127}", caps);
+        assert!(kinds.contains(&AsmTokenKind::LBrace));
+        assert!(kinds.contains(&AsmTokenKind::LParen));
+        assert!(kinds.contains(&AsmTokenKind::Plus));
+        assert!(kinds.contains(&AsmTokenKind::Percent));
+        assert!(kinds.contains(&AsmTokenKind::RBrace));
     }
 }
