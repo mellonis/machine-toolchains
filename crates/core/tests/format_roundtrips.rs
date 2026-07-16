@@ -87,4 +87,34 @@ proptest! {
     fn tapeblock_never_panics_on_noise(noise in proptest::collection::vec(any::<u8>(), 0..64)) {
         let _ = TapeBlockFile::from_bytes(&noise);
     }
+
+    /// A block with arbitrary per-tape alphabets round-trips. Each tape carries
+    /// its OWN non-empty alphabet (min length 1) with cells kept in range — an
+    /// empty own-alphabet is a degenerate value that coerces to inherit and is
+    /// deliberately never generated here.
+    #[test]
+    fn mt_v2_round_trip(
+        seed in prop::collection::vec(
+            (prop::collection::vec("[a-z]{1,3}", 1..5), prop::collection::vec(0u8..4, 0..8)),
+            1..4),
+    ) {
+        // Build tapes whose cells stay within their own alphabet.
+        let tapes: Vec<_> = seed.into_iter().map(|(alpha, cells)| {
+            let n = alpha.len() as u8;
+            TapeSnapshot {
+                origin: 0,
+                cells: cells.into_iter().map(|c| c % n).collect(),
+                head: 0,
+                alphabet: Some(alpha),
+            }
+        }).collect();
+        let block = TapeBlockFile { alphabet: vec!["_".into()], tapes };
+        prop_assert_eq!(TapeBlockFile::from_bytes(&block.to_bytes()).unwrap(), block);
+    }
+
+    /// from_bytes never panics on arbitrary bytes (must return Err, not panic).
+    #[test]
+    fn mt_from_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+        let _ = TapeBlockFile::from_bytes(&bytes);
+    }
 }
