@@ -1,5 +1,7 @@
 use mtc_core::formats::executable::Executable;
-use mtc_core::formats::object::{ObjectFile, Relocation, Symbol, SymbolDef};
+use mtc_core::formats::object::{
+    BoundCall, MapPair, ObjectFile, Relocation, RoutineSig, Symbol, SymbolDef, TapeBinding,
+};
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use proptest::prelude::*;
 
@@ -67,6 +69,39 @@ proptest! {
     #[test]
     fn object_never_panics_on_noise(noise in proptest::collection::vec(any::<u8>(), 0..64)) {
         let _ = ObjectFile::from_bytes(&noise);
+    }
+
+    /// A v3 object with arbitrary signatures, tables, and bindings round-trips.
+    #[test]
+    fn mo_v3_round_trip(
+        blob in proptest::collection::vec(any::<u8>(), 5..32),
+        table in proptest::collection::vec(any::<u8>(), 0..32),
+        arity in 1u8..=16,
+        caller_tape in 0u8..16,
+        src in any::<u32>(),
+        dst in any::<u32>(),
+        one_way in any::<bool>(),
+    ) {
+        let obj = ObjectFile {
+            arch: 1,
+            symbols: vec![Symbol { name: "f".into(), def: SymbolDef::Defined { blob: 0 } }],
+            blobs: vec![blob.clone()],
+            relocations: vec![],
+            debug: None,
+            signatures: Some(vec![RoutineSig { arity, cardinalities: vec![2; arity as usize] }]),
+            table_blobs: Some(vec![table]),
+            table_fixups: vec![],
+            bound_calls: vec![BoundCall {
+                blob: 0,
+                offset: (blob.len() as u32) - 4,
+                symbol: 0,
+                binding: vec![TapeBinding {
+                    caller_tape,
+                    pairs: vec![MapPair { src, dst, one_way }],
+                }],
+            }],
+        };
+        prop_assert_eq!(ObjectFile::from_bytes(&obj.to_bytes()).unwrap(), obj);
     }
 
     #[test]
