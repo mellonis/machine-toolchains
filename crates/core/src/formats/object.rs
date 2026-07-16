@@ -947,6 +947,17 @@ mod tests {
         assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
     }
 
+    /// The two flag-gated v3 sections are independent: a signatures-only
+    /// object (no table blobs) round-trips.
+    #[test]
+    fn v3_signatures_only_round_trips() {
+        let mut obj = sample_v3_sigs();
+        obj.table_blobs = None;
+        let bytes = obj.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 3);
+        assert_eq!(ObjectFile::from_bytes(&bytes).unwrap(), obj);
+    }
+
     #[test]
     fn v2_file_still_loads_with_empty_v3_fields() {
         let v2 = sample();
