@@ -1,6 +1,7 @@
 //! `MX` executable container (docs/formats.md).
 
 use super::FormatError;
+use super::PROFILE_BASE;
 use super::crc32::{stamp_crc, verify_crc};
 use super::io::{Reader, put_u16, put_u32};
 
@@ -16,8 +17,8 @@ pub struct Executable {
     pub entry: u32,
     pub code: Vec<u8>,
     /// v2 header fields; the v1 code-only shape leaves them at defaults
-    /// (`tape_count: 1`, `profile: 0`, empty cardinalities, empty tables)
-    /// and serializes as version 1 (docs/formats.md).
+    /// (`tape_count: 1`, `profile: PROFILE_BASE`, empty cardinalities,
+    /// empty tables) and serializes as version 1 (docs/formats.md).
     pub tape_count: u8,
     pub profile: u8,
     pub alphabet_cardinalities: Vec<u32>,
@@ -32,7 +33,7 @@ impl Executable {
             entry,
             code,
             tape_count: 1,
-            profile: 0,
+            profile: PROFILE_BASE,
             alphabet_cardinalities: Vec::new(),
             tables: Vec::new(),
         }
@@ -63,7 +64,7 @@ impl Executable {
     /// True when the image carries no v2-only data and must serialize as v1.
     fn is_v1_shape(&self) -> bool {
         self.tape_count == 1
-            && self.profile == 0
+            && self.profile == PROFILE_BASE
             && self.alphabet_cardinalities.is_empty()
             && self.tables.is_empty()
     }
@@ -185,7 +186,7 @@ impl Executable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::{ARCH_PM1, ARCH_TM1, FormatError};
+    use crate::formats::{ARCH_PM1, ARCH_TM1, FormatError, PROFILE_FRAMES};
 
     fn sample() -> Executable {
         Executable::code_only(ARCH_PM1, 0, vec![0x0D, 0x05, 0x02]) // ent, rgt, stp
@@ -290,7 +291,7 @@ mod tests {
             vec![0x10, 0x02], // code (rd; stp — placeholder)
             vec![1, 1, 0, 5], // tables (a tiny match-table blob)
             2,                // tape_count
-            1,                // profile = frames
+            PROFILE_FRAMES,   // profile = frames
             vec![3, 128],     // per-tape alphabet cardinalities
         )
     }
@@ -317,7 +318,7 @@ mod tests {
         assert_eq!(bytes[6], 0); // flags
         // [7..11] crc
         assert_eq!(bytes[11], 2); // tape_count
-        assert_eq!(bytes[12], 1); // profile = frames
+        assert_eq!(bytes[12], PROFILE_FRAMES); // profile = frames
         assert_eq!(u32::from_le_bytes(bytes[13..17].try_into().unwrap()), 0); // entry
         assert_eq!(u32::from_le_bytes(bytes[17..21].try_into().unwrap()), 2); // code_size
         assert_eq!(u32::from_le_bytes(bytes[21..25].try_into().unwrap()), 4); // table_size

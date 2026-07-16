@@ -110,6 +110,16 @@ impl<'a> DebugSession<'a> {
         self.core.mf()
     }
 
+    /// The frame register (0 = the identity frame; non-zero inside a framed
+    /// call) — the frames profile's counterpart to `mf()`. On a base-profile
+    /// session it stays 0. Note: if a trap halts a session mid frame-load,
+    /// `fr()` reports the not-yet-loaded frame value — FR is set at the
+    /// framed call before its descriptor finishes loading, and the trap
+    /// freezes state there. Harmless: it is simply the FR at trap time.
+    pub fn fr(&self) -> u32 {
+        self.core.fr()
+    }
+
     pub fn depth(&self) -> usize {
         self.stack.depth()
     }

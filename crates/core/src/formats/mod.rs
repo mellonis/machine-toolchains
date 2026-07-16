@@ -10,6 +10,16 @@ pub const ARCH_PM1: u8 = 0x01;
 /// TM-1, the multi-tape Turing architecture.
 pub const ARCH_TM1: u8 = 0x02;
 
+/// Execution-profile ids carried in the `MX` v2 header (docs/formats.md
+/// (executable image)). The base profile is the frameless single-machine
+/// execution model every architecture starts from; the frames profile
+/// adds the FR register, frame-descriptor loads, and the framed
+/// call/return instructions. The formats layer stores the byte verbatim;
+/// the VM's loader judges whether it implements the profile.
+pub const PROFILE_BASE: u8 = 0;
+/// The frames execution profile (docs/formats.md (executable image)).
+pub const PROFILE_FRAMES: u8 = 1;
+
 pub mod executable;
 pub mod object;
 pub mod tapeblock;

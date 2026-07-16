@@ -2,6 +2,7 @@
 //! (loading)).
 
 use crate::formats::executable::Executable;
+use crate::formats::{PROFILE_BASE, PROFILE_FRAMES};
 
 use super::arch::Arch;
 use super::core::Core;
@@ -34,7 +35,14 @@ impl ArchRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadError {
     UnknownArch(u8),
-    EntryNotEntryMarker { at: u32 },
+    EntryNotEntryMarker {
+        at: u32,
+    },
+    /// The image declares an execution profile this VM does not implement
+    /// (docs/formats.md (executable image)).
+    UnsupportedProfile {
+        profile: u8,
+    },
 }
 
 impl std::fmt::Display for LoadError {
@@ -43,6 +51,9 @@ impl std::fmt::Display for LoadError {
             Self::UnknownArch(id) => write!(f, "unknown architecture {id:#04x}"),
             Self::EntryNotEntryMarker { at } => {
                 write!(f, "entry point {at:#010x} is not an entry marker")
+            }
+            Self::UnsupportedProfile { profile } => {
+                write!(f, "unsupported execution profile {profile}")
             }
         }
     }
@@ -107,6 +118,9 @@ pub struct Machine<'a> {
     tables: Vec<u8>,
     /// Tape devices the image expects; a v1 code-only image is single-tape.
     tape_count: u8,
+    /// Execution profile the image declares (docs/formats.md (executable
+    /// image)); `PROFILE_BASE` for a v1 code-only image, validated at load.
+    profile: u8,
     /// Per-tape alphabet cardinalities; empty for a v1 code-only image (no
     /// per-tape check runs then).
     alphabet_cardinalities: Vec<u32>,
@@ -118,6 +132,7 @@ impl<'a> std::fmt::Debug for Machine<'a> {
             .field("code", &self.code)
             .field("entry", &self.entry)
             .field("tape_count", &self.tape_count)
+            .field("profile", &self.profile)
             .finish()
     }
 }
@@ -137,6 +152,7 @@ impl<'a> Machine<'a> {
                 entry,
                 tables: Vec::new(),
                 tape_count: 1,
+                profile: PROFILE_BASE,
                 alphabet_cardinalities: Vec::new(),
             }),
             _ => Err(LoadError::EntryNotEntryMarker { at: entry }),
@@ -150,11 +166,20 @@ impl<'a> Machine<'a> {
         let arch = registry
             .get(exe.arch)
             .ok_or(LoadError::UnknownArch(exe.arch))?;
+        // Reject a profile the VM doesn't implement before wiring anything
+        // up (docs/formats.md (executable image)); precedence is arch →
+        // profile → entry marker.
+        if exe.profile > PROFILE_FRAMES {
+            return Err(LoadError::UnsupportedProfile {
+                profile: exe.profile,
+            });
+        }
         let mut machine = Machine::with_arch(arch, exe.code.clone(), exe.entry)?;
         // Carry the whole v2 image; a v1 code-only exe leaves these at the
         // with_arch defaults (docs/formats.md (executable image)).
         machine.tables = exe.tables.clone();
         machine.tape_count = exe.tape_count;
+        machine.profile = exe.profile;
         machine.alphabet_cardinalities = exe.alphabet_cardinalities.clone();
         Ok(machine)
     }
@@ -167,6 +192,28 @@ impl<'a> Machine<'a> {
         &self.code
     }
 
+    /// Build the execution core for this image (docs/formats.md (executable
+    /// image)): sized to the tape count, with the frames profile enabled
+    /// when the image declares it. The single Core-construction site for
+    /// every entry point — legacy `run`/`debug` route through it too,
+    /// staying byte-identical because a v1 code-only image is `tape_count`
+    /// 1 (so `with_device_count(1)` is the identity of the default) and
+    /// `PROFILE_BASE` (so `with_frames()` is never applied).
+    ///
+    /// The device count is bounded 1..=16 on every image loaded through
+    /// `Executable::from_bytes` (the v2 reader rejects 0/>16; a v1 image is
+    /// always 1), so no clamp is needed here; a directly constructed
+    /// oversized image would only make a too-wide identity `ReadAll` trap
+    /// `BadOperand` at slot 16 rather than misbehave.
+    fn build_core(&self) -> Core<'a> {
+        let core = Core::new(self.arch, self.entry).with_device_count(self.tape_count);
+        if self.profile == PROFILE_FRAMES {
+            core.with_frames()
+        } else {
+            core
+        }
+    }
+
     /// Shared run engine (docs/formats.md (executable image)): builds the
     /// core/stack, optionally latches the initial mark, and drives the whole
     /// image (code + table ROM) against `devices`. `preload_mark` is the PM-1
@@ -177,7 +224,7 @@ impl<'a> Machine<'a> {
         opts: RunOptions,
         preload_mark: bool,
     ) -> RunResult {
-        let mut core = Core::new(self.arch, self.entry);
+        let mut core = self.build_core();
         if preload_mark {
             // Loading step (docs/isa.md (loading)): latch initial MF from the
             // mark device, tact-free (loading, not execution). PM-1 matches
@@ -241,7 +288,7 @@ impl<'a> Machine<'a> {
     /// table ROM.
     pub fn debug(&self, opts: RunOptions) -> DebugSession<'a> {
         DebugSession::new(
-            Core::new(self.arch, self.entry),
+            self.build_core(),
             self.code.clone(),
             ReturnStack::new(opts.stack_depth),
             opts.profile,
@@ -254,7 +301,7 @@ impl<'a> Machine<'a> {
     /// `run_tapes`. Drive it with `step_in_tapes`.
     pub fn debug_tapes(&self, opts: RunOptions) -> DebugSession<'a> {
         DebugSession::new(
-            Core::new(self.arch, self.entry),
+            self.build_core(),
             self.code.clone(),
             ReturnStack::new(opts.stack_depth),
             opts.profile,
@@ -268,10 +315,13 @@ impl<'a> Machine<'a> {
 mod tests {
     use super::*;
     use crate::formats::executable::Executable;
+    use crate::formats::{PROFILE_BASE, PROFILE_FRAMES};
     use crate::vm::arch::test_arch::TestArch;
     use crate::vm::debug::{DebugEvent, PauseCause};
     use crate::vm::devices::InfiniteTape;
     use crate::vm::driver::Outcome;
+    use crate::vm::frame::test_support::descriptor_bytes;
+    use crate::vm::trap::Trap;
 
     // TestArch entry marker: 0x0E
 
@@ -391,7 +441,7 @@ mod tests {
         code.extend(5u32.to_le_bytes());
         code.push(0x02); // stp at 12
         let tables = vec![2, 1, 0, 1, 1, 1, 0, 12, 0, 0, 0];
-        Executable::sectioned(0x7F, 0, code, tables, 2, 0, cardinalities)
+        Executable::sectioned(0x7F, 0, code, tables, 2, PROFILE_BASE, cardinalities)
     }
 
     fn test_registry() -> ArchRegistry {
@@ -487,6 +537,148 @@ mod tests {
         let mut devs: [&mut dyn Tape; 1] = [&mut marked];
         let r = machine.run_tapes(&mut devs, RunOptions::default()).unwrap();
         assert_eq!(r.outcome, Outcome::Halted);
+    }
+
+    // A profile-frames sectioned image over the fake test arch: an entry
+    // marker, a framed call activating the arity-1 descriptor at table
+    // offset 0 (virtual tape 0 → physical tape 1), a framed body that
+    // reads-all and returns through exit 0, and the exit's stp. Mirrors
+    // the core-level frames tests but assembled as a whole v2 image, so
+    // the entire Machine load + run_tapes/debug_tapes plumbing runs.
+    //   [0]  0x0E  entry marker
+    //   [1]  0x19  callframe rel +1 → 7   [2..6] rel32 = 1
+    //   [6]  0x03  hlt (return-address canary — retx must not land here)
+    //   [7]  0x0E  callee entry marker
+    //   [8]  0x18  read-all (framed: arity 1, reads physical tape 1)
+    //   [9]  0x1A  retx#0 → exits[0] = 10
+    //   [10] 0x02  stp
+    // descriptor@0: arity 1, virtual 0 → phys 1, identity maps, exits [10].
+    fn frames_image(profile: u8) -> Executable {
+        let mut code = vec![0x0E, 0x19];
+        code.extend(1u32.to_le_bytes());
+        code.push(0x03); // hlt at 6
+        code.push(0x0E); // ent at 7
+        code.extend([0x18, 0x1A, 0x02]); // read-all, retx#0, stp at 10
+        let tables = descriptor_bytes(&[(1, &[], &[])], &[10]);
+        Executable::sectioned(0x7F, 0, code, tables, 2, profile, Vec::new())
+    }
+
+    #[test]
+    fn run_tapes_runs_a_frames_profile_image_end_to_end() {
+        let registry = test_registry();
+        let machine = Machine::from_executable(&frames_image(PROFILE_FRAMES), &registry).unwrap();
+        let mut t0 = InfiniteTape::new();
+        let mut t1 = InfiniteTape::new();
+        let mut devs: [&mut dyn Tape; 2] = [&mut t0, &mut t1];
+        let r = machine.run_tapes(&mut devs, RunOptions::default()).unwrap();
+        // Stopped proves run_tapes built the Core with_frames(): without it
+        // the callframe would trap ProfileViolation instead of activating
+        // the frame, translating the read, and exiting through retx.
+        assert_eq!(r.outcome, Outcome::Stopped);
+    }
+
+    #[test]
+    fn base_profile_image_traps_profile_violation_on_a_framed_call() {
+        // The identical image under the base profile: the callframe is
+        // outside the execution profile, so run_tapes (which withholds
+        // with_frames()) traps rather than running — pinning that the
+        // profile byte is what gates the frames mechanism on.
+        let registry = test_registry();
+        let machine = Machine::from_executable(&frames_image(PROFILE_BASE), &registry).unwrap();
+        let mut t0 = InfiniteTape::new();
+        let mut t1 = InfiniteTape::new();
+        let mut devs: [&mut dyn Tape; 2] = [&mut t0, &mut t1];
+        let r = machine.run_tapes(&mut devs, RunOptions::default()).unwrap();
+        assert_eq!(
+            r.outcome,
+            Outcome::Trapped(Trap::ProfileViolation { at: 1 })
+        );
+    }
+
+    #[test]
+    fn from_executable_rejects_an_unsupported_profile() {
+        let registry = test_registry();
+        let exe = Executable::sectioned(0x7F, 0, vec![0x0E, 0x02], Vec::new(), 1, 2, Vec::new());
+        assert_eq!(
+            Machine::from_executable(&exe, &registry).unwrap_err(),
+            LoadError::UnsupportedProfile { profile: 2 }
+        );
+        // Both implemented profiles load.
+        for profile in [PROFILE_BASE, PROFILE_FRAMES] {
+            let exe = Executable::sectioned(
+                0x7F,
+                0,
+                vec![0x0E, 0x02],
+                Vec::new(),
+                1,
+                profile,
+                Vec::new(),
+            );
+            assert!(Machine::from_executable(&exe, &registry).is_ok());
+        }
+    }
+
+    #[test]
+    fn debug_tapes_exposes_fr_and_retx_pops_like_ret() {
+        // fr() transitions 0 → non-zero → 0 across a framed call, and the
+        // return depth mirrors a plain call/ret (retx pops exactly one
+        // entry). Both are driven by the same stepped framed image.
+        let registry = test_registry();
+        let machine = Machine::from_executable(&frames_image(PROFILE_FRAMES), &registry).unwrap();
+        let mut session = machine.debug_tapes(RunOptions::default());
+        let mut t0 = InfiniteTape::new();
+        let mut t1 = InfiniteTape::new();
+        let mut devs: [&mut dyn Tape; 2] = [&mut t0, &mut t1];
+
+        // Identity frame, empty stack before the first step.
+        assert_eq!(session.fr(), 0);
+        assert_eq!(session.depth(), 0);
+
+        // ent@0 → still the identity frame.
+        assert_eq!(
+            session.step_in_tapes(&mut devs),
+            DebugEvent::Paused(PauseCause::Step)
+        );
+        assert_eq!(session.fr(), 0);
+        assert_eq!(session.depth(), 0);
+
+        // callframe@1 → frame active (FR non-zero) and the return address
+        // pushed (depth 1, exactly like a plain call).
+        assert_eq!(
+            session.step_in_tapes(&mut devs),
+            DebugEvent::Paused(PauseCause::Step)
+        );
+        assert_eq!(session.ip(), 7);
+        assert_ne!(session.fr(), 0);
+        assert_eq!(session.depth(), 1);
+        let fr_inside = session.fr();
+
+        // ent@7, read-all@8 → inside the frame, unchanged FR and depth.
+        for expected_ip in [8u32, 9] {
+            assert_eq!(
+                session.step_in_tapes(&mut devs),
+                DebugEvent::Paused(PauseCause::Step)
+            );
+            assert_eq!(session.ip(), expected_ip);
+            assert_eq!(session.fr(), fr_inside);
+            assert_eq!(session.depth(), 1);
+        }
+
+        // retx#0@9 → pops one entry like ret (depth 0) and restores the
+        // identity frame (FR 0), landing on exits[0] = 10.
+        assert_eq!(
+            session.step_in_tapes(&mut devs),
+            DebugEvent::Paused(PauseCause::Step)
+        );
+        assert_eq!(session.ip(), 10);
+        assert_eq!(session.fr(), 0);
+        assert_eq!(session.depth(), 0);
+
+        // stp@10.
+        assert_eq!(
+            session.step_in_tapes(&mut devs),
+            DebugEvent::Finished(Outcome::Stopped)
+        );
     }
 
     #[test]
