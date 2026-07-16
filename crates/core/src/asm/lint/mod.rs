@@ -4,7 +4,7 @@
 
 pub(crate) mod rules;
 
-use super::cst::{AsmCst, parse_asm_cst};
+use super::cst::{AsmCst, parse_asm_cst_with};
 use super::lower::{SourceFunction, lower};
 use super::{ArchSyntax, AsmError, assemble};
 use crate::diagnostics::Diagnostic;
@@ -42,7 +42,9 @@ pub fn lint(
     source: &str,
     allow: &[String],
 ) -> Result<Vec<Diagnostic>, AsmError> {
-    let cst = parse_asm_cst(source);
+    // Parse under the dialect's caps, matching `assemble` (identical to
+    // the default parse for every cap-off dialect).
+    let cst = parse_asm_cst_with(source, syntax.caps);
     let functions = lower(&cst, syntax, source)?;
     assemble(syntax, 0, source, false)?;
 

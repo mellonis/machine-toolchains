@@ -23,6 +23,9 @@ pub(crate) enum DecodedOperand {
     None,
     Ints(Vec<u32>),
     RelTarget(u32), // absolute target address (same space as `addr`)
+    /// Absolute TABLE-space offset (TableRef) — NOT a code address; the
+    /// traversal must never treat it as a successor.
+    TableAddr(u32),
 }
 
 /// Decode ONE instruction at `addr` within `[addr, end)`. `None` means an
@@ -51,6 +54,15 @@ pub(crate) fn decode_at(syntax: &ArchSyntax, code: &[u8], addr: u32, end: u32) -
             let off = i32::from_le_bytes(bytes);
             let target = (i64::from(addr) + 5 + i64::from(off)) as u32;
             (5, DecodedOperand::RelTarget(target))
+        }
+        OperandKind::TableRef => {
+            if addr + 5 > end {
+                return None;
+            }
+            let bytes: [u8; 4] = code[(addr + 1) as usize..(addr + 5) as usize]
+                .try_into()
+                .unwrap();
+            (5, DecodedOperand::TableAddr(u32::from_le_bytes(bytes)))
         }
         OperandKind::SymbolVec => {
             let mut i = addr + 1;

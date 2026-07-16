@@ -117,6 +117,10 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                         DecodedOperand::Ints(v) => {
                             Some(v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
                         }
+                        // Table-space offset: rendered numerically; the
+                        // labeled `.section tables` round-trip lands in a
+                        // later task.
+                        DecodedOperand::TableAddr(t) => Some(t.to_string()),
                         DecodedOperand::RelTarget(t) => {
                             if syntax.is_call(entry.opcode) {
                                 // The hole starts one byte after the opcode.
@@ -291,6 +295,8 @@ pub fn disassemble_executable(
                             entry.mnemonic,
                             v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "),
                         )),
+                        // Numeric for now (later task: table labels).
+                        DecodedOperand::TableAddr(t) => Some((entry.mnemonic, t.to_string())),
                         DecodedOperand::RelTarget(t) => {
                             if entry.flow == Flow::Call && roots.binary_search(t).is_ok() {
                                 Some((far_mnemonic(entry), func_name(*t)))
@@ -358,6 +364,8 @@ pub fn listing_line(
                 DecodedOperand::Ints(v) => {
                     v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
                 }
+                // Table-space offset — never resolved against code labels.
+                DecodedOperand::TableAddr(t) => format!("{t:#06x}"),
                 DecodedOperand::RelTarget(t) => match resolve(t) {
                     Some(name) => format!("{t:#06x} <{name}>"),
                     None => format!("{t:#06x}"),

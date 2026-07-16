@@ -15,6 +15,7 @@ impl mtc_core::vm::Arch for CodecArch {
             0x01 => Some(mtc_core::vm::OperandKind::RelI8),
             0x02 => Some(mtc_core::vm::OperandKind::RelI32),
             0x03 => Some(mtc_core::vm::OperandKind::SymbolVec),
+            0x04 => Some(mtc_core::vm::OperandKind::TableRef),
             _ => None,
         }
     }
@@ -81,5 +82,12 @@ proptest! {
     #[test]
     fn symbol_vec_round_trips(v in proptest::collection::vec(0u32..0x80, 1..8)) {
         round_trip(0x03, Operand::Symbols(v));
+    }
+
+    #[test]
+    fn table_ref_round_trips(v in any::<u32>()) {
+        // Unsigned absolute: the full u32 range must survive, including
+        // values whose top bit would flip an i32 negative.
+        round_trip(0x04, Operand::Table(v));
     }
 }

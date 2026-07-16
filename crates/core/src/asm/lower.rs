@@ -4,7 +4,8 @@
 //! every diagnostic. Replaces the old line-oriented parser.
 
 use super::cst::{
-    AsmCst, AsmItem, AsmItemKind, FuncCst, InstrCst, LabelCst, LineCst, ReptCst, parse_asm_cst_with,
+    AsmCst, AsmItem, AsmItemKind, FuncCst, InstrCst, LabelCst, LineCst, OperandToken, ReptCst,
+    SectionCst, TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with,
 };
 use super::subst::substitute;
 use super::syntax::ArchSyntax;
@@ -61,6 +62,79 @@ pub enum SourceOperand {
     Name(SpannedName),
     /// `@name` — a function-symbol reference, not a local label.
     SymbolName(SpannedName),
+    /// A `[..]` vector operand, parsed per element. Which elements are
+    /// legal depends on the consuming context (match rows: payload and
+    /// wildcard; write vectors: payload and keep; move vectors: the
+    /// three moves) — that legality is the dialect's per-mnemonic call;
+    /// this layer only parses.
+    Vector(Vec<VecElem>),
+}
+
+/// One element of a `[..]` vector operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VecElem {
+    Payload(u32),
+    /// `*` — any symbol (match rows). Encodes as `0x7F`.
+    Wildcard,
+    /// `-` — keep, no write on that tape. Encodes as `0x7F`.
+    Keep,
+    /// `<` — encodes as 1.
+    MoveLeft,
+    /// `>` — encodes as 2.
+    MoveRight,
+    /// `.` — encodes as 0.
+    Stay,
+}
+
+/// A match-table row: parsed elements plus the directive's span (the
+/// span every discipline diagnostic for this row points at).
+#[derive(Debug)]
+pub struct SourceRow {
+    pub elems: Vec<VecElem>,
+    pub span: Span,
+}
+
+/// One file-scoped table lowered from a labeled run of directives in
+/// `.section tables`. Byte emission and discipline validation live in
+/// the assembler; this is the parsed, spanned source form.
+#[derive(Debug)]
+pub enum SourceTable {
+    /// A labeled run of `.row [..]` directives.
+    Match {
+        name: SpannedName,
+        rows: Vec<SourceRow>,
+    },
+    /// A labeled run of `.targets`/`.target` directives; entries are
+    /// CODE labels, resolved after function layout.
+    Dispatch {
+        name: SpannedName,
+        targets: Vec<SpannedName>,
+    },
+}
+
+impl SourceTable {
+    pub fn name(&self) -> &SpannedName {
+        match self {
+            SourceTable::Match { name, .. } | SourceTable::Dispatch { name, .. } => name,
+        }
+    }
+}
+
+/// Everything one lowered source file carries: the functions (code
+/// section) and the tables (`.section tables`). Cap-off dialects never
+/// produce tables — the CST never shapes the directives.
+#[derive(Debug)]
+pub struct LoweredSource {
+    pub functions: Vec<SourceFunction>,
+    pub tables: Vec<SourceTable>,
+}
+
+/// Which source section the lowering cursor is in. The default is code,
+/// so dialects without the tables cap never notice sections exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Code,
+    Tables,
 }
 
 fn err(span: Span, kind: AsmErrorKind) -> AsmError {
@@ -101,26 +175,61 @@ fn spanned(label: &LabelCst) -> SpannedName {
     }
 }
 
+/// The functions-only view of [`lower_source`], for consumers that never
+/// see tables (the lint layer; every existing cap-off dialect). All
+/// validation still runs — only the successfully lowered tables are
+/// dropped from the result.
 pub(crate) fn lower(
     cst: &AsmCst,
     syntax: &ArchSyntax,
     source: &str,
 ) -> Result<Vec<SourceFunction>, AsmError> {
-    let mut functions: Vec<SourceFunction> = Vec::new();
-    let mut pending: Vec<SpannedName> = Vec::new();
+    lower_source(cst, syntax, source).map(|lowered| lowered.functions)
+}
+
+/// The lowering state threaded through every item: the accumulating
+/// output plus the two cursors — pending labels awaiting their
+/// instruction, and the section/table-run position.
+struct LowerCtx {
+    functions: Vec<SourceFunction>,
+    pending: Vec<SpannedName>,
+    section: Section,
+    tables: Vec<SourceTable>,
+    /// `tables.last()` still accepts unlabeled continuation directives.
+    /// Closed by a `.section` switch; table directives are the only
+    /// items legal in the tables section, so nothing else can intervene
+    /// (comments are trivia and do not close a run).
+    run_open: bool,
+}
+
+pub(crate) fn lower_source(
+    cst: &AsmCst,
+    syntax: &ArchSyntax,
+    source: &str,
+) -> Result<LoweredSource, AsmError> {
+    let mut ctx = LowerCtx {
+        functions: Vec::new(),
+        pending: Vec::new(),
+        section: Section::Code,
+        tables: Vec::new(),
+        run_open: false,
+    };
 
     for item in &cst.items {
-        lower_item(item, syntax, source, &mut functions, &mut pending)?;
+        lower_item(item, syntax, source, &mut ctx)?;
     }
 
     // A label with no instruction after it, at end of input.
-    if let Some(first) = pending.first() {
+    if let Some(first) = ctx.pending.first() {
         return Err(err(
             first.span,
             AsmErrorKind::Syntax("label at end of function"),
         ));
     }
-    Ok(functions)
+    Ok(LoweredSource {
+        functions: ctx.functions,
+        tables: ctx.tables,
+    })
 }
 
 /// Lowers one CST item. Shared by the top-level pass and — via
@@ -132,34 +241,258 @@ fn lower_item(
     item: &AsmItem,
     syntax: &ArchSyntax,
     source: &str,
-    functions: &mut Vec<SourceFunction>,
-    pending: &mut Vec<SpannedName>,
+    ctx: &mut LowerCtx,
 ) -> Result<(), AsmError> {
     match &item.kind {
         AsmItemKind::Comment(_) => {}
         AsmItemKind::Raw(raw) => return Err(err(raw.span, AsmErrorKind::RawLine)),
-        AsmItemKind::Func(func) => lower_func(func, functions, pending)?,
-        AsmItemKind::Line(line) => lower_line(line, syntax, functions, pending)?,
-        // Sections and table directives are shaped only under the opt-in
-        // caps; PM-1's caps are off, so these are unreachable through the
-        // real arch and reachable only by a fake-caps direct lower call.
-        // Lowering them lands in a later task — until then, a clear error
-        // rather than a silent drop.
-        AsmItemKind::Section(s) => {
-            return Err(err(
-                s.span,
-                AsmErrorKind::Syntax("sections lower in a later task"),
-            ));
-        }
-        AsmItemKind::TableDirective(d) => {
-            return Err(err(
-                d.span,
-                AsmErrorKind::Syntax("table directives lower in a later task"),
-            ));
-        }
-        AsmItemKind::Rept(r) => lower_rept(r, syntax, source, functions, pending)?,
+        AsmItemKind::Func(func) => lower_func(func, ctx)?,
+        AsmItemKind::Line(line) => lower_line(line, syntax, ctx)?,
+        // Sections and table directives shape only under the opt-in caps;
+        // cap-off dialects (PM-1) never reach these arms.
+        AsmItemKind::Section(s) => lower_section(s, ctx)?,
+        AsmItemKind::TableDirective(d) => lower_table_directive(d, ctx)?,
+        AsmItemKind::Rept(r) => lower_rept(r, syntax, source, ctx)?,
     }
     Ok(())
+}
+
+/// `.section NAME`: switches the section cursor and closes any open
+/// table run. Only `code` and `tables` exist.
+fn lower_section(section: &SectionCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    // A pending label cannot bind across a section boundary — same rule
+    // as a label immediately before `.func`.
+    if let Some(first) = ctx.pending.first() {
+        return Err(err(
+            first.span,
+            AsmErrorKind::Syntax("label at end of function"),
+        ));
+    }
+    ctx.run_open = false;
+    ctx.section = match section.name.as_str() {
+        "code" => Section::Code,
+        "tables" => Section::Tables,
+        _ => {
+            return Err(err(
+                section.span,
+                AsmErrorKind::BadTable("unknown section (expected `code` or `tables`)"),
+            ));
+        }
+    };
+    Ok(())
+}
+
+/// A table directive's parsed payload, before run attachment.
+enum ParsedDirective {
+    Row(SourceRow),
+    Targets(Vec<SpannedName>),
+}
+
+/// `.row [..]` / `.targets L1, ..` / `.target L`: legal only inside
+/// `.section tables`. A LABELED directive opens a table; unlabeled
+/// directives continue the open run. A labeled directive naming the OPEN
+/// run of the same kind continues it instead — that is what a `.rept`
+/// around `T: .row [..{v}..]` expands to, one same-labeled row per
+/// iteration.
+fn lower_table_directive(d: &TableDirectiveCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    if ctx.section != Section::Tables {
+        return Err(err(
+            d.span,
+            AsmErrorKind::BadTable("table directives live in the tables section"),
+        ));
+    }
+    for label in &d.labels {
+        if !is_label_name(&label.name) {
+            return Err(err(
+                label.span,
+                AsmErrorKind::Syntax("label names use letters, digits, underscore"),
+            ));
+        }
+    }
+    if d.labels.len() > 1 {
+        return Err(err(
+            d.labels[1].span,
+            AsmErrorKind::BadTable("one label per table directive"),
+        ));
+    }
+
+    let parsed = match d.kind {
+        TableDirectiveKind::Row => {
+            // The CST shapes `.row` only around a single bracketed
+            // vector; the guard is defensive.
+            let [token] = d.operands.as_slice() else {
+                return Err(err(
+                    d.span,
+                    AsmErrorKind::BadVector("`.row` takes one bracketed vector"),
+                ));
+            };
+            let elems = parse_vector(token)?;
+            for elem in &elems {
+                match elem {
+                    // 0x7F is the wildcard byte, so exact payloads stop at 0x7E.
+                    VecElem::Payload(p) if *p > 0x7E => {
+                        return Err(err(
+                            token.span,
+                            AsmErrorKind::BadVector("match payloads are at most 126"),
+                        ));
+                    }
+                    VecElem::Payload(_) | VecElem::Wildcard => {}
+                    _ => {
+                        return Err(err(
+                            token.span,
+                            AsmErrorKind::BadVector("match rows allow payloads and `*` only"),
+                        ));
+                    }
+                }
+            }
+            ParsedDirective::Row(SourceRow {
+                elems,
+                span: d.span,
+            })
+        }
+        TableDirectiveKind::Targets | TableDirectiveKind::Target => {
+            if d.operands.is_empty() {
+                return Err(err(
+                    d.span,
+                    AsmErrorKind::BadTable("a dispatch table needs at least one target"),
+                ));
+            }
+            if matches!(d.kind, TableDirectiveKind::Target) && d.operands.len() != 1 {
+                return Err(err(
+                    d.operands[1].span,
+                    AsmErrorKind::BadTable("`.target` takes one label"),
+                ));
+            }
+            let mut targets = Vec::with_capacity(d.operands.len());
+            for operand in &d.operands {
+                if !is_label_name(&operand.text) {
+                    return Err(err(
+                        operand.span,
+                        AsmErrorKind::BadTable("dispatch targets are label names"),
+                    ));
+                }
+                targets.push(SpannedName {
+                    name: operand.text.clone(),
+                    span: operand.span,
+                });
+            }
+            ParsedDirective::Targets(targets)
+        }
+    };
+
+    match d.labels.first() {
+        Some(label) => {
+            // A labeled directive continuing the open run of the same
+            // name AND kind appends; anything else opens a fresh table
+            // under a fresh (file-scoped) name.
+            let continues = ctx.run_open
+                && match (ctx.tables.last(), &parsed) {
+                    (Some(SourceTable::Match { name, .. }), ParsedDirective::Row(_)) => {
+                        name.name == label.name
+                    }
+                    (Some(SourceTable::Dispatch { name, .. }), ParsedDirective::Targets(_)) => {
+                        name.name == label.name
+                    }
+                    _ => false,
+                };
+            if continues {
+                append_to_run(ctx.tables.last_mut().expect("run open"), parsed);
+            } else {
+                if ctx.tables.iter().any(|t| t.name().name == label.name) {
+                    return Err(err(
+                        label.span,
+                        AsmErrorKind::DuplicateLabel(label.name.clone()),
+                    ));
+                }
+                let name = spanned(label);
+                ctx.tables.push(match parsed {
+                    ParsedDirective::Row(row) => SourceTable::Match {
+                        name,
+                        rows: vec![row],
+                    },
+                    ParsedDirective::Targets(targets) => SourceTable::Dispatch { name, targets },
+                });
+                ctx.run_open = true;
+            }
+        }
+        None => {
+            if !ctx.run_open {
+                return Err(err(
+                    d.span,
+                    AsmErrorKind::BadTable("a table starts with a labeled directive"),
+                ));
+            }
+            let table = ctx.tables.last_mut().expect("run open");
+            match (&*table, &parsed) {
+                (SourceTable::Match { .. }, ParsedDirective::Row(_))
+                | (SourceTable::Dispatch { .. }, ParsedDirective::Targets(_)) => {
+                    append_to_run(table, parsed);
+                }
+                _ => {
+                    return Err(err(
+                        d.span,
+                        AsmErrorKind::BadTable("cannot mix rows and targets in one table"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Appends a parsed directive to a run whose kind is already known to
+/// match (both callers check).
+fn append_to_run(table: &mut SourceTable, parsed: ParsedDirective) {
+    match (table, parsed) {
+        (SourceTable::Match { rows, .. }, ParsedDirective::Row(row)) => rows.push(row),
+        (SourceTable::Dispatch { targets, .. }, ParsedDirective::Targets(mut more)) => {
+            targets.append(&mut more);
+        }
+        _ => unreachable!("caller checked the run kind"),
+    }
+}
+
+/// Parses a verbatim `[..]` operand token into vector elements. Element
+/// LEGALITY per context is the caller's (ultimately the dialect's) call;
+/// this accepts the full element vocabulary.
+fn parse_vector(token: &OperandToken) -> Result<Vec<VecElem>, AsmError> {
+    let inner = token
+        .text
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .ok_or_else(|| {
+            err(
+                token.span,
+                AsmErrorKind::BadVector("expected a `[..]` vector"),
+            )
+        })?;
+    let mut elems = Vec::new();
+    for part in inner.split(',') {
+        let elem = match part.trim() {
+            "*" => VecElem::Wildcard,
+            "-" => VecElem::Keep,
+            "<" => VecElem::MoveLeft,
+            ">" => VecElem::MoveRight,
+            "." => VecElem::Stay,
+            // `[]` also lands here: its one split part is empty.
+            "" => {
+                return Err(err(
+                    token.span,
+                    AsmErrorKind::BadVector("empty vector element"),
+                ));
+            }
+            payload => VecElem::Payload(payload.parse::<u32>().map_err(|_| {
+                err(
+                    token.span,
+                    AsmErrorKind::BadVector(
+                        "vector elements are integers or `*`, `-`, `<`, `>`, `.`",
+                    ),
+                )
+            })?),
+        };
+        elems.push(elem);
+    }
+    Ok(elems)
 }
 
 /// Expands a `.rept v, lo, hi` … `.endr` block textually (the GNU-as
@@ -172,8 +505,7 @@ fn lower_rept(
     rept: &ReptCst,
     syntax: &ArchSyntax,
     source: &str,
-    functions: &mut Vec<SourceFunction>,
-    pending: &mut Vec<SpannedName>,
+    ctx: &mut LowerCtx,
 ) -> Result<(), AsmError> {
     if rept.lo > rept.hi {
         return Err(err(rept.span, AsmErrorKind::BadRept));
@@ -200,8 +532,7 @@ fn lower_rept(
             // block needs its own `.endr`, absent from one line).
             let cst = parse_asm_cst_with(&expanded, syntax.caps);
             for expanded_item in &cst.items {
-                lower_item(expanded_item, syntax, source, functions, pending)
-                    .map_err(|e| err(span, e.kind))?;
+                lower_item(expanded_item, syntax, source, ctx).map_err(|e| err(span, e.kind))?;
             }
         }
     }
@@ -223,17 +554,19 @@ fn body_item_span(item: &AsmItem) -> Option<Span> {
     }
 }
 
-fn lower_func(
-    func: &FuncCst,
-    functions: &mut Vec<SourceFunction>,
-    pending: &[SpannedName],
-) -> Result<(), AsmError> {
+fn lower_func(func: &FuncCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
     // A label immediately before a `.func` binds to nothing (legacy: the
     // first check in the `.func` branch, before the name is parsed).
-    if let Some(first) = pending.first() {
+    if let Some(first) = ctx.pending.first() {
         return Err(err(
             first.span,
             AsmErrorKind::Syntax("label at end of function"),
+        ));
+    }
+    if ctx.section == Section::Tables {
+        return Err(err(
+            func.name_span,
+            AsmErrorKind::BadTable("functions are not allowed in the tables section"),
         ));
     }
     if !is_symbol_name(&func.name) {
@@ -242,13 +575,13 @@ fn lower_func(
             AsmErrorKind::Syntax("bad function name"),
         ));
     }
-    if functions.iter().any(|f| f.name == func.name) {
+    if ctx.functions.iter().any(|f| f.name == func.name) {
         return Err(err(
             func.name_span,
             AsmErrorKind::DuplicateFunction(func.name.clone()),
         ));
     }
-    functions.push(SourceFunction {
+    ctx.functions.push(SourceFunction {
         name: func.name.clone(),
         name_span: func.name_span,
         local: func.local,
@@ -257,12 +590,7 @@ fn lower_func(
     Ok(())
 }
 
-fn lower_line(
-    line: &LineCst,
-    syntax: &ArchSyntax,
-    functions: &mut Vec<SourceFunction>,
-    pending: &mut Vec<SpannedName>,
-) -> Result<(), AsmError> {
+fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result<(), AsmError> {
     // Every label name must be a bare identifier. This is where
     // `foo.bar:` and `std::x:` are rejected — the CST shapes them as
     // label candidates; the tightening lives here.
@@ -275,14 +603,33 @@ fn lower_line(
         }
     }
 
+    // Inside the tables section only table directives are legal. A
+    // `.row` whose operand region was not one bracketed vector degrades
+    // to a Line (CST rule) — give it the precise vector complaint rather
+    // than the generic section one.
+    if ctx.section == Section::Tables {
+        if let Some(instr) = &line.instr
+            && instr.word == ".row"
+        {
+            return Err(err(
+                instr.word_span,
+                AsmErrorKind::BadVector("`.row` takes one bracketed vector"),
+            ));
+        }
+        return Err(err(
+            line.span,
+            AsmErrorKind::BadTable("only table directives are allowed in the tables section"),
+        ));
+    }
+
     let Some(instr) = &line.instr else {
         // Label-only line. Outside any function it is stray code;
         // otherwise the labels wait for the next instruction.
-        if functions.is_empty() {
+        if ctx.functions.is_empty() {
             // A label-only line always carries at least one label.
             return Err(err(line.labels[0].span, AsmErrorKind::OutsideFunction));
         }
-        pending.extend(line.labels.iter().map(spanned));
+        ctx.pending.extend(line.labels.iter().map(spanned));
         return Ok(());
     };
 
@@ -292,18 +639,18 @@ fn lower_line(
     // `L1: .func …` is a plain unknown mnemonic. This fires before the
     // open-function check, matching the legacy `.func`-branch precedence.
     if instr.word == ".func" && line.labels.is_empty() {
-        return lower_malformed_func(instr, functions, pending);
+        return lower_malformed_func(instr, ctx);
     }
 
     // Outside any function an instruction is stray code — reported
     // before mnemonic lookup (matches the pinned `.function f` case).
-    if functions.is_empty() {
+    if ctx.functions.is_empty() {
         return Err(err(instr.word_span, AsmErrorKind::OutsideFunction));
     }
 
     // Labels bound to this instruction: those pending from prior
     // label-only lines, then this line's own.
-    let mut labels: Vec<SpannedName> = std::mem::take(pending);
+    let mut labels: Vec<SpannedName> = std::mem::take(&mut ctx.pending);
     labels.extend(line.labels.iter().map(spanned));
 
     let item = if instr.word == ".byte" {
@@ -326,7 +673,7 @@ fn lower_line(
             operand: classify_operand(entry.operand, instr)?,
         }
     };
-    functions
+    ctx.functions
         .last_mut()
         .expect("function open")
         .items
@@ -339,14 +686,10 @@ fn lower_line(
 /// region (comma-joined so the legacy whitespace tokenization is
 /// preserved); spans point at the `.func` word, except the
 /// pending-label check which points at the label.
-fn lower_malformed_func(
-    instr: &InstrCst,
-    functions: &mut Vec<SourceFunction>,
-    pending: &[SpannedName],
-) -> Result<(), AsmError> {
+fn lower_malformed_func(instr: &InstrCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
     // Same first check as the exact-`.func` path: a label immediately
     // before any `.func` (well-formed or not) binds to nothing.
-    if let Some(first) = pending.first() {
+    if let Some(first) = ctx.pending.first() {
         return Err(err(
             first.span,
             AsmErrorKind::Syntax("label at end of function"),
@@ -379,13 +722,13 @@ fn lower_malformed_func(
     if !is_symbol_name(name) {
         return Err(err(word_span, AsmErrorKind::Syntax("bad function name")));
     }
-    if functions.iter().any(|f| f.name == name) {
+    if ctx.functions.iter().any(|f| f.name == name) {
         return Err(err(
             word_span,
             AsmErrorKind::DuplicateFunction(name.to_string()),
         ));
     }
-    functions.push(SourceFunction {
+    ctx.functions.push(SourceFunction {
         name: name.to_string(),
         name_span: word_span,
         local,
@@ -453,6 +796,14 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
             }
         }
         OperandKind::SymbolVec => {
+            // A bracketed `[..]` region reaches here as ONE verbatim
+            // token (caps.vectors CST rule) and classifies as a vector;
+            // per-mnemonic encoding of vectors is the dialect's job.
+            if let [one] = operands.as_slice()
+                && one.text.starts_with('[')
+            {
+                return Ok(SourceOperand::Vector(parse_vector(one)?));
+            }
             if operands.is_empty() {
                 return Err(err(
                     instr.word_span,
@@ -469,6 +820,26 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
                 })?);
             }
             Ok(SourceOperand::Ints(ints))
+        }
+        OperandKind::TableRef => {
+            // A table reference is a file-scoped table LABEL (label
+            // grammar, not the dotted/namespaced symbol grammar).
+            let [one] = operands.as_slice() else {
+                return Err(err(
+                    instr.word_span,
+                    AsmErrorKind::BadOperand("takes one table label"),
+                ));
+            };
+            if !is_label_name(&one.text) {
+                return Err(err(
+                    one.span,
+                    AsmErrorKind::BadOperand("table references are labels"),
+                ));
+            }
+            Ok(SourceOperand::Name(SpannedName {
+                name: one.text.clone(),
+                span: one.span,
+            }))
         }
     }
 }
@@ -808,6 +1179,75 @@ L1:     nop
         let e = lower_rept_src(src).unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::BadSubstitution(_)));
         assert_eq!(e.span.start.line, 3); // the `wr {v+}` body line
+    }
+
+    // -- Vector operands (caps.vectors) ----------------------------------
+
+    /// `test_syntax()` with the vectors cap on, so `[..]` operand tokens
+    /// exist for the classic `wr` (SymbolVec) mnemonic to classify.
+    fn vectors_syntax() -> ArchSyntax {
+        let mut syntax = test_syntax();
+        syntax.caps = AsmCaps {
+            vectors: true,
+            ..Default::default()
+        };
+        syntax
+    }
+
+    fn lower_vectors_src(src: &str) -> Result<Vec<SourceFunction>, AsmError> {
+        let syntax = vectors_syntax();
+        lower(&parse_asm_cst_with(src, syntax.caps), &syntax, src)
+    }
+
+    #[test]
+    fn vector_operands_parse_per_element() {
+        // The full element vocabulary in one vector; legality per context
+        // is the consumer's call — this layer only parses.
+        let src = ".func f\n        wr [1, *, -, <, >, .]\n";
+        let funcs = lower_vectors_src(src).unwrap();
+        match &funcs[0].items[0] {
+            SourceItem::Instr {
+                operand: SourceOperand::Vector(elems),
+                ..
+            } => {
+                assert_eq!(
+                    elems,
+                    &vec![
+                        VecElem::Payload(1),
+                        VecElem::Wildcard,
+                        VecElem::Keep,
+                        VecElem::MoveLeft,
+                        VecElem::MoveRight,
+                        VecElem::Stay,
+                    ]
+                );
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_vector_elements_are_rejected() {
+        let e = lower_vectors_src(".func f\n        wr [1, x]\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{e}");
+
+        let e = lower_vectors_src(".func f\n        wr []\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{e}");
+
+        let e = lower_vectors_src(".func f\n        wr [1,,2]\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{e}");
+    }
+
+    #[test]
+    fn plain_int_operands_still_classify_as_ints_under_vector_caps() {
+        // The vectors cap must not disturb the classic spelled-out form.
+        let funcs = lower_vectors_src(".func f\n        wr 1, 2\n").unwrap();
+        match &funcs[0].items[0] {
+            SourceItem::Instr { operand, .. } => {
+                assert!(matches!(operand, SourceOperand::Ints(v) if v == &vec![1, 2]));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]

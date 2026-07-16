@@ -53,6 +53,23 @@ pub enum AsmErrorKind {
     /// evaluate (bad grammar, unknown variable, unbalanced brace, …).
     /// The carried string is the evaluator's own message.
     BadSubstitution(String),
+    /// A `[..]` vector operand that does not parse (bad element, empty
+    /// vector) or carries an element illegal in its context (a move
+    /// marker in a match row, …).
+    BadVector(&'static str),
+    /// A section/table structural violation: a table directive outside
+    /// `.section tables`, a function inside it, an unreferenced or
+    /// multiply-referenced table, a run without a label, ….
+    BadTable(&'static str),
+    /// A match-table discipline violation (docs/formats.md (assembly
+    /// text)): exact rows first — sorted, pairwise disjoint; wildcard
+    /// rows after in source order; an all-wildcard catch-all only last;
+    /// all rows one width. The span is the offending row's.
+    TableDiscipline(&'static str),
+    /// A table-space label that does not resolve: an operand naming no
+    /// table, a dispatch target defined in no function, or dispatch
+    /// targets that do not all live in the one owning function.
+    UnknownTableLabel(String),
 }
 
 impl AsmErrorKind {
@@ -73,6 +90,10 @@ impl AsmErrorKind {
             AsmErrorKind::RawLine => "raw-line",
             AsmErrorKind::BadRept => "bad-rept",
             AsmErrorKind::BadSubstitution(_) => "bad-substitution",
+            AsmErrorKind::BadVector(_) => "bad-vector",
+            AsmErrorKind::BadTable(_) => "bad-table",
+            AsmErrorKind::TableDiscipline(_) => "table-discipline",
+            AsmErrorKind::UnknownTableLabel(_) => "unknown-table-label",
         }
     }
 }
@@ -84,7 +105,10 @@ impl std::fmt::Display for AsmErrorKind {
             // messages (`takes one name`, `bad function name`, …).
             AsmErrorKind::Syntax(m)
             | AsmErrorKind::BadOperand(m)
-            | AsmErrorKind::EncodeError(m) => {
+            | AsmErrorKind::EncodeError(m)
+            | AsmErrorKind::BadVector(m)
+            | AsmErrorKind::BadTable(m)
+            | AsmErrorKind::TableDiscipline(m) => {
                 write!(f, "{m}")
             }
             AsmErrorKind::UnknownMnemonic(m) => write!(f, "unknown mnemonic `{m}`"),
@@ -98,6 +122,7 @@ impl std::fmt::Display for AsmErrorKind {
             AsmErrorKind::RawLine => write!(f, "not assembly text"),
             AsmErrorKind::BadRept => write!(f, "empty `.rept` range (lo > hi)"),
             AsmErrorKind::BadSubstitution(m) => write!(f, "invalid substitution: {m}"),
+            AsmErrorKind::UnknownTableLabel(l) => write!(f, "unknown table label `{l}`"),
         }
     }
 }
@@ -168,8 +193,12 @@ mod tests {
             AsmErrorKind::RawLine,
             AsmErrorKind::BadRept,
             AsmErrorKind::BadSubstitution("x".into()),
+            AsmErrorKind::BadVector("x"),
+            AsmErrorKind::BadTable("x"),
+            AsmErrorKind::TableDiscipline("x"),
+            AsmErrorKind::UnknownTableLabel("x".into()),
         ];
-        assert_eq!(kinds.len(), 12);
+        assert_eq!(kinds.len(), 16);
         let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
     }

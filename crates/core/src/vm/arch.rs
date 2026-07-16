@@ -11,6 +11,10 @@ pub enum OperandKind {
     RelI32,
     /// Self-delimiting symbol vector: 7-bit payloads, high bit on the last.
     SymbolVec,
+    /// Absolute table-section offset: 4 bytes, u32 LE (RelI32's width but
+    /// unsigned and absolute — table walks address the table space, not
+    /// instruction-relative code).
+    TableRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +23,8 @@ pub enum Operand {
     I8(i8),
     I32(i32),
     Symbols(Vec<u32>),
+    /// A [`OperandKind::TableRef`] operand: the absolute table offset.
+    Table(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +87,7 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
         Operand::None => Vec::new(),
         Operand::I8(v) => vec![*v as u8],
         Operand::I32(v) => v.to_le_bytes().to_vec(),
+        Operand::Table(v) => v.to_le_bytes().to_vec(),
         Operand::Symbols(symbols) => {
             let Some((last, init)) = symbols.split_last() else {
                 return Err("symbol vector must not be empty");
@@ -100,7 +107,7 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
 /// 0x06 right+latch | 0x07 wr(vec)+latch | 0x08 jmp rel8 | 0x09 jm rel32 |
 /// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to Nop) |
 /// 0x10 read dev0→slot0 + dev1→slot1 (probes TR latching) |
-/// 0x11 mtc @table (abs table offset) | 0x12 djmp @table (probes the table engine) |
+/// 0x11 mtc @table | 0x12 djmp @table (TableRef: abs u32 table offset; probes the table engine) |
 /// 0x13 wr(vec) on dev 1 | 0x14 left on dev 1 (probes device-indexed tape micro-ops) |
 /// 0x15 raise unmapped-read | 0x16 raise unmapped-write (probes Raise micro-op) |
 /// 0x17 read dev0→slot0 (single-tape TR latch, for the table-program end-to-end test)
@@ -120,7 +127,8 @@ pub(crate) mod test_arch {
                 0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14..=0x17 => Some(OperandKind::None),
                 0x07 | 0x13 => Some(OperandKind::SymbolVec),
                 0x08 => Some(OperandKind::RelI8),
-                0x09 | 0x0A | 0x11 | 0x12 => Some(OperandKind::RelI32),
+                0x09 | 0x0A => Some(OperandKind::RelI32),
+                0x11 | 0x12 => Some(OperandKind::TableRef),
                 _ => None,
             }
         }
@@ -156,8 +164,8 @@ pub(crate) mod test_arch {
                     MicroOp::Read { dev: 0, slot: 0 },
                     MicroOp::Read { dev: 1, slot: 1 },
                 ],
-                (0x11, Operand::I32(o)) => vec![MicroOp::MatchTable { table: *o as u32 }],
-                (0x12, Operand::I32(o)) => vec![MicroOp::DispatchJump { table: *o as u32 }],
+                (0x11, Operand::Table(o)) => vec![MicroOp::MatchTable { table: *o }],
+                (0x12, Operand::Table(o)) => vec![MicroOp::DispatchJump { table: *o }],
                 (0x13, Operand::Symbols(s)) if s.len() == 1 => {
                     vec![MicroOp::Write {
                         dev: 1,
@@ -194,6 +202,7 @@ mod tests {
         assert!(matches!(a.operand_kind(0x07), Some(OperandKind::SymbolVec)));
         assert!(matches!(a.operand_kind(0x08), Some(OperandKind::RelI8)));
         assert!(matches!(a.operand_kind(0x09), Some(OperandKind::RelI32)));
+        assert!(matches!(a.operand_kind(0x11), Some(OperandKind::TableRef)));
         assert!(a.operand_kind(0x55).is_none());
     }
 
@@ -220,6 +229,15 @@ mod tests {
         assert_eq!(
             encode_operand(&Operand::I32(-6)).unwrap(),
             vec![0xFA, 0xFF, 0xFF, 0xFF]
+        );
+        // TableRef: u32 LE, absolute — the high bit is a value bit, not a sign.
+        assert_eq!(
+            encode_operand(&Operand::Table(7)).unwrap(),
+            vec![7, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_operand(&Operand::Table(0x8000_0001)).unwrap(),
+            vec![0x01, 0x00, 0x00, 0x80]
         );
         assert_eq!(
             encode_operand(&Operand::Symbols(vec![1])).unwrap(),

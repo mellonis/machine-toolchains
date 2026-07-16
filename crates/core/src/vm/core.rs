@@ -169,7 +169,7 @@ impl<'a> Core<'a> {
         let complete = match kind {
             OperandKind::None => true, // unreachable by construction
             OperandKind::RelI8 => buf.len() == 1,
-            OperandKind::RelI32 => buf.len() == 4,
+            OperandKind::RelI32 | OperandKind::TableRef => buf.len() == 4,
             OperandKind::SymbolVec => byte & 0x80 != 0,
         };
         if !complete {
@@ -180,6 +180,9 @@ impl<'a> Core<'a> {
             OperandKind::None => Operand::None,
             OperandKind::RelI8 => Operand::I8(buf[0] as i8),
             OperandKind::RelI32 => Operand::I32(i32::from_le_bytes(buf[..4].try_into().unwrap())),
+            OperandKind::TableRef => {
+                Operand::Table(u32::from_le_bytes(buf[..4].try_into().unwrap()))
+            }
             OperandKind::SymbolVec => {
                 Operand::Symbols(buf.iter().map(|b| u32::from(b & 0x7F)).collect())
             }

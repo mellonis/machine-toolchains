@@ -475,12 +475,19 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
         // `.row` without a bracketed vector — fall through to Line.
     }
 
-    let operands = operand_region(
-        line,
-        &body[at + 1..],
-        line_no,
-        word_token.col + word_token.len,
-    );
+    // A bracketed operand region on an ordinary instruction line
+    // (caps.vectors) is captured as ONE verbatim `[..]` token, exactly
+    // like a `.row`'s vector — the interior commas must not split it.
+    // Under default caps `LBracket` tokens never exist, so this is dead
+    // and the comma-split below is byte-identical to before.
+    let region = &body[at + 1..];
+    let operands = if caps.vectors
+        && let Some(op) = vector_operand(line, region, line_no)
+    {
+        vec![op]
+    } else {
+        operand_region(line, region, line_no, word_token.col + word_token.len)
+    };
     AsmItemKind::Line(LineCst {
         labels,
         instr: Some(InstrCst {
@@ -1021,6 +1028,16 @@ L1:     rgt
         // becomes Raw (via Junk) or a Line, exactly as before this task.
         let cst = parse_asm_cst(".section tables\n");
         assert!(!matches!(&cst.items[0].kind, AsmItemKind::Section(_)));
+    }
+
+    #[test]
+    fn instruction_vector_operand_is_one_verbatim_token() {
+        // With caps.vectors, an instruction's bracketed operand region is
+        // one lossless `[..]` token — the interior commas do not split it
+        // (mirrors the `.row` treatment below).
+        let cst = parse_asm_cst_with("vwrite [1, -, 2]\n", caps_all());
+        let line = as_line(&cst.items[0]);
+        assert_eq!(operand_texts(line), vec!["[1, -, 2]"]);
     }
 
     #[test]
