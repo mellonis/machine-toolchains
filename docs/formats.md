@@ -12,9 +12,9 @@ Magics are toolchain-neutral: two ASCII letters plus a binary epoch byte —
 `MO 0x01` object, `MX 0x01` executable, `MT 0x01` tape-block. The epoch
 byte marks header-layout generations and doubles as a text-file guard; a
 `u16 format version` field inside each header covers evolution within an
-epoch. Each container dispatches on its own version field — MO, MX, and MT
-all read `1..=2` today, selecting the layout from that field and never from
-the extension. The containers are shared across present and future machine
+epoch. Each container dispatches on its own version field — MO reads
+`1..=3`, MX and MT read `1..=2` today, selecting the layout from that field
+and never from the extension. The containers are shared across present and future machine
 toolchains built on this codebase: the file *extension* carries the
 toolchain flavor (`.pmo`/`.pmx`/`.pmt` from `pmt`), while the magic plus an
 `arch` byte identify the actual content. Tools never dispatch on file
@@ -82,9 +82,12 @@ the version field.
 
 ```
 magic "MO" 0x01
-u16 format version (OBJECT_FORMAT_VERSION = 2; readers accept 1..=2)
+u16 format version (readers accept 1..=3; writers emit
+                OBJECT_FORMAT_VERSION_V2 = 2 unless v3 records are present,
+                then OBJECT_FORMAT_VERSION_V3 = 3)
 u8 arch
-u8 flags (bit 0 = has debug section)
+u8 flags (bit 0 = has debug section, bit 1 = has signatures,
+                bit 2 = has table blobs)
 u32 crc32
 string table:   u32 count, then per string: u16 length, UTF-8 bytes
 symbol table:   u32 count, then per symbol: u32 name (string index),
@@ -101,13 +104,64 @@ debug section (present iff flags bit 0 is set), once per blob:
                 u32 label count, then per label: u32 name (string index),
                 u32 code offset
                 u32 line count, then per line: u32 code offset, u32 source line
+── version 3 appends four trailing sections, in this order ──
+signatures (present iff flags bit 1 is set), once per blob:
+                u8 arity (1..=16), then arity × u32 alphabet cardinality
+                (each >= 1)
+table blobs (present iff flags bit 2 is set), once per blob:
+                u32 length, table bytes
+table fixups:   u32 count, then per fixup: u32 blob, u32 offset,
+                u32 table offset (into that blob's own table blob)
+bound calls:    u32 count, then per bound call: u32 blob, u32 offset,
+                u32 symbol, u8 tape count, then per tape binding:
+                u8 caller tape (< 16), u16 pair count, then per pair:
+                u32 src, u32 dst, u8 flags (bit 0 = one-way)
 ```
 
 Symbol kind 2 (**Local**) was added in object format version 2: a local
 symbol is defined but not exported — bound directly within its own object,
 invisible to cross-object resolution, so it can neither shadow nor be
 shadowed (`docs/language.md (visibility)`, `docs/stdlib.md`). Version-1
-object bytes (no locals) still decode under a version-2 reader.
+object bytes (no locals) still decode under a later reader.
+
+Object format version 3 was added for generic-routine composition: it
+appends four record kinds — routine signatures, per-routine table blobs,
+table fixups, and bound calls. An object carrying any of them serializes as
+version 3; a plain PM-1 object, with none present, still serializes
+byte-for-byte as version 2, and that is what the compiler and assembler
+emit. A reader accepts 1..=3 and rejects a pre-version-3 object that sets
+either version-3 flag bit. The signature and table-blob sections are gated
+by flags bits 1 and 2; the table-fixup and bound-call sections are
+unconditional — a version-3 object always writes both counts, zero when the
+respective list is empty.
+
+- **Routine signatures** state a generic routine's contract: the virtual
+  tape arity — how many tapes the routine operates on, `1..=16` — and, per
+  tape, the alphabet cardinality (how many glyphs that tape distinguishes,
+  each `>= 1`). One signature per code blob, parallel to the blobs like the
+  debug section.
+- **Table blobs** hold a routine's own match/dispatch tables — the
+  per-routine counterpart of the executable's table section — one blob per
+  code blob.
+- **Table fixups** are operand holes in a blob's `mtc`/`djmp` instructions:
+  the u32 operand is an offset into that blob's own table blob, which the
+  linker rebases into the final image's table section. The 4-byte hole obeys
+  the same `offset..offset + 4` in-blob invariant as a call relocation.
+- **Bound calls** are the declarative call sites of composed routines
+  (`call name [binding]`): each marks a call operand hole, like a
+  relocation, then binds every callee virtual tape — which caller tape feeds
+  it and the symbol map between the two alphabets. A map pair flagged
+  **one-way** is read-only: collapse is allowed and it is excluded from
+  write-back.
+
+The format layer validates **structure** only. It bounds-checks every
+field — arity in `1..=16`, cardinality non-zero, `caller_tape` below 16,
+every blob and symbol index in range, each hole's `offset..offset + 4`
+inside its blob, each table offset inside its table blob — and rejects
+reserved map-pair flag bits. Whether a binding's maps form the legal
+bijection the composition demands — completion, hole rules, write-back
+consistency — is **mapping legality**, checked by the linker, not the
+format.
 
 Per-function granularity is what gives the linker dead-function
 elimination and leaves link-time inlining open as a future extension. A
