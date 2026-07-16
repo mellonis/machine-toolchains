@@ -307,6 +307,144 @@ namespaced/nested symbol reference without ambiguity.
   the mnemonic set (each takes a one-element symbol vector like `wr`). No
   existing program changes meaning; the accepted set only grew (`docs/isa.md`).
 
+## `.tma` — assembly text (TM-1)
+
+The TM-1 `.tma` dialect version is **0.1** (pre-1.0: the version is `0.N`
+and `N` bumps on any grammar change — the same acceptance-contract shape
+as the `.pma` dialect above). Where PM-1 drives one two-symbol tape, TM-1
+drives up to sixteen tapes, each with its own alphabet, and branches
+through match/dispatch tables rather than the mark register alone. The
+dialect turns on three grammar features the classic `.pma` grammar leaves
+off — a **tables** section, the `.rept` macro, and `[..]` **vector**
+operands — plus a per-routine signature directive.
+
+```asm
+.section tables
+Tfetch: .row    [1, *, *, *]            ; match tape 0 == 1, others any
+        .row    [8, *, *, *]
+Dfetch: .targets L_step, L_halt         ; MR = 1 → L_step, MR = 2 → L_halt
+
+.section code
+.routine main, tapes=4, alpha=(9, 127, 127, 2)
+.func main
+L_step: rd                              ; latch every head into its slot
+        mtc     Tfetch                  ; walk the table, set the match reg
+        djmp    Dfetch                  ; dispatch on the match reg
+L_halt: stp
+```
+
+One instruction (or one table directive) per line, `;` line comments, the
+same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
+8, operands at 16, comments at 32); the parser accepts any whitespace on
+input, and `pmt fmt` / `tmt dis` emit the grid. `tmt dis` output is always
+valid assembler input and round-trips to the original bytes.
+
+### Sections and the routine signature
+
+A `.tma` file is split into two sections. `.section tables` holds the
+match and dispatch tables; `.section code` holds the functions. The
+default section is `code`, so a file may omit `.section code`. Only table
+directives are legal in the tables section, and only functions/code in the
+code section.
+
+`.routine <name>, tapes=<N>, alpha=(<c1>, …, <cN>)` declares a function's
+generic-routine signature: `tapes` is the tape count (1..=16), and `alpha`
+lists one alphabet cardinality per tape (each at least 1; the list length
+equals `tapes`). The directive must **precede** the `.func` it names, any
+distance in the same file; it attaches when the function is defined. The
+entry routine's signature fixes the executable image's tape count and
+per-tape alphabets, which a run validates its tape band against.
+
+### The mnemonic set
+
+Sixteen mnemonics. The match register (**MR**) is written only by `mtc`;
+the vector `rd`/`wr`/`mov` instructions leave it untouched, so `jm`/`jnm`
+test the most recent `mtc` outcome regardless of intervening tape motion.
+
+| opcode | mnemonic | operand | meaning |
+|---|---|---|---|
+| `0x01` | `nop` | — | no-op |
+| `0x02` | `stp` | — | stop — clean termination (`tmt run` exits 0) |
+| `0x03` | `hlt` | — | halt (`tmt run` exits 2) |
+| `0x04` | `rd` | — | latch every tape head into its match slot in one fetch |
+| `0x05` | `mtc` | table | walk a match table against the latched heads, setting MR |
+| `0x06` | `djmp` | table | dispatch: jump through the table indexed by MR |
+| `0x07` | `wr` | symbol vector | write one symbol per tape (`-` keeps a cell) |
+| `0x08` | `jmp` | label | unconditional jump |
+| `0x09` | `jm` | label | jump if the last `mtc` matched a row (MR ≠ 0) |
+| `0x0A` | `jnm` | label | jump if the last `mtc` matched no row (MR = 0) |
+| `0x0B` | `call` | symbol | call a routine; the width is chosen at link time |
+| `0x0C` | `ret` | — | return from a call |
+| `0x0D` | `ent` | — | entry marker — emitted implicitly by `.func`, the runtime call guard |
+| `0x0E` | `brk` | — | debugger break |
+| `0x0F` | `mov` | move vector | move one step per tape (`<` left, `>` right, `.` stay) |
+| `0x1B` | `call.s` | label | the **short** form of `call` — see below |
+
+`call.s` exists in the mnemonic set for disassembly display and link-time
+relaxation only: the assembler always emits far `call` and rejects
+`call.s <target>` in source (the width is linker-selected). The linker's
+relaxation fixpoint narrows a far `call` to `call.s` when the target is in
+short range, exactly as PM-1 does.
+
+### Vector operands
+
+Three instructions and the `.row` directive take a bracketed vector with
+**one element per tape**, left to right. The element vocabulary depends on
+where the vector appears:
+
+- **match rows** (`.row [..]`): a symbol index is an **exact** match on
+  that tape's head; `*` is the wildcard ("any symbol").
+- **write vectors** (`wr [..]`): a symbol index is written to that tape's
+  cell; `-` **keeps** the cell untouched (no write on that tape).
+- **move vectors** (`mov [..]`): `>` steps that head right, `<` left, `.`
+  stays put.
+
+### Match and dispatch tables
+
+A **match table** is a labeled run of `.row` directives. Each row is one
+vector; a run of rows under one label forms the table `mtc` walks. The
+walk returns the 1-based index of the first row every tape matches — this
+number is the match register (MR) — or 0 if no row matches. Table
+discipline: all rows share one width (1..=16); **exact** rows (no
+wildcard) come first, sorted and pairwise disjoint; **wildcard** rows
+follow in source order; an **all-wildcard** catch-all, if present, is
+last. A table with no catch-all leaves MR = 0 on an unmatched head, and a
+following `djmp` on MR = 0 traps — a machine can get an invalid-symbol
+fault for free by omitting the catch-all.
+
+A **dispatch table** is a labeled run of `.targets`/`.target` directives:
+`.targets L1, …, Lk` lists the targets indexed by MR (MR = 1 selects
+`L1`, and so on), and `.target L` contributes a single target.
+Consecutive directives under the **same label** accrue into one table, so
+a wide dispatch table can be built one entry at a time — the idiom a
+`.rept` uses to emit a value-indexed table.
+
+### The compact symbol family (the `0x7F` rule)
+
+TM-1 tables and vectors use the **compact** symbol family: one byte per
+element, holding a 7-bit symbol index in `0`..=`126`. The value `0x7F` is
+**reserved as the transparent marker** — a match-row byte of `0x7F`
+matches any latched symbol (this is what `*` compiles to), and a write
+element of `0x7F` keeps the cell (what `-` compiles to). Reserving `0x7F`
+is why the compact family caps alphabets at **127 symbols**: every payload
+index must stay at or below `0x7E`. An alphabet wider than 127 symbols
+needs a wider symbol family, which the compact grammar does not yet reach.
+
+### The `.rept` macro
+
+`.rept <var>, <lo>, <hi>` … `.endr` expands its body textually, once per
+integer `value` in `lo..=hi` (the GNU-as model): each body line is emitted
+with its `{expr}` markers replaced by the evaluated integer. The
+expression grammar is `+`, `-`, `*`, and `%` over the loop variable,
+integer literals, and parentheses; arithmetic is signed, and overflow, a
+zero modulus, or a negative remainder are errors rather than silent
+wrap-around. Because expansion is textual, a `{expr}` may appear anywhere
+on a line — inside a `[..]` vector element, in a label name, or in a
+dispatch target — so `.rept` naturally emits value-indexed rows and
+targets. A labeled directive inside a `.rept` emits the **same** label
+every iteration; combined with same-label continuation, that is how a
+`.rept` builds one wide match or dispatch table across its expansion.
+
 ## `.pmx.map` — link-time sidecar
 
 Written next to a `.pmx` by `pmt link` as `<output>.pmx.map`: a JSON
