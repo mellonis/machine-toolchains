@@ -1098,10 +1098,12 @@ mod tests {
 
     /// Neutral fake dialect proving zero TM-1 knowledge in core:
     /// `tmatch`/`tdispatch` reference tables (TableRef), `vwrite` is the
-    /// vector-capable write mnemonic, plus nop/stp/ent as usual.
+    /// vector-capable write mnemonic, `fimm` takes a plain immediate
+    /// (Imm8), `fcall` is a framed call (FramedCall, Call flow), plus
+    /// nop/stp/ent as usual.
     fn fake_syntax() -> ArchSyntax {
         use crate::asm::syntax::{AsmCaps, SyntaxEntry};
-        use Flow::{FallThrough as FT, Stop};
+        use Flow::{Call, FallThrough as FT, Stop};
         ArchSyntax {
             entries: vec![
                 SyntaxEntry {
@@ -1115,6 +1117,18 @@ mod tests {
                     mnemonic: "stp",
                     operand: OperandKind::None,
                     flow: Stop,
+                },
+                SyntaxEntry {
+                    opcode: 0x13,
+                    mnemonic: "fimm",
+                    operand: OperandKind::Imm8,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x14,
+                    mnemonic: "fcall",
+                    operand: OperandKind::FramedCall,
+                    flow: Call,
                 },
                 SyntaxEntry {
                     opcode: 0x07,
@@ -1445,6 +1459,99 @@ D0: .targets MISSING
         // caps-on dialect, so the object serializes as v2.
         let obj = asm_fake(".func main\n    nop\n    stp\n").unwrap();
         assert!(obj.is_v2_shape());
+    }
+
+    // -- Immediate + framed-call operands (Imm8 / FramedCall) ----------
+
+    #[test]
+    fn fimm_emits_opcode_then_immediate_byte() {
+        let obj = asm_fake(".func main\n        fimm #7\n        stp\n").unwrap();
+        // [ent 0E][fimm 13][7][stp 02] — one raw immediate byte, no vector
+        // continuation bit.
+        assert_eq!(obj.blobs[0], vec![0x0E, 0x13, 7, 0x02]);
+        assert!(obj.is_v2_shape()); // no tables, no refs
+    }
+
+    #[test]
+    fn fimm_immediate_bounds_and_hash_prefix_are_enforced() {
+        // Missing `#` prefix.
+        let e = asm_fake(".func main\n        fimm 7\n        stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
+        // Above the byte range.
+        let e = asm_fake(".func main\n        fimm #256\n        stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
+        // The bounds themselves assemble.
+        assert!(asm_fake(".func main\n        fimm #0\n        stp\n").is_ok());
+        assert!(asm_fake(".func main\n        fimm #255\n        stp\n").is_ok());
+    }
+
+    #[test]
+    fn fcall_emits_reloc_for_the_target_and_frame_fixup_at_offset_plus_4() {
+        // `fcall target, T0`: the displacement half relocates to `target`,
+        // the frame half is a table-ref hole naming match table T0.
+        let src = "\
+.section tables
+T0: .row [1, 2]
+.section code
+.func main
+    fcall target, T0
+    stp
+.func target
+    stp
+";
+        let obj = asm_fake(src).unwrap();
+        // main blob: ent@0, fcall@1 (opcode + 8-byte hole = 1..10), stp@10.
+        // Rel hole at 2..6 (zeroed reloc), frame hole at 6..10 (patched to
+        // T0's blob-local offset, 0).
+        assert_eq!(obj.blobs[0], vec![0x0E, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
+        // One relocation: the target symbol at the displacement hole (2).
+        assert_eq!(obj.relocations.len(), 1);
+        assert_eq!(obj.relocations[0].blob, 0);
+        assert_eq!(obj.relocations[0].offset, 2);
+        assert_eq!(
+            obj.symbols[obj.relocations[0].symbol as usize].name,
+            "target"
+        );
+        // One table fixup: the frame hole at offset+4 = 6, table offset 0.
+        assert_eq!(
+            obj.table_fixups,
+            vec![TableFixup {
+                blob: 0,
+                offset: 6,
+                table_offset: 0
+            }]
+        );
+        // T0's bytes live in main's table blob (width 2, one exact row).
+        let tables = obj.table_blobs.as_ref().unwrap();
+        assert_eq!(tables[0], vec![2, 1, 0, 1, 2]);
+    }
+
+    #[test]
+    fn fcall_operand_shape_violations_are_rejected() {
+        // A single name — the frame half is missing.
+        let e =
+            asm_fake(".func main\n    fcall target\n    stp\n.func target\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
+        // A `@`-prefixed target: framed-call targets are already symbols.
+        let e = asm_fake(
+            ".section tables\nT0: .row [1]\n.section code\n.func main\n    fcall @target, T0\n    stp\n.func target\n    stp\n",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("drop the `@`")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn fcall_frame_label_naming_no_table_is_unknown_table_label() {
+        // The frame half must resolve to a table defined in the file.
+        let e = asm_fake(".func main\n    fcall target, NOPE\n    stp\n.func target\n    stp\n")
+            .unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::UnknownTableLabel(ref l) if l == "NOPE"),
+            "{e}"
+        );
     }
 
     // -- Instruction vector operands (caps.vectors emit arms) ----------

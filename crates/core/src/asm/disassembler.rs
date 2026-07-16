@@ -929,11 +929,13 @@ mod tests {
     /// of `assembler.rs`'s test helper, per the repo's per-file-helper
     /// convention): `tmatch` references a match table (FallThrough → a
     /// lookup), `tdispatch` references a dispatch table (Stop → transfers
-    /// through it), `vwrite` is the vector-capable write, plus nop/stp/ent.
+    /// through it), `vwrite` is the vector-capable write, `fimm` takes a
+    /// plain immediate (Imm8), `fcall` is a framed call (FramedCall, Call
+    /// flow), plus nop/stp/ent.
     fn fake_syntax() -> ArchSyntax {
         use crate::asm::AsmCaps;
         use crate::vm::OperandKind;
-        use Flow::{FallThrough as FT, Stop};
+        use Flow::{Call, FallThrough as FT, Stop};
         ArchSyntax {
             entries: vec![
                 SyntaxEntry {
@@ -947,6 +949,18 @@ mod tests {
                     mnemonic: "stp",
                     operand: OperandKind::None,
                     flow: Stop,
+                },
+                SyntaxEntry {
+                    opcode: 0x13,
+                    mnemonic: "fimm",
+                    operand: OperandKind::Imm8,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x14,
+                    mnemonic: "fcall",
+                    operand: OperandKind::FramedCall,
+                    flow: Call,
                 },
                 SyntaxEntry {
                     opcode: 0x07,
@@ -1169,6 +1183,60 @@ L0001:  nop
 ";
         assert_eq!(dis, expected);
         assert!(!dis.contains(".section"), "no tables → no section markers");
+    }
+
+    #[test]
+    fn fimm_operand_renders_hash_form_and_round_trips() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        let syntax = fake_syntax();
+        let src = "\
+.func main
+        fimm    #7
+        stp
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        assert_eq!(dis, src, "fimm disassembly:\n{dis}");
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
+    }
+
+    #[test]
+    fn fcall_operand_renders_target_and_frame_label_and_round_trips() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        let syntax = fake_syntax();
+        // A framed call to a defined function `target`, activating frame
+        // table T0 (a match table here — the frame-descriptor kind lands
+        // in a later task; T3 only exercises the operand + fixup path).
+        let src = "\
+.section tables
+T0:     .row    [1, 2]
+.section code
+.func main
+        fcall   target, T0
+        stp
+.func target
+        stp
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        assert_eq!(dis, src, "fcall disassembly:\n{dis}");
+        // The displacement half renders from the reloc symbol, the frame
+        // half from the synthesized table label.
+        assert!(dis.contains("fcall   target, T0"), "{dis}");
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        // Full object round trip.
+        assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
     }
 
     #[test]
