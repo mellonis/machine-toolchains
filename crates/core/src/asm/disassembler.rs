@@ -8,6 +8,7 @@ use super::syntax::{ArchSyntax, Flow};
 use crate::formats::executable::Executable;
 use crate::formats::object::{ObjectFile, SymbolDef};
 use crate::linker::MapFile;
+use crate::vm::OperandKind;
 
 /// Canonical `.pma` trailing-comment column (docs/formats.md (assembly
 /// text)), the same stop `fmt.rs` uses — needed only to place the
@@ -61,6 +62,44 @@ pub fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
         }
         None => body,
     }
+}
+
+/// Renders a decoded int-vector operand under the dialect's caps
+/// (docs/formats.md (assembly text)). With `caps.vectors`, a
+/// `SymbolVec` renders in bracket form with the keep marker (`0x7F` →
+/// `-`) and a `MoveVec` with the move glyphs (0 → `.`, 1 → `<`, 2 →
+/// `>`; an out-of-vocabulary move code renders as its raw number —
+/// defensive, the assembler never emits one). With the cap off — every
+/// pre-vectors dialect — the classic comma-joined ints text is
+/// byte-identical to before the vector kinds existed.
+fn ints_operand_text(syntax: &ArchSyntax, kind: OperandKind, v: &[u32]) -> String {
+    let plain = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+    if !syntax.caps.vectors {
+        return plain(v);
+    }
+    let elems: Vec<String> = match kind {
+        OperandKind::SymbolVec => v
+            .iter()
+            .map(|&e| {
+                if e == 0x7F {
+                    "-".to_string()
+                } else {
+                    e.to_string()
+                }
+            })
+            .collect(),
+        OperandKind::MoveVec => v
+            .iter()
+            .map(|&e| match e {
+                0 => ".".to_string(),
+                1 => "<".to_string(),
+                2 => ">".to_string(),
+                other => other.to_string(),
+            })
+            .collect(),
+        _ => return plain(v),
+    };
+    format!("[{}]", elems.join(", "))
 }
 
 /// `.byte` fallback: one directive per byte, the label (if any) attached
@@ -338,7 +377,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                     let text: Option<String> = match operand {
                         DecodedOperand::None => Some(String::new()),
                         DecodedOperand::Ints(v) => {
-                            Some(v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
+                            Some(ints_operand_text(syntax, entry.operand, v))
                         }
                         // Table reference: the synthesized `Tn` label of
                         // the table at this blob-local offset (from
@@ -521,10 +560,9 @@ pub fn disassemble_executable(
                     first = false;
                     let text: Option<(&'static str, String)> = match operand {
                         DecodedOperand::None => Some((entry.mnemonic, String::new())),
-                        DecodedOperand::Ints(v) => Some((
-                            entry.mnemonic,
-                            v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "),
-                        )),
+                        DecodedOperand::Ints(v) => {
+                            Some((entry.mnemonic, ints_operand_text(syntax, entry.operand, v)))
+                        }
                         // Numeric for now (later task: table labels).
                         DecodedOperand::TableAddr(t) => Some((entry.mnemonic, t.to_string())),
                         DecodedOperand::RelTarget(t) => {
@@ -592,7 +630,12 @@ pub fn listing_line(
             let operand_text = match operand {
                 DecodedOperand::None => String::new(),
                 DecodedOperand::Ints(v) => {
-                    v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                    // The mnemonic came out of a successful decode, so
+                    // the entry lookup cannot miss.
+                    let entry = syntax
+                        .by_mnemonic(mnemonic)
+                        .expect("decoded mnemonic is in the table");
+                    ints_operand_text(syntax, entry.operand, &v)
                 }
                 // Table-space offset — never resolved against code labels.
                 DecodedOperand::TableAddr(t) => format!("{t:#06x}"),
@@ -692,6 +735,12 @@ mod tests {
                     opcode: 0x07,
                     mnemonic: "vwrite",
                     operand: OperandKind::SymbolVec,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x18,
+                    mnemonic: "vmove",
+                    operand: OperandKind::MoveVec,
                     flow: FT,
                 },
                 SyntaxEntry {
@@ -798,6 +847,45 @@ B:  stp
         // section, so reassembly would fault on unknown labels. Closing
         // that is the linked-image table path (phase 4b), out of scope
         // here; dispatch rendering is read-only for now.
+    }
+
+    #[test]
+    fn vector_operands_render_bracket_form_and_round_trip() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        // Under caps.vectors a SymbolVec renders `[..]` with the keep
+        // marker (`0x7F` → `-`) and a MoveVec with the move glyphs
+        // (0 → `.`, 1 → `<`, 2 → `>`); assemble ∘ dis is a fixpoint.
+        let syntax = fake_syntax();
+        let src = "\
+.func main
+        vwrite  [1, -, 2]
+        vmove   [<, ., >]
+        stp
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        assert_eq!(dis, src, "vector disassembly:\n{dis}");
+        // Already canonical under fmt, and reassembly is exact.
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
+    }
+
+    #[test]
+    fn caps_off_symbol_vec_rendering_is_unchanged() {
+        // The byte-compat pin for the vector-rendering lever: a caps-off
+        // dialect (PM-1's shape) keeps the classic comma-joined ints —
+        // never the bracket form, and never `-` for a 0x7F payload.
+        let syntax = test_syntax();
+        let src = ".func f\n        wr      1, 127\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        assert_eq!(dis, src);
+        assert!(!dis.contains('['), "caps-off must not render brackets");
     }
 
     #[test]

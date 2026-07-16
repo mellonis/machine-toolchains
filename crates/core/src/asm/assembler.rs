@@ -230,6 +230,28 @@ fn assemble_function(
                         bytes.extend(encoded);
                         slots.push(Slot::Fixed { span, bytes });
                     }
+                    // Bracket-form vectors, routed by OperandKind: the
+                    // assembler is arch-agnostic, so element vocabulary
+                    // is a property of the operand kind, never of a
+                    // mnemonic (docs/formats.md (assembly text)).
+                    (OperandKind::SymbolVec, SourceOperand::Vector(elems, vspan)) => {
+                        slots.push(vector_slot(
+                            *opcode,
+                            span,
+                            *vspan,
+                            elems,
+                            write_vector_element,
+                        )?);
+                    }
+                    (OperandKind::MoveVec, SourceOperand::Vector(elems, vspan)) => {
+                        slots.push(vector_slot(
+                            *opcode,
+                            span,
+                            *vspan,
+                            elems,
+                            move_vector_element,
+                        )?);
+                    }
                     (OperandKind::RelI8 | OperandKind::RelI32, SourceOperand::SymbolName(name)) => {
                         match entry.flow {
                             Flow::Call => {
@@ -452,6 +474,58 @@ fn assemble_function(
                 debug: BlobDebug { labels, lines },
                 table_refs,
             });
+        }
+    }
+}
+
+/// Encodes a `[..]` vector operand into a fixed slot, mapping each
+/// element through the operand kind's vocabulary. An element outside
+/// the vocabulary is a `BadVector` at the operand's own span
+/// (`vector_span`); `span` stays the whole item's, for the slot and
+/// any encode failure.
+fn vector_slot(
+    opcode: u8,
+    span: Span,
+    vector_span: Span,
+    elems: &[VecElem],
+    vocab: fn(&VecElem) -> Result<u32, &'static str>,
+) -> Result<Slot, AsmError> {
+    let mut vals = Vec::with_capacity(elems.len());
+    for elem in elems {
+        vals.push(vocab(elem).map_err(|m| err(vector_span, AsmErrorKind::BadVector(m)))?);
+    }
+    let encoded = encode_operand(&Operand::Symbols(vals))
+        .map_err(|m| err(span, AsmErrorKind::EncodeError(m)))?;
+    let mut bytes = vec![opcode];
+    bytes.extend(encoded);
+    Ok(Slot::Fixed { span, bytes })
+}
+
+/// Write-vector vocabulary (docs/formats.md (assembly text)): payloads
+/// up to `0x7E` write their symbol; `-` keeps the cell (`0x7F` on the
+/// wire, so `0x7F` is not writable as a payload); wildcards belong to
+/// `.row` rows and moves to a move vector.
+fn write_vector_element(elem: &VecElem) -> Result<u32, &'static str> {
+    match elem {
+        VecElem::Payload(p) if *p <= 0x7E => Ok(*p),
+        VecElem::Payload(_) => Err("write payloads are at most 126"),
+        VecElem::Keep => Ok(0x7F),
+        VecElem::Wildcard | VecElem::MoveLeft | VecElem::MoveRight | VecElem::Stay => {
+            Err("move/wildcard element in a write vector")
+        }
+    }
+}
+
+/// Move-vector vocabulary (docs/formats.md (assembly text)): `.` stays
+/// (0), `<` steps left (1), `>` steps right (2); nothing else — moves
+/// are never spelled numerically.
+fn move_vector_element(elem: &VecElem) -> Result<u32, &'static str> {
+    match elem {
+        VecElem::Stay => Ok(0),
+        VecElem::MoveLeft => Ok(1),
+        VecElem::MoveRight => Ok(2),
+        VecElem::Payload(_) | VecElem::Wildcard | VecElem::Keep => {
+            Err("only `<`, `>`, `.` belong in a move vector")
         }
     }
 }
@@ -981,6 +1055,12 @@ mod tests {
                     flow: FT,
                 },
                 SyntaxEntry {
+                    opcode: 0x18,
+                    mnemonic: "vmove",
+                    operand: OperandKind::MoveVec,
+                    flow: FT,
+                },
+                SyntaxEntry {
                     opcode: 0x11,
                     mnemonic: "tmatch",
                     operand: OperandKind::TableRef,
@@ -1266,5 +1346,73 @@ D0: .targets MISSING
         // caps-on dialect, so the object serializes as v2.
         let obj = asm_fake(".func main\n    nop\n    stp\n").unwrap();
         assert!(obj.is_v2_shape());
+    }
+
+    // -- Instruction vector operands (caps.vectors emit arms) ----------
+
+    #[test]
+    fn write_vector_assembles_with_keep_as_7f() {
+        let obj = asm_fake(".func main\n        vwrite [1, -, 2]\n        stp\n").unwrap();
+        // [ent 0E][vwrite 07][1, keep 0x7F, 2 | 0x80 on the last][stp 02]
+        assert_eq!(obj.blobs[0], vec![0x0E, 0x07, 0x01, 0x7F, 0x82, 0x02]);
+    }
+
+    #[test]
+    fn move_vector_assembles_with_move_codes() {
+        let obj = asm_fake(".func main\n        vmove [<, ., >]\n        stp\n").unwrap();
+        // `<` → 1, `.` → 0, `>` → 2 (high bit on the last element).
+        assert_eq!(obj.blobs[0], vec![0x0E, 0x18, 0x01, 0x00, 0x82, 0x02]);
+    }
+
+    #[test]
+    fn spelled_out_ints_still_assemble_under_vector_caps() {
+        // The classic (SymbolVec, Ints) arm is untouched by the vector
+        // arms: `vwrite 1` and `vwrite [1]` produce identical bytes.
+        let spelled = asm_fake(".func main\n        vwrite 1\n        stp\n").unwrap();
+        let bracket = asm_fake(".func main\n        vwrite [1]\n        stp\n").unwrap();
+        assert_eq!(spelled.blobs, bracket.blobs);
+        assert_eq!(spelled.blobs[0], vec![0x0E, 0x07, 0x81, 0x02]);
+    }
+
+    #[test]
+    fn write_vector_vocabulary_violations_are_bad_vector_with_the_operand_span() {
+        // Wildcards belong to `.row`, moves to a move vector; the span
+        // is the `[..]` operand's own.
+        for bad in ["[1, *]", "[<]", "[.]", "[>]"] {
+            let src = format!(".func main\n        vwrite {bad}\n        stp\n");
+            let e = asm_fake(&src).unwrap_err();
+            assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{bad}: {e}");
+            let end = 16 + bad.chars().count() as u32;
+            assert_eq!(e.span, Span::new(2, 16, 2, end), "{bad}");
+        }
+        // 0x7F would alias the keep marker; anything above overflows the
+        // 7-bit element budget — both refuse before encoding.
+        for bad in ["[127]", "[200]"] {
+            let src = format!(".func main\n        vwrite {bad}\n        stp\n");
+            let e = asm_fake(&src).unwrap_err();
+            assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn move_vector_vocabulary_violations_are_bad_vector_with_the_operand_span() {
+        // Moves are spelled `<`/`>`/`.` only — numeric payloads, keeps,
+        // and wildcards all refuse.
+        for bad in ["[1]", "[0]", "[*]", "[-]", "[1, .]"] {
+            let src = format!(".func main\n        vmove {bad}\n        stp\n");
+            let e = asm_fake(&src).unwrap_err();
+            assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{bad}: {e}");
+        }
+        let e = asm_fake(".func main\n        vmove [*, .]\n").unwrap_err();
+        assert_eq!(e.span, Span::new(2, 15, 2, 21)); // the `[*, .]` region
+    }
+
+    #[test]
+    fn move_vector_requires_bracket_form() {
+        // No legacy spelled-out-ints form exists for MoveVec.
+        let e = asm_fake(".func main\n        vmove 1, 0\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
+        let e = asm_fake(".func main\n        vmove\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
     }
 }

@@ -62,12 +62,13 @@ pub enum SourceOperand {
     Name(SpannedName),
     /// `@name` — a function-symbol reference, not a local label.
     SymbolName(SpannedName),
-    /// A `[..]` vector operand, parsed per element. Which elements are
-    /// legal depends on the consuming context (match rows: payload and
+    /// A `[..]` vector operand, parsed per element, carrying the bracket
+    /// region's span for emit-time diagnostics. Which elements are legal
+    /// depends on the consuming context (match rows: payload and
     /// wildcard; write vectors: payload and keep; move vectors: the
-    /// three moves) — that legality is the dialect's per-mnemonic call;
-    /// this layer only parses.
-    Vector(Vec<VecElem>),
+    /// three moves) — that legality is enforced per OperandKind at the
+    /// assembler's emit arms; this layer only parses.
+    Vector(Vec<VecElem>, Span),
 }
 
 /// One element of a `[..]` vector operand.
@@ -802,7 +803,7 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
             if let [one] = operands.as_slice()
                 && one.text.starts_with('[')
             {
-                return Ok(SourceOperand::Vector(parse_vector(one)?));
+                return Ok(SourceOperand::Vector(parse_vector(one)?, one.span));
             }
             if operands.is_empty() {
                 return Err(err(
@@ -828,7 +829,7 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
             if let [one] = operands.as_slice()
                 && one.text.starts_with('[')
             {
-                return Ok(SourceOperand::Vector(parse_vector(one)?));
+                return Ok(SourceOperand::Vector(parse_vector(one)?, one.span));
             }
             Err(err(
                 instr.word_span,
@@ -1221,7 +1222,7 @@ L1:     nop
         let funcs = lower_vectors_src(src).unwrap();
         match &funcs[0].items[0] {
             SourceItem::Instr {
-                operand: SourceOperand::Vector(elems),
+                operand: SourceOperand::Vector(elems, _),
                 ..
             } => {
                 assert_eq!(
