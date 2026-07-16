@@ -85,10 +85,12 @@ impl Arch for Tm1 {
         match opcode {
             NOP | STP | HLT | RD | RET | ENT | BRK => Some(OperandKind::None),
             MTC | DJMP => Some(OperandKind::TableRef),
-            // `mov` will carry its own move-vector operand kind once that
-            // lands; its wire form is the same self-delimiting vector, so
-            // it shares `SymbolVec` until then.
-            WR | MOV => Some(OperandKind::SymbolVec),
+            WR => Some(OperandKind::SymbolVec),
+            // Same self-delimiting wire form as `wr`, but the move-vector
+            // kind selects the `[<, ., >]` assembly vocabulary and
+            // rendering; both fetch to `Operand::Symbols`, so the
+            // lowering below reads them uniformly.
+            MOV => Some(OperandKind::MoveVec),
             JMP | JM | JNM | CALL => Some(OperandKind::RelI32),
             CALL_S => Some(OperandKind::RelI8),
             _ => None,
@@ -227,14 +229,8 @@ mod tests {
                 "opcode {op:#04x}"
             );
         }
-        // `mov` shares `SymbolVec` with `wr` until the move-vector operand
-        // kind lands.
-        for op in [WR, MOV] {
-            assert!(
-                matches!(a.operand_kind(op), Some(OperandKind::SymbolVec)),
-                "opcode {op:#04x}"
-            );
-        }
+        assert!(matches!(a.operand_kind(WR), Some(OperandKind::SymbolVec)));
+        assert!(matches!(a.operand_kind(MOV), Some(OperandKind::MoveVec)));
         for op in [JMP, JM, JNM, CALL] {
             assert!(
                 matches!(a.operand_kind(op), Some(OperandKind::RelI32)),
