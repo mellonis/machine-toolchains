@@ -122,6 +122,72 @@ impl MatchWalk {
     }
 }
 
+pub(crate) enum DispatchStep {
+    NeedByte(u32),
+    Done(u32),
+    OutOfRange,
+}
+
+enum DStage {
+    CountLo,
+    CountHi { lo: u8 },
+    Entry { pos: u8, acc: [u8; 4] },
+}
+
+pub(crate) struct DispatchWalk {
+    base: u32,
+    mr: u32,
+    stage: DStage,
+}
+
+impl DispatchWalk {
+    /// `mr` must be ≥ 1 (the caller handles MR = 0 as NoTransition).
+    pub(crate) fn new(table_addr: u32, mr: u32) -> Self {
+        Self {
+            base: table_addr,
+            mr,
+            stage: DStage::CountLo,
+        }
+    }
+
+    fn entry_addr(&self, pos: u8) -> u32 {
+        self.base + 2 + (self.mr - 1) * 4 + u32::from(pos)
+    }
+
+    pub(crate) fn feed(&mut self, byte: Option<u8>) -> DispatchStep {
+        match (&self.stage, byte) {
+            (DStage::CountLo, None) => DispatchStep::NeedByte(self.base),
+            (DStage::CountLo, Some(lo)) => {
+                self.stage = DStage::CountHi { lo };
+                DispatchStep::NeedByte(self.base + 1)
+            }
+            (DStage::CountHi { lo }, Some(hi)) => {
+                let lo = *lo; // copy before assigning to self.stage (borrowck)
+                let count = u16::from_le_bytes([lo, hi]);
+                if self.mr > u32::from(count) {
+                    return DispatchStep::OutOfRange;
+                }
+                self.stage = DStage::Entry {
+                    pos: 0,
+                    acc: [0; 4],
+                };
+                DispatchStep::NeedByte(self.entry_addr(0))
+            }
+            (DStage::Entry { pos, acc }, Some(b)) => {
+                let (pos, mut acc) = (*pos, *acc);
+                acc[usize::from(pos)] = b;
+                if pos == 3 {
+                    return DispatchStep::Done(u32::from_le_bytes(acc));
+                }
+                self.stage = DStage::Entry { pos: pos + 1, acc };
+                DispatchStep::NeedByte(self.entry_addr(pos + 1))
+            }
+            // feed(None) mid-walk is a core-side protocol bug.
+            _ => DispatchStep::OutOfRange,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +243,29 @@ mod tests {
         assert_eq!(walk(&[0, 1, 0], &[1]), Err("malformed")); // width 0
         assert_eq!(walk(&[17, 1, 0], &[1; 16]), Err("malformed")); // width 17
         assert_eq!(walk(&[3, 1, 0, 1, 1, 1], &[1, 1]), Err("malformed")); // width > tr
+    }
+
+    /// Run a DispatchWalk to completion against an in-memory table blob.
+    fn dispatch(table: &[u8], mr: u32) -> Result<u32, &'static str> {
+        let mut w = DispatchWalk::new(0, mr);
+        let mut input = None;
+        loop {
+            match w.feed(input) {
+                DispatchStep::NeedByte(addr) => {
+                    input = Some(*table.get(addr as usize).ok_or("out of table")?);
+                }
+                DispatchStep::Done(t) => return Ok(t),
+                DispatchStep::OutOfRange => return Err("out of range"),
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_selects_by_mr() {
+        // 2 entries: 0x11111111, 0x22222222
+        let t = vec![2, 0, 0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22];
+        assert_eq!(dispatch(&t, 1), Ok(0x1111_1111));
+        assert_eq!(dispatch(&t, 2), Ok(0x2222_2222));
+        assert_eq!(dispatch(&t, 3), Err("out of range"));
     }
 }
