@@ -19,10 +19,16 @@ pub struct WideTape {
 
 impl WideTape {
     /// A blank tape over an alphabet of `width` symbols (indices `0..width`).
-    /// `width == 0` is a caller bug — an alphabet with no symbols cannot back
-    /// a tape.
+    /// `width` must be `1..=256`: an empty alphabet cannot back a tape, and
+    /// the snapshot representation (docs/formats.md (tape-block snapshot))
+    /// stores cells as `u8`, so the largest index (`width - 1`) must fit a
+    /// byte. An out-of-range `width` is a caller bug.
     pub fn new(width: u32) -> Self {
         assert!(width >= 1, "wide tape needs a non-empty alphabet");
+        assert!(
+            width <= 256,
+            "wide tape alphabet exceeds 256 symbols (snapshot cells are u8)"
+        );
         Self {
             cells: HashMap::new(),
             width,
@@ -56,6 +62,8 @@ impl WideTape {
     /// Build from a `TapeSnapshot` (docs/formats.md). Snapshot cells are `u8`;
     /// any cell `>= width` is outside this tape's alphabet and is rejected
     /// (mirrors `InfiniteTape::from_snapshot`, which rejects cells `> 1`).
+    /// `width` shares `new`'s `1..=256` bound — an out-of-range `width`
+    /// panics there.
     pub fn from_snapshot(
         s: &crate::formats::tapeblock::TapeSnapshot,
         width: u32,
@@ -77,12 +85,15 @@ impl WideTape {
     /// cell at the head). Trim/origin policy is byte-identical to
     /// `InfiniteTape::to_snapshot` so downstream goldens agree.
     ///
-    /// Cell indices narrow `u32 -> u8`: `write` rejects indices `>= width` and
-    /// TM-1 alphabets cap at 127 symbols (the compact symbol family's payload
-    /// tops out at `0x7E`), so a stored index never exceeds 255 in the real
-    /// pipeline. The narrowing is a hard invariant check (matching the
-    /// `u8`-narrowing serialization asserts in the `.pmt` codec) rather than a
-    /// silent truncation.
+    /// Cell indices narrow `u32 -> u8`, and the narrowing is total, not
+    /// lossy: `TapeSnapshot.cells` is `Vec<u8>` and the MT container's
+    /// per-tape alphabet-count field is a `u8` (docs/formats.md (tape-block
+    /// snapshot)), so any snapshot-representable tape has `width <= 256` and
+    /// every cell index (`< width`) is `<= 255`, which fits a byte. `new`
+    /// enforces `width <= 256` at construction, so the bound always holds
+    /// here. The `expect` is a hard invariant check — matching the
+    /// `u8`-narrowing serialization asserts in the `.pmt` codec — rather than
+    /// a silent truncation.
     pub fn to_snapshot(&self) -> crate::formats::tapeblock::TapeSnapshot {
         let marks = self.nonblank_cells();
         let lo = marks.first().copied().unwrap_or(self.head).min(self.head);
@@ -261,6 +272,29 @@ mod tests {
         assert_eq!(
             tape.write(2),
             Err(DeviceFault::IndexOutsideAlphabet { index: 2 })
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds 256")]
+    fn width_above_256_panics() {
+        // Snapshot cells are `u8`, so a width past 256 (index 256 = 0x100)
+        // could not narrow; the bound is enforced at construction.
+        let _ = WideTape::new(257);
+    }
+
+    #[test]
+    fn width_256_is_accepted_and_max_index_round_trips() {
+        // The upper alphabet bound: width 256 means indices 0..256, so the
+        // largest symbol (255) must round-trip through the u8 snapshot cells.
+        let mut tape = WideTape::new(256);
+        tape.write(255).unwrap();
+        assert_eq!(tape.read(), 255);
+        assert_eq!(tape.to_snapshot().cells, vec![255]);
+        // 256 itself is outside the 0..256 index range.
+        assert_eq!(
+            tape.write(256),
+            Err(DeviceFault::IndexOutsideAlphabet { index: 256 })
         );
     }
 
