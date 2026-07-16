@@ -8,7 +8,7 @@
 //! offset 0:  width      u8   — positions per row (1..=16)
 //! offset 1:  row_count  u16  LE
 //! offset 3:  rows       row_count × width bytes; each byte is a 7-bit symbol
-//!                       payload; 0x7F = wildcard ("transparent", spec §3.2)
+//!                       payload; 0x7F = wildcard ("transparent")
 //! ```
 
 pub(crate) enum WalkStep {

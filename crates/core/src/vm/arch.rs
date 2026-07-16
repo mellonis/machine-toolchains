@@ -47,12 +47,12 @@ pub enum MicroOp {
     Call(i32),
     Ret,
     /// Walk the match table at byte offset `table` in table ROM against TR;
-    /// set MR (0 = no row matched). Spec §4.
+    /// set MR (0 = no row matched).
     MatchTable {
         table: u32,
     },
     /// Jump through the dispatch table at `table` by MR;
-    /// MR = 0 traps NoTransition. Spec §4.
+    /// MR = 0 traps NoTransition.
     DispatchJump {
         table: u32,
     },
