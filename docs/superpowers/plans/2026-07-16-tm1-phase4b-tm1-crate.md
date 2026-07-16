@@ -220,6 +220,31 @@ All arch-agnostic; fake-dialect tested; every new lexer/CST/emit path caps-gated
 
 ---
 
+### Task 5b (execution-time amendment): `WideTape` — a wide-alphabet core tape device
+
+**Why (discovered during Task 5):** `InfiniteTape` is physically two-symbol — its storage is a packed bit array (`HashMap<i64, u64>` pages). The spec's §7 assumption that tape devices are "reused as-is" fails for TM-1's wide alphabets; the UTM's 9- and 127-symbol tapes cannot exist at runtime. Additive fix; `InfiniteTape` untouched (PM-1's hot path stays byte-identical).
+
+**Files:**
+- Create: `crates/core/src/vm/devices/wide_tape.rs` (+ export from `devices/mod.rs`, re-export at `vm::` level beside `InfiniteTape`)
+- Modify: `crates/turing-machine/src/cli/run.rs` (build `WideTape` universally — width = each tape's effective-alphabet length; a 2-symbol tape is just width 2)
+- Test: unit tests in `wide_tape.rs`; a `StrictTape<WideTape>` sanity test; a tmt CLI test running a 3-symbol program end-to-end (1 tape, `alpha=(3)`, write symbol 2, `stp`, assert exit 0 and the final tape)
+
+**API:**
+```rust
+pub struct WideTape { cells: HashMap<i64, u32>, width: u32, head: i64 }
+impl WideTape {
+    pub fn new(width: u32) -> Self                       // width >= 1; 0 is a caller bug (assert)
+    pub fn from_snapshot(s: &TapeSnapshot, width: u32) -> Result<Self, DeviceFault>  // cells >= width → IndexOutsideAlphabet
+    pub fn to_snapshot(&self) -> TapeSnapshot            // mirror InfiniteTape::to_snapshot's trim/origin policy exactly
+    pub fn head(&self) -> i64
+}
+impl Tape for WideTape  // read: 0 for unset cells; write: index >= width → IndexOutsideAlphabet; alphabet_size() = width
+```
+
+**Steps:** failing unit tests (round-trip, default-blank reads, out-of-width write fault, from_snapshot rejection, StrictTape decoration) → implement → failing tmt 3-symbol CLI test → switch run.rs to WideTape → full gate (workspace tests, clippy `-D warnings`, fmt, goldens clean) → commit `feat(core): WideTape — wide-alphabet tape device` + `feat(turing-machine): run builds WideTape devices` (or one commit).
+
+---
+
 ### Task 6: UTM de-speculation — the phase-4 milestone — plus docs and the phase gate
 
 **Files:**
