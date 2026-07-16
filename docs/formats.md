@@ -12,7 +12,9 @@ Magics are toolchain-neutral: two ASCII letters plus a binary epoch byte —
 `MO 0x01` object, `MX 0x01` executable, `MT 0x01` tape-block. The epoch
 byte marks header-layout generations and doubles as a text-file guard; a
 `u16 format version` field inside each header covers evolution within an
-epoch. The containers are shared across present and future machine
+epoch. Each container dispatches on its own version field — MO, MX, and MT
+all read `1..=2` today, selecting the layout from that field and never from
+the extension. The containers are shared across present and future machine
 toolchains built on this codebase: the file *extension* carries the
 toolchain flavor (`.pmo`/`.pmx`/`.pmt` from `pmt`), while the magic plus an
 `arch` byte identify the actual content. Tools never dispatch on file
@@ -30,10 +32,18 @@ accept either a `.pmo` or a `.pmx` on the same command line.
 
 ## `.pmx` — executable
 
+An `.pmx` reader dispatches on the `u16 format version` field: **version 1**
+is the code-only image PM-1 emits, **version 2** is a sectioned image that
+adds a table section plus per-tape alphabet cardinalities and a processor
+profile. The magic and `sniff()` are identical across both versions —
+version selection is the header field alone, never the extension.
+
+### Version 1 (code-only)
+
 ```
 offset  size  field
 0       3     magic "MX" 0x01
-3       2     u16 format version (FORMAT_VERSION = 1)
+3       2     u16 format version (= 1)
 5       1     u8 arch (0x01 = PM-1)
 6       1     u8 flags (0; reserved)
 7       4     u32 crc32
@@ -49,6 +59,24 @@ be inside the code section, and the loader additionally checks that byte is
 `ent` before running (`docs/isa.md`). The linker guarantees the
 **`.pmx entry`** symbol is literally `main`, which is what lets a bare
 executable's disassembly name the entry root `main`.
+
+### Version 2 (sectioned)
+
+```
+magic "MX" 0x01 (3) | u16 version = 2 | arch (1) | flags = 0 (1) | crc u32 (4)
+tape_count u8 (1..=16) | profile u8 (0 = base, 1 = frames) | entry u32 | code_size u32 | table_size u32
+alphabet_cardinalities: tape_count × u32 | code bytes | table bytes
+```
+
+Version 2 carries everything version 1 does plus three additions: a
+**table section** (`table_size` bytes after the code, holding the VM's
+match/dispatch tables — its table ROM), one **u32 alphabet cardinality per
+tape** (`tape_count` of them, `1..=16` tapes), and a one-byte **processor
+profile** (0 = base, 1 = frames). These fields are stored verbatim; the
+format layer never interprets `arch`, `profile`, or the cardinalities. A
+version-1 reader still loads any PM-1 image, and a version-2 reader loads
+both — the two shapes share magic and CRC discipline and differ only past
+the version field.
 
 ## `.pmo` — object file
 
@@ -91,10 +119,17 @@ transitively reaches gets linked in (`docs/stdlib.md`).
 Binary tape-block state — one or more tapes with their heads, usable as
 `pmt run` input and output; golden tests diff final blocks as files.
 
+An `.pmt` reader dispatches on the `u16 format version` field: **version 1**
+carries a single shared block alphabet (what PM-1 emits), **version 2** lets
+each tape carry its own glyph table. The magic and `sniff()` are identical
+across both versions — version selection is the header field alone.
+
+### Version 1 (shared alphabet)
+
 ```
 offset  size  field
 0       3     magic "MT" 0x01
-3       2     u16 format version (FORMAT_VERSION = 1)
+3       2     u16 format version (= 1)
 5       1     u8 flags (0; reserved)
 6       4     u32 crc32
 10      1     u8 alphabet count (non-zero)
@@ -102,6 +137,23 @@ offset  size  field
 —       1     u8 tape count (non-zero)
 —       —     per tape: i64 origin, u32 length, u8 indices[length], i64 head
 ```
+
+### Version 2 (per-tape glyph tables)
+
+```
+magic "MT" 0x01 (3) | u16 version = 2 | flags = 0 (1) | crc u32 (4)
+block_alphabet: u8 count + per-glyph (u16 len + utf8)
+tape_count u8
+per tape: origin i64 | cells_len u32 | cells | head i64 | own_alphabet_count u8 | own_alphabet (u16 len + utf8) ×
+```
+
+Version 2 keeps the block alphabet as a shared fallback and appends an
+optional glyph table to each tape. An `own_alphabet_count` of 0 means the
+tape **inherits** the block alphabet — an empty per-tape override is treated
+as inherit, not as a distinct empty alphabet. Cells are validated against
+each tape's *effective* alphabet (its own table if present, otherwise the
+block). A version-1 reader loads any PM-1 tape block, and a version-2 reader
+loads both shapes.
 
 The alphabet travels WITH the tape data — a `.pmt` renders using its own
 glyphs (index 0 is blank by convention). **Glyphs live ONLY on the tape
