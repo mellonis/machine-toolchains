@@ -78,7 +78,83 @@ impl TapeBlockFile {
     }
 
     fn to_bytes_v2(&self) -> Vec<u8> {
-        unimplemented!("MT v2 emit lands in task 5")
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC_TAPEBLOCK);
+        put_u16(&mut out, MT_FORMAT_VERSION_V2);
+        out.push(0); // flags
+        put_u32(&mut out, 0); // crc placeholder
+
+        // Block-level fallback/shared alphabet.
+        write_glyphs(&mut out, &self.alphabet);
+
+        out.push(u8::try_from(self.tapes.len()).expect("tape count fits u8"));
+        for tape in &self.tapes {
+            put_i64(&mut out, tape.origin);
+            put_u32(
+                &mut out,
+                u32::try_from(tape.cells.len()).expect("cells fit u32"),
+            );
+            out.extend_from_slice(&tape.cells);
+            put_i64(&mut out, tape.head);
+            // Per-tape glyph table: count 0 means "inherit the block alphabet".
+            match &tape.alphabet {
+                None => out.push(0),
+                Some(own) => write_glyphs(&mut out, own),
+            }
+        }
+
+        stamp_crc(&mut out, CRC_OFFSET);
+        out
+    }
+
+    /// v2 body (per-tape glyph tables). `r` is positioned right after the
+    /// version field; this reads flags/crc, the block alphabet, and every
+    /// tape's snapshot fields plus its optional own glyph table.
+    fn from_body_v2(mut r: Reader<'_>) -> Result<Self, FormatError> {
+        let _flags = r.u8()?;
+        let _crc = r.u32()?;
+
+        let block_count = r.u8()? as usize;
+        let block_alphabet = read_glyphs(&mut r, block_count)?;
+
+        let tape_count = r.u8()? as usize;
+        if tape_count == 0 {
+            return Err(FormatError::Malformed("no tapes"));
+        }
+        let mut tapes = Vec::with_capacity(tape_count);
+        for _ in 0..tape_count {
+            let origin = r.i64()?;
+            let length = r.u32()? as usize;
+            let cells = r.bytes(length)?.to_vec();
+            let head = r.i64()?;
+            let own_count = r.u8()? as usize;
+            let own = if own_count == 0 {
+                None
+            } else {
+                Some(read_glyphs(&mut r, own_count)?)
+            };
+            // Bounds are checked against the effective alphabet: this tape's
+            // own table if present, otherwise the block fallback.
+            let effective = own.as_ref().unwrap_or(&block_alphabet);
+            if effective.is_empty() {
+                return Err(FormatError::Malformed("empty alphabet"));
+            }
+            if cells.iter().any(|&c| c as usize >= effective.len()) {
+                return Err(FormatError::Malformed("cell index outside alphabet"));
+            }
+            tapes.push(TapeSnapshot {
+                origin,
+                cells,
+                head,
+                alphabet: own,
+            });
+        }
+        r.finish()?;
+
+        Ok(Self {
+            alphabet: block_alphabet,
+            tapes,
+        })
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
@@ -94,7 +170,7 @@ impl TapeBlockFile {
         let version = r.u16()?;
         match version {
             MT_FORMAT_VERSION_V1 => {}
-            // v2 (per-tape glyph tables) parse lands in a later task.
+            MT_FORMAT_VERSION_V2 => return Self::from_body_v2(r),
             _ => return Err(FormatError::UnsupportedVersion(version)),
         }
         let _flags = r.u8()?;
@@ -137,6 +213,30 @@ impl TapeBlockFile {
 
         Ok(Self { alphabet, tapes })
     }
+}
+
+/// Writes a glyph table: a `u8` count, then each glyph as `u16` byte-length +
+/// its UTF-8 bytes. Shared by the v2 block alphabet and per-tape own tables.
+fn write_glyphs(out: &mut Vec<u8>, glyphs: &[String]) {
+    out.push(u8::try_from(glyphs.len()).expect("alphabet fits u8"));
+    for glyph in glyphs {
+        put_u16(out, u16::try_from(glyph.len()).expect("glyph fits u16"));
+        out.extend_from_slice(glyph.as_bytes());
+    }
+}
+
+/// Reads `count` glyphs (each `u16` byte-length + UTF-8 bytes) into a vector,
+/// rejecting non-UTF-8 payloads.
+fn read_glyphs(r: &mut Reader<'_>, count: usize) -> Result<Vec<String>, FormatError> {
+    let mut glyphs = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = r.u16()? as usize;
+        let raw = r.bytes(len)?;
+        let glyph =
+            std::str::from_utf8(raw).map_err(|_| FormatError::Malformed("glyph not utf-8"))?;
+        glyphs.push(glyph.to_owned());
+    }
+    Ok(glyphs)
 }
 
 #[cfg(test)]
@@ -254,5 +354,64 @@ mod tests {
             TapeBlockFile::from_bytes(&bytes),
             Err(FormatError::Malformed("glyph not utf-8"))
         ));
+    }
+
+    fn sample_v2() -> TapeBlockFile {
+        TapeBlockFile {
+            alphabet: vec!["_".into()], // block fallback
+            tapes: vec![
+                TapeSnapshot {
+                    origin: 0,
+                    cells: vec![0, 1, 2],
+                    head: 0,
+                    alphabet: Some(vec!["_".into(), "0".into(), "1".into()]),
+                },
+                TapeSnapshot {
+                    origin: 0,
+                    cells: vec![0],
+                    head: 0,
+                    alphabet: None, // inherits block "_"
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn v2_round_trips_per_tape_alphabets() {
+        let block = sample_v2();
+        let bytes = block.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2);
+        assert_eq!(TapeBlockFile::from_bytes(&bytes).unwrap(), block);
+    }
+
+    #[test]
+    fn v2_cell_outside_own_alphabet_rejected() {
+        let mut block = sample_v2();
+        block.tapes[0].cells[0] = 9; // own alphabet has 3 symbols
+        let bytes = block.to_bytes();
+        assert!(matches!(
+            TapeBlockFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("cell index outside alphabet"))
+        ));
+    }
+
+    #[test]
+    fn v2_emoji_glyphs_survive() {
+        let block = TapeBlockFile {
+            alphabet: vec!["_".into()],
+            tapes: vec![TapeSnapshot {
+                origin: 0,
+                cells: vec![0, 1],
+                head: 0,
+                alphabet: Some(vec!["_".into(), "😀".into()]),
+            }],
+        };
+        assert_eq!(TapeBlockFile::from_bytes(&block.to_bytes()).unwrap(), block);
+    }
+
+    #[test]
+    fn v1_shared_alphabet_file_still_loads() {
+        let v1 = sample(); // all None
+        assert_eq!(TapeBlockFile::from_bytes(&v1.to_bytes()).unwrap(), v1);
     }
 }
