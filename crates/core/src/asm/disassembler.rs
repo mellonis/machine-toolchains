@@ -487,6 +487,21 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                                 Some(format!("L{t:04X}"))
                             }
                         }
+                        DecodedOperand::Imm(n) => Some(format!("#{n}")),
+                        // A framed call: the displacement half relocates
+                        // like a call (rendered from the reloc symbol), the
+                        // frame half is a table-space label. A missing
+                        // target reloc falls back to `.byte`, like a
+                        // reloc-less call.
+                        DecodedOperand::FramedCall { table, .. } => {
+                            reloc_at.get(&(blob, d.addr + 1)).map(|name| {
+                                let frame = table_labels
+                                    .get(&(blob, *table))
+                                    .cloned()
+                                    .unwrap_or_else(|| table.to_string());
+                                format!("{name}, {frame}")
+                            })
+                        }
                     };
                     match text {
                         Some(operand_text) => {
@@ -765,6 +780,12 @@ pub fn disassemble_executable(
                                 None // cross-region non-root: .byte fallback
                             }
                         }
+                        DecodedOperand::Imm(n) => Some((entry.mnemonic, format!("#{n}"))),
+                        // Linked-image framed-call rendering (target +
+                        // frame-descriptor labels) lands with the frame
+                        // directive task; until then a framed call in a
+                        // linked image renders defensively as `.byte`.
+                        DecodedOperand::FramedCall { .. } => None,
                     };
                     match text {
                         Some((mnemonic, operand_text)) => {
@@ -831,6 +852,14 @@ pub fn listing_line(
                     Some(name) => format!("{t:#06x} <{name}>"),
                     None => format!("{t:#06x}"),
                 },
+                DecodedOperand::Imm(n) => format!("#{n}"),
+                DecodedOperand::FramedCall { target, table } => {
+                    let tgt = match resolve(target) {
+                        Some(name) => format!("{target:#06x} <{name}>"),
+                        None => format!("{target:#06x}"),
+                    };
+                    format!("{tgt}, {table:#06x}")
+                }
             };
             (len, mnemonic, operand_text)
         }

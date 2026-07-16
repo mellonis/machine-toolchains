@@ -68,6 +68,14 @@ pub enum SourceOperand {
     /// three moves) — that legality is enforced per OperandKind at the
     /// assembler's emit arms; this layer only parses.
     Vector(Vec<VecElem>, Span),
+    /// An `#<int>` immediate (Imm8), already range-checked to 0..=255.
+    Imm(u8),
+    /// A framed call operand: the call `target` (a symbol name, like a
+    /// plain call's) and the `frame` table label (like a TableRef).
+    FramedCall {
+        target: SpannedName,
+        frame: SpannedName,
+    },
 }
 
 /// One element of a `[..]` vector operand.
@@ -1002,6 +1010,71 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
                 name: one.text.clone(),
                 span: one.span,
             }))
+        }
+        OperandKind::Imm8 => {
+            // Exactly one `#<int>` operand, range 0..=255.
+            let [one] = operands.as_slice() else {
+                return Err(err(
+                    instr.word_span,
+                    AsmErrorKind::BadOperand("takes one `#<n>` immediate"),
+                ));
+            };
+            let digits = one.text.strip_prefix('#').ok_or_else(|| {
+                err(
+                    one.span,
+                    AsmErrorKind::BadOperand("immediates are written `#<n>`"),
+                )
+            })?;
+            let value = digits.parse::<u8>().map_err(|_| {
+                err(
+                    one.span,
+                    AsmErrorKind::BadOperand("immediate must be 0..=255"),
+                )
+            })?;
+            Ok(SourceOperand::Imm(value))
+        }
+        OperandKind::FramedCall => {
+            // `<target>, <frame>`: a call target (symbol name, like a
+            // plain call's) and a frame table LABEL (like a TableRef).
+            let [target, frame] = operands.as_slice() else {
+                return Err(err(
+                    instr.word_span,
+                    AsmErrorKind::BadOperand("takes a call target and a frame table label"),
+                ));
+            };
+            // Target half — same grammar as a plain call target; `@name`
+            // is rejected exactly as a call rejects it (already a symbol).
+            if target.text.starts_with('@') {
+                return Err(err(
+                    target.span,
+                    AsmErrorKind::BadOperand(
+                        "framed-call targets are already symbols; drop the `@`",
+                    ),
+                ));
+            }
+            if !is_symbol_name(&target.text) {
+                return Err(err(
+                    target.span,
+                    AsmErrorKind::BadOperand("framed-call targets are names, not numbers"),
+                ));
+            }
+            // Frame half — a file-scoped table LABEL.
+            if !is_label_name(&frame.text) {
+                return Err(err(
+                    frame.span,
+                    AsmErrorKind::BadOperand("frame references are table labels"),
+                ));
+            }
+            Ok(SourceOperand::FramedCall {
+                target: SpannedName {
+                    name: target.text.clone(),
+                    span: target.span,
+                },
+                frame: SpannedName {
+                    name: frame.text.clone(),
+                    span: frame.span,
+                },
+            })
         }
     }
 }

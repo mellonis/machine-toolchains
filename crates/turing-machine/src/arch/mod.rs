@@ -211,6 +211,11 @@ mod tests {
                 Operand::Symbols(vec![0; usize::from(arch.tape_count)])
             }
             OperandKind::TableRef => Operand::Table(0),
+            // No TM-1 opcode carries an immediate or a framed-call operand
+            // yet (those instructions arrive with the frames dialect).
+            OperandKind::Imm8 | OperandKind::FramedCall => {
+                unreachable!("no TM-1 opcode uses this operand kind yet")
+            }
         }
     }
 

@@ -248,8 +248,9 @@ impl<'a> Core<'a> {
         self.ip += 1;
         let complete = match kind {
             OperandKind::None => true, // unreachable by construction
-            OperandKind::RelI8 => buf.len() == 1,
+            OperandKind::RelI8 | OperandKind::Imm8 => buf.len() == 1,
             OperandKind::RelI32 | OperandKind::TableRef => buf.len() == 4,
+            OperandKind::FramedCall => buf.len() == 8,
             OperandKind::SymbolVec | OperandKind::MoveVec => byte & 0x80 != 0,
         };
         if !complete {
@@ -263,6 +264,12 @@ impl<'a> Core<'a> {
             OperandKind::TableRef => {
                 Operand::Table(u32::from_le_bytes(buf[..4].try_into().unwrap()))
             }
+            OperandKind::Imm8 => Operand::Imm(buf[0]),
+            // Displacement (bytes 0..4) then frame table offset (4..8).
+            OperandKind::FramedCall => Operand::FramedCall {
+                rel: i32::from_le_bytes(buf[..4].try_into().unwrap()),
+                table: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            },
             // MoveVec shares SymbolVec's compact walk AND its decoded
             // shape: both fetch to `Operand::Symbols`, so an arch's
             // lowerings handle every vector operand uniformly — the two

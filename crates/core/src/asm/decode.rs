@@ -26,6 +26,15 @@ pub(crate) enum DecodedOperand {
     /// Absolute TABLE-space offset (TableRef) — NOT a code address; the
     /// traversal must never treat it as a successor.
     TableAddr(u32),
+    /// A plain 8-bit immediate (Imm8), rendered `#<n>`.
+    Imm(u8),
+    /// A framed call (FramedCall): the resolved absolute code target (like
+    /// [`DecodedOperand::RelTarget`]) and the absolute table-space offset
+    /// of its frame descriptor.
+    FramedCall {
+        target: u32,
+        table: u32,
+    },
 }
 
 /// Decode ONE instruction at `addr` within `[addr, end)`. `None` means an
@@ -63,6 +72,34 @@ pub(crate) fn decode_at(syntax: &ArchSyntax, code: &[u8], addr: u32, end: u32) -
                 .try_into()
                 .unwrap();
             (5, DecodedOperand::TableAddr(u32::from_le_bytes(bytes)))
+        }
+        OperandKind::Imm8 => {
+            if addr + 2 > end {
+                return None;
+            }
+            (2, DecodedOperand::Imm(code[(addr + 1) as usize]))
+        }
+        OperandKind::FramedCall => {
+            if addr + 9 > end {
+                return None;
+            }
+            let rel_bytes: [u8; 4] = code[(addr + 1) as usize..(addr + 5) as usize]
+                .try_into()
+                .unwrap();
+            let table_bytes: [u8; 4] = code[(addr + 5) as usize..(addr + 9) as usize]
+                .try_into()
+                .unwrap();
+            let off = i32::from_le_bytes(rel_bytes);
+            // The displacement resolves like RelI32: absolute target =
+            // instruction end + off.
+            let target = (i64::from(addr) + 9 + i64::from(off)) as u32;
+            (
+                9,
+                DecodedOperand::FramedCall {
+                    target,
+                    table: u32::from_le_bytes(table_bytes),
+                },
+            )
         }
         // MoveVec shares SymbolVec's compact wire walk and, like the
         // fetch path, decodes to plain ints — the renderer distinguishes

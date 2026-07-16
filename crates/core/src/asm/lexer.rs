@@ -36,6 +36,8 @@ pub(crate) enum AsmTokenKind {
     RParen,
     /// `=` (tables cap; the `.routine` directive's `key=value` fields).
     Eq,
+    /// `#` (tables cap; the `#N` immediate-operand prefix).
+    Hash,
     /// `*` inside `[…]` or `{…}` (vectors / rept caps).
     Star,
     /// `-` inside `[…]` or `{…}` (vectors / rept caps).
@@ -137,8 +139,9 @@ fn scan_number(chars: &[char], start: usize) -> (String, usize) {
 ///     at ANY position under the cap — they carry no meaning in the
 ///     classic grammar, and the `.routine` directive's alpha list needs
 ///     them outside any brace block.
-///   * tables: `caps.tables` lets `=` lex as `Eq` at any position (the
-///     `.routine` directive's `key=value` fields).
+///   * tables: `caps.tables` lets `=` lex as `Eq` and `#` lex as `Hash`
+///     at any position (the `.routine` directive's `key=value` fields;
+///     the `#N` immediate-operand prefix).
 ///
 /// With `AsmCaps::default()` (all off) every arm is dead and the caller
 /// falls through to the classic path, so the token stream is byte-identical.
@@ -165,6 +168,7 @@ fn caps_token(
         '+' if in_rept => Some(AsmTokenKind::Plus),
         '%' if in_rept => Some(AsmTokenKind::Percent),
         '=' if caps.tables => Some(AsmTokenKind::Eq),
+        '#' if caps.tables => Some(AsmTokenKind::Hash),
         _ => None,
     }
 }
@@ -552,6 +556,7 @@ mod tests {
             | AsmTokenKind::Gt
             | AsmTokenKind::Dot
             | AsmTokenKind::Eq
+            | AsmTokenKind::Hash
             | AsmTokenKind::Junk(_) => 1,
         }
     }
@@ -618,6 +623,40 @@ mod tests {
                 word("tapes", 1, 1, 5),
                 junk('=', 1, 6),
                 number("2", 1, 7, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_caps_keep_hash_junk() {
+        // Byte-compat pin for the `Hash` gate: with caps off, `#` lexes
+        // exactly as before — a Junk token — so no pre-tables dialect
+        // (PM-1's shape) sees an immediate-operand prefix.
+        let toks = lex_for_test("trap #0", AsmCaps::default());
+        assert_eq!(
+            toks,
+            vec![word("trap", 1, 1, 4), junk('#', 1, 6), number("0", 1, 7, 1),]
+        );
+    }
+
+    #[test]
+    fn tables_cap_lexes_hash_as_hash() {
+        let caps = AsmCaps {
+            tables: true,
+            ..Default::default()
+        };
+        let toks = lex_for_test("trap #0", caps);
+        assert_eq!(
+            toks,
+            vec![
+                word("trap", 1, 1, 4),
+                AsmToken {
+                    kind: AsmTokenKind::Hash,
+                    line: 1,
+                    col: 6,
+                    len: 1,
+                },
+                number("0", 1, 7, 1),
             ]
         );
     }

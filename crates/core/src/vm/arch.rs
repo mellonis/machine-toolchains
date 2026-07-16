@@ -22,6 +22,17 @@ pub enum OperandKind {
     /// the distinction is an assembly-vocabulary and rendering matter
     /// (docs/formats.md (assembly text)), not a fetch matter.
     MoveVec,
+    /// A plain 8-bit immediate: one raw byte, decoded to
+    /// [`Operand::Imm`]. Carries a small numeric argument directly in the
+    /// instruction (e.g. a trap kind or a return-exit index) — not an
+    /// address and not relocatable.
+    Imm8,
+    /// A framed call operand: 8 bytes — a signed 32-bit code-relative
+    /// displacement (LE) followed by an unsigned 32-bit table-section
+    /// offset (LE) naming the frame descriptor to activate. The
+    /// displacement half relocates like a call target; the offset half is
+    /// an absolute table-space address like [`OperandKind::TableRef`].
+    FramedCall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +43,15 @@ pub enum Operand {
     Symbols(Vec<u32>),
     /// A [`OperandKind::TableRef`] operand: the absolute table offset.
     Table(u32),
+    /// An [`OperandKind::Imm8`] operand: the raw immediate byte.
+    Imm(u8),
+    /// An [`OperandKind::FramedCall`] operand: the code-relative
+    /// displacement of the call target and the table-section offset of
+    /// the frame descriptor to activate.
+    FramedCall {
+        rel: i32,
+        table: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +139,15 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
         Operand::I8(v) => vec![*v as u8],
         Operand::I32(v) => v.to_le_bytes().to_vec(),
         Operand::Table(v) => v.to_le_bytes().to_vec(),
+        Operand::Imm(v) => vec![*v],
+        // Displacement first (signed, LE), then the frame table offset
+        // (unsigned, LE): 8 bytes, the inverse of the core's FramedCall
+        // fetch.
+        Operand::FramedCall { rel, table } => {
+            let mut out = rel.to_le_bytes().to_vec();
+            out.extend(table.to_le_bytes());
+            out
+        }
         Operand::Symbols(symbols) => {
             let Some((last, init)) = symbols.split_last() else {
                 return Err("symbol vector must not be empty");

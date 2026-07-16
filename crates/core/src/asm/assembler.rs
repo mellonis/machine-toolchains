@@ -53,6 +53,18 @@ enum Slot {
         opcode: u8,
         name: String,
     },
+    /// A framed call (`call.m target, F`-style): opcode + 8-byte hole.
+    /// The first 4 bytes relocate to the target symbol (like a `Call`);
+    /// the last 4 are a table-ref hole naming the frame descriptor,
+    /// patched with its blob-local table offset and recorded as a
+    /// `TableFixup` — the same single-owner attribution as a `TableRef`.
+    FramedCall {
+        span: Span,
+        opcode: u8,
+        target: String,
+        frame_name: String,
+        frame_span: Span,
+    },
 }
 
 impl Slot {
@@ -67,6 +79,7 @@ impl Slot {
                 }
             }
             Slot::Call { .. } | Slot::TableRef { .. } => 5,
+            Slot::FramedCall { .. } => 9,
         }
     }
 }
@@ -221,6 +234,21 @@ fn assemble_function(
                             name_span: name.span,
                             opcode: *opcode,
                             name: name.name.clone(),
+                        });
+                    }
+                    (OperandKind::Imm8, SourceOperand::Imm(value)) => {
+                        slots.push(Slot::Fixed {
+                            span,
+                            bytes: vec![*opcode, *value],
+                        });
+                    }
+                    (OperandKind::FramedCall, SourceOperand::FramedCall { target, frame }) => {
+                        slots.push(Slot::FramedCall {
+                            span,
+                            opcode: *opcode,
+                            target: target.name.clone(),
+                            frame_name: frame.name.clone(),
+                            frame_span: frame.span,
                         });
                     }
                     (OperandKind::SymbolVec, SourceOperand::Ints(ints)) => {
@@ -409,7 +437,8 @@ fn assemble_function(
                     match slot {
                         Slot::Fixed { span, .. }
                         | Slot::Jump { span, .. }
-                        | Slot::TableRef { span, .. } => span.start.line,
+                        | Slot::TableRef { span, .. }
+                        | Slot::FramedCall { span, .. } => span.start.line,
                         Slot::Call { symbol_span, .. } => symbol_span.start.line,
                     },
                 ));
@@ -461,6 +490,40 @@ fn assemble_function(
                         table_refs.push(TableRefHole {
                             name: name.clone(),
                             name_span: *name_span,
+                            offset: blob.len() as u32,
+                        });
+                        blob.extend([0u8; 4]);
+                    }
+                    Slot::FramedCall {
+                        opcode,
+                        target,
+                        frame_name,
+                        frame_span,
+                        ..
+                    } => {
+                        blob.push(*opcode);
+                        // Displacement half: relocates to the target
+                        // symbol exactly like a plain call.
+                        let sym_idx = *symbol_index.entry(target.clone()).or_insert_with(|| {
+                            symbols.push(Symbol {
+                                name: target.clone(),
+                                def: SymbolDef::External,
+                            });
+                            (symbols.len() - 1) as u32
+                        });
+                        relocs.push(Relocation {
+                            blob: blob_idx,
+                            offset: blob.len() as u32,
+                            symbol: sym_idx,
+                        });
+                        blob.extend([0u8; 4]);
+                        // Frame half: a table-ref hole at offset+4, riding
+                        // `build_tables`' single-owner attribution and the
+                        // same fixup path as a `TableRef` (the hole is 4
+                        // bytes, here at offset+4 rather than offset+0).
+                        table_refs.push(TableRefHole {
+                            name: frame_name.clone(),
+                            name_span: *frame_span,
                             offset: blob.len() as u32,
                         });
                         blob.extend([0u8; 4]);
