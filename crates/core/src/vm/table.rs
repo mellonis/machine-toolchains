@@ -129,6 +129,12 @@ enum DStage {
     Entry { pos: u8, acc: [u8; 4] },
 }
 
+/// Dispatch table byte layout (indexed by the 1-based match result MR):
+///
+/// ```text
+/// offset 0:  entry_count  u16  LE
+/// offset 2:  entries      entry_count × u32 LE — absolute code addresses
+/// ```
 pub(crate) struct DispatchWalk {
     base: u32,
     mr: u32,

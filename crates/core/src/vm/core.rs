@@ -865,4 +865,45 @@ mod tests {
             Ev::Trapped(Trap::TableOutOfBounds { at: 1 })
         );
     }
+
+    #[test]
+    fn match_table_malformed_width_traps_bad_operand() {
+        // The width byte (17) exceeds the 16-position ceiling, so MatchWalk
+        // yields Malformed on the first table byte; the MatchTable settle arm
+        // maps it to BadOperand pinned at the mtc's own address (1). The TR
+        // fill [1,2] is never compared — the header is rejected before any
+        // row byte is read.
+        let blob = [17u8, 1, 0]; // width 17, row_count 1 (LE) — never reached
+        assert_eq!(
+            run_with_tables(&table_code(), &blob, &[1, 2]),
+            Ev::Trapped(Trap::BadOperand { at: 1 })
+        );
+    }
+
+    #[test]
+    fn dispatch_mr_past_entry_count_traps_out_of_range() {
+        // [1,9] takes the wildcard row → MR=2, but the dispatch table declares
+        // only one entry (count=1); MR > count makes DispatchWalk yield
+        // OutOfRange → DispatchOutOfRange at the djmp's address (6).
+        let mut blob = vec![2u8, 2, 0, 1, 2, 1, 0x7F]; // match table at 0
+        blob.extend([1u8, 0]); // dispatch count = 1 (LE)
+        blob.extend(11u32.to_le_bytes()); // the lone entry (would serve MR=1)
+        assert_eq!(
+            run_with_tables(&table_code(), &blob, &[1, 9]),
+            Ev::Trapped(Trap::DispatchOutOfRange { at: 6 })
+        );
+    }
+
+    #[test]
+    fn dispatch_entry_read_past_table_traps_out_of_bounds() {
+        // [1,2] matches row 1 → MR=1 (in range), but the blob ends right after
+        // the dispatch count — the entry TableRead runs off the table and
+        // returns OutOfTable → TableOutOfBounds at the djmp's address (6).
+        let mut blob = vec![2u8, 2, 0, 1, 2, 1, 0x7F]; // match table at 0
+        blob.extend([1u8, 0]); // dispatch count = 1, then truncated (no entry bytes)
+        assert_eq!(
+            run_with_tables(&table_code(), &blob, &[1, 2]),
+            Ev::Trapped(Trap::TableOutOfBounds { at: 6 })
+        );
+    }
 }
