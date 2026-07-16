@@ -619,7 +619,7 @@ impl ObjectFile {
                     let code = blobs
                         .get(blob as usize)
                         .ok_or(FormatError::Malformed("fixup out of range"))?;
-                    if offset as usize >= code.len() {
+                    if u64::from(offset) + 4 > code.len() as u64 {
                         return Err(FormatError::Malformed("fixup out of range"));
                     }
                     // A fixup addresses its blob's own table blob; without a
@@ -650,7 +650,7 @@ impl ObjectFile {
                     if blob as usize >= blob_count {
                         return Err(FormatError::Malformed("bound call blob index out of range"));
                     }
-                    if offset as usize >= blobs[blob as usize].len() {
+                    if u64::from(offset) + 4 > blobs[blob as usize].len() as u64 {
                         return Err(FormatError::Malformed("bound call offset out of range"));
                     }
                     if symbol as usize >= symbol_count {
@@ -1015,6 +1015,27 @@ mod tests {
         let mut obj = sample_v3_full();
         obj.table_fixups[0].blob = 99;
         assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn v3_fixup_without_tables_rejected() {
+        // A fixup rebases into its blob's table blob; with no table section
+        // there is nothing to rebase into, so the object is malformed.
+        let mut obj = sample_v3_full();
+        obj.table_blobs = None;
+        assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn v3_bound_call_offset_overrun_rejected() {
+        // The offset's 4-byte hole must satisfy offset..offset + 4 <= blob len.
+        // offset == len - 3 leaves the hole overrunning the blob, so it is
+        // rejected — while the sample's in-bounds offset still round-trips.
+        let mut obj = sample_v3_full();
+        let blob_len = obj.blobs[obj.bound_calls[0].blob as usize].len() as u32;
+        obj.bound_calls[0].offset = blob_len - 3;
+        assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+        assert!(ObjectFile::from_bytes(&sample_v3_full().to_bytes()).is_ok());
     }
 
     #[test]
