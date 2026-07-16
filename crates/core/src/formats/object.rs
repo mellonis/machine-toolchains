@@ -187,7 +187,7 @@ impl ObjectFile {
     }
 
     /// True when no v3 data is present, so the object serializes byte-for-byte
-    /// as v2. Task-later v3 emit gates on the negation of this.
+    /// as v2. v3 emit gates on the negation of this.
     pub fn is_v2_shape(&self) -> bool {
         self.signatures.is_none()
             && self.table_blobs.is_none()
@@ -616,10 +616,22 @@ impl ObjectFile {
                     let blob = r.u32()?;
                     let offset = r.u32()?;
                     let table_offset = r.u32()?;
-                    if blob as usize >= blob_count {
-                        return Err(FormatError::Malformed(
-                            "table fixup blob index out of range",
-                        ));
+                    let code = blobs
+                        .get(blob as usize)
+                        .ok_or(FormatError::Malformed("fixup out of range"))?;
+                    if offset as usize >= code.len() {
+                        return Err(FormatError::Malformed("fixup out of range"));
+                    }
+                    // A fixup addresses its blob's own table blob; without a
+                    // table section there is nothing for it to rebase into.
+                    let Some(tables) = &table_blobs else {
+                        return Err(FormatError::Malformed("fixup out of range"));
+                    };
+                    let table = tables
+                        .get(blob as usize)
+                        .ok_or(FormatError::Malformed("fixup out of range"))?;
+                    if table_offset as usize >= table.len() {
+                        return Err(FormatError::Malformed("fixup out of range"));
                     }
                     table_fixups.push(TableFixup {
                         blob,
@@ -637,6 +649,9 @@ impl ObjectFile {
                     let tape_count = r.u8()? as usize;
                     if blob as usize >= blob_count {
                         return Err(FormatError::Malformed("bound call blob index out of range"));
+                    }
+                    if offset as usize >= blobs[blob as usize].len() {
+                        return Err(FormatError::Malformed("bound call offset out of range"));
                     }
                     if symbol as usize >= symbol_count {
                         return Err(FormatError::Malformed(
@@ -656,9 +671,7 @@ impl ObjectFile {
                             let dst = r.u32()?;
                             let flags_byte = r.u8()?;
                             if (flags_byte & !1) != 0 {
-                                return Err(FormatError::Malformed(
-                                    "bound call pair flags out of range",
-                                ));
+                                return Err(FormatError::Malformed("reserved map-pair flags"));
                             }
                             pairs.push(MapPair {
                                 src,
@@ -940,5 +953,88 @@ mod tests {
         let back = ObjectFile::from_bytes(&v2.to_bytes()).unwrap();
         assert!(back.signatures.is_none() && back.table_blobs.is_none());
         assert!(back.table_fixups.is_empty() && back.bound_calls.is_empty());
+    }
+
+    fn sample_v3_full() -> ObjectFile {
+        let mut obj = sample_v3_sigs();
+        obj.table_fixups = vec![TableFixup {
+            blob: 0,
+            offset: 2,
+            table_offset: 0,
+        }];
+        obj.bound_calls = vec![BoundCall {
+            blob: 0,
+            offset: 1,
+            symbol: 0,
+            binding: vec![TapeBinding {
+                caller_tape: 2,
+                pairs: vec![
+                    MapPair {
+                        src: 1,
+                        dst: 3,
+                        one_way: false,
+                    },
+                    MapPair {
+                        src: 4,
+                        dst: 0,
+                        one_way: true,
+                    }, // '^' => blank
+                ],
+            }],
+        }];
+        obj
+    }
+
+    #[test]
+    fn v3_full_round_trip_preserves_one_way() {
+        let obj = sample_v3_full();
+        let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
+        assert_eq!(back, obj);
+        assert!(back.bound_calls[0].binding[0].pairs[1].one_way);
+        assert!(!back.bound_calls[0].binding[0].pairs[0].one_way);
+    }
+
+    #[test]
+    fn v3_bound_call_indices_validated() {
+        // blob out of range
+        let mut obj = sample_v3_full();
+        obj.bound_calls[0].blob = 99;
+        assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+        // symbol out of range
+        let mut obj = sample_v3_full();
+        obj.bound_calls[0].symbol = 99;
+        assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+        // caller_tape >= 16
+        let mut obj = sample_v3_full();
+        obj.bound_calls[0].binding[0].caller_tape = 16;
+        assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn v3_fixup_indices_validated() {
+        let mut obj = sample_v3_full();
+        obj.table_fixups[0].blob = 99;
+        assert!(ObjectFile::from_bytes(&obj.to_bytes()).is_err());
+    }
+
+    #[test]
+    fn v3_pair_reserved_flags_rejected() {
+        // Hand-corrupt the pair-flags byte to set a reserved bit, restamp CRC.
+        let obj = sample_v3_full();
+        let mut bytes = obj.to_bytes();
+        // The LAST pair-flags byte in the file is the final byte before nothing
+        // else follows it in this sample (bound_calls is the last section and
+        // the one-way pair is its last pair): flags byte == 0x01 at the end.
+        let pos = bytes.len() - 1;
+        assert_eq!(
+            bytes[pos], 0x01,
+            "layout assumption: trailing one-way flag byte"
+        );
+        bytes[pos] = 0x03; // set a reserved bit
+        crate::formats::crc32::stamp_crc(&mut bytes, 7);
+        assert!(matches!(
+            ObjectFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("reserved map-pair flags"))
+        ));
     }
 }
