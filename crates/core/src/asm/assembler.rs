@@ -1224,6 +1224,37 @@ T0: .row [{v}]
     }
 
     #[test]
+    fn rept_expanded_same_label_targets_continue_one_table() {
+        // The UTM dispatch pattern (the `.target` sibling of the `.row`
+        // continuation above): a `.rept` around a LABELED `.target` emits
+        // the same label every iteration — the targets accrue into ONE
+        // dispatch table instead of clashing.
+        let src = "\
+.section tables
+.rept i, 0, 2
+D0: .target T{i}
+.endr
+.section code
+.func main
+    tdispatch D0
+T0: nop
+T1: nop
+T2: stp
+";
+        let obj = asm_fake(src).unwrap();
+        let tables = obj.table_blobs.as_ref().unwrap();
+        // One dispatch table with three entries (T0, T1, T2) — proof the
+        // three same-label `.target` lines merged rather than clashing.
+        // Layout: ent@0, tdispatch@1 (hole 2..6), T0: nop@6, T1: nop@7,
+        // T2: stp@8. Dispatch layout: entry_count u16 LE + u32 LE offsets.
+        let mut expected = vec![3u8, 0];
+        expected.extend(6u32.to_le_bytes());
+        expected.extend(7u32.to_le_bytes());
+        expected.extend(8u32.to_le_bytes());
+        assert_eq!(tables[0], expected);
+    }
+
+    #[test]
     fn discipline_violations_are_rejected() {
         let asm_table = |table_lines: &str| {
             let src = format!(
