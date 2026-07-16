@@ -6,8 +6,8 @@ use mtc_core::formats::ARCH_PM1;
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use mtc_core::vm::{
-    ArchRegistry, InfiniteTape, LoadError, Machine, Outcome, RunLimits, RunOptions, RunStats,
-    TactProfile, Trap,
+    ArchRegistry, DebugEvent, InfiniteTape, LoadError, Machine, Outcome, RunLimits, RunOptions,
+    RunStats, TactProfile, Trap,
 };
 use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::arch::opcodes::*;
@@ -176,6 +176,48 @@ fn step_limit_stops_the_infinite_loop() {
     };
     let r = m.run(&mut t, opts);
     assert_eq!(r.outcome, Outcome::Trapped(Trap::StepLimit));
+}
+
+#[test]
+fn fused_equals_unfused_pair() {
+    // The fused write+move opcodes must be observably identical to the
+    // unfused pair: `wrl 1; stp` ≡ `wr 1; lft; stp`.
+    //
+    // The head starts on a mark, so the load-time MF latch is `true` while
+    // the correct final MF is `false` (the blank the leftward move lands
+    // on). That gap makes the check discriminating: a dropped final latch
+    // would leave MF stuck at `true`, and a latch-taken-before-the-move
+    // would read the just-written mark (`true`) — both diverge from `false`.
+    let reg = registry();
+
+    let run = |code: Vec<u8>| {
+        let m = Machine::from_executable(&machine_for(code), &reg).unwrap();
+        let mut tape = InfiniteTape::from_cells([true], 0, 0);
+        let mut session = m.debug(RunOptions::default());
+        let event = session.continue_(&mut tape);
+        (event, tape.marked_cells(), tape.head(), session.mf())
+    };
+
+    // wr 1; lft; stp   (operand byte 0x81 = symbol index 1, the mark)
+    let (unfused_event, unfused_marks, unfused_head, unfused_mf) =
+        run(vec![ENT, WR, 0x81, LFT, STP]);
+    // wrl 1; stp
+    let (fused_event, fused_marks, fused_head, fused_mf) = run(vec![ENT, WRL, 0x81, STP]);
+
+    // Both stop cleanly — a trap must not slip through as "equivalent".
+    assert_eq!(unfused_event, DebugEvent::Finished(Outcome::Stopped));
+    assert_eq!(fused_event, DebugEvent::Finished(Outcome::Stopped));
+
+    // Fused observables equal the unfused pair's.
+    assert_eq!(fused_marks, unfused_marks);
+    assert_eq!(fused_head, unfused_head);
+    assert_eq!(fused_mf, unfused_mf);
+
+    // ...and the concrete result is what the trace predicts, so the test is
+    // not vacuously satisfied by two identical no-ops.
+    assert_eq!(fused_marks, vec![0]); // mark written at the start cell
+    assert_eq!(fused_head, -1); // moved one cell left
+    assert!(!fused_mf); // MF reflects the blank landed on, not the write
 }
 
 #[test]

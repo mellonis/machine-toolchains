@@ -10,6 +10,10 @@ pub mod opcodes {
     pub const LFT: u8 = 0x04;
     pub const RGT: u8 = 0x05;
     pub const WR: u8 = 0x06;
+    // Fused write+move (docs/isa.md): wr x; lft / wr x; rgt in one fetch,
+    // final MF identical (cell at head after the move).
+    pub const WRL: u8 = 0x07;
+    pub const WRR: u8 = 0x0F;
     pub const JMP: u8 = 0x08;
     pub const JM: u8 = 0x09;
     pub const JNM: u8 = 0x0A;
@@ -43,7 +47,7 @@ impl Arch for Pm1 {
     fn operand_kind(&self, opcode: u8) -> Option<OperandKind> {
         match opcode {
             NOP | STP | HLT | LFT | RGT | RET | ENT | BRK => Some(OperandKind::None),
-            WR => Some(OperandKind::SymbolVec),
+            WR | WRL | WRR => Some(OperandKind::SymbolVec),
             JMP | JM | JNM | CALL => Some(OperandKind::RelI32),
             JMP_S | JM_S | JNM_S | CALL_S => Some(OperandKind::RelI8),
             _ => None,
@@ -73,6 +77,35 @@ impl Arch for Pm1 {
                             dev: 0,
                             index: s[0],
                         },
+                        MicroOp::LatchMatch(MARK),
+                    ]
+                }
+                _ => return Err(Trap::BadOperand { at: 0 }),
+            },
+            // Fused write+move: ≡ `wr x; lft` / `wr x; rgt` (docs/isa.md).
+            // The final latch reads the cell AFTER the move, so MF matches
+            // the unfused pair exactly.
+            WRL => match operand {
+                Operand::Symbols(s) if s.len() == 1 => {
+                    vec![
+                        MicroOp::Write {
+                            dev: 0,
+                            index: s[0],
+                        },
+                        MicroOp::MoveLeft { dev: 0 },
+                        MicroOp::LatchMatch(MARK),
+                    ]
+                }
+                _ => return Err(Trap::BadOperand { at: 0 }),
+            },
+            WRR => match operand {
+                Operand::Symbols(s) if s.len() == 1 => {
+                    vec![
+                        MicroOp::Write {
+                            dev: 0,
+                            index: s[0],
+                        },
+                        MicroOp::MoveRight { dev: 0 },
                         MicroOp::LatchMatch(MARK),
                     ]
                 }
@@ -123,7 +156,12 @@ mod tests {
                 "opcode {op:#04x}"
             );
         }
-        assert!(matches!(a.operand_kind(WR), Some(OperandKind::SymbolVec)));
+        for op in [WR, WRL, WRR] {
+            assert!(
+                matches!(a.operand_kind(op), Some(OperandKind::SymbolVec)),
+                "opcode {op:#04x}"
+            );
+        }
         for op in [JMP, JM, JNM, CALL] {
             assert!(
                 matches!(a.operand_kind(op), Some(OperandKind::RelI32)),
@@ -137,7 +175,7 @@ mod tests {
             );
             assert_eq!(op, (op - 0x10) | 0x10); // short = far | 0x10 (self-check of constants)
         }
-        for invalid in [0x00u8, 0x07, 0x0F, 0x10, 0x17, 0x1C, 0x80, 0xFF] {
+        for invalid in [0x00u8, 0x10, 0x17, 0x1C, 0x80, 0xFF] {
             assert!(
                 a.operand_kind(invalid).is_none(),
                 "opcode {invalid:#04x} must be invalid"
@@ -196,6 +234,38 @@ mod tests {
         assert_eq!(a.lower(ENT, &Operand::None).unwrap(), vec![MicroOp::Nop]);
         assert_eq!(a.lower(BRK, &Operand::None).unwrap(), vec![MicroOp::Brk]);
         assert_eq!(a.lower(NOP, &Operand::None).unwrap(), vec![MicroOp::Nop]);
+    }
+
+    #[test]
+    fn wrl_wrr_lower_to_write_move_latch() {
+        let arch = Pm1;
+        let one = Operand::Symbols(vec![1]);
+        assert_eq!(
+            arch.lower(WRL, &one).unwrap(),
+            vec![
+                MicroOp::Write { dev: 0, index: 1 },
+                MicroOp::MoveLeft { dev: 0 },
+                MicroOp::LatchMatch(MARK),
+            ]
+        );
+        assert_eq!(
+            arch.lower(WRR, &one).unwrap(),
+            vec![
+                MicroOp::Write { dev: 0, index: 1 },
+                MicroOp::MoveRight { dev: 0 },
+                MicroOp::LatchMatch(MARK),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrl_wrr_require_exactly_one_symbol() {
+        let a = Pm1;
+        for op in [WRL, WRR] {
+            assert!(a.lower(op, &Operand::Symbols(vec![0])).is_ok());
+            assert!(a.lower(op, &Operand::Symbols(vec![1, 2])).is_err());
+            assert!(a.lower(op, &Operand::Symbols(vec![])).is_err());
+        }
     }
 
     #[test]
