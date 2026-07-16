@@ -285,3 +285,47 @@ T0: .row [1, 2]
     let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
     assert_eq!(back, obj);
 }
+
+/// Signatures and tables together: a `.routine`-signed two-function file
+/// with a match table engages BOTH flag-gated version-3 sections from
+/// real assembly, and the object round-trips through
+/// `to_bytes`/`from_bytes` unchanged.
+#[test]
+fn object_round_trips_with_signatures_and_tables_together() {
+    use mtc_core::formats::object::RoutineSig;
+    let src = "\
+.routine owner, tapes=2, alpha=(3, 5)
+.routine plain, tapes=1, alpha=(2)
+.section tables
+T0: .row [1, 2]
+    .row [1, *]
+.section code
+.func owner
+    tmatch T0
+    stp
+.func plain
+    nop
+    stp
+";
+    let obj = asm(src).expect("assembles");
+    assert_eq!(
+        obj.signatures,
+        Some(vec![
+            RoutineSig {
+                arity: 2,
+                cardinalities: vec![3, 5],
+            },
+            RoutineSig {
+                arity: 1,
+                cardinalities: vec![2],
+            },
+        ])
+    );
+    assert!(obj.table_blobs.is_some(), "table section present too");
+
+    let bytes = obj.to_bytes();
+    // Wire version field sits right after the 3-byte magic: version 3.
+    assert_eq!(u16::from_le_bytes([bytes[3], bytes[4]]), 3);
+    let back = ObjectFile::from_bytes(&bytes).unwrap();
+    assert_eq!(back, obj);
+}
