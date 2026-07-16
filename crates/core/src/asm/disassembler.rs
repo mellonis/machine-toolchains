@@ -56,7 +56,7 @@ pub fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
             let field = format!("{l}:");
             let mut line = field.clone();
             line.push_str(&" ".repeat(MNEMONIC_COL - field.chars().count()));
-            line.push_str(&body[MNEMONIC_COL..]);
+            line.push_str(body.get(MNEMONIC_COL..).unwrap_or(""));
             line
         }
         None => body,
@@ -854,6 +854,13 @@ L0001:  nop
         assert_eq!(grid_line(Some("L0001"), "nop", ""), "L0001:  nop");
         assert_eq!(grid_line(None, "wr", "1"), "        wr      1");
         assert_eq!(grid_line(None, "stop", ""), "        stop");
+    }
+
+    #[test]
+    fn grid_line_is_total_on_empty_mnemonic() {
+        // Must not panic; renders the label alone.
+        let line = grid_line(Some("L1"), "", "");
+        assert!(line.starts_with("L1:"));
     }
 
     #[test]
