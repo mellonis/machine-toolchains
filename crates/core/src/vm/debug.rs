@@ -38,11 +38,18 @@ pub struct DebugSession<'a> {
     core: Core<'a>,
     code: Vec<u8>,
     stack: ReturnStack,
+    /// Match/dispatch table ROM (docs/formats.md (executable image)); empty
+    /// for a legacy single-tape session.
+    tables: Vec<u8>,
     stats: RunStats,
     profile: TactProfile,
     limits: RunLimits,
     breakpoints: BTreeSet<u32>,
     started: bool,
+    /// Latch the initial mark from the mark device on the first step (the
+    /// PM-1 loading step). Set for legacy single-tape sessions; cleared by
+    /// `with_tables` for the multi-tape v2 shape (mirrors `run_tapes`).
+    latch_initial_mark: bool,
     finished: Option<Outcome>,
     trap_reported: bool,
 }
@@ -59,14 +66,27 @@ impl<'a> DebugSession<'a> {
             core,
             code,
             stack,
+            tables: Vec::new(),
             stats: RunStats::default(),
             profile,
             limits,
             breakpoints: BTreeSet::new(),
             started: false,
+            latch_initial_mark: true,
             finished: None,
             trap_reported: false,
         }
+    }
+
+    /// Carry a table ROM into the session (docs/formats.md (executable
+    /// image)) and switch it to the multi-tape v2 shape: this also clears the
+    /// PM-1 initial-mark latch, mirroring `run_tapes` (MR starts 0; head
+    /// symbols enter via explicit read micro-ops). Drive such a session with
+    /// `step_in_tapes`.
+    pub fn with_tables(mut self, tables: Vec<u8>) -> Self {
+        self.tables = tables;
+        self.latch_initial_mark = false;
+        self
     }
 
     pub fn add_breakpoint(&mut self, addr: u32) {
@@ -106,22 +126,21 @@ impl<'a> DebugSession<'a> {
         self.finished
     }
 
-    /// One raw instruction; the shared bottom of every public motion.
-    fn advance(&mut self, device: &mut dyn Tape) -> StepEvent {
-        if !self.started {
+    /// One raw instruction; the shared bottom of every public motion. The
+    /// device set arrives per call — a legacy session wraps its single
+    /// device into a one-element slice.
+    fn advance(&mut self, devices: &mut [&mut dyn Tape]) -> StepEvent {
+        if !self.started && self.latch_initial_mark {
             // Initial MF latch, tact-free (loading, not execution) —
             // mirrors Machine::run; PM-1 matches against mark index 1.
-            self.core.set_mf(device.read() == 1);
+            self.core.set_mf(devices[0].read() == 1);
         }
-        let mut devices: [&mut dyn Tape; 1] = [device];
-        // PM-1 has no table section yet — an empty blob (docs/isa.md
-        // (match tables)); phase 3 feeds the MX v2 table section here.
         let event = step_instruction(
             &mut self.core,
             &self.code,
             &mut self.stack,
-            &mut devices,
-            &[],
+            devices,
+            &self.tables,
             self.profile,
             self.limits,
             &mut self.stats,
@@ -153,10 +172,18 @@ impl<'a> DebugSession<'a> {
     }
 
     pub fn step_in(&mut self, device: &mut dyn Tape) -> DebugEvent {
+        self.step_in_tapes(&mut [device])
+    }
+
+    /// Multi-tape single step (docs/formats.md (executable image)): the
+    /// device-set analog of `step_in`, mirroring it exactly — one raw
+    /// instruction, then a `Step` pause. Like `step_in`, it does not consult
+    /// breakpoints (only the `continue`/`step_over`/`step_out` motions do).
+    pub fn step_in_tapes(&mut self, devices: &mut [&mut dyn Tape]) -> DebugEvent {
         if let Some(done) = self.gate() {
             return done;
         }
-        let event = self.advance(device);
+        let event = self.advance(devices);
         self.settle(event, PauseCause::Step)
     }
 
@@ -173,7 +200,7 @@ impl<'a> DebugSession<'a> {
         if let Some(done) = self.gate() {
             return done;
         }
-        let event = self.advance(device);
+        let event = self.advance(&mut [&mut *device]);
         if self.stack.depth() > depth0
             && let StepEvent::Retired = event
         {
@@ -212,7 +239,7 @@ impl<'a> DebugSession<'a> {
             return DebugEvent::Paused(PauseCause::Manual);
         }
         loop {
-            let event = self.advance(device);
+            let event = self.advance(&mut [&mut *device]);
             match event {
                 StepEvent::Retired => {
                     if let Some(target) = until_depth
@@ -382,6 +409,43 @@ mod tests {
         assert_eq!(s.stats().steps, 0);
         assert_eq!(
             s.run_steps(&mut tape, 10),
+            DebugEvent::Finished(Outcome::Stopped)
+        );
+    }
+
+    #[test]
+    fn step_in_tapes_drives_two_devices_through_a_table_rom() {
+        // Two devices read into TR, a width-2 match table folds them into MR,
+        // a dispatch jump lands on stp. `with_tables` must feed the ROM and
+        // must NOT preload MF (mirrors run_tapes).
+        //   [0] entry; [1] read both; [2] mtc @0; [7] djmp @5; [12] stp
+        let mut code = vec![0x0E, 0x10, 0x11];
+        code.extend(0u32.to_le_bytes());
+        code.push(0x12);
+        code.extend(5u32.to_le_bytes());
+        code.push(0x02);
+        let tables = vec![2, 1, 0, 1, 1, 1, 0, 12, 0, 0, 0];
+        static ARCH: TestArch = TestArch;
+        let mut s = DebugSession::new(
+            Core::new(&ARCH, 0),
+            code,
+            ReturnStack::new(4),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(tables);
+        let mut t0 = InfiniteTape::from_cells([true], 0, 0);
+        let mut t1 = InfiniteTape::from_cells([true], 0, 0);
+        let mut devs: [&mut dyn super::Tape; 2] = [&mut t0, &mut t1];
+        for expected_ip in [1u32, 2, 7, 12] {
+            assert_eq!(
+                s.step_in_tapes(&mut devs),
+                DebugEvent::Paused(PauseCause::Step)
+            );
+            assert_eq!(s.ip(), expected_ip);
+        }
+        assert_eq!(
+            s.step_in_tapes(&mut devs),
             DebugEvent::Finished(Outcome::Stopped)
         );
     }
