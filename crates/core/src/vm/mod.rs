@@ -16,4 +16,4 @@ pub use debug::{DebugEvent, DebugSession, PauseCause};
 pub use devices::{InfiniteTape, StrictTape, Tape};
 pub use driver::{Outcome, ReturnStack, RunLimits, RunResult, RunStats, TactProfile, run};
 pub use machine::{ArchRegistry, LoadError, Machine, RunOptions};
-pub use trap::{DeviceFault, Trap};
+pub use trap::{DeviceFault, RaisedTrapKind, Trap};
