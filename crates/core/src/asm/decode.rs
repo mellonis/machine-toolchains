@@ -64,7 +64,10 @@ pub(crate) fn decode_at(syntax: &ArchSyntax, code: &[u8], addr: u32, end: u32) -
                 .unwrap();
             (5, DecodedOperand::TableAddr(u32::from_le_bytes(bytes)))
         }
-        OperandKind::SymbolVec => {
+        // MoveVec shares SymbolVec's compact wire walk and, like the
+        // fetch path, decodes to plain ints — the renderer distinguishes
+        // the two kinds via the syntax entry, not the decoded shape.
+        OperandKind::SymbolVec | OperandKind::MoveVec => {
             let mut i = addr + 1;
             let mut symbols = Vec::new();
             let mut ok = false;

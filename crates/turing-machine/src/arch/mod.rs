@@ -203,7 +203,11 @@ mod tests {
             OperandKind::None => Operand::None,
             OperandKind::RelI8 => Operand::I8(0),
             OperandKind::RelI32 => Operand::I32(0),
-            OperandKind::SymbolVec => Operand::Symbols(vec![0; usize::from(arch.tape_count)]),
+            // Both vector kinds fetch to `Operand::Symbols`; 0 lowers
+            // cleanly for `wr` (write 0) and `mov` (stay) alike.
+            OperandKind::SymbolVec | OperandKind::MoveVec => {
+                Operand::Symbols(vec![0; usize::from(arch.tape_count)])
+            }
             OperandKind::TableRef => Operand::Table(0),
         }
     }

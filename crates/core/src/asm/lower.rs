@@ -821,6 +821,20 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
             }
             Ok(SourceOperand::Ints(ints))
         }
+        OperandKind::MoveVec => {
+            // A move vector is written in bracket form only (`[<, ., >]`),
+            // routed exactly like SymbolVec's bracketed spelling; unlike
+            // SymbolVec there is no legacy spelled-out-ints form to keep.
+            if let [one] = operands.as_slice()
+                && one.text.starts_with('[')
+            {
+                return Ok(SourceOperand::Vector(parse_vector(one)?));
+            }
+            Err(err(
+                instr.word_span,
+                AsmErrorKind::BadOperand("takes a `[..]` move vector"),
+            ))
+        }
         OperandKind::TableRef => {
             // A table reference is a file-scoped table LABEL (label
             // grammar, not the dotted/namespaced symbol grammar).

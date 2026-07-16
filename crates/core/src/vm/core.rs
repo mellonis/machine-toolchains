@@ -170,7 +170,7 @@ impl<'a> Core<'a> {
             OperandKind::None => true, // unreachable by construction
             OperandKind::RelI8 => buf.len() == 1,
             OperandKind::RelI32 | OperandKind::TableRef => buf.len() == 4,
-            OperandKind::SymbolVec => byte & 0x80 != 0,
+            OperandKind::SymbolVec | OperandKind::MoveVec => byte & 0x80 != 0,
         };
         if !complete {
             self.phase = Phase::FetchOperand { opcode, kind, buf };
@@ -183,7 +183,12 @@ impl<'a> Core<'a> {
             OperandKind::TableRef => {
                 Operand::Table(u32::from_le_bytes(buf[..4].try_into().unwrap()))
             }
-            OperandKind::SymbolVec => {
+            // MoveVec shares SymbolVec's compact walk AND its decoded
+            // shape: both fetch to `Operand::Symbols`, so an arch's
+            // lowerings handle every vector operand uniformly — the two
+            // kinds differ only in assembly vocabulary and rendering,
+            // which never reach the core.
+            OperandKind::SymbolVec | OperandKind::MoveVec => {
                 Operand::Symbols(buf.iter().map(|b| u32::from(b & 0x7F)).collect())
             }
         };

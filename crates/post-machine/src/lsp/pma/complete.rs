@@ -153,8 +153,9 @@ fn operand_hint_detail(entry: &SyntaxEntry) -> Option<String> {
             Flow::Jump | Flow::Branch => Some(format!("{} <label>", entry.mnemonic)),
             Flow::FallThrough | Flow::Stop => None,
         },
-        // PM-1 has no table-referencing mnemonics; no hint to build.
-        OperandKind::TableRef => None,
+        // PM-1 has no table-referencing or move-vector mnemonics; no
+        // hint to build.
+        OperandKind::TableRef | OperandKind::MoveVec => None,
     }
 }
 

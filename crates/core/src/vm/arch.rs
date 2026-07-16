@@ -15,6 +15,13 @@ pub enum OperandKind {
     /// unsigned and absolute — table walks address the table space, not
     /// instruction-relative code).
     TableRef,
+    /// Self-delimiting move vector: [`SymbolVec`]'s wire form exactly
+    /// (7-bit payloads, high bit on the last), carrying per-tape move
+    /// codes — 0 = stay, 1 = left, 2 = right — instead of symbol
+    /// indices. It decodes to [`Operand::Symbols`] like `SymbolVec`;
+    /// the distinction is an assembly-vocabulary and rendering matter
+    /// (docs/formats.md (assembly text)), not a fetch matter.
+    MoveVec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +88,10 @@ pub trait Arch {
 }
 
 /// Encode an operand to its wire form (docs/isa.md). The inverse of the
-/// core's fetch-time decoding — property-tested against it.
+/// core's fetch-time decoding — property-tested against it. A move
+/// vector ([`OperandKind::MoveVec`]) arrives as [`Operand::Symbols`]
+/// and encodes identically to a symbol vector; its payloads are the
+/// move codes 0/1/2, comfortably within the 7-bit element budget.
 pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
     Ok(match operand {
         Operand::None => Vec::new(),

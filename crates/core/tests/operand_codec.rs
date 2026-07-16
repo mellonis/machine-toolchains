@@ -16,6 +16,7 @@ impl mtc_core::vm::Arch for CodecArch {
             0x02 => Some(mtc_core::vm::OperandKind::RelI32),
             0x03 => Some(mtc_core::vm::OperandKind::SymbolVec),
             0x04 => Some(mtc_core::vm::OperandKind::TableRef),
+            0x05 => Some(mtc_core::vm::OperandKind::MoveVec),
             _ => None,
         }
     }
@@ -90,4 +91,20 @@ proptest! {
         // values whose top bit would flip an i32 negative.
         round_trip(0x04, Operand::Table(v));
     }
+
+    #[test]
+    fn move_vec_round_trips(v in proptest::collection::vec(0u32..3, 1..=16)) {
+        // MoveVec shares SymbolVec's wire form and decoded shape
+        // (`Operand::Symbols`); the move payloads 0/1/2 stay within the
+        // 7-bit element budget by construction.
+        round_trip(0x05, Operand::Symbols(v));
+    }
+}
+
+#[test]
+fn empty_vectors_do_not_encode() {
+    // Both vector kinds share `Operand::Symbols`, whose encoding is
+    // self-delimiting via the high bit on the LAST element — an empty
+    // vector has no last element to carry it, so encoding refuses.
+    assert!(encode_operand(&Operand::Symbols(vec![])).is_err());
 }
