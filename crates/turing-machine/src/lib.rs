@@ -6,5 +6,6 @@
 
 pub mod arch;
 pub mod asm;
+pub mod cli;
 
 pub use asm::{TM1_TMA_DIALECT_VERSION, tm1_syntax};

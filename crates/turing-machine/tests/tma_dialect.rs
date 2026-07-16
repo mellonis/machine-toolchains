@@ -161,6 +161,26 @@ fn formatter_is_idempotent_on_the_sectioned_program() {
 }
 
 #[test]
+fn call_s_is_linker_only_and_rejected_in_source() {
+    // `call.s` is the short form of `call`: it exists in the syntax table
+    // for relaxation + disassembly display, but the assembler rejects it by
+    // name — only the linker's fixpoint may select it. Mirrors PM-1.
+    let src = "\
+.routine main, tapes=1, alpha=(2)
+.section code
+.func main
+        call.s main
+        stp
+";
+    let err = assemble(src, false).expect_err("call.s must be rejected in source");
+    assert!(
+        format!("{:?}", err.kind).contains("call.s width is linker-selected"),
+        "unexpected error: {:?}",
+        err.kind
+    );
+}
+
+#[test]
 fn routine_vectors_and_rept_are_accepted_together() {
     // A single source using `.routine`, the `[..]` vector operands, and a
     // `.rept` block together — the three caps the TM-1 dialect turns on.
