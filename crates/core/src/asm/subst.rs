@@ -113,10 +113,13 @@ impl Eval<'_> {
                 Some('%') => {
                     self.pos += 1;
                     let rhs = self.atom()?;
-                    if rhs == 0 {
-                        return Err("modulo by zero".to_string());
-                    }
-                    let rem = acc % rhs;
+                    let rem = acc.checked_rem(rhs).ok_or_else(|| {
+                        if rhs == 0 {
+                            "modulo by zero".to_string()
+                        } else {
+                            "arithmetic overflow".to_string()
+                        }
+                    })?;
                     if rem < 0 {
                         return Err("negative modulo result".to_string());
                     }
@@ -229,5 +232,11 @@ mod tests {
         assert!(eval_expr("v%0", "v", 5).is_err());
         // 5 - 10 = -5; -5 % 3 is negative in Rust → rejected.
         assert!(eval_expr("(v-10)%3", "v", 5).is_err());
+    }
+
+    #[test]
+    fn modulo_overflow_is_an_error_not_a_panic() {
+        assert!(eval_expr("(0-9223372036854775807-1)%(0-1)", "v", 0).is_err());
+        assert!(eval_expr("v%0", "v", 5).is_err());
     }
 }
