@@ -49,7 +49,7 @@ fn version_reports_exactly_three_lines() {
             mtc_post_machine::PM1_PMA_DIALECT_VERSION
         )
     );
-    assert_eq!(mtc_post_machine::PM1_PMA_DIALECT_VERSION, "0.2");
+    assert_eq!(mtc_post_machine::PM1_PMA_DIALECT_VERSION, "0.3");
 }
 
 const HELLO: &str = "main() { 1: mark; 2: right; 3: mark(!); }";

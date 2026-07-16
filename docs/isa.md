@@ -54,10 +54,11 @@ one of the implementations below, reached through the `Tape` trait.
 - **SP** — implicit in the return-stack's depth: `call` pushes, `ret` pops;
   overflow and underflow are traps.
 - **FLAGS** — bit 0 is **MF** (match flag). Every tape instruction (`lft`,
-  `rgt`, `wr`) latches `MF := (tape.read() == 1)` after acting, and MF is
-  also latched once before the very first instruction runs (from the
-  initial tape state). `jm`/`jnm` test MF, never the tape directly. Other
-  bits are reserved and read as 0.
+  `rgt`, `wr`, `wrl`, `wrr`) latches `MF := (tape.read() == 1)` after
+  acting — for the fused write+move opcodes that read happens after the
+  move — and MF is also latched once before the very first instruction
+  runs (from the initial tape state). `jm`/`jnm` test MF, never the tape
+  directly. Other bits are reserved and read as 0.
 
 Besides these architectural registers, the core has internal buffers no
 instruction can observe: the instruction/operand latch staged between
@@ -146,7 +147,7 @@ to pure layout plus patching.
 | `0x04` | `lft` | | head left (latches MF) |
 | `0x05` | `rgt` | | head right (latches MF) |
 | `0x06` | `wr` | symbol vector | write symbol index to the cell (latches MF). In PM-1 always one element: `wr 1` = mark, `wr 0` = blank |
-| `0x07` | — | | reserved |
+| `0x07` | `wrl` | symbol vector | write symbol index, then head left (latches MF after the move) — a fused `wr`+`lft` |
 | `0x08` | `jmp` | rel i32 | unconditional jump |
 | `0x09` | `jm` | rel i32 | jump if match (MF = 1) |
 | `0x0A` | `jnm` | rel i32 | jump if no match (MF = 0) |
@@ -154,16 +155,25 @@ to pure layout plus patching.
 | `0x0C` | `ret` | | pop return address, jump |
 | `0x0D` | `ent` | | function landing pad; executes as no-op |
 | `0x0E` | `brk` | | breakpoint (`debugger` builtin) |
+| `0x0F` | `wrr` | symbol vector | write symbol index, then head right (latches MF after the move) — a fused `wr`+`rgt` |
 | `0x18` | `jmp.s` | rel i8 | short form of `0x08` |
 | `0x19` | `jm.s` | rel i8 | short form of `0x09` |
 | `0x1A` | `jnm.s` | rel i8 | short form of `0x0A` |
 | `0x1B` | `call.s` | rel i8 | short form of `0x0B` |
 
 This table matches `pm1_syntax()` in `crates/post-machine/src/asm/mod.rs`
-entry-for-entry (17 real entries; `0x00`/`0x07`/opcodes `≥ 0x80` are not
+entry-for-entry (19 real entries; `0x00` and opcodes `≥ 0x80` are not
 table rows — they decode to "invalid" or "reserved").
 
 - **Short-form rule:** `short = far | 0x10`.
+- **Additive ISA revision:** `wrl` (`0x07`) and `wrr` (`0x0F`) are the
+  first opcodes added after v1 — a fused write-then-move that writes,
+  moves the head, and latches MF once after the move, behaving exactly
+  like the unfused `wr`; `lft` / `wr`; `rgt` pair it stands in for. Adding
+  opcodes is a **minor ISA revision**: they occupy previously-unassigned
+  bytes, so a processor built before the revision traps them as invalid
+  opcodes, and code that uses them requires a VM that recognizes the
+  revision.
 - **`ent` verification is always on:** `call`/`call.s` trap
   (`CallTargetNotEntry`) unless the target byte is `0x0D`. Every function
   begins with `ent` — the compiler emits it, and the assembler's `.func`
@@ -184,7 +194,10 @@ word pushed or popped costs 1 tact; device commands cost what the **tape
 profile** says — the electronic default is `move/read/write = 1`, and a
 `pmt run --tact-profile M,R,W` lets a mechanical profile model a physical
 tape's slower motion. The MF latch is honest: every tape instruction pays
-its trailing `read()`.
+its trailing `read()`. A fused write+move (`wrl`/`wrr`) is one instruction,
+not two: it pays a single fetch and one trailing MF latch (the `read()`
+after the move), skipping the intermediate latch read that the unfused
+`wr`; `lft` / `wr`; `rgt` pair pays right after its write.
 
 Examples at the electronic default: `rgt` costs 4 tacts (fetch 1 + execute
 1 + move 1 + latch-read 1); `jm` costs 6 vs `jm.s` costs 3 (relaxation is a
@@ -211,7 +224,7 @@ Trap causes:
 
 | Trap | Cause |
 |---|---|
-| `InvalidOpcode` | opcode `0x00`, `0x07`, or any undefined byte |
+| `InvalidOpcode` | opcode `0x00` or any undefined byte |
 | `CodeOutOfBounds` | a jump, call target, or fetch landed outside the code image |
 | `BadOperand` | a malformed operand for the decoded opcode |
 | `CallTargetNotEntry` | `call`/`call.s` targeted a byte that is not `ent` |

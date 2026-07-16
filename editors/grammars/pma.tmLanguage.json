@@ -32,7 +32,7 @@
     },
     "mnemonics": {
       "name": "keyword.other.mnemonic.pma",
-      "match": "\\b(call\\.s|jmp\\.s|jnm\\.s|call|jm\\.s|nop|stp|hlt|lft|rgt|jmp|jnm|ret|ent|brk|wr|jm)\\b"
+      "match": "\\b(call\\.s|jmp\\.s|jnm\\.s|call|jm\\.s|nop|stp|hlt|lft|rgt|jmp|jnm|ret|ent|brk|wrl|wrr|wr|jm)\\b"
     },
     "label": {
       "match": "^[ \\t]*([A-Za-z_][A-Za-z0-9_]*)(:)",

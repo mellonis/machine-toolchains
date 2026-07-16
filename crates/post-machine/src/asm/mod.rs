@@ -10,8 +10,9 @@ use crate::arch::opcodes::*;
 
 /// PM-1 `.pma` dialect version — an acceptance contract (docs/formats.md
 /// (assembly text)): pre-1.0 it is 0.N and N bumps on ANY grammar
-/// change. 0.2: labels tightened to letters/digits/underscore.
-pub const PM1_PMA_DIALECT_VERSION: &str = "0.2";
+/// change. 0.2: labels tightened to letters/digits/underscore. 0.3: the
+/// fused write+move mnemonics `wrl`/`wrr` are accepted.
+pub const PM1_PMA_DIALECT_VERSION: &str = "0.3";
 
 pub fn pm1_syntax() -> ArchSyntax {
     use Flow::{Branch, Call as CallF, FallThrough as FT, Jump, Stop};
@@ -51,6 +52,20 @@ pub fn pm1_syntax() -> ArchSyntax {
             SyntaxEntry {
                 opcode: WR,
                 mnemonic: "wr",
+                operand: SymbolVec,
+                flow: FT,
+            },
+            // Fused write+move (docs/isa.md): `wr x; lft` / `wr x; rgt` in
+            // one fetch. No short forms, so no relax pairs.
+            SyntaxEntry {
+                opcode: WRL,
+                mnemonic: "wrl",
+                operand: SymbolVec,
+                flow: FT,
+            },
+            SyntaxEntry {
+                opcode: WRR,
+                mnemonic: "wrr",
                 operand: SymbolVec,
                 flow: FT,
             },

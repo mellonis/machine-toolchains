@@ -308,3 +308,27 @@ fn rejections_pin_kind_and_span_start() {
         );
     }
 }
+
+// --- Property 4: the fused write+move mnemonics assemble and disassemble --
+
+/// The fused `wrl`/`wrr` opcodes (docs/isa.md) reach the assembler and
+/// disassembler by name through `pm1_syntax()`: a `.pma` function using
+/// both assembles, and its disassembly names each mnemonic with its
+/// symbol operand.
+#[test]
+fn wrl_wrr_round_trip_through_asm_and_dis() {
+    let src = ".func f\n        wrl 1\n        wrr 0\n        stp\n";
+    let object = assemble(src, false).expect("wrl/wrr assemble via pm1_syntax()");
+    let listing = disassemble_object(&object);
+    // Collapse the grid formatter's column padding so the mnemonic sits
+    // next to its operand for a substring check.
+    let flattened = listing.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flattened.contains("wrl 1"),
+        "disassembly is missing `wrl 1`:\n{listing}"
+    );
+    assert!(
+        flattened.contains("wrr 0"),
+        "disassembly is missing `wrr 0`:\n{listing}"
+    );
+}

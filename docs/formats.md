@@ -225,7 +225,7 @@ CLI: `pmt tape build " * * *" --head 3 -o in.pmt`, `pmt tape show in.pmt`,
 
 ## `.pma` — assembly text
 
-The PM-1 `.pma` dialect version is **0.2** (pre-1.0: the version is `0.N`
+The PM-1 `.pma` dialect version is **0.3** (pre-1.0: the version is `0.N`
 and `N` bumps on any grammar change, the same acceptance-contract shape as
 the `.pmc` language version in `docs/language.md`). See "Dialect version
 history" below for what each version changed.
@@ -303,6 +303,9 @@ namespaced/nested symbol reference without ambiguity.
   letters still legal). Symbol names in `.func` and jump/call operands are
   unaffected — the dotted/`::`-segmented grammar above still applies to
   them.
+- **0.3** — additive: the fused write+move mnemonics `wrl` and `wrr` join
+  the mnemonic set (each takes a one-element symbol vector like `wr`). No
+  existing program changes meaning; the accepted set only grew (`docs/isa.md`).
 
 ## `.pmx.map` — link-time sidecar
 
