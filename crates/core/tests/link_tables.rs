@@ -220,6 +220,40 @@ A:      stp
     assert_eq!(exe.tables, expected, "entry follows the shifted label");
 }
 
+#[test]
+fn table_ref_holes_follow_a_relaxation_shift() {
+    // The dual of the dispatch-entry case: here the TABLE REFERENCE
+    // itself sits after a far call that narrows, so the hole's final
+    // code position moves — the patch must land at the shifted offset,
+    // not the blob-relative one.
+    let src = "\
+.routine main, tapes=1, alpha=(2)
+.routine helper, tapes=1, alpha=(2)
+.section tables
+T:  .row [1]
+    .row [*]
+.section code
+.func main
+        call    helper
+        tmatch  T
+        stp
+.func helper
+        ret
+";
+    let out = link_one(asm(src, false));
+    let exe = &out.executable;
+    // Object blob: ent@0, far call@1..6, tmatch@6 (hole 7..11), stp@11.
+    // Linked: call.s@1..3 (helper at 9, end 3 -> off 6), tmatch@3
+    // (hole 4..8, patched to section offset 0), stp@8; helper@9.
+    assert_eq!(
+        exe.code,
+        vec![
+            0x0E, 0x31, 0x06, 0x11, 0x00, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B
+        ]
+    );
+    assert_eq!(exe.tables, vec![1, 2, 0, 1, 0x7F]);
+}
+
 // ------------------------------------------------------------------
 // Executable-level disassembly + the strong round trip
 // ------------------------------------------------------------------
