@@ -38,6 +38,28 @@ impl Executable {
         }
     }
 
+    /// A version-2 sectioned image (the shape TM-1 emits).
+    #[allow(clippy::too_many_arguments)]
+    pub fn sectioned(
+        arch: u8,
+        entry: u32,
+        code: Vec<u8>,
+        tables: Vec<u8>,
+        tape_count: u8,
+        profile: u8,
+        alphabet_cardinalities: Vec<u32>,
+    ) -> Self {
+        Self {
+            arch,
+            entry,
+            code,
+            tape_count,
+            profile,
+            alphabet_cardinalities,
+            tables,
+        }
+    }
+
     /// True when the image carries no v2-only data and must serialize as v1.
     fn is_v1_shape(&self) -> bool {
         self.tape_count <= 1
@@ -47,8 +69,11 @@ impl Executable {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        assert!(self.is_v1_shape(), "MX v2 emit lands in a later task");
-        self.to_bytes_v1()
+        if self.is_v1_shape() {
+            self.to_bytes_v1()
+        } else {
+            self.to_bytes_v2()
+        }
     }
 
     fn to_bytes_v1(&self) -> Vec<u8> {
@@ -68,6 +93,33 @@ impl Executable {
         out
     }
 
+    fn to_bytes_v2(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC_EXECUTABLE);
+        put_u16(&mut out, MX_FORMAT_VERSION_V2);
+        out.push(self.arch);
+        out.push(0); // flags
+        put_u32(&mut out, 0); // crc placeholder
+        out.push(self.tape_count);
+        out.push(self.profile);
+        put_u32(&mut out, self.entry);
+        put_u32(
+            &mut out,
+            u32::try_from(self.code.len()).expect("code fits u32"),
+        );
+        put_u32(
+            &mut out,
+            u32::try_from(self.tables.len()).expect("tables fit u32"),
+        );
+        for &card in &self.alphabet_cardinalities {
+            put_u32(&mut out, card);
+        }
+        out.extend_from_slice(&self.code);
+        out.extend_from_slice(&self.tables);
+        stamp_crc(&mut out, CRC_OFFSET);
+        out
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
         if bytes.len() < 3 {
             return Err(FormatError::Truncated);
@@ -79,21 +131,54 @@ impl Executable {
 
         let mut r = Reader::new(&bytes[3..]);
         let version = r.u16()?;
-        if version != MX_FORMAT_VERSION_V1 {
-            return Err(FormatError::UnsupportedVersion(version));
+        match version {
+            MX_FORMAT_VERSION_V1 => {
+                let arch = r.u8()?;
+                let _flags = r.u8()?;
+                let _crc = r.u32()?;
+                let entry = r.u32()?;
+                let code_size = r.u32()? as usize;
+                let code = r.bytes(code_size)?.to_vec();
+                r.finish()?;
+                if entry as usize >= code.len() {
+                    return Err(FormatError::Malformed("entry offset outside code"));
+                }
+                Ok(Self::code_only(arch, entry, code))
+            }
+            MX_FORMAT_VERSION_V2 => {
+                let arch = r.u8()?;
+                let _flags = r.u8()?;
+                let _crc = r.u32()?;
+                let tape_count = r.u8()?;
+                if tape_count == 0 || tape_count > 16 {
+                    return Err(FormatError::Malformed("tape count out of range"));
+                }
+                let profile = r.u8()?;
+                let entry = r.u32()?;
+                let code_size = r.u32()? as usize;
+                let table_size = r.u32()? as usize;
+                let mut alphabet_cardinalities = Vec::with_capacity(tape_count as usize);
+                for _ in 0..tape_count {
+                    alphabet_cardinalities.push(r.u32()?);
+                }
+                let code = r.bytes(code_size)?.to_vec();
+                let tables = r.bytes(table_size)?.to_vec();
+                r.finish()?;
+                if entry as usize >= code.len() {
+                    return Err(FormatError::Malformed("entry offset outside code"));
+                }
+                Ok(Self::sectioned(
+                    arch,
+                    entry,
+                    code,
+                    tables,
+                    tape_count,
+                    profile,
+                    alphabet_cardinalities,
+                ))
+            }
+            other => Err(FormatError::UnsupportedVersion(other)),
         }
-        let arch = r.u8()?;
-        let _flags = r.u8()?;
-        let _crc = r.u32()?;
-        let entry = r.u32()?;
-        let code_size = r.u32()? as usize;
-        let code = r.bytes(code_size)?.to_vec();
-        r.finish()?;
-
-        if entry as usize >= code.len() {
-            return Err(FormatError::Malformed("entry offset outside code"));
-        }
-        Ok(Self::code_only(arch, entry, code))
     }
 }
 
@@ -196,5 +281,68 @@ mod tests {
         let mut extended = bytes.clone();
         extended.push(0);
         assert!(Executable::from_bytes(&extended).is_err());
+    }
+
+    fn sample_v2() -> Executable {
+        Executable::sectioned(
+            0x02,             // arch (TM-1)
+            0,                // entry
+            vec![0x10, 0x02], // code (rd; stp — placeholder)
+            vec![1, 1, 0, 5], // tables (a tiny match-table blob)
+            2,                // tape_count
+            1,                // profile = frames
+            vec![3, 128],     // per-tape alphabet cardinalities
+        )
+    }
+
+    #[test]
+    fn v2_round_trips() {
+        let exe = sample_v2();
+        let bytes = exe.to_bytes();
+        assert_eq!(&bytes[0..3], b"MX\x01");
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2);
+        assert_eq!(Executable::from_bytes(&bytes).unwrap(), exe);
+    }
+
+    #[test]
+    fn v1_still_parses_after_v2_lands() {
+        let v1 = Executable::code_only(ARCH_PM1, 0, vec![0x0D, 0x05, 0x02]);
+        assert_eq!(Executable::from_bytes(&v1.to_bytes()).unwrap(), v1);
+    }
+
+    #[test]
+    fn v2_corruption_rejected_before_decode() {
+        let mut bytes = sample_v2().to_bytes();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xFF;
+        assert!(matches!(
+            Executable::from_bytes(&bytes),
+            Err(FormatError::BadCrc { .. })
+        ));
+    }
+
+    #[test]
+    fn v2_tape_count_zero_or_over_16_rejected() {
+        for bad in [0u8, 17] {
+            let mut exe = sample_v2();
+            exe.tape_count = bad;
+            exe.alphabet_cardinalities = vec![3; bad.max(1) as usize];
+            let bytes = exe.to_bytes();
+            assert!(matches!(
+                Executable::from_bytes(&bytes),
+                Err(FormatError::Malformed("tape count out of range"))
+            ));
+        }
+    }
+
+    #[test]
+    fn v2_cardinality_count_must_match_tape_count() {
+        // Hand-corrupt: tape_count says 2 but only 1 cardinality present.
+        let exe = sample_v2();
+        let mut bytes = exe.to_bytes();
+        // tape_count is at offset 11 (after magic3+ver2+arch1+flags1+crc4)
+        bytes[11] = 3; // claim 3 tapes; only 2 cardinalities follow → truncation/mismatch
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        assert!(Executable::from_bytes(&bytes).is_err());
     }
 }
