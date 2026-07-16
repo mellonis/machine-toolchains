@@ -1,11 +1,18 @@
 //! `MT` tape-block container (docs/formats.md).
 
+use super::FormatError;
 use super::crc32::{stamp_crc, verify_crc};
 use super::io::{Reader, put_i64, put_u16, put_u32};
-use super::{FORMAT_VERSION, FormatError};
 
 pub const MAGIC_TAPEBLOCK: [u8; 3] = [b'M', b'T', 0x01];
 const CRC_OFFSET: usize = 6;
+
+/// Shared-alphabet shape: every tape inherits the block-level `alphabet`
+/// (docs/formats.md).
+pub const MT_FORMAT_VERSION_V1: u16 = 1;
+/// Per-tape glyph tables: at least one tape carries its own `alphabet`
+/// (docs/formats.md). Emit/parse lands in a later task.
+pub const MT_FORMAT_VERSION_V2: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TapeBlockFile {
@@ -18,13 +25,31 @@ pub struct TapeSnapshot {
     pub origin: i64,
     pub cells: Vec<u8>,
     pub head: i64,
+    /// v2: this tape's own glyph table. `None` inherits the block-level
+    /// `alphabet` (the v1 shape); `Some` triggers v2 emit (docs/formats.md).
+    pub alphabet: Option<Vec<String>>,
 }
 
 impl TapeBlockFile {
+    /// `true` when every tape inherits the block `alphabet` (no per-tape
+    /// override) — the v1 shape that serializes byte-identical to the
+    /// pre-per-tape-alphabet format.
+    fn is_v1_shape(&self) -> bool {
+        self.tapes.iter().all(|t| t.alphabet.is_none())
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
+        if self.is_v1_shape() {
+            self.to_bytes_v1()
+        } else {
+            self.to_bytes_v2()
+        }
+    }
+
+    fn to_bytes_v1(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC_TAPEBLOCK);
-        put_u16(&mut out, FORMAT_VERSION);
+        put_u16(&mut out, MT_FORMAT_VERSION_V1);
         out.push(0); // flags
         put_u32(&mut out, 0); // crc placeholder
 
@@ -52,6 +77,10 @@ impl TapeBlockFile {
         out
     }
 
+    fn to_bytes_v2(&self) -> Vec<u8> {
+        unimplemented!("MT v2 emit lands in task 5")
+    }
+
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
         if bytes.len() < 3 {
             return Err(FormatError::Truncated);
@@ -63,8 +92,10 @@ impl TapeBlockFile {
 
         let mut r = Reader::new(&bytes[3..]);
         let version = r.u16()?;
-        if version != FORMAT_VERSION {
-            return Err(FormatError::UnsupportedVersion(version));
+        match version {
+            MT_FORMAT_VERSION_V1 => {}
+            // v2 (per-tape glyph tables) parse lands in a later task.
+            _ => return Err(FormatError::UnsupportedVersion(version)),
         }
         let _flags = r.u8()?;
         let _crc = r.u32()?;
@@ -99,6 +130,7 @@ impl TapeBlockFile {
                 origin,
                 cells,
                 head,
+                alphabet: None,
             });
         }
         r.finish()?;
@@ -118,6 +150,7 @@ mod tests {
                 origin: -2,
                 cells: vec![0, 1, 1, 0, 1],
                 head: 1,
+                alphabet: None,
             }],
         }
     }
@@ -129,6 +162,17 @@ mod tests {
         assert_eq!(TapeBlockFile::from_bytes(&bytes).unwrap(), sample());
     }
 
+    /// A shared-alphabet block (all tapes `alphabet: None`) serializes
+    /// byte-for-byte as v1 — this pins the committed golden .pmt files.
+    #[test]
+    fn shared_alphabet_is_byte_identical_v1() {
+        let block = sample(); // all tapes alphabet: None after this task's refactor
+        let bytes = block.to_bytes();
+        assert_eq!(&bytes[0..3], b"MT\x01");
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 1);
+        assert_eq!(TapeBlockFile::from_bytes(&bytes).unwrap(), block);
+    }
+
     #[test]
     fn multi_tape_and_multibyte_glyphs() {
         let block = TapeBlockFile {
@@ -138,11 +182,13 @@ mod tests {
                     origin: 0,
                     cells: vec![2, 1, 0],
                     head: 0,
+                    alphabet: None,
                 },
                 TapeSnapshot {
                     origin: -100,
                     cells: vec![0],
                     head: -100,
+                    alphabet: None,
                 },
             ],
         };

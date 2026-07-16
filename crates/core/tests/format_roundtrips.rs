@@ -77,7 +77,7 @@ proptest! {
     ) {
         let block = TapeBlockFile {
             alphabet: vec![" ".into(), "*".into()],
-            tapes: vec![TapeSnapshot { origin, cells, head }],
+            tapes: vec![TapeSnapshot { origin, cells, head, alphabet: None }],
         };
         let back = TapeBlockFile::from_bytes(&block.to_bytes()).unwrap();
         prop_assert_eq!(back, block);

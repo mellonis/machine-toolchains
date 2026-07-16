@@ -196,6 +196,7 @@ mod tests {
             origin: 0,
             cells: vec![1, 0, 1],
             head: 2,
+            alphabet: None,
         };
         let alphabet: Vec<String> = vec![" ".into(), "*".into()];
         let rendered = render_tape(&snapshot, &alphabet);

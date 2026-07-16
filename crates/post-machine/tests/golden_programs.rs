@@ -76,6 +76,7 @@ fn cases() -> Vec<(&'static str, &'static str, Vec<bool>, i64, TapeSnapshot)> {
                 origin: 0,
                 cells: vec![1, 1, 1, 1],
                 head: 0,
+                alphabet: None,
             },
         ),
         (
@@ -87,6 +88,7 @@ fn cases() -> Vec<(&'static str, &'static str, Vec<bool>, i64, TapeSnapshot)> {
                 origin: 0,
                 cells: vec![1, 1],
                 head: 0,
+                alphabet: None,
             },
         ),
         (
@@ -98,6 +100,7 @@ fn cases() -> Vec<(&'static str, &'static str, Vec<bool>, i64, TapeSnapshot)> {
                 origin: 0,
                 cells: vec![0],
                 head: 0,
+                alphabet: None,
             },
         ),
     ]

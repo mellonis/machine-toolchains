@@ -202,6 +202,7 @@ fn pmt_in_run_pmt_out() {
             origin: 0,
             cells: vec![1, 1, 1, 0, 1],
             head: 0,
+            alphabet: None,
         }],
     };
     let bytes = input.to_bytes();

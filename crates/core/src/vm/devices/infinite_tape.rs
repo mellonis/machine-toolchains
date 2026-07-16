@@ -105,6 +105,7 @@ impl InfiniteTape {
             origin: lo,
             cells,
             head: self.head,
+            alphabet: None,
         }
     }
 }
@@ -156,6 +157,7 @@ mod tests {
             origin: -2,
             cells: vec![1, 0, 1, 1, 0],
             head: 1,
+            alphabet: None,
         };
         let tape = InfiniteTape::from_snapshot(&snap).unwrap();
         assert_eq!(tape.marked_cells(), vec![-2, 0, 1]);
@@ -169,6 +171,7 @@ mod tests {
             origin: 0,
             cells: vec![0, 2],
             head: 0,
+            alphabet: None,
         };
         assert_eq!(
             InfiniteTape::from_snapshot(&snap),

@@ -133,6 +133,7 @@ fn tape_build(raw: &[String]) -> Result<CliOutput, String> {
             origin: 0,
             cells,
             head,
+            alphabet: None,
         }],
     };
     fs::write(&out, block.to_bytes()).map_err(|e| format!("cannot write {out}: {e}"))?;
