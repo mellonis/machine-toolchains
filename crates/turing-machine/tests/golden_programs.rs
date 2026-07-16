@@ -1,0 +1,334 @@
+//! Derivation-first goldens for the brainfuck UTM
+//! (docs/examples/brainfuck-utm.tma). A tiny independent brainfuck reference
+//! interpreter derives the final four-tape state; the UTM's run must
+//! reproduce it, and the committed `.tmt` goldens are byte-identical to the
+//! derived snapshots. Mirrors the PM-1 `golden_programs.rs` discipline: the
+//! goldens are regenerated FROM the derivation, never from run output.
+//!
+//! Run choice: the library `run_tapes` entry point on `WideTape` devices we
+//! build directly (not the `tmt` CLI) — it hands back the raw tape snapshots
+//! for byte-level comparison without the block/alphabet round-trip a CLI run
+//! would impose.
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use mtc_core::formats::executable::Executable;
+use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
+use mtc_core::linker::LinkOptions;
+use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, Trap, WideTape};
+use mtc_turing_machine::arch::Tm1;
+use mtc_turing_machine::asm::{assemble, link};
+
+fn example_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma")
+}
+
+fn golden_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
+}
+
+/// The UTM's per-tape alphabet cardinalities, from the example's `.routine`:
+/// prog 9 symbols, data/out 127 each, cnt 2.
+const WIDTHS: [u32; 4] = [9, 127, 127, 2];
+
+/// bf source → prog-tape symbol indices, plus the `'H'` sentinel (index 8)
+/// the UTM halts on (docs/examples/brainfuck-utm.tma alphabet:
+/// 0=' ' 1='+' 2='-' 3='<' 4='>' 5='.' 6='[' 7=']' 8='H').
+fn encode(program: &str) -> Vec<u8> {
+    let mut prog: Vec<u8> = program
+        .chars()
+        .map(|c| match c {
+            '+' => 1,
+            '-' => 2,
+            '<' => 3,
+            '>' => 4,
+            '.' => 5,
+            '[' => 6,
+            ']' => 7,
+            other => panic!("unsupported bf char {other:?}"),
+        })
+        .collect();
+    prog.push(8); // the 'H' sentinel
+    prog
+}
+
+/// The independent derivation: a brainfuck reference interpreter. Cells wrap
+/// mod 127 to mirror the UTM's `%127` arithmetic; the data tape is unbounded
+/// in both directions. Returns only the non-blank data cells (matching the
+/// device's sparse storage), the final data pointer, and the output bytes.
+struct BfRun {
+    data: BTreeMap<i64, u8>,
+    data_head: i64,
+    out: Vec<u8>,
+}
+
+fn interpret(program: &str) -> BfRun {
+    let ops: Vec<char> = program.chars().collect();
+    let mut data: BTreeMap<i64, u8> = BTreeMap::new();
+    let mut ptr: i64 = 0;
+    let mut out = Vec::new();
+    let mut ip = 0usize;
+    while ip < ops.len() {
+        match ops[ip] {
+            // Wrap on a 0..=126 ring: +1 and +126 (== -1) both stay in `u8`.
+            '+' => {
+                let cell = data.entry(ptr).or_insert(0);
+                *cell = (*cell + 1) % 127;
+            }
+            '-' => {
+                let cell = data.entry(ptr).or_insert(0);
+                *cell = (*cell + 126) % 127;
+            }
+            '<' => ptr -= 1,
+            '>' => ptr += 1,
+            '.' => out.push(data.get(&ptr).copied().unwrap_or(0)),
+            '[' => {
+                if data.get(&ptr).copied().unwrap_or(0) == 0 {
+                    let mut depth = 1;
+                    while depth > 0 {
+                        ip += 1;
+                        match ops[ip] {
+                            '[' => depth += 1,
+                            ']' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            ']' => {
+                if data.get(&ptr).copied().unwrap_or(0) != 0 {
+                    let mut depth = 1;
+                    while depth > 0 {
+                        ip -= 1;
+                        match ops[ip] {
+                            ']' => depth += 1,
+                            '[' => depth -= 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            other => panic!("unsupported bf char {other:?}"),
+        }
+        ip += 1;
+    }
+    // Blank cells (value 0) are never stored on a tape — drop them so the
+    // derived snapshot's span matches the device's.
+    data.retain(|_, &mut v| v != 0);
+    BfRun {
+        data,
+        data_head: ptr,
+        out,
+    }
+}
+
+/// The documented dense-window normalization (docs/formats.md (tape-block
+/// snapshot)): span from `min(marks ∪ head)` to `max(marks ∪ head)`, blank
+/// cells rendered as index 0. An independent re-implementation of the
+/// device's `to_snapshot`, so the derived golden never routes through the
+/// code under test.
+fn snapshot(marks: &BTreeMap<i64, u8>, head: i64) -> TapeSnapshot {
+    let lo = marks.keys().min().copied().unwrap_or(head).min(head);
+    let hi = marks.keys().max().copied().unwrap_or(head).max(head);
+    let cells = (lo..=hi)
+        .map(|c| marks.get(&c).copied().unwrap_or(0))
+        .collect();
+    TapeSnapshot {
+        origin: lo,
+        cells,
+        head,
+        alphabet: None,
+    }
+}
+
+/// The four final tape snapshots the UTM must leave, derived independently of
+/// the toolchain:
+///   [0] prog  unchanged; the head ends on the `'H'` sentinel (last cell) —
+///             the UTM advances the program head once per executed instruction
+///   [1] data  the reference interpreter's cells + final pointer
+///   [2] out   byte k at position k, head one past the last write (each `'.'`
+///             writes then steps the output head right)
+///   [3] cnt   always blank, head home: every bracket-skip push is matched by
+///             a pop, so the nesting counter returns to empty at halt
+fn derive(program: &str) -> [TapeSnapshot; 4] {
+    let prog = encode(program);
+    let run = interpret(program);
+
+    let prog_marks: BTreeMap<i64, u8> = prog
+        .iter()
+        .enumerate()
+        .filter(|&(_, &v)| v != 0)
+        .map(|(i, &v)| (i as i64, v))
+        .collect();
+    let prog_snap = snapshot(&prog_marks, prog.len() as i64 - 1);
+
+    let data_snap = snapshot(&run.data, run.data_head);
+
+    let out_marks: BTreeMap<i64, u8> = run
+        .out
+        .iter()
+        .enumerate()
+        .filter(|&(_, &v)| v != 0)
+        .map(|(i, &v)| (i as i64, v))
+        .collect();
+    let out_snap = snapshot(&out_marks, run.out.len() as i64);
+
+    let cnt_snap = snapshot(&BTreeMap::new(), 0);
+
+    [prog_snap, data_snap, out_snap, cnt_snap]
+}
+
+/// Assemble + link the flagship example once.
+fn utm() -> Executable {
+    let source = fs::read_to_string(example_path()).expect("example source present");
+    let obj = assemble(&source, false).expect("the UTM assembles");
+    link(&[obj], &[], LinkOptions::default())
+        .expect("the UTM links")
+        .executable
+}
+
+/// Run the UTM over a fresh four-tape band: the program encoded onto the prog
+/// tape, the other three blank. Returns the outcome and the four final
+/// snapshots.
+fn run_utm(exe: &Executable, program: &str) -> (Outcome, [TapeSnapshot; 4]) {
+    let prog = encode(program);
+    let prog_snap = TapeSnapshot {
+        origin: 0,
+        cells: prog,
+        head: 0,
+        alphabet: None,
+    };
+    let mut prog_tape = WideTape::from_snapshot(&prog_snap, WIDTHS[0]).expect("prog fits width 9");
+    let mut data_tape = WideTape::new(WIDTHS[1]);
+    let mut out_tape = WideTape::new(WIDTHS[2]);
+    let mut cnt_tape = WideTape::new(WIDTHS[3]);
+
+    let mut registry = ArchRegistry::new();
+    registry.register(Box::new(Tm1::new(exe.tape_count)));
+    let machine = Machine::from_executable(exe, &registry).expect("loads");
+
+    let mut devices: Vec<&mut dyn Tape> =
+        vec![&mut prog_tape, &mut data_tape, &mut out_tape, &mut cnt_tape];
+    let result = machine
+        .run_tapes(
+            &mut devices,
+            RunOptions {
+                limits: RunLimits {
+                    max_steps: Some(1_000_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("run set-up ok");
+    drop(devices);
+
+    let snaps = [
+        prog_tape.to_snapshot(),
+        data_tape.to_snapshot(),
+        out_tape.to_snapshot(),
+        cnt_tape.to_snapshot(),
+    ];
+    (result.outcome, snaps)
+}
+
+/// Wrap the four derived snapshots into an MT block for byte comparison. A
+/// shared numeric alphabet spans every tape's symbols (the widest is 127);
+/// the snapshots carry no per-tape override, so the block serializes in the
+/// v1 shared-alphabet shape.
+fn block(snaps: &[TapeSnapshot; 4]) -> TapeBlockFile {
+    TapeBlockFile {
+        alphabet: (0..127u32).map(|i| i.to_string()).collect(),
+        tapes: snaps.to_vec(),
+    }
+}
+
+/// (bf source, golden file, expected first output byte). The output byte is
+/// spelled out so the test pins the reference interpreter to a hand-computed
+/// value, not merely to itself.
+fn cases() -> Vec<(&'static str, &'static str, u8)> {
+    vec![
+        ("+++.", "bf_add.expected.tmt", 3),
+        ("++[>+++<-]>.", "bf_loop.expected.tmt", 6),
+    ]
+}
+
+#[test]
+fn goldens_match_the_derived_snapshots_and_files() {
+    let exe = utm();
+    for (program, golden, expected_out) in cases() {
+        let derived = derive(program);
+        // The reference derivation itself yields the intended output byte.
+        assert_eq!(
+            derived[2].cells.first().copied(),
+            Some(expected_out),
+            "{program} should output {expected_out}"
+        );
+
+        let (outcome, actual) = run_utm(&exe, program);
+        assert_eq!(
+            outcome,
+            Outcome::Stopped,
+            "{program} halts via the 'H' sentinel (stp)"
+        );
+        // The UTM reproduces the independent derivation on every tape — the
+        // prog tape unchanged with its head on 'H', the data + out tapes
+        // matching the reference interpreter, the cnt tape blank.
+        assert_eq!(
+            actual, derived,
+            "{program}: UTM tapes must match the reference derivation"
+        );
+
+        // The committed .tmt is byte-for-byte the derived block.
+        let bytes = fs::read(golden_dir().join(golden)).expect("golden .tmt present");
+        assert_eq!(bytes, block(&derived).to_bytes(), "{golden} drifted");
+    }
+}
+
+#[test]
+fn a_program_symbol_with_no_dispatch_row_traps() {
+    // A blank program tape reads symbol 0 (' ') at the first fetch: Tfetch has
+    // rows for 1..=8 only, and no catch-all, so `mtc` leaves MR=0 and `djmp`
+    // faults — the UTM's free "invalid opcode" trap, now proven.
+    let exe = utm();
+    let mut registry = ArchRegistry::new();
+    registry.register(Box::new(Tm1::new(exe.tape_count)));
+    let machine = Machine::from_executable(&exe, &registry).expect("loads");
+
+    let mut prog = WideTape::new(WIDTHS[0]);
+    let mut data = WideTape::new(WIDTHS[1]);
+    let mut out = WideTape::new(WIDTHS[2]);
+    let mut cnt = WideTape::new(WIDTHS[3]);
+    let mut devices: Vec<&mut dyn Tape> = vec![&mut prog, &mut data, &mut out, &mut cnt];
+    let result = machine
+        .run_tapes(
+            &mut devices,
+            RunOptions {
+                limits: RunLimits {
+                    max_steps: Some(1_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("run set-up ok");
+    assert!(
+        matches!(result.outcome, Outcome::Trapped(Trap::NoTransition { .. })),
+        "a blank program symbol traps with no applicable transition: {:?}",
+        result.outcome
+    );
+}
+
+/// Regenerates the golden `.tmt` files FROM THE DERIVED SNAPSHOTS (never from
+/// run output — derivation-first). Mirrors pmt's regen convention.
+/// cargo test -p mtc-turing-machine --test golden_programs regen -- --ignored
+#[test]
+#[ignore = "writes the golden files; run explicitly"]
+fn regen_goldens() {
+    for (program, golden, _) in cases() {
+        let derived = derive(program);
+        fs::write(golden_dir().join(golden), block(&derived).to_bytes()).unwrap();
+    }
+}

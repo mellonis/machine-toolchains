@@ -1,9 +1,9 @@
 ; =============================================================================
-; brainfuck UTM in TM-1 assembly — SPECULATIVE (arch 0x02 is not implemented;
-; this file validates the Appendix A design of the toolchain spec).
+; brainfuck UTM in TM-1 assembly — the working flagship example: it assembles,
+; links, and runs, driven end to end by the toolchain's golden test suite.
 ;
-; Source algorithm: mellonis/machines-demo#64 — a ~20-state universal Turing
-; machine interpreting any brainfuck program from its program tape.
+; Source algorithm: a ~20-state universal Turing machine interpreting any
+; brainfuck program from its program tape, from the machines-demo project.
 ;
 ; 4 tapes:  [0] prog   bf source + 'H' sentinel; head = instruction pointer
 ;           [1] data   bf cells; head = data pointer
@@ -13,7 +13,8 @@
 ; Alphabets (symbol indices; glyphs are presentation metadata):
 ;   prog: 0=' '  1='+'  2='-'  3='<'  4='>'  5='.'  6='['  7=']'  8='H'
 ;   data, out: byte values 0..126  (127 capped: index 0x7F is the match
-;              wildcard in the compact symbol family — see spec Appendix A)
+;              wildcard in the compact symbol family — see docs/formats.md
+;              (the .tma dialect))
 ;   cnt:  0=' '  1='*'
 ;
 ; Vector notation, one element per tape [prog, data, out, cnt]:
@@ -50,24 +51,24 @@ Dfetch: .targets L_plus, L_minus, L_left, L_right, L_dot, L_lbr, L_rbr, L_halt
 .rept v, 0, 126
 Tinc:   .row    [*,{v},*,*]
 .endr
-Dinc:   .rept v, 0, 126
-        .target Linc{v}
-        .endr
+.rept v, 0, 126
+Dinc:   .target Linc{v}
+.endr
 
 .rept v, 0, 126
 Tdec:   .row    [*,{v},*,*]
 .endr
-Ddec:   .rept v, 0, 126
-        .target Ldec{v}
-        .endr
+.rept v, 0, 126
+Ddec:   .target Ldec{v}
+.endr
 
 ; ---- '.' : copy current data cell to the output tape ---------------------
 .rept v, 0, 126
 Tdot:   .row    [*,{v},*,*]
 .endr
-Ddot:   .rept v, 0, 126
-        .target Ldot{v}
-        .endr
+.rept v, 0, 126
+Ddot:   .target Ldot{v}
+.endr
 
 ; ---- '[' / ']' : zero-test on the data cell ------------------------------
 Tzero:  .row    [*,0,*,*]               ; MR=1 : data cell is zero
@@ -94,6 +95,7 @@ Dsb:    .targets L_sb_push, L_sb_pop, L_sb_scan
 Dsbp:   .targets L_sb_done, L_sb        ; empty → step right, fetch; else scan
 
 .section code
+.routine main, tapes=4, alpha=(9,127,127,2)
 .func main
 
 ; ==== fetch ================================================================
