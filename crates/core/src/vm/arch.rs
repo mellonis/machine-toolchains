@@ -46,6 +46,16 @@ pub enum MicroOp {
     },
     Call(i32),
     Ret,
+    /// Walk the match table at byte offset `table` in table ROM against TR;
+    /// set MR (0 = no row matched). Spec §4.
+    MatchTable {
+        table: u32,
+    },
+    /// Jump through the dispatch table at `table` by MR;
+    /// MR = 0 traps NoTransition. Spec §4.
+    DispatchJump {
+        table: u32,
+    },
     /// Trap explicitly with a typed kind (the `trap #kind` instruction family).
     Raise {
         kind: RaisedTrapKind,
@@ -90,6 +100,7 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
 /// 0x06 right+latch | 0x07 wr(vec)+latch | 0x08 jmp rel8 | 0x09 jm rel32 |
 /// 0x0A call rel32 | 0x0B ret | 0x0E entry marker (lowers to Nop) |
 /// 0x10 read dev0→slot0 + dev1→slot1 (probes TR latching) |
+/// 0x11 mtc @table (abs table offset) | 0x12 djmp @table (probes the table engine) |
 /// 0x13 wr(vec) on dev 1 | 0x14 left on dev 1 (probes device-indexed tape micro-ops) |
 /// 0x15 raise unmapped-read | 0x16 raise unmapped-write (probes Raise micro-op)
 #[cfg(test)]
@@ -108,7 +119,7 @@ pub(crate) mod test_arch {
                 0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14..=0x16 => Some(OperandKind::None),
                 0x07 | 0x13 => Some(OperandKind::SymbolVec),
                 0x08 => Some(OperandKind::RelI8),
-                0x09 | 0x0A => Some(OperandKind::RelI32),
+                0x09 | 0x0A | 0x11 | 0x12 => Some(OperandKind::RelI32),
                 _ => None,
             }
         }
@@ -144,6 +155,8 @@ pub(crate) mod test_arch {
                     MicroOp::Read { dev: 0, slot: 0 },
                     MicroOp::Read { dev: 1, slot: 1 },
                 ],
+                (0x11, Operand::I32(o)) => vec![MicroOp::MatchTable { table: *o as u32 }],
+                (0x12, Operand::I32(o)) => vec![MicroOp::DispatchJump { table: *o as u32 }],
                 (0x13, Operand::Symbols(s)) if s.len() == 1 => {
                     vec![MicroOp::Write {
                         dev: 1,

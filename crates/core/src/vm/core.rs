@@ -4,6 +4,7 @@
 
 use super::arch::{Arch, MicroOp, Operand, OperandKind};
 use super::bus::{BusRequest, BusResponse, CoreEvent};
+use super::table::{DispatchWalk, MatchWalk};
 use super::trap::{RaisedTrapKind, Trap};
 
 enum Phase {
@@ -31,6 +32,8 @@ enum Pending {
     EntCheck { target: u32 },
     Push { target: u32 },
     Pop,
+    Match(MatchWalk),
+    Dispatch(DispatchWalk),
 }
 
 pub struct Core<'a> {
@@ -250,6 +253,54 @@ impl<'a> Core<'a> {
                 BusResponse::StackEmpty => return self.trap(Trap::StackUnderflow),
                 _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
             },
+            Pending::Match(mut walk) => match resp {
+                BusResponse::Byte(b) => {
+                    match walk.feed(Some(b), &self.tr[..usize::from(self.tr_len)]) {
+                        crate::vm::table::WalkStep::NeedByte(addr) => {
+                            self.phase = Phase::Execute {
+                                ops,
+                                pending: Pending::Match(walk),
+                            };
+                            return CoreEvent::Request(BusRequest::TableRead { addr });
+                        }
+                        crate::vm::table::WalkStep::Done(mr) => self.mr = mr,
+                        crate::vm::table::WalkStep::Malformed => {
+                            return self.trap(Trap::BadOperand {
+                                at: self.instr_start,
+                            });
+                        }
+                    }
+                }
+                BusResponse::OutOfTable => {
+                    return self.trap(Trap::TableOutOfBounds {
+                        at: self.instr_start,
+                    });
+                }
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+            Pending::Dispatch(mut walk) => match resp {
+                BusResponse::Byte(b) => match walk.feed(Some(b)) {
+                    crate::vm::table::DispatchStep::NeedByte(addr) => {
+                        self.phase = Phase::Execute {
+                            ops,
+                            pending: Pending::Dispatch(walk),
+                        };
+                        return CoreEvent::Request(BusRequest::TableRead { addr });
+                    }
+                    crate::vm::table::DispatchStep::Done(target) => self.ip = target,
+                    crate::vm::table::DispatchStep::OutOfRange => {
+                        return self.trap(Trap::DispatchOutOfRange {
+                            at: self.instr_start,
+                        });
+                    }
+                },
+                BusResponse::OutOfTable => {
+                    return self.trap(Trap::TableOutOfBounds {
+                        at: self.instr_start,
+                    });
+                }
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
         }
 
         // 2. Issue the next micro-op.
@@ -316,6 +367,37 @@ impl<'a> Core<'a> {
                     Err(trap) => return self.trap(trap),
                 },
                 MicroOp::Ret => (BusRequest::StackPop, Pending::Pop),
+                MicroOp::MatchTable { table } => {
+                    let mut walk = MatchWalk::new(table);
+                    match walk.feed(None, self.tr()) {
+                        crate::vm::table::WalkStep::NeedByte(addr) => {
+                            (BusRequest::TableRead { addr }, Pending::Match(walk))
+                        }
+                        _ => {
+                            return self.trap(Trap::BadOperand {
+                                at: self.instr_start,
+                            });
+                        }
+                    }
+                }
+                MicroOp::DispatchJump { table } => {
+                    if self.mr == 0 {
+                        return self.trap(Trap::NoTransition {
+                            at: self.instr_start,
+                        });
+                    }
+                    let mut walk = DispatchWalk::new(table, self.mr);
+                    match walk.feed(None) {
+                        crate::vm::table::DispatchStep::NeedByte(addr) => {
+                            (BusRequest::TableRead { addr }, Pending::Dispatch(walk))
+                        }
+                        _ => {
+                            return self.trap(Trap::BadOperand {
+                                at: self.instr_start,
+                            });
+                        }
+                    }
+                }
             };
             self.phase = Phase::Execute { ops, pending };
             return CoreEvent::Request(request);
@@ -698,5 +780,89 @@ mod tests {
         assert_eq!(core.mr(), 1);
         core.set_mf(false);
         assert_eq!(core.mr(), 0);
+    }
+
+    /// Serve CodeRead from `code`, TableRead from `tables`, DeviceRead from
+    /// a symbol queue; resume past inter-instruction Steps and return the
+    /// first terminal event (Stopped / Halted / Trapped).
+    fn run_with_tables(code: &[u8], tables: &[u8], symbols: &[u32]) -> Ev {
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0);
+        let mut reads = symbols.iter().copied();
+        let mut ev = core.start();
+        loop {
+            ev = match ev {
+                Ev::Request(Rq::CodeRead { addr }) => core.resume(match code.get(addr as usize) {
+                    Some(&b) => Rs::Byte(b),
+                    None => Rs::OutOfCode,
+                }),
+                Ev::Request(Rq::TableRead { addr }) => {
+                    core.resume(match tables.get(addr as usize) {
+                        Some(&b) => Rs::Byte(b),
+                        None => Rs::OutOfTable,
+                    })
+                }
+                Ev::Request(Rq::DeviceRead { .. }) => {
+                    core.resume(Rs::Symbol(reads.next().expect("device script exhausted")))
+                }
+                Ev::Step | Ev::Break => core.resume(Rs::Ok),
+                other => return other,
+            };
+        }
+    }
+
+    /// Match table at 0 (width 2, rows [1,2] and [1,*]), dispatch table at 7
+    /// (2 entries: code addresses 11 and 12).
+    fn table_blob() -> Vec<u8> {
+        let mut t = vec![2, 2, 0, 1, 2, 1, 0x7F];
+        t.extend([2u8, 0]);
+        t.extend(11u32.to_le_bytes()); // MR=1 → stp at code addr 11
+        t.extend(12u32.to_le_bytes()); // MR=2 → hlt at code addr 12
+        t
+    }
+
+    /// 0x10 rd(dev0→tr0, dev1→tr1); 0x11 mtc @0; 0x12 djmp @7; stp; hlt.
+    fn table_code() -> Vec<u8> {
+        let mut c = vec![0x10, 0x11];
+        c.extend(0i32.to_le_bytes());
+        c.push(0x12);
+        c.extend(7i32.to_le_bytes());
+        c.push(0x02); // stp — code addr 11
+        c.push(0x03); // hlt — code addr 12
+        c
+    }
+
+    /// rd; mtc; djmp — the canonical conditional-state shape end to end.
+    #[test]
+    fn match_then_dispatch_selects_target() {
+        // [1,2] matches row 1 → MR=1 → dispatch to stp.
+        assert_eq!(
+            run_with_tables(&table_code(), &table_blob(), &[1, 2]),
+            Ev::Stopped
+        );
+        // [1,9] falls to the wildcard row → MR=2 → dispatch to hlt.
+        assert_eq!(
+            run_with_tables(&table_code(), &table_blob(), &[1, 9]),
+            Ev::Halted
+        );
+    }
+
+    #[test]
+    fn dispatch_on_no_match_traps_no_transition() {
+        // [5,5] matches nothing (no catch-all) → MR=0 → djmp (at addr 6) traps.
+        assert_eq!(
+            run_with_tables(&table_code(), &table_blob(), &[5, 5]),
+            Ev::Trapped(Trap::NoTransition { at: 6 })
+        );
+    }
+
+    #[test]
+    fn table_read_past_section_traps() {
+        // Truncated blob: header parses (width 2, 2 rows), first row byte
+        // (addr 3) is out of table → the mtc at addr 1 faults.
+        assert_eq!(
+            run_with_tables(&table_code(), &table_blob()[..3], &[1, 2]),
+            Ev::Trapped(Trap::TableOutOfBounds { at: 1 })
+        );
     }
 }

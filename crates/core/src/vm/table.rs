@@ -11,11 +11,6 @@
 //!                       payload; 0x7F = wildcard ("transparent", spec §3.2)
 //! ```
 
-// This module is a pure library not yet driven by the core; every item is
-// unreferenced in the lib build until the core wires the walk. A module-scoped
-// allow keeps the `-D warnings` gate green without touching sibling modules.
-#![allow(dead_code)]
-
 pub(crate) enum WalkStep {
     NeedByte(u32),
     Done(u32),
