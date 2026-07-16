@@ -515,4 +515,93 @@ mod tests {
         // table reads priced at table_read_cost=1, plus 1 device read.
         assert_eq!(r.stats.stall_tacts, 10 + 1);
     }
+
+    /// A framed program runs end to end through the driver: descriptor
+    /// loads are served from table ROM as FrameReads priced at
+    /// frame_load_cost per byte, and the maps steer real tape devices.
+    fn run_frames_program(profile: TactProfile) -> (RunResult, bool, [Vec<i64>; 2]) {
+        // Descriptor at table offset 0: arity 1, virtual 0 → phys 1,
+        // swap maps both ways ({0,1} alphabet), one exit. 20 bytes:
+        // 3 header + (1 phys + 2+4 rmap + 2+4 wmap) + 4 exit.
+        let tables = crate::vm::frame::test_support::descriptor_bytes(
+            &[(1, &[1, 0], &[1, 0])],
+            &[11], // exits[0] = the stp
+        );
+        assert_eq!(tables.len(), 20);
+        // [0..5] callframe +1 → 6; [5] hlt (return canary — retx must
+        // exit, not return); [6] ent; [7] read-all; [8..10] wr v=1;
+        // [10] retx#0; [11] stp.
+        let mut code = vec![0x19];
+        code.extend(1i32.to_le_bytes());
+        code.extend([0x03, 0x0E, 0x18, 0x07, 0x81, 0x1A, 0x02]);
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0).with_device_count(2).with_frames();
+        let mut stack = ReturnStack::new(4);
+        let mut tape0 = InfiniteTape::new();
+        let mut tape1 = InfiniteTape::new();
+        tape1.write(1).unwrap(); // phys head cell = 1
+        {
+            let mut devices: Vec<&mut dyn crate::vm::devices::Tape> = vec![&mut tape0, &mut tape1];
+            let r = run(
+                &mut core,
+                &code,
+                &mut stack,
+                &mut devices,
+                &tables,
+                profile,
+                RunLimits::default(),
+            );
+            (r, core.mf(), [tape0.marked_cells(), tape1.marked_cells()])
+        }
+    }
+
+    #[test]
+    fn frames_program_end_to_end() {
+        let (r, mf, marked) = run_frames_program(TactProfile::ELECTRONIC);
+        assert_eq!(r.outcome, Outcome::Stopped);
+        // The framed body read phys tape 1 (cell 1 → virtual 0), wrote
+        // virtual 1 back through the wmap (→ phys 0): cell 1 → 0, so no
+        // marked cells remain on either tape.
+        assert_eq!(marked, [Vec::<i64>::new(), Vec::new()]);
+        // The write's trailing latch re-read the cell (now 0) → virtual
+        // 1 == the match index → mf true (both maps proven live).
+        assert!(mf);
+        // Tacts (docs/isa.md (timing model) shape):
+        //   core: callframe fetch 5 + ent-read 1 + push 1 + exec 1 = 8;
+        //         ent 2; read-all 2; wr fetch 2 + exec 1 = 3;
+        //         retx fetch 1 + pop 1 + exec 1 = 3; stp fetch 1 → 19.
+        //   stall: 20 descriptor bytes × frame_load_cost 1 = 20, plus
+        //          1 read-all read + 1 write + 1 latch read = 23.
+        assert_eq!(
+            r.stats,
+            RunStats {
+                steps: 5,
+                core_tacts: 19,
+                stall_tacts: 23
+            }
+        );
+    }
+
+    #[test]
+    fn frame_load_cost_prices_descriptor_bytes_only() {
+        // Same program, frame_load_cost 3: only the 20 descriptor bytes
+        // reprice (20 × 3 + 3 device stalls); core tacts are untouched.
+        let profile = TactProfile {
+            move_cost: 1,
+            read_cost: 1,
+            write_cost: 1,
+            table_read_cost: 1,
+            frame_load_cost: 3,
+        };
+        let (r, _, _) = run_frames_program(profile);
+        assert_eq!(r.outcome, Outcome::Stopped);
+        assert_eq!(
+            r.stats,
+            RunStats {
+                steps: 5,
+                core_tacts: 19,
+                stall_tacts: 63
+            }
+        );
+    }
 }
