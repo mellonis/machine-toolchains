@@ -21,6 +21,28 @@ proptest! {
         let _ = Executable::from_bytes(&noise); // must return Err, not panic
     }
 
+    /// Any well-formed v2 sectioned image round-trips.
+    #[test]
+    fn mx_v2_round_trip(
+        arch in any::<u8>(),
+        tape_count in 1u8..=16,
+        profile in 0u8..=1,
+        code in proptest::collection::vec(any::<u8>(), 1..64),
+        tables in proptest::collection::vec(any::<u8>(), 0..64),
+    ) {
+        let entry = 0u32; // always in-bounds for code.len() >= 1
+        let cards = vec![3u32; tape_count as usize];
+        let exe = Executable::sectioned(arch, entry, code, tables, tape_count, profile, cards);
+        let back = Executable::from_bytes(&exe.to_bytes()).unwrap();
+        prop_assert_eq!(back, exe);
+    }
+
+    /// from_bytes never panics on arbitrary bytes (must return Err, not panic).
+    #[test]
+    fn mx_from_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+        let _ = Executable::from_bytes(&bytes);
+    }
+
     #[test]
     fn object_round_trips(
         blob in proptest::collection::vec(any::<u8>(), 5..64),

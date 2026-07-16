@@ -304,6 +304,26 @@ mod tests {
         assert_eq!(Executable::from_bytes(&bytes).unwrap(), exe);
     }
 
+    /// Pins the absolute v2 header byte offsets so a symmetric field
+    /// transposition (e.g. swapping tape_count/profile or entry/code_size)
+    /// would fail. Layout: magic3 + ver2 + arch1 + flags1 + crc4 +
+    /// tape_count1 + profile1 + entry4 + code_size4 + table_size4 + cards.
+    #[test]
+    fn v2_layout_is_exact() {
+        let bytes = sample_v2().to_bytes();
+        assert_eq!(&bytes[0..3], b"MX\x01");
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2); // version
+        assert_eq!(bytes[5], 0x02); // arch (TM-1)
+        assert_eq!(bytes[6], 0); // flags
+        // [7..11] crc
+        assert_eq!(bytes[11], 2); // tape_count
+        assert_eq!(bytes[12], 1); // profile = frames
+        assert_eq!(u32::from_le_bytes(bytes[13..17].try_into().unwrap()), 0); // entry
+        assert_eq!(u32::from_le_bytes(bytes[17..21].try_into().unwrap()), 2); // code_size
+        assert_eq!(u32::from_le_bytes(bytes[21..25].try_into().unwrap()), 4); // table_size
+        assert_eq!(u32::from_le_bytes(bytes[25..29].try_into().unwrap()), 3); // cardinality[0]
+    }
+
     #[test]
     fn v1_still_parses_after_v2_lands() {
         let v1 = Executable::code_only(ARCH_PM1, 0, vec![0x0D, 0x05, 0x02]);
