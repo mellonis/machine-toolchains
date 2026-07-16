@@ -141,12 +141,21 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
 /// 0x11 mtc @table | 0x12 djmp @table (TableRef: abs u32 table offset; probes the table engine) |
 /// 0x13 wr(vec) on dev 1 | 0x14 left on dev 1 (probes device-indexed tape micro-ops) |
 /// 0x15 raise unmapped-read | 0x16 raise unmapped-write (probes Raise micro-op) |
-/// 0x17 read dev0→slot0 (single-tape TR latch, for the table-program end-to-end test)
+/// 0x17 read dev0→slot0 (single-tape TR latch, for the table-program end-to-end test) |
+/// 0x18 read-all | 0x19 callframe rel32 → descriptor at table offset 0 |
+/// 0x1A retx#0 | 0x1B retx#1 | 0x1C callframe rel32 → descriptor at
+/// `FRAME2_OFFSET` | 0x1D retx#2 (probe the frames profile; the fake
+/// encodings hard-wire the frame offset / exit index per opcode — rel
+/// rides the same rel32 wire as plain call, and the real framed-call
+/// operand encoding is an assembler concern outside the core)
 #[cfg(test)]
 pub(crate) mod test_arch {
     use super::*;
 
     pub(crate) struct TestArch;
+
+    /// Table-section offset of the second fake frame descriptor (0x1C).
+    pub(crate) const FRAME2_OFFSET: u32 = 64;
 
     impl Arch for TestArch {
         fn arch_id(&self) -> u8 {
@@ -155,10 +164,12 @@ pub(crate) mod test_arch {
 
         fn operand_kind(&self, opcode: u8) -> Option<OperandKind> {
             match opcode {
-                0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14..=0x17 => Some(OperandKind::None),
+                0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14..=0x18 | 0x1A | 0x1B | 0x1D => {
+                    Some(OperandKind::None)
+                }
                 0x07 | 0x13 => Some(OperandKind::SymbolVec),
                 0x08 => Some(OperandKind::RelI8),
-                0x09 | 0x0A => Some(OperandKind::RelI32),
+                0x09 | 0x0A | 0x19 | 0x1C => Some(OperandKind::RelI32),
                 0x11 | 0x12 => Some(OperandKind::TableRef),
                 _ => None,
             }
@@ -211,6 +222,15 @@ pub(crate) mod test_arch {
                     kind: RaisedTrapKind::UnmappedWrite,
                 }],
                 (0x17, _) => vec![MicroOp::Read { dev: 0, slot: 0 }],
+                (0x18, _) => vec![MicroOp::ReadAll],
+                (0x19, Operand::I32(o)) => vec![MicroOp::CallFrame { rel: *o, frame: 0 }],
+                (0x1A, _) => vec![MicroOp::RetX { k: 0 }],
+                (0x1B, _) => vec![MicroOp::RetX { k: 1 }],
+                (0x1C, Operand::I32(o)) => vec![MicroOp::CallFrame {
+                    rel: *o,
+                    frame: FRAME2_OFFSET,
+                }],
+                (0x1D, _) => vec![MicroOp::RetX { k: 2 }],
                 _ => return Err(Trap::BadOperand { at: 0 }),
             })
         }
