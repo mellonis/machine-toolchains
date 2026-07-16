@@ -7,7 +7,7 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use super::LinkError;
-use crate::formats::object::{BlobDebug, ObjectFile, SymbolDef};
+use crate::formats::object::{BlobDebug, ObjectFile, RoutineSig, SymbolDef};
 
 #[derive(Debug)]
 pub(crate) struct FuncRef<'a> {
@@ -16,6 +16,16 @@ pub(crate) struct FuncRef<'a> {
     pub debug: Option<&'a BlobDebug>,
     /// Call sites in blob order: (hole offset in blob, callee index in `order`).
     pub calls: Vec<(u32, usize)>,
+    /// This function's table blob — its match/dispatch table bytes
+    /// (docs/formats.md (.pmo)); empty when the object carries none.
+    pub table: &'a [u8],
+    /// TableRef operand holes within this blob, as (hole offset in blob,
+    /// offset into `table`); the layout pass rebases them into the final
+    /// table section (docs/formats.md (executable image)).
+    pub table_fixups: Vec<(u32, u32)>,
+    /// The function's generic-routine signature, when its object signs
+    /// blobs (signatures are all-or-none per object, parallel to blobs).
+    pub signature: Option<&'a RoutineSig>,
 }
 
 #[derive(Debug)]
@@ -158,6 +168,21 @@ pub(crate) fn resolve<'a>(
                 blob: &object.blobs[site.1 as usize],
                 debug: object.debug.as_ref().map(|d| &d[site.1 as usize]),
                 calls: calls_by_site.remove(&site).unwrap_or_default(),
+                table: object
+                    .table_blobs
+                    .as_ref()
+                    .and_then(|t| t.get(site.1 as usize))
+                    .map_or(&[][..], Vec::as_slice),
+                table_fixups: object
+                    .table_fixups
+                    .iter()
+                    .filter(|fx| fx.blob == site.1)
+                    .map(|fx| (fx.offset, fx.table_offset))
+                    .collect(),
+                signature: object
+                    .signatures
+                    .as_ref()
+                    .and_then(|s| s.get(site.1 as usize)),
             }
         })
         .collect();

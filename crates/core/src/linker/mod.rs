@@ -27,6 +27,23 @@ pub enum LinkError {
         symbol: String,
         at: u32,
     },
+    /// A function's table blob failed the fixup-driven walk: bytes not
+    /// covered by any referenced table, a truncated table header, or a
+    /// dispatch entry off its function's instruction boundaries. `at` is
+    /// the table-blob-relative offset of the first offending byte.
+    MalformedTable {
+        symbol: String,
+        at: u32,
+    },
+    /// An object carries declarative call-site binding records, which
+    /// the linker cannot honor yet — they are the composition engine's
+    /// input. Refusing beats silently dropping call semantics. Carries
+    /// the callee symbol name of the first such record.
+    UnsupportedBindings(String),
+    /// The link brings in table content or routine signatures, so the
+    /// executable needs a sectioned header — but the entry function has
+    /// no signature to fill it. Carries the entry function's name.
+    MissingSignature(String),
 }
 
 impl std::fmt::Display for LinkError {
@@ -41,6 +58,26 @@ impl std::fmt::Display for LinkError {
             ),
             Self::MalformedBlob { symbol, at } => {
                 write!(f, "malformed blob for `{symbol}` at offset {at}")
+            }
+            Self::MalformedTable { symbol, at } => {
+                write!(
+                    f,
+                    "malformed table data for `{symbol}` at table offset {at}"
+                )
+            }
+            Self::UnsupportedBindings(name) => {
+                write!(
+                    f,
+                    "call-site binding records are not supported yet (call to `{name}`); \
+                     they need the composition engine"
+                )
+            }
+            Self::MissingSignature(name) => {
+                write!(
+                    f,
+                    "entry function `{name}` has no routine signature to fill the \
+                     sectioned executable header"
+                )
             }
         }
     }
@@ -124,6 +161,20 @@ pub fn link(
     libraries: &[ObjectFile],
     options: LinkOptions,
 ) -> Result<LinkOutput, LinkError> {
+    // Declarative call-site binding records are the composition engine's
+    // input; until that lands the linker refuses them outright — even in
+    // functions that would be dropped — rather than silently emitting a
+    // call whose tape binding never happens.
+    for object in objects.iter().chain(libraries) {
+        if let Some(bound) = object.bound_calls.first() {
+            let name = object
+                .symbols
+                .get(bound.symbol as usize)
+                .map_or_else(String::new, |s| s.name.clone());
+            return Err(LinkError::UnsupportedBindings(name));
+        }
+    }
+
     let resolved = resolve::resolve(objects, libraries)?;
     let arch = objects
         .first()
@@ -133,8 +184,34 @@ pub fn link(
 
     let built = layout::build(syntax, &resolved.order, options.relax)?;
 
+    // Emit shape (docs/formats.md (executable image)): table content or
+    // routine signatures anywhere in the reached set require the
+    // sectioned image, whose header fields come from the ENTRY
+    // function's signature — tape count from its arity, per-tape
+    // alphabet cardinalities verbatim, profile 0 (base; a nonzero
+    // profile awaits the composition engine). Without either, the
+    // code-only shape is emitted exactly as before tables existed.
+    let any_signature = resolved.order.iter().any(|f| f.signature.is_some());
+    let executable = if !built.tables.is_empty() || any_signature {
+        let entry = &resolved.order[0];
+        let Some(sig) = entry.signature else {
+            return Err(LinkError::MissingSignature(entry.name.to_string()));
+        };
+        Executable::sectioned(
+            arch,
+            0,
+            built.code,
+            built.tables,
+            sig.arity,
+            0,
+            sig.cardinalities.clone(),
+        )
+    } else {
+        Executable::code_only(arch, 0, built.code)
+    };
+
     Ok(LinkOutput {
-        executable: Executable::code_only(arch, 0, built.code),
+        executable,
         map: MapFile {
             arch,
             functions: built.functions,

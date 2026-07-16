@@ -10,7 +10,7 @@
 //! their original width with the offset recomputed through the map (the
 //! shrink-only invariant guarantees it still fits).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::resolve::FuncRef;
 use super::{LinkError, MapFunction};
@@ -51,6 +51,11 @@ impl Piece {
 
 pub(super) struct Built {
     pub code: Vec<u8>,
+    /// The concatenated table section (docs/formats.md (executable
+    /// image)): each reached function's table blob in layout order, its
+    /// dispatch entries rebased to absolute code offsets. Empty when no
+    /// reached function carries tables.
+    pub tables: Vec<u8>,
     pub functions: Vec<MapFunction>,
     pub relaxed_calls: u32,
     pub far_calls: u32,
@@ -198,6 +203,111 @@ fn layout_pass(functions: &[Vec<Piece>], is_short: &[Vec<bool>]) -> (Vec<u32>, V
     (bases, offsets)
 }
 
+/// Appends one function's table blob to the executable's table section
+/// (docs/formats.md (executable image)), rebasing every dispatch entry
+/// from a blob-relative code offset to its absolute address in the
+/// linked code — `code_base` + the entry's post-relaxation offset from
+/// the SAME `orig_to_new` map jump re-encoding uses, so entries follow
+/// labels that relaxation shifted.
+///
+/// A table blob is not self-describing: kinds come from the referencing
+/// instructions, exactly as object disassembly infers them — the opcode
+/// one byte before each fixup hole; a `FallThrough` flow is a pure
+/// lookup (match table), any control transfer dispatches THROUGH its
+/// table (dispatch table). Match tables span `3 + width*count` bytes
+/// (`width u8`, `count u16 LE`, rows), dispatch tables `2 + 4*count`
+/// (`count u16 LE`, `count` u32 LE entries). Every byte must belong to
+/// exactly one fixup-attributed table — a gap, overlap, truncated
+/// header, or dispatch entry off instruction boundaries is a
+/// [`LinkError::MalformedTable`] whose `at` is the table-blob-relative
+/// offset of the first offending byte.
+fn append_function_tables(
+    syntax: &ArchSyntax,
+    f: &FuncRef,
+    code_base: u32,
+    orig_to_new: &HashMap<u32, u32>,
+    out: &mut Vec<u8>,
+) -> Result<(), LinkError> {
+    // Distinct table starts and their kinds; duplicate references to one
+    // table collapse to the first classifier.
+    let mut starts: BTreeMap<u32, bool> = BTreeMap::new();
+    for &(hole, table_off) in &f.table_fixups {
+        let is_dispatch = hole
+            .checked_sub(1)
+            .and_then(|pos| f.blob.get(pos as usize).copied())
+            .and_then(|opcode| syntax.by_opcode(opcode))
+            .is_some_and(|entry| entry.flow != Flow::FallThrough);
+        starts.entry(table_off).or_insert(is_dispatch);
+    }
+    let malformed = |at: u32| LinkError::MalformedTable {
+        symbol: f.name.to_string(),
+        at,
+    };
+
+    let tb = f.table;
+    let len = tb.len() as u32;
+    let mut pos = 0u32;
+    for (&start, &is_dispatch) in &starts {
+        if start != pos {
+            // A gap before this table (uncovered bytes) or an overlap
+            // with the previous one.
+            return Err(malformed(pos.min(start)));
+        }
+        if is_dispatch {
+            let header_end = start.checked_add(2).filter(|&e| e <= len);
+            let Some(header_end) = header_end else {
+                return Err(malformed(start));
+            };
+            let count = u32::from(u16::from_le_bytes([
+                tb[start as usize],
+                tb[start as usize + 1],
+            ]));
+            let end = header_end + 4 * count;
+            if end > len {
+                return Err(malformed(start));
+            }
+            out.extend_from_slice(&tb[start as usize..header_end as usize]);
+            for k in 0..count {
+                let at = header_end + 4 * k;
+                let entry_bytes: [u8; 4] = tb[at as usize..(at + 4) as usize]
+                    .try_into()
+                    .expect("bounds checked above");
+                let orig = u32::from_le_bytes(entry_bytes);
+                // A dispatch entry must land on an instruction boundary
+                // of its owning function; anything else is table data no
+                // rebase can make sense of.
+                let Some(&new) = orig_to_new.get(&orig) else {
+                    return Err(malformed(at));
+                };
+                out.extend_from_slice(&(code_base + new).to_le_bytes());
+            }
+            pos = end;
+        } else {
+            let header_end = start.checked_add(3).filter(|&e| e <= len);
+            let Some(header_end) = header_end else {
+                return Err(malformed(start));
+            };
+            let width = u32::from(tb[start as usize]);
+            let count = u32::from(u16::from_le_bytes([
+                tb[start as usize + 1],
+                tb[start as usize + 2],
+            ]));
+            let end = header_end + width * count;
+            if end > len {
+                return Err(malformed(start));
+            }
+            // Match rows carry symbol indices, not code offsets — copied
+            // verbatim.
+            out.extend_from_slice(&tb[start as usize..end as usize]);
+            pos = end;
+        }
+    }
+    if pos != len {
+        return Err(malformed(pos));
+    }
+    Ok(())
+}
+
 pub(super) fn build(
     syntax: &ArchSyntax,
     order: &[FuncRef],
@@ -257,6 +367,7 @@ pub(super) fn build(
     let (bases, offsets) = layout_pass(&functions, &is_short);
 
     let mut code = Vec::new();
+    let mut tables = Vec::new();
     let mut map_functions = Vec::with_capacity(order.len());
     let mut relaxed_calls = 0u32;
     let mut far_calls = 0u32;
@@ -339,6 +450,33 @@ pub(super) fn build(
 
         let end = code.len() as u32;
 
+        // Table section (docs/formats.md (executable image)): this
+        // function's tables are appended at the running section length —
+        // its table base — with dispatch entries rebased through the
+        // same `orig_to_new` map the jumps above used; then every
+        // TableRef operand hole in the just-emitted code is patched from
+        // its blob-local table offset to the final section offset.
+        let table_base = tables.len() as u32;
+        if !f.table.is_empty() || !f.table_fixups.is_empty() {
+            append_function_tables(syntax, f, base, &orig_to_new, &mut tables)?;
+        }
+        for &(hole, table_off) in &f.table_fixups {
+            // The hole is a TableRef instruction's operand, one byte
+            // past its opcode; a hole whose opcode is not an instruction
+            // boundary is a malformed blob, not a layout bug.
+            let Some(&instr_new) = hole
+                .checked_sub(1)
+                .and_then(|opcode_at| orig_to_new.get(&opcode_at))
+            else {
+                return Err(LinkError::MalformedBlob {
+                    symbol: f.name.to_string(),
+                    at: hole,
+                });
+            };
+            let patch_at = (base + instr_new + 1) as usize;
+            code[patch_at..patch_at + 4].copy_from_slice(&(table_base + table_off).to_le_bytes());
+        }
+
         let (labels, lines) = match f.debug {
             Some(debug) => {
                 let mut labels = Vec::with_capacity(debug.labels.len());
@@ -377,6 +515,7 @@ pub(super) fn build(
 
     Ok(Built {
         code,
+        tables,
         functions: map_functions,
         relaxed_calls,
         far_calls,
@@ -649,6 +788,163 @@ X:      stop
         // jmp.s at 1, end 3, g at 3 → off 0.
         assert_eq!(out.executable.code, vec![0x0E, 0x30, 0x00, 0x0E, 0x0B]);
         assert_eq!(out.report.relaxed_calls, 1);
+    }
+
+    // -- Tables: section emission, guards, and the PM-1-shape lock ------
+
+    /// `syntax_with_short_call()` + the neutral table mnemonics (per the
+    /// per-file-helper convention, mirroring `assembler.rs`): `tmatch`
+    /// references a match table (FallThrough), `tdispatch` a dispatch
+    /// table (Stop), caps all on so `.section`/`.row`/`.targets`/
+    /// `.routine` shape.
+    fn fake_table_syntax() -> crate::asm::ArchSyntax {
+        use crate::asm::AsmCaps;
+        let mut s = syntax_with_short_call();
+        s.entries.push(SyntaxEntry {
+            opcode: 0x11,
+            mnemonic: "tmatch",
+            operand: OperandKind::TableRef,
+            flow: Flow::FallThrough,
+        });
+        s.entries.push(SyntaxEntry {
+            opcode: 0x12,
+            mnemonic: "tdispatch",
+            operand: OperandKind::TableRef,
+            flow: Flow::Stop,
+        });
+        s.caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        s
+    }
+
+    const TABLED_MAIN: &str = "\
+.routine main, tapes=2, alpha=(3, 5)
+.section tables
+T0: .row [1, 2]
+    .row [1, *]
+D0: .targets A, B
+.section code
+.func main
+        tmatch  T0
+        tdispatch D0
+A:      nop
+B:      stop
+";
+
+    #[test]
+    fn bound_calls_are_rejected_before_any_layout() {
+        use crate::formats::object::BoundCall;
+        let syntax = fake_table_syntax();
+        let mut obj = assemble(&syntax, 0x7E, TWO_FUNCS, false).unwrap();
+        obj.bound_calls.push(BoundCall {
+            blob: 0,
+            offset: 2,
+            symbol: 1, // `go`
+            binding: vec![],
+        });
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::UnsupportedBindings("go".into())
+        );
+    }
+
+    #[test]
+    fn tables_without_entry_signature_are_missing_signature() {
+        // TABLED_MAIN minus its `.routine` line: table content present,
+        // entry unsigned.
+        let src = TABLED_MAIN
+            .lines()
+            .filter(|l| !l.starts_with(".routine"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let syntax = fake_table_syntax();
+        let obj = assemble(&syntax, 0x7E, &src, false).unwrap();
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(e, crate::linker::LinkError::MissingSignature("main".into()));
+    }
+
+    #[test]
+    fn stray_table_bytes_are_malformed_table() {
+        // A trailing byte no fixup-attributed table covers.
+        let syntax = fake_table_syntax();
+        let mut obj = assemble(&syntax, 0x7E, TABLED_MAIN, false).unwrap();
+        let table = &mut obj.table_blobs.as_mut().unwrap()[0];
+        let at = table.len() as u32;
+        table.push(0xEE);
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::MalformedTable {
+                symbol: "main".into(),
+                at
+            }
+        );
+    }
+
+    #[test]
+    fn dispatch_entry_off_instruction_boundary_is_malformed_table() {
+        // Tamper the first dispatch entry to point mid-instruction.
+        // Table layout: match (3 + 2*2 = 7 bytes), dispatch header at 7,
+        // first entry at 9 — the tampered value 2 is inside tmatch's
+        // operand, not a boundary.
+        let syntax = fake_table_syntax();
+        let mut obj = assemble(&syntax, 0x7E, TABLED_MAIN, false).unwrap();
+        let table = &mut obj.table_blobs.as_mut().unwrap()[0];
+        table[9..13].copy_from_slice(&2u32.to_le_bytes());
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::MalformedTable {
+                symbol: "main".into(),
+                at: 9
+            }
+        );
+    }
+
+    #[test]
+    fn tableless_link_is_byte_identical_to_the_code_only_shape() {
+        // The PM-1 lock: a tableless, unsigned link must produce the
+        // version-1 code-only image byte-for-byte — table support must
+        // not leak into the classic path.
+        let syntax = syntax_with_short_call();
+        let obj = assemble(&syntax, 0x7E, TWO_FUNCS, false).unwrap();
+        let out = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap();
+        let bytes = out.executable.to_bytes();
+        assert_eq!(
+            u16::from_le_bytes(bytes[3..5].try_into().unwrap()),
+            1,
+            "code-only image stays format version 1"
+        );
+        let expected = crate::formats::executable::Executable::code_only(
+            0x7E,
+            0,
+            vec![0x0E, 0x31, 0x01, 0x02, 0x0E, 0x01, 0x0B],
+        );
+        assert_eq!(bytes, expected.to_bytes());
+    }
+
+    #[test]
+    fn signatures_without_tables_still_emit_a_sectioned_image() {
+        let src = "\
+.routine main, tapes=2, alpha=(3, 5)
+.func main
+        stop
+";
+        let syntax = fake_table_syntax();
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let out = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap();
+        let exe = &out.executable;
+        assert_eq!(exe.tape_count, 2);
+        assert_eq!(exe.profile, 0);
+        assert_eq!(exe.alphabet_cardinalities, vec![3, 5]);
+        assert!(exe.tables.is_empty());
+        let bytes = exe.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2);
     }
 
     #[test]
