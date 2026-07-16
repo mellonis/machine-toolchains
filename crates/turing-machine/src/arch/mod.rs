@@ -1,8 +1,10 @@
 //! PM-1's sibling: the TM-1 instruction set as an arch module for the
-//! mtc-core VM. Pure table — no state beyond the tape count. TM-1 is a
-//! multi-tape Turing machine: up to sixteen tapes, one head each, driven in
-//! lockstep by the vector `rd`/`wr`/`mov` instructions and branched by the
-//! shared match/dispatch table engine.
+//! mtc-core VM. Pure table — no state at all: lowering is width-agnostic
+//! (`rd` expands to `ReadAll` at execution, `wr`/`mov` accept any
+//! `1..=16`-wide vector). TM-1 is a multi-tape Turing machine: up to
+//! sixteen tapes, one head each, driven in lockstep by the vector
+//! `rd`/`wr`/`mov` instructions and branched by the shared match/dispatch
+//! table engine.
 //!
 //! Unlike PM-1, TM-1 never latches the match register from a tape op. Its
 //! match register (MR) is written only by `mtc` (the match-table walk);
@@ -10,7 +12,7 @@
 //! `mtc` outcome regardless of intervening tape motion. No lowering here
 //! ever emits `LatchMatch` — that per-op marking is a PM-1-ism.
 
-use mtc_core::vm::{Arch, MicroOp, Operand, OperandKind, Trap};
+use mtc_core::vm::{Arch, MicroOp, Operand, OperandKind, RaisedTrapKind, Trap};
 
 pub mod opcodes {
     pub const NOP: u8 = 0x01;
@@ -33,17 +35,25 @@ pub mod opcodes {
     pub const BRK: u8 = 0x0E;
     /// Vector move: one step per tape (0 stay, 1 left, 2 right).
     pub const MOV: u8 = 0x0F;
+    /// Raise a typed trap explicitly (`trap #kind`): kind `0` = unmapped
+    /// read, `1` = unmapped write. The frames stubs a linker composition
+    /// emits reach for these to signal a crossed map hole.
+    pub const TRAP: u8 = 0x11;
+    /// Framed call (`call.m target, F`): call `target` and activate the
+    /// frame descriptor at table label `F` for the callee. The caller's
+    /// frame is restored on return.
+    pub const CALL_M: u8 = 0x13;
+    /// Multi-exit frame return (`retx #k`): leave the active frame through
+    /// exit `k` of its exit vector (the pushed return address is discarded).
+    pub const RETX: u8 = 0x14;
     /// Short form: far `| 0x10`. Only `call` has one so far; the linker
     /// selects it during relaxation — the assembler always emits far.
     pub const CALL_S: u8 = 0x1B;
 
-    // Reserved TM-1 opcodes — numbered but deliberately not defined or
+    // Reserved TM-1 opcode — numbered but deliberately not defined or
     // lowered here yet, so `operand_kind` returns `None` and a program that
-    // uses one traps on fetch until the producer that emits it lands:
-    //   0x11 trap   — raise a typed trap explicitly (future linker stubs)
-    //   0x12 wrmv   — fused per-tape write+move in one fetch (future codegen)
-    //   0x13 call.m — medium-range call form (future linker relaxation)
-    //   0x14 retx   — extended return unwinding a call frame (future frames)
+    // uses it traps on fetch until the producer that emits it lands:
+    //   0x12 wrmv — fused per-tape write+move in one fetch (future codegen)
 }
 
 use opcodes::*;
@@ -56,23 +66,24 @@ const STAY: u32 = 0;
 const LEFT: u32 = 1;
 const RIGHT: u32 = 2;
 
-/// The TM-1 architecture, parameterized by how many tapes its programs
-/// drive. The count fixes the width of the vector `rd`/`wr`/`mov`
-/// instructions and the number of TR slots `rd` fills.
-pub struct Tm1 {
-    tape_count: u8,
-}
+/// The TM-1 architecture. Lowering is width-agnostic — `rd` expands to
+/// `ReadAll` at execution, and `wr`/`mov` accept any `1..=16`-wide vector,
+/// deriving each device index from the vector position — so the arch holds
+/// no per-machine state. The frame (or, under the identity frame, the
+/// machine width wired into the VM) validates device indices at run time.
+pub struct Tm1;
 
 impl Tm1 {
-    /// `tape_count` must be in `1..=16` — one head per tape, and the TR
-    /// bank (each tape's `rd` slot) is sixteen wide, so slot == tape index
-    /// is always in range.
+    /// `tape_count` must be in `1..=16` (one head per tape). The arch is
+    /// width-agnostic now, but the constructor keeps validating the
+    /// machine's declared tape count as a cheap sanity guard on a loaded
+    /// image; the value is not otherwise retained.
     pub fn new(tape_count: u8) -> Self {
         assert!(
             (1..=16).contains(&tape_count),
             "TM-1 supports 1..=16 tapes, got {tape_count}"
         );
-        Self { tape_count }
+        Self
     }
 }
 
@@ -91,6 +102,11 @@ impl Arch for Tm1 {
             // rendering; both fetch to `Operand::Symbols`, so the
             // lowering below reads them uniformly.
             MOV => Some(OperandKind::MoveVec),
+            // `trap #kind` and `retx #k` carry a plain immediate byte;
+            // `call.m target, F` carries the framed-call operand (a rel
+            // displacement plus a frame table offset).
+            TRAP | RETX => Some(OperandKind::Imm8),
+            CALL_M => Some(OperandKind::FramedCall),
             JMP | JM | JNM | CALL => Some(OperandKind::RelI32),
             CALL_S => Some(OperandKind::RelI8),
             _ => None,
@@ -110,34 +126,39 @@ impl Arch for Tm1 {
             Operand::Table(v) => Ok(*v),
             _ => Err(Trap::BadOperand { at: 0 }),
         };
-        let n = usize::from(self.tape_count);
+        let imm = |o: &Operand| match o {
+            Operand::Imm(v) => Ok(*v),
+            _ => Err(Trap::BadOperand { at: 0 }),
+        };
         Ok(match opcode {
             NOP | ENT => vec![MicroOp::Nop],
             STP => vec![MicroOp::Stop],
             HLT => vec![MicroOp::Halt],
             BRK => vec![MicroOp::Brk],
             RET => vec![MicroOp::Ret],
-            // One read per tape; slot == device index (TR bank is 16 wide,
-            // tape cap 16 makes the mapping total).
-            RD => (0..self.tape_count)
-                .map(|dev| MicroOp::Read { dev, slot: dev })
-                .collect(),
+            // Latch every visible tape into TR in one micro-op. `ReadAll`
+            // expands at execution to the machine width (identity frame) or
+            // the active frame's arity, so lowering stays width-agnostic.
+            RD => vec![MicroOp::ReadAll],
             MTC => vec![MicroOp::MatchTable {
                 table: table(operand)?,
             }],
             DJMP => vec![MicroOp::DispatchJump {
                 table: table(operand)?,
             }],
-            // One symbol per tape. `0x7F` keeps the cell; any other value
-            // must be a 7-bit symbol (≤ `0x7E`) — a wider payload is a
-            // malformed operand.
+            // One symbol per vector position; the device index IS the
+            // position. Any `1..=16`-wide vector lowers — a routine body
+            // authored at arity M < the machine width is legal, and the
+            // static width check lives in the assembler for signed
+            // functions (docs/formats.md (assembly text)). `0x7F` keeps the
+            // cell; any other value must be a 7-bit symbol (≤ `0x7E`).
             WR => {
                 let syms = match operand {
-                    Operand::Symbols(s) if s.len() == n => s,
+                    Operand::Symbols(s) if (1..=16).contains(&s.len()) => s,
                     _ => return Err(Trap::BadOperand { at: 0 }),
                 };
                 let mut ops = Vec::new();
-                for (dev, &v) in (0u8..self.tape_count).zip(syms.iter()) {
+                for (dev, &v) in (0u8..).zip(syms.iter()) {
                     if v == KEEP {
                         continue;
                     }
@@ -148,15 +169,16 @@ impl Arch for Tm1 {
                 }
                 ops
             }
-            // One move per tape: 0 stays (skipped), 1 left, 2 right; any
-            // other value is a malformed operand.
+            // One move per vector position: 0 stays (skipped), 1 left, 2
+            // right; any other value is a malformed operand. Same
+            // width-agnostic rule as `wr`.
             MOV => {
                 let moves = match operand {
-                    Operand::Symbols(s) if s.len() == n => s,
+                    Operand::Symbols(s) if (1..=16).contains(&s.len()) => s,
                     _ => return Err(Trap::BadOperand { at: 0 }),
                 };
                 let mut ops = Vec::new();
-                for (dev, &m) in (0u8..self.tape_count).zip(moves.iter()) {
+                for (dev, &m) in (0u8..).zip(moves.iter()) {
                     match m {
                         STAY => {}
                         LEFT => ops.push(MicroOp::MoveLeft { dev }),
@@ -166,6 +188,29 @@ impl Arch for Tm1 {
                 }
                 ops
             }
+            // `trap #kind`: 0 → unmapped-read, 1 → unmapped-write; any other
+            // kind is a malformed operand (numeric kinds leave room for
+            // named kinds later without a grammar break).
+            TRAP => match imm(operand)? {
+                0 => vec![MicroOp::Raise {
+                    kind: RaisedTrapKind::UnmappedRead,
+                }],
+                1 => vec![MicroOp::Raise {
+                    kind: RaisedTrapKind::UnmappedWrite,
+                }],
+                _ => return Err(Trap::BadOperand { at: 0 }),
+            },
+            // `call.m target, F`: the framed-call operand carries the rel
+            // displacement and the frame descriptor's table-section offset.
+            CALL_M => match operand {
+                Operand::FramedCall { rel, table } => vec![MicroOp::CallFrame {
+                    rel: *rel,
+                    frame: *table,
+                }],
+                _ => return Err(Trap::BadOperand { at: 0 }),
+            },
+            // `retx #k`: leave the active frame through exit `k`.
+            RETX => vec![MicroOp::RetX { k: imm(operand)? }],
             JMP => vec![MicroOp::JumpRel(off32(operand)?)],
             JM => vec![MicroOp::JumpRelIf {
                 off: off32(operand)?,
@@ -193,29 +238,27 @@ mod tests {
     use mtc_core::vm::{MicroOp, Operand, OperandKind};
 
     /// Every defined TM-1 opcode.
-    const ALL_OPCODES: [u8; 16] = [
-        NOP, STP, HLT, RD, MTC, DJMP, WR, JMP, JM, JNM, CALL, RET, ENT, BRK, MOV, CALL_S,
+    const ALL_OPCODES: [u8; 19] = [
+        NOP, STP, HLT, RD, MTC, DJMP, WR, JMP, JM, JNM, CALL, RET, ENT, BRK, MOV, TRAP, CALL_M,
+        RETX, CALL_S,
     ];
 
-    /// A valid operand for `op`'s operand kind, filling symbol vectors to
-    /// `arch.tape_count` with values that lower without error for both `wr`
-    /// (0 → write 0) and `mov` (0 → stay).
-    fn valid_operand(arch: &Tm1, op: u8) -> Operand {
-        match arch.operand_kind(op).unwrap() {
+    /// A valid operand for `op`'s operand kind, with values that lower
+    /// without error for every opcode of that kind (0 → write 0 / stay for
+    /// vectors, `#0` → unmapped-read / exit 0 for immediates).
+    fn valid_operand(op: u8) -> Operand {
+        match Tm1::new(2).operand_kind(op).unwrap() {
             OperandKind::None => Operand::None,
             OperandKind::RelI8 => Operand::I8(0),
             OperandKind::RelI32 => Operand::I32(0),
             // Both vector kinds fetch to `Operand::Symbols`; 0 lowers
             // cleanly for `wr` (write 0) and `mov` (stay) alike.
-            OperandKind::SymbolVec | OperandKind::MoveVec => {
-                Operand::Symbols(vec![0; usize::from(arch.tape_count)])
-            }
+            OperandKind::SymbolVec | OperandKind::MoveVec => Operand::Symbols(vec![0, 0]),
             OperandKind::TableRef => Operand::Table(0),
-            // No TM-1 opcode carries an immediate or a framed-call operand
-            // yet (those instructions arrive with the frames dialect).
-            OperandKind::Imm8 | OperandKind::FramedCall => {
-                unreachable!("no TM-1 opcode uses this operand kind yet")
-            }
+            // `trap #0` / `retx #0` lower without error; `call.m` takes a
+            // rel displacement plus a frame table offset.
+            OperandKind::Imm8 => Operand::Imm(0),
+            OperandKind::FramedCall => Operand::FramedCall { rel: 0, table: 0 },
         }
     }
 
@@ -236,6 +279,16 @@ mod tests {
         }
         assert!(matches!(a.operand_kind(WR), Some(OperandKind::SymbolVec)));
         assert!(matches!(a.operand_kind(MOV), Some(OperandKind::MoveVec)));
+        for op in [TRAP, RETX] {
+            assert!(
+                matches!(a.operand_kind(op), Some(OperandKind::Imm8)),
+                "opcode {op:#04x}"
+            );
+        }
+        assert!(matches!(
+            a.operand_kind(CALL_M),
+            Some(OperandKind::FramedCall)
+        ));
         for op in [JMP, JM, JNM, CALL] {
             assert!(
                 matches!(a.operand_kind(op), Some(OperandKind::RelI32)),
@@ -248,7 +301,9 @@ mod tests {
     #[test]
     fn operand_kind_is_none_for_unknown_and_reserved_opcodes() {
         let a = Tm1::new(2);
-        for invalid in [0x00u8, 0x10, 0x11, 0x12, 0x13, 0x14, 0x1A, 0x1C, 0x80, 0xFF] {
+        // 0x11 (trap), 0x13 (call.m), 0x14 (retx) are now defined; 0x12
+        // (wrmv) is still the one reserved-but-undefined opcode.
+        for invalid in [0x00u8, 0x10, 0x12, 0x1A, 0x1C, 0x80, 0xFF] {
             assert!(
                 a.operand_kind(invalid).is_none(),
                 "opcode {invalid:#04x} must be unknown"
@@ -273,22 +328,17 @@ mod tests {
     }
 
     #[test]
-    fn rd_reads_every_tape_with_slot_equal_dev() {
-        let a = Tm1::new(4);
-        assert_eq!(
-            a.lower(RD, &Operand::None).unwrap(),
-            vec![
-                MicroOp::Read { dev: 0, slot: 0 },
-                MicroOp::Read { dev: 1, slot: 1 },
-                MicroOp::Read { dev: 2, slot: 2 },
-                MicroOp::Read { dev: 3, slot: 3 },
-            ]
-        );
-        // A single-tape machine reads exactly one device.
-        assert_eq!(
-            Tm1::new(1).lower(RD, &Operand::None).unwrap(),
-            vec![MicroOp::Read { dev: 0, slot: 0 }]
-        );
+    fn rd_lowers_to_a_single_read_all() {
+        // `rd` no longer expands per-tape at lower time — it lowers to one
+        // width-agnostic `ReadAll`, which the VM expands to the machine
+        // width or the active frame's arity at execution. The lowering is
+        // independent of the constructor's declared tape count.
+        for tapes in [1u8, 4, 16] {
+            assert_eq!(
+                Tm1::new(tapes).lower(RD, &Operand::None).unwrap(),
+                vec![MicroOp::ReadAll]
+            );
+        }
     }
 
     #[test]
@@ -378,17 +428,100 @@ mod tests {
     }
 
     #[test]
-    fn wr_and_mov_require_operand_length_equal_to_tape_count() {
+    fn wr_and_mov_accept_any_width_1_to_16() {
+        // Width no longer has to equal the machine's tape count: a routine
+        // body authored at a narrower arity lowers freely. The arch accepts
+        // any `1..=16`-wide vector; the per-function arity match is the
+        // assembler's static check (signed functions only).
         let a = Tm1::new(3);
         for op in [WR, MOV] {
-            assert!(
-                a.lower(op, &Operand::Symbols(vec![0, 0, 0])).is_ok(),
-                "opcode {op:#04x} length 3 on a 3-tape machine"
-            );
-            assert!(a.lower(op, &Operand::Symbols(vec![0, 0])).is_err());
-            assert!(a.lower(op, &Operand::Symbols(vec![0, 0, 0, 0])).is_err());
+            for width in [1usize, 2, 3, 4, 16] {
+                assert!(
+                    a.lower(op, &Operand::Symbols(vec![0; width])).is_ok(),
+                    "opcode {op:#04x} width {width}"
+                );
+            }
+            // Empty and over-wide vectors, and a non-vector operand, are
+            // still malformed.
+            assert!(a.lower(op, &Operand::Symbols(vec![])).is_err());
+            assert!(a.lower(op, &Operand::Symbols(vec![0; 17])).is_err());
             assert!(a.lower(op, &Operand::None).is_err());
         }
+    }
+
+    #[test]
+    fn vector_device_index_is_the_position_not_the_tape_count() {
+        // The device index derives from the vector position, independent of
+        // the constructor's tape count: a width-3 vector on a 2-tape arch
+        // still targets devices 0..=2.
+        let a = Tm1::new(2);
+        assert_eq!(
+            a.lower(WR, &Operand::Symbols(vec![KEEP, KEEP, 3])).unwrap(),
+            vec![MicroOp::Write { dev: 2, index: 3 }]
+        );
+        assert_eq!(
+            a.lower(MOV, &Operand::Symbols(vec![STAY, STAY, RIGHT]))
+                .unwrap(),
+            vec![MicroOp::MoveRight { dev: 2 }]
+        );
+    }
+
+    #[test]
+    fn trap_lowers_to_the_two_raise_kinds_and_rejects_other_kinds() {
+        let a = Tm1::new(2);
+        assert_eq!(
+            a.lower(TRAP, &Operand::Imm(0)).unwrap(),
+            vec![MicroOp::Raise {
+                kind: RaisedTrapKind::UnmappedRead
+            }]
+        );
+        assert_eq!(
+            a.lower(TRAP, &Operand::Imm(1)).unwrap(),
+            vec![MicroOp::Raise {
+                kind: RaisedTrapKind::UnmappedWrite
+            }]
+        );
+        // Kind 2 has no meaning yet: a lower-time malformed operand.
+        assert_eq!(
+            a.lower(TRAP, &Operand::Imm(2)),
+            Err(Trap::BadOperand { at: 0 })
+        );
+        // Wrong operand shape is also malformed.
+        assert!(a.lower(TRAP, &Operand::None).is_err());
+    }
+
+    #[test]
+    fn call_m_lowers_the_rel_and_frame_into_a_call_frame() {
+        let a = Tm1::new(2);
+        assert_eq!(
+            a.lower(
+                CALL_M,
+                &Operand::FramedCall {
+                    rel: -12,
+                    table: 40
+                }
+            )
+            .unwrap(),
+            vec![MicroOp::CallFrame {
+                rel: -12,
+                frame: 40
+            }]
+        );
+        // Wrong operand shape is malformed.
+        assert!(a.lower(CALL_M, &Operand::I32(0)).is_err());
+    }
+
+    #[test]
+    fn retx_passes_the_exit_index_through() {
+        let a = Tm1::new(2);
+        for k in [0u8, 1, 5] {
+            assert_eq!(
+                a.lower(RETX, &Operand::Imm(k)).unwrap(),
+                vec![MicroOp::RetX { k }]
+            );
+        }
+        // Wrong operand shape is malformed.
+        assert!(a.lower(RETX, &Operand::None).is_err());
     }
 
     #[test]
@@ -408,10 +541,12 @@ mod tests {
     #[test]
     fn invalid_opcode_lowers_to_invalid_opcode_trap() {
         let a = Tm1::new(2);
+        // 0x12 (wrmv) is reserved but undefined — the one opcode below
+        // 0x15 with no lowering.
         assert_eq!(
-            a.lower(0x11, &Operand::None),
+            a.lower(0x12, &Operand::None),
             Err(Trap::InvalidOpcode {
-                opcode: 0x11,
+                opcode: 0x12,
                 at: 0
             })
         );
@@ -421,7 +556,7 @@ mod tests {
     fn no_lowering_ever_emits_latch_match() {
         let a = Tm1::new(2);
         for op in ALL_OPCODES {
-            let ops = a.lower(op, &valid_operand(&a, op)).unwrap();
+            let ops = a.lower(op, &valid_operand(op)).unwrap();
             assert!(
                 !ops.iter().any(|m| matches!(m, MicroOp::LatchMatch(_))),
                 "opcode {op:#04x} must not latch the match register"
@@ -451,7 +586,9 @@ mod tests {
 
     #[test]
     fn sixteen_tapes_is_the_upper_bound() {
+        // The upper bound is a constructor guard now; lowering itself is
+        // width-agnostic, so `rd` is one `ReadAll` regardless.
         let a = Tm1::new(16);
-        assert_eq!(a.lower(RD, &Operand::None).unwrap().len(), 16);
+        assert_eq!(a.lower(RD, &Operand::None).unwrap(), vec![MicroOp::ReadAll]);
     }
 }

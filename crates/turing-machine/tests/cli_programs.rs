@@ -73,7 +73,7 @@ fn version_reports_exactly_two_lines() {
             mtc_turing_machine::TM1_TMA_DIALECT_VERSION
         )
     );
-    assert_eq!(mtc_turing_machine::TM1_TMA_DIALECT_VERSION, "0.1");
+    assert_eq!(mtc_turing_machine::TM1_TMA_DIALECT_VERSION, "0.2");
     assert_eq!(out.code, 0);
 }
 

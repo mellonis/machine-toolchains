@@ -17,8 +17,10 @@ use crate::arch::opcodes::*;
 /// pre-1.0 it is 0.N and N bumps on ANY grammar change. 0.1: the initial
 /// TM-1 assembly surface — the sixteen mnemonics below plus the sectioned
 /// `.routine` / `.section` / `.row` / `.targets` / `.rept` directives and
-/// the `[..]` write- and move-vector operand forms.
-pub const TM1_TMA_DIALECT_VERSION: &str = "0.1";
+/// the `[..]` write- and move-vector operand forms. 0.2: the frames
+/// instructions — `trap #kind`, the framed call `call.m target, F`, and the
+/// multi-exit return `retx #k` — with the `#imm` immediate operand form.
+pub const TM1_TMA_DIALECT_VERSION: &str = "0.2";
 
 /// The TM-1 mnemonic table (the `.tma` dialect). Opcode/operand shapes
 /// mirror the TM-1 arch module (`crate::arch`); flows follow the same
@@ -27,7 +29,7 @@ pub const TM1_TMA_DIALECT_VERSION: &str = "0.1";
 /// treat both dialects uniformly.
 pub fn tm1_syntax() -> ArchSyntax {
     use Flow::{Branch, Call as CallF, FallThrough as FT, Jump, Stop};
-    use OperandKind::{MoveVec, None as N, RelI8, RelI32, SymbolVec, TableRef};
+    use OperandKind::{FramedCall, Imm8, MoveVec, None as N, RelI8, RelI32, SymbolVec, TableRef};
     ArchSyntax {
         entries: vec![
             SyntaxEntry {
@@ -128,6 +130,32 @@ pub fn tm1_syntax() -> ArchSyntax {
                 mnemonic: "mov",
                 operand: MoveVec,
                 flow: FT,
+            },
+            // Raise a typed trap explicitly (`trap #kind`): a plain
+            // fall-through, like `nop` for the reachability walk.
+            SyntaxEntry {
+                opcode: TRAP,
+                mnemonic: "trap",
+                operand: Imm8,
+                flow: FT,
+            },
+            // Framed call (`call.m target, F`): the call flow (a static
+            // successor plus the fall-through) matches plain `call`. Its
+            // relaxation to a short form is a later phase — `relax_pairs`
+            // stays call-only.
+            SyntaxEntry {
+                opcode: CALL_M,
+                mnemonic: "call.m",
+                operand: FramedCall,
+                flow: CallF,
+            },
+            // Multi-exit frame return (`retx #k`): a transfer with no
+            // static successor, so `Stop` for the walk — mirrors `ret`.
+            SyntaxEntry {
+                opcode: RETX,
+                mnemonic: "retx",
+                operand: Imm8,
+                flow: Stop,
             },
             SyntaxEntry {
                 opcode: CALL_S,

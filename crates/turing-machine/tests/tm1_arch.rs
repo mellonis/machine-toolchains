@@ -40,7 +40,10 @@ fn two_tape_read_match_dispatch_move_write_stop() {
     tables.extend(target.to_le_bytes());
 
     let arch = Tm1::new(2);
-    let mut core = Core::new(&arch, 0);
+    // `rd` lowers to `ReadAll`, which expands to the core's device count at
+    // execution; drive it over both tapes by wiring that count (the
+    // `Machine` runner wires it from the executable's tape count).
+    let mut core = Core::new(&arch, 0).with_device_count(2);
     let mut stack = ReturnStack::new(4);
     let mut tape0 = InfiniteTape::new();
     let mut tape1 = InfiniteTape::new();

@@ -63,9 +63,53 @@ hit:    wr   [1, -]
 miss:   hlt
 ";
 
+/// The 0.2 frames instructions — `trap #kind`, the framed call
+/// `call.m target, F`, and the multi-exit return `retx #k`. The frame
+/// operand references a match table here: to the assembler's fixup
+/// machinery a frame label is just a table label, so a `call.m` naming a
+/// match table attributes fine. The frame-descriptor table kind and its
+/// semantic checks arrive with the `.frame` directive (a later phase) —
+/// this is the T5-tightening point.
+const FRAMES_MNEMONICS: &str = "\
+.routine main, tapes=2, alpha=(2, 2)
+.routine helper, tapes=2, alpha=(2, 2)
+.section tables
+T0: .row [1, 1]
+    .row [*, *]
+F0: .row [1, 1]
+.section code
+.func main
+        rd
+        mtc     T0
+        trap    #0
+        call.m  helper, F0
+        stp
+.func helper
+        retx    #1
+";
+
 #[test]
-fn dialect_version_is_0_1() {
-    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.1");
+fn dialect_version_is_0_2() {
+    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.2");
+}
+
+#[test]
+fn frames_instructions_assemble_and_object_round_trip() {
+    // `trap #0`, `call.m helper, F0`, and `retx #1` assemble and round-trip
+    // through the object-level disassembler (byte-identical dis ∘ asm, the
+    // same fixpoint the other mnemonics use). `call.m` renders at the
+    // object level; its executable-level rendering lands with `.frame`.
+    let obj1 = assemble(FRAMES_MNEMONICS, false).expect("frames program assembles");
+    let text = disassemble_object(&obj1);
+    for needle in ["trap", "#0", "call.m", "retx", "#1"] {
+        assert!(text.contains(needle), "dis missing `{needle}`:\n{text}");
+    }
+    let obj2 = assemble(&text, false).expect("rendered frames disassembly re-assembles");
+    assert_eq!(
+        obj1.to_bytes(),
+        obj2.to_bytes(),
+        "frames dis ∘ asm must reproduce the object byte-for-byte:\n{text}"
+    );
 }
 
 #[test]
