@@ -274,6 +274,52 @@ fn tape_count_mismatch_is_a_tool_error_naming_both_numbers() {
 }
 
 #[test]
+fn wide_alphabet_tape_writes_a_symbol_beyond_binary_and_stops() {
+    let dir = scratch("wide_alphabet");
+    // A one-tape, 3-symbol program: write symbol 2 at the start cell, stop.
+    // Under a physically two-symbol tape `wr [2]` would fault; the run builds
+    // a width-3 `WideTape` from the band's effective alphabet, so it succeeds.
+    let src = "\
+.routine main, tapes=1, alpha=(3)
+.section code
+.func main
+        wr   [2]
+        stp
+";
+    let exe = asm_and_link(&dir, "prog", src);
+    let tape = dir.join("prog.tmt");
+    execute(&args(&[
+        "tape",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "-o",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let out = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        out.code, 0,
+        "wide-alphabet write stops (exit 0):\n{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("Stopped"), "{}", out.stdout);
+    // The final tape shows the written symbol under its 3-glyph alphabet.
+    assert!(
+        out.stdout.contains("|2|"),
+        "final tape carries the written symbol:\n{}",
+        out.stdout
+    );
+}
+
+#[test]
 fn tape_new_sizes_per_tape_alphabets_from_cardinalities() {
     let dir = scratch("tape_new_alphabets");
     // A two-tape image with distinct cardinalities (2, 3); the minted MT

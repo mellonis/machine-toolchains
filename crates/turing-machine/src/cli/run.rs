@@ -11,8 +11,8 @@ use mtc_core::formats::executable::Executable;
 use mtc_core::formats::tapeblock::TapeBlockFile;
 use mtc_core::linker::MapFile;
 use mtc_core::vm::{
-    ArchRegistry, DebugEvent, InfiniteTape, Machine, Outcome, PauseCause, RunLimits, RunOptions,
-    RunStats, Tape,
+    ArchRegistry, DebugEvent, Machine, Outcome, PauseCause, RunLimits, RunOptions, RunStats, Tape,
+    WideTape,
 };
 
 use crate::arch::Tm1;
@@ -101,12 +101,18 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         .iter()
         .map(|t| t.alphabet.clone().unwrap_or_else(|| block.alphabet.clone()))
         .collect();
-    let mut tapes: Vec<InfiniteTape> = block
+    // A `WideTape` per band, sized to that band's effective-alphabet length —
+    // a binary tape is just width 2. `InfiniteTape` is physically two-symbol,
+    // so TM-1's wide alphabets need the general device (docs/isa.md (the tape
+    // and device bus)).
+    let mut tapes: Vec<WideTape> = block
         .tapes
         .iter()
         .enumerate()
         .map(|(i, snap)| {
-            InfiniteTape::from_snapshot(snap).map_err(|e| format!("{tape_path}: tape {i}: {e:?}"))
+            let width = u32::try_from(alphabets[i].len()).expect("alphabet width fits u32");
+            WideTape::from_snapshot(snap, width)
+                .map_err(|e| format!("{tape_path}: tape {i}: {e:?}"))
         })
         .collect::<Result<_, _>>()?;
 
