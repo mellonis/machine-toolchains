@@ -4,11 +4,6 @@
 pub mod crc32;
 pub(crate) mod io;
 
-/// Format version written into every v1 container (`MX`, `MT`). `MO` has
-/// its own constant, `object::OBJECT_FORMAT_VERSION`, since it evolved
-/// past v1 independently.
-pub const FORMAT_VERSION: u16 = 1;
-
 /// Architecture ids carried in `MO`/`MX` headers. The formats layer
 /// stores them verbatim; only the VM's arch registry judges them.
 pub const ARCH_PM1: u8 = 0x01;

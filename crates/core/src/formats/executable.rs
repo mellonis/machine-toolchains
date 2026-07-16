@@ -62,7 +62,7 @@ impl Executable {
 
     /// True when the image carries no v2-only data and must serialize as v1.
     fn is_v1_shape(&self) -> bool {
-        self.tape_count <= 1
+        self.tape_count == 1
             && self.profile == 0
             && self.alphabet_cardinalities.is_empty()
             && self.tables.is_empty()
@@ -322,6 +322,11 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[17..21].try_into().unwrap()), 2); // code_size
         assert_eq!(u32::from_le_bytes(bytes[21..25].try_into().unwrap()), 4); // table_size
         assert_eq!(u32::from_le_bytes(bytes[25..29].try_into().unwrap()), 3); // cardinality[0]
+        assert_eq!(u32::from_le_bytes(bytes[29..33].try_into().unwrap()), 128); // cardinality[1]
+        // Sections follow the cardinalities: code first, then tables. Pinning
+        // both catches a symmetric code|tables swap.
+        assert_eq!(&bytes[33..35], &[0x10, 0x02]); // code section
+        assert_eq!(&bytes[35..39], &[1, 1, 0, 5]); // tables section
     }
 
     #[test]

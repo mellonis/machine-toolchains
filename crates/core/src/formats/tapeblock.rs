@@ -376,6 +376,42 @@ mod tests {
         }
     }
 
+    /// Pins the absolute v2 byte offsets so a symmetric field transposition
+    /// (e.g. head before cells, or origin/cells_len swapped) would fail.
+    /// Layout: magic3 + ver2 + flags1 + crc4 + block-alphabet + tape_count1 +
+    /// per-tape (origin8 + cells_len4 + cells + head8 + own-glyph-table).
+    #[test]
+    fn v2_layout_is_exact() {
+        let bytes = sample_v2().to_bytes();
+        assert_eq!(&bytes[0..3], b"MT\x01"); // magic
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2); // version
+        assert_eq!(bytes[5], 0); // flags
+        // [6..10] crc
+        // Block fallback alphabet ["_"].
+        assert_eq!(bytes[10], 1); // block_alphabet_count
+        assert_eq!(u16::from_le_bytes(bytes[11..13].try_into().unwrap()), 1); // "_" byte-len
+        assert_eq!(bytes[13], b'_'); // "_" glyph
+        assert_eq!(bytes[14], 2); // tape_count
+        // Tape 0: cells [0,1,2], own alphabet ["_","0","1"].
+        assert_eq!(i64::from_le_bytes(bytes[15..23].try_into().unwrap()), 0); // origin
+        assert_eq!(u32::from_le_bytes(bytes[23..27].try_into().unwrap()), 3); // cells_len
+        assert_eq!(&bytes[27..30], &[0, 1, 2]); // cells
+        assert_eq!(i64::from_le_bytes(bytes[30..38].try_into().unwrap()), 0); // head
+        assert_eq!(bytes[38], 3); // own_alphabet_count
+        assert_eq!(u16::from_le_bytes(bytes[39..41].try_into().unwrap()), 1); // "_" byte-len
+        assert_eq!(bytes[41], b'_');
+        assert_eq!(u16::from_le_bytes(bytes[42..44].try_into().unwrap()), 1); // "0" byte-len
+        assert_eq!(bytes[44], b'0');
+        assert_eq!(u16::from_le_bytes(bytes[45..47].try_into().unwrap()), 1); // "1" byte-len
+        assert_eq!(bytes[47], b'1');
+        // Tape 1: cells [0], own alphabet None → inherit marker.
+        assert_eq!(i64::from_le_bytes(bytes[48..56].try_into().unwrap()), 0); // origin
+        assert_eq!(u32::from_le_bytes(bytes[56..60].try_into().unwrap()), 1); // cells_len
+        assert_eq!(&bytes[60..61], &[0]); // cells
+        assert_eq!(i64::from_le_bytes(bytes[61..69].try_into().unwrap()), 0); // head
+        assert_eq!(bytes[69], 0); // own_alphabet_count == 0 (inherit block)
+    }
+
     #[test]
     fn v2_round_trips_per_tape_alphabets() {
         let block = sample_v2();
