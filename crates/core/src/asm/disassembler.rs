@@ -302,6 +302,82 @@ fn render_dispatch_table(
     out.push('\n');
 }
 
+/// One canonical `.routine` line (newline included), the exact grid
+/// `fmt.rs`'s printer normalizes to.
+fn routine_line(name: &str, tapes: u8, cardinalities: &[u32]) -> String {
+    let alpha = cardinalities
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(".routine {name}, tapes={tapes}, alpha=({alpha})\n")
+}
+
+/// The entries of the dispatch table at `start` in a LINKED table
+/// section (`entry_count u16 LE`, then `entry_count × u32 LE` absolute
+/// code addresses). Defensive: a truncated table yields the entries
+/// that fit rather than panicking (the linker never emits one).
+fn dispatch_entries(tables: &[u8], start: u32) -> Vec<u32> {
+    let base = start as usize;
+    let (Some(&lo), Some(&hi)) = (tables.get(base), tables.get(base + 1)) else {
+        return Vec::new();
+    };
+    let count = u16::from_le_bytes([lo, hi]) as usize;
+    let mut entries = Vec::with_capacity(count);
+    let mut pos = base + 2;
+    for _ in 0..count {
+        let Some(bytes) = tables.get(pos..pos + 4) else {
+            break;
+        };
+        entries.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+        pos += 4;
+    }
+    entries
+}
+
+/// One dispatch table of a LINKED image as a `.targets` line: entries
+/// are absolute code addresses, resolved through the map-derived label
+/// names in `labels`. An unresolved entry renders as raw hex, flagged
+/// by a comment at the grid comment column — a mapless rendering is
+/// read-only, since only label names make the text reassembleable.
+fn render_linked_dispatch_table(
+    out: &mut String,
+    name: &str,
+    tables: &[u8],
+    start: u32,
+    labels: &BTreeMap<u32, String>,
+) {
+    let entries = dispatch_entries(tables, start);
+    if entries.is_empty() {
+        return;
+    }
+    let mut names = Vec::with_capacity(entries.len());
+    let mut any_raw = false;
+    for target in entries {
+        match labels.get(&target) {
+            Some(n) => names.push(n.clone()),
+            None => {
+                any_raw = true;
+                names.push(format!("{target:#06x}"));
+            }
+        }
+    }
+    let line = grid_line(Some(name), ".targets", &names.join(", "));
+    out.push_str(&line);
+    if any_raw {
+        // grid_line emits no comment: pad the last physical line to the
+        // comment column by hand so the flag still lands on the grid.
+        let last_len = line.rsplit('\n').next().unwrap_or(&line).chars().count();
+        if last_len < COMMENT_COL {
+            out.push_str(&" ".repeat(COMMENT_COL - last_len));
+        } else {
+            out.push(' ');
+        }
+        out.push_str("; unresolved dispatch targets (no map labels)");
+    }
+    out.push('\n');
+}
+
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     let mut out = String::new();
     // Tables render first, in their own section, with `.section code`
@@ -335,6 +411,13 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
             SymbolDef::External => continue,
         };
         let code = &obj.blobs[blob as usize];
+        // A signed object re-emits each function's `.routine` line ahead
+        // of its `.func`, so dis ∘ asm preserves signatures (they are
+        // all-or-none per object, parallel to blobs — docs/formats.md
+        // (.pmo)).
+        if let Some(sig) = obj.signatures.as_ref().and_then(|s| s.get(blob as usize)) {
+            out.push_str(&routine_line(&symbol.name, sig.arity, &sig.cardinalities));
+        }
         out.push_str(&format!(
             ".func {}{}\n",
             symbol.name,
@@ -448,6 +531,10 @@ pub fn disassemble_executable(
     let mut instrs: BTreeMap<u32, Decoded> = BTreeMap::new();
     let mut roots: BTreeSet<u32> = BTreeSet::from([exe.entry]);
     let mut work: Vec<u32> = vec![exe.entry];
+    // Table starts discovered from TableRef operands (each names one
+    // table in `exe.tables`), and every dispatch table's entry addresses.
+    let mut table_kinds: BTreeMap<u32, TableKind> = BTreeMap::new();
+    let mut dispatch_targets: BTreeSet<u32> = BTreeSet::new();
     while let Some(addr) = work.pop() {
         if addr >= len || instrs.contains_key(&addr) {
             continue;
@@ -460,6 +547,28 @@ pub fn disassemble_executable(
         };
         let entry = syntax.by_mnemonic(mnemonic).unwrap();
         let next = addr + d.len;
+        // A TableRef operand names a table start; the kind comes from
+        // THIS instruction's flow (the same inference as object-level
+        // rendering — a FallThrough op is a pure lookup, any transfer
+        // dispatches THROUGH its table). A dispatch table's entries are
+        // code addresses the flow walk below cannot see, so they join
+        // the work list — as label candidates, never roots.
+        if let DecodedOperand::TableAddr(t) = operand
+            && !table_kinds.contains_key(t)
+        {
+            let kind = if entry.flow == Flow::FallThrough {
+                TableKind::Match
+            } else {
+                TableKind::Dispatch
+            };
+            table_kinds.insert(*t, kind);
+            if matches!(kind, TableKind::Dispatch) {
+                for target in dispatch_entries(&exe.tables, *t) {
+                    dispatch_targets.insert(target);
+                    work.push(target);
+                }
+            }
+        }
         match (entry.flow, operand) {
             (Flow::FallThrough, _) => work.push(next),
             (Flow::Stop, _) => {}
@@ -512,13 +621,75 @@ pub fn disassemble_executable(
         entry.mnemonic
     };
 
+    // Map-resolved names for dispatch targets: the label at that
+    // absolute address when the map carries one. Unresolved targets
+    // render as raw hex and get no code label — that rendering is
+    // read-only, since only label names make the text reassembleable.
+    let dispatch_label: BTreeMap<u32, String> = dispatch_targets
+        .iter()
+        .filter_map(|&addr| {
+            map?.functions.iter().find_map(|f| {
+                f.labels
+                    .iter()
+                    .find(|(_, a)| *a == addr)
+                    .map(|(n, _)| (addr, n.clone()))
+            })
+        })
+        .collect();
+
     let mut out = String::new();
+    // A sectioned (version-2) image opens with a synthesized `.routine`
+    // for the entry function: the header's tape count and per-tape
+    // alphabet cardinalities are exactly what the directive declares
+    // (docs/formats.md (executable image)). A code-only image emits
+    // nothing extra — byte-compatible with the pre-tables renderer.
+    let sectioned = exe.tape_count != 1
+        || exe.profile != 0
+        || !exe.alphabet_cardinalities.is_empty()
+        || !exe.tables.is_empty();
+    if sectioned {
+        out.push_str(&routine_line(
+            &func_name(exe.entry),
+            exe.tape_count,
+            &exe.alphabet_cardinalities,
+        ));
+    }
+    // Discovered tables render next in their own section, `T<n>` labels
+    // synthesized in ascending section-offset order; the code section's
+    // TableRef operands reference them by name below.
+    let mut table_labels: HashMap<u32, String> = HashMap::new();
+    if !table_kinds.is_empty() {
+        out.push_str(".section tables\n");
+        let bounds: Vec<u32> = table_kinds.keys().copied().collect();
+        for (idx, (&start, &kind)) in table_kinds.iter().enumerate() {
+            let name = format!("T{idx}");
+            table_labels.insert(start, name.clone());
+            let end = bounds
+                .get(idx + 1)
+                .copied()
+                .unwrap_or(exe.tables.len() as u32);
+            match kind {
+                TableKind::Match => render_match_table(&mut out, &name, &exe.tables, start, end),
+                TableKind::Dispatch => render_linked_dispatch_table(
+                    &mut out,
+                    &name,
+                    &exe.tables,
+                    start,
+                    &dispatch_label,
+                ),
+            }
+        }
+        out.push_str(".section code\n");
+    }
     for (i, &root) in roots.iter().enumerate() {
         let end = region_end(i);
         out.push_str(&format!(".func {}\n", func_name(root)));
 
-        // Jump-target labels within this region.
-        let mut targets = BTreeSet::new();
+        // Label names within this region: jump targets synthesize
+        // `LXXXX`; a map-resolved dispatch target keeps its map name so
+        // the `.targets` line above and the code line agree (a shared
+        // address takes the dispatch name).
+        let mut labels_at: BTreeMap<u32, String> = BTreeMap::new();
         for (_, d) in instrs.range(root..end) {
             if let Body::Instr {
                 mnemonic,
@@ -528,15 +699,18 @@ pub fn disassemble_executable(
                 let e = syntax.by_mnemonic(mnemonic).unwrap();
                 if e.flow != Flow::Call && *t > root && *t < end && roots.binary_search(t).is_err()
                 {
-                    targets.insert(*t);
+                    labels_at.insert(*t, format!("L{t:04X}"));
                 }
             }
+        }
+        for (&addr, name) in dispatch_label.range(root + 1..end) {
+            labels_at.insert(addr, name.clone());
         }
 
         let mut addr = root;
         let mut first = true;
         while addr < end {
-            let label_name = targets.contains(&addr).then(|| format!("L{addr:04X}"));
+            let label_name = labels_at.get(&addr).cloned();
             match instrs.get(&addr) {
                 None => {
                     push_byte_lines(
@@ -563,8 +737,18 @@ pub fn disassemble_executable(
                         DecodedOperand::Ints(v) => {
                             Some((entry.mnemonic, ints_operand_text(syntax, entry.operand, v)))
                         }
-                        // Numeric for now (later task: table labels).
-                        DecodedOperand::TableAddr(t) => Some((entry.mnemonic, t.to_string())),
+                        // Table reference: the synthesized `Tn` label of
+                        // the table at this section offset, falling back
+                        // to the raw offset if the section pass could not
+                        // place it (defensive — the operand itself is
+                        // what discovered every table).
+                        DecodedOperand::TableAddr(t) => Some((
+                            entry.mnemonic,
+                            table_labels
+                                .get(t)
+                                .cloned()
+                                .unwrap_or_else(|| t.to_string()),
+                        )),
                         DecodedOperand::RelTarget(t) => {
                             if entry.flow == Flow::Call && roots.binary_search(t).is_ok() {
                                 Some((far_mnemonic(entry), func_name(*t)))
@@ -572,7 +756,11 @@ pub fn disassemble_executable(
                                 // Tail jump to a function: symbol form.
                                 Some((far_mnemonic(entry), format!("@{}", func_name(*t))))
                             } else if entry.flow != Flow::Call && *t > root && *t < end {
-                                Some((entry.mnemonic, format!("L{t:04X}")))
+                                let label = labels_at
+                                    .get(t)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("L{t:04X}"));
+                                Some((entry.mnemonic, label))
                             } else {
                                 None // cross-region non-root: .byte fallback
                             }
@@ -847,6 +1035,45 @@ B:  stp
         // section, so reassembly would fault on unknown labels. Closing
         // that is the linked-image table path (phase 4b), out of scope
         // here; dispatch rendering is read-only for now.
+    }
+
+    #[test]
+    fn object_dis_renders_routine_signatures_and_round_trips() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        let syntax = fake_syntax();
+        // Signatures are all-or-none per object: both functions signed.
+        let src = "\
+.routine main, tapes=2, alpha=(3, 5)
+.routine helper, tapes=1, alpha=(2)
+.func main
+        stp
+.func helper
+        nop
+        stp
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        // Each `.routine` re-emits immediately ahead of its `.func`
+        // (the directive must precede its function).
+        let expected = "\
+.routine main, tapes=2, alpha=(3, 5)
+.func main
+        stp
+.routine helper, tapes=1, alpha=(2)
+.func helper
+        nop
+        stp
+";
+        assert_eq!(dis, expected, "signed-object disassembly:\n{dis}");
+        // Already canonical under fmt, and dis ∘ asm preserves the
+        // signatures — the round trip Task 2 left lossy.
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
     }
 
     #[test]
