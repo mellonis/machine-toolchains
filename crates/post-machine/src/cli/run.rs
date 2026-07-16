@@ -190,6 +190,9 @@ fn parse_profile(text: &str) -> Result<TactProfile, String> {
         move_cost: parse(m)?,
         read_cost: parse(r)?,
         write_cost: parse(w)?,
+        // PM-1 never issues a table read; the `--tact-profile M,R,W`
+        // surface stays three-valued. Default to the electronic price.
+        table_read_cost: TactProfile::ELECTRONIC.table_read_cost,
     })
 }
 

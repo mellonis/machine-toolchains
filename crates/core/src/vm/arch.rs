@@ -102,7 +102,8 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
 /// 0x10 read dev0→slot0 + dev1→slot1 (probes TR latching) |
 /// 0x11 mtc @table (abs table offset) | 0x12 djmp @table (probes the table engine) |
 /// 0x13 wr(vec) on dev 1 | 0x14 left on dev 1 (probes device-indexed tape micro-ops) |
-/// 0x15 raise unmapped-read | 0x16 raise unmapped-write (probes Raise micro-op)
+/// 0x15 raise unmapped-read | 0x16 raise unmapped-write (probes Raise micro-op) |
+/// 0x17 read dev0→slot0 (single-tape TR latch, for the table-program end-to-end test)
 #[cfg(test)]
 pub(crate) mod test_arch {
     use super::*;
@@ -116,7 +117,7 @@ pub(crate) mod test_arch {
 
         fn operand_kind(&self, opcode: u8) -> Option<OperandKind> {
             match opcode {
-                0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14..=0x16 => Some(OperandKind::None),
+                0x01..=0x06 | 0x0B | 0x0E | 0x10 | 0x14..=0x17 => Some(OperandKind::None),
                 0x07 | 0x13 => Some(OperandKind::SymbolVec),
                 0x08 => Some(OperandKind::RelI8),
                 0x09 | 0x0A | 0x11 | 0x12 => Some(OperandKind::RelI32),
@@ -170,6 +171,7 @@ pub(crate) mod test_arch {
                 (0x16, _) => vec![MicroOp::Raise {
                     kind: RaisedTrapKind::UnmappedWrite,
                 }],
+                (0x17, _) => vec![MicroOp::Read { dev: 0, slot: 0 }],
                 _ => return Err(Trap::BadOperand { at: 0 }),
             })
         }

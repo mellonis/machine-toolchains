@@ -47,6 +47,7 @@ pub struct TactProfile {
     pub move_cost: u32,
     pub read_cost: u32,
     pub write_cost: u32,
+    pub table_read_cost: u32,
 }
 
 impl TactProfile {
@@ -54,6 +55,7 @@ impl TactProfile {
         move_cost: 1,
         read_cost: 1,
         write_cost: 1,
+        table_read_cost: 1,
     };
 }
 
@@ -111,6 +113,7 @@ pub(crate) fn step_instruction(
     code: &[u8],
     stack: &mut ReturnStack,
     devices: &mut [&mut dyn Tape],
+    tables: &[u8],
     profile: TactProfile,
     limits: RunLimits,
     stats: &mut RunStats,
@@ -187,8 +190,13 @@ pub(crate) fn step_instruction(
                         },
                         None => BusResponse::Fault(DeviceFault::NoSuchDevice { dev }),
                     },
-                    // task 9 wires the real table ROM
-                    BusRequest::TableRead { .. } => BusResponse::OutOfTable,
+                    BusRequest::TableRead { addr } => match tables.get(addr as usize) {
+                        Some(&byte) => {
+                            stats.stall_tacts += u64::from(profile.table_read_cost);
+                            BusResponse::Byte(byte)
+                        }
+                        None => BusResponse::OutOfTable,
+                    },
                 };
                 if over_tacts(stats) {
                     return StepEvent::Finished(Outcome::Trapped(Trap::TactLimit));
@@ -222,6 +230,7 @@ pub fn run(
     code: &[u8],
     stack: &mut ReturnStack,
     devices: &mut [&mut dyn Tape],
+    tables: &[u8],
     profile: TactProfile,
     limits: RunLimits,
 ) -> RunResult {
@@ -233,6 +242,7 @@ pub fn run(
             code,
             stack,
             devices,
+            tables,
             profile,
             limits,
             &mut stats,
@@ -269,7 +279,15 @@ mod tests {
         let mut stack = ReturnStack::new(4);
         let mut tape = InfiniteTape::new();
         let mut devices: Vec<&mut dyn Tape> = vec![&mut tape];
-        let result = run(&mut core, code, &mut stack, &mut devices, profile, limits);
+        let result = run(
+            &mut core,
+            code,
+            &mut stack,
+            &mut devices,
+            &[],
+            profile,
+            limits,
+        );
         (result, tape)
     }
 
@@ -310,6 +328,7 @@ mod tests {
             move_cost: 50,
             read_cost: 5,
             write_cost: 10,
+            table_read_cost: 1,
         };
         let (r, _) = drive(&[0x06, 0x02], RunLimits::default(), mech);
         assert_eq!(
@@ -433,6 +452,7 @@ mod tests {
             &[0x14, 0x02],
             &mut stack,
             &mut devices,
+            &[],
             TactProfile::ELECTRONIC,
             RunLimits::default(),
         );
@@ -442,5 +462,44 @@ mod tests {
                 fault: crate::vm::trap::DeviceFault::NoSuchDevice { dev: 1 }
             })
         );
+    }
+
+    /// A conditional-state program runs end to end through the driver and
+    /// table reads are priced as stall tacts.
+    #[test]
+    fn table_program_end_to_end() {
+        // match table (width 1): row [1] → MR=1 ; dispatch: 1 entry → addr of stp.
+        // InfiniteTape's alphabet is {0, 1}, so the head symbol and the match
+        // row are 1 (the brief's 2 predates knowing the tape is two-symbol).
+        // code: 0x17 dev0 read (→ tr0); then mtc(0), djmp(4), stp at the
+        // dispatch target.
+        let mut tables = vec![1, 1, 0, 1]; // match table at 0, 4 bytes
+        let stp_addr: u32 = 11; // code: 0x17, 0x11+4, 0x12+4 → 1+5+5 = 11
+        tables.extend([1, 0]); // dispatch: 1 entry
+        tables.extend(stp_addr.to_le_bytes());
+        let mut code = vec![0x17, 0x11];
+        code.extend(0i32.to_le_bytes());
+        code.push(0x12);
+        code.extend(4i32.to_le_bytes());
+        code.push(0x02); // stp at 11
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0);
+        let mut stack = ReturnStack::new(4);
+        let mut tape = InfiniteTape::new();
+        tape.write(1).unwrap(); // head cell = symbol 1 → row matches
+        let mut devices: Vec<&mut dyn crate::vm::devices::Tape> = vec![&mut tape];
+        let r = run(
+            &mut core,
+            &code,
+            &mut stack,
+            &mut devices,
+            &tables,
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        );
+        assert_eq!(r.outcome, Outcome::Stopped);
+        // 4 match-table bytes + 2 dispatch count bytes + 4 entry bytes = 10
+        // table reads priced at table_read_cost=1, plus 1 device read.
+        assert_eq!(r.stats.stall_tacts, 10 + 1);
     }
 }

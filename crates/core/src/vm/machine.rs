@@ -120,11 +120,14 @@ impl<'a> Machine<'a> {
         core.set_mf(device.read() == 1);
         let mut stack = ReturnStack::new(opts.stack_depth);
         let mut devices: [&mut dyn Tape; 1] = [device];
+        // PM-1 has no table section yet — an empty blob (docs/isa.md
+        // (match tables)); phase 3 feeds the MX v2 table section here.
         run(
             &mut core,
             &self.code,
             &mut stack,
             &mut devices,
+            &[],
             opts.profile,
             opts.limits,
         )

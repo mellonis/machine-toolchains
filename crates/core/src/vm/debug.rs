@@ -114,11 +114,14 @@ impl<'a> DebugSession<'a> {
             self.core.set_mf(device.read() == 1);
         }
         let mut devices: [&mut dyn Tape; 1] = [device];
+        // PM-1 has no table section yet — an empty blob (docs/isa.md
+        // (match tables)); phase 3 feeds the MX v2 table section here.
         let event = step_instruction(
             &mut self.core,
             &self.code,
             &mut self.stack,
             &mut devices,
+            &[],
             self.profile,
             self.limits,
             &mut self.stats,
