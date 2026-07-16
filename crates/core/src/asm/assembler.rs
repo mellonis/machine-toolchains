@@ -144,10 +144,16 @@ pub fn assemble(
     let mut blob_table_refs: Vec<Vec<TableRefHole>> = Vec::with_capacity(functions.len());
 
     for (blob_idx, function) in functions.iter().enumerate() {
+        // A signed function (its file declares `.routine`) carries an
+        // arity; vector operands inside it are statically width-checked
+        // against it. Signatures are caps-gated (no `.routine` without the
+        // tables cap) and parallel the functions by index when present.
+        let sig_arity = lowered.signatures.as_ref().map(|sigs| sigs[blob_idx].arity);
         let assembled = assemble_function(
             syntax,
             function,
             blob_idx as u32,
+            sig_arity,
             &mut symbols,
             &mut symbol_index,
         )?;
@@ -188,6 +194,7 @@ fn assemble_function(
     syntax: &ArchSyntax,
     function: &SourceFunction,
     blob_idx: u32,
+    sig_arity: Option<u8>,
     symbols: &mut Vec<Symbol>,
     symbol_index: &mut HashMap<String, u32>,
 ) -> Result<AssembledFunction, AsmError> {
@@ -273,6 +280,7 @@ fn assemble_function(
                             span,
                             *vspan,
                             elems,
+                            sig_arity,
                             write_vector_element,
                         )?);
                     }
@@ -282,6 +290,7 @@ fn assemble_function(
                             span,
                             *vspan,
                             elems,
+                            sig_arity,
                             move_vector_element,
                         )?);
                     }
@@ -551,13 +560,28 @@ fn assemble_function(
 /// the vocabulary is a `BadVector` at the operand's own span
 /// (`vector_span`); `span` stays the whole item's, for the slot and
 /// any encode failure.
+///
+/// `sig_arity` carries the enclosing function's `.routine` arity when it
+/// is signed. Inside a signed function every vector operand must be
+/// exactly that wide — a routine authored at arity M drives M tapes, so a
+/// mismatched vector is a static `BadVector` (docs/formats.md (assembly
+/// text)). Unsigned functions keep the arch's full 1..=16 freedom.
 fn vector_slot(
     opcode: u8,
     span: Span,
     vector_span: Span,
     elems: &[VecElem],
+    sig_arity: Option<u8>,
     vocab: fn(&VecElem) -> Result<u32, &'static str>,
 ) -> Result<Slot, AsmError> {
+    if let Some(arity) = sig_arity
+        && elems.len() != usize::from(arity)
+    {
+        return Err(err(
+            vector_span,
+            AsmErrorKind::BadVector("vector width does not match the routine arity"),
+        ));
+    }
     let mut vals = Vec::with_capacity(elems.len());
     for elem in elems {
         vals.push(vocab(elem).map_err(|m| err(vector_span, AsmErrorKind::BadVector(m)))?);
@@ -1611,6 +1635,44 @@ T0: .row [1, 2]
         }
         let e = asm_fake(".func main\n        vmove [*, .]\n").unwrap_err();
         assert_eq!(e.span, Span::new(2, 15, 2, 21)); // the `[*, .]` region
+    }
+
+    // -- Signed-function static vector-width check ----------------------
+
+    #[test]
+    fn signed_function_vector_wrong_width_is_bad_vector() {
+        // `main` is signed at arity 2 (a `.routine` with two tapes). A
+        // wider write vector and a narrower move vector both mismatch the
+        // routine arity — the static width check refuses them at the
+        // operand's own span.
+        for bad in ["vwrite [1, 2, 3]", "vmove [<]"] {
+            let src =
+                format!(".routine main, tapes=2, alpha=(3, 5)\n.func main\n    {bad}\n    stp\n");
+            let e = asm_fake(&src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadVector(m) if m.contains("arity")),
+                "{bad}: {e:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_function_vector_matching_arity_assembles() {
+        // Width 2 matches the arity-2 signature: both vector kinds pass.
+        assert!(
+            asm_fake(
+                ".routine main, tapes=2, alpha=(3, 5)\n.func main\n    vwrite [1, 2]\n    vmove [<, >]\n    stp\n"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unsigned_function_keeps_full_vector_width_freedom() {
+        // No `.routine`, so no arity to match: the assembler width-checks
+        // nothing and the arch's own 1..=16 freedom stands. A width-3 write
+        // and a width-1 move both assemble.
+        assert!(asm_fake(".func main\n    vwrite [1, 2, 3]\n    vmove [<]\n    stp\n").is_ok());
     }
 
     #[test]
