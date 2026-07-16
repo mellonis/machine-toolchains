@@ -6,6 +6,7 @@ pub mod core;
 pub mod debug;
 pub mod devices;
 pub mod driver;
+pub(crate) mod frame;
 pub mod machine;
 pub(crate) mod table;
 pub mod trap;

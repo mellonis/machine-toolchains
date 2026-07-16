@@ -73,6 +73,27 @@ pub enum MicroOp {
     Raise {
         kind: RaisedTrapKind,
     },
+    /// Latch every visible tape into TR (slot k ← tape k) and set the TR
+    /// width to the number of tapes read. Under the identity frame that is
+    /// all `device_count` physical tapes; under an active frame it is the
+    /// frame's `arity` virtual tapes, each read through its symbol map.
+    /// Expands at execution time — an architecture's lowering stays
+    /// width-agnostic.
+    ReadAll,
+    /// A framed call: like [`MicroOp::Call`], plus it activates the frame
+    /// descriptor at table-section offset `frame` for the callee (the
+    /// caller's frame is restored on return). Requires the frames
+    /// execution profile.
+    CallFrame {
+        rel: i32,
+        frame: u32,
+    },
+    /// A multi-exit return: leave the active frame through exit `k` of its
+    /// exit vector (the pushed return address is discarded). Requires the
+    /// frames execution profile.
+    RetX {
+        k: u8,
+    },
     Stop,
     Halt,
     Brk,

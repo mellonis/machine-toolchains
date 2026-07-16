@@ -119,6 +119,7 @@ fn mechanical_profile_shows_the_stall_economy() {
         read_cost: 5,
         write_cost: 10,
         table_read_cost: 1,
+        frame_load_cost: 1,
     };
     let r = m.run(
         &mut t,

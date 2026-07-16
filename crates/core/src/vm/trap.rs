@@ -10,20 +10,51 @@ pub enum DeviceFault {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trap {
-    InvalidOpcode { opcode: u8, at: u32 },
-    CodeOutOfBounds { at: u32 },
-    BadOperand { at: u32 },
-    CallTargetNotEntry { target: u32 },
+    InvalidOpcode {
+        opcode: u8,
+        at: u32,
+    },
+    CodeOutOfBounds {
+        at: u32,
+    },
+    BadOperand {
+        at: u32,
+    },
+    CallTargetNotEntry {
+        target: u32,
+    },
     StackOverflow,
     StackUnderflow,
     StepLimit,
     TactLimit,
-    Device { fault: DeviceFault },
-    NoTransition { at: u32 },
-    TableOutOfBounds { at: u32 },
-    DispatchOutOfRange { at: u32 },
-    UnmappedRead { at: u32 },
-    UnmappedWrite { at: u32 },
+    Device {
+        fault: DeviceFault,
+    },
+    NoTransition {
+        at: u32,
+    },
+    TableOutOfBounds {
+        at: u32,
+    },
+    DispatchOutOfRange {
+        at: u32,
+    },
+    UnmappedRead {
+        at: u32,
+    },
+    UnmappedWrite {
+        at: u32,
+    },
+    /// A multi-exit return named an exit index the active frame's exit
+    /// vector does not have (or fired with no frame active at all).
+    ExitOutOfRange {
+        at: u32,
+    },
+    /// An instruction that requires the frames execution profile was
+    /// executed on a core running the base profile.
+    ProfileViolation {
+        at: u32,
+    },
 }
 
 impl std::fmt::Display for Trap {
@@ -51,6 +82,12 @@ impl std::fmt::Display for Trap {
             }
             Self::UnmappedRead { at } => write!(f, "unmapped symbol read at {at:#010x}"),
             Self::UnmappedWrite { at } => write!(f, "unmapped symbol write at {at:#010x}"),
+            Self::ExitOutOfRange { at } => {
+                write!(f, "frame exit index out of range at {at:#010x}")
+            }
+            Self::ProfileViolation { at } => {
+                write!(f, "instruction outside the execution profile at {at:#010x}")
+            }
         }
     }
 }

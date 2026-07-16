@@ -4,6 +4,7 @@
 
 use super::arch::{Arch, MicroOp, Operand, OperandKind};
 use super::bus::{BusRequest, BusResponse, CoreEvent};
+use super::frame::FrameDescriptor;
 use super::table::{DispatchWalk, MatchWalk};
 use super::trap::{RaisedTrapKind, Trap};
 
@@ -45,6 +46,19 @@ pub struct Core<'a> {
     tr_len: u8,
     phase: Phase,
     brk_pending: bool,
+    /// Number of physical tape devices visible to `ReadAll` under the
+    /// identity frame.
+    device_count: u8,
+    /// Whether the frames execution profile is active. Off (the base
+    /// profile), `Call`/`Ret` behave exactly as always and the frame
+    /// instructions trap `ProfileViolation`.
+    frames_enabled: bool,
+    /// The frame register: 0 = identity (no translation); a non-zero
+    /// value is the active descriptor's table-section offset + 1.
+    fr: u32,
+    /// Decoded descriptor for the active frame (`Some` iff FR != 0 and
+    /// the descriptor load completed).
+    frame_cache: Option<FrameDescriptor>,
 }
 
 impl<'a> Core<'a> {
@@ -58,11 +72,34 @@ impl<'a> Core<'a> {
             tr_len: 0,
             phase: Phase::FetchOpcode,
             brk_pending: false,
+            device_count: 1,
+            frames_enabled: false,
+            fr: 0,
+            frame_cache: None,
         }
+    }
+
+    /// Builder: how many physical tape devices the machine exposes
+    /// (default 1). Only `ReadAll` under the identity frame consumes it.
+    pub fn with_device_count(mut self, n: u8) -> Self {
+        self.device_count = n;
+        self
+    }
+
+    /// Builder: enable the frames execution profile — `Call`/`Ret` keep
+    /// the FR pair stack in step, and `CallFrame`/`RetX` become legal.
+    pub fn with_frames(mut self) -> Self {
+        self.frames_enabled = true;
+        self
     }
 
     pub fn ip(&self) -> u32 {
         self.ip
+    }
+
+    /// The frame register (0 = identity frame).
+    pub fn fr(&self) -> u32 {
+        self.fr
     }
 
     /// Address of the instruction the core is executing (or last worked
@@ -388,6 +425,36 @@ impl<'a> Core<'a> {
                         }
                     }
                 }
+                MicroOp::ReadAll => {
+                    // Width: the active frame's arity, or every physical
+                    // tape under the identity frame. Expanding into plain
+                    // `Read` micro-ops reuses their translation, fault,
+                    // and settle paths verbatim.
+                    let width = match self.active_frame() {
+                        Some(desc) => desc.entries.len() as u8,
+                        None => self.device_count,
+                    };
+                    self.tr_len = 0;
+                    for i in (0..width).rev() {
+                        ops.push_front(MicroOp::Read { dev: i, slot: i });
+                    }
+                    continue;
+                }
+                MicroOp::CallFrame { .. } | MicroOp::RetX { .. } if !self.frames_enabled => {
+                    // Base profile: the frame instructions are outside
+                    // the execution profile.
+                    return self.trap(Trap::ProfileViolation {
+                        at: self.instr_start,
+                    });
+                }
+                MicroOp::CallFrame { .. } | MicroOp::RetX { .. } => {
+                    // Frames profile: descriptor loading lands with the
+                    // frame loader; until then nothing constructs an
+                    // enabled core.
+                    return self.trap(Trap::ProfileViolation {
+                        at: self.instr_start,
+                    });
+                }
                 MicroOp::DispatchJump { table } => {
                     if self.mr == 0 {
                         return self.trap(Trap::NoTransition {
@@ -417,6 +484,22 @@ impl<'a> Core<'a> {
             CoreEvent::Break
         } else {
             CoreEvent::Step
+        }
+    }
+
+    /// The active frame's descriptor, `None` under the identity frame.
+    /// Invariant: a non-zero FR always has a decoded descriptor — FR
+    /// only becomes non-zero together with a completed descriptor load,
+    /// and a failed load traps before anything else executes.
+    fn active_frame(&self) -> Option<&FrameDescriptor> {
+        if self.fr == 0 {
+            None
+        } else {
+            Some(
+                self.frame_cache
+                    .as_ref()
+                    .expect("non-zero FR always has a decoded descriptor"),
+            )
         }
     }
 
@@ -614,7 +697,7 @@ mod tests {
                         Rq::DeviceMoveLeft { .. }
                         | Rq::DeviceMoveRight { .. }
                         | Rq::DeviceWrite { .. } => Rs::Ok,
-                        Rq::TableRead { .. } => Rs::OutOfTable,
+                        Rq::TableRead { .. } | Rq::FrameRead { .. } => Rs::OutOfTable,
                     };
                     ev = core.resume(resp);
                 }

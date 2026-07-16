@@ -4,14 +4,35 @@ use super::trap::{DeviceFault, Trap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusRequest {
-    CodeRead { addr: u32 },
-    StackPush { value: u32 },
+    CodeRead {
+        addr: u32,
+    },
+    StackPush {
+        value: u32,
+    },
     StackPop,
-    DeviceMoveLeft { dev: u8 },
-    DeviceMoveRight { dev: u8 },
-    DeviceRead { dev: u8 },
-    DeviceWrite { dev: u8, index: u32 },
-    TableRead { addr: u32 },
+    DeviceMoveLeft {
+        dev: u8,
+    },
+    DeviceMoveRight {
+        dev: u8,
+    },
+    DeviceRead {
+        dev: u8,
+    },
+    DeviceWrite {
+        dev: u8,
+        index: u32,
+    },
+    TableRead {
+        addr: u32,
+    },
+    /// A frame-descriptor byte read. Served from the same table ROM as
+    /// `TableRead` but priced separately: descriptor loads happen at call
+    /// time, and their cost is a distinct knob in the tact profile.
+    FrameRead {
+        addr: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

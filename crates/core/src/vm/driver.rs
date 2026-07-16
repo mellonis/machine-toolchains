@@ -48,6 +48,10 @@ pub struct TactProfile {
     pub read_cost: u32,
     pub write_cost: u32,
     pub table_read_cost: u32,
+    /// Per-byte price of a frame-descriptor load (`FrameRead`). Descriptor
+    /// bytes live in the same table ROM as match/dispatch tables but are
+    /// fetched at call time, so their cost is a separate knob.
+    pub frame_load_cost: u32,
 }
 
 impl TactProfile {
@@ -56,6 +60,7 @@ impl TactProfile {
         read_cost: 1,
         write_cost: 1,
         table_read_cost: 1,
+        frame_load_cost: 1,
     };
 }
 
@@ -197,6 +202,13 @@ pub(crate) fn step_instruction(
                         }
                         None => BusResponse::OutOfTable,
                     },
+                    BusRequest::FrameRead { addr } => match tables.get(addr as usize) {
+                        Some(&byte) => {
+                            stats.stall_tacts += u64::from(profile.frame_load_cost);
+                            BusResponse::Byte(byte)
+                        }
+                        None => BusResponse::OutOfTable,
+                    },
                 };
                 if over_tacts(stats) {
                     return StepEvent::Finished(Outcome::Trapped(Trap::TactLimit));
@@ -329,6 +341,7 @@ mod tests {
             read_cost: 5,
             write_cost: 10,
             table_read_cost: 1,
+            frame_load_cost: 1,
         };
         let (r, _) = drive(&[0x06, 0x02], RunLimits::default(), mech);
         assert_eq!(
