@@ -1,13 +1,19 @@
 //! Binary → canonical `.pma` text (docs/formats.md (assembly text)).
 //! Output is valid assembler input; object round-trips are exact.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::decode::{Body, Decoded, DecodedOperand, decode_at, decode_stream};
-use super::syntax::ArchSyntax;
+use super::syntax::{ArchSyntax, Flow};
 use crate::formats::executable::Executable;
 use crate::formats::object::{ObjectFile, SymbolDef};
 use crate::linker::MapFile;
+
+/// Canonical `.pma` trailing-comment column (docs/formats.md (assembly
+/// text)), the same stop `fmt.rs` uses — needed only to place the
+/// defensive comment on a dispatch table with unresolved offsets so the
+/// rendered line still lands on the grid.
+const COMMENT_COL: usize = 32;
 
 /// Canonical .pma grid (docs/formats.md (assembly text)): label col 0,
 /// mnemonic col 8, operand col 16; trailing spaces trimmed. A label
@@ -16,26 +22,44 @@ use crate::linker::MapFile;
 /// return value has no trailing newline (callers already append one)
 /// but may contain an interior one.
 pub fn grid_line(label: Option<&str>, mnemonic: &str, operand: &str) -> String {
-    fn instr_line(mnemonic: &str, operand: &str) -> String {
-        let mut line = format!("{:<8}{mnemonic:<8}{operand}", "");
-        while line.ends_with(' ') {
-            line.pop();
+    const MNEMONIC_COL: usize = 8;
+    const OPERAND_COL: usize = 16;
+
+    // The mnemonic + operand portion, laid out from the mnemonic column
+    // (8 leading spaces). The operand lands at [`OPERAND_COL`], or one
+    // space past a mnemonic that reaches or overflows that stop — the
+    // same overflow rule as `fmt.rs`'s `pad_to`, so a directive whose
+    // keyword is 8+ chars (`.targets`, an arch's `tdispatch`) still keeps
+    // one separating space instead of butting against the operand.
+    let mut body = " ".repeat(MNEMONIC_COL);
+    body.push_str(mnemonic);
+    if !operand.is_empty() {
+        let col = body.chars().count();
+        if col < OPERAND_COL {
+            body.push_str(&" ".repeat(OPERAND_COL - col));
+        } else {
+            body.push(' ');
         }
-        line
+        body.push_str(operand);
     }
+    while body.ends_with(' ') {
+        body.pop();
+    }
+
     match label {
-        Some(l) if l.chars().count() + 1 >= 8 => {
-            format!("{l}:\n{}", instr_line(mnemonic, operand))
-        }
+        // A label field (name + `:`) reaching the mnemonic column moves to
+        // its own line so it never pushes the mnemonic out of alignment.
+        Some(l) if l.chars().count() + 1 >= MNEMONIC_COL => format!("{l}:\n{body}"),
+        // Otherwise the label overwrites the leading mnemonic-column
+        // padding (the first `MNEMONIC_COL` ASCII spaces of `body`).
         Some(l) => {
-            let label_field = format!("{l}:");
-            let mut line = format!("{label_field:<8}{mnemonic:<8}{operand}");
-            while line.ends_with(' ') {
-                line.pop();
-            }
+            let field = format!("{l}:");
+            let mut line = field.clone();
+            line.push_str(&" ".repeat(MNEMONIC_COL - field.chars().count()));
+            line.push_str(&body[MNEMONIC_COL..]);
             line
         }
-        None => instr_line(mnemonic, operand),
+        None => body,
     }
 }
 
@@ -52,8 +76,207 @@ fn push_byte_lines(out: &mut String, label: Option<&str>, bytes: &[u8]) {
     }
 }
 
+/// Which table a blob-local table offset holds, inferred from the
+/// instruction that references it.
+#[derive(Clone, Copy)]
+enum TableKind {
+    Match,
+    Dispatch,
+}
+
+/// `(blob index, blob-local table offset) -> synthesized `Tn` label`: the
+/// code section looks up a table reference's display name here.
+type TableLabels = HashMap<(u32, u32), String>;
+
+/// Renders the `.section tables` body for `obj`'s table blobs and returns
+/// it with a `(blob, table-offset) -> synthesized label` map for the code
+/// section to reference an operand by name.
+///
+/// Table labels are synthesized `T0`, `T1`, … scanning blobs in index
+/// order and, within each blob, tables in ascending table-offset order
+/// (one global counter, so names are unique across the single tables
+/// section). Returns `None` when the object carries no discoverable
+/// tables — its disassembly is then byte-identical to a pre-tables
+/// object (no `.section` lines at all).
+///
+/// A table's kind is read from the instruction that references it, not
+/// from the bytes (a concatenated table blob is not self-describing): the
+/// opcode one byte before each fixup hole. A `FallThrough` op is a pure
+/// lookup (a match table); any control-transfer flow means the op
+/// dispatches THROUGH its table (a dispatch table). This keeps core
+/// arch-agnostic — `Flow` is arch-supplied per-opcode data the
+/// disassembler already consumes, never a mnemonic-string match.
+fn render_tables_section(syntax: &ArchSyntax, obj: &ObjectFile) -> Option<(String, TableLabels)> {
+    let table_blobs = obj.table_blobs.as_ref()?;
+
+    let kind_of = |blob: u32, hole: u32| -> TableKind {
+        let flow = hole
+            .checked_sub(1)
+            .and_then(|pos| obj.blobs.get(blob as usize)?.get(pos as usize).copied())
+            .and_then(|opcode| syntax.by_opcode(opcode))
+            .map(|entry| entry.flow);
+        match flow {
+            Some(Flow::FallThrough) | None => TableKind::Match,
+            Some(_) => TableKind::Dispatch,
+        }
+    };
+
+    // Distinct table start offsets (and their kinds) per blob. Every
+    // assembler-emitted table is referenced, so every start appears here;
+    // duplicate references to one table collapse to its first classifier.
+    let mut per_blob: Vec<BTreeMap<u32, TableKind>> = vec![BTreeMap::new(); table_blobs.len()];
+    for fixup in &obj.table_fixups {
+        if let Some(starts) = per_blob.get_mut(fixup.blob as usize) {
+            starts
+                .entry(fixup.table_offset)
+                .or_insert_with(|| kind_of(fixup.blob, fixup.offset));
+        }
+    }
+    if per_blob.iter().all(BTreeMap::is_empty) {
+        return None;
+    }
+
+    let mut labels: TableLabels = HashMap::new();
+    let mut body = String::new();
+    let mut next = 0u32;
+    for (blob, starts) in per_blob.iter().enumerate() {
+        let tb = &table_blobs[blob];
+        let bounds: Vec<u32> = starts.keys().copied().collect();
+        for (idx, (&start, &kind)) in starts.iter().enumerate() {
+            let name = format!("T{next}");
+            next += 1;
+            labels.insert((blob as u32, start), name.clone());
+            let end = bounds.get(idx + 1).copied().unwrap_or(tb.len() as u32);
+            match kind {
+                TableKind::Match => render_match_table(&mut body, &name, tb, start, end),
+                TableKind::Dispatch => {
+                    render_dispatch_table(&mut body, &name, tb, start, end, blob as u32, obj)
+                }
+            }
+        }
+    }
+    Some((body, labels))
+}
+
+/// One match table (vm/table.rs layout: `width u8`, `row_count u16 LE`,
+/// then `row_count × width` bytes, `0x7F` = wildcard) as `.row [..]`
+/// lines — the label on the first row, the rest continuing the run. A
+/// truncated table stops cleanly rather than panicking (defensive; the
+/// assembler never emits one).
+fn render_match_table(out: &mut String, name: &str, tb: &[u8], start: u32, end: u32) {
+    let base = start as usize;
+    let (Some(&width_b), Some(&lo), Some(&hi)) = (tb.get(base), tb.get(base + 1), tb.get(base + 2))
+    else {
+        return;
+    };
+    let width = width_b as usize;
+    let row_count = u16::from_le_bytes([lo, hi]) as usize;
+    let limit = (end as usize).min(tb.len());
+    let mut pos = base + 3;
+    for row in 0..row_count {
+        if width == 0 || pos + width > limit {
+            break;
+        }
+        let elems: Vec<String> = tb[pos..pos + width]
+            .iter()
+            .map(|&b| {
+                if b == 0x7F {
+                    "*".to_string()
+                } else {
+                    b.to_string()
+                }
+            })
+            .collect();
+        let operand = format!("[{}]", elems.join(", "));
+        out.push_str(&grid_line((row == 0).then_some(name), ".row", &operand));
+        out.push('\n');
+        pos += width;
+    }
+}
+
+/// One dispatch table (vm/table.rs layout: `entry_count u16 LE`, then
+/// `entry_count × u32 LE` blob-relative code offsets) as a `.targets`
+/// line. Each entry offset resolves to a code label from the owning
+/// blob's debug info when present; an unresolved offset renders as its
+/// raw number, flagged by a comment at the grid comment column (defensive
+/// — `-g` assembler output always resolves). Reassembly of the resolved
+/// form still needs the code section to define those labels, which
+/// object disassembly does not yet emit — dispatch rendering is read-only
+/// for now.
+fn render_dispatch_table(
+    out: &mut String,
+    name: &str,
+    tb: &[u8],
+    start: u32,
+    end: u32,
+    blob: u32,
+    obj: &ObjectFile,
+) {
+    let base = start as usize;
+    let (Some(&lo), Some(&hi)) = (tb.get(base), tb.get(base + 1)) else {
+        return;
+    };
+    let count = u16::from_le_bytes([lo, hi]) as usize;
+    let name_at = |offset: u32| -> Option<&str> {
+        obj.debug
+            .as_ref()?
+            .get(blob as usize)?
+            .labels
+            .iter()
+            .find(|(_, o)| *o == offset)
+            .map(|(n, _)| n.as_str())
+    };
+    let limit = (end as usize).min(tb.len());
+    let mut pos = base + 2;
+    let mut names = Vec::with_capacity(count);
+    let mut any_raw = false;
+    for _ in 0..count {
+        if pos + 4 > limit {
+            break;
+        }
+        let target = u32::from_le_bytes(tb[pos..pos + 4].try_into().unwrap());
+        match name_at(target) {
+            Some(n) => names.push(n.to_string()),
+            None => {
+                any_raw = true;
+                names.push(target.to_string());
+            }
+        }
+        pos += 4;
+    }
+    if names.is_empty() {
+        return;
+    }
+    let line = grid_line(Some(name), ".targets", &names.join(", "));
+    out.push_str(&line);
+    if any_raw {
+        // grid_line emits no comment: pad the last physical line to the
+        // comment column by hand so the flag still lands on the grid.
+        let last_len = line.rsplit('\n').next().unwrap_or(&line).chars().count();
+        if last_len < COMMENT_COL {
+            out.push_str(&" ".repeat(COMMENT_COL - last_len));
+        } else {
+            out.push(' ');
+        }
+        out.push_str("; unresolved dispatch offsets (no debug labels)");
+    }
+    out.push('\n');
+}
+
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     let mut out = String::new();
+    // Tables render first, in their own section, with `.section code`
+    // before the function bodies. A no-tables object emits neither line,
+    // so its output stays byte-identical to a pre-tables object.
+    let table_labels = match render_tables_section(syntax, obj) {
+        Some((section, labels)) => {
+            out.push_str(".section tables\n");
+            out.push_str(&section);
+            out.push_str(".section code\n");
+            labels
+        }
+        None => HashMap::new(),
+    };
     // reloc lookup: (blob, hole offset) -> symbol name
     let reloc_at: BTreeMap<(u32, u32), &str> = obj
         .relocations
@@ -117,10 +340,17 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                         DecodedOperand::Ints(v) => {
                             Some(v.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))
                         }
-                        // Table-space offset: rendered numerically; the
-                        // labeled `.section tables` round-trip lands in a
-                        // later task.
-                        DecodedOperand::TableAddr(t) => Some(t.to_string()),
+                        // Table reference: the synthesized `Tn` label of
+                        // the table at this blob-local offset (from
+                        // `render_tables_section`), falling back to the
+                        // raw offset if the object carried a reference to
+                        // a table the section pass could not place.
+                        DecodedOperand::TableAddr(t) => Some(
+                            table_labels
+                                .get(&(blob, *t))
+                                .cloned()
+                                .unwrap_or_else(|| t.to_string()),
+                        ),
                         DecodedOperand::RelTarget(t) => {
                             if syntax.is_call(entry.opcode) {
                                 // The hole starts one byte after the opcode.
@@ -170,7 +400,7 @@ pub fn disassemble_executable(
     exe: &Executable,
     map: Option<&MapFile>,
 ) -> String {
-    use crate::asm::syntax::{Flow, SyntaxEntry};
+    use crate::asm::syntax::SyntaxEntry;
     let code = &exe.code;
     let len = code.len() as u32;
 
@@ -434,6 +664,168 @@ mod tests {
     use crate::asm::syntax::{Flow, RelaxPair, SyntaxEntry};
     use crate::formats::executable::Executable;
     use crate::vm::OperandKind;
+
+    /// Neutral fake dialect proving zero PM-1 knowledge in core (replica
+    /// of `assembler.rs`'s test helper, per the repo's per-file-helper
+    /// convention): `tmatch` references a match table (FallThrough → a
+    /// lookup), `tdispatch` references a dispatch table (Stop → transfers
+    /// through it), `vwrite` is the vector-capable write, plus nop/stp/ent.
+    fn fake_syntax() -> ArchSyntax {
+        use crate::asm::AsmCaps;
+        use crate::vm::OperandKind;
+        use Flow::{FallThrough as FT, Stop};
+        ArchSyntax {
+            entries: vec![
+                SyntaxEntry {
+                    opcode: 0x01,
+                    mnemonic: "nop",
+                    operand: OperandKind::None,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x02,
+                    mnemonic: "stp",
+                    operand: OperandKind::None,
+                    flow: Stop,
+                },
+                SyntaxEntry {
+                    opcode: 0x07,
+                    mnemonic: "vwrite",
+                    operand: OperandKind::SymbolVec,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x11,
+                    mnemonic: "tmatch",
+                    operand: OperandKind::TableRef,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x12,
+                    mnemonic: "tdispatch",
+                    operand: OperandKind::TableRef,
+                    flow: Stop,
+                },
+                SyntaxEntry {
+                    opcode: 0x0E,
+                    mnemonic: "ent",
+                    operand: OperandKind::None,
+                    flow: FT,
+                },
+            ],
+            relax_pairs: vec![],
+            entry_opcode: 0x0E,
+            break_opcode: None,
+            caps: AsmCaps {
+                tables: true,
+                rept: true,
+                vectors: true,
+            },
+        }
+    }
+
+    #[test]
+    fn object_dis_renders_match_table_and_references_it_by_label() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        let syntax = fake_syntax();
+        let src = "\
+.section tables
+T0: .row [1, 2]
+    .row [1, *]
+.section code
+.func main
+    tmatch T0
+    stp
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        let expected = "\
+.section tables
+T0:     .row    [1, 2]
+        .row    [1, *]
+.section code
+.func main
+        tmatch  T0
+        stp
+";
+        assert_eq!(dis, expected, "match-table disassembly:\n{dis}");
+        // The pieces the brief calls out: a tables section, a `.row` line,
+        // the wildcard as `*`, the reference by synthesized label.
+        assert!(dis.contains(".section tables"));
+        assert!(dis.contains("T0:     .row    [1, 2]"));
+        assert!(dis.contains("[1, *]")); // wildcard byte rendered as `*`
+        assert!(dis.contains("tmatch  T0"));
+        // Already canonical: fmt over it (caps on) is the identity.
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        // And it reassembles to the identical object — a full round trip.
+        assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
+    }
+
+    #[test]
+    fn object_dis_renders_dispatch_targets_by_debug_label() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        let syntax = fake_syntax();
+        // `-g` so the owning blob's debug labels resolve the entry offsets.
+        let src = "\
+.section tables
+D0: .targets A, B
+.section code
+.func main
+    tdispatch D0
+A:  nop
+B:  stp
+";
+        let obj = assemble(&syntax, 0x7E, src, true).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        // Dispatch entries resolve to their debug label names; the code
+        // instruction references the table by synthesized label.
+        assert!(dis.contains("T0:     .targets A, B"), "{dis}");
+        assert!(dis.contains("tdispatch T0"), "{dis}");
+        // Still canonical under fmt (the rendering lands on the grid).
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        // NOTE: not a full round trip — object disassembly does not emit
+        // the dispatch targets' code labels (`A:`/`B:`) in the code
+        // section, so reassembly would fault on unknown labels. Closing
+        // that is the linked-image table path (phase 4b), out of scope
+        // here; dispatch rendering is read-only for now.
+    }
+
+    #[test]
+    fn no_tables_object_dis_is_byte_compatible() {
+        // The byte-compat guard: an object without tables disassembles
+        // with NO `.section` lines — byte-identical to a pre-tables build.
+        let syntax = test_syntax();
+        let src = "\
+.func f
+L0001:  nop
+        jmp.s   L0001
+        wr      1
+        call    g
+        stop
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        let expected = "\
+.func f
+L0001:  nop
+        jmp.s   L0001
+        wr      1
+        call    g
+        stop
+";
+        assert_eq!(dis, expected);
+        assert!(!dis.contains(".section"), "no tables → no section markers");
+    }
 
     #[test]
     fn grid_line_long_label_own_line() {

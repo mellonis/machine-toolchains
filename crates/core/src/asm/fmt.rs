@@ -12,7 +12,11 @@
 //! CST's `Span`/`Pos::col` fields are 1-based, so a 0-based target of
 //! 32 is the 1-based column 33 a `TrailingComment.col` would report.
 
-use super::cst::{AsmItem, AsmItemKind, LineCst, OperandToken, parse_asm_cst};
+use super::cst::{
+    AsmItem, AsmItemKind, LabelCst, LineCst, OperandToken, ReptCst, SectionCst, TableDirectiveCst,
+    TableDirectiveKind, TrailingComment, parse_asm_cst_with,
+};
+use super::syntax::AsmCaps;
 use super::{AsmError, AsmErrorKind};
 
 const TOP_COL: usize = 0;
@@ -27,13 +31,30 @@ const COMMENT_COL: usize = 32;
 /// line instead.
 const MAX_INLINE_LABEL_FIELD: usize = 7;
 
-/// `.pma` source → canonical grid text. Err = the structural gate: the
-/// file contains a Raw (non-assembly) line — a disassembly-listing row,
-/// a stray `<name>`, `A: 5`, and the like; nothing else refuses (an
-/// unknown mnemonic still formats — this layer has no semantic gate,
-/// only the CST's structural one). Thin renderer: never prints.
+/// `.pma` source → canonical grid text, classic dialect (no opt-in
+/// surface). Thin wrapper over [`format_asm_with`] at
+/// [`AsmCaps::default`] — byte-identical to the pre-caps printer, since
+/// sections, table directives, and `.rept` blocks never shape under the
+/// default caps.
 pub fn format_asm(source: &str) -> Result<String, AsmError> {
-    let cst = parse_asm_cst(source);
+    format_asm_with(source, AsmCaps::default())
+}
+
+/// `.pma` source → canonical grid text under `caps` (the dialect's
+/// opt-in surface). Err = the structural gate: the file contains a Raw
+/// (non-assembly) line — a disassembly-listing row, a stray `<name>`,
+/// `A: 5`, and the like; nothing else refuses (an unknown mnemonic still
+/// formats — this layer has no semantic gate, only the CST's structural
+/// one). Thin renderer: never prints.
+///
+/// The opt-in nodes normalize to the same column grid as ordinary lines,
+/// with ONE exception: a `.rept` block's BODY prints VERBATIM from source
+/// (macros as written) — see [`print_rept`] — because a body item's CST
+/// shaping is intentionally imperfect for substitution templates
+/// (`Linc{v}: nop` shapes labelless), and grid-printing it would corrupt
+/// its text.
+pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> {
+    let cst = parse_asm_cst_with(source, caps);
     if let Some(raw) = cst.items.iter().find_map(|item| match &item.kind {
         AsmItemKind::Raw(r) => Some(r),
         _ => None,
@@ -80,29 +101,9 @@ pub fn format_asm(source: &str) -> Result<String, AsmError> {
             }
             AsmItemKind::Line(l) => print_line(&mut out, l),
             AsmItemKind::Raw(_) => unreachable!("the structural gate above already refused"),
-            // Opt-in caps nodes: `format_asm` parses with
-            // `AsmCaps::default()`, so these never appear today. Task 5
-            // (the fmt round for the TM-1 assembly surface) implements
-            // their canonical grid printing; until then, refuse like a
-            // Raw line rather than emit nothing.
-            AsmItemKind::Section(s) => {
-                return Err(AsmError {
-                    span: s.span,
-                    kind: AsmErrorKind::RawLine,
-                });
-            }
-            AsmItemKind::TableDirective(d) => {
-                return Err(AsmError {
-                    span: d.span,
-                    kind: AsmErrorKind::RawLine,
-                });
-            }
-            AsmItemKind::Rept(r) => {
-                return Err(AsmError {
-                    span: r.span,
-                    kind: AsmErrorKind::RawLine,
-                });
-            }
+            AsmItemKind::Section(s) => print_section(&mut out, s),
+            AsmItemKind::TableDirective(d) => print_table_directive(&mut out, d),
+            AsmItemKind::Rept(r) => print_rept(&mut out, r, source),
         }
     }
     Ok(out)
@@ -154,17 +155,37 @@ fn own_line_comment_col(items: &[AsmItem], i: usize, seen_func: bool) -> usize {
 /// instruction follows, it owns the continuation line and the label
 /// line has nothing else to carry.
 fn print_line(out: &mut String, line: &LineCst) {
-    let n = line.labels.len();
-    for label in &line.labels[..n.saturating_sub(1)] {
+    let instr = line
+        .instr
+        .as_ref()
+        .map(|i| (i.word.as_str(), i.operands.as_slice()));
+    print_fields(out, &line.labels, instr, &line.trailing);
+}
+
+/// The shared `label* [word operands] [; comment]` grid printer, driving
+/// both [`print_line`] and [`print_table_directive`] — a table directive
+/// (`.row`/`.targets`/`.target`) is the same shape with a mandatory
+/// directive word standing in for the mnemonic. `instr` is `None` only
+/// for a label-only Line; a table directive always passes `Some`, so the
+/// long-label-only-line-with-trailing-comment idempotency guard (the
+/// `instr.is_none()` branch below) can never fire for one.
+fn print_fields(
+    out: &mut String,
+    labels: &[LabelCst],
+    instr: Option<(&str, &[OperandToken])>,
+    trailing: &Option<TrailingComment>,
+) {
+    let n = labels.len();
+    for label in &labels[..n.saturating_sub(1)] {
         out.push_str(&label.name);
         out.push_str(":\n");
     }
 
     let mut cur = String::new();
-    if let Some(last) = line.labels.last() {
+    if let Some(last) = labels.last() {
         let field = format!("{}:", last.name);
         let fits_inline = field.chars().count() <= MAX_INLINE_LABEL_FIELD;
-        if fits_inline || line.instr.is_none() {
+        if fits_inline || instr.is_none() {
             cur.push_str(&field);
         } else {
             out.push_str(&field);
@@ -173,12 +194,12 @@ fn print_line(out: &mut String, line: &LineCst) {
     }
     let mut col = cur.chars().count();
 
-    if let Some(instr) = &line.instr {
+    if let Some((word, operands)) = instr {
         pad_to(&mut cur, &mut col, MNEMONIC_COL);
-        cur.push_str(&instr.word);
-        col += instr.word.chars().count();
+        cur.push_str(word);
+        col += word.chars().count();
 
-        let operand_text = join_operands(&instr.operands);
+        let operand_text = join_operands(operands);
         if !operand_text.is_empty() {
             pad_to(&mut cur, &mut col, OPERAND_COL);
             cur.push_str(&operand_text);
@@ -186,7 +207,7 @@ fn print_line(out: &mut String, line: &LineCst) {
         }
     }
 
-    if let Some(tc) = &line.trailing {
+    if let Some(tc) = trailing {
         pad_to(&mut cur, &mut col, COMMENT_COL);
         cur.push_str(&tc.text);
     }
@@ -196,6 +217,84 @@ fn print_line(out: &mut String, line: &LineCst) {
         out.push_str(trimmed);
         out.push('\n');
     }
+}
+
+/// `.section NAME` — a column-0 region marker, printed like `.func`
+/// (single space before the name, trailing comment padded to
+/// [`COMMENT_COL`]).
+fn print_section(out: &mut String, s: &SectionCst) {
+    let mut line = format!(".section {}", s.name);
+    let mut col = line.chars().count();
+    if let Some(tc) = &s.trailing {
+        pad_to(&mut line, &mut col, COMMENT_COL);
+        line.push_str(&tc.text);
+    }
+    out.push_str(line.trim_end());
+    out.push('\n');
+}
+
+/// `.row [..]` / `.targets L1, ..` / `.target L` — the same
+/// label/word/operands grid as an instruction line, with the directive
+/// keyword standing in for the mnemonic. Operands print verbatim from
+/// their CST tokens (a `.row` keeps its whole bracketed vector as one
+/// token; `.targets` comma-joins its names), so interior spelling
+/// survives.
+fn print_table_directive(out: &mut String, d: &TableDirectiveCst) {
+    let word = match d.kind {
+        TableDirectiveKind::Row => ".row",
+        TableDirectiveKind::Targets => ".targets",
+        TableDirectiveKind::Target => ".target",
+    };
+    print_fields(
+        out,
+        &d.labels,
+        Some((word, d.operands.as_slice())),
+        &d.trailing,
+    );
+}
+
+/// `.rept v, lo, hi` … `.endr`. The header and terminator normalize to
+/// the grid (column-0 directives, like `.func`); the BODY prints VERBATIM
+/// — every physical source line strictly between the header line and the
+/// `.endr` line, exactly as written (macros as written), with only
+/// trailing whitespace trimmed to honor the whole-file no-trailing-space
+/// invariant. Body items are NOT re-shaped through the grid: a
+/// substitution template such as `Linc{v}: nop` shapes labelless (the
+/// `{` breaks the word), and grid-printing it would corrupt its spacing
+/// and text. Recovering the body by physical-line range (`endr_span`
+/// bounds it) also preserves body comments and blank lines, which carry
+/// no line number of their own on a Comment item.
+fn print_rept(out: &mut String, r: &ReptCst, source: &str) {
+    // Header: reconstructed from the parsed bounds and normalized.
+    let mut header = format!(".rept {}, {}, {}", r.var, r.lo, r.hi);
+    let mut col = header.chars().count();
+    if let Some(tc) = &r.trailing {
+        pad_to(&mut header, &mut col, COMMENT_COL);
+        header.push_str(&tc.text);
+    }
+    out.push_str(header.trim_end());
+    out.push('\n');
+
+    // Body: source lines (1-based) in (header_line, endr_line), verbatim.
+    let lines: Vec<&str> = source.lines().collect();
+    let body_start = r.span.start.line as usize + 1;
+    let body_end = r.endr_span.start.line as usize;
+    for n in body_start..body_end {
+        if let Some(text) = lines.get(n - 1) {
+            out.push_str(text.trim_end());
+            out.push('\n');
+        }
+    }
+
+    // Terminator: `.endr` (+ its retained trailing comment).
+    let mut endr = String::from(".endr");
+    let mut col = endr.chars().count();
+    if let Some(tc) = &r.endr_trailing {
+        pad_to(&mut endr, &mut col, COMMENT_COL);
+        endr.push_str(&tc.text);
+    }
+    out.push_str(endr.trim_end());
+    out.push('\n');
 }
 
 /// Operand text verbatim from the CST's `OperandToken`s (never
@@ -682,5 +781,97 @@ START:  nop
                 "disassembly is not already canonical:\n{dis}"
             );
         }
+    }
+
+    // -- Task 5: sections, table directives, and `.rept` blocks --------
+    // All exercise the opt-in surface, so they format under caps-on.
+
+    fn caps_all() -> AsmCaps {
+        AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        }
+    }
+
+    #[test]
+    fn section_and_table_directives_normalize_to_the_grid() {
+        // `.section` is a column-0 directive (single space, like `.func`);
+        // `.row`/`.targets` are label + word + operands on the same grid
+        // as an instruction line. A `.row`'s bracketed vector survives as
+        // one verbatim operand; `.targets` comma-joins its names.
+        let src = "\
+.section    tables
+T0:   .row  [1, 2]
+      .row [1, *]
+D0:.targets  A,B
+.section code
+";
+        let expected = "\
+.section tables
+T0:     .row    [1, 2]
+        .row    [1, *]
+D0:     .targets A, B
+.section code
+";
+        assert_eq!(format_asm_with(src, caps_all()).unwrap(), expected);
+    }
+
+    #[test]
+    fn rept_header_and_endr_normalize_but_the_body_prints_verbatim() {
+        // Header reconstructed + normalized (`.rept v,0,1` → grid spacing);
+        // body line kept AS WRITTEN — odd interior spacing and its comment
+        // survive, only trailing whitespace trimmed; `.endr` keeps its own
+        // trailing comment, padded to the comment column.
+        let src = ".rept v,0,1\n   Linc{v}:    nop      ; step   \n.endr  ; done\n";
+        let expected = format!(
+            ".rept v, 0, 1\n   Linc{{v}}:    nop      ; step\n.endr{}; done\n",
+            " ".repeat(COMMENT_COL - ".endr".len())
+        );
+        assert_eq!(format_asm_with(src, caps_all()).unwrap(), expected);
+    }
+
+    #[test]
+    fn rept_body_preserves_comment_and_blank_lines() {
+        // Comment items carry no line number, so the body is recovered by
+        // physical-line range (bounded by `endr_span`), not by walking
+        // body items — a comment-only line and a blank line both survive.
+        let src = ".rept v, 0, 0\n        ; a note\n\n        nop\n.endr\n";
+        let out = format_asm_with(src, caps_all()).unwrap();
+        assert_eq!(out, src);
+        assert_eq!(format_asm_with(&out, caps_all()).unwrap(), out);
+    }
+
+    #[test]
+    fn idempotent_over_all_mechanisms() {
+        // Sections, grid-normalized table directives, a `.rept` block with
+        // a verbatim (template) body, and a vector operand all in one file:
+        // format(format(x)) == format(x).
+        let src = "\
+.section tables
+Tm:     .row    [5, 6]
+        .row    [*, *]
+.rept v, 1, 2
+Tr{v}:  .targets loop
+.endr
+.section code
+.func main
+        wr      [1, -, 2]
+        tmatch  Tm
+        stp
+loop:   nop
+";
+        let once = format_asm_with(src, caps_all()).unwrap();
+        let twice = format_asm_with(&once, caps_all()).unwrap();
+        assert_eq!(twice, once, "not idempotent:\n{once}");
+    }
+
+    #[test]
+    fn default_caps_still_refuse_the_new_directive_lines() {
+        // Under default caps `.section`/`.row` never shape as their nodes;
+        // a `.row` line degrades to a Line with a Junk bracket → a Raw
+        // node → the structural gate. This pins that PM-1 fmt is
+        // unaffected by the opt-in surface.
+        assert!(format_asm(".section tables\nT0: .row [1, 2]\n").is_err());
     }
 }

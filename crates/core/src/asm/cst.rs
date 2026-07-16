@@ -145,11 +145,14 @@ pub struct TableDirectiveCst {
 }
 
 /// `.rept v, lo, hi` … `.endr`. `span` covers the `.rept` header line
-/// (excluding a trailing comment); the closing `.endr` is consumed but
-/// not stored — its own trailing comment, if any, is not retained (the
-/// struct has no slot for it). `body` holds the block's lines shaped AS
-/// WRITTEN — substitution markers `{…}` survive verbatim inside each
-/// item's operand text; expansion happens in a later task.
+/// (excluding a trailing comment); `endr_span` covers the closing
+/// `.endr` word (excluding its trailing comment), and `endr_trailing`
+/// retains that comment — together they make the block self-describing,
+/// so a printer bounds the body by physical line (header line + 1 through
+/// `.endr` line − 1) without re-scanning for the terminator. `body` holds
+/// the block's lines shaped AS WRITTEN — substitution markers `{…}`
+/// survive verbatim inside each item's operand text; expansion happens at
+/// lower.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReptCst {
     pub var: String,
@@ -158,6 +161,8 @@ pub struct ReptCst {
     pub body: Vec<AsmItem>,
     pub span: Span,
     pub trailing: Option<TrailingComment>,
+    pub endr_span: Span,
+    pub endr_trailing: Option<TrailingComment>,
 }
 
 /// Total: never fails. Uses the classic assembly grammar
@@ -191,6 +196,7 @@ pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
             let rest = &records[i + 1..];
             if let Some(off) = rest.iter().position(|r| is_endr(&r.tokens)) {
                 let body = shape_body(&rest[..off], caps);
+                let (endr_span, endr_trailing) = endr_parts(&rest[off]);
                 items.push(AsmItem {
                     blank_before: rec.blank_before,
                     kind: AsmItemKind::Rept(ReptCst {
@@ -200,6 +206,8 @@ pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
                         body,
                         span: header.span,
                         trailing: header.trailing,
+                        endr_span,
+                        endr_trailing,
                     }),
                 });
                 i += 1 + off + 1; // header + body + the closing `.endr`
@@ -317,6 +325,16 @@ fn rept_header(rec: &LineRecord<'_>) -> Option<ReptHeader> {
 fn is_endr(tokens: &[AsmToken]) -> bool {
     let (body, _) = split_trailing(tokens);
     matches!(body, [only] if word_text(only) == Some(".endr"))
+}
+
+/// The `.endr` record's word span (excluding its trailing comment) and
+/// that trailing comment, if any. Precondition: `rec` passed [`is_endr`],
+/// so its non-comment body is exactly the `.endr` word.
+fn endr_parts(rec: &LineRecord<'_>) -> (Span, Option<TrailingComment>) {
+    let (body, trailing) = split_trailing(&rec.tokens);
+    let word = &body[0];
+    let span = Span::new(rec.line_no, word.col, rec.line_no, word.col + word.len);
+    (span, trailing)
 }
 
 /// Splits a trailing comment token off the end of a line's tokens; the
@@ -1020,6 +1038,22 @@ L1:     rgt
         };
         assert_eq!((r.var.as_str(), r.lo, r.hi), ("v", 0, 2));
         assert_eq!(r.body.len(), 1); // one line, unexpanded
+        // The block is self-describing: the header spans line 1, the
+        // `.endr` word spans line 3, so the body occupies exactly line 2.
+        assert_eq!(r.span, Span::new(1, 1, 1, 14));
+        assert_eq!(r.endr_span, Span::new(3, 1, 3, 6));
+        assert_eq!(r.endr_trailing, None);
+    }
+
+    #[test]
+    fn rept_retains_the_endr_trailing_comment() {
+        let src = ".rept v, 0, 0\n        nop\n.endr   ; close\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let AsmItemKind::Rept(r) = &cst.items[0].kind else {
+            panic!("not a rept")
+        };
+        assert_eq!(r.endr_span, Span::new(3, 1, 3, 6)); // the `.endr` word
+        assert_eq!(trailing_text(&r.endr_trailing), Some("; close"));
     }
 
     #[test]
