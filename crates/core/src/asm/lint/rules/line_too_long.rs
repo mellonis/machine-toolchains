@@ -33,7 +33,7 @@ mod tests {
     fn findings(src: &str) -> Vec<Diagnostic> {
         let syntax = test_syntax();
         let cst = parse_asm_cst(src);
-        let functions = lower(&cst, &syntax).unwrap();
+        let functions = lower(&cst, &syntax, src).unwrap();
         let ctx = AsmLintContext {
             source: src,
             cst: &cst,

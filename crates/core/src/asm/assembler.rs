@@ -65,7 +65,7 @@ pub fn assemble(
     source: &str,
     with_debug: bool,
 ) -> Result<ObjectFile, AsmError> {
-    let functions = lower(&super::cst::parse_asm_cst(source), syntax)?;
+    let functions = lower(&super::cst::parse_asm_cst(source), syntax, source)?;
 
     let mut symbols: Vec<Symbol> = functions
         .iter()

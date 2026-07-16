@@ -67,7 +67,7 @@ mod tests {
 
     fn findings(syntax: &ArchSyntax, src: &str) -> Vec<Diagnostic> {
         let cst = parse_asm_cst(src);
-        let functions = lower(&cst, syntax).unwrap();
+        let functions = lower(&cst, syntax, src).unwrap();
         let ctx = AsmLintContext {
             source: src,
             cst: &cst,

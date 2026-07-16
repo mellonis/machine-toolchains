@@ -10,6 +10,7 @@ pub mod fmt;
 pub(crate) mod lexer;
 pub mod lint;
 mod lower;
+mod subst;
 pub(crate) mod syntax;
 
 pub use assembler::assemble;
@@ -46,6 +47,12 @@ pub enum AsmErrorKind {
     /// A line that is not assembly-shaped (a CST Raw node): a disassembly
     /// listing row, a stray `<name>`, `A: 5`, and the like.
     RawLine,
+    /// A `.rept v, lo, hi` whose bounds describe an empty range (`lo > hi`).
+    BadRept,
+    /// A `{expr}` substitution marker in a `.rept` body that failed to
+    /// evaluate (bad grammar, unknown variable, unbalanced brace, …).
+    /// The carried string is the evaluator's own message.
+    BadSubstitution(String),
 }
 
 impl AsmErrorKind {
@@ -64,6 +71,8 @@ impl AsmErrorKind {
             AsmErrorKind::ShortOffsetOutOfRange { .. } => "short-offset-out-of-range",
             AsmErrorKind::EncodeError(_) => "encode-error",
             AsmErrorKind::RawLine => "raw-line",
+            AsmErrorKind::BadRept => "bad-rept",
+            AsmErrorKind::BadSubstitution(_) => "bad-substitution",
         }
     }
 }
@@ -87,6 +96,8 @@ impl std::fmt::Display for AsmErrorKind {
                 write!(f, "short jump to `{target}` is out of range")
             }
             AsmErrorKind::RawLine => write!(f, "not assembly text"),
+            AsmErrorKind::BadRept => write!(f, "empty `.rept` range (lo > hi)"),
+            AsmErrorKind::BadSubstitution(m) => write!(f, "invalid substitution: {m}"),
         }
     }
 }
@@ -155,8 +166,10 @@ mod tests {
             AsmErrorKind::ShortOffsetOutOfRange { target: "x".into() },
             AsmErrorKind::EncodeError("x"),
             AsmErrorKind::RawLine,
+            AsmErrorKind::BadRept,
+            AsmErrorKind::BadSubstitution("x".into()),
         ];
-        assert_eq!(kinds.len(), 10);
+        assert_eq!(kinds.len(), 12);
         let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
     }

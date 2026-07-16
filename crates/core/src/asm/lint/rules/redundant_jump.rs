@@ -77,7 +77,7 @@ mod tests {
     fn findings(src: &str) -> Vec<Diagnostic> {
         let syntax = test_syntax();
         let cst = parse_asm_cst(src);
-        let functions = lower(&cst, &syntax).unwrap();
+        let functions = lower(&cst, &syntax, src).unwrap();
         let ctx = AsmLintContext {
             source: src,
             cst: &cst,
@@ -165,7 +165,7 @@ mod tests {
             &src[byte_of(src, edit.span.end)..]
         );
         let syntax = test_syntax();
-        let funcs = lower(&parse_asm_cst(&fixed), &syntax).unwrap();
+        let funcs = lower(&parse_asm_cst(&fixed), &syntax, &fixed).unwrap();
         assert_eq!(funcs[0].items.len(), 1); // br is gone; only `stop` remains
         match &funcs[0].items[0] {
             SourceItem::Instr { labels, .. } => {
@@ -210,7 +210,7 @@ mod tests {
             &src[byte_of(src, edit.span.end)..]
         );
         let syntax = test_syntax();
-        let funcs = lower(&parse_asm_cst(&fixed), &syntax).unwrap();
+        let funcs = lower(&parse_asm_cst(&fixed), &syntax, &fixed).unwrap();
         assert_eq!(funcs[0].items.len(), 1); // jmp is gone; only `stop` remains
         match &funcs[0].items[0] {
             SourceItem::Instr { labels, .. } => {

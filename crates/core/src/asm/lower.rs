@@ -3,7 +3,10 @@
 //! this pass validates + classifies, attaching a precise [`Span`] to
 //! every diagnostic. Replaces the old line-oriented parser.
 
-use super::cst::{AsmCst, AsmItemKind, FuncCst, InstrCst, LabelCst, LineCst};
+use super::cst::{
+    AsmCst, AsmItem, AsmItemKind, FuncCst, InstrCst, LabelCst, LineCst, ReptCst, parse_asm_cst_with,
+};
+use super::subst::substitute;
 use super::syntax::ArchSyntax;
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
@@ -98,41 +101,16 @@ fn spanned(label: &LabelCst) -> SpannedName {
     }
 }
 
-pub(crate) fn lower(cst: &AsmCst, syntax: &ArchSyntax) -> Result<Vec<SourceFunction>, AsmError> {
+pub(crate) fn lower(
+    cst: &AsmCst,
+    syntax: &ArchSyntax,
+    source: &str,
+) -> Result<Vec<SourceFunction>, AsmError> {
     let mut functions: Vec<SourceFunction> = Vec::new();
     let mut pending: Vec<SpannedName> = Vec::new();
 
     for item in &cst.items {
-        match &item.kind {
-            AsmItemKind::Comment(_) => {}
-            AsmItemKind::Raw(raw) => return Err(err(raw.span, AsmErrorKind::RawLine)),
-            AsmItemKind::Func(func) => lower_func(func, &mut functions, &pending)?,
-            AsmItemKind::Line(line) => lower_line(line, syntax, &mut functions, &mut pending)?,
-            // Sections, table directives, and `.rept` blocks are shaped
-            // only under the opt-in caps; PM-1's caps are off, so these
-            // are unreachable through the real arch and reachable only by
-            // a fake-caps direct lower call. Lowering them lands in a
-            // later task — until then, a clear error rather than a silent
-            // drop.
-            AsmItemKind::Section(s) => {
-                return Err(err(
-                    s.span,
-                    AsmErrorKind::Syntax("sections lower in a later task"),
-                ));
-            }
-            AsmItemKind::TableDirective(d) => {
-                return Err(err(
-                    d.span,
-                    AsmErrorKind::Syntax("table directives lower in a later task"),
-                ));
-            }
-            AsmItemKind::Rept(r) => {
-                return Err(err(
-                    r.span,
-                    AsmErrorKind::Syntax("rept blocks lower in a later task"),
-                ));
-            }
-        }
+        lower_item(item, syntax, source, &mut functions, &mut pending)?;
     }
 
     // A label with no instruction after it, at end of input.
@@ -143,6 +121,106 @@ pub(crate) fn lower(cst: &AsmCst, syntax: &ArchSyntax) -> Result<Vec<SourceFunct
         ));
     }
     Ok(functions)
+}
+
+/// Lowers one CST item. Shared by the top-level pass and — via
+/// [`lower_rept`] — by each expanded `.rept` body item, so the two go
+/// through exactly the same classification and error paths. `source` is
+/// threaded only so `.rept` can recover its body lines verbatim for
+/// substitution; every other arm ignores it.
+fn lower_item(
+    item: &AsmItem,
+    syntax: &ArchSyntax,
+    source: &str,
+    functions: &mut Vec<SourceFunction>,
+    pending: &mut Vec<SpannedName>,
+) -> Result<(), AsmError> {
+    match &item.kind {
+        AsmItemKind::Comment(_) => {}
+        AsmItemKind::Raw(raw) => return Err(err(raw.span, AsmErrorKind::RawLine)),
+        AsmItemKind::Func(func) => lower_func(func, functions, pending)?,
+        AsmItemKind::Line(line) => lower_line(line, syntax, functions, pending)?,
+        // Sections and table directives are shaped only under the opt-in
+        // caps; PM-1's caps are off, so these are unreachable through the
+        // real arch and reachable only by a fake-caps direct lower call.
+        // Lowering them lands in a later task — until then, a clear error
+        // rather than a silent drop.
+        AsmItemKind::Section(s) => {
+            return Err(err(
+                s.span,
+                AsmErrorKind::Syntax("sections lower in a later task"),
+            ));
+        }
+        AsmItemKind::TableDirective(d) => {
+            return Err(err(
+                d.span,
+                AsmErrorKind::Syntax("table directives lower in a later task"),
+            ));
+        }
+        AsmItemKind::Rept(r) => lower_rept(r, syntax, source, functions, pending)?,
+    }
+    Ok(())
+}
+
+/// Expands a `.rept v, lo, hi` … `.endr` block textually (the GNU-as
+/// model): for each `value` in `lo..=hi`, every body line is recovered
+/// verbatim from `source`, its `{expr}` markers substituted, and the
+/// result re-parsed and lowered through [`lower_item`] as if written
+/// inline. Diagnostics point at the original body line's span — both the
+/// substitution error and any error lowering the expanded line.
+fn lower_rept(
+    rept: &ReptCst,
+    syntax: &ArchSyntax,
+    source: &str,
+    functions: &mut Vec<SourceFunction>,
+    pending: &mut Vec<SpannedName>,
+) -> Result<(), AsmError> {
+    if rept.lo > rept.hi {
+        return Err(err(rept.span, AsmErrorKind::BadRept));
+    }
+    for value in rept.lo..=rept.hi {
+        for body_item in &rept.body {
+            // Comment body items carry no line number and lower to
+            // nothing regardless of substitution, so skipping is
+            // equivalent to recover + re-parse + no-op lower.
+            let Some(span) = body_item_span(body_item) else {
+                continue;
+            };
+            // Recover the WHOLE physical line (leading indent and any
+            // trailing comment ride along — the column-span slice would
+            // drop them). Every body item is exactly one physical line.
+            let line_text = source
+                .lines()
+                .nth(span.start.line as usize - 1)
+                .unwrap_or_default();
+            let expanded = substitute(line_text, &rept.var, value)
+                .map_err(|m| err(span, AsmErrorKind::BadSubstitution(m)))?;
+            // Re-parse under the same dialect caps. A single line yields
+            // at most one item; a nested `.rept` cannot re-open here (a
+            // block needs its own `.endr`, absent from one line).
+            let cst = parse_asm_cst_with(&expanded, syntax.caps);
+            for expanded_item in &cst.items {
+                lower_item(expanded_item, syntax, source, functions, pending)
+                    .map_err(|e| err(span, e.kind))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The source span of a CST item, or `None` for a [`AsmItemKind::Comment`]
+/// (which carries only a column). Used by [`lower_rept`] to find each
+/// body line's physical line for verbatim recovery.
+fn body_item_span(item: &AsmItem) -> Option<Span> {
+    match &item.kind {
+        AsmItemKind::Comment(_) => None,
+        AsmItemKind::Func(f) => Some(f.span),
+        AsmItemKind::Line(l) => Some(l.span),
+        AsmItemKind::Raw(r) => Some(r.span),
+        AsmItemKind::Section(s) => Some(s.span),
+        AsmItemKind::TableDirective(d) => Some(d.span),
+        AsmItemKind::Rept(r) => Some(r.span),
+    }
 }
 
 fn lower_func(
@@ -398,11 +476,31 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::cst::parse_asm_cst;
+    use crate::asm::cst::{parse_asm_cst, parse_asm_cst_with};
+    use crate::asm::syntax::AsmCaps;
     use crate::asm::syntax::fixture::test_syntax;
 
     fn lower_src(src: &str) -> Result<Vec<SourceFunction>, AsmError> {
-        lower(&parse_asm_cst(src), &test_syntax())
+        lower(&parse_asm_cst(src), &test_syntax(), src)
+    }
+
+    /// `test_syntax()` with the `.rept` cap on, so `.rept … .endr` blocks
+    /// shape (and expand) instead of degrading. Everything else is the
+    /// classic fixture.
+    fn rept_syntax() -> ArchSyntax {
+        let mut syntax = test_syntax();
+        syntax.caps = AsmCaps {
+            rept: true,
+            ..Default::default()
+        };
+        syntax
+    }
+
+    /// Lower under [`rept_syntax`], parsing the CST with the matching caps
+    /// so `.rept` blocks are shaped before lowering expands them.
+    fn lower_rept_src(src: &str) -> Result<Vec<SourceFunction>, AsmError> {
+        let syntax = rept_syntax();
+        lower(&parse_asm_cst_with(src, syntax.caps), &syntax, src)
     }
 
     fn label_names(labels: &[SpannedName]) -> Vec<&str> {
@@ -653,5 +751,73 @@ L1:     nop
         let e = lower_src(listing).unwrap_err();
         assert_eq!(e.kind, AsmErrorKind::RawLine);
         assert_eq!(e.span.start.col, 3); // trimmed extent
+    }
+
+    // -- `.rept` macro expansion (docs/formats.md (assembly text)) -------
+
+    #[test]
+    fn rept_expands_a_plain_body_line_once_per_iteration() {
+        // `.rept v, 0, 2` around a `nop` yields three inlined instructions.
+        let src = ".func f\n.rept v, 0, 2\n        nop\n.endr\n";
+        let funcs = lower_rept_src(src).unwrap();
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].items.len(), 3);
+        for item in &funcs[0].items {
+            assert!(matches!(item, SourceItem::Instr { opcode: 0x01, .. }));
+        }
+    }
+
+    #[test]
+    fn rept_substitutes_the_loop_variable_into_labels() {
+        // The re-lex/re-shape model is what makes the label survive: the
+        // body item `L{v}: nop` never shapes as a label (the `{` breaks
+        // the word), but substituting the physical line to `L0: nop` and
+        // re-parsing detects the label — three DISTINCT labels result.
+        let src = ".func f\n.rept v, 0, 2\nL{v}: nop\n.endr\n";
+        let funcs = lower_rept_src(src).unwrap();
+        let names: Vec<&str> = funcs[0]
+            .items
+            .iter()
+            .map(|item| match item {
+                SourceItem::Instr { labels, .. } => {
+                    assert_eq!(labels.len(), 1);
+                    labels[0].name.as_str()
+                }
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["L0", "L1", "L2"]);
+    }
+
+    #[test]
+    fn rept_with_empty_range_is_bad_rept() {
+        // `lo > hi` describes no iterations — a `BadRept`, pointed at the
+        // `.rept` header line.
+        let src = ".func f\n.rept v, 2, 0\n        nop\n.endr\n";
+        let e = lower_rept_src(src).unwrap_err();
+        assert_eq!(e.kind, AsmErrorKind::BadRept);
+        assert_eq!(e.span.start.line, 2); // the `.rept` header
+    }
+
+    #[test]
+    fn rept_substitution_failure_carries_the_body_line_span() {
+        // `{v+}` is a malformed expression; the error is a
+        // `BadSubstitution` at the original body line, not at the
+        // re-parsed single line.
+        let src = ".func f\n.rept v, 0, 0\n        wr {v+}\n.endr\n";
+        let e = lower_rept_src(src).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadSubstitution(_)));
+        assert_eq!(e.span.start.line, 3); // the `wr {v+}` body line
+    }
+
+    #[test]
+    fn rept_lowering_error_is_remapped_to_the_body_line_span() {
+        // A body line that substitutes cleanly but lowers to an error
+        // (unknown mnemonic) reports at the original body line, not the
+        // re-parsed line 1.
+        let src = ".func f\n.rept v, 0, 0\n        bogus{v}\n.endr\n";
+        let e = lower_rept_src(src).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::UnknownMnemonic(ref m) if m == "bogus0"));
+        assert_eq!(e.span.start.line, 3);
     }
 }

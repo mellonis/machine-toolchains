@@ -43,7 +43,7 @@ pub fn lint(
     allow: &[String],
 ) -> Result<Vec<Diagnostic>, AsmError> {
     let cst = parse_asm_cst(source);
-    let functions = lower(&cst, syntax)?;
+    let functions = lower(&cst, syntax, source)?;
     assemble(syntax, 0, source, false)?;
 
     let ctx = AsmLintContext {
