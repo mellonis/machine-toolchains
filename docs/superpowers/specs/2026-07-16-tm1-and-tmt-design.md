@@ -1021,7 +1021,19 @@ any time as a pmt minor release.
 | 5 | Linker: composition engine, stamping, frames (+ compose table + exit vectors + `retx`), hybrid, dedup, relaxations, map sidecar; frames profile in the VM; `LinkOptions.entry` (absorbed from manifest plan 1) | three-mode equivalence green |
 | 6 | Language: lexer/parser/CST, front end (worlds, graft, ranges, bind), TM IR, optimizer, codegen, `tmt compile`/`ir`, stdlib port | examples 1–6 as goldens; opt-equivalence green |
 | 7 | Tooling: lint/fmt ×2, LSP services, `tmt lsp`, completions, `tmt.json`; the TM plugin pair | sideload checklists pass |
-| 8 | Docs (per-arch pages under `docs/`), CHANGELOG version block, GH release with plugin artifacts | arc release |
+| 8 | Docs (domain split, below), CHANGELOG version block, GH release with plugin artifacts | arc release |
+
+**Docs domain split** (ruled 2026-07-16 during phase-2 execution): phase 8
+restructures `docs/` into per-toolchain domains — `docs/pmt/` and `docs/tmt/`
+each carrying `language/isa/cli/stdlib/lint/fmt` pages — while the genuinely
+shared pages stay at the root (`formats.md`: containers are arch-agnostic with
+per-dialect sections; `history.md`: the lineage covers both families;
+`lsp.md`: one framework, per-language service subsections). The mechanical
+citation sweep (`docs/isa.md (keyword)` → `docs/pmt/isa.md (keyword)` in code
+comments, plus README/CLAUDE.md links) is phase 8's FIRST commit, before any
+tmt page is written. Until phase 8, arch-neutral additions keep landing in the
+shared root pages (the MX v2/MT v2/MO v3 layouts and the `.tma` dialect
+section in `formats.md` follow this rule).
 
 After the arc: the manifest execution round (#16 + #11) implements `pmt build`
 **and** `tmt build` per the approved manifest spec.
