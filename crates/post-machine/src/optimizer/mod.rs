@@ -32,6 +32,7 @@ pub mod cell_state;
 pub mod check_fold;
 pub mod dataflow;
 pub mod dce;
+pub mod fuse_tape_ops;
 pub mod inline;
 pub mod jump_threading;
 pub mod tail_call;
@@ -85,6 +86,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("tail-call", tail_call::run),
     ("tail-merge", tail_merge::run),
     ("dce", dce::run),
+    ("fuse-tape-ops", fuse_tape_ops::run),
 ];
 
 type ProgramPassFn = fn(&mut IrProgram) -> u32;

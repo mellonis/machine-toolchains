@@ -8,6 +8,7 @@ use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::asm::link;
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::ir::IrProgram;
+use mtc_post_machine::optimizer::OptLevel;
 
 /// docs/language.md's source sample, verbatim modulo comments.
 const SPEC_PMC: &str = "\
@@ -218,6 +219,29 @@ fn a_pmc_compiled_library_links_lazily() {
         .map(|f| f.name.as_str())
         .collect();
     assert_eq!(names, vec!["main", "goToEnd"]);
+}
+
+#[test]
+fn o1_fuses_adjacent_write_move_into_wrl_while_o0_does_not() {
+    // `mark; left;` lowers to `[wr 1, lft]` in one block. At -O1 the
+    // fuse-tape-ops pass collapses the pair to `wrl 1`; at -O0 the two ops
+    // stay separate (no optimizer artifact leaks into unoptimized output).
+    const SRC: &str = "main() { mark; left; }";
+
+    let o0 = compile(SRC, CompileOptions::default()).unwrap();
+    assert!(o0.pma.contains("wr"), "{}", o0.pma);
+    assert!(o0.pma.contains("lft"), "{}", o0.pma);
+    assert!(!o0.pma.contains("wrl"), "{}", o0.pma);
+
+    let o1 = compile(
+        SRC,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(o1.pma.contains("wrl"), "{}", o1.pma);
 }
 
 #[test]

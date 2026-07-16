@@ -176,8 +176,9 @@ fn flagship_optimizes_to_exact_bytes() {
     // Coupled(Some(1))) and b2's confirming wr0 (blank edge,
     // Coupled(Some(0))) drop in the SAME call. branch-fold r1: fact
     // Coupled(Some(0)) at the check -> goto blank arm. dce r1: block
-    // `1:` dies. r2: zero changes — fixpoint. rounds == 2.
-    // Codegen: ent, wr 1, rgt, wr 0, stp = 7 bytes.
+    // `1:` dies. fuse-tape-ops r1: the adjacent `wr 1, rgt` fuses to
+    // `wrr 1`. r2: zero changes — fixpoint. rounds == 2.
+    // Codegen: ent, wrr 1, wr 0, stp = 6 bytes.
     let out = compile(
         FLAGSHIP,
         CompileOptions {
@@ -187,10 +188,7 @@ fn flagship_optimizes_to_exact_bytes() {
     )
     .unwrap();
     let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
-    assert_eq!(
-        linked.executable.code,
-        vec![ENT, WR, 0x81, RGT, WR, 0x80, STP]
-    );
+    assert_eq!(linked.executable.code, vec![ENT, WRR, 0x81, WR, 0x80, STP]);
     assert_eq!(out.report.opt.rounds, 2);
 
     // -O0 reference: 20 bytes (ent + 11 op bytes + jnm.s 2 + wr/stp 3 + wr/stp 3).
@@ -202,7 +200,7 @@ fn flagship_optimizes_to_exact_bytes() {
 #[test]
 fn flagship_is_equivalent_on_all_tapes() {
     let (o0, o1) = assert_equivalent(FLAGSHIP, TAPES);
-    assert_eq!((o0, o1), (20, 7));
+    assert_eq!((o0, o1), (20, 6));
 }
 
 #[test]
@@ -448,10 +446,7 @@ fn flagship_is_untouched_by_the_6b_passes() {
     .unwrap();
     let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
     use mtc_post_machine::arch::opcodes::*;
-    assert_eq!(
-        linked.executable.code,
-        vec![ENT, WR, 0x81, RGT, WR, 0x80, STP]
-    );
+    assert_eq!(linked.executable.code, vec![ENT, WRR, 0x81, WR, 0x80, STP]);
 }
 
 #[test]
