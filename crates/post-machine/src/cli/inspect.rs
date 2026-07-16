@@ -91,16 +91,22 @@ fn load_map(exe_path: &Path, explicit: Option<String>) -> Result<Option<MapFile>
 
 const TAPE_USAGE: &str = "\
 USAGE: pmt tape build \" * * *\" [--head N] [-o OUT.pmt]
+       pmt tape new --from APP.pmx [-o OUT.pmt]
+       pmt tape set IN.pmt (-o OUT.pmt | --in-place)
+                    [--tape N] [--cells PATTERN] [--origin N] [--head N]
        pmt tape show FILE.pmt
 
 build: cell characters are the PM-1 glyphs (space = blank, * = mark);
-the leftmost character is cell 0. show: renders any .pmt with its own
-alphabet.
+the leftmost character is cell 0. new: a blank template sized to the
+executable's tape count. set: clone IN.pmt, applying edits to tape N
+(default 0). show: renders any .pmt with its own alphabet.
 ";
 
 pub(super) fn tape(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
         Some("build") => tape_build(&raw[1..]),
+        Some("new") => tape_new(&raw[1..]),
+        Some("set") => tape_set(&raw[1..]),
         Some("show") => tape_show(&raw[1..]),
         _ => Ok(CliOutput::ok(TAPE_USAGE.into(), String::new())),
     }
@@ -137,6 +143,142 @@ fn tape_build(raw: &[String]) -> Result<CliOutput, String> {
         }],
     };
     fs::write(&out, block.to_bytes()).map_err(|e| format!("cannot write {out}: {e}"))?;
+    Ok(CliOutput::ok(String::new(), String::new()))
+}
+
+/// `pmt tape new --from APP.pmx [-o OUT.pmt]` — a blank tape template
+/// sized to the executable's tape count (v1 images have exactly one).
+/// The template uses PM-1's default glyphs and an empty tape per band,
+/// head at 0 — the same shape `tape build` writes, minus the cells.
+fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    let from = args.value("--from")?;
+    let out = args.value("-o")?.unwrap_or_else(|| "blank.pmt".into());
+    let extra = args.positionals()?;
+    if !extra.is_empty() {
+        return Err(format!(
+            "tape new takes no positional arguments\n\n{TAPE_USAGE}"
+        ));
+    }
+    let Some(from) = from else {
+        return Err(format!("tape new needs --from APP.pmx\n\n{TAPE_USAGE}"));
+    };
+    let bytes = fs::read(&from).map_err(|e| format!("cannot read {from}: {e}"))?;
+    match sniff(&bytes) {
+        Some(ContainerKind::Executable) => {}
+        _ => return Err(format!("{from}: not an executable image (.pmx)")),
+    }
+    let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{from}: {e}"))?;
+    let tape_count = usize::from(exe.tape_count).max(1);
+    let block = TapeBlockFile {
+        alphabet: DEFAULT_GLYPHS.iter().map(|g| g.to_string()).collect(),
+        tapes: (0..tape_count)
+            .map(|_| TapeSnapshot {
+                origin: 0,
+                cells: Vec::new(),
+                head: 0,
+                alphabet: None,
+            })
+            .collect(),
+    };
+    fs::write(&out, block.to_bytes()).map_err(|e| format!("cannot write {out}: {e}"))?;
+    Ok(CliOutput::ok(String::new(), String::new()))
+}
+
+/// `pmt tape set IN.pmt (-o OUT.pmt | --in-place) [--tape N] [--cells P]
+/// [--origin N] [--head N]` — clone semantics: read `IN.pmt`, apply the
+/// given edits to tape N (default 0), and write the result out. The
+/// source is never mutated; the output goes to `-o` or, with
+/// `--in-place`, back over the input. Any subset of edits may be given;
+/// none is a plain copy. `--cells` maps each character of the pattern
+/// through tape N's effective alphabet (its own if present, else the
+/// block's) by glyph.
+fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    let out = args.value("-o")?;
+    let in_place = args.flag("--in-place");
+    let tape_index: usize = match args.value("--tape")? {
+        Some(text) => text.parse().map_err(|_| format!("bad --tape `{text}`"))?,
+        None => 0,
+    };
+    let cells = args.value("--cells")?;
+    let origin: Option<i64> = match args.value("--origin")? {
+        Some(text) => Some(text.parse().map_err(|_| format!("bad --origin `{text}`"))?),
+        None => None,
+    };
+    let head: Option<i64> = match args.value("--head")? {
+        Some(text) => Some(text.parse().map_err(|_| format!("bad --head `{text}`"))?),
+        None => None,
+    };
+    let inputs = args.positionals()?;
+    let [input] = inputs.as_slice() else {
+        return Err(format!("tape set takes exactly one file\n\n{TAPE_USAGE}"));
+    };
+
+    // Output destination: exactly one of -o / --in-place. Refusing the
+    // neither case is what keeps `set` from silently clobbering IN.pmt.
+    let dest: String = match (out, in_place) {
+        (Some(_), true) => {
+            return Err(format!(
+                "tape set: -o and --in-place are mutually exclusive\n\n{TAPE_USAGE}"
+            ));
+        }
+        (Some(path), false) => path,
+        (None, true) => input.clone(),
+        (None, false) => {
+            return Err(format!(
+                "tape set needs -o OUT.pmt or --in-place\n\n{TAPE_USAGE}"
+            ));
+        }
+    };
+
+    let bytes = fs::read(input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    let mut block = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{input}: {e}"))?;
+    let tape_count = block.tapes.len();
+    if tape_index >= tape_count {
+        return Err(format!(
+            "--tape {tape_index}: out of range (block has {tape_count} tape(s))"
+        ));
+    }
+
+    // Map the pattern under two shared borrows (the tape's own alphabet
+    // and the block fallback) BEFORE taking the mutable tape borrow.
+    let new_cells: Option<Vec<u8>> = match cells {
+        Some(pattern) => {
+            let effective: &[String] = block.tapes[tape_index]
+                .alphabet
+                .as_deref()
+                .unwrap_or(&block.alphabet);
+            let mapped = pattern
+                .chars()
+                .map(|c| {
+                    let glyph = c.to_string();
+                    effective
+                        .iter()
+                        .position(|g| *g == glyph)
+                        .map(|i| i as u8)
+                        .ok_or_else(|| {
+                            format!("bad cell character `{c}` (alphabet: {effective:?})")
+                        })
+                })
+                .collect::<Result<Vec<u8>, _>>()?;
+            Some(mapped)
+        }
+        None => None,
+    };
+
+    let tape = &mut block.tapes[tape_index];
+    if let Some(cells) = new_cells {
+        tape.cells = cells;
+    }
+    if let Some(origin) = origin {
+        tape.origin = origin;
+    }
+    if let Some(head) = head {
+        tape.head = head;
+    }
+
+    fs::write(&dest, block.to_bytes()).map_err(|e| format!("cannot write {dest}: {e}"))?;
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 

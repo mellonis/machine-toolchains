@@ -389,6 +389,49 @@ fn tape_build_spec() -> CommandSpec {
     }
 }
 
+fn tape_new_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["tape", "new"]),
+        positional: Positional::None,
+        flags: vec![
+            FlagSpec::value(
+                "--from",
+                "executable to size the blank template to",
+                ValueHint::File(ext(&["pmx"])),
+            ),
+            FlagSpec::value(
+                "-o",
+                "output path (default blank.pmt)",
+                ValueHint::File(ext(&["pmt"])),
+            ),
+        ],
+    }
+}
+
+fn tape_set_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["tape", "set"]),
+        positional: Positional::One(PositionalHint::File(ext(&["pmt"]))),
+        flags: vec![
+            FlagSpec::value(
+                "-o",
+                "output path (clone target)",
+                ValueHint::File(ext(&["pmt"])),
+            )
+            .exclusive("set-output"),
+            FlagSpec::boolean("--in-place", "write back over the input").exclusive("set-output"),
+            FlagSpec::value("--tape", "tape index to edit (default 0)", ValueHint::Text),
+            FlagSpec::value(
+                "--cells",
+                "glyph pattern for the tape's cells",
+                ValueHint::Text,
+            ),
+            FlagSpec::value("--origin", "leftmost cell's coordinate", ValueHint::Text),
+            FlagSpec::value("--head", "head position", ValueHint::Text),
+        ],
+    }
+}
+
 fn tape_show_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["tape", "show"]),
@@ -486,7 +529,7 @@ fn top_level_help(name: &str) -> &'static str {
         "fmt" => "format .pmc/.pma sources in place (--check to preview; -)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
         "run" => "execute a .pmx on a tape",
-        "tape" => "build/show .pmt tape-block snapshots",
+        "tape" => "build/new/set/show .pmt tape-block snapshots",
         "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
         "lsp" => "run the LSP server on stdio",
         "completions" => "emit a shell completion script (zsh; bash/fish follow-on)",
@@ -500,6 +543,8 @@ fn group_child_help(path: &[String]) -> &'static str {
         path.get(1).map(String::as_str),
     ) {
         (Some("tape"), Some("build")) => "write a .pmt tape-block snapshot from a glyph pattern",
+        (Some("tape"), Some("new")) => "write a blank .pmt template sized to an executable",
+        (Some("tape"), Some("set")) => "clone a .pmt tape-block snapshot with edits",
         (Some("tape"), Some("show")) => "render a .pmt tape-block snapshot",
         (Some("ir"), Some("graph")) => "render --emit-ir JSON as a Mermaid flowchart",
         _ => "",
@@ -547,6 +592,8 @@ pub fn registry() -> Registry {
         fmt_spec(),
         dis_spec(),
         tape_build_spec(),
+        tape_new_spec(),
+        tape_set_spec(),
         tape_show_spec(),
         run_spec(),
         ir_graph_spec(),

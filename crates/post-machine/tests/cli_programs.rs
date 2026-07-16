@@ -382,6 +382,86 @@ fn dis_listing_and_tape_show_render() {
 }
 
 #[test]
+fn tape_new_from_pmx_creates_blank_template() {
+    let dir = scratch("tape_new");
+    let src = dir.join("h.pmc");
+    fs::write(&src, HELLO).unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("h.pmo").to_str().unwrap()])).unwrap();
+
+    let blank = dir.join("t.pmt");
+    execute(&args(&[
+        "tape",
+        "new",
+        "--from",
+        dir.join("h.pmx").to_str().unwrap(),
+        "-o",
+        blank.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(blank.exists());
+
+    let shown = execute(&args(&["tape", "show", blank.to_str().unwrap()])).unwrap();
+    // A v1 image has one tape; the template is empty with the head at 0.
+    assert!(shown.stdout.contains("tape 0:"), "{}", shown.stdout);
+    assert!(shown.stdout.contains("head 0"), "{}", shown.stdout);
+    assert!(!shown.stdout.contains("tape 1:"), "{}", shown.stdout);
+    // Empty cells render as the bare bordered span `||`.
+    assert!(shown.stdout.contains("||"), "{}", shown.stdout);
+}
+
+#[test]
+fn tape_set_clones_with_edits() {
+    let dir = scratch("tape_set");
+    let a = dir.join("a.pmt");
+    let b = dir.join("b.pmt");
+    // a: cells [blank, mark], head 1.
+    execute(&args(&[
+        "tape",
+        "build",
+        " *",
+        "--head",
+        "1",
+        "-o",
+        a.to_str().unwrap(),
+    ]))
+    .unwrap();
+    // Clone a into b with both cells marked and the head moved to 0.
+    execute(&args(&[
+        "tape",
+        "set",
+        a.to_str().unwrap(),
+        "-o",
+        b.to_str().unwrap(),
+        "--cells",
+        "**",
+        "--head",
+        "0",
+    ]))
+    .unwrap();
+
+    let shown_b = execute(&args(&["tape", "show", b.to_str().unwrap()])).unwrap();
+    assert!(shown_b.stdout.contains("|**|"), "{}", shown_b.stdout);
+    assert!(shown_b.stdout.contains("head 0"), "{}", shown_b.stdout);
+
+    // Clone semantics: the source is untouched.
+    let shown_a = execute(&args(&["tape", "show", a.to_str().unwrap()])).unwrap();
+    assert!(shown_a.stdout.contains("| *|"), "{}", shown_a.stdout);
+    assert!(shown_a.stdout.contains("head 1"), "{}", shown_a.stdout);
+}
+
+#[test]
+fn tape_set_requires_output() {
+    let dir = scratch("tape_set_no_out");
+    let a = dir.join("a.pmt");
+    execute(&args(&["tape", "build", " *", "-o", a.to_str().unwrap()])).unwrap();
+    // Neither -o nor --in-place: refuse rather than silently overwrite.
+    let err = execute(&args(&["tape", "set", a.to_str().unwrap(), "--head", "2"])).unwrap_err();
+    assert!(err.contains("--in-place"), "{err}");
+    assert!(err.contains("USAGE: pmt tape"), "{err}");
+}
+
+#[test]
 fn ir_graph_renders_mermaid() {
     let dir = scratch("ir_graph");
     let src = dir.join("g.pmc");
