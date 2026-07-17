@@ -1,6 +1,7 @@
 //! `MO` objects → `MX` executables: symbol resolution, reachability,
 //! layout, and relaxation (docs/stdlib.md (linking)).
 
+pub(crate) mod compose;
 mod layout;
 pub(crate) mod resolve;
 
