@@ -607,3 +607,86 @@ fn in_stamp_plain_callee_inherits_the_body_composite() {
     );
     assert_ne!(cell_at(&obs.snaps[0], 1), 0, "the bound callee wrote too");
 }
+
+// ── the same program through the CLI in all three modes ──────────────────────
+
+fn args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// End to end through the real `tmt` CLI (in-process): assemble program (a)
+/// once, then `link --call-mech mono|frames|hybrid` and `run` each image over
+/// the same seeded tape. The exit codes must be identical — the CLI path
+/// carries the same three-mode equivalence the library harness proves, and
+/// `--call-mech` is wired end to end (docs/cli.md).
+#[test]
+fn program_a_runs_identically_via_the_cli_in_all_three_modes() {
+    use mtc_turing_machine::cli::execute;
+
+    let dir = scratch("mode_equivalence_cli");
+    let src = dir.join("a.tma");
+    std::fs::write(&src, CROSS_ALPHABET).unwrap();
+    let obj = dir.join("a.tmo");
+    execute(&args(&[
+        "asm",
+        src.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let mut codes = Vec::new();
+    for mech in ["mono", "frames", "hybrid"] {
+        let exe = dir.join(format!("a-{mech}.tmx"));
+        let link = execute(&args(&[
+            "link",
+            obj.to_str().unwrap(),
+            "--call-mech",
+            mech,
+            "-o",
+            exe.to_str().unwrap(),
+        ]))
+        .unwrap_or_else(|e| panic!("link --call-mech {mech}: {e}"));
+        assert_eq!(link.code, 0, "link {mech} exits 0: {}", link.stdout);
+
+        // Mint a tape from this image and seed one data cell 'a' (physical 1)
+        // on tape 0 — the happy path that stops.
+        let tape = dir.join(format!("a-{mech}.tmt"));
+        execute(&args(&[
+            "tape",
+            "new",
+            "--from",
+            exe.to_str().unwrap(),
+            "-o",
+            tape.to_str().unwrap(),
+        ]))
+        .unwrap();
+        execute(&args(&[
+            "tape",
+            "set",
+            tape.to_str().unwrap(),
+            "--in-place",
+            "--tape",
+            "0",
+            "--cells",
+            "1",
+        ]))
+        .unwrap();
+
+        let out = execute(&args(&[
+            "run",
+            exe.to_str().unwrap(),
+            "--tape",
+            tape.to_str().unwrap(),
+        ]))
+        .unwrap();
+        codes.push(out.code);
+    }
+    assert_eq!(codes, vec![0, 0, 0], "all three modes stop and exit 0");
+}
