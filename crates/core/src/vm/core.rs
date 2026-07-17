@@ -447,11 +447,18 @@ impl<'a> Core<'a> {
                         };
                         return CoreEvent::Request(BusRequest::FrameRead { addr: next });
                     }
-                    // compose[FR][site]: 0 is reserved-invalid at runtime —
-                    // the linker never emits a reachable 0 (docs/formats.md
-                    // (frames region)).
+                    // compose[FR][site] must name a real composite index
+                    // 1..=K: 0 is reserved-invalid, and a value past K would
+                    // index the directory out of range. The linker never
+                    // emits either; a hostile image traps rather than
+                    // reading past the region (docs/formats.md (frames
+                    // region)).
                     let composite = u16::from_le_bytes([buf[0], buf[1]]);
-                    if composite == 0 {
+                    let k = self
+                        .frames
+                        .expect("frames profile active in a compose read")
+                        .composites;
+                    if composite == 0 || composite > k {
                         return self.trap(Trap::BadOperand {
                             at: self.instr_start,
                         });
@@ -877,7 +884,21 @@ impl<'a> Core<'a> {
             });
         }
         let k = u32::from(meta.composites);
-        let addr0 = meta.base + 4 + k * 4 + (self.fr * s + site) * 2;
+        // Compose-table address in u64: a loaded image can't reach here with
+        // an overflowing value (from_bytes bounded the region into the table
+        // section — docs/formats.md (frames region)), but a directly-driven
+        // Core with a hostile FramesMeta (large K/S/FR) would otherwise
+        // overflow the u32 multiply — trap TableOutOfBounds instead of
+        // panicking.
+        let addr0_u64 = u64::from(meta.base)
+            + 4
+            + u64::from(k) * 4
+            + (u64::from(self.fr) * u64::from(s) + u64::from(site)) * 2;
+        let Ok(addr0) = u32::try_from(addr0_u64) else {
+            return self.trap(Trap::TableOutOfBounds {
+                at: self.instr_start,
+            });
+        };
         self.phase = Phase::Execute {
             ops,
             pending: Pending::ComposeRead {
@@ -900,7 +921,16 @@ impl<'a> Core<'a> {
         let meta = self
             .frames
             .expect("frames profile active on a directory read");
-        let addr0 = meta.base + 4 + (self.fr - 1) * 4;
+        // FR holds the resolved composite index (1..=K, guaranteed non-zero
+        // by the compose-read guard and the reload path); directory[FR-1] in
+        // u64 so a hostile base can't overflow the u32 add (docs/formats.md
+        // (frames region)).
+        let addr0_u64 = u64::from(meta.base) + 4 + (u64::from(self.fr) - 1) * 4;
+        let Ok(addr0) = u32::try_from(addr0_u64) else {
+            return self.trap(Trap::TableOutOfBounds {
+                at: self.instr_start,
+            });
+        };
         self.phase = Phase::Execute {
             ops,
             pending: Pending::DirectoryRead {
@@ -2118,6 +2148,34 @@ mod tests {
         let base = descriptor.len() as u32;
         let mut tables = descriptor;
         tables.extend(region_bytes(&[0], &[&[0], &[1]])); // compose[0][0] = 0
+        let meta = FramesMeta {
+            base,
+            composites: 1,
+            sites: 1,
+        };
+        let mut rig = FramesRig {
+            code,
+            tables,
+            reads: FramesRig::reads_of(&[]),
+            stack_cap: 4,
+        };
+        let mut core = Core::new(&arch, 0).with_frames(meta);
+        let (ev, _, _) = rig.run(&mut core);
+        assert_eq!(ev, Ev::Trapped(Trap::BadOperand { at: 0 }));
+    }
+
+    #[test]
+    fn compose_entry_past_k_traps_bad_operand() {
+        // compose[0][0] = 2 names a composite past K=1: no such directory
+        // entry exists, so the framed call traps BadOperand rather than
+        // setting FR out of range and reading the directory past the region.
+        // Mirrors the reserved-invalid-0 case; the linker never emits either.
+        let arch = TestArch;
+        let code = framed_program(0x19, &[]); // site 0
+        let descriptor = descriptor_bytes(&[(1, &[], &[])], &[9]);
+        let base = descriptor.len() as u32;
+        let mut tables = descriptor;
+        tables.extend(region_bytes(&[0], &[&[2], &[1]])); // compose[0][0] = 2 (> K=1)
         let meta = FramesMeta {
             base,
             composites: 1,

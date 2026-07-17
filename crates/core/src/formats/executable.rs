@@ -190,10 +190,33 @@ impl Executable {
                 if entry as usize >= code.len() {
                     return Err(FormatError::Malformed("entry offset outside code"));
                 }
-                // A non-zero frames offset must point strictly inside the
-                // tables section — it names the start of the frames region.
-                if frames_offset != 0 && frames_offset as usize >= tables.len() {
-                    return Err(FormatError::Malformed("frames offset outside tables"));
+                // A non-zero frames offset names the start of the frames
+                // region; the WHOLE declared region must fall inside the
+                // tables section, or the VM's compose/directory address
+                // arithmetic would run past it (docs/formats.md (frames
+                // region)). The region is a 4-byte header (K u16, S u16),
+                // then the directory (K × u32), then the compose table
+                // ((K+1) × S × u16). Validated in u64 so a large K/S can't
+                // overflow the size computation; this also rejects a region
+                // truncated mid-directory or mid-compose.
+                if frames_offset != 0 {
+                    let base = frames_offset as usize;
+                    if base >= tables.len() {
+                        return Err(FormatError::Malformed("frames offset outside tables"));
+                    }
+                    if base + 4 > tables.len() {
+                        return Err(FormatError::Malformed(
+                            "frames region exceeds the table section",
+                        ));
+                    }
+                    let k = u64::from(u16::from_le_bytes([tables[base], tables[base + 1]]));
+                    let s = u64::from(u16::from_le_bytes([tables[base + 2], tables[base + 3]]));
+                    let region_end = u64::from(frames_offset) + 4 + k * 4 + (k + 1) * s * 2;
+                    if region_end > tables.len() as u64 {
+                        return Err(FormatError::Malformed(
+                            "frames region exceeds the table section",
+                        ));
+                    }
                 }
                 Ok(Self::sectioned(
                     arch,
@@ -361,22 +384,35 @@ mod tests {
         assert_eq!(&bytes[39..43], &[1, 1, 0, 5]); // tables section
     }
 
+    /// A minimal well-formed frames region (K=1, S=1) preceded by
+    /// `prefix` filler bytes: 4-byte header + directory (1 × u32) + compose
+    /// ((K+1) × S × u16) = 12 bytes. Returns (tables, frames_offset).
+    fn tables_with_region(prefix: usize) -> (Vec<u8>, u32) {
+        let mut tables = vec![0xAA; prefix];
+        tables.extend(1u16.to_le_bytes()); // K = 1
+        tables.extend(1u16.to_le_bytes()); // S = 1
+        tables.extend(0u32.to_le_bytes()); // directory[0] = 0
+        tables.extend(1u16.to_le_bytes()); // compose[0][0] = 1
+        tables.extend(1u16.to_le_bytes()); // compose[1][0] = 1
+        (tables, prefix as u32)
+    }
+
     /// An image carrying a frames-region offset round-trips it, serializes
     /// as v2 (the offset is v2-only data), and pins the offset's byte
     /// position (25..29, immediately after `table_size`).
     #[test]
     fn frames_offset_round_trips_and_is_positioned() {
+        let (tables, frames_offset) = tables_with_region(2); // region at offset 2
         let exe = Executable::sectioned(
             ARCH_TM1,
             0,
             vec![0x10, 0x02],
-            // tables long enough that offset 2 is strictly inside.
-            vec![1, 1, 0, 5, 9, 9],
+            tables,
             2,
             PROFILE_FRAMES,
             vec![3, 128],
         )
-        .with_frames_offset(2);
+        .with_frames_offset(frames_offset);
         let bytes = exe.to_bytes();
         assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2);
         assert_eq!(u32::from_le_bytes(bytes[25..29].try_into().unwrap()), 2);
@@ -393,6 +429,92 @@ mod tests {
         assert!(matches!(
             Executable::from_bytes(&bytes),
             Err(FormatError::Malformed("frames offset outside tables"))
+        ));
+    }
+
+    /// A region header declaring a huge K makes the declared region overrun
+    /// the tables section — rejected at load, before any VM address
+    /// arithmetic can consume the oversized K.
+    #[test]
+    fn frames_region_overrunning_section_is_rejected() {
+        let mut tables = vec![0xAA]; // region begins at offset 1
+        tables.extend(1000u16.to_le_bytes()); // K = 1000
+        tables.extend(1u16.to_le_bytes()); // S = 1
+        // No directory/compose bytes follow: the declared region overruns.
+        let exe = Executable::sectioned(
+            ARCH_TM1,
+            0,
+            vec![0x10, 0x02],
+            tables,
+            2,
+            PROFILE_FRAMES,
+            vec![3, 128],
+        )
+        .with_frames_offset(1);
+        let bytes = exe.to_bytes();
+        assert!(matches!(
+            Executable::from_bytes(&bytes),
+            Err(FormatError::Malformed(
+                "frames region exceeds the table section"
+            ))
+        ));
+    }
+
+    /// A region truncated mid-directory (K=2 declared, only 1.5 directory
+    /// entries present) is rejected — the size formula accounts for the
+    /// K × u32 directory.
+    #[test]
+    fn frames_region_truncated_mid_directory_is_rejected() {
+        let mut tables = vec![0xAA]; // region begins at offset 1
+        tables.extend(2u16.to_le_bytes()); // K = 2
+        tables.extend(1u16.to_le_bytes()); // S = 1
+        tables.extend(0u32.to_le_bytes()); // directory[0] (full)
+        tables.extend([0, 0]); // directory[1]: only 2 of 4 bytes
+        let exe = Executable::sectioned(
+            ARCH_TM1,
+            0,
+            vec![0x10, 0x02],
+            tables,
+            2,
+            PROFILE_FRAMES,
+            vec![3, 128],
+        )
+        .with_frames_offset(1);
+        let bytes = exe.to_bytes();
+        assert!(matches!(
+            Executable::from_bytes(&bytes),
+            Err(FormatError::Malformed(
+                "frames region exceeds the table section"
+            ))
+        ));
+    }
+
+    /// A region with a full header and directory but a truncated compose
+    /// table is rejected — the size formula accounts for the (K+1) × S × u16
+    /// compose table.
+    #[test]
+    fn frames_region_truncated_mid_compose_is_rejected() {
+        let mut tables = vec![0xAA]; // region begins at offset 1
+        tables.extend(1u16.to_le_bytes()); // K = 1
+        tables.extend(1u16.to_le_bytes()); // S = 1
+        tables.extend(0u32.to_le_bytes()); // directory[0] (full)
+        tables.extend([1, 0]); // compose[0][0]; compose[1][0] missing
+        let exe = Executable::sectioned(
+            ARCH_TM1,
+            0,
+            vec![0x10, 0x02],
+            tables,
+            2,
+            PROFILE_FRAMES,
+            vec![3, 128],
+        )
+        .with_frames_offset(1);
+        let bytes = exe.to_bytes();
+        assert!(matches!(
+            Executable::from_bytes(&bytes),
+            Err(FormatError::Malformed(
+                "frames region exceeds the table section"
+            ))
         ));
     }
 

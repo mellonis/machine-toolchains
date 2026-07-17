@@ -222,9 +222,12 @@ impl<'a> Machine<'a> {
     /// The frames region's shape for the core (docs/formats.md (frames
     /// region)): `base` is the header's `frames_offset`; K and S are the
     /// region header's first two u16s, read directly from the tables blob
-    /// at load time (metadata, not a priced run-time read). A malformed or
-    /// absent header yields zeros — a subsequent framed call then traps
-    /// through the ordinary bounds paths.
+    /// at load time (metadata, not a priced run-time read). `from_bytes`
+    /// validates that the whole declared region fits the tables section, so
+    /// a loaded image's 4-byte header is always present here; the `.get()`
+    /// fallback is belt-and-braces for a directly-constructed image (K=S=0
+    /// then defers a framed call to the ordinary bounds paths rather than
+    /// panicking).
     fn frames_meta(&self) -> FramesMeta {
         let base = self.frames_offset as usize;
         let u16_at = |p: usize| -> u16 {
