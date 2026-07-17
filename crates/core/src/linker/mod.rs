@@ -5,6 +5,7 @@ pub(crate) mod compose;
 mod engine;
 mod layout;
 pub(crate) mod resolve;
+mod stamp;
 
 use crate::asm::ArchSyntax;
 use crate::formats::executable::Executable;
@@ -66,6 +67,12 @@ pub enum LinkError {
     /// mechanism it does not implement yet. FRAMES is complete; `Mono` and
     /// `Hybrid` land with the stamping engine. Internal inter-task state.
     UnsupportedCallMech(CallMech),
+    /// A raw hand-authored framed call (`call.m` / a `.frame` descriptor)
+    /// was reached under `--call-mech=mono`: a mono image runs on the base
+    /// profile, which has no frames machinery to activate the descriptor.
+    /// Carries the offending function's name (docs/formats.md (frames
+    /// profile)).
+    MonoRawFrame(String),
 }
 
 impl std::fmt::Display for LinkError {
@@ -104,6 +111,12 @@ impl std::fmt::Display for LinkError {
                 f,
                 "the {mech} call mechanism is not implemented yet \
                  (it lands with the stamping engine)"
+            ),
+            Self::MonoRawFrame(symbol) => write!(
+                f,
+                "`{symbol}` uses a raw framed call, which the mono call \
+                 mechanism cannot lower onto the base profile; build with \
+                 --call-mech=frames or hybrid"
             ),
         }
     }

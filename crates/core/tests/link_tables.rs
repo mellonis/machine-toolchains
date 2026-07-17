@@ -971,10 +971,39 @@ fn a_dropped_functions_bound_call_is_not_lowered() {
     assert!(out.report.dropped.contains(&"sub".to_string()));
 }
 
-/// FRAMES is the only mechanism implemented this phase; Mono and Hybrid
-/// error clearly (internal inter-task state until the stamping engine).
+// -- Mono stamping + hybrid classification (phase 5b) --------------------
+//
+// Mono lowers each bound site to a plain call into a stamped copy on the
+// BASE profile; hybrid classifies per site. Stamps are map-visible synthetic
+// functions named `<callee>$<digest8>`.
+
+fn mono_opts() -> LinkOptions {
+    LinkOptions {
+        call_mech: CallMech::Mono,
+        ..Default::default()
+    }
+}
+
+fn hybrid_opts() -> LinkOptions {
+    LinkOptions {
+        call_mech: CallMech::Hybrid,
+        ..Default::default()
+    }
+}
+
+/// The map functions whose name marks them a mono stamp (`<callee>$<hex>`).
+fn stamp_names(out: &LinkOutput) -> Vec<String> {
+    out.map
+        .functions
+        .iter()
+        .filter(|f| f.name.contains('$'))
+        .map(|f| f.name.clone())
+        .collect()
+}
+
+/// A single non-collapse bound call under mono stamps one base-profile copy.
 #[test]
-fn mono_and_hybrid_mechanisms_are_unimplemented() {
+fn a_mono_bound_call_stamps_a_base_profile_copy() {
     let src = "\
 .routine main, tapes=2, alpha=(4, 4)
 .routine sub, tapes=2, alpha=(4, 4)
@@ -983,16 +1012,263 @@ fn mono_and_hybrid_mechanisms_are_unimplemented() {
         call    sub [0{1->2, 2->1}, 1]
         stp
 .func sub
+        wr [1, -]
         ret
 ";
-    for mech in [CallMech::Mono, CallMech::Hybrid] {
-        let opts = LinkOptions {
-            call_mech: mech,
-            ..Default::default()
-        };
-        let e = link(&fake_syntax(), &[asm(src, false)], &[], opts).unwrap_err();
-        assert_eq!(e, LinkError::UnsupportedCallMech(mech));
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    assert_ne!(
+        out.executable.profile, PROFILE_FRAMES,
+        "mono ⇒ base profile"
+    );
+    assert_eq!(out.executable.frames_offset, 0, "no frames region");
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "exactly one stamp: {:?}",
+        out.map
+    );
+    assert!(
+        stamp_names(&out)[0].starts_with("sub$"),
+        "stamp named after the callee: {:?}",
+        stamp_names(&out)
+    );
+}
+
+/// Two sites binding the same callee the same way stamp ONE deduped copy.
+#[test]
+fn mono_dedups_equal_composites() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        wr [1, -]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "two equal composites dedup to one stamp: {:?}",
+        stamp_names(&out)
+    );
+}
+
+/// A full-arity identity binding collapses to a plain call into the ORIGINAL
+/// routine — no stamp, no frames (§5.6).
+#[test]
+fn an_identity_binding_under_mono_calls_the_original() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0, 1]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    assert!(
+        stamp_names(&out).is_empty(),
+        "identity collapses, no stamp: {:?}",
+        stamp_names(&out)
+    );
+    assert_ne!(out.executable.profile, PROFILE_FRAMES);
+    assert!(!out.executable.code.contains(&0x14), "no framed call");
+}
+
+/// A raw `call.m` reached under mono is a contradiction (the base profile has
+/// no compose machinery) — a clear link error.
+#[test]
+fn a_raw_call_m_under_mono_is_a_link_error() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.routine leaf, tapes=2, alpha=(4, 4)
+.section tables
+Fr: .frame  tapes=(0, 1)
+    .map    0, rmap=(1->2)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        fcall   leaf, Fr
+        stp
+.func sub
+        ret
+.func leaf
+        ret
+";
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).unwrap_err();
+    assert_eq!(e, LinkError::MonoRawFrame("main".into()));
+}
+
+/// The hand-derived read-table rewrite: a machine-width match table with
+/// synthesized trap rows PREPENDED, a one-way collapse expanding one row into
+/// two, and a no-preimage row DROPPED with the paired dispatch renumbered.
+/// `main` (1 tape, alphabet 4) mono-calls `sub` (1 tape, alphabet 3) binding
+/// physical 1 and 2 both onto virtual 1 (a one-way collapse); physical 3 has
+/// no virtual image (a read hole).
+#[test]
+fn mono_read_table_rewrite_is_byte_derived() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+    .row [1]
+    .row [2]
+D0: .targets A, B, C
+.section code
+.func main
+        call    sub [0{1=>1, 2=>1}]
+        stp
+.func sub
+        rd
+        tmatch  T0
+        tdispatch D0
+A:      wr [0]
+        ret
+B:      wr [1]
+        ret
+C:      wr [2]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    let exe = &out.executable;
+    assert_ne!(exe.profile, PROFILE_FRAMES, "mono stays base profile");
+
+    // Locate the stamp function and its code range.
+    let stamp = out
+        .map
+        .functions
+        .iter()
+        .find(|f| f.name.starts_with("sub$"))
+        .expect("one stamp of sub");
+    let code = &exe.code;
+    let (mut match_off, mut disp_off, mut wr_a) = (None, None, None);
+    let mut i = stamp.start as usize;
+    while i < stamp.end as usize {
+        match code[i] {
+            0x11 => {
+                // tmatch: 4-byte section offset follows.
+                match_off = Some(u32::from_le_bytes(code[i + 1..i + 5].try_into().unwrap()));
+                i += 5;
+            }
+            0x12 => {
+                disp_off = Some(u32::from_le_bytes(code[i + 1..i + 5].try_into().unwrap()));
+                i += 5;
+            }
+            0x07 => {
+                // First wr in the stamp is `A: wr [0]` → physical 0.
+                if wr_a.is_none() {
+                    wr_a = Some(code[i + 1]);
+                }
+                i += 2; // opcode + one self-delimiting byte
+            }
+            0x04 | 0x0B | 0x02 | 0x0E => i += 1, // rd / ret / stp / ent
+            0x18 => i += 2,                      // trap #k
+            other => panic!("unexpected opcode {other:#04x} in stamp at {i}"),
+        }
     }
+    let match_off = match_off.expect("stamp has a match table") as usize;
+    let disp_off = disp_off.expect("stamp has a dispatch table") as usize;
+
+    // Match table: width 1, four rows [3][0][1][2] — the trap row for the
+    // read hole 3 FIRST, then virtual 0's preimage [0], then virtual 1's two
+    // preimages [1] and [2] (the collapse expansion). Virtual 2 (no
+    // preimage) dropped.
+    let tbl = &exe.tables;
+    assert_eq!(tbl[match_off], 1, "machine-width match table");
+    assert_eq!(
+        u16::from_le_bytes([tbl[match_off + 1], tbl[match_off + 2]]),
+        4,
+        "trap row + 3 surviving rows"
+    );
+    assert_eq!(
+        &tbl[match_off + 3..match_off + 7],
+        &[3u8, 0, 1, 2],
+        "rows: [3](trap) [0] [1] [2]"
+    );
+
+    // Dispatch: four entries. entry[0] → the trap stub (`trap #0`), entry[1]
+    // → A, entries[2] and [3] → B (the collapse points both preimages at the
+    // same target). C is dropped (no dispatch entry).
+    assert_eq!(
+        u16::from_le_bytes([tbl[disp_off], tbl[disp_off + 1]]),
+        4,
+        "one trap entry + three row entries"
+    );
+    let entry = |k: usize| {
+        let at = disp_off + 2 + k * 4;
+        u32::from_le_bytes(tbl[at..at + 4].try_into().unwrap()) as usize
+    };
+    assert_eq!(code[entry(0)], 0x18, "trap-stub opcode");
+    assert_eq!(code[entry(0) + 1], 0, "trap #0 (unmapped read)");
+    assert_eq!(code[entry(1)], 0x07, "row 0 → A: wr");
+    assert_eq!(
+        entry(2),
+        entry(3),
+        "the collapse expansion shares one target"
+    );
+    assert_eq!(code[entry(2)], 0x07, "collapse rows → B: wr");
+
+    // The write projection: `A: wr [0]` writes virtual 0 → physical 0. The
+    // self-delimiting byte carries payload 0 with the high (last) bit set.
+    assert_eq!(
+        wr_a.expect("a wr in the stamp"),
+        0x80,
+        "wr [0] → physical 0"
+    );
+}
+
+/// Hybrid: one image with BOTH a mono-stamped bijection site and a
+/// frames-lowered holey site. The image is FRAMES (a frames site survives),
+/// carries a frames region, AND a mono stamp.
+#[test]
+fn hybrid_mixes_a_stamp_and_a_frames_site() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine swap, tapes=1, alpha=(4)
+.routine narrow, tapes=1, alpha=(2)
+.section code
+.func main
+        call    swap [0{1->2, 2->1}]
+        call    narrow [0{1=>0}]
+        stp
+.func swap
+        wr [1]
+        ret
+.func narrow
+        wr [1]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).expect("links");
+    // swap is an equal-size bijection → mono stamp; narrow (alphabet 2 vs the
+    // 4-symbol machine, holey) → frames.
+    assert_eq!(
+        out.executable.profile, PROFILE_FRAMES,
+        "a frames site ⇒ FRAMES"
+    );
+    assert!(
+        out.executable.frames_offset != 0,
+        "hybrid emits a frames region for the frames site"
+    );
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the bijection site is mono-stamped: {:?}",
+        stamp_names(&out)
+    );
+    assert!(
+        stamp_names(&out)[0].starts_with("swap$"),
+        "the swap site (a bijection) is the stamp: {:?}",
+        stamp_names(&out)
+    );
 }
 
 /// A raw `call.m` inside an engine-composed routine keeps its constant

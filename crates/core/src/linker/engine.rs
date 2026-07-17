@@ -89,10 +89,11 @@ pub(super) struct FramesPlan {
 }
 
 /// One control-transfer site in a routine's original blob, in offset order.
-enum SiteKind<'a> {
+pub(super) enum SiteKind<'a> {
     /// A relocated plain call or tail jump: the callee inherits the active
-    /// frame (context preserved).
-    Plain { callee: usize },
+    /// frame (context preserved). `addr` is the opcode's blob offset (the
+    /// hole is `addr + 1`) — the mono stamper keys its retargeting by it.
+    Plain { addr: u32, callee: usize },
     /// A declarative bound call. `collapse` marks a full pass-through that
     /// lowers to a plain call (§5.6).
     Bound {
@@ -131,11 +132,25 @@ pub(super) fn lower<'a>(
         return Ok((order, None));
     }
 
-    // FRAMES is the only implemented mechanism this phase.
-    if call_mech != CallMech::Frames {
-        return Err(LinkError::UnsupportedCallMech(call_mech));
+    // Mono stamps rewritten copies; hybrid classifies per site. FRAMES keeps
+    // one generic copy and a runtime compose table (`lower_frames`).
+    match call_mech {
+        CallMech::Mono => super::stamp::lower_mono(syntax, order, &sites, machine_sig),
+        CallMech::Hybrid => super::stamp::lower_hybrid(syntax, order, &sites, machine_sig),
+        CallMech::Frames => lower_frames(syntax, order, &sites, machine_sig),
     }
+}
 
+/// FRAMES lowering: keep one generic copy of each routine and resolve every
+/// bound-call site through the runtime compose table (docs/formats.md (frames
+/// profile)). Extracted from `lower` so hybrid can invoke it on an order whose
+/// mono-classified bound sites have already been rewritten to plain calls.
+pub(super) fn lower_frames<'a>(
+    syntax: &ArchSyntax,
+    order: Vec<FuncRef<'a>>,
+    sites: &[Vec<SiteKind<'a>>],
+    machine_sig: &RoutineSig,
+) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>), LinkError> {
     // Every routine that frames anything needs a framed-call opcode.
     let fc_opcode = syntax
         .framed_call_opcode()
@@ -168,7 +183,7 @@ pub(super) fn lower<'a>(
 
         for site in &sites[fi] {
             match site {
-                SiteKind::Plain { callee } => {
+                SiteKind::Plain { callee, .. } => {
                     queue.push_back((*callee, ctx.clone()));
                 }
                 SiteKind::Bound {
@@ -244,7 +259,7 @@ pub(super) fn lower<'a>(
     }
     let mut columns_src: Vec<ColSrc> = Vec::new();
     let mut new_order = Vec::with_capacity(order.len());
-    for (f, func_sites) in order.into_iter().zip(&sites) {
+    for (f, func_sites) in order.into_iter().zip(sites) {
         let (rewritten, framed) = rewrite_blob(syntax, fc_opcode, f, func_sites)?;
         let fi = new_order.len();
         new_order.push(rewritten);
@@ -405,14 +420,17 @@ fn intern_composite(
     i
 }
 
-fn routine_sig<'a>(order: &[FuncRef<'a>], idx: usize) -> Result<&'a RoutineSig, LinkError> {
+pub(super) fn routine_sig<'a>(
+    order: &[FuncRef<'a>],
+    idx: usize,
+) -> Result<&'a RoutineSig, LinkError> {
     order[idx].signature.ok_or_else(|| LinkError::BadBinding {
         callee: order[idx].name.to_string(),
         message: "callee has no routine signature to bind against".to_string(),
     })
 }
 
-fn bad_binding(callee: &str, e: &super::compose::ComposeError) -> LinkError {
+pub(super) fn bad_binding(callee: &str, e: &super::compose::ComposeError) -> LinkError {
     LinkError::BadBinding {
         callee: callee.to_string(),
         message: e.to_string(),
@@ -422,7 +440,7 @@ fn bad_binding(callee: &str, e: &super::compose::ComposeError) -> LinkError {
 /// Decode a routine's ORIGINAL blob into its ordered control sites, and
 /// validate every bound call's binding once against the caller and callee
 /// signatures (docs/formats.md (bound calls)).
-fn scan_sites<'a>(
+pub(super) fn scan_sites<'a>(
     syntax: &ArchSyntax,
     f: &FuncRef<'a>,
     machine_sig: &RoutineSig,
@@ -469,7 +487,10 @@ fn scan_sites<'a>(
                         collapse,
                     });
                 } else if let Some(&callee) = calls.get(&hole) {
-                    out.push(SiteKind::Plain { callee });
+                    out.push(SiteKind::Plain {
+                        addr: d.addr,
+                        callee,
+                    });
                 }
             }
             (Flow::Call, DecodedOperand::FramedCall { .. }) => {
@@ -486,7 +507,10 @@ fn scan_sites<'a>(
                 // and Stop carry no relocation; Call's plain and bound forms
                 // are handled above.
                 if let Some(&callee) = calls.get(&(d.addr + 1)) {
-                    out.push(SiteKind::Plain { callee });
+                    out.push(SiteKind::Plain {
+                        addr: d.addr,
+                        callee,
+                    });
                 }
             }
             _ => {}
