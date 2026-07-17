@@ -65,8 +65,9 @@ pub enum LinkError {
         message: String,
     },
     /// The composition engine was asked to lower bound calls under a
-    /// mechanism it does not implement yet. FRAMES is complete; `Mono` and
-    /// `Hybrid` land with the stamping engine. Internal inter-task state.
+    /// mechanism it does not implement. All three mechanisms (mono, frames,
+    /// hybrid) have landed, so nothing constructs this today; it is kept
+    /// for future mechanism gating. Internal inter-task state.
     UnsupportedCallMech(CallMech),
     /// A raw hand-authored framed call (`call.m` / a `.frame` descriptor)
     /// was reached under `--call-mech=mono`: a mono image runs on the base
@@ -141,12 +142,13 @@ impl std::fmt::Display for LinkError {
 impl std::error::Error for LinkError {}
 
 /// Which mechanism the composition engine uses to lower a declarative
-/// bound call (docs/formats.md (frames profile)). `Mono` stamps a
-/// rewritten routine copy per composite; `Frames` keeps one generic copy
-/// and resolves the binding through a runtime compose table; `Hybrid`
-/// (the default) classifies per call site. CARRIED by `LinkOptions` but
-/// not yet consumed — the engine that reads it lands in a later
-/// phase-5b task; today all three link identically.
+/// bound call; the three produce different images. `Mono` stamps a
+/// specialized copy of the callee per distinct composite and stays on the
+/// base profile (no frames region). `Frames` keeps one generic copy per
+/// routine and resolves every binding through descriptors + the runtime
+/// compose region (docs/formats.md (frames region)). `Hybrid` (the
+/// default) classifies per call site: a completed bijection stamps like
+/// mono, anything holey or one-way frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CallMech {
     Mono,
@@ -173,9 +175,8 @@ pub struct LinkOptions {
     /// BFS entry symbol; `None` selects the default `"main"`. Threaded to
     /// `resolve` as the reachability root (the `tmt link --entry` flag).
     pub entry: Option<String>,
-    /// The bound-call lowering mechanism. CARRIED but NOT YET CONSUMED:
-    /// the composition engine that reads this lands in a later phase-5b
-    /// task, so this field affects no output today.
+    /// The bound-call lowering mechanism the composition engine applies
+    /// (see [`CallMech`]); it selects the image `link` emits.
     pub call_mech: CallMech,
 }
 

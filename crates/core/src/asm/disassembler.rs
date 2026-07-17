@@ -946,7 +946,7 @@ pub fn disassemble_executable(
     // Each discovered `call.m` site's callee address — a `call.m` always calls
     // the same callee, whatever composite its column selects, so this names the
     // routine of every composite reachable through the site (the map-less
-    // legend's routine names, docs/formats.md (image-inspectability)).
+    // legend's routine names, docs/formats.md (image-inspectability principle)).
     let mut site_target: HashMap<u32, u32> = HashMap::new();
     while let Some(addr) = work.pop() {
         if addr >= len || instrs.contains_key(&addr) {

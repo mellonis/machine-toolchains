@@ -499,8 +499,10 @@ pub(crate) fn is_full_passthrough(
 
 /// Normalize in place: canonicalize every tape's maps. Idempotent. The
 /// dedup key and digest are only stable across a canonicalized composite.
-// Consumed by the map-sidecar binding-label renderer (a later phase-5b
-// task); the engine reaches composites already canonical by construction.
+// Test-only today: the engine reaches composites already canonical by
+// construction, and the binding-label renderer works from the image's
+// dense descriptor bytes, not sparse composites. Retained (hence the
+// allow) for future sparse-side consumers.
 #[allow(dead_code)]
 pub(crate) fn canonicalize(c: &mut Composite) {
     for tape in &mut c.tapes {
@@ -530,9 +532,8 @@ pub(crate) fn canonical_key(c: &Composite) -> Vec<u8> {
 /// A 32-bit content address for a composite: CRC-32 of its
 /// [`canonical_key`] (the container checksum algorithm — docs/formats.md
 /// (bound calls)). Stable across builds and across pair-insertion order.
-// The digest is the map-sidecar label's collision fallback (a later
-// phase-5b task); the engine dedups on the full `canonical_key` directly.
-#[allow(dead_code)]
+// Names each stamped copy (`<routine>$<digest8>`); stamp dedup itself
+// keys on the full `canonical_key`, not the digest.
 pub(crate) fn digest(c: &Composite) -> u32 {
     crc32(&canonical_key(c))
 }
