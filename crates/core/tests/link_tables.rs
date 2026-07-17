@@ -1603,3 +1603,105 @@ fn frameless_link_has_no_bindings() {
     assert!(out.map.bindings.is_empty());
     assert!(!out.map.to_json().contains("bindings"));
 }
+
+/// The dis frames legend WITHOUT a map: composites are named from the image
+/// alone (descriptor decode + the site callees), and two identical labels
+/// collide, so the second is `.2` — the same disambiguation the sidecar uses.
+#[test]
+fn dis_legend_names_raw_composites_from_the_image() {
+    let out = link_one(asm(TWO_SITES, false));
+    // No map: labels derived from the descriptor bytes + the call.m callees.
+    let text = disassemble_executable(&fake_syntax(), &out.executable, None);
+    assert!(
+        text.contains("; frames: 2 composite(s), 2 site(s)"),
+        "legend header:\n{text}"
+    );
+    assert!(text.contains(";   F1: main@[0]"), "composite 1:\n{text}");
+    assert!(
+        text.contains(";   F2: main@[0].2"),
+        "collision suffix:\n{text}"
+    );
+    // Both sites are constant, so no site summary line.
+    assert!(
+        !text.contains(";   site"),
+        "no context-dependent site:\n{text}"
+    );
+}
+
+/// The dis frames legend WITH a map uses the sidecar's binding labels; a
+/// single equal-size bijection site is constant, named `F1` inline and in the
+/// legend.
+#[test]
+fn dis_legend_uses_map_binding_labels() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let text = disassemble_executable(&fake_syntax(), &out.executable, Some(&out.map));
+    assert!(
+        text.contains("; frames: 1 composite(s), 1 site(s)"),
+        "legend header:\n{text}"
+    );
+    assert!(
+        text.contains(";   F1: sub@[0{1->2,2->1}, 1]"),
+        "map-labeled composite:\n{text}"
+    );
+    // The one site is constant → rendered by its F-label inline (F0, the
+    // tables-section descriptor label), not `@site`.
+    assert!(
+        text.contains("fcall   sub, F0"),
+        "constant site inline:\n{text}"
+    );
+    assert!(
+        !text.contains("@site"),
+        "no context-dependent site:\n{text}"
+    );
+}
+
+/// A context-dependent site (reached under two composites) renders `@site<N>`
+/// in the code and gets a legend summary of the composites it can select.
+#[test]
+fn dis_legend_summarizes_a_context_dependent_site() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine r, tapes=2, alpha=(4, 4)
+.routine q, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    r [0{1->2, 2->1}, 1]
+        call    r [0{1->3, 3->1}, 1]
+        stp
+.func r
+        call    q [0{2->3, 3->2}, 1]
+        ret
+.func q
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let text = disassemble_executable(&fake_syntax(), &out.executable, Some(&out.map));
+    // r's call.m to q (site 2) resolves to composite 3 under E1 and 4 under
+    // E2 — context-dependent, so it renders `@site2`.
+    assert!(
+        text.contains("fcall   q, @site2"),
+        "non-constant site:\n{text}"
+    );
+    assert!(
+        text.contains(";   site2: [F3, F4]"),
+        "site summary lists both composites:\n{text}"
+    );
+    // Four composites in the legend, one per directory entry.
+    assert!(
+        text.contains("; frames: 4 composite(s), 3 site(s)"),
+        "{text}"
+    );
+    for f in ["F1", "F2", "F3", "F4"] {
+        assert!(text.contains(&format!(";   {f}: ")), "{f} listed:\n{text}");
+    }
+}

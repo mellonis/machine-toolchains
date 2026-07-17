@@ -429,3 +429,58 @@ fn cli_trace_shows_fr_zero_outside_and_non_zero_inside_the_frame() {
         "FR is non-zero inside the framed call:\n{trace}"
     );
 }
+
+#[test]
+fn cli_link_v_reports_the_frames_counters() {
+    let dir = scratch("frames_cli_link_v");
+    let src = dir.join("milestone.tma");
+    fs::write(&src, MILESTONE).unwrap();
+    let obj = dir.join("milestone.tmo");
+    execute(&args(&[
+        "asm",
+        src.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let exe = dir.join("milestone.tmx");
+    let out = execute(&args(&[
+        "link",
+        obj.to_str().unwrap(),
+        "-o",
+        exe.to_str().unwrap(),
+        "-v",
+    ]))
+    .unwrap();
+    // The first report line is unchanged; the frames line follows because the
+    // image carries the hand-authored descriptor Fh (one composite).
+    assert!(
+        out.stderr.contains("link: dropped ["),
+        "the base report line:\n{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("frames: 1 composite(s)"),
+        "the frames counters line:\n{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn cli_dis_shows_the_frames_legend() {
+    let dir = scratch("frames_cli_dis_legend");
+    let (exe, _tape) = cli_setup(&dir);
+    // `dis` auto-loads the `.tmx.map` sidecar `link` wrote, so the legend names
+    // the composite from the sidecar's binding record.
+    let out = execute(&args(&["dis", exe.to_str().unwrap()])).unwrap();
+    assert!(
+        out.stdout.contains("; frames: 1 composite(s), 1 site(s)"),
+        "legend header in dis output:\n{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains(";   F1: helper@["),
+        "legend names the composite:\n{}",
+        out.stdout
+    );
+}

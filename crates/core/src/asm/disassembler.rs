@@ -777,6 +777,149 @@ fn resolve_site(exe: &Executable, site: u32) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
 
+/// The decoded frames region (docs/formats.md (frames region)): the K
+/// directory descriptor offsets and the `(K+1) × S` compose matrix. `tmt
+/// dis`'s legend and `call.m` rendering read composite columns from it — a
+/// constant column names one descriptor, a context-dependent one lists the
+/// composites it can select.
+struct FramesRegion {
+    /// Descriptor offset per composite index: `directory[c - 1]` for composite
+    /// `c` (1..=K).
+    directory: Vec<u32>,
+    /// `(K + 1)` rows (active frame 0..=K) of `S` columns (call sites).
+    compose: Vec<Vec<u16>>,
+}
+
+impl FramesRegion {
+    fn site_count(&self) -> usize {
+        self.compose.first().map_or(0, Vec::len)
+    }
+
+    /// The distinct non-zero composite indices a site's column can select,
+    /// ascending (0 = unreachable pair, dropped).
+    fn site_composites(&self, site: usize) -> Vec<u16> {
+        let mut v: Vec<u16> = self
+            .compose
+            .iter()
+            .filter_map(|row| row.get(site).copied())
+            .filter(|&c| c != 0)
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// `Some(c)` when the site's column resolves to exactly one composite (a
+    /// constant site — hand-authored, or an engine site reached under one
+    /// context); `None` when it is context-dependent (or unreachable).
+    fn constant(&self, site: usize) -> Option<u16> {
+        let v = self.site_composites(site);
+        (v.len() == 1).then(|| v[0])
+    }
+}
+
+/// Decode the frames region into a [`FramesRegion`] (docs/formats.md (frames
+/// region)); `None` when the image carries no region.
+fn parse_frames_region(exe: &Executable) -> Option<FramesRegion> {
+    let base = exe.frames_offset;
+    if base == 0 {
+        return None;
+    }
+    let tb = &exe.tables;
+    let u16_at = |p: u32| -> Option<u16> {
+        let p = p as usize;
+        Some(u16::from_le_bytes([*tb.get(p)?, *tb.get(p + 1)?]))
+    };
+    let k = usize::from(u16_at(base)?);
+    let s = usize::from(u16_at(base + 2)?);
+    let dir_base = base as usize + 4;
+    let mut directory = Vec::with_capacity(k);
+    for i in 0..k {
+        let at = dir_base + i * 4;
+        directory.push(u32::from_le_bytes(tb.get(at..at + 4)?.try_into().ok()?));
+    }
+    let comp_base = dir_base + k * 4;
+    let mut compose = Vec::with_capacity(k + 1);
+    for r in 0..=k {
+        let mut row = Vec::with_capacity(s);
+        for c in 0..s {
+            let at = comp_base + (r * s + c) * 2;
+            row.push(u16::from_le_bytes([*tb.get(at)?, *tb.get(at + 1)?]));
+        }
+        compose.push(row);
+    }
+    Some(FramesRegion { directory, compose })
+}
+
+/// The `tmt dis` frames legend (docs/formats.md (frames region)): a comment
+/// block naming every directory composite `F<i>` (`i` = composite index /
+/// frame-register value) by its canonical binding label, then a one-line
+/// summary of each context-dependent site's composites. Labels come from the
+/// map sidecar's `bindings` when present; without a map they are derived from
+/// the descriptor bytes alone (image-inspectability), named by the site
+/// callees. Every line is a `;` comment at column 0, so re-assembly ignores it
+/// and the round trip is unaffected.
+fn frames_legend(
+    region: &FramesRegion,
+    map: Option<&MapFile>,
+    site_target: &HashMap<u32, u32>,
+    func_name: &impl Fn(u32) -> String,
+    exe: &Executable,
+) -> String {
+    let k = region.directory.len();
+    let s = region.site_count();
+
+    // (composite index, canonical label) in composite-index order.
+    let labeled: Vec<(u16, String)> = match map {
+        Some(m) if !m.bindings.is_empty() => m
+            .bindings
+            .iter()
+            .map(|b| (b.index, b.label.clone()))
+            .collect(),
+        _ => {
+            // No sidecar labels: derive each composite's routine name from a
+            // site that reaches it (a `call.m` always calls the same routine),
+            // then render labels from the descriptors themselves.
+            let mut routines = vec![String::new(); k];
+            for (&site, &target) in site_target {
+                for c in region.site_composites(site as usize) {
+                    let i = usize::from(c) - 1;
+                    if i < routines.len() && routines[i].is_empty() {
+                        routines[i] = func_name(target);
+                    }
+                }
+            }
+            crate::linker::binding_label::build_bindings(&exe.tables, exe.frames_offset, &routines)
+                .into_iter()
+                .map(|b| (b.index, b.label))
+                .collect()
+        }
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!("; frames: {k} composite(s), {s} site(s)\n"));
+    for (index, label) in &labeled {
+        out.push_str(&format!(";   F{index}: {label}\n"));
+    }
+    // Context-dependent sites (a row-varying compose column) get a summary of
+    // the composites they can select; constant sites already render their
+    // `F`-label inline in the code.
+    for site in 0..s {
+        if region.constant(site).is_none() {
+            let comps = region.site_composites(site);
+            if !comps.is_empty() {
+                let list = comps
+                    .iter()
+                    .map(|c| format!("F{c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(";   site{site}: [{list}]\n"));
+            }
+        }
+    }
+    out
+}
+
 pub fn disassemble_executable(
     syntax: &ArchSyntax,
     exe: &Executable,
@@ -795,10 +938,11 @@ pub fn disassemble_executable(
     // table in `exe.tables`), and every dispatch table's entry addresses.
     let mut table_kinds: BTreeMap<u32, TableKind> = BTreeMap::new();
     let mut dispatch_targets: BTreeSet<u32> = BTreeSet::new();
-    // Maps each discovered `call.m` site index to the descriptor offset it
-    // resolves to through the frames region — the operand carries the site,
-    // but the table label + descriptor render at the descriptor's offset.
-    let mut site_to_desc: HashMap<u32, u32> = HashMap::new();
+    // Each discovered `call.m` site's callee address — a `call.m` always calls
+    // the same callee, whatever composite its column selects, so this names the
+    // routine of every composite reachable through the site (the map-less
+    // legend's routine names, docs/formats.md (image-inspectability)).
+    let mut site_target: HashMap<u32, u32> = HashMap::new();
     while let Some(addr) = work.pop() {
         if addr >= len || instrs.contains_key(&addr) {
             continue;
@@ -838,11 +982,16 @@ pub fn disassemble_executable(
         // callee (`target`, a call root). The descriptor's exit vector
         // holds code addresses the flow walk cannot see, so they join the
         // work list as label candidates (like dispatch entries).
-        if let DecodedOperand::FramedCall { table: site, .. } = operand
-            && let Some(desc_off) = resolve_site(exe, *site)
+        if let DecodedOperand::FramedCall {
+            table: site,
+            target,
+        } = operand
         {
-            site_to_desc.insert(*site, desc_off);
-            if let std::collections::btree_map::Entry::Vacant(slot) = table_kinds.entry(desc_off) {
+            site_target.insert(*site, *target);
+            if let Some(desc_off) = resolve_site(exe, *site)
+                && let std::collections::btree_map::Entry::Vacant(slot) =
+                    table_kinds.entry(desc_off)
+            {
                 slot.insert(TableKind::Frame);
                 if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
                     for &exit in &frame.exits {
@@ -874,6 +1023,25 @@ pub fn disassemble_executable(
             _ => work.push(next), // malformed flow/operand combo: keep walking
         }
         instrs.insert(addr, d);
+    }
+
+    // Every directory descriptor is inspectable, whether or not any constant
+    // site named it during the walk (a context-dependent site resolves to no
+    // single descriptor). Register the whole directory as frame tables so all
+    // get an `F<n>` label + render, and add their exits as label candidates
+    // (docs/formats.md (image-inspectability principle)).
+    let region = parse_frames_region(exe);
+    if let Some(region) = &region {
+        for &desc_off in &region.directory {
+            if let std::collections::btree_map::Entry::Vacant(slot) = table_kinds.entry(desc_off) {
+                slot.insert(TableKind::Frame);
+                if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
+                    for &exit in &frame.exits {
+                        dispatch_targets.insert(exit);
+                    }
+                }
+            }
+        }
     }
 
     let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();
@@ -927,6 +1095,11 @@ pub fn disassemble_executable(
         .collect();
 
     let mut out = String::new();
+    // Each `call.m` site's operand text: a constant column names its one
+    // descriptor by `F<n>` label; a context-dependent column renders `@site<N>`
+    // and the legend summarizes its composites. Filled once the frame labels
+    // are known (below), read by the code section.
+    let mut site_operand: HashMap<u32, String> = HashMap::new();
     // A sectioned (version-2) image opens with a synthesized `.routine`
     // for the entry function: the header's tape count and per-tape
     // alphabet cardinalities are exactly what the directive declares
@@ -988,6 +1161,27 @@ pub fn disassemble_executable(
                     }
                 }
             }
+        }
+        // The frames legend (docs/formats.md (frames region)): resolve each
+        // `call.m` site's operand text, then a comment block naming every
+        // directory composite and summarizing each context-dependent site.
+        // Comments are trivia, so re-assembly ignores them and the round trip
+        // is unaffected; emitted at column 0 (before the first `.func`), which
+        // `fmt` leaves in place.
+        if let Some(region) = &region {
+            for site in 0..region.site_count() {
+                let text = match region.constant(site) {
+                    Some(c) => region
+                        .directory
+                        .get(usize::from(c) - 1)
+                        .and_then(|off| table_labels.get(off))
+                        .cloned()
+                        .unwrap_or_else(|| format!("@site{site}")),
+                    None => format!("@site{site}"),
+                };
+                site_operand.insert(site as u32, text);
+            }
+            out.push_str(&frames_legend(region, map, &site_target, &func_name, exe));
         }
         out.push_str(".section code\n");
     }
@@ -1077,22 +1271,20 @@ pub fn disassemble_executable(
                         }
                         DecodedOperand::Imm(n) => Some((entry.mnemonic, format!("#{n}"))),
                         // A framed call: the callee is a call root (rendered
-                        // by name); the frame half is the call SITE index,
-                        // resolved through the region to the synthesized
-                        // `F`-label of its descriptor (raw sites have a
-                        // constant column, so this is faithful). An
-                        // unresolvable site renders `@siteN` (the composition
-                        // engine's non-constant columns arrive later); a
-                        // target that never became a root falls back to
-                        // `.byte`.
+                        // by name); the frame half is the call SITE index. A
+                        // constant compose column (a hand-authored site, or an
+                        // engine site reached under one context) names its one
+                        // descriptor by `F`-label; a context-dependent column
+                        // renders `@site<N>` and the legend lists the composites
+                        // it can select. A target that never became a root
+                        // falls back to `.byte`.
                         DecodedOperand::FramedCall {
                             target,
                             table: site,
                         } => {
                             if roots.binary_search(target).is_ok() {
-                                let frame = site_to_desc
+                                let frame = site_operand
                                     .get(site)
-                                    .and_then(|desc_off| table_labels.get(desc_off))
                                     .cloned()
                                     .unwrap_or_else(|| format!("@site{site}"));
                                 Some((entry.mnemonic, format!("{}, {frame}", func_name(*target))))
