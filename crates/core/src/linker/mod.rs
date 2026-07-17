@@ -2,6 +2,7 @@
 //! layout, and relaxation (docs/stdlib.md (linking)).
 
 pub(crate) mod compose;
+mod engine;
 mod layout;
 pub(crate) mod resolve;
 
@@ -40,11 +41,6 @@ pub enum LinkError {
         symbol: String,
         at: u32,
     },
-    /// An object carries declarative call-site binding records, which
-    /// the linker cannot honor yet — they are the composition engine's
-    /// input. Refusing beats silently dropping call semantics. Carries
-    /// the callee symbol name of the first such record.
-    UnsupportedBindings(String),
     /// The link brings in table content or routine signatures, so the
     /// executable needs a sectioned header — but the entry function has
     /// no signature to fill it. Carries the entry function's name.
@@ -54,12 +50,18 @@ pub enum LinkError {
     /// non-injective completed bijection, a per-direction conflict). The
     /// message carries the callee name and the specific reason
     /// (docs/formats.md (bound calls)).
-    BadBinding { callee: String, message: String },
+    BadBinding {
+        callee: String,
+        message: String,
+    },
     /// A frame descriptor is inconsistent with the entry signature: a
     /// physical-tape index at or past the machine's arity, or an
     /// undecodable hand-authored descriptor. Carries the owning function's
     /// name and the specific reason (docs/formats.md (frame descriptors)).
-    BadFrameDescriptor { symbol: String, message: String },
+    BadFrameDescriptor {
+        symbol: String,
+        message: String,
+    },
     /// The composition engine was asked to lower bound calls under a
     /// mechanism it does not implement yet. FRAMES is complete; `Mono` and
     /// `Hybrid` land with the stamping engine. Internal inter-task state.
@@ -83,13 +85,6 @@ impl std::fmt::Display for LinkError {
                 write!(
                     f,
                     "malformed table data for `{symbol}` at table offset {at}"
-                )
-            }
-            Self::UnsupportedBindings(name) => {
-                write!(
-                    f,
-                    "call-site binding records are not supported yet (call to `{name}`); \
-                     they need the composition engine"
                 )
             }
             Self::MissingSignature(name) => {
@@ -231,24 +226,39 @@ pub fn link(
     let entry = options.entry.as_deref().unwrap_or("main");
     let resolved = resolve::resolve(objects, libraries, entry)?;
 
-    // Declarative call-site binding records are the composition engine's
-    // input; until that lands the linker refuses them rather than
-    // silently emitting a call whose tape binding never happens. The
-    // refusal is scoped to REACHABLE bound calls (a binding inside a
-    // dropped/shadowed function never runs, so it must not poison the
-    // link); the callee's name comes from the resolved order.
-    if let Some(func) = resolved.order.iter().find(|f| !f.bound.is_empty()) {
-        let callee = &resolved.order[func.bound[0].1];
-        return Err(LinkError::UnsupportedBindings(callee.name.to_string()));
-    }
-
     let arch = objects
         .first()
         .or_else(|| libraries.first())
         .expect("resolve succeeded => at least one object")
         .arch;
 
-    let built = layout::build(syntax, &resolved.order, options.relax)?;
+    // Every hand-authored frame descriptor's physical-tape indices must lie
+    // within the machine arity (docs/formats.md (frame descriptors)); the
+    // machine arity is the entry signature's. Validated for every reached
+    // function before the engine or layout consumes the descriptors.
+    let entry_sig = resolved.order[0].signature;
+    if let Some(sig) = entry_sig {
+        engine::validate_frame_phys(syntax, &resolved.order, sig)?;
+    } else if resolved.order.iter().any(|f| !f.bound.is_empty()) {
+        // A reachable declarative bound call needs the machine signature
+        // (arity + cardinalities) to compose against; an unsigned entry
+        // has none (docs/formats.md (frames profile)).
+        return Err(LinkError::MissingSignature(
+            resolved.order[0].name.to_string(),
+        ));
+    }
+
+    // The composition engine lowers declarative bound calls in FRAMES mode:
+    // it rewrites each reachable routine's bound-call sites into framed
+    // calls and computes the runtime compose table (docs/formats.md (frames
+    // profile)). It is a no-op for bindingless links, keeping them on the
+    // byte-identical 5a/T2 path.
+    let (order, frames_plan) = match entry_sig {
+        Some(sig) => engine::lower(syntax, resolved.order, sig, options.call_mech)?,
+        None => (resolved.order, None),
+    };
+
+    let built = layout::build(syntax, &order, options.relax, frames_plan.as_ref())?;
 
     // Emit shape (docs/formats.md (executable image)): table content or
     // routine signatures anywhere in the reached set require the
@@ -259,14 +269,14 @@ pub fn link(
     // `PROFILE_BASE` — so frameless links stay byte-identical. Without
     // either tables or a signature, the code-only shape is emitted
     // exactly as before tables existed.
-    let any_signature = resolved.order.iter().any(|f| f.signature.is_some());
+    let any_signature = order.iter().any(|f| f.signature.is_some());
     let profile = if built.frames_present {
         PROFILE_FRAMES
     } else {
         PROFILE_BASE
     };
     let executable = if !built.tables.is_empty() || any_signature {
-        let entry = &resolved.order[0];
+        let entry = &order[0];
         let Some(sig) = entry.signature else {
             return Err(LinkError::MissingSignature(entry.name.to_string()));
         };

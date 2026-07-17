@@ -165,11 +165,10 @@ fn binding_call_assembles_records_dis_round_trips_and_link_refuses() {
         "binding call dis ∘ asm:\n{text}"
     );
 
-    // A bound callee now enters BFS reachability like a relocation
-    // callee: `plusOne` is an extern here, so it surfaces as an
-    // unresolved symbol. (A REACHABLE, DEFINED bound call is refused with
-    // UnsupportedBindings until the composition engine lands — covered in
-    // the linker's own tests.)
+    // A bound callee enters BFS reachability like a relocation callee:
+    // `plusOne` is an extern here, so it surfaces as an unresolved symbol.
+    // (A REACHABLE, DEFINED bound call is lowered by the composition engine
+    // — covered end-to-end in the linker's and TM crate's own tests.)
     let e = link(&tm1_syntax(), &[obj], &[], LinkOptions::default()).unwrap_err();
     assert_eq!(
         e,

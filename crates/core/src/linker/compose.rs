@@ -32,12 +32,6 @@
 //! tables are materialized only by the descriptor emitter in a later
 //! phase-5b task.
 
-// The composition engine (a later phase-5b task) is the sole non-test
-// consumer of this surface; until it is wired in, the algebra is exercised
-// only by its own tests, so the crate-visible entry points read as unused
-// in a non-test build. The allow drops out when the engine calls them.
-#![allow(dead_code)]
-
 use crate::formats::crc32::crc32;
 use crate::formats::object::{RoutineSig, TapeBinding};
 use std::collections::{BTreeMap, BTreeSet};
@@ -472,6 +466,9 @@ pub(crate) fn is_identity(c: &Composite) -> bool {
 
 /// Normalize in place: canonicalize every tape's maps. Idempotent. The
 /// dedup key and digest are only stable across a canonicalized composite.
+// Consumed by the map-sidecar binding-label renderer (a later phase-5b
+// task); the engine reaches composites already canonical by construction.
+#[allow(dead_code)]
 pub(crate) fn canonicalize(c: &mut Composite) {
     for tape in &mut c.tapes {
         tape.rmap.canonicalize();
@@ -500,6 +497,9 @@ pub(crate) fn canonical_key(c: &Composite) -> Vec<u8> {
 /// A 32-bit content address for a composite: CRC-32 of its
 /// [`canonical_key`] (the container checksum algorithm — docs/formats.md
 /// (bound calls)). Stable across builds and across pair-insertion order.
+// The digest is the map-sidecar label's collision fallback (a later
+// phase-5b task); the engine dedups on the full `canonical_key` directly.
+#[allow(dead_code)]
 pub(crate) fn digest(c: &Composite) -> u32 {
     crc32(&canonical_key(c))
 }

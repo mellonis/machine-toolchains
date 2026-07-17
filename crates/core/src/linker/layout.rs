@@ -495,6 +495,7 @@ pub(super) fn build(
     syntax: &ArchSyntax,
     order: &[FuncRef],
     relax: bool,
+    plan: Option<&super::engine::FramesPlan>,
 ) -> Result<Built, LinkError> {
     let functions: Vec<Vec<Piece>> = order
         .iter()
@@ -555,9 +556,17 @@ pub(super) fn build(
     let mut relaxed_calls = 0u32;
     let mut far_calls = 0u32;
     let mut frames_present = false;
-    // Raw framed-call sites in (function, piece) emission order; each
+    // Raw framed-call sites in (function, piece) emission order; used only
+    // on the plan-less path (a pure hand-authored / 5a image), where each
     // becomes a dense 0-based call site with a constant compose column.
     let mut raw_sites: Vec<RawSite> = Vec::new();
+    // Every framed-call piece's frame-half code hole, in (function, piece)
+    // emission order — the engine's compose columns are indexed by this same
+    // order. The frames-region pass writes each its dense site index.
+    let mut fcall_holes: Vec<usize> = Vec::new();
+    // Each function's table-section base, for resolving raw directory
+    // entries the engine plan names by (function, table offset).
+    let mut func_table_bases: Vec<u32> = Vec::with_capacity(order.len());
 
     for (fi, f) in order.iter().enumerate() {
         let pieces = &functions[fi];
@@ -568,6 +577,7 @@ pub(super) fn build(
         // (tables grow only in the per-function append that follows it), so
         // a framed call can resolve its descriptor's absolute offset here.
         let table_base = tables.len() as u32;
+        func_table_bases.push(table_base);
 
         // orig blob offset -> new offset within THIS function; needed to
         // resolve jump targets (arbitrary earlier/later instruction
@@ -652,21 +662,24 @@ pub(super) fn build(
                     code.extend(off32.to_le_bytes());
                     let code_hole = code.len();
                     code.extend_from_slice(&f.blob[(*orig + 5) as usize..(*orig + 9) as usize]);
-                    // The frame fixup for this site names its descriptor's
-                    // blob-local table offset; its absolute offset is this
-                    // function's table base plus that.
-                    let Some(&(_, table_off)) =
-                        f.table_fixups.iter().find(|(hole, _)| *hole == *orig + 5)
-                    else {
-                        return Err(LinkError::MalformedBlob {
-                            symbol: f.name.to_string(),
-                            at: *orig + 5,
+                    fcall_holes.push(code_hole);
+                    if plan.is_none() {
+                        // Plan-less (hand-authored / 5a) path: the frame fixup
+                        // names this site's descriptor; its absolute offset is
+                        // this function's table base plus the blob-local one.
+                        let Some(&(_, table_off)) =
+                            f.table_fixups.iter().find(|(hole, _)| *hole == *orig + 5)
+                        else {
+                            return Err(LinkError::MalformedBlob {
+                                symbol: f.name.to_string(),
+                                at: *orig + 5,
+                            });
+                        };
+                        raw_sites.push(RawSite {
+                            code_hole,
+                            desc_abs: table_base + table_off,
                         });
-                    };
-                    raw_sites.push(RawSite {
-                        code_hole,
-                        desc_abs: table_base + table_off,
-                    });
+                    }
                     far_calls += 1;
                 }
             }
@@ -751,45 +764,54 @@ pub(super) fn build(
         });
     }
 
-    // The frames region (docs/formats.md (frames region)): once every raw
-    // site's descriptor offset is known, build the composite directory
-    // (distinct descriptor offsets in table-section order → indices 1..=K),
-    // rewrite each site's frame half to its dense 0-based site index, and
-    // emit the compose table with a CONSTANT column per raw site.
-    let frames_offset = if raw_sites.is_empty() {
-        0
-    } else {
-        let mut directory: Vec<u32> = raw_sites.iter().map(|s| s.desc_abs).collect();
-        directory.sort_unstable();
-        directory.dedup();
-        let composite_of = |desc_abs: u32| -> u16 {
-            let idx = directory
-                .iter()
-                .position(|&d| d == desc_abs)
-                .expect("every site descriptor is in the directory");
-            u16::try_from(idx + 1).expect("composite index fits u16")
-        };
-        // Rewrite each site's placeholder frame half to its site index.
-        for (site, rs) in raw_sites.iter().enumerate() {
-            let site = u32::try_from(site).expect("site index fits u32");
-            code[rs.code_hole..rs.code_hole + 4].copy_from_slice(&site.to_le_bytes());
-        }
-        let k = u16::try_from(directory.len()).expect("composite count fits u16");
-        let s = u16::try_from(raw_sites.len()).expect("site count fits u16");
-        let frames_offset = u32::try_from(tables.len()).expect("frames offset fits u32");
-        tables.extend(k.to_le_bytes());
-        tables.extend(s.to_le_bytes());
-        for &off in &directory {
-            tables.extend(off.to_le_bytes());
-        }
-        // Rows = active FR 0..=K; every row of a raw site's column carries
-        // the same composite index (the site is context-independent).
-        for _fr in 0..=k {
-            for rs in &raw_sites {
-                tables.extend(composite_of(rs.desc_abs).to_le_bytes());
+    // The frames region (docs/formats.md (frames region)). Two paths:
+    //  * with an engine plan, the composition engine already computed the
+    //    directory (as sources) and the full compose matrix; layout resolves
+    //    the address-dependent descriptor offsets and emits verbatim;
+    //  * without a plan, this is a pure hand-authored (5a) image — build the
+    //    directory from the raw sites' descriptors and emit constant columns.
+    let frames_offset = match plan {
+        Some(plan) => emit_planned_region(
+            plan,
+            &mut code,
+            &mut tables,
+            &fcall_holes,
+            &func_table_bases,
+        ),
+        None if !raw_sites.is_empty() => {
+            let mut directory: Vec<u32> = raw_sites.iter().map(|s| s.desc_abs).collect();
+            directory.sort_unstable();
+            directory.dedup();
+            let composite_of = |desc_abs: u32| -> u16 {
+                let idx = directory
+                    .iter()
+                    .position(|&d| d == desc_abs)
+                    .expect("every site descriptor is in the directory");
+                u16::try_from(idx + 1).expect("composite index fits u16")
+            };
+            // Rewrite each site's placeholder frame half to its site index.
+            for (site, rs) in raw_sites.iter().enumerate() {
+                let site = u32::try_from(site).expect("site index fits u32");
+                code[rs.code_hole..rs.code_hole + 4].copy_from_slice(&site.to_le_bytes());
             }
+            let k = u16::try_from(directory.len()).expect("composite count fits u16");
+            let s = u16::try_from(raw_sites.len()).expect("site count fits u16");
+            let frames_offset = u32::try_from(tables.len()).expect("frames offset fits u32");
+            tables.extend(k.to_le_bytes());
+            tables.extend(s.to_le_bytes());
+            for &off in &directory {
+                tables.extend(off.to_le_bytes());
+            }
+            // Rows = active FR 0..=K; every row of a raw site's column carries
+            // the same composite index (the site is context-independent).
+            for _fr in 0..=k {
+                for rs in &raw_sites {
+                    tables.extend(composite_of(rs.desc_abs).to_le_bytes());
+                }
+            }
+            frames_offset
         }
-        frames_offset
+        None => 0,
     };
 
     Ok(Built {
@@ -801,6 +823,57 @@ pub(super) fn build(
         frames_present,
         frames_offset,
     })
+}
+
+/// Emit the engine-planned frames region (docs/formats.md (frames region)):
+/// append the synthesized descriptors, resolve the directory's
+/// address-dependent offsets, write each framed-call piece its dense site
+/// index (piece order matches the plan's compose columns), then emit the
+/// `K u16, S u16`, directory, and `(K+1) × S` compose matrix. Returns the
+/// region's offset into the table section.
+fn emit_planned_region(
+    plan: &super::engine::FramesPlan,
+    code: &mut [u8],
+    tables: &mut Vec<u8>,
+    fcall_holes: &[usize],
+    func_table_bases: &[u32],
+) -> u32 {
+    use super::engine::DirSource;
+
+    // Append the synthesized (address-independent) descriptors.
+    let mut engine_offsets: Vec<u32> = Vec::with_capacity(plan.engine_descriptors.len());
+    for desc in &plan.engine_descriptors {
+        engine_offsets.push(u32::try_from(tables.len()).expect("table offset fits u32"));
+        tables.extend_from_slice(desc);
+    }
+    // Resolve the directory to absolute descriptor offsets.
+    let directory: Vec<u32> = plan
+        .directory
+        .iter()
+        .map(|src| match src {
+            DirSource::Engine(i) => engine_offsets[*i],
+            DirSource::Raw { func, table_offset } => func_table_bases[*func] + table_offset,
+        })
+        .collect();
+    // Write each framed-call piece its dense site index.
+    for (site, &hole) in fcall_holes.iter().enumerate() {
+        let idx = u32::try_from(site).expect("site index fits u32");
+        code[hole..hole + 4].copy_from_slice(&idx.to_le_bytes());
+    }
+    let k = u16::try_from(directory.len()).expect("composite count fits u16");
+    let s = u16::try_from(fcall_holes.len()).expect("site count fits u16");
+    let frames_offset = u32::try_from(tables.len()).expect("frames offset fits u32");
+    tables.extend(k.to_le_bytes());
+    tables.extend(s.to_le_bytes());
+    for &off in &directory {
+        tables.extend(off.to_le_bytes());
+    }
+    for row in &plan.compose {
+        for &v in row {
+            tables.extend(v.to_le_bytes());
+        }
+    }
+    frames_offset
 }
 
 #[cfg(test)]
@@ -1125,7 +1198,10 @@ B:      stop
 ";
 
     #[test]
-    fn bound_calls_are_rejected_before_any_layout() {
+    fn a_bound_call_in_an_unsigned_entry_is_missing_signature() {
+        // The composition engine needs the machine signature to compose a
+        // binding; an unsigned entry has none, so a reachable bound call is
+        // refused for the missing signature (the guard the engine replaced).
         use crate::formats::object::BoundCall;
         let syntax = fake_table_syntax();
         let mut obj = assemble(&syntax, 0x7E, TWO_FUNCS, false).unwrap();
@@ -1136,18 +1212,14 @@ B:      stop
             binding: vec![],
         });
         let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
-        assert_eq!(
-            e,
-            crate::linker::LinkError::UnsupportedBindings("go".into())
-        );
+        assert_eq!(e, crate::linker::LinkError::MissingSignature("main".into()));
     }
 
     #[test]
-    fn assembled_binding_call_assembles_but_is_refused_at_link() {
-        // The whole T6 gate in one flow: a declarative binding call
-        // assembles (producing the MO record), then the linker refuses it
-        // with `UnsupportedBindings` naming the callee — until the 5b
-        // composition engine can lower it.
+    fn assembled_binding_call_assembles_and_needs_a_signed_entry() {
+        // A declarative binding call assembles (producing the MO record, no
+        // relocation); the linker then routes it through the composition
+        // engine, which refuses an unsigned entry for the missing signature.
         let syntax = fake_table_syntax();
         let src = "\
 .func main
@@ -1163,10 +1235,7 @@ B:      stop
         assert_eq!(obj.symbols[obj.bound_calls[0].symbol as usize].name, "go");
         assert!(obj.relocations.is_empty());
         let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
-        assert_eq!(
-            e,
-            crate::linker::LinkError::UnsupportedBindings("go".into())
-        );
+        assert_eq!(e, crate::linker::LinkError::MissingSignature("main".into()));
     }
 
     #[test]

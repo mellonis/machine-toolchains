@@ -581,9 +581,10 @@ fn entry_override_links_a_function_unreachable_from_main() {
 }
 
 #[test]
-fn a_reachable_bound_call_is_refused_naming_the_callee() {
-    // `main` bound-calls `sub` (defined). Resolve reaches `sub`, then the
-    // guard refuses the still-unsupported binding, naming the callee.
+fn a_reachable_bound_call_without_a_signed_entry_is_missing_signature() {
+    // `main` bound-calls `sub`, but `main` is unsigned — the composition
+    // engine has no machine signature to compose against, so the link is
+    // refused for the missing entry signature.
     let mut obj = bare_object(&["main", "sub"]);
     obj.bound_calls.push(BoundCall {
         blob: 0,
@@ -598,7 +599,7 @@ fn a_reachable_bound_call_is_refused_naming_the_callee() {
         LinkOptions::default(),
     )
     .unwrap_err();
-    assert_eq!(e, LinkError::UnsupportedBindings("sub".into()));
+    assert_eq!(e, LinkError::MissingSignature("main".into()));
 }
 
 #[test]
