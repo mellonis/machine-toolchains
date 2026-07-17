@@ -652,3 +652,316 @@ fn an_unresolved_bound_callee_is_an_unresolved_error() {
     .unwrap_err();
     assert_eq!(e, LinkError::Unresolved(vec!["ghost".into()]));
 }
+
+// -- The composition engine (phase 5b): closure + FRAMES lowering --------
+//
+// Every expected frames region is decoded from the executable here and
+// checked structurally; the fake dialect proves core stays arch-agnostic.
+
+use mtc_core::formats::PROFILE_FRAMES;
+use mtc_core::linker::CallMech;
+
+/// FRAMES-mode link options (the mechanism this phase implements).
+fn frames_opts() -> LinkOptions {
+    LinkOptions {
+        call_mech: CallMech::Frames,
+        ..Default::default()
+    }
+}
+
+/// The decoded frames region (docs/formats.md (frames region)).
+#[derive(Debug, PartialEq, Eq)]
+struct Region {
+    k: u16,
+    s: u16,
+    directory: Vec<u32>,
+    /// `(k+1)` rows of `s` columns each.
+    compose: Vec<Vec<u16>>,
+}
+
+fn parse_region(exe: &mtc_core::formats::executable::Executable) -> Option<Region> {
+    if exe.frames_offset == 0 {
+        return None;
+    }
+    let t = &exe.tables;
+    let mut p = exe.frames_offset as usize;
+    let k = u16::from_le_bytes([t[p], t[p + 1]]);
+    let s = u16::from_le_bytes([t[p + 2], t[p + 3]]);
+    p += 4;
+    let mut directory = Vec::new();
+    for _ in 0..k {
+        directory.push(u32::from_le_bytes(t[p..p + 4].try_into().unwrap()));
+        p += 4;
+    }
+    let mut compose = Vec::new();
+    for _ in 0..=k {
+        let mut row = Vec::new();
+        for _ in 0..s {
+            row.push(u16::from_le_bytes([t[p], t[p + 1]]));
+            p += 2;
+        }
+        compose.push(row);
+    }
+    Some(Region {
+        k,
+        s,
+        directory,
+        compose,
+    })
+}
+
+/// A single non-collapsing bound call links in FRAMES mode: one framed
+/// site, one composite, the frames profile.
+#[test]
+fn a_single_bound_call_lowers_to_one_framed_site() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(out.executable.profile, PROFILE_FRAMES);
+    let region = parse_region(&out.executable).expect("frames region present");
+    assert_eq!(region.k, 1, "one composite");
+    assert_eq!(region.s, 1, "one framed site");
+    // Row 0 (identity): main's site activates composite 1. Row 1 (that
+    // composite): unreachable for this site, 0.
+    assert_eq!(region.compose[0], vec![1]);
+    assert_eq!(region.compose[1], vec![0]);
+}
+
+/// Two-level nesting R→Q under two contexts: `main` bound-calls `r` under
+/// two distinct composites, and `r` bound-calls `q` at one site. That
+/// site's compose column differs by active-frame row — the engine's core
+/// behavior (one site, a different composite per context).
+#[test]
+fn a_site_reached_under_two_contexts_has_a_row_dependent_column() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine r, tapes=2, alpha=(4, 4)
+.routine q, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    r [0{1->2, 2->1}, 1]
+        call    r [0{1->3, 3->1}, 1]
+        stp
+.func r
+        call    q [0{2->3, 3->2}, 1]
+        ret
+.func q
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let region = parse_region(&out.executable).expect("frames region");
+    // Four composites: E1, E2 (main's two calls), then C1, C2 (r's site
+    // composed under each). Three framed sites: main's two + r's one.
+    assert_eq!(region.k, 4);
+    assert_eq!(region.s, 3);
+    // Column order = (function, offset): main.b1, main.b2, r.S.
+    // Row 0 (identity) activates main's two composites; r's site is not
+    // reached at identity.
+    assert_eq!(region.compose[0], vec![1, 2, 0]);
+    // r's site (column 2) resolves to a DIFFERENT composite under E1 (row 1)
+    // than under E2 (row 2) — the same site, a context-dependent frame.
+    assert_ne!(region.compose[1][2], region.compose[2][2]);
+    assert_eq!(region.compose[1][2], 3);
+    assert_eq!(region.compose[2][2], 4);
+    // main's sites are not reached under any non-identity row.
+    assert_eq!(region.compose[1][0], 0);
+    assert_eq!(region.compose[2][1], 0);
+}
+
+/// A full-arity identity binding collapses to a plain call (§5.6): no framed
+/// site, no frames region — the callee inherits the caller's frame.
+#[test]
+fn a_full_identity_binding_collapses_to_a_plain_call() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0, 1]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_ne!(out.executable.profile, PROFILE_FRAMES, "no frames needed");
+    assert_eq!(out.executable.frames_offset, 0);
+    // The collapsed bound call is now an ordinary relaxed call, never a
+    // framed call (opcode 0x14).
+    assert!(
+        !out.executable.code.contains(&0x14),
+        "no framed call emitted"
+    );
+}
+
+/// A projecting identity binding (fewer tapes than the caller) is NOT a
+/// pass-through and stays a framed call — the projection guard on the §5.6
+/// collapse rule (a 1-tape identity composite under a 2-tape caller).
+#[test]
+fn a_projecting_identity_binding_stays_a_framed_call() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=1, alpha=(4)
+.section code
+.func main
+        call    sub [0]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(out.executable.profile, PROFILE_FRAMES);
+    let region = parse_region(&out.executable).expect("frames region");
+    assert_eq!(region.k, 1, "the projecting composite is real");
+    assert_eq!(region.s, 1, "the site stays a framed call");
+    assert!(out.executable.code.contains(&0x14), "framed call emitted");
+}
+
+/// Two sites binding the same callee with the same binding compose to the
+/// same composite — deduped to ONE directory entry, but two columns.
+#[test]
+fn equal_composites_dedup_to_one_directory_entry() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let region = parse_region(&out.executable).expect("frames region");
+    assert_eq!(region.k, 1, "one deduped composite for two equal sites");
+    assert_eq!(region.s, 2, "two framed sites");
+    assert_eq!(region.compose[0], vec![1, 1], "both sites -> composite 1");
+}
+
+/// An out-of-alphabet caller symbol is a static link error (the caller-side
+/// range the algebra leaves to the linker).
+#[test]
+fn an_out_of_range_caller_symbol_is_a_link_error() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(8, 8)
+.section code
+.func main
+        call    sub [0{5->1}, 1]
+        stp
+.func sub
+        ret
+";
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).unwrap_err();
+    match e {
+        LinkError::BadBinding { callee, message } => {
+            assert_eq!(callee, "sub");
+            assert!(
+                message.contains('5') && message.contains("caller"),
+                "{message}"
+            );
+        }
+        other => panic!("expected BadBinding, got {other:?}"),
+    }
+}
+
+/// An equal-size binding whose identity completion is non-injective is a
+/// static link error (the completed bijection the linker requires).
+#[test]
+fn a_non_injective_equal_size_binding_is_a_link_error() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2}, 1]
+        stp
+.func sub
+        ret
+";
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).unwrap_err();
+    assert!(
+        matches!(&e, LinkError::BadBinding { message, .. } if message.contains("injective")),
+        "{e:?}"
+    );
+}
+
+/// Two independent links of the same program are byte-identical — the
+/// closure order is deterministic (reproducible builds).
+#[test]
+fn a_bound_call_link_is_deterministic() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine r, tapes=2, alpha=(4, 4)
+.routine q, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    r [0{1->2, 2->1}, 1]
+        call    r [0{1->3, 3->1}, 1]
+        stp
+.func r
+        call    q [0{2->3, 3->2}, 1]
+        ret
+.func q
+        ret
+";
+    let a = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).unwrap();
+    let b = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).unwrap();
+    assert_eq!(a.executable.to_bytes(), b.executable.to_bytes());
+}
+
+/// A bound call in an unreachable function is never lowered — the routine
+/// (and its callee) drop, and no frames region appears.
+#[test]
+fn a_dropped_functions_bound_call_is_not_lowered() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine dead, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        stp
+.func dead
+        call    sub [0{1->2, 2->1}, 1]
+        ret
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(out.executable.frames_offset, 0, "nothing framed");
+    assert_ne!(out.executable.profile, PROFILE_FRAMES);
+    assert!(out.report.dropped.contains(&"dead".to_string()));
+    assert!(out.report.dropped.contains(&"sub".to_string()));
+}
+
+/// FRAMES is the only mechanism implemented this phase; Mono and Hybrid
+/// error clearly (internal inter-task state until the stamping engine).
+#[test]
+fn mono_and_hybrid_mechanisms_are_unimplemented() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        ret
+";
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let opts = LinkOptions {
+            call_mech: mech,
+            ..Default::default()
+        };
+        let e = link(&fake_syntax(), &[asm(src, false)], &[], opts).unwrap_err();
+        assert_eq!(e, LinkError::UnsupportedCallMech(mech));
+    }
+}
