@@ -639,15 +639,35 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     // A bracketed operand region on an ordinary instruction line
     // (caps.vectors) is captured as ONE verbatim `[..]` token, exactly
     // like a `.row`'s vector — the interior commas must not split it.
-    // Under default caps `LBracket` tokens never exist, so this is dead
-    // and the comma-split below is byte-identical to before.
+    // Two shapes carry a bracket: a lone vector (`wr [1, 2]`, region is
+    // the bracket) and a call-target-then-binding (`call f [2, 0]`, a
+    // name then the bracket). Both capture everything from the first `[`
+    // to the last `]` as one verbatim operand; any operands before the
+    // `[` comma-split as usual (the name half of a binding call). Under
+    // default caps `LBracket` tokens never exist, so this is dead and the
+    // comma-split below is byte-identical to before.
     let region = &body[at + 1..];
-    let operands = if caps.vectors
-        && let Some(op) = vector_operand(line, region, line_no)
+    let after_word = word_token.col + word_token.len;
+    let operands = match caps
+        .vectors
+        .then(|| {
+            region
+                .iter()
+                .position(|t| matches!(t.kind, AsmTokenKind::LBracket))
+        })
+        .flatten()
     {
-        vec![op]
-    } else {
-        operand_region(line, region, line_no, word_token.col + word_token.len)
+        Some(open) => match vector_operand(line, &region[open..], line_no) {
+            Some(bracket) => {
+                let mut ops = operand_region(line, &region[..open], line_no, after_word);
+                ops.push(bracket);
+                ops
+            }
+            // A malformed bracket region (no closing `]`) degrades to the
+            // plain comma-split; lower reports the mismatch precisely.
+            None => operand_region(line, region, line_no, after_word),
+        },
+        None => operand_region(line, region, line_no, after_word),
     };
     AsmItemKind::Line(LineCst {
         labels,
@@ -732,7 +752,7 @@ fn routine_directive(
 
 /// A `Number` token's value as a canonically spelled u32 — the spelling
 /// must equal the value's own rendering (rejects `-1`, `007`, overflow).
-fn canonical_u32(token: &AsmToken) -> Option<(u32, Span)> {
+pub(super) fn canonical_u32(token: &AsmToken) -> Option<(u32, Span)> {
     let AsmTokenKind::Number(text) = &token.kind else {
         return None;
     };
@@ -902,7 +922,7 @@ fn parse_named_pairs<'a>(
 /// A comma-separated list of `<from> (-> | =>) <to>` pairs (canonically
 /// spelled values). An empty token slice is the empty list (`rmap=()` =
 /// identity). `None` on any structural violation.
-fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
+pub(super) fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
     let mut pairs = Vec::new();
     let mut i = 0;
     while i < inner.len() {
@@ -927,6 +947,76 @@ fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
         }
     }
     Some(pairs)
+}
+
+/// Shapes a declarative binding-call operand's interior (the text
+/// between the operand's `[` and `]`) into per-entry `(physIdx, pairs)`
+/// tuples — list position is the callee virtual tape (docs/formats.md
+/// (bound calls)). An entry is a canonical `<physIdx>`, optionally
+/// followed by a `{ <pair>, … }` symbol map reusing the `.map` pair
+/// grammar (`->` bidirectional, `=>` one-way). Total shaping: `None` on
+/// any structural violation (bad number, unbalanced braces, empty entry,
+/// trailing junk); an empty/whitespace interior shapes as `Some(vec![])`
+/// so the caller distinguishes `[]` (rejected there) from malformed.
+///
+/// The interior is re-lexed at bracket depth 0 (no `vectors` cap) so the
+/// `->`/`=>` arrows lex as arrows rather than the in-bracket move markers
+/// — the binding lives in `[..]` at source level, but its pairs read like
+/// a `.map` clause's `(..)` pairs.
+pub(super) fn parse_binding(inner: &str, line_no: u32) -> Option<Vec<(u32, Vec<FramePairCst>)>> {
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    let caps = AsmCaps {
+        tables: true,
+        rept: true,
+        vectors: false,
+    };
+    let tokens: Vec<AsmToken> = lex_line(inner, line_no, caps)
+        .into_iter()
+        .filter(|t| !matches!(t.kind, AsmTokenKind::Comment(_)))
+        .collect();
+    // Split into entries at brace-depth-0 commas; commas inside a `{..}`
+    // map belong to that entry's pair list.
+    let mut segments: Vec<&[AsmToken]> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        match t.kind {
+            AsmTokenKind::LBrace => depth += 1,
+            AsmTokenKind::RBrace => depth -= 1,
+            AsmTokenKind::Comma if depth == 0 => {
+                segments.push(&tokens[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    segments.push(&tokens[start..]);
+    let mut entries = Vec::with_capacity(segments.len());
+    for seg in segments {
+        entries.push(parse_binding_entry(seg)?);
+    }
+    Some(entries)
+}
+
+/// One binding entry: a canonical physical-tape index, then an optional
+/// `{ <pairs> }` group. `None` on any structural violation.
+fn parse_binding_entry(seg: &[AsmToken]) -> Option<(u32, Vec<FramePairCst>)> {
+    let (first, rest) = seg.split_first()?;
+    let phys = canonical_u32(first)?.0;
+    if rest.is_empty() {
+        return Some((phys, Vec::new()));
+    }
+    let [lbrace, mid @ .., rbrace] = rest else {
+        return None;
+    };
+    if !matches!(lbrace.kind, AsmTokenKind::LBrace) || !matches!(rbrace.kind, AsmTokenKind::RBrace)
+    {
+        return None;
+    }
+    Some((phys, parse_pairs(mid)?))
 }
 
 /// The [`TableDirectiveKind`] a leading directive word names, or `None`

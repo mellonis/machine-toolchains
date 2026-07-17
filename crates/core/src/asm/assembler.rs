@@ -5,13 +5,16 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::lower::{
-    FrameTapeMap, SourceFunction, SourceItem, SourceOperand, SourceRow, SourceTable, SpannedName,
-    VecElem, lower_source,
+    FrameTapeMap, SourceFunction, SourceItem, SourceOperand, SourceRow, SourceTable,
+    SourceTapeBinding, SpannedName, VecElem, lower_source,
 };
 use super::syntax::{ArchSyntax, Flow};
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
-use crate::formats::object::{BlobDebug, ObjectFile, Relocation, Symbol, SymbolDef, TableFixup};
+use crate::formats::object::{
+    BlobDebug, BoundCall, MapPair, ObjectFile, Relocation, Symbol, SymbolDef, TableFixup,
+    TapeBinding,
+};
 use crate::vm::{Operand, OperandKind, encode_operand};
 
 fn err(span: Span, kind: AsmErrorKind) -> AsmError {
@@ -65,6 +68,18 @@ enum Slot {
         frame_name: String,
         frame_span: Span,
     },
+    /// A declarative binding call (`call name [binding]`): the far-call
+    /// opcode + a 4-byte ZERO hole, with NO relocation — the call target
+    /// and tape binding ride a `BoundCall` record instead, which the
+    /// composition engine lowers at link time (docs/formats.md (bound
+    /// calls)). `symbol_span` doubles as the debug-line source, like
+    /// `Call`.
+    BoundCall {
+        symbol_span: Span,
+        opcode: u8,
+        target: String,
+        binding: Vec<TapeBinding>,
+    },
 }
 
 impl Slot {
@@ -78,7 +93,7 @@ impl Slot {
                     2
                 }
             }
-            Slot::Call { .. } | Slot::TableRef { .. } => 5,
+            Slot::Call { .. } | Slot::TableRef { .. } | Slot::BoundCall { .. } => 5,
             Slot::FramedCall { .. } => 9,
         }
     }
@@ -105,6 +120,7 @@ struct AssembledFunction {
     relocations: Vec<Relocation>,
     debug: BlobDebug,
     table_refs: Vec<TableRefHole>,
+    bound_calls: Vec<BoundCall>,
 }
 
 pub fn assemble(
@@ -142,6 +158,7 @@ pub fn assemble(
 
     let mut blobs = Vec::with_capacity(functions.len());
     let mut relocations = Vec::new();
+    let mut bound_calls: Vec<BoundCall> = Vec::new();
     let mut debug = with_debug.then(Vec::new);
     // Per-blob label offsets and TableRef holes, for table building.
     let mut blob_labels: Vec<Vec<(String, u32)>> = Vec::with_capacity(functions.len());
@@ -163,6 +180,7 @@ pub fn assemble(
         )?;
         blobs.push(assembled.blob);
         relocations.extend(assembled.relocations);
+        bound_calls.extend(assembled.bound_calls);
         blob_labels.push(assembled.debug.labels.clone());
         blob_table_refs.push(assembled.table_refs);
         if let Some(d) = debug.as_mut() {
@@ -191,6 +209,9 @@ pub fn assemble(
     // the blobs — when present; absent, the object keeps its v2 shape
     // byte-for-byte.
     object.signatures = lowered.signatures;
+    // Declarative binding calls force the v3 object shape (docs/formats.md
+    // (bound calls)); an object with none keeps its v2 shape byte-for-byte.
+    object.bound_calls = bound_calls;
     Ok(object)
 }
 
@@ -260,6 +281,17 @@ fn assemble_function(
                             target: target.name.clone(),
                             frame_name: frame.name.clone(),
                             frame_span: frame.span,
+                        });
+                    }
+                    (
+                        OperandKind::RelI8 | OperandKind::RelI32,
+                        SourceOperand::BoundCallOp { target, binding },
+                    ) => {
+                        slots.push(Slot::BoundCall {
+                            symbol_span: target.span,
+                            opcode: *opcode,
+                            target: target.name.clone(),
+                            binding: binding.iter().map(source_binding_to_object).collect(),
                         });
                     }
                     (OperandKind::SymbolVec, SourceOperand::Ints(ints)) => {
@@ -454,6 +486,7 @@ fn assemble_function(
             // Final emit.
             let mut blob = vec![syntax.entry_opcode];
             let mut relocs = Vec::new();
+            let mut bound_calls = Vec::new();
             let mut lines = Vec::new();
             let mut table_refs = Vec::new();
             for (i, slot) in slots.iter().enumerate() {
@@ -467,7 +500,9 @@ fn assemble_function(
                         | Slot::Jump { span, .. }
                         | Slot::TableRef { span, .. }
                         | Slot::FramedCall { span, .. } => span.start.line,
-                        Slot::Call { symbol_span, .. } => symbol_span.start.line,
+                        Slot::Call { symbol_span, .. } | Slot::BoundCall { symbol_span, .. } => {
+                            symbol_span.start.line
+                        }
                     },
                 ));
                 match slot {
@@ -558,6 +593,34 @@ fn assemble_function(
                         });
                         blob.extend([0u8; 4]);
                     }
+                    Slot::BoundCall {
+                        opcode,
+                        target,
+                        binding,
+                        ..
+                    } => {
+                        blob.push(*opcode);
+                        // A binding call carries NO relocation: the 4-byte
+                        // hole stays zero and the target+binding ride a
+                        // `BoundCall` record the composition engine lowers
+                        // at link time (docs/formats.md (bound calls)). The
+                        // callee may be extern; interning it mirrors a plain
+                        // call's external-symbol handling.
+                        let sym_idx = *symbol_index.entry(target.clone()).or_insert_with(|| {
+                            symbols.push(Symbol {
+                                name: target.clone(),
+                                def: SymbolDef::External,
+                            });
+                            (symbols.len() - 1) as u32
+                        });
+                        bound_calls.push(BoundCall {
+                            blob: blob_idx,
+                            offset: blob.len() as u32,
+                            symbol: sym_idx,
+                            binding: binding.clone(),
+                        });
+                        blob.extend([0u8; 4]);
+                    }
                 }
             }
             let labels = label_slot
@@ -571,8 +634,25 @@ fn assemble_function(
                 relocations: relocs,
                 debug: BlobDebug { labels, lines },
                 table_refs,
+                bound_calls,
             });
         }
+    }
+}
+
+/// Converts a validated source tape binding into its MO wire form
+/// (docs/formats.md (bound calls)). The one-way bit is real data here —
+/// it distinguishes `->` (bidirectional) from `=>` (read-only) pairs for
+/// the composition engine, unlike a frame descriptor where the wire form
+/// drops it.
+fn source_binding_to_object(b: &SourceTapeBinding) -> TapeBinding {
+    TapeBinding {
+        caller_tape: b.caller_tape,
+        pairs: b
+            .pairs
+            .iter()
+            .map(|&(src, dst, one_way)| MapPair { src, dst, one_way })
+            .collect(),
     }
 }
 
@@ -1240,7 +1320,7 @@ mod tests {
     /// nop/stp/ent as usual.
     fn fake_syntax() -> ArchSyntax {
         use crate::asm::syntax::{AsmCaps, SyntaxEntry};
-        use Flow::{Call, FallThrough as FT, Stop};
+        use Flow::{Call, FallThrough as FT, Jump, Stop};
         ArchSyntax {
             entries: vec![
                 SyntaxEntry {
@@ -1266,6 +1346,18 @@ mod tests {
                     mnemonic: "fcall",
                     operand: OperandKind::FramedCall,
                     flow: Call,
+                },
+                SyntaxEntry {
+                    opcode: 0x21,
+                    mnemonic: "call",
+                    operand: OperandKind::RelI32,
+                    flow: Call,
+                },
+                SyntaxEntry {
+                    opcode: 0x20,
+                    mnemonic: "jmp",
+                    operand: OperandKind::RelI32,
+                    flow: Jump,
                 },
                 SyntaxEntry {
                     opcode: 0x07,
@@ -1684,6 +1776,132 @@ F0: .frame tapes=(0, 1)
         .unwrap_err();
         assert!(
             matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("drop the `@`")),
+            "{e}"
+        );
+    }
+
+    // -- Declarative binding calls (`call name [binding]`) --------------
+
+    const BINDING_PROGRAM: &str = "\
+.func main
+    call plusOne [2{1->3,2=>0}, 0]
+    stp
+.func plusOne
+    stp
+";
+
+    #[test]
+    fn binding_call_emits_zero_hole_and_a_bound_call_record() {
+        let obj = asm_fake(BINDING_PROGRAM).unwrap();
+        // main blob: ent@0, call@1 (opcode 0x21 + 4-byte ZERO hole at
+        // 2..6), stp@6. No relocation rides the hole.
+        assert_eq!(obj.blobs[0], vec![0x0E, 0x21, 0, 0, 0, 0, 0x02]);
+        assert!(
+            obj.relocations.is_empty(),
+            "no relocation for a binding call"
+        );
+        // The bound-call record carries the hole and the binding.
+        assert_eq!(obj.bound_calls.len(), 1);
+        let bc = &obj.bound_calls[0];
+        assert_eq!(bc.blob, 0);
+        assert_eq!(bc.offset, 2);
+        assert_eq!(obj.symbols[bc.symbol as usize].name, "plusOne");
+        // Binding: entry 0 = physical tape 2 with a `->` and a `=>` pair;
+        // entry 1 = physical tape 0, no pairs. The one-way bit is real data.
+        assert_eq!(bc.binding.len(), 2);
+        assert_eq!(bc.binding[0].caller_tape, 2);
+        assert_eq!(
+            bc.binding[0].pairs,
+            vec![
+                MapPair {
+                    src: 1,
+                    dst: 3,
+                    one_way: false
+                },
+                MapPair {
+                    src: 2,
+                    dst: 0,
+                    one_way: true
+                },
+            ]
+        );
+        assert_eq!(bc.binding[1].caller_tape, 0);
+        assert!(bc.binding[1].pairs.is_empty());
+        // A bound call forces the v3 object shape.
+        assert!(!obj.is_v2_shape());
+    }
+
+    #[test]
+    fn binding_call_round_trips_through_object_bytes() {
+        let obj = asm_fake(BINDING_PROGRAM).unwrap();
+        let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
+        assert_eq!(back.bound_calls, obj.bound_calls);
+        assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn binding_call_target_may_be_external() {
+        // `plusOne` is undefined in this file — like a plain call, the
+        // record's symbol is interned as External.
+        let obj = asm_fake(".func main\n    call plusOne [0]\n    stp\n").unwrap();
+        assert_eq!(obj.bound_calls.len(), 1);
+        let sym = &obj.symbols[obj.bound_calls[0].symbol as usize];
+        assert_eq!(sym.name, "plusOne");
+        assert_eq!(sym.def, SymbolDef::External);
+        assert!(obj.relocations.is_empty());
+    }
+
+    #[test]
+    fn binding_call_physical_index_over_15_is_rejected() {
+        let e = asm_fake(".func main\n    call f [16]\n    stp\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(ref m) if m.contains("< 16")),
+            "{e}"
+        );
+        // The diagnostic points at the `[..]` binding operand on line 2,
+        // starting at the `[` (column 12), not the whole line.
+        assert_eq!(e.span.start.line, 2);
+        assert_eq!(e.span.start.col, 12);
+    }
+
+    #[test]
+    fn binding_call_duplicate_source_is_rejected() {
+        let e = asm_fake(".func main\n    call f [0{1->2,1->3}]\n    stp\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(ref m) if m.contains("duplicate source")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn binding_call_empty_binding_is_rejected() {
+        let e = asm_fake(".func main\n    call f []\n    stp\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(ref m) if m.contains("at least one")),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn binding_call_malformed_pairs_are_rejected() {
+        // A non-canonical index (`01`), a lone arrow, and an unbalanced
+        // brace each fail structural shaping.
+        for src in [
+            ".func main\n    call f [01]\n    stp\n",
+            ".func main\n    call f [0{1->}]\n    stp\n",
+            ".func main\n    call f [0{1->2]\n    stp\n",
+        ] {
+            let e = asm_fake(src).unwrap_err();
+            assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "{src}: {e}");
+        }
+    }
+
+    #[test]
+    fn binding_bracket_on_a_non_call_is_rejected() {
+        // `jmp` is a RelI32 Jump — a trailing bracket is not a binding.
+        let e = asm_fake(".func main\n    jmp L [0]\nL:  stp\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("only a call")),
             "{e}"
         );
     }

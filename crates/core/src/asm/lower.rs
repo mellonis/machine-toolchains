@@ -6,10 +6,10 @@
 use super::cst::{
     AsmCst, AsmItem, AsmItemKind, FrameDirectiveCst, FrameHeaderCst, FrameMapCst, FramePairCst,
     FuncCst, InstrCst, LabelCst, LineCst, OperandToken, ReptCst, RoutineDirectiveCst, SectionCst,
-    TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with,
+    TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with, parse_binding,
 };
 use super::subst::substitute;
-use super::syntax::ArchSyntax;
+use super::syntax::{ArchSyntax, Flow, SyntaxEntry};
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
 use crate::formats::object::RoutineSig;
@@ -77,6 +77,30 @@ pub enum SourceOperand {
         target: SpannedName,
         frame: SpannedName,
     },
+    /// A declarative binding call operand (`call name [binding]`): the
+    /// call `target` (a symbol name, like a plain call's) and the tape
+    /// binding — one entry per callee virtual tape, in list order. The
+    /// assembler emits a plain far-call opcode with a zeroed hole (no
+    /// relocation) and records the binding as an MO bound-call for the
+    /// composition engine to lower (docs/formats.md (bound calls)).
+    BoundCallOp {
+        target: SpannedName,
+        binding: Vec<SourceTapeBinding>,
+    },
+}
+
+/// One virtual-tape binding at a declarative call site: which caller
+/// physical tape feeds this callee tape (`caller_tape`), and the symbol
+/// map between their alphabets. `one_way` (the `=>` spelling) marks a
+/// read-only pair, excluded from write-back. Mapping legality (blank
+/// rules, bijection, completion) is the composition engine's, checked at
+/// link time (docs/formats.md (bound calls)); this layer records the
+/// authored pairs verbatim after structural validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceTapeBinding {
+    pub caller_tape: u8,
+    /// `(src, dst, one_way)` per authored pair, in source order.
+    pub pairs: Vec<(u32, u32, bool)>,
 }
 
 /// One element of a `[..]` vector operand.
@@ -1098,7 +1122,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
             span: line.span,
             labels,
             opcode: entry.opcode,
-            operand: classify_operand(entry.operand, instr)?,
+            operand: classify_operand(entry, instr)?,
         }
     };
     ctx.functions
@@ -1182,9 +1206,9 @@ fn lower_byte(instr: &InstrCst) -> Result<u8, AsmError> {
     })
 }
 
-fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand, AsmError> {
+fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOperand, AsmError> {
     let operands = &instr.operands;
-    match kind {
+    match entry.operand {
         OperandKind::None => {
             if let Some(first) = operands.first() {
                 return Err(err(
@@ -1195,6 +1219,15 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
             Ok(SourceOperand::None)
         }
         OperandKind::RelI8 | OperandKind::RelI32 => {
+            // Declarative binding-call form: `call <name> [<binding>]` —
+            // a call target then a trailing bracket group. The bracket is
+            // captured as one verbatim operand by the CST (docs/formats.md
+            // (bound calls)); only a call takes a binding.
+            if let [target, bracket] = operands.as_slice()
+                && bracket.text.starts_with('[')
+            {
+                return classify_bound_call(entry, target, bracket);
+            }
             let [one] = operands.as_slice() else {
                 return Err(err(
                     instr.word_span,
@@ -1351,6 +1384,96 @@ fn classify_operand(kind: OperandKind, instr: &InstrCst) -> Result<SourceOperand
             })
         }
     }
+}
+
+/// Classifies a declarative binding call (`call <name> [<binding>]`). The
+/// `target` is a plain call target and `bracket` the verbatim `[..]`
+/// operand. Only a `Flow::Call` mnemonic takes a binding; jumps/branches
+/// with a trailing bracket are rejected. Structural validation lives here
+/// (physical index `< 16`, canonical `u32` src/dst, no duplicate source
+/// in one entry, non-empty binding); mapping legality — the blank↔blank
+/// rule, bijection, write-back consistency — is the composition engine's,
+/// checked at link time (docs/formats.md (bound calls)).
+fn classify_bound_call(
+    entry: &SyntaxEntry,
+    target: &OperandToken,
+    bracket: &OperandToken,
+) -> Result<SourceOperand, AsmError> {
+    if entry.flow != Flow::Call {
+        return Err(err(
+            bracket.span,
+            AsmErrorKind::BadOperand("only a call takes a tape binding"),
+        ));
+    }
+    // Target half — same grammar as a plain call target.
+    if target.text.starts_with('@') {
+        return Err(err(
+            target.span,
+            AsmErrorKind::BadOperand("call targets are already symbols; drop the `@`"),
+        ));
+    }
+    if !is_symbol_name(&target.text) {
+        return Err(err(
+            target.span,
+            AsmErrorKind::BadOperand("call targets are names, not numbers"),
+        ));
+    }
+    let inner = bracket
+        .text
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .ok_or_else(|| {
+            err(
+                bracket.span,
+                AsmErrorKind::BadFrame("malformed tape binding".into()),
+            )
+        })?;
+    let entries = parse_binding(inner, bracket.span.start.line).ok_or_else(|| {
+        err(
+            bracket.span,
+            AsmErrorKind::BadFrame("malformed tape binding".into()),
+        )
+    })?;
+    if entries.is_empty() {
+        return Err(err(
+            bracket.span,
+            AsmErrorKind::BadFrame(
+                "a binding call needs at least one tape entry; use a plain `call` for none".into(),
+            ),
+        ));
+    }
+    let mut binding = Vec::with_capacity(entries.len());
+    for (phys, pairs) in entries {
+        let caller_tape = u8::try_from(phys).ok().filter(|&p| p < 16).ok_or_else(|| {
+            err(
+                bracket.span,
+                AsmErrorKind::BadFrame("binding physical tape index must be < 16".into()),
+            )
+        })?;
+        // A source symbol may bind at most once per tape — a repeated src
+        // is an ambiguous map, rejected regardless of composition rules.
+        let mut seen = Vec::with_capacity(pairs.len());
+        for p in &pairs {
+            if seen.contains(&p.from) {
+                return Err(err(
+                    bracket.span,
+                    AsmErrorKind::BadFrame("duplicate source symbol in a tape binding".into()),
+                ));
+            }
+            seen.push(p.from);
+        }
+        binding.push(SourceTapeBinding {
+            caller_tape,
+            pairs: pairs.iter().map(|p| (p.from, p.to, p.one_way)).collect(),
+        });
+    }
+    Ok(SourceOperand::BoundCallOp {
+        target: SpannedName {
+            name: target.text.clone(),
+            span: target.span,
+        },
+        binding,
+    })
 }
 
 #[cfg(test)]
