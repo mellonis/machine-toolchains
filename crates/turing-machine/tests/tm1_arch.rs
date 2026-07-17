@@ -69,3 +69,60 @@ fn two_tape_read_match_dispatch_move_write_stop() {
         assert_eq!(tape.head(), 1);
     }
 }
+
+#[test]
+fn wrmv_matches_the_wr_then_mov_pair() {
+    use mtc_turing_machine::arch::opcodes::WRMV;
+
+    // A single fused `wrmv [1, 1], [>, <]` must leave byte-identical tapes
+    // and heads to the `wr [1, 1]; mov [>, <]` pair driven over the same
+    // two blank tapes — all writes precede all moves (one formal step).
+    let fused = {
+        let mut c = vec![WRMV];
+        c.extend(
+            encode_operand(&Operand::WriteMove {
+                writes: vec![1, 1],
+                moves: vec![2, 1], // dev0 right, dev1 left
+            })
+            .unwrap(),
+        );
+        c.push(opcodes::STP);
+        c
+    };
+    let pair = {
+        let mut c = vec![opcodes::WR];
+        c.extend(encode_operand(&Operand::Symbols(vec![1, 1])).unwrap());
+        c.push(opcodes::MOV);
+        c.extend(encode_operand(&Operand::Symbols(vec![2, 1])).unwrap());
+        c.push(opcodes::STP);
+        c
+    };
+
+    // Run a code image over two fresh blank tapes; report each tape's marks
+    // and head, so the two programs' observable tape state can be compared.
+    fn run_prog(code: &[u8]) -> Vec<(Vec<i64>, i64)> {
+        let arch = Tm1::new(2);
+        let mut core = Core::new(&arch, 0).with_device_count(2);
+        let mut stack = ReturnStack::new(4);
+        let mut tape0 = InfiniteTape::new();
+        let mut tape1 = InfiniteTape::new();
+        let mut devices: Vec<&mut dyn Tape> = vec![&mut tape0, &mut tape1];
+        let result = run(
+            &mut core,
+            code,
+            &mut stack,
+            &mut devices,
+            &[],
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        );
+        drop(devices);
+        assert_eq!(result.outcome, Outcome::Stopped);
+        vec![
+            (tape0.marked_cells(), tape0.head()),
+            (tape1.marked_cells(), tape1.head()),
+        ]
+    }
+
+    assert_eq!(run_prog(&fused), run_prog(&pair));
+}

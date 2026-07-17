@@ -93,8 +93,30 @@ other:  hlt
 ";
 
 #[test]
-fn dialect_version_is_0_2() {
-    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.2");
+fn dialect_version_is_0_3() {
+    assert_eq!(TM1_TMA_DIALECT_VERSION, "0.3");
+}
+
+/// The 0.3 fused write+move `wrmv [w…], [m…]`: the write vector then the
+/// move vector in one instruction (all writes precede all moves).
+const WRMV_PROGRAM: &str = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section code
+.func main
+        wrmv [1, -], [<, .]
+        stp
+";
+
+#[test]
+fn wrmv_assembles_and_object_round_trips() {
+    let obj = assemble(WRMV_PROGRAM, false).expect("wrmv assembles");
+    let text = disassemble_object(&obj);
+    assert!(
+        text.contains("wrmv    [1, -], [<, .]"),
+        "dis missing the fused write+move:\n{text}"
+    );
+    let obj2 = assemble(&text, false).expect("rendered wrmv re-assembles");
+    assert_eq!(obj.to_bytes(), obj2.to_bytes(), "wrmv dis ∘ asm:\n{text}");
 }
 
 #[test]

@@ -35,6 +35,11 @@ pub mod opcodes {
     pub const BRK: u8 = 0x0E;
     /// Vector move: one step per tape (0 stay, 1 left, 2 right).
     pub const MOV: u8 = 0x0F;
+    /// Fused per-tape write+move (`wrmv [w…], [m…]`): the write vector then
+    /// the move vector, one formal step — all writes precede all moves
+    /// (behaviorally the `wr; mov` pair). `0x7F` keeps a cell in the write
+    /// group; the move group uses the same 0 stay / 1 left / 2 right codes.
+    pub const WRMV: u8 = 0x12;
     /// Raise a typed trap explicitly (`trap #kind`): kind `0` = unmapped
     /// read, `1` = unmapped write. The frames stubs a linker composition
     /// emits reach for these to signal a crossed map hole.
@@ -49,11 +54,6 @@ pub mod opcodes {
     /// Short form: far `| 0x10`. Only `call` has one so far; the linker
     /// selects it during relaxation — the assembler always emits far.
     pub const CALL_S: u8 = 0x1B;
-
-    // Reserved TM-1 opcode — numbered but deliberately not defined or
-    // lowered here yet, so `operand_kind` returns `None` and a program that
-    // uses it traps on fetch until the producer that emits it lands:
-    //   0x12 wrmv — fused per-tape write+move in one fetch (future codegen)
 }
 
 use opcodes::*;
@@ -102,6 +102,9 @@ impl Arch for Tm1 {
             // rendering; both fetch to `Operand::Symbols`, so the
             // lowering below reads them uniformly.
             MOV => Some(OperandKind::MoveVec),
+            // Fused write+move: two self-delimiting groups (the write
+            // vector then the move vector), decoding to `Operand::WriteMove`.
+            WRMV => Some(OperandKind::WriteMoveVec),
             // `trap #kind` and `retx #k` carry a plain immediate byte;
             // `call.m target, F` carries the framed-call operand (a rel
             // displacement plus a frame table offset).
@@ -188,6 +191,40 @@ impl Arch for Tm1 {
                 }
                 ops
             }
+            // `wrmv [w…], [m…]`: the fused write+move of one formal step.
+            // ALL writes precede ALL moves — behaviorally the `wr; mov`
+            // pair (docs/formats.md (assembly text)). The two vectors share
+            // one arity; a width mismatch, an empty/over-16 group, or an
+            // out-of-vocabulary payload is a malformed operand (house
+            // style: the arch rejects at lower, not the wire codec).
+            WRMV => {
+                let (writes, moves) = match operand {
+                    Operand::WriteMove { writes, moves } => (writes, moves),
+                    _ => return Err(Trap::BadOperand { at: 0 }),
+                };
+                if writes.len() != moves.len() || !(1..=16).contains(&writes.len()) {
+                    return Err(Trap::BadOperand { at: 0 });
+                }
+                let mut ops = Vec::new();
+                for (dev, &v) in (0u8..).zip(writes.iter()) {
+                    if v == KEEP {
+                        continue;
+                    }
+                    if v > KEEP {
+                        return Err(Trap::BadOperand { at: 0 });
+                    }
+                    ops.push(MicroOp::Write { dev, index: v });
+                }
+                for (dev, &m) in (0u8..).zip(moves.iter()) {
+                    match m {
+                        STAY => {}
+                        LEFT => ops.push(MicroOp::MoveLeft { dev }),
+                        RIGHT => ops.push(MicroOp::MoveRight { dev }),
+                        _ => return Err(Trap::BadOperand { at: 0 }),
+                    }
+                }
+                ops
+            }
             // `trap #kind`: 0 → unmapped-read, 1 → unmapped-write; any other
             // kind is a malformed operand (numeric kinds leave room for
             // named kinds later without a grammar break).
@@ -241,9 +278,9 @@ mod tests {
     use mtc_core::vm::{MicroOp, Operand, OperandKind};
 
     /// Every defined TM-1 opcode.
-    const ALL_OPCODES: [u8; 19] = [
-        NOP, STP, HLT, RD, MTC, DJMP, WR, JMP, JM, JNM, CALL, RET, ENT, BRK, MOV, TRAP, CALL_M,
-        RETX, CALL_S,
+    const ALL_OPCODES: [u8; 20] = [
+        NOP, STP, HLT, RD, MTC, DJMP, WR, JMP, JM, JNM, CALL, RET, ENT, BRK, MOV, WRMV, TRAP,
+        CALL_M, RETX, CALL_S,
     ];
 
     /// A valid operand for `op`'s operand kind, with values that lower
@@ -257,6 +294,12 @@ mod tests {
             // Both vector kinds fetch to `Operand::Symbols`; 0 lowers
             // cleanly for `wr` (write 0) and `mov` (stay) alike.
             OperandKind::SymbolVec | OperandKind::MoveVec => Operand::Symbols(vec![0, 0]),
+            // `wrmv` fetches to `Operand::WriteMove`; equal-width groups of
+            // 0 lower cleanly (write 0 on every tape, stay on every tape).
+            OperandKind::WriteMoveVec => Operand::WriteMove {
+                writes: vec![0, 0],
+                moves: vec![0, 0],
+            },
             OperandKind::TableRef => Operand::Table(0),
             // `trap #0` / `retx #0` lower without error; `call.m` takes a
             // rel displacement plus a frame table offset.
@@ -282,6 +325,10 @@ mod tests {
         }
         assert!(matches!(a.operand_kind(WR), Some(OperandKind::SymbolVec)));
         assert!(matches!(a.operand_kind(MOV), Some(OperandKind::MoveVec)));
+        assert!(matches!(
+            a.operand_kind(WRMV),
+            Some(OperandKind::WriteMoveVec)
+        ));
         for op in [TRAP, RETX] {
             assert!(
                 matches!(a.operand_kind(op), Some(OperandKind::Imm8)),
@@ -304,9 +351,10 @@ mod tests {
     #[test]
     fn operand_kind_is_none_for_unknown_and_reserved_opcodes() {
         let a = Tm1::new(2);
-        // 0x11 (trap), 0x13 (call.m), 0x14 (retx) are now defined; 0x12
-        // (wrmv) is still the one reserved-but-undefined opcode.
-        for invalid in [0x00u8, 0x10, 0x12, 0x1A, 0x1C, 0x80, 0xFF] {
+        // 0x11 (trap), 0x12 (wrmv), 0x13 (call.m), 0x14 (retx) are all
+        // defined now — no TM-1 opcode below 0x15 remains reserved. 0x10 is
+        // an unused gap; 0x1A/0x1C are undefined above the range.
+        for invalid in [0x00u8, 0x10, 0x1A, 0x1C, 0x80, 0xFF] {
             assert!(
                 a.operand_kind(invalid).is_none(),
                 "opcode {invalid:#04x} must be unknown"
@@ -393,6 +441,132 @@ mod tests {
             a.lower(MOV, &Operand::Symbols(vec![STAY, STAY, STAY]))
                 .unwrap(),
             vec![]
+        );
+    }
+
+    #[test]
+    fn wrmv_lowers_all_writes_then_all_moves() {
+        let a = Tm1::new(2);
+        // [5, 1], [>, <]: write dev0=5, dev1=1, THEN move dev0 right, dev1
+        // left — every write precedes every move (one formal step, the
+        // `wr; mov` pair fused).
+        assert_eq!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![5, 1],
+                    moves: vec![RIGHT, LEFT],
+                }
+            )
+            .unwrap(),
+            vec![
+                MicroOp::Write { dev: 0, index: 5 },
+                MicroOp::Write { dev: 1, index: 1 },
+                MicroOp::MoveRight { dev: 0 },
+                MicroOp::MoveLeft { dev: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn wrmv_all_keep_write_elides_the_writes() {
+        let a = Tm1::new(2);
+        // Keep on every tape: no Write micro-ops, only the moves survive.
+        assert_eq!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![KEEP, KEEP],
+                    moves: vec![LEFT, RIGHT],
+                }
+            )
+            .unwrap(),
+            vec![MicroOp::MoveLeft { dev: 0 }, MicroOp::MoveRight { dev: 1 }]
+        );
+    }
+
+    #[test]
+    fn wrmv_all_stay_move_elides_the_moves() {
+        let a = Tm1::new(2);
+        // Stay on every tape: only the writes survive.
+        assert_eq!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![1, 0],
+                    moves: vec![STAY, STAY],
+                }
+            )
+            .unwrap(),
+            vec![
+                MicroOp::Write { dev: 0, index: 1 },
+                MicroOp::Write { dev: 1, index: 0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn wrmv_width_mismatch_and_bad_shapes_are_bad_operand() {
+        let a = Tm1::new(2);
+        // The write and move vectors must share one arity.
+        assert!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![1, 0],
+                    moves: vec![RIGHT],
+                }
+            )
+            .is_err()
+        );
+        // Empty groups and over-16 are malformed.
+        assert!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![],
+                    moves: vec![],
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![0; 17],
+                    moves: vec![0; 17],
+                }
+            )
+            .is_err()
+        );
+        // A non-WriteMove operand shape is malformed.
+        assert!(a.lower(WRMV, &Operand::None).is_err());
+    }
+
+    #[test]
+    fn wrmv_rejects_out_of_vocabulary_payloads() {
+        let a = Tm1::new(2);
+        // A write payload above the keep marker, and a move code above right.
+        assert!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![0x80, 0],
+                    moves: vec![STAY, STAY],
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            a.lower(
+                WRMV,
+                &Operand::WriteMove {
+                    writes: vec![0, 0],
+                    moves: vec![3, STAY],
+                }
+            )
+            .is_err()
         );
     }
 
@@ -537,12 +711,11 @@ mod tests {
     #[test]
     fn invalid_opcode_lowers_to_invalid_opcode_trap() {
         let a = Tm1::new(2);
-        // 0x12 (wrmv) is reserved but undefined — the one opcode below
-        // 0x15 with no lowering.
+        // 0x10 is an unused gap below the defined range — no lowering.
         assert_eq!(
-            a.lower(0x12, &Operand::None),
+            a.lower(0x10, &Operand::None),
             Err(Trap::InvalidOpcode {
-                opcode: 0x12,
+                opcode: 0x10,
                 at: 0
             })
         );

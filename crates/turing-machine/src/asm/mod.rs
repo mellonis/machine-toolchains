@@ -20,7 +20,10 @@ use crate::arch::opcodes::*;
 /// the `[..]` write- and move-vector operand forms. 0.2: the frames
 /// instructions — `trap #kind`, the framed call `call.m target, F`, and the
 /// multi-exit return `retx #k` — with the `#imm` immediate operand form.
-pub const TM1_TMA_DIALECT_VERSION: &str = "0.2";
+/// 0.3: the fused write+move `wrmv [w…], [m…]` — the write vector then the
+/// move vector in one instruction (all writes precede all moves), the
+/// `-O0` codegen canon for a rule's write+move action.
+pub const TM1_TMA_DIALECT_VERSION: &str = "0.3";
 
 /// The TM-1 mnemonic table (the `.tma` dialect). Opcode/operand shapes
 /// mirror the TM-1 arch module (`crate::arch`); flows follow the same
@@ -29,7 +32,9 @@ pub const TM1_TMA_DIALECT_VERSION: &str = "0.2";
 /// treat both dialects uniformly.
 pub fn tm1_syntax() -> ArchSyntax {
     use Flow::{Branch, Call as CallF, FallThrough as FT, Jump, Stop};
-    use OperandKind::{FramedCall, Imm8, MoveVec, None as N, RelI8, RelI32, SymbolVec, TableRef};
+    use OperandKind::{
+        FramedCall, Imm8, MoveVec, None as N, RelI8, RelI32, SymbolVec, TableRef, WriteMoveVec,
+    };
     ArchSyntax {
         entries: vec![
             SyntaxEntry {
@@ -129,6 +134,15 @@ pub fn tm1_syntax() -> ArchSyntax {
                 opcode: MOV,
                 mnemonic: "mov",
                 operand: MoveVec,
+                flow: FT,
+            },
+            // Fused write+move (`wrmv [w…], [m…]`): the write vector then
+            // the move vector, one instruction (all writes precede all
+            // moves). A plain fall-through, like `wr`/`mov`.
+            SyntaxEntry {
+                opcode: WRMV,
+                mnemonic: "wrmv",
+                operand: WriteMoveVec,
                 flow: FT,
             },
             // Raise a typed trap explicitly (`trap #kind`): a plain
