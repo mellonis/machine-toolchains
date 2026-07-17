@@ -206,3 +206,72 @@ fn hybrid_mixed_image_is_frames_and_runs_both_paths() {
         "the frames write ran after the stamp"
     );
 }
+
+/// A 2-tape machine mono-calls a 1-tape `sub` bound to physical tape 1 through
+/// a swap (physical 1 ↔ virtual 2, physical 2 ↔ virtual 1). `sub`'s whole body
+/// is one fused `wrmv [1], [>]`: it writes virtual 1 — which the write map
+/// sends to physical 2 — and moves right, both landing on physical tape 1 under
+/// the projection. Physical tape 0 is unbound, so the stamp emits keep + stay
+/// there. Exercises the fused-write+move mono-stamping arm on its happy path.
+const WRMV_HAPPY: &str = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=1, alpha=(4)
+.section code
+.func main
+        call sub [1{1->2, 2->1}]
+        stp
+.func sub
+        wrmv [1], [>]
+        ret
+";
+
+#[test]
+fn mono_stamped_wrmv_writes_through_wmap_and_moves_under_projection() {
+    let exe = build(WRMV_HAPPY, CallMech::Mono);
+    assert_ne!(exe.profile, PROFILE_FRAMES, "mono ⇒ base profile");
+    let (outcome, snaps) = run(&exe, &[4, 4]);
+    assert_eq!(outcome, Outcome::Stopped);
+    // Physical tape 1: virtual 1 wrote as physical 2 at position 0, then the
+    // fused `>` advanced the head to 1.
+    assert_eq!(cell_at(&snaps[1], 0), 2, "virtual 1 → physical 2 via wmap");
+    assert_eq!(snaps[1].head, 1, "the fused `>` advanced physical tape 1");
+    // Physical tape 0 is unbound: keep + stay, so it stays blank at home.
+    assert_eq!(cell_at(&snaps[0], 0), 0, "tape 0 untouched");
+    assert_eq!(snaps[0].head, 0, "tape 0 head did not move");
+}
+
+/// A 1-tape machine mono-calls a 1-tape `sub` through a swap that leaves
+/// virtual 3 with no physical image (the machine alphabet is width 3). `sub`
+/// first moves right (head 0 → 1), then a fused `wrmv [3], [>]` whose write
+/// half is the hole. The stamp replaces the WHOLE fused instruction with
+/// `trap #1` before emitting anything, so the `>` never runs — the moves-drop
+/// observable. This is the write-HOLE counterpart to the happy path above.
+const WRMV_WRITE_HOLE: &str = "\
+.routine main, tapes=1, alpha=(3)
+.routine sub, tapes=1, alpha=(4)
+.section code
+.func main
+        call sub [0{1->2, 2->1}]
+        stp
+.func sub
+        mov  [>]
+        wrmv [3], [>]
+        ret
+";
+
+#[test]
+fn mono_stamped_wrmv_write_hole_traps_and_drops_the_move() {
+    let exe = build(WRMV_WRITE_HOLE, CallMech::Mono);
+    assert_ne!(exe.profile, PROFILE_FRAMES, "still base profile");
+    let (outcome, snaps) = run(&exe, &[3]);
+    assert!(
+        matches!(outcome, Outcome::Trapped(Trap::UnmappedWrite { .. })),
+        "write hole traps UnmappedWrite, got {outcome:?}"
+    );
+    // The `mov` before the trapping `wrmv` advanced the head to 1; the fused
+    // instruction trapped on its write half, so the fused `>` was dropped —
+    // the head rests where the prior `mov` left it (1), not at 2.
+    assert_eq!(snaps[0].head, 1, "the trapped fused move did not run");
+    // And nothing wrote: no cell was ever marked.
+    assert_eq!(cell_at(&snaps[0], 0), 0, "no write survived the trap");
+}
