@@ -127,3 +127,38 @@ fn a_jump_over_a_widened_site_is_re_encoded() {
     // The jump skipped the framed call; `sub` never wrote — a blank tape.
     assert_eq!(cell_at(&snap, 0), 0, "sub was skipped, tape stays blank");
 }
+
+/// A hand-authored `call.m` inside an engine-composed routine keeps activating
+/// its authored descriptor (absolute placement), unaffected by the composite
+/// `r` runs under. `main` bound-calls `r` under a swap-1-3 frame; `r`'s raw
+/// `call.m leaf, Fr` writes virtual 1 through `Fr`'s wmap (1->2), so `leaf`
+/// lands physical 2 — NOT physical 3 (which the enclosing frame would give).
+const NESTED_RAW: &str = "\
+.routine main, tapes=1, alpha=(4)
+.routine r, tapes=1, alpha=(4)
+.routine leaf, tapes=1, alpha=(4)
+.section tables
+Fr: .frame  tapes=(0)
+    .map    0, wmap=(1->2)
+.section code
+.func main
+        call    r [0{1->3, 3->1}]
+        stp
+.func r
+        call.m  leaf, Fr
+        ret
+.func leaf
+        wr      [1]
+        ret
+";
+
+#[test]
+fn a_raw_call_m_in_a_composed_routine_activates_its_own_descriptor() {
+    let exe = build(NESTED_RAW);
+    assert_eq!(exe.profile, PROFILE_FRAMES);
+    let (outcome, snap) = run(&exe, 4);
+    assert_eq!(outcome, Outcome::Stopped);
+    // Fr's wmap sends virtual 1 -> physical 2, regardless of the swap-1-3
+    // frame `r` runs under (which would send virtual 1 -> physical 3).
+    assert_eq!(cell_at(&snap, 0), 2, "the authored descriptor Fr activated");
+}
