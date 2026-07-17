@@ -477,9 +477,14 @@ fn scan_sites<'a>(
                     frame_hole: d.addr + 5,
                 });
             }
-            (Flow::Jump, DecodedOperand::RelTarget(_)) => {
-                // A relocated tail jump transfers control preserving the
-                // frame — a plain-call closure edge.
+            (Flow::Jump | Flow::Branch, DecodedOperand::RelTarget(_)) => {
+                // A relocated tail jump or conditional branch transfers
+                // control preserving the frame — a plain-call closure edge,
+                // so a callee reachable only through it is still visited
+                // under the caller's active context. Matches the same
+                // Jump | Branch grouping in the blob rewrite. FallThrough
+                // and Stop carry no relocation; Call's plain and bound forms
+                // are handled above.
                 if let Some(&callee) = calls.get(&(d.addr + 1)) {
                     out.push(SiteKind::Plain { callee });
                 }
