@@ -81,9 +81,9 @@ pub enum AsmErrorKind {
     /// (docs/formats.md (frame descriptors)): a duplicate `.map k`, a
     /// tape index `k` at or past the frame arity, a tapes list empty or
     /// over 16, a map index/value past `0xFFFE`, a second `.exits`, an
-    /// orphan `.map`/`.exits` with no open `.frame`, a map pair that
-    /// breaks blank↔blank, or an exit label absent from the owning
-    /// function. The carried string is the full message.
+    /// orphan `.map`/`.exits` with no open `.frame`, a `0->X` map pair that
+    /// unpins blank (index 0 must map to 0), or an exit label absent from
+    /// the owning function. The carried string is the full message.
     BadFrame(String),
 }
 

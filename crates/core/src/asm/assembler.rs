@@ -942,8 +942,8 @@ fn build_tables(
 /// entries u16 LE]`, then `exit_count × u32 LE` blob-relative code offsets.
 /// A missing `.map k` emits identity (both lengths 0). Exit labels resolve
 /// against the OWNING function's labels; an exit absent there is a
-/// `BadFrame`. The dense maps arrive already blank↔blank-checked from
-/// lower.
+/// `BadFrame`. The dense maps arrive already blank-pinning-checked from
+/// lower (index 0 pinned to 0; a symbol may otherwise fold onto blank).
 fn emit_frame_descriptor(
     tapes: &[u8],
     maps: &[FrameTapeMap],
@@ -1975,6 +1975,43 @@ F0: .frame tapes=(1, 0, 2)
         );
     }
 
+    #[test]
+    fn frame_map_may_collapse_symbols_onto_blank() {
+        // A non-blank symbol may fold onto blank (index 0) in either
+        // direction. rmap `3->0` reads a foreign boundary marker AS the
+        // callee's blank — the flagship one-way pattern; wmap `2->0` writes
+        // a virtual symbol back as physical blank — an erase. Only index 0
+        // itself stays pinned. The dense bytes carry the 0-valued entries
+        // (0 is a legal mapped value; the hole marker is `0xFFFF`).
+        let src = "\
+.section tables
+F0: .frame tapes=(0)
+    .map 0, rmap=(1->2, 3->0), wmap=(2->0)
+.section code
+.func main
+    fcall helper, F0
+    stp
+.func helper
+    stp
+";
+        let obj = asm_fake(src).unwrap();
+        let tables = obj.table_blobs.as_ref().unwrap();
+        // Descriptor: arity 1, exit_count 0,
+        //   tape0: phys 0,
+        //     rmap_len 4 → [0, 2, hole, 0]  (idx0 pinned, 1->2, idx2 hole, 3->0)
+        //     wmap_len 3 → [0, hole, 0]      (idx0 pinned, idx1 hole, 2->0)
+        let expected = vec![
+            1u8, // arity
+            0, 0, // exit_count
+            0, // tape0 phys
+            4, 0, // rmap_len
+            0, 0, 2, 0, 0xFF, 0xFF, 0, 0, // rmap: 0, 2, hole, 0
+            3, 0, // wmap_len
+            0, 0, 0xFF, 0xFF, 0, 0, // wmap: 0, hole, 0
+        ];
+        assert_eq!(tables[0], expected);
+    }
+
     /// Assemble a frames program built from a table-section body and a
     /// `call.m` in `main` referencing `F0`, returning the error.
     fn asm_frame_err(table_body: &str, exits_labels: &str) -> AsmError {
@@ -2007,12 +2044,11 @@ F0: .frame tapes=(1, 0, 2)
             matches!(e.kind, AsmErrorKind::BadFrame(_)),
             "exits twice: {e}"
         );
-        // Blank↔blank: 0 -> non-blank.
+        // Blank pinning: 0 -> non-blank is rejected (blank must map to
+        // blank). A non-blank index folding onto 0 is legal — see
+        // `frame_map_may_collapse_symbols_onto_blank`.
         let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .map 0, rmap=(0->3)", "");
         assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "0->X: {e}");
-        // Blank↔blank: non-blank -> 0.
-        let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .map 0, wmap=(3->0)", "");
-        assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "X->0: {e}");
         // Exit label absent from the owning function.
         let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .exits ghost", "");
         assert!(

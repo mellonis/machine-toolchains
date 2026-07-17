@@ -544,20 +544,27 @@ fn open_frame_table_mut(ctx: &mut LowerCtx) -> Option<&mut SourceTable> {
     }
 }
 
-/// Materializes a `.map` pair list into a dense `max index + 1` u16 table
-/// (docs/formats.md (frame descriptors)): index 0 is forced to identity
-/// (0->0) so blank↔blank always holds, unset indices are holes (`0xFFFF`),
-/// and index/value past `0xFFFE` is rejected. Blank↔blank guard: no pair
-/// may set index 0 to a non-blank value, and no non-blank index may map
-/// onto 0 — so the blank symbol is a unique fixed point in every map. The
-/// one-way (`=>`) bit does not affect the descriptor bytes (the wire form
-/// has no one-way flag). An empty pair list is the identity map (`len 0`).
+/// Materializes a `.map` pair list into a dense `max index + 1` u16 table:
+/// index 0 is forced to identity (0->0) so the blank symbol always reads
+/// and writes as blank, unset indices are holes (`0xFFFF`), and
+/// index/value past `0xFFFE` is rejected. Blank pinning is one-directional:
+/// index 0 is pinned to 0 — a `0->X` pair with X != 0 is rejected in BOTH
+/// maps — but a non-blank index MAY map onto 0. Collapsing a symbol onto
+/// blank is ordinary tape behaviour: reading a foreign boundary marker AS
+/// the callee's blank (`Y->0` in rmap) is the flagship one-way pattern, and
+/// writing a virtual symbol back as the physical blank (`Y->0` in wmap) is
+/// an erase. So only index 0 itself is a fixed point; whether a given fold
+/// is sound (a non-injective map) is the composition engine's binding
+/// check, not this raw descriptor-authoring surface. The one-way (`=>`) bit
+/// does not affect the descriptor bytes (the wire form has no one-way
+/// flag). An empty pair list is the identity map (`len 0`).
 fn build_dense_map(pairs: &[FramePairCst], span: Span) -> Result<Vec<u16>, AsmError> {
-    // Validate every pair against the blank↔blank rule and the index/value
-    // ceiling, collecting the effective (index != 0) entries. An explicit
-    // `0->0` pair is the forced identity itself and contributes nothing —
-    // dropping it keeps the dense form canonical (the disassembler never
-    // re-emits index 0), so asm∘dis∘asm stays byte-identical.
+    // Validate every pair against the blank-pinning rule and the
+    // index/value ceiling, collecting the effective (index != 0) entries.
+    // An explicit `0->0` pair is the forced identity itself and contributes
+    // nothing — dropping it keeps the dense form canonical (the
+    // disassembler never re-emits index 0), so asm∘dis∘asm stays
+    // byte-identical.
     let mut max_idx = 0u32;
     let mut effective: Vec<(u32, u32)> = Vec::new();
     for p in pairs {
@@ -568,24 +575,20 @@ fn build_dense_map(pairs: &[FramePairCst], span: Span) -> Result<Vec<u16>, AsmEr
             ));
         }
         if p.from == 0 {
+            // Index 0 is pinned to identity: blank reads and writes as
+            // blank. A `0->X` with X != 0 is the only blank-rule rejection.
             if p.to != 0 {
                 return Err(err(
                     span,
-                    AsmErrorKind::BadFrame(
-                        "frame map breaks blank↔blank: 0 must map to 0".to_string(),
-                    ),
+                    AsmErrorKind::BadFrame("frame map unpins blank: 0 must map to 0".to_string()),
                 ));
             }
             continue; // 0->0 is the forced identity; no dense entry
         }
-        if p.to == 0 {
-            return Err(err(
-                span,
-                AsmErrorKind::BadFrame(
-                    "frame map breaks blank↔blank: only 0 may map to 0".to_string(),
-                ),
-            ));
-        }
+        // A non-blank index MAY map onto 0 — folding a symbol onto blank (a
+        // marker read as blank in rmap, an erase in wmap). Only index 0
+        // itself is a fixed point; fold soundness is the composition
+        // engine's binding check, not this authoring surface.
         max_idx = max_idx.max(p.from);
         effective.push((p.from, p.to));
     }
@@ -593,7 +596,7 @@ fn build_dense_map(pairs: &[FramePairCst], span: Span) -> Result<Vec<u16>, AsmEr
         return Ok(Vec::new()); // identity map (empty or all 0->0)
     }
     let mut table = vec![0xFFFFu16; max_idx as usize + 1];
-    table[0] = 0; // blank↔blank: the blank symbol maps to itself
+    table[0] = 0; // index 0 pinned: the blank symbol maps to itself
     for (from, to) in effective {
         table[from as usize] = to as u16;
     }

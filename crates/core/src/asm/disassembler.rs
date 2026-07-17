@@ -1632,6 +1632,51 @@ other:  stp
     }
 
     #[test]
+    fn frame_map_collapse_onto_blank_round_trips() {
+        // A `Y->0` fold (a marker read as blank in rmap, an erase in wmap)
+        // is a legal, non-hole dense entry: the disassembler re-emits it (0
+        // is not the `0xFFFF` hole) and the image re-assembles byte-for-byte.
+        use crate::asm::{AsmCaps, format_asm_with};
+        use crate::linker::{LinkOptions, link};
+        let syntax = fake_syntax();
+        let src = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section tables
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1->2, 3->0), wmap=(2->0)
+    .exits done
+.section code
+.func main
+    fcall main, F0
+done:   stp
+";
+        let obj = assemble(&syntax, 0x7E, src, true).unwrap();
+        let out = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap();
+        assert_eq!(out.executable.profile, crate::formats::PROFILE_FRAMES);
+        let text = disassemble_executable(&syntax, &out.executable, Some(&out.map));
+        // The fold pairs survive disassembly verbatim (0-valued, not holes).
+        assert!(
+            text.contains("rmap=(1->2, 3->0)"),
+            "rmap fold dropped:\n{text}"
+        );
+        assert!(text.contains("wmap=(2->0)"), "wmap fold dropped:\n{text}");
+        // Canonical, and the round trip reproduces the image byte-for-byte.
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&text, caps).unwrap(), text);
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        let out2 = link(&syntax, &[obj2], &[], LinkOptions::default()).unwrap();
+        assert_eq!(
+            out2.executable.to_bytes(),
+            out.executable.to_bytes(),
+            "dis ∘ link must reproduce the image byte-for-byte:\n{text}"
+        );
+    }
+
+    #[test]
     fn grid_line_long_label_own_line() {
         // Case 11: an 8+-char label field moves to its own line, the
         // instruction line follows with no label.
