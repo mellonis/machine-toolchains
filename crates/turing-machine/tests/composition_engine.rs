@@ -100,3 +100,30 @@ fn a_declarative_binding_link_is_reproducible() {
     let b = build(TWO_CONTEXT).to_bytes();
     assert_eq!(a, b);
 }
+
+/// An intra-function jump crossing a widened bound-call site must be
+/// re-encoded through the offset map: the jump lands on `A` (the stop),
+/// skipping the framed call, so `sub` never writes and the tape stays blank.
+/// A mis-shifted offset would land inside the widened framed call.
+const JUMP_OVER_SITE: &str = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(4)
+.section code
+.func main
+        jmp     A
+        call    sub [0{1->2, 2->1}]
+A:      stp
+.func sub
+        wr      [1]
+        ret
+";
+
+#[test]
+fn a_jump_over_a_widened_site_is_re_encoded() {
+    let exe = build(JUMP_OVER_SITE);
+    assert_eq!(exe.profile, PROFILE_FRAMES, "the bound call still frames");
+    let (outcome, snap) = run(&exe, 4);
+    assert_eq!(outcome, Outcome::Stopped);
+    // The jump skipped the framed call; `sub` never wrote — a blank tape.
+    assert_eq!(cell_at(&snap, 0), 0, "sub was skipped, tape stays blank");
+}

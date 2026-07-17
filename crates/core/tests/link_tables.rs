@@ -1006,3 +1006,35 @@ Fr: .frame  tapes=(0, 1)
         );
     }
 }
+
+/// A function that BOTH frames a bound call (widening 5→9 bytes) AND owns a
+/// dispatch table whose target sits after the widened site: the engine's
+/// blob rewrite must shift the dispatch entry's blob-relative code offset,
+/// so it still lands on the target after layout rebases it.
+#[test]
+fn a_widened_site_shifts_a_later_dispatch_entry() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section tables
+D:  .targets A
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        tdispatch D
+A:      stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let exe = &out.executable;
+    // Rewritten main: ent@0, fcall@1..10 (widened), tdispatch@10..15,
+    // A: stp@15. `A` sits at absolute 15 (was blob-relative 11 before the
+    // +4 widen). The dispatch table (main's, first in the section) is
+    // `count(1) u16` then the entry `u32` = A's absolute address.
+    assert_eq!(u16::from_le_bytes([exe.tables[0], exe.tables[1]]), 1);
+    let entry = u32::from_le_bytes(exe.tables[2..6].try_into().unwrap());
+    assert_eq!(entry, 15, "dispatch entry follows the widened site to A");
+    // And A really is the stp at absolute 15.
+    assert_eq!(exe.code[15], 0x02, "stp at A");
+}
