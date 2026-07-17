@@ -38,7 +38,9 @@ use super::LinkError;
 use super::compose::{
     Composite, CompositeTape, canonical_key, compose, digest, identity_composite, is_identity,
 };
-use super::engine::{FramesPlan, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites};
+use super::engine::{
+    EngineStats, FramesPlan, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
+};
 use super::resolve::FuncRef;
 use crate::asm::decode::{self, Body, DecodedOperand};
 use crate::asm::{ArchSyntax, Flow};
@@ -58,6 +60,20 @@ struct StampBody {
     table: Vec<u8>,
     table_fixups: Vec<(u32, u32)>,
     calls: Vec<(u32, usize)>,
+    /// Unmapped-read trap rows synthesized into this stamp's match tables.
+    trap_rows: u32,
+    /// Extra match rows this stamp gained from one-way collapse expansion.
+    expanded_rows: u32,
+}
+
+/// Report counters accumulated while building the mono stamp set — folded
+/// into the link report's engine counters (docs/cli.md (the link report)).
+#[derive(Debug, Default, Clone, Copy)]
+struct StampStats {
+    /// (routine, composite) pairs that resolved to an already-built stamp.
+    dedup_savings: u32,
+    synthesized_trap_rows: u32,
+    expanded_rows: u32,
 }
 
 /// A rewritten match row's dispatch source: the shared read-trap stub, or a
@@ -99,7 +115,7 @@ pub(super) fn lower_mono<'a>(
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>), LinkError> {
+) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -138,7 +154,13 @@ pub(super) fn lower_mono<'a>(
         }
     }
 
-    let (stamps, seed_target) = mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
+    let (stamps, seed_target, stats) = mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
+    let engine_stats = EngineStats {
+        instantiations: u32::try_from(stamps.len()).unwrap_or(u32::MAX),
+        dedup_savings: stats.dedup_savings,
+        synthesized_trap_rows: stats.synthesized_trap_rows,
+        expanded_rows: stats.expanded_rows,
+    };
 
     // Retarget every original's bound sites to a plain call. Reachable sites
     // hit the stamp (or the original, for a collapse); a bound site in a
@@ -167,7 +189,7 @@ pub(super) fn lower_mono<'a>(
         out.push(f);
     }
     out.extend(stamps);
-    Ok((out, None))
+    Ok((out, None, engine_stats))
 }
 
 // -- HYBRID ------------------------------------------------------------------
@@ -181,7 +203,7 @@ pub(super) fn lower_hybrid<'a>(
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>), LinkError> {
+) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -225,7 +247,9 @@ pub(super) fn lower_hybrid<'a>(
     // Mixed: build the mono stamps, promote the bijection bound sites to
     // plain calls into them (dropping those bound records), then let the
     // frames path lower whatever bound records remain.
-    let (stamps, seed_target) = mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
+    let (stamps, seed_target, mono_stats) =
+        mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
+    let instantiations = u32::try_from(stamps.len()).unwrap_or(u32::MAX);
 
     let mut new_order: Vec<FuncRef> = Vec::with_capacity(n + stamps.len());
     for (fi, mut f) in order.into_iter().enumerate() {
@@ -247,7 +271,16 @@ pub(super) fn lower_hybrid<'a>(
         .iter()
         .map(|f| scan_sites(syntax, f, machine_sig, &new_order))
         .collect::<Result<_, _>>()?;
-    lower_frames(syntax, new_order, &new_sites, machine_sig)
+    let (order, plan, frames_stats) = lower_frames(syntax, new_order, &new_sites, machine_sig)?;
+    // A hybrid image accounts for BOTH mechanisms: the mono stamps' counters
+    // plus the frames path's descriptor dedup.
+    let stats = EngineStats {
+        instantiations,
+        dedup_savings: mono_stats.dedup_savings + frames_stats.dedup_savings,
+        synthesized_trap_rows: mono_stats.synthesized_trap_rows,
+        expanded_rows: mono_stats.expanded_rows,
+    };
+    Ok((order, plan, stats))
 }
 
 /// A completed bijection (mono-eligible): every bound tape equal-size (so
@@ -324,7 +357,7 @@ fn mono_stamps<'a>(
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
     seeds: &[(usize, u32, usize, &'a BoundCall)],
-) -> Result<(Vec<FuncRef<'a>>, HashMap<(usize, u32), usize>), LinkError> {
+) -> Result<(Vec<FuncRef<'a>>, HashMap<(usize, u32), usize>, StampStats), LinkError> {
     let ma = machine_sig.arity as usize;
     let id = identity_composite(ma, 0);
 
@@ -332,13 +365,14 @@ fn mono_stamps<'a>(
     let mut key_to_slot: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut worklist: VecDeque<usize> = VecDeque::new();
     let mut seed_target: HashMap<(usize, u32), usize> = HashMap::new();
+    let mut stats = StampStats::default();
 
     // Seed: compose each site's binding at the machine identity.
     for &(fi, addr, callee, record) in seeds {
         let callee_sig = routine_sig(order, callee)?;
         let child = compose(&id, callee, &record.binding, callee_sig)
             .map_err(|e| bad_binding(&order[callee].name, &e))?;
-        let idx = intern(
+        let (idx, dup) = intern(
             &mut nodes,
             &mut key_to_slot,
             &mut worklist,
@@ -346,6 +380,9 @@ fn mono_stamps<'a>(
             callee,
             child,
         );
+        if dup {
+            stats.dedup_savings += 1;
+        }
         seed_target.insert((fi, addr), idx);
     }
 
@@ -366,7 +403,7 @@ fn mono_stamps<'a>(
                 SiteKind::Plain { addr, callee } => {
                     let mut child = comp.clone();
                     child.routine = *callee;
-                    let idx = intern(
+                    let (idx, dup) = intern(
                         &mut nodes,
                         &mut key_to_slot,
                         &mut worklist,
@@ -374,6 +411,9 @@ fn mono_stamps<'a>(
                         *callee,
                         child,
                     );
+                    if dup {
+                        stats.dedup_savings += 1;
+                    }
                     targets.insert(*addr, idx);
                 }
                 SiteKind::Bound {
@@ -390,14 +430,18 @@ fn mono_stamps<'a>(
                     let idx = if is_identity(&child) && child.tapes.len() == ma {
                         *callee
                     } else {
-                        intern(
+                        let (idx, dup) = intern(
                             &mut nodes,
                             &mut key_to_slot,
                             &mut worklist,
                             order,
                             *callee,
                             child,
-                        )
+                        );
+                        if dup {
+                            stats.dedup_savings += 1;
+                        }
+                        idx
                     };
                     targets.insert(*addr, idx);
                 }
@@ -423,6 +467,8 @@ fn mono_stamps<'a>(
             callee_sig,
             &stamp_targets[slot],
         )?;
+        stats.synthesized_trap_rows += body.trap_rows;
+        stats.expanded_rows += body.expanded_rows;
         stamp_funcs.push(FuncRef {
             name: Cow::Owned(node.name.clone()),
             blob: Cow::Owned(body.blob),
@@ -435,11 +481,12 @@ fn mono_stamps<'a>(
         });
     }
 
-    Ok((stamp_funcs, seed_target))
+    Ok((stamp_funcs, seed_target, stats))
 }
 
 /// Intern a (routine, composite) into the stamp set, deduped by canonical
-/// key. Returns its ORDER index (`order.len() + slot`).
+/// key. Returns its ORDER index (`order.len() + slot`) and whether it
+/// resolved to an ALREADY-built stamp (a stamp the dedup avoided).
 fn intern(
     nodes: &mut Vec<StampNode>,
     key_to_slot: &mut HashMap<Vec<u8>, usize>,
@@ -447,11 +494,11 @@ fn intern(
     order: &[FuncRef],
     routine: usize,
     mut composite: Composite,
-) -> usize {
+) -> (usize, bool) {
     composite.routine = routine;
     let key = canonical_key(&composite);
     if let Some(&slot) = key_to_slot.get(&key) {
-        return order.len() + slot;
+        return (order.len() + slot, true);
     }
     let slot = nodes.len();
     let name = format!("{}${:08x}", order[routine].name, digest(&composite));
@@ -462,7 +509,7 @@ fn intern(
     });
     key_to_slot.insert(key, slot);
     worklist.push_back(slot);
-    order.len() + slot
+    (order.len() + slot, false)
 }
 
 // -- one stamp body ----------------------------------------------------------
@@ -552,6 +599,8 @@ fn build_stamp(
     let mut dispatch_fixups: Vec<(usize, DispEntry)> = Vec::new();
     let mut pending_remap: Option<Vec<EntrySrc>> = None;
     let mut needs_trap_stub = false;
+    let mut trap_rows = 0u32;
+    let mut expanded_rows = 0u32;
 
     let blob_bytes: &[u8] = &callee.blob;
     for d in decode::decode_stream(syntax, blob_bytes, 0, blob_bytes.len() as u32) {
@@ -618,8 +667,10 @@ fn build_stamp(
                 if entry.flow == Flow::FallThrough {
                     // A match table: rewrite its rows and remember the row
                     // remapping for the dispatch that consumes its MR.
-                    let (bytes, remap) =
+                    let (bytes, remap, tr, ex) =
                         rewrite_match_table(&callee.table, *t_off, comp, &projs, ma, &callee.name)?;
+                    trap_rows += tr;
+                    expanded_rows += ex;
                     if remap.iter().any(|e| matches!(e, EntrySrc::TrapStub)) {
                         needs_trap_stub = true;
                     }
@@ -751,6 +802,8 @@ fn build_stamp(
         table,
         table_fixups,
         calls,
+        trap_rows,
+        expanded_rows,
     })
 }
 
@@ -827,8 +880,10 @@ fn encode_vec_into(blob: &mut Vec<u8>, vals: &[u8]) {
 
 /// Rewrite a match table from callee width to machine width, prepending
 /// unmapped-read trap rows and expanding/dropping rows per the read
-/// preimage. Returns the new table bytes and the dispatch-entry sources in
-/// the new row order.
+/// preimage. Returns the new table bytes, the dispatch-entry sources in the
+/// new row order, the count of synthesized trap rows, and the count of EXTRA
+/// rows one-way collapse expansion produced (the growth beyond one row per
+/// surviving original — docs/cli.md (the link report)).
 fn rewrite_match_table(
     table: &[u8],
     t_off: u32,
@@ -836,7 +891,7 @@ fn rewrite_match_table(
     projs: &[TapeProj],
     ma: usize,
     name: &str,
-) -> Result<(Vec<u8>, Vec<EntrySrc>), LinkError> {
+) -> Result<(Vec<u8>, Vec<EntrySrc>, u32, u32), LinkError> {
     let base = t_off as usize;
     let malformed = || LinkError::MalformedTable {
         symbol: name.to_string(),
@@ -853,6 +908,8 @@ fn rewrite_match_table(
 
     let mut rows: Vec<Vec<u8>> = Vec::new();
     let mut remap: Vec<EntrySrc> = Vec::new();
+    let mut trap_rows = 0u32;
+    let mut expanded = 0u32;
 
     // Synthesized read-trap rows, first-match: one per hole physical symbol.
     for proj in projs {
@@ -861,6 +918,7 @@ fn rewrite_match_table(
             row[proj.phys] = u;
             rows.push(row);
             remap.push(EntrySrc::TrapStub);
+            trap_rows += 1;
         }
     }
 
@@ -886,7 +944,11 @@ fn rewrite_match_table(
         if dead {
             continue; // drop the row (and, in step, its dispatch entry)
         }
-        for combo in cartesian(&opts) {
+        let combos = cartesian(&opts);
+        // A one-way collapse gives a cell several physical preimages, so one
+        // original row expands into several — the extra rows are the growth.
+        expanded += u32::try_from(combos.len().saturating_sub(1)).unwrap_or(u32::MAX);
+        for combo in combos {
             let mut row = vec![0x7Fu8; ma];
             for (pos, val) in combo {
                 row[pos] = val;
@@ -901,7 +963,7 @@ fn rewrite_match_table(
     for row in &rows {
         out.extend_from_slice(row);
     }
-    Ok((out, remap))
+    Ok((out, remap, trap_rows, expanded))
 }
 
 /// The cartesian product of per-position option lists, preserving position

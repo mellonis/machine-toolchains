@@ -2056,6 +2056,7 @@ START:  nop
                 labels: vec![],
                 lines: vec![],
             }],
+            bindings: vec![],
         };
         let text_with_map = disassemble_executable(&syntax, &exe, Some(&map));
         assert!(text_with_map.contains(".func helper"), "{text_with_map}");
@@ -2123,6 +2124,7 @@ START:  nop
                 labels: vec![("L1".into(), 1)],
                 lines: vec![],
             }],
+            bindings: vec![],
         };
         let listing = listing_executable(&pm1_like_syntax(), &exe, Some(&map));
         let expected = "\

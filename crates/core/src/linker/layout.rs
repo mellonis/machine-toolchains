@@ -122,6 +122,17 @@ pub(super) struct Built {
     /// (docs/formats.md (frames region)), or 0 when no framed call is
     /// present.
     pub frames_offset: u32,
+    /// The frames directory size K (distinct composites in the image), 0 when
+    /// no region is emitted — the link report's `composites`.
+    pub composites: u32,
+    /// Compose-matrix bytes, `(K+1) × S × 2` — the link report's
+    /// `compose_table_bytes` (0 with no region).
+    pub compose_table_bytes: u32,
+    /// The callee routine name of each directory entry, in composite-index
+    /// order — the map sidecar names composites by it (docs/formats.md
+    /// (sidecar bindings)). From the engine plan, or (for a hand-authored
+    /// image) the raw framed calls' callees. Empty with no region.
+    pub frames_routines: Vec<String>,
 }
 
 /// One raw (hand-authored) framed-call site collected during emission: the
@@ -132,6 +143,9 @@ pub(super) struct Built {
 struct RawSite {
     code_hole: usize,
     desc_abs: u32,
+    /// The framed call's callee — names this raw composite in the sidecar
+    /// (docs/formats.md (sidecar bindings)).
+    callee: usize,
 }
 
 /// Decode `f`'s original blob into a `Piece` list. Decode failure, a call
@@ -678,6 +692,7 @@ pub(super) fn build(
                         raw_sites.push(RawSite {
                             code_hole,
                             desc_abs: table_base + table_off,
+                            callee: *callee,
                         });
                     }
                     far_calls += 1;
@@ -770,14 +785,19 @@ pub(super) fn build(
     //    the address-dependent descriptor offsets and emits verbatim;
     //  * without a plan, this is a pure hand-authored (5a) image — build the
     //    directory from the raw sites' descriptors and emit constant columns.
-    let frames_offset = match plan {
-        Some(plan) => emit_planned_region(
-            plan,
-            &mut code,
-            &mut tables,
-            &fcall_holes,
-            &func_table_bases,
-        ),
+    let (frames_offset, composites, compose_table_bytes, frames_routines) = match plan {
+        Some(plan) => {
+            let frames_offset = emit_planned_region(
+                plan,
+                &mut code,
+                &mut tables,
+                &fcall_holes,
+                &func_table_bases,
+            );
+            let k = plan.directory.len() as u32;
+            let s = fcall_holes.len() as u32;
+            (frames_offset, k, (k + 1) * s * 2, plan.routines.clone())
+        }
         None if !raw_sites.is_empty() => {
             let mut directory: Vec<u32> = raw_sites.iter().map(|s| s.desc_abs).collect();
             directory.sort_unstable();
@@ -794,6 +814,18 @@ pub(super) fn build(
                 let site = u32::try_from(site).expect("site index fits u32");
                 code[rs.code_hole..rs.code_hole + 4].copy_from_slice(&site.to_le_bytes());
             }
+            // Each directory composite's callee routine name (docs/formats.md
+            // (sidecar bindings)): the first raw site naming that descriptor.
+            let routines: Vec<String> = directory
+                .iter()
+                .map(|&desc_abs| {
+                    raw_sites
+                        .iter()
+                        .find(|rs| rs.desc_abs == desc_abs)
+                        .map(|rs| order[rs.callee].name.to_string())
+                        .unwrap_or_default()
+                })
+                .collect();
             let k = u16::try_from(directory.len()).expect("composite count fits u16");
             let s = u16::try_from(raw_sites.len()).expect("site count fits u16");
             let frames_offset = u32::try_from(tables.len()).expect("frames offset fits u32");
@@ -809,9 +841,14 @@ pub(super) fn build(
                     tables.extend(composite_of(rs.desc_abs).to_le_bytes());
                 }
             }
-            frames_offset
+            (
+                frames_offset,
+                u32::from(k),
+                (u32::from(k) + 1) * u32::from(s) * 2,
+                routines,
+            )
         }
-        None => 0,
+        None => (0, 0, 0, Vec::new()),
     };
 
     Ok(Built {
@@ -822,6 +859,9 @@ pub(super) fn build(
         far_calls,
         frames_present,
         frames_offset,
+        composites,
+        compose_table_bytes,
+        frames_routines,
     })
 }
 

@@ -136,6 +136,22 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
             r.relaxed_calls,
             r.far_calls
         );
+        // The composition-engine counters follow only when the image carries
+        // frames content, so a frameless link keeps the single-line report
+        // (docs/cli.md (the link report)).
+        if r.composites > 0 || r.instantiations > 0 {
+            let _ = writeln!(
+                stderr,
+                "frames: {} composite(s), {} stamp(s), {} B compose table; \
+                 {} deduped, {} trap row(s), {} expanded row(s)",
+                r.composites,
+                r.instantiations,
+                r.compose_table_bytes,
+                r.dedup_savings,
+                r.synthesized_trap_rows,
+                r.expanded_rows
+            );
+        }
     }
     Ok(CliOutput::ok(String::new(), stderr))
 }

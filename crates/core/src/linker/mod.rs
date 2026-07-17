@@ -1,6 +1,7 @@
 //! `MO` objects → `MX` executables: symbol resolution, reachability,
 //! layout, and relaxation (docs/stdlib.md (linking)).
 
+pub(crate) mod binding_label;
 pub(crate) mod compose;
 mod engine;
 mod layout;
@@ -203,12 +204,50 @@ pub struct MapFunction {
     pub lines: Vec<(u32, u32)>,
 }
 
+/// One virtual tape of a composite binding, decoded to the sparse
+/// structured truth (docs/formats.md (sidecar bindings)): the physical tape
+/// it projects onto, its non-identity read pairs (`(src, dst, one_way)` —
+/// identity is implicit), and the read/write hole sets. A machine consumer
+/// (a debugger, a DAP adapter) reads this; the human-readable
+/// [`MapBinding::label`] is derived from the same descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapBindingTape {
+    pub phys: u8,
+    /// `(src, dst, one_way)`; `one_way` marks a `=>` read-only pair (no
+    /// write-back inverse). Non-identity pairs only.
+    pub pairs: Vec<(u32, u32, bool)>,
+    pub read_holes: Vec<u32>,
+    pub write_holes: Vec<u32>,
+}
+
+/// One directory composite as a map-sidecar record (docs/formats.md (sidecar
+/// bindings)): its 1-based directory index, the callee routine, the derived
+/// canonical label, and the per-tape structured truth. Every directory entry
+/// gets one — engine-synthesized composites and hand-authored `.frame`
+/// descriptors alike (the latter decoded dense→sparse from their bytes; the
+/// record shape is the same either way).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapBinding {
+    /// The runtime composite index (1..=K), a directory offset+1.
+    pub index: u16,
+    pub routine: String,
+    /// The canonical `name@[…]` label (docs/formats.md (binding labels)),
+    /// with any one-image display collision suffixed `.2`, `.3`, ….
+    pub label: String,
+    pub tapes: Vec<MapBindingTape>,
+}
+
 /// The `.pmx.map` sidecar contents: the plain in-memory shape, JSON via
 /// [`MapFile::to_json`]/[`MapFile::from_json`] (docs/formats.md).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MapFile {
     pub arch: u8,
     pub functions: Vec<MapFunction>,
+    /// Structured composite records for a frames image (docs/formats.md
+    /// (sidecar bindings)). Absent (and omitted from the JSON) for a
+    /// frameless link, so a pre-bindings sidecar still parses (serde default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<MapBinding>,
 }
 
 impl MapFile {
@@ -233,6 +272,27 @@ pub struct LinkReport {
     pub relaxed_calls: u32,
     /// Count of symbol sites (calls and tail jumps) that stayed far.
     pub far_calls: u32,
+    /// Mono stamps emitted — one specialized routine copy per distinct
+    /// (routine, composite) pair reached under `--call-mech=mono|hybrid`
+    /// (0 in frames mode and for frameless links).
+    pub instantiations: u32,
+    /// The frames directory size K — distinct composites in the image
+    /// (engine-synthesized plus hand-authored `.frame` descriptors), 0 with
+    /// no frames region.
+    pub composites: u32,
+    /// Bytes of the compose matrix — `(K+1) × S × 2` (rows = active frame
+    /// 0..=K, columns = call sites); excludes the K/S header and directory.
+    pub compose_table_bytes: u32,
+    /// Stamps and descriptors avoided by interning: how many times a
+    /// (routine, composite) pair resolved to an already-built copy — mono
+    /// stamp dedup plus frames descriptor dedup.
+    pub dedup_savings: u32,
+    /// Unmapped-read trap rows synthesized into stamped match tables (mono
+    /// stamping); 0 in pure frames mode.
+    pub synthesized_trap_rows: u32,
+    /// Extra match rows produced by one-way collapse expansion in mono
+    /// stamping (the growth beyond one row per original); 0 in frames mode.
+    pub expanded_rows: u32,
 }
 
 #[derive(Debug)]
@@ -281,12 +341,21 @@ pub fn link(
     // calls and computes the runtime compose table (docs/formats.md (frames
     // profile)). It is a no-op for bindingless links, keeping them on the
     // byte-identical 5a/T2 path.
-    let (order, frames_plan) = match entry_sig {
+    let (order, frames_plan, stats) = match entry_sig {
         Some(sig) => engine::lower(syntax, resolved.order, sig, options.call_mech)?,
-        None => (resolved.order, None),
+        None => (resolved.order, None, engine::EngineStats::default()),
     };
 
     let built = layout::build(syntax, &order, options.relax, frames_plan.as_ref())?;
+
+    // Structured composite records for the map sidecar (docs/formats.md
+    // (sidecar bindings)): decode every directory descriptor from the final
+    // table section — so the sidecar is provably consistent with the image —
+    // and pair it with the callee routine names layout threaded through in
+    // directory order. Empty for a frameless link. Built before `built.tables`
+    // is moved into the executable below.
+    let bindings =
+        binding_label::build_bindings(&built.tables, built.frames_offset, &built.frames_routines);
 
     // Emit shape (docs/formats.md (executable image)): table content or
     // routine signatures anywhere in the reached set require the
@@ -333,11 +402,18 @@ pub fn link(
         map: MapFile {
             arch,
             functions: built.functions,
+            bindings,
         },
         report: LinkReport {
             dropped: resolved.dropped,
             relaxed_calls: built.relaxed_calls,
             far_calls: built.far_calls,
+            instantiations: stats.instantiations,
+            composites: built.composites,
+            compose_table_bytes: built.compose_table_bytes,
+            dedup_savings: stats.dedup_savings,
+            synthesized_trap_rows: stats.synthesized_trap_rows,
+            expanded_rows: stats.expanded_rows,
         },
     })
 }
@@ -357,12 +433,68 @@ mod tests {
                 labels: vec![("X".into(), 3)],
                 lines: vec![(1, 2), (3, 4)],
             }],
+            bindings: Vec::new(),
         };
         let json = map.to_json();
         assert!(json.contains("\"main\""));
         assert!(!json.contains("\"alphabet\""));
+        // A frameless map omits the bindings key entirely (skip_serializing_if).
+        assert!(
+            !json.contains("bindings"),
+            "empty bindings must not serialize"
+        );
         let back = MapFile::from_json(&json).unwrap();
         assert_eq!(back, map);
         assert!(MapFile::from_json("{not json").is_err());
+    }
+
+    #[test]
+    fn map_json_round_trips_with_bindings() {
+        let map = MapFile {
+            arch: 2,
+            functions: vec![MapFunction {
+                name: "main".into(),
+                start: 0,
+                end: 10,
+                labels: vec![],
+                lines: vec![],
+            }],
+            bindings: vec![MapBinding {
+                index: 1,
+                routine: "helper".into(),
+                label: "helper@[2{1->3}, 0]".into(),
+                tapes: vec![
+                    MapBindingTape {
+                        phys: 2,
+                        pairs: vec![(1, 3, false)],
+                        read_holes: vec![],
+                        write_holes: vec![2],
+                    },
+                    MapBindingTape {
+                        phys: 0,
+                        pairs: vec![],
+                        read_holes: vec![],
+                        write_holes: vec![],
+                    },
+                ],
+            }],
+        };
+        let json = map.to_json();
+        assert!(json.contains("\"bindings\""));
+        assert!(json.contains("helper@[2{1->3}, 0]"));
+        let back = MapFile::from_json(&json).unwrap();
+        assert_eq!(back, map);
+    }
+
+    #[test]
+    fn old_sidecar_without_bindings_parses() {
+        // A pre-bindings sidecar (no `bindings` key) still deserializes, with
+        // the field defaulting empty (serde default).
+        let json =
+            r#"{"arch":1,"functions":[{"name":"main","start":0,"end":7,"labels":[],"lines":[]}]}"#;
+        let back = MapFile::from_json(json).unwrap();
+        assert_eq!(back.arch, 1);
+        assert_eq!(back.functions.len(), 1);
+        assert!(back.bindings.is_empty());
     }
 }

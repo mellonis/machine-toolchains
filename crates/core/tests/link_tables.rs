@@ -1417,3 +1417,189 @@ A:      stp
     // And A really is the stp at absolute 15.
     assert_eq!(exe.code[15], 0x02, "stp at A");
 }
+
+// -- The link report counters + the map sidecar bindings (phase 5b, T6) --
+
+/// FRAMES mode fills `composites` and `compose_table_bytes` (the compose
+/// matrix, `(K+1) × S × 2`) and leaves the mono-only counters zero. The
+/// two-context program has K=4, S=3 → 4 composites, 30 matrix bytes.
+#[test]
+fn frames_report_counts_composites_and_compose_bytes() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine r, tapes=2, alpha=(4, 4)
+.routine q, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    r [0{1->2, 2->1}, 1]
+        call    r [0{1->3, 3->1}, 1]
+        stp
+.func r
+        call    q [0{2->3, 3->2}, 1]
+        ret
+.func q
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let r = &out.report;
+    assert_eq!(r.composites, 4, "K = 4 directory entries");
+    assert_eq!(
+        r.compose_table_bytes,
+        (4 + 1) * 3 * 2,
+        "compose matrix bytes"
+    );
+    assert_eq!(r.instantiations, 0, "no mono stamps in frames mode");
+    assert_eq!(r.dedup_savings, 0, "all four composites distinct");
+    assert_eq!(r.synthesized_trap_rows, 0);
+    assert_eq!(r.expanded_rows, 0);
+}
+
+/// FRAMES descriptor interning: two sites binding the same callee the same
+/// way share one directory entry, and the second interning is a dedup saving.
+#[test]
+fn frames_report_counts_descriptor_dedup() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let r = &out.report;
+    assert_eq!(r.composites, 1, "one deduped composite");
+    assert_eq!(r.compose_table_bytes, (1 + 1) * 2 * 2, "K=1, S=2");
+    assert_eq!(r.dedup_savings, 1, "the second equal composite is deduped");
+    assert_eq!(r.instantiations, 0);
+}
+
+/// MONO stamping fills `instantiations`, `synthesized_trap_rows`, and
+/// `expanded_rows` and leaves the frames counters zero. The hand-derived
+/// program stamps one copy of `sub` with one read-hole trap row and one
+/// one-way collapse expanding a row (the same shape `mono_read_table_rewrite_
+/// is_byte_derived` proves byte-for-byte).
+#[test]
+fn mono_report_counts_stamps_traps_and_expansions() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+    .row [1]
+    .row [2]
+D0: .targets A, B, C
+.section code
+.func main
+        call    sub [0{1=>1, 2=>1}]
+        stp
+.func sub
+        rd
+        tmatch  T0
+        tdispatch D0
+A:      wr [0]
+        ret
+B:      wr [1]
+        ret
+C:      wr [2]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    let r = &out.report;
+    assert_eq!(r.instantiations, 1, "one stamp of sub");
+    assert_eq!(r.synthesized_trap_rows, 1, "physical 3 is a read hole");
+    assert_eq!(r.expanded_rows, 1, "the one-way collapse expands one row");
+    assert_eq!(r.composites, 0, "mono stays on the base profile");
+    assert_eq!(r.compose_table_bytes, 0);
+    assert_eq!(r.dedup_savings, 0);
+}
+
+/// HYBRID accounts for BOTH mechanisms in one report: the bijection site
+/// mono-stamps (a `instantiation`) and the holey site is frames-lowered (a
+/// `composite`).
+#[test]
+fn hybrid_report_counts_both_mechanisms() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine swap, tapes=1, alpha=(4)
+.routine narrow, tapes=1, alpha=(2)
+.section code
+.func main
+        call    swap [0{1->2, 2->1}]
+        call    narrow [0{1=>0}]
+        stp
+.func swap
+        wr [1]
+        ret
+.func narrow
+        wr [1]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).expect("links");
+    let r = &out.report;
+    assert_eq!(r.instantiations, 1, "the swap bijection is stamped");
+    assert_eq!(
+        r.composites, 1,
+        "the narrow holey site is a frames composite"
+    );
+    assert_eq!(r.compose_table_bytes, 4, "K=1, S=1 → (1+1)×1×2");
+}
+
+/// The map sidecar records each composite structurally, with the canonical
+/// label. A single equal-size bijection binding: one record naming the
+/// callee, its label the swapped pairs, its structured pairs decoded.
+#[test]
+fn sidecar_records_the_composite_binding() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(out.map.bindings.len(), 1);
+    let b = &out.map.bindings[0];
+    assert_eq!(b.index, 1);
+    assert_eq!(b.routine, "sub");
+    assert_eq!(b.label, "sub@[0{1->2,2->1}, 1]");
+    assert_eq!(b.tapes.len(), 2);
+    assert_eq!(b.tapes[0].phys, 0);
+    assert_eq!(b.tapes[0].pairs, vec![(1, 2, false), (2, 1, false)]);
+    assert!(b.tapes[0].read_holes.is_empty());
+    assert_eq!(b.tapes[1].phys, 1);
+    assert!(b.tapes[1].pairs.is_empty(), "the passthrough tape is bare");
+}
+
+/// A hand-authored (5a) raw-descriptor image gets binding records too, decoded
+/// from the descriptor bytes — and two identical labels collide, so the second
+/// is disambiguated `.2`.
+#[test]
+fn sidecar_records_raw_descriptors_with_collision_suffix() {
+    let out = link_one(asm(TWO_SITES, false));
+    assert_eq!(out.map.bindings.len(), 2, "two raw descriptors");
+    assert_eq!(out.map.bindings[0].index, 1);
+    assert_eq!(out.map.bindings[1].index, 2);
+    assert_eq!(out.map.bindings[0].routine, "main");
+    assert_eq!(out.map.bindings[1].routine, "main");
+    // Both descriptors are the identity `tapes=(0)`, so the labels collide and
+    // the second gets the deterministic `.2` suffix.
+    assert_eq!(out.map.bindings[0].label, "main@[0]");
+    assert_eq!(out.map.bindings[1].label, "main@[0].2");
+}
+
+/// A frameless link carries no binding records — the sidecar's `bindings` is
+/// empty and (with `skip_serializing_if`) absent from the JSON entirely.
+#[test]
+fn frameless_link_has_no_bindings() {
+    // SINGLE is signed and tabled but frameless: no directory, no bindings.
+    let out = link_one(asm(SINGLE, false));
+    assert!(out.map.bindings.is_empty());
+    assert!(!out.map.to_json().contains("bindings"));
+}

@@ -70,6 +70,24 @@ pub(super) enum DirSource {
     Raw { func: usize, table_offset: u32 },
 }
 
+/// Composition-engine counters surfaced in the link report (docs/cli.md (the
+/// link report)). Frames lowering fills `dedup_savings` (descriptor
+/// interning); mono/hybrid stamping fills the rest. The directory size and
+/// compose-matrix byte count are layout's to report (it emits the region), so
+/// they are not here.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct EngineStats {
+    /// Mono stamps emitted (distinct routine copies).
+    pub instantiations: u32,
+    /// (routine, composite) pairs that resolved to an already-built copy —
+    /// mono stamp dedup plus frames descriptor dedup.
+    pub dedup_savings: u32,
+    /// Unmapped-read trap rows synthesized into stamped match tables.
+    pub synthesized_trap_rows: u32,
+    /// Extra match rows from one-way collapse expansion (growth beyond one).
+    pub expanded_rows: u32,
+}
+
 /// The address-independent frames model the engine hands layout. Layout
 /// resolves the two address-dependent pieces (engine-descriptor and
 /// raw-descriptor table offsets) into the directory and emits the region
@@ -86,6 +104,11 @@ pub(super) struct FramesPlan {
     /// columns (framed-call sites in (function, piece) emission order),
     /// values = composite index (1..=K) or 0 (unreachable pair).
     pub compose: Vec<Vec<u16>>,
+    /// The callee routine name of each directory entry, in composite-index
+    /// order (parallel to `directory`). The map sidecar's binding records name
+    /// each composite by it (docs/formats.md (sidecar bindings)); the
+    /// descriptor bytes carry no routine reference, so it is threaded here.
+    pub routines: Vec<String>,
 }
 
 /// One control-transfer site in a routine's original blob, in offset order.
@@ -118,7 +141,7 @@ pub(super) fn lower<'a>(
     order: Vec<FuncRef<'a>>,
     machine_sig: &RoutineSig,
     call_mech: CallMech,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>), LinkError> {
+) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
     // Scan every reached routine for its control sites. Bindingless links
     // (no bound call anywhere) skip the engine entirely.
     let sites: Vec<Vec<SiteKind>> = order
@@ -129,7 +152,7 @@ pub(super) fn lower<'a>(
         .iter()
         .any(|s| s.iter().any(|k| matches!(k, SiteKind::Bound { .. })));
     if !has_bound {
-        return Ok((order, None));
+        return Ok((order, None, EngineStats::default()));
     }
 
     // Mono stamps rewritten copies; hybrid classifies per site. FRAMES keeps
@@ -150,7 +173,7 @@ pub(super) fn lower_frames<'a>(
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>), LinkError> {
+) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
     // Every routine that frames anything needs a framed-call opcode.
     let fc_opcode = syntax
         .framed_call_opcode()
@@ -164,6 +187,9 @@ pub(super) fn lower_frames<'a>(
     // --- closure over (routine, composite): engine composites + columns ---
     let mut engine_comps: Vec<Composite> = Vec::new();
     let mut comp_index: HashMap<Vec<u8>, u16> = HashMap::new();
+    // Interning that resolved to an already-synthesized descriptor — each is
+    // a descriptor emit avoided, reported as a dedup saving.
+    let mut dedup_savings = 0u32;
     // (function, bound-site addr) -> active-frame row -> child composite index.
     let mut site_columns: HashMap<(usize, u32), HashMap<u16, u16>> = HashMap::new();
 
@@ -206,7 +232,11 @@ pub(super) fn lower_frames<'a>(
                     let callee_sig = routine_sig(&order, *callee)?;
                     let child = compose(&ctx, *callee, &record.binding, callee_sig)
                         .map_err(|e| bad_binding(&order[*callee].name, &e))?;
-                    let idx = intern_composite(&mut engine_comps, &mut comp_index, child.clone());
+                    let (idx, deduped) =
+                        intern_composite(&mut engine_comps, &mut comp_index, child.clone());
+                    if deduped {
+                        dedup_savings += 1;
+                    }
                     site_columns
                         .entry((fi, *addr))
                         .or_default()
@@ -223,6 +253,15 @@ pub(super) fn lower_frames<'a>(
     }
 
     let engine_count = engine_comps.len();
+
+    // Each directory entry's callee routine name, in composite-index order:
+    // engine composites carry the callee routine in the composite; the raw
+    // entries below append theirs. The map sidecar names composites by it
+    // (docs/formats.md (sidecar bindings)).
+    let mut routines: Vec<String> = engine_comps
+        .iter()
+        .map(|c| order[c.routine].name.to_string())
+        .collect();
 
     // --- raw descriptors: directory entries + constant columns ---
     // Deterministic order: function order, then frame-half offset order.
@@ -243,6 +282,17 @@ pub(super) fn lower_frames<'a>(
                 let next = engine_count + raw_dir.len() + 1;
                 raw_index.entry((fi, table_off)).or_insert_with(|| {
                     raw_dir.push((fi, table_off));
+                    // The framed call's displacement half (`frame_hole - 4`)
+                    // relocates to the callee; its name labels this raw
+                    // composite (best-effort — sites sharing a descriptor
+                    // share the first-seen callee's name).
+                    let name = order[fi]
+                        .calls
+                        .iter()
+                        .find(|(h, _)| *h == frame_hole - 4)
+                        .map(|&(_, callee)| order[callee].name.to_string())
+                        .unwrap_or_default();
+                    routines.push(name);
                     u16::try_from(next).expect("composite index fits u16")
                 });
             }
@@ -279,7 +329,14 @@ pub(super) fn lower_frames<'a>(
     // the rewrite stands (bound holes are now relocations) but no frames
     // region is needed — hand the rewritten order back plan-less.
     if columns_src.is_empty() {
-        return Ok((new_order, None));
+        return Ok((
+            new_order,
+            None,
+            EngineStats {
+                dedup_savings,
+                ..EngineStats::default()
+            },
+        ));
     }
 
     // --- compose matrix: (K+1) rows × S columns ---
@@ -319,7 +376,12 @@ pub(super) fn lower_frames<'a>(
             engine_descriptors,
             directory,
             compose: compose_rows,
+            routines,
         }),
+        EngineStats {
+            dedup_savings,
+            ..EngineStats::default()
+        },
     ))
 }
 
@@ -404,20 +466,22 @@ fn check_descriptor_phys(
 }
 
 /// Intern a composite into the engine directory, deduped by canonical key.
-/// Returns its 1-based directory index (engine composites occupy 1..=E).
+/// Returns its 1-based directory index (engine composites occupy 1..=E) and
+/// whether it resolved to an ALREADY-interned composite (a descriptor emit
+/// the dedup avoided).
 fn intern_composite(
     comps: &mut Vec<Composite>,
     index: &mut HashMap<Vec<u8>, u16>,
     c: Composite,
-) -> u16 {
+) -> (u16, bool) {
     let key = canonical_key(&c);
     if let Some(&i) = index.get(&key) {
-        return i;
+        return (i, true);
     }
     comps.push(c);
     let i = u16::try_from(comps.len()).expect("composite index fits u16");
     index.insert(key, i);
-    i
+    (i, false)
 }
 
 pub(super) fn routine_sig<'a>(
