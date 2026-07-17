@@ -1568,7 +1568,7 @@ fn sidecar_records_the_composite_binding() {
     let b = &out.map.bindings[0];
     assert_eq!(b.index, 1);
     assert_eq!(b.routine, "sub");
-    assert_eq!(b.label, "sub@[0{1->2,2->1}, 1]");
+    assert_eq!(b.label, "sub@[0{1->2,2->1},1]");
     assert_eq!(b.tapes.len(), 2);
     assert_eq!(b.tapes[0].phys, 0);
     assert_eq!(b.tapes[0].pairs, vec![(1, 2, false), (2, 1, false)]);
@@ -1670,7 +1670,7 @@ fn dis_legend_uses_map_binding_labels() {
         "legend header:\n{text}"
     );
     assert!(
-        text.contains(";   C1: sub@[0{1->2,2->1}, 1]"),
+        text.contains(";   C1: sub@[0{1->2,2->1},1]"),
         "map-labeled composite:\n{text}"
     );
     // The one site is constant → rendered by its F-label inline (F0, the

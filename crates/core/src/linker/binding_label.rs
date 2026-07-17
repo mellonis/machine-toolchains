@@ -59,7 +59,10 @@ pub(crate) struct LabelTape<'a> {
 /// Render `routine`'s composite as `name@[entry, …]` (docs/formats.md
 /// (binding labels)). One entry per virtual tape, in tape order.
 pub(crate) fn label(routine: &str, tapes: &[LabelTape]) -> String {
-    let entries = tapes.iter().map(entry).collect::<Vec<_>>().join(", ");
+    // Entries join with a bare comma — no space — per the canonical grammar
+    // (docs/formats.md (binding labels)); the same separator the pair list
+    // inside `{…}` already uses, so the whole label is space-free.
+    let entries = tapes.iter().map(entry).collect::<Vec<_>>().join(",");
     format!("{routine}@[{entries}]")
 }
 
@@ -303,7 +306,7 @@ mod tests {
         assert_eq!(label("f", &[tape(0, &[], &[])]), "f@[0]");
         assert_eq!(
             label("f", &[tape(2, &[], &[]), tape(0, &[], &[])]),
-            "f@[2, 0]"
+            "f@[2,0]"
         );
     }
 

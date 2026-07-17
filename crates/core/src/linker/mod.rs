@@ -462,7 +462,7 @@ mod tests {
             bindings: vec![MapBinding {
                 index: 1,
                 routine: "helper".into(),
-                label: "helper@[2{1->3}, 0]".into(),
+                label: "helper@[2{1->3},0]".into(),
                 tapes: vec![
                     MapBindingTape {
                         phys: 2,
@@ -481,7 +481,7 @@ mod tests {
         };
         let json = map.to_json();
         assert!(json.contains("\"bindings\""));
-        assert!(json.contains("helper@[2{1->3}, 0]"));
+        assert!(json.contains("helper@[2{1->3},0]"));
         let back = MapFile::from_json(&json).unwrap();
         assert_eq!(back, map);
     }
