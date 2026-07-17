@@ -480,6 +480,7 @@ fn item_end_pos(item: &AsmItem, line: u32) -> Pos {
         AsmItemKind::TableDirective(d) => d.span.end,
         AsmItemKind::Rept(r) => r.span.end,
         AsmItemKind::RoutineDirective(r) => r.span.end,
+        AsmItemKind::FrameDirective(d) => d.span().end,
         AsmItemKind::Comment(c) => Pos {
             line,
             col: c.col + c.text.chars().count() as u32,

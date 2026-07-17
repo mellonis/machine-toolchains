@@ -64,6 +64,14 @@ fn fake_syntax() -> ArchSyntax {
                 operand: OperandKind::RelI8,
                 flow: Call,
             },
+            // A framed call (`call.m`-shape): FramedCall operand, Call flow;
+            // never relaxed in 5a.
+            SyntaxEntry {
+                opcode: 0x14,
+                mnemonic: "fcall",
+                operand: OperandKind::FramedCall,
+                flow: Call,
+            },
             SyntaxEntry {
                 opcode: 0x0E,
                 mnemonic: "ent",
@@ -218,6 +226,124 @@ A:      stp
     expected.extend(1u16.to_le_bytes());
     expected.extend(8u32.to_le_bytes());
     assert_eq!(exe.tables, expected, "entry follows the shifted label");
+}
+
+/// A single-function frames program: `main` calls itself framed through a
+/// `.frame` descriptor with a non-identity rmap (a `->`, a one-way `=>`,
+/// and a hole) and two exits into `main`. Single-function so the
+/// disassembler's entry-only `.routine` synthesis re-assembles.
+const FRAMES: &str = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section tables
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1->2, 3=>1)
+    .exits done, other
+.section code
+.func main
+        fcall   main, F0
+done:   stp
+other:  stp
+";
+
+#[test]
+fn frames_link_selects_the_frames_profile_with_absolute_exits() {
+    // A frame descriptor + a framed call ⇒ PROFILE_FRAMES. The framed call
+    // is fixed 9 bytes (never relaxed); its displacement half patches to
+    // the callee like a far call. The exit vector's blob-relative offsets
+    // rebase to ABSOLUTE code addresses.
+    let out = link(
+        &fake_syntax(),
+        &[asm(FRAMES, true)],
+        &[],
+        LinkOptions::default(),
+    )
+    .expect("links");
+    let exe = &out.executable;
+    assert_eq!(exe.profile, 1, "frames image ⇒ PROFILE_FRAMES");
+    // ent@0, fcall@1 (opcode + 4-byte rel + 4-byte frame ref = 1..10),
+    // done: stp@10, other: stp@11. The framed call self-targets main (0),
+    // so the displacement (instruction end 10 → target 0) is -10.
+    assert_eq!(exe.code[1], 0x14, "framed-call opcode kept");
+    let rel = i32::from_le_bytes(exe.code[2..6].try_into().unwrap());
+    assert_eq!(rel, -10, "displacement patched to the callee base");
+    // Exit vector is the descriptor's trailing two u32s: done=10, other=11.
+    let tables = &exe.tables;
+    let exits_at = tables.len() - 8;
+    assert_eq!(&tables[exits_at..exits_at + 4], &10u32.to_le_bytes());
+    assert_eq!(&tables[exits_at + 4..exits_at + 8], &11u32.to_le_bytes());
+}
+
+#[test]
+fn frames_dis_round_trips_the_linked_image() {
+    // asm → link → dis(with map) → asm → link is byte-identical: the frame
+    // surface (`.frame`/`.map`/`.exits`) and the framed call all reproduce.
+    let out = link(
+        &fake_syntax(),
+        &[asm(FRAMES, true)],
+        &[],
+        LinkOptions::default(),
+    )
+    .expect("links");
+    let text = disassemble_executable(&fake_syntax(), &out.executable, Some(&out.map));
+    assert!(text.contains("F0:     .frame  tapes=(1, 0)"), "{text}");
+    assert!(text.contains(".map    0, rmap=(1->2, 3->1)"), "{text}");
+    assert!(text.contains(".exits  done, other"), "{text}");
+    assert!(text.contains("fcall   main, F0"), "{text}");
+    let out2 = link(
+        &fake_syntax(),
+        &[asm(&text, false)],
+        &[],
+        LinkOptions::default(),
+    )
+    .expect("re-links");
+    assert_eq!(out2.executable.to_bytes(), out.executable.to_bytes());
+}
+
+#[test]
+fn frameless_tabled_link_stays_base_profile() {
+    // The profile-emission lock in the other direction: a tabled but
+    // frameless link is PROFILE_BASE — table support must not flip the
+    // profile byte on a frame-free image.
+    let out = link_one(asm(SINGLE, false));
+    assert_eq!(out.executable.profile, 0);
+}
+
+#[test]
+fn frame_exits_follow_a_relaxation_shift() {
+    // A far call BEFORE an exit label narrows to call.s at link time,
+    // moving the label 3 bytes down — the frame exit vector must land on
+    // the SHIFTED address, exactly like a dispatch entry.
+    let src = "\
+.routine main, tapes=1, alpha=(2)
+.routine helper, tapes=1, alpha=(2)
+.section tables
+F0: .frame tapes=(0)
+    .exits A
+.section code
+.func main
+        fcall   main, F0
+        call    helper
+A:      stp
+.func helper
+        ret
+";
+    let obj = asm(src, false);
+    // In the object: ent@0, fcall@1..10, far call@10..15, A: stp@15.
+    // The descriptor is [arity 1][exit_count 1,0][tape0 phys 0, rmap_len
+    // 0,0, wmap_len 0,0][exit A u32] — the exit sits at descriptor offset 8.
+    let blob_relative = u32::from_le_bytes(
+        obj.table_blobs.as_ref().unwrap()[0][8..12]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(blob_relative, 15);
+    let out = link_one(obj);
+    let exe = &out.executable;
+    assert_eq!(exe.profile, 1);
+    assert_eq!(exe.code[10], 0x31, "call relaxed short");
+    // Linked: ent@0, fcall@1..10, call.s@10..12, A: stp@12.
+    let exit = u32::from_le_bytes(exe.tables[8..12].try_into().unwrap());
+    assert_eq!(exit, 12, "exit follows the shifted label");
 }
 
 #[test]

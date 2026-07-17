@@ -117,10 +117,125 @@ fn push_byte_lines(out: &mut String, label: Option<&str>, bytes: &[u8]) {
 
 /// Which table a blob-local table offset holds, inferred from the
 /// instruction that references it.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum TableKind {
     Match,
     Dispatch,
+    Frame,
+}
+
+/// A decoded frame descriptor (docs/formats.md (frame descriptors)):
+/// per-tape physical projection + dense symbol maps, plus the exit vector
+/// (blob-relative code offsets in an object, absolute in a linked image).
+/// Shared by object- and executable-level rendering.
+struct ParsedFrame {
+    tapes: Vec<u8>,
+    rmaps: Vec<Vec<u16>>,
+    wmaps: Vec<Vec<u16>>,
+    exits: Vec<u32>,
+}
+
+/// Walks a frame descriptor at `start`; `None` on truncation (defensive —
+/// the assembler/linker never emit one).
+fn parse_frame_descriptor(tb: &[u8], start: u32) -> Option<ParsedFrame> {
+    let mut pos = start as usize;
+    let arity = *tb.get(pos)?;
+    pos += 1;
+    let exit_count = u16::from_le_bytes([*tb.get(pos)?, *tb.get(pos + 1)?]) as usize;
+    pos += 2;
+    let read_map = |pos: &mut usize| -> Option<Vec<u16>> {
+        let len = u16::from_le_bytes([*tb.get(*pos)?, *tb.get(*pos + 1)?]) as usize;
+        *pos += 2;
+        let mut m = Vec::with_capacity(len);
+        for _ in 0..len {
+            m.push(u16::from_le_bytes([*tb.get(*pos)?, *tb.get(*pos + 1)?]));
+            *pos += 2;
+        }
+        Some(m)
+    };
+    let mut tapes = Vec::with_capacity(arity as usize);
+    let mut rmaps = Vec::with_capacity(arity as usize);
+    let mut wmaps = Vec::with_capacity(arity as usize);
+    for _ in 0..arity {
+        tapes.push(*tb.get(pos)?);
+        pos += 1;
+        rmaps.push(read_map(&mut pos)?);
+        wmaps.push(read_map(&mut pos)?);
+    }
+    let mut exits = Vec::with_capacity(exit_count);
+    for _ in 0..exit_count {
+        let bytes = tb.get(pos..pos + 4)?;
+        exits.push(u32::from_le_bytes(bytes.try_into().unwrap()));
+        pos += 4;
+    }
+    Some(ParsedFrame {
+        tapes,
+        rmaps,
+        wmaps,
+        exits,
+    })
+}
+
+/// A dense symbol map (`0xFFFF` = hole) as `<idx>-><val>` pairs: index 0 is
+/// the forced identity and holes are implicit, so both are dropped — the
+/// canonical form the assembler re-materializes byte-for-byte.
+fn dense_map_pairs(dense: &[u16]) -> String {
+    dense
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|&(_, &v)| v != 0xFFFF)
+        .map(|(i, &v)| format!("{i}->{v}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Renders one frame descriptor as `.frame`/`.map`/`.exits` lines. The
+/// descriptor label sits on the `.frame` line; a `.map` line prints per
+/// tape with a non-identity map; `.exits` resolves each code offset
+/// through `exit_name`.
+fn render_frame_table(
+    out: &mut String,
+    name: &str,
+    frame: &ParsedFrame,
+    exit_name: impl Fn(u32) -> String,
+) {
+    let tapes = frame
+        .tapes
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str(&grid_line(
+        Some(name),
+        ".frame",
+        &format!("tapes=({tapes})"),
+    ));
+    out.push('\n');
+    for (k, (rmap, wmap)) in frame.rmaps.iter().zip(&frame.wmaps).enumerate() {
+        if rmap.is_empty() && wmap.is_empty() {
+            continue;
+        }
+        let mut operand = k.to_string();
+        if !rmap.is_empty() {
+            operand.push_str(&format!(", rmap=({})", dense_map_pairs(rmap)));
+        }
+        if !wmap.is_empty() {
+            operand.push_str(&format!(", wmap=({})", dense_map_pairs(wmap)));
+        }
+        out.push_str(&grid_line(None, ".map", &operand));
+        out.push('\n');
+    }
+    if !frame.exits.is_empty() {
+        let names = frame
+            .exits
+            .iter()
+            .map(|&o| exit_name(o))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&grid_line(None, ".exits", &names));
+        out.push('\n');
+    }
 }
 
 /// `(blob index, blob-local table offset) -> synthesized `Tn` label`: the
@@ -148,16 +263,37 @@ type TableLabels = HashMap<(u32, u32), String>;
 fn render_tables_section(syntax: &ArchSyntax, obj: &ObjectFile) -> Option<(String, TableLabels)> {
     let table_blobs = obj.table_blobs.as_ref()?;
 
+    // Kind inference keys on the REFERENCING operand kind, not the table
+    // bytes: a plain `TableRef` sits one byte after its opcode (Match if it
+    // falls through, else Dispatch); a `FramedCall`'s frame half sits five
+    // bytes after its opcode (Frame). The object blob zeroes the framed
+    // call's displacement half, so a frame hole's `hole - 1` byte is never
+    // a TableRef opcode — the TableRef test is checked first without
+    // aliasing a frame reference.
     let kind_of = |blob: u32, hole: u32| -> TableKind {
-        let flow = hole
-            .checked_sub(1)
-            .and_then(|pos| obj.blobs.get(blob as usize)?.get(pos as usize).copied())
-            .and_then(|opcode| syntax.by_opcode(opcode))
-            .map(|entry| entry.flow);
-        match flow {
-            Some(Flow::FallThrough) | None => TableKind::Match,
-            Some(_) => TableKind::Dispatch,
+        let Some(code) = obj.blobs.get(blob as usize) else {
+            return TableKind::Match;
+        };
+        let opcode_at = |off: Option<u32>| {
+            off.and_then(|p| code.get(p as usize))
+                .copied()
+                .and_then(|op| syntax.by_opcode(op))
+        };
+        if let Some(entry) = opcode_at(hole.checked_sub(1))
+            && entry.operand == OperandKind::TableRef
+        {
+            return if entry.flow == Flow::FallThrough {
+                TableKind::Match
+            } else {
+                TableKind::Dispatch
+            };
         }
+        if let Some(entry) = opcode_at(hole.checked_sub(5))
+            && entry.operand == OperandKind::FramedCall
+        {
+            return TableKind::Frame;
+        }
+        TableKind::Match
     };
 
     // Distinct table start offsets (and their kinds) per blob. Every
@@ -175,21 +311,39 @@ fn render_tables_section(syntax: &ArchSyntax, obj: &ObjectFile) -> Option<(Strin
         return None;
     }
 
+    // Frame descriptors get synthesized `F<n>` labels, match/dispatch
+    // tables `T<n>` — the code section references each by its kind's
+    // operand (a `call.m` names an `F`, an `mtc`/`djmp` a `T`).
     let mut labels: TableLabels = HashMap::new();
     let mut body = String::new();
-    let mut next = 0u32;
+    let mut next_t = 0u32;
+    let mut next_f = 0u32;
     for (blob, starts) in per_blob.iter().enumerate() {
         let tb = &table_blobs[blob];
         let bounds: Vec<u32> = starts.keys().copied().collect();
         for (idx, (&start, &kind)) in starts.iter().enumerate() {
-            let name = format!("T{next}");
-            next += 1;
+            let name = if kind == TableKind::Frame {
+                let n = format!("F{next_f}");
+                next_f += 1;
+                n
+            } else {
+                let n = format!("T{next_t}");
+                next_t += 1;
+                n
+            };
             labels.insert((blob as u32, start), name.clone());
             let end = bounds.get(idx + 1).copied().unwrap_or(tb.len() as u32);
             match kind {
                 TableKind::Match => render_match_table(&mut body, &name, tb, start, end),
                 TableKind::Dispatch => {
                     render_dispatch_table(&mut body, &name, tb, start, end, blob as u32, obj)
+                }
+                TableKind::Frame => {
+                    if let Some(frame) = parse_frame_descriptor(tb, start) {
+                        render_frame_table(&mut body, &name, &frame, |offset| {
+                            frame_exit_debug_name(obj, blob as u32, offset)
+                        });
+                    }
                 }
             }
         }
@@ -300,6 +454,18 @@ fn render_dispatch_table(
         out.push_str("; unresolved dispatch offsets (no debug labels)");
     }
     out.push('\n');
+}
+
+/// An object frame exit's code label: the owning blob's debug label at
+/// that blob-relative offset, or the raw offset when no `-g` label names
+/// it (a read-only rendering, like an unresolved dispatch entry).
+fn frame_exit_debug_name(obj: &ObjectFile, blob: u32, offset: u32) -> String {
+    obj.debug
+        .as_ref()
+        .and_then(|d| d.get(blob as usize))
+        .and_then(|bd| bd.labels.iter().find(|(_, o)| *o == offset))
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| offset.to_string())
 }
 
 /// One canonical `.routine` line (newline included), the exact grid
@@ -584,6 +750,21 @@ pub fn disassemble_executable(
                 }
             }
         }
+        // A framed call names a frame descriptor (`table`) — a Frame table
+        // — and a callee (`target`, a call root). The descriptor's exit
+        // vector holds code addresses the flow walk cannot see, so they
+        // join the work list as label candidates (like dispatch entries).
+        if let DecodedOperand::FramedCall { table, .. } = operand
+            && !table_kinds.contains_key(table)
+        {
+            table_kinds.insert(*table, TableKind::Frame);
+            if let Some(frame) = parse_frame_descriptor(&exe.tables, *table) {
+                for &exit in &frame.exits {
+                    dispatch_targets.insert(exit);
+                    work.push(exit);
+                }
+            }
+        }
         match (entry.flow, operand) {
             (Flow::FallThrough, _) => work.push(next),
             (Flow::Stop, _) => {}
@@ -595,6 +776,12 @@ pub fn disassemble_executable(
             (Flow::Call, DecodedOperand::RelTarget(t)) => {
                 roots.insert(*t);
                 work.push(*t);
+                work.push(next);
+            }
+            // A framed call is a call: the target becomes a root.
+            (Flow::Call, DecodedOperand::FramedCall { target, .. }) => {
+                roots.insert(*target);
+                work.push(*target);
                 work.push(next);
             }
             _ => work.push(next), // malformed flow/operand combo: keep walking
@@ -669,15 +856,26 @@ pub fn disassemble_executable(
             &exe.alphabet_cardinalities,
         ));
     }
-    // Discovered tables render next in their own section, `T<n>` labels
-    // synthesized in ascending section-offset order; the code section's
-    // TableRef operands reference them by name below.
+    // Discovered tables render next in their own section, `T<n>`
+    // (match/dispatch) and `F<n>` (frame) labels synthesized in ascending
+    // section-offset order; the code section's operands reference them by
+    // name below.
     let mut table_labels: HashMap<u32, String> = HashMap::new();
     if !table_kinds.is_empty() {
         out.push_str(".section tables\n");
         let bounds: Vec<u32> = table_kinds.keys().copied().collect();
+        let mut next_t = 0u32;
+        let mut next_f = 0u32;
         for (idx, (&start, &kind)) in table_kinds.iter().enumerate() {
-            let name = format!("T{idx}");
+            let name = if kind == TableKind::Frame {
+                let n = format!("F{next_f}");
+                next_f += 1;
+                n
+            } else {
+                let n = format!("T{next_t}");
+                next_t += 1;
+                n
+            };
             table_labels.insert(start, name.clone());
             let end = bounds
                 .get(idx + 1)
@@ -692,6 +890,16 @@ pub fn disassemble_executable(
                     start,
                     &dispatch_label,
                 ),
+                TableKind::Frame => {
+                    if let Some(frame) = parse_frame_descriptor(&exe.tables, start) {
+                        render_frame_table(&mut out, &name, &frame, |offset| {
+                            dispatch_label
+                                .get(&offset)
+                                .cloned()
+                                .unwrap_or_else(|| format!("{offset:#06x}"))
+                        });
+                    }
+                }
             }
         }
         out.push_str(".section code\n");
@@ -781,11 +989,21 @@ pub fn disassemble_executable(
                             }
                         }
                         DecodedOperand::Imm(n) => Some((entry.mnemonic, format!("#{n}"))),
-                        // Linked-image framed-call rendering (target +
-                        // frame-descriptor labels) lands with the frame
-                        // directive task; until then a framed call in a
-                        // linked image renders defensively as `.byte`.
-                        DecodedOperand::FramedCall { .. } => None,
+                        // A framed call: the callee is a call root (rendered
+                        // by name); the frame half is the synthesized
+                        // `F`-label of the descriptor at `table`. A target
+                        // that never became a root falls back to `.byte`.
+                        DecodedOperand::FramedCall { target, table } => {
+                            if roots.binary_search(target).is_ok() {
+                                let frame = table_labels
+                                    .get(table)
+                                    .cloned()
+                                    .unwrap_or_else(|| table.to_string());
+                                Some((entry.mnemonic, format!("{}, {frame}", func_name(*target))))
+                            } else {
+                                None
+                            }
+                        }
                     };
                     match text {
                         Some((mnemonic, operand_text)) => {
@@ -1210,15 +1428,18 @@ L0001:  nop
     fn fcall_operand_renders_target_and_frame_label_and_round_trips() {
         use crate::asm::{AsmCaps, format_asm_with};
         let syntax = fake_syntax();
-        // A framed call to a defined function `target`, activating frame
-        // table T0 (a match table here — the frame-descriptor kind lands
-        // in a later task; T3 only exercises the operand + fixup path).
+        // A framed call to a defined function `target`, activating a real
+        // `.frame` descriptor F0 (post-handoff-e a `call.m` must name a
+        // `.frame`, never a match/dispatch table). The descriptor has a
+        // non-identity rmap on tape 0 (a `->`, a one-way `=>`, and a hole);
+        // its `=>` re-renders as `->` (the wire form has no one-way bit).
         let src = "\
 .section tables
-T0:     .row    [1, 2]
+F0:     .frame  tapes=(2, 0)
+        .map    0, rmap=(1->2, 3->1)
 .section code
 .func main
-        fcall   target, T0
+        fcall   target, F0
         stp
 .func target
         stp
@@ -1227,16 +1448,99 @@ T0:     .row    [1, 2]
         let dis = disassemble_object(&syntax, &obj);
         assert_eq!(dis, src, "fcall disassembly:\n{dis}");
         // The displacement half renders from the reloc symbol, the frame
-        // half from the synthesized table label.
-        assert!(dis.contains("fcall   target, T0"), "{dis}");
+        // half from the synthesized frame label.
+        assert!(dis.contains("fcall   target, F0"), "{dis}");
+        assert!(dis.contains("F0:     .frame  tapes=(2, 0)"), "{dis}");
+        assert!(dis.contains(".map    0, rmap=(1->2, 3->1)"), "{dis}");
         let caps = AsmCaps {
             tables: true,
             rept: true,
             vectors: true,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
-        // Full object round trip.
+        // Full object round trip (no exits here, so it round-trips at the
+        // object level; exit labels round-trip through the linked image).
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
+    }
+
+    #[test]
+    fn linked_frame_descriptor_round_trips_with_exits() {
+        // The strong round trip at the executable level, single-function
+        // form (the executable disassembler synthesizes only the ENTRY
+        // `.routine`, and the assembler's all-or-none signature rule then
+        // demands the reached set be one function — so the frame's caller
+        // is `main` itself). A `.frame` with two exits into `main`,
+        // assembled with `-g`, linked, disassembled WITH the map,
+        // re-assembled, and re-linked — the images must be byte-identical.
+        // The exit vector's absolute code addresses resolve back to their
+        // map label names.
+        use crate::asm::{AsmCaps, format_asm_with};
+        use crate::linker::{LinkOptions, link};
+        let syntax = fake_syntax();
+        let src = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section tables
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1->2, 3=>1)
+    .exits done, other
+.section code
+.func main
+    fcall main, F0
+done:   stp
+other:  stp
+";
+        let obj = assemble(&syntax, 0x7E, src, true).unwrap();
+        let out = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap();
+        // The frames profile is selected because a frame descriptor + a
+        // framed call are present.
+        assert_eq!(out.executable.profile, crate::formats::PROFILE_FRAMES);
+        // The exit vector carries ABSOLUTE code addresses after the link:
+        // `done`/`other` are the two `stp`s just past the 9-byte framed
+        // call (ent@0, call.m@1..10, done@10, other@11).
+        let done = out.map.functions[0]
+            .labels
+            .iter()
+            .find(|(n, _)| n == "done")
+            .unwrap()
+            .1;
+        let other = out.map.functions[0]
+            .labels
+            .iter()
+            .find(|(n, _)| n == "other")
+            .unwrap()
+            .1;
+        assert_eq!((done, other), (10, 11));
+        let tables = &out.executable.tables;
+        // Descriptor: arity 1, exit_count 2, tape0 phys 1 rmap_len 4 (0,2,
+        // hole,1) wmap_len 0, then exits done, other as ABSOLUTE u32 LE.
+        let exits_at = tables.len() - 8;
+        assert_eq!(&tables[exits_at..exits_at + 4], &done.to_le_bytes());
+        assert_eq!(&tables[exits_at + 4..exits_at + 8], &other.to_le_bytes());
+        let text = disassemble_executable(&syntax, &out.executable, Some(&out.map));
+        assert!(text.contains("F0:"), "no frame table:\n{text}");
+        assert!(text.contains(".map    0, rmap="), "no map:\n{text}");
+        assert!(
+            text.contains(".exits  done, other"),
+            "exits not resolved:\n{text}"
+        );
+        assert!(
+            text.contains("fcall   main, F0"),
+            "framed call not rendered:\n{text}"
+        );
+        // Canonical, and the round trip reproduces the image byte-for-byte.
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&text, caps).unwrap(), text);
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        let out2 = link(&syntax, &[obj2], &[], LinkOptions::default()).unwrap();
+        assert_eq!(
+            out2.executable.to_bytes(),
+            out.executable.to_bytes(),
+            "dis ∘ link must reproduce the image byte-for-byte:\n{text}"
+        );
     }
 
     #[test]

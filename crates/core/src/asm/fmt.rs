@@ -13,8 +13,9 @@
 //! 32 is the 1-based column 33 a `TrailingComment.col` would report.
 
 use super::cst::{
-    AsmItem, AsmItemKind, LabelCst, LineCst, OperandToken, ReptCst, RoutineDirectiveCst,
-    SectionCst, TableDirectiveCst, TableDirectiveKind, TrailingComment, parse_asm_cst_with,
+    AsmItem, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, LabelCst, LineCst,
+    OperandToken, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst, TableDirectiveKind,
+    TrailingComment, parse_asm_cst_with,
 };
 use super::syntax::AsmCaps;
 use super::{AsmError, AsmErrorKind};
@@ -105,6 +106,7 @@ pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> 
             AsmItemKind::TableDirective(d) => print_table_directive(&mut out, d),
             AsmItemKind::Rept(r) => print_rept(&mut out, r, source),
             AsmItemKind::RoutineDirective(r) => print_routine(&mut out, r),
+            AsmItemKind::FrameDirective(d) => print_frame_directive(&mut out, d),
         }
     }
     Ok(out)
@@ -275,6 +277,70 @@ fn print_table_directive(out: &mut String, d: &TableDirectiveCst) {
         Some((word, d.operands.as_slice())),
         &d.trailing,
     );
+}
+
+/// `.frame`/`.map`/`.exits` — the frame-descriptor directive family
+/// (docs/formats.md (frame descriptors)), each printed on the same
+/// label/word/operands grid as a table directive: `.frame` carries the
+/// descriptor label; `.map`/`.exits` are unlabeled. The operand text is
+/// reconstructed from the parsed fields (canonically spelled, so no token
+/// text changes — mirrors [`print_routine`]); `->`/`=>` survive exactly
+/// as authored (the CST records the one-way bit).
+fn print_frame_directive(out: &mut String, d: &FrameDirectiveCst) {
+    match d {
+        FrameDirectiveCst::Header(h) => {
+            let alpha = h
+                .tapes
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let operand = [OperandToken {
+                text: format!("tapes=({alpha})"),
+                span: h.span,
+            }];
+            print_fields(
+                out,
+                std::slice::from_ref(&h.label),
+                Some((".frame", &operand)),
+                &h.trailing,
+            );
+        }
+        FrameDirectiveCst::Map(m) => {
+            let operand = [OperandToken {
+                text: frame_map_operand(m),
+                span: m.span,
+            }];
+            print_fields(out, &[], Some((".map", &operand)), &m.trailing);
+        }
+        FrameDirectiveCst::Exits(e) => {
+            print_fields(out, &[], Some((".exits", &e.targets)), &e.trailing);
+        }
+    }
+}
+
+/// `<k>[, rmap=(…)][, wmap=(…)]` — the reconstructed `.map` operand text.
+fn frame_map_operand(m: &FrameMapCst) -> String {
+    let mut s = m.k.to_string();
+    if let Some(pairs) = &m.rmap {
+        s.push_str(&format!(", rmap=({})", frame_pairs_text(pairs)));
+    }
+    if let Some(pairs) = &m.wmap {
+        s.push_str(&format!(", wmap=({})", frame_pairs_text(pairs)));
+    }
+    s
+}
+
+/// A `(..)` pair list as `<from>-><to>` / `<from>=><to>`, comma-joined.
+fn frame_pairs_text(pairs: &[FramePairCst]) -> String {
+    pairs
+        .iter()
+        .map(|p| {
+            let arrow = if p.one_way { "=>" } else { "->" };
+            format!("{}{arrow}{}", p.from, p.to)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `.rept v, lo, hi` … `.endr`. The header and terminator normalize to
@@ -907,6 +973,30 @@ loop:   nop
     fn routine_directive_already_canonical_is_verbatim() {
         let src = ".routine main, tapes=2, alpha=(3, 5)\n.func main\n        stp\n";
         assert_eq!(format_asm_with(src, caps_all()).unwrap(), src);
+    }
+
+    #[test]
+    fn frame_directives_normalize_to_the_grid_and_are_idempotent() {
+        // `.frame` carries the descriptor label (label/word/operands grid);
+        // `.map`/`.exits` are unlabeled. Tight spacing normalizes to the
+        // `, ` / grid convention; `->`/`=>` survive exactly as authored.
+        let src = "\
+.section tables
+F0:.frame  tapes=(3,0)
+   .map 0,rmap=(2->1, 4=>0),wmap=(1->2)
+   .exits Lodd,Leven
+.section code
+";
+        let expected = "\
+.section tables
+F0:     .frame  tapes=(3, 0)
+        .map    0, rmap=(2->1, 4=>0), wmap=(1->2)
+        .exits  Lodd, Leven
+.section code
+";
+        assert_eq!(format_asm_with(src, caps_all()).unwrap(), expected);
+        // Idempotent.
+        assert_eq!(format_asm_with(expected, caps_all()).unwrap(), expected);
     }
 
     #[test]

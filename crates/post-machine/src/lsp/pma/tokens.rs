@@ -36,7 +36,8 @@ pub(super) fn semantic_tokens(state: &PmaDocState) -> Vec<SemToken> {
             | AsmItemKind::Section(_)
             | AsmItemKind::TableDirective(_)
             | AsmItemKind::Rept(_)
-            | AsmItemKind::RoutineDirective(_) => {}
+            | AsmItemKind::RoutineDirective(_)
+            | AsmItemKind::FrameDirective(_) => {}
         }
     }
     out.sort_by_key(|t| t.span.start);

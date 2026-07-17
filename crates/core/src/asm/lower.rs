@@ -4,8 +4,9 @@
 //! every diagnostic. Replaces the old line-oriented parser.
 
 use super::cst::{
-    AsmCst, AsmItem, AsmItemKind, FuncCst, InstrCst, LabelCst, LineCst, OperandToken, ReptCst,
-    RoutineDirectiveCst, SectionCst, TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with,
+    AsmCst, AsmItem, AsmItemKind, FrameDirectiveCst, FrameHeaderCst, FrameMapCst, FramePairCst,
+    FuncCst, InstrCst, LabelCst, LineCst, OperandToken, ReptCst, RoutineDirectiveCst, SectionCst,
+    TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with,
 };
 use super::subst::substitute;
 use super::syntax::ArchSyntax;
@@ -118,12 +119,37 @@ pub enum SourceTable {
         name: SpannedName,
         targets: Vec<SpannedName>,
     },
+    /// A `.frame` group: the projection (`tapes`), per-virtual-tape symbol
+    /// maps (materialized dense — index 0 forced to identity for
+    /// blank↔blank), and the multi-exit return labels (CODE labels,
+    /// resolved after function layout, like dispatch entries). Referenced
+    /// by a `call.m` frame operand, not by `mtc`/`djmp`.
+    Frame {
+        name: SpannedName,
+        /// Physical tape per virtual tape; arity = `tapes.len()`.
+        tapes: Vec<u8>,
+        maps: Vec<FrameTapeMap>,
+        exits: Vec<SpannedName>,
+    },
+}
+
+/// One virtual tape's dense symbol maps in a frame descriptor. `rmap`
+/// (PHYSICAL->VIRTUAL, read) and `wmap` (VIRTUAL->PHYSICAL, write) are
+/// materialized to `max index + 1` entries, index 0 forced to identity,
+/// `0xFFFF` = hole; empty = the identity map (`*_len == 0`).
+#[derive(Debug)]
+pub struct FrameTapeMap {
+    pub k: u8,
+    pub rmap: Vec<u16>,
+    pub wmap: Vec<u16>,
 }
 
 impl SourceTable {
     pub fn name(&self) -> &SpannedName {
         match self {
-            SourceTable::Match { name, .. } | SourceTable::Dispatch { name, .. } => name,
+            SourceTable::Match { name, .. }
+            | SourceTable::Dispatch { name, .. }
+            | SourceTable::Frame { name, .. } => name,
         }
     }
 }
@@ -313,8 +339,224 @@ fn lower_item(
         AsmItemKind::TableDirective(d) => lower_table_directive(d, ctx)?,
         AsmItemKind::Rept(r) => lower_rept(r, syntax, source, ctx)?,
         AsmItemKind::RoutineDirective(d) => lower_routine_directive(d, ctx)?,
+        AsmItemKind::FrameDirective(d) => lower_frame_directive(d, ctx)?,
     }
     Ok(())
+}
+
+/// `.frame`/`.map`/`.exits`: builds a frame descriptor's source form
+/// (docs/formats.md (frame descriptors)). Legal only inside `.section
+/// tables`. `.frame <name>` (labeled) opens a group; `.map`/`.exits`
+/// (unlabeled) continue the open group. Descriptor bytes are laid out in
+/// the assembler once the owner is known; this pass validates structure
+/// and materializes the dense symbol maps.
+fn lower_frame_directive(d: &FrameDirectiveCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    if let Some(first) = ctx.pending.first() {
+        return Err(err(
+            first.span,
+            AsmErrorKind::Syntax("label at end of function"),
+        ));
+    }
+    if ctx.section != Section::Tables {
+        return Err(err(
+            d.span(),
+            AsmErrorKind::BadTable("frame directives live in the tables section"),
+        ));
+    }
+    match d {
+        FrameDirectiveCst::Header(h) => lower_frame_header(h, ctx),
+        FrameDirectiveCst::Map(m) => lower_frame_map(m, ctx),
+        FrameDirectiveCst::Exits(e) => lower_frame_exits(e, ctx),
+    }
+}
+
+/// `Fname: .frame tapes=(<int>, …)` — opens a descriptor group.
+fn lower_frame_header(h: &FrameHeaderCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    if !is_label_name(&h.label.name) {
+        return Err(err(
+            h.label.span,
+            AsmErrorKind::Syntax("label names use letters, digits, underscore"),
+        ));
+    }
+    if h.tapes.is_empty() || h.tapes.len() > 16 {
+        return Err(err(
+            h.tapes_span,
+            AsmErrorKind::BadFrame("frame `tapes` list must have 1..=16 entries".to_string()),
+        ));
+    }
+    let mut tapes = Vec::with_capacity(h.tapes.len());
+    for &phys in &h.tapes {
+        let phys = u8::try_from(phys).map_err(|_| {
+            err(
+                h.tapes_span,
+                AsmErrorKind::BadFrame("physical tape index exceeds 255".to_string()),
+            )
+        })?;
+        tapes.push(phys);
+    }
+    if ctx.tables.iter().any(|t| t.name().name == h.label.name) {
+        return Err(err(
+            h.label.span,
+            AsmErrorKind::DuplicateLabel(h.label.name.clone()),
+        ));
+    }
+    ctx.tables.push(SourceTable::Frame {
+        name: spanned(&h.label),
+        tapes,
+        maps: Vec::new(),
+        exits: Vec::new(),
+    });
+    ctx.run_open = true;
+    Ok(())
+}
+
+/// `.map <k>[, rmap=(…)][, wmap=(…)]` — continues the open frame group.
+fn lower_frame_map(m: &FrameMapCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    let Some((tapes_len, maps)) = open_frame_mut(ctx) else {
+        return Err(err(
+            m.span,
+            AsmErrorKind::BadFrame("`.map` has no preceding `.frame`".to_string()),
+        ));
+    };
+    if usize::try_from(m.k).is_err() || m.k as usize >= tapes_len {
+        return Err(err(
+            m.k_span,
+            AsmErrorKind::BadFrame(format!(
+                "`.map` tape {} is >= the frame arity {tapes_len}",
+                m.k
+            )),
+        ));
+    }
+    let k = m.k as u8;
+    if maps.iter().any(|fm| fm.k == k) {
+        return Err(err(
+            m.k_span,
+            AsmErrorKind::BadFrame(format!("duplicate `.map {k}`")),
+        ));
+    }
+    let rmap = match &m.rmap {
+        Some(pairs) => build_dense_map(pairs, m.rmap_span.unwrap_or(m.span))?,
+        None => Vec::new(),
+    };
+    let wmap = match &m.wmap {
+        Some(pairs) => build_dense_map(pairs, m.wmap_span.unwrap_or(m.span))?,
+        None => Vec::new(),
+    };
+    maps.push(FrameTapeMap { k, rmap, wmap });
+    Ok(())
+}
+
+/// `.exits <label>, …` — sets the open frame's return targets (once).
+fn lower_frame_exits(e: &super::cst::FrameExitsCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    // Validate the labels first (independent of the open-frame check), so a
+    // bad label name reports precisely.
+    let mut targets = Vec::with_capacity(e.targets.len());
+    for operand in &e.targets {
+        if !is_label_name(&operand.text) {
+            return Err(err(
+                operand.span,
+                AsmErrorKind::BadFrame("exit targets are label names".to_string()),
+            ));
+        }
+        targets.push(SpannedName {
+            name: operand.text.clone(),
+            span: operand.span,
+        });
+    }
+    let Some(SourceTable::Frame { exits, .. }) = open_frame_table_mut(ctx) else {
+        return Err(err(
+            e.span,
+            AsmErrorKind::BadFrame("`.exits` has no preceding `.frame`".to_string()),
+        ));
+    };
+    if !exits.is_empty() {
+        return Err(err(
+            e.span,
+            AsmErrorKind::BadFrame("`.exits` may appear at most once per frame".to_string()),
+        ));
+    }
+    *exits = targets;
+    Ok(())
+}
+
+/// The open frame's `(tapes.len(), &mut maps)` when the last table is a
+/// frame still accepting continuations; `None` otherwise (orphan `.map`).
+fn open_frame_mut(ctx: &mut LowerCtx) -> Option<(usize, &mut Vec<FrameTapeMap>)> {
+    if !ctx.run_open {
+        return None;
+    }
+    match ctx.tables.last_mut() {
+        Some(SourceTable::Frame { tapes, maps, .. }) => Some((tapes.len(), maps)),
+        _ => None,
+    }
+}
+
+/// The open frame table (mutable) when the last table is a frame still
+/// accepting continuations; `None` otherwise (orphan `.exits`).
+fn open_frame_table_mut(ctx: &mut LowerCtx) -> Option<&mut SourceTable> {
+    if !ctx.run_open {
+        return None;
+    }
+    match ctx.tables.last_mut() {
+        table @ Some(SourceTable::Frame { .. }) => table,
+        _ => None,
+    }
+}
+
+/// Materializes a `.map` pair list into a dense `max index + 1` u16 table
+/// (docs/formats.md (frame descriptors)): index 0 is forced to identity
+/// (0->0) so blank↔blank always holds, unset indices are holes (`0xFFFF`),
+/// and index/value past `0xFFFE` is rejected. Blank↔blank guard: no pair
+/// may set index 0 to a non-blank value, and no non-blank index may map
+/// onto 0 — so the blank symbol is a unique fixed point in every map. The
+/// one-way (`=>`) bit does not affect the descriptor bytes (the wire form
+/// has no one-way flag). An empty pair list is the identity map (`len 0`).
+fn build_dense_map(pairs: &[FramePairCst], span: Span) -> Result<Vec<u16>, AsmError> {
+    // Validate every pair against the blank↔blank rule and the index/value
+    // ceiling, collecting the effective (index != 0) entries. An explicit
+    // `0->0` pair is the forced identity itself and contributes nothing —
+    // dropping it keeps the dense form canonical (the disassembler never
+    // re-emits index 0), so asm∘dis∘asm stays byte-identical.
+    let mut max_idx = 0u32;
+    let mut effective: Vec<(u32, u32)> = Vec::new();
+    for p in pairs {
+        if p.from > 0xFFFE || p.to > 0xFFFE {
+            return Err(err(
+                span,
+                AsmErrorKind::BadFrame("frame map index/value exceeds 0xFFFE".to_string()),
+            ));
+        }
+        if p.from == 0 {
+            if p.to != 0 {
+                return Err(err(
+                    span,
+                    AsmErrorKind::BadFrame(
+                        "frame map breaks blank↔blank: 0 must map to 0".to_string(),
+                    ),
+                ));
+            }
+            continue; // 0->0 is the forced identity; no dense entry
+        }
+        if p.to == 0 {
+            return Err(err(
+                span,
+                AsmErrorKind::BadFrame(
+                    "frame map breaks blank↔blank: only 0 may map to 0".to_string(),
+                ),
+            ));
+        }
+        max_idx = max_idx.max(p.from);
+        effective.push((p.from, p.to));
+    }
+    if effective.is_empty() {
+        return Ok(Vec::new()); // identity map (empty or all 0->0)
+    }
+    let mut table = vec![0xFFFFu16; max_idx as usize + 1];
+    table[0] = 0; // blank↔blank: the blank symbol maps to itself
+    for (from, to) in effective {
+        table[from as usize] = to as u16;
+    }
+    Ok(table)
 }
 
 /// `.routine <name>, tapes=<int>, alpha=(<int>, …)`: declares the named
@@ -691,6 +933,7 @@ fn body_item_span(item: &AsmItem) -> Option<Span> {
         AsmItemKind::TableDirective(d) => Some(d.span),
         AsmItemKind::Rept(r) => Some(r.span),
         AsmItemKind::RoutineDirective(d) => Some(d.span),
+        AsmItemKind::FrameDirective(d) => Some(d.span()),
     }
 }
 
@@ -743,6 +986,20 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
                 AsmErrorKind::Syntax("label names use letters, digits, underscore"),
             ));
         }
+    }
+
+    // A malformed frame directive — the CST keeps it a Line when the
+    // directive is not structurally exact (mirror `.routine`/`.func`) —
+    // gets a precise complaint instead of UnknownMnemonic, in either
+    // section. Only for dialects whose tables cap could shape one at all.
+    if let Some(instr) = &line.instr
+        && matches!(instr.word.as_str(), ".frame" | ".map" | ".exits")
+        && syntax.caps.tables
+    {
+        return Err(err(
+            instr.word_span,
+            AsmErrorKind::BadFrame(format!("malformed `{}` directive", instr.word)),
+        ));
     }
 
     // Inside the tables section only table directives are legal. A

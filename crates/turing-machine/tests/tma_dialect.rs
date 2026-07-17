@@ -63,28 +63,32 @@ hit:    wr   [1, -]
 miss:   hlt
 ";
 
-/// The 0.2 frames instructions — `trap #kind`, the framed call
-/// `call.m target, F`, and the multi-exit return `retx #k`. The frame
-/// operand references a match table here: to the assembler's fixup
-/// machinery a frame label is just a table label, so a `call.m` naming a
-/// match table attributes fine. The frame-descriptor table kind and its
-/// semantic checks arrive with the `.frame` directive (a later phase) —
-/// this is the T5-tightening point.
+/// The full 0.2 frames surface: a hand-authored `.frame` descriptor
+/// (`.frame`/`.map`/`.exits`) activated by the framed call `call.m target,
+/// F`, plus `trap #kind` and the multi-exit return `retx #k`. `main`
+/// projects its two tapes to a narrower routine through F0 (virtual (0,1)
+/// → physical (1,0), a non-identity rmap with a `->`, a one-way `=>`, and a
+/// hole) and returns through two exits. Post-T5 a `call.m` must name a
+/// `.frame` descriptor, never a match table.
 const FRAMES_MNEMONICS: &str = "\
 .routine main, tapes=2, alpha=(2, 2)
 .routine helper, tapes=2, alpha=(2, 2)
 .section tables
 T0: .row [1, 1]
     .row [*, *]
-F0: .row [1, 1]
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1->1, 3=>1)
+    .exits done, other
 .section code
 .func main
         rd
         mtc     T0
         trap    #0
         call.m  helper, F0
-        stp
+done:   stp
+other:  hlt
 .func helper
+        wr      [1, -]
         retx    #1
 ";
 
@@ -94,22 +98,30 @@ fn dialect_version_is_0_2() {
 }
 
 #[test]
-fn frames_instructions_assemble_and_object_round_trip() {
-    // `trap #0`, `call.m helper, F0`, and `retx #1` assemble and round-trip
-    // through the object-level disassembler (byte-identical dis ∘ asm, the
-    // same fixpoint the other mnemonics use). `call.m` renders at the
-    // object level; its executable-level rendering lands with `.frame`.
-    let obj1 = assemble(FRAMES_MNEMONICS, false).expect("frames program assembles");
-    let text = disassemble_object(&obj1);
-    for needle in ["trap", "#0", "call.m", "retx", "#1"] {
+fn frames_program_assembles_links_and_dis_renders_the_surface() {
+    // The full frames surface assembles, and the object-level disassembler
+    // renders it back: `.frame`/`.map`/`.exits`, `call.m`, `trap`, `retx`.
+    let obj = assemble(FRAMES_MNEMONICS, true).expect("frames program assembles");
+    let text = disassemble_object(&obj);
+    for needle in [
+        ".frame  tapes=(1, 0)",
+        ".map    0, rmap=(1->1, 3->1)",
+        ".exits  done, other",
+        "call.m  helper, F0",
+        "trap    #0",
+        "retx    #1",
+    ] {
         assert!(text.contains(needle), "dis missing `{needle}`:\n{text}");
     }
-    let obj2 = assemble(&text, false).expect("rendered frames disassembly re-assembles");
+    // It links to a frames-profile image (runtime is the T7 milestone).
+    let out =
+        link(&tm1_syntax(), &[obj], &[], LinkOptions::default()).expect("frames program links");
     assert_eq!(
-        obj1.to_bytes(),
-        obj2.to_bytes(),
-        "frames dis ∘ asm must reproduce the object byte-for-byte:\n{text}"
+        out.executable.profile,
+        mtc_core::formats::PROFILE_FRAMES,
+        "a frame descriptor + a framed call ⇒ PROFILE_FRAMES"
     );
+    assert_eq!(out.executable.tape_count, 2);
 }
 
 #[test]

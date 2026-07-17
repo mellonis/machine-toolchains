@@ -5,8 +5,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::lower::{
-    SourceFunction, SourceItem, SourceOperand, SourceRow, SourceTable, SpannedName, VecElem,
-    lower_source,
+    FrameTapeMap, SourceFunction, SourceItem, SourceOperand, SourceRow, SourceTable, SpannedName,
+    VecElem, lower_source,
 };
 use super::syntax::{ArchSyntax, Flow};
 use super::{AsmError, AsmErrorKind};
@@ -86,10 +86,14 @@ impl Slot {
 
 /// A `TableRef` operand hole recorded during emit: the 4-byte hole at
 /// `offset` within its blob, and the table label it references.
+/// `is_frame_ref` distinguishes a `call.m` frame-half hole (which must
+/// name a `.frame` descriptor) from a plain `mtc`/`djmp` table reference
+/// (which must not) — the kind knowledge `build_tables` enforces.
 struct TableRefHole {
     name: String,
     name_span: Span,
     offset: u32,
+    is_frame_ref: bool,
 }
 
 /// One assembled function: the code blob, its relocations, the
@@ -259,6 +263,21 @@ fn assemble_function(
                         });
                     }
                     (OperandKind::SymbolVec, SourceOperand::Ints(ints)) => {
+                        // Inside a signed function the static width check is
+                        // spelling-independent: the spelled-out `wr 1, 0`
+                        // must honor the routine arity exactly as `wr [1, 0]`
+                        // does through `vector_slot` (docs/formats.md
+                        // (assembly text)).
+                        if let Some(arity) = sig_arity
+                            && ints.len() != usize::from(arity)
+                        {
+                            return Err(err(
+                                span,
+                                AsmErrorKind::BadVector(
+                                    "vector width does not match the routine arity",
+                                ),
+                            ));
+                        }
                         let sym: Result<Vec<u32>, _> = ints
                             .iter()
                             .map(|&i| u32::try_from(i).map_err(|_| "negative symbol index"))
@@ -500,6 +519,7 @@ fn assemble_function(
                             name: name.clone(),
                             name_span: *name_span,
                             offset: blob.len() as u32,
+                            is_frame_ref: false,
                         });
                         blob.extend([0u8; 4]);
                     }
@@ -534,6 +554,7 @@ fn assemble_function(
                             name: frame_name.clone(),
                             name_span: *frame_span,
                             offset: blob.len() as u32,
+                            is_frame_ref: true,
                         });
                         blob.extend([0u8; 4]);
                     }
@@ -653,7 +674,11 @@ fn build_tables(
     let table_index =
         |name: &str| -> Option<usize> { tables.iter().position(|t| t.name().name == name) };
 
-    // 2. Owner candidates from TableRef operands.
+    // 2. Owner candidates from TableRef operands. Kind knowledge is
+    //    directive-driven here (handoff e): a `call.m` frame-half hole
+    //    (`is_frame_ref`) must name a `.frame` descriptor, and a plain
+    //    `mtc`/`djmp` reference must NOT — enforced at attribution time,
+    //    where both the referencing kind and the table kind are known.
     let mut owners: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); tables.len()];
     for (blob, holes) in refs.iter().enumerate() {
         for hole in holes {
@@ -663,6 +688,29 @@ fn build_tables(
                     AsmErrorKind::UnknownTableLabel(hole.name.clone()),
                 ));
             };
+            let is_frame_table = matches!(tables[ti], SourceTable::Frame { .. });
+            match (hole.is_frame_ref, is_frame_table) {
+                (true, false) => {
+                    return Err(err(
+                        hole.name_span,
+                        AsmErrorKind::BadFrame(format!(
+                            "`call.m` frame operand `{}` must name a `.frame` descriptor",
+                            hole.name
+                        )),
+                    ));
+                }
+                (false, true) => {
+                    return Err(err(
+                        hole.name_span,
+                        AsmErrorKind::BadFrame(format!(
+                            "`{}` is a `.frame` descriptor; reference it with `call.m`, \
+                             not a table operand",
+                            hole.name
+                        )),
+                    ));
+                }
+                _ => {}
+            }
             owners[ti].insert(blob as u32);
         }
     }
@@ -780,6 +828,12 @@ fn build_tables(
                     out.extend(offset.to_le_bytes());
                 }
             }
+            SourceTable::Frame {
+                tapes, maps, exits, ..
+            } => {
+                let descriptor = emit_frame_descriptor(tapes, maps, exits, &labels[owner])?;
+                out.extend(descriptor);
+            }
         }
     }
 
@@ -800,6 +854,65 @@ fn build_tables(
         }
     }
     Ok((table_blobs, fixups))
+}
+
+/// Lays out a frame descriptor's bytes (docs/formats.md (frame
+/// descriptors)): `arity u8`, `exit_count u16 LE`, then per virtual tape
+/// `[phys u8, rmap_len u16 LE, rmap entries u16 LE, wmap_len u16 LE, wmap
+/// entries u16 LE]`, then `exit_count × u32 LE` blob-relative code offsets.
+/// A missing `.map k` emits identity (both lengths 0). Exit labels resolve
+/// against the OWNING function's labels; an exit absent there is a
+/// `BadFrame`. The dense maps arrive already blank↔blank-checked from
+/// lower.
+fn emit_frame_descriptor(
+    tapes: &[u8],
+    maps: &[FrameTapeMap],
+    exits: &[SpannedName],
+    owner_labels: &[(String, u32)],
+) -> Result<Vec<u8>, AsmError> {
+    let arity = tapes.len(); // lower guarantees 1..=16
+    if exits.len() > usize::from(u16::MAX) {
+        return Err(err(
+            exits[0].span,
+            AsmErrorKind::BadFrame("too many frame exits".to_string()),
+        ));
+    }
+    let mut out = Vec::new();
+    out.push(arity as u8);
+    out.extend((exits.len() as u16).to_le_bytes());
+    for (k, &phys) in tapes.iter().enumerate() {
+        out.push(phys);
+        let map = maps.iter().find(|m| m.k as usize == k);
+        let (rmap, wmap): (&[u16], &[u16]) = match map {
+            Some(m) => (&m.rmap, &m.wmap),
+            None => (&[], &[]),
+        };
+        out.extend((rmap.len() as u16).to_le_bytes());
+        for &v in rmap {
+            out.extend(v.to_le_bytes());
+        }
+        out.extend((wmap.len() as u16).to_le_bytes());
+        for &v in wmap {
+            out.extend(v.to_le_bytes());
+        }
+    }
+    for exit in exits {
+        let offset = owner_labels
+            .iter()
+            .find(|(n, _)| n == &exit.name)
+            .map(|(_, offset)| *offset)
+            .ok_or_else(|| {
+                err(
+                    exit.span,
+                    AsmErrorKind::BadFrame(format!(
+                        "exit label `{}` is not in the owning function",
+                        exit.name
+                    )),
+                )
+            })?;
+        out.extend(offset.to_le_bytes());
+    }
+    Ok(out)
 }
 
 /// Match-table discipline (docs/formats.md (assembly text)): all rows
@@ -1511,14 +1624,16 @@ D0: .targets MISSING
 
     #[test]
     fn fcall_emits_reloc_for_the_target_and_frame_fixup_at_offset_plus_4() {
-        // `fcall target, T0`: the displacement half relocates to `target`,
-        // the frame half is a table-ref hole naming match table T0.
+        // `fcall target, F0`: the displacement half relocates to `target`,
+        // the frame half is a table-ref hole naming the `.frame` descriptor
+        // F0 (post-handoff-e a framed call must name a `.frame`, never a
+        // match/dispatch table).
         let src = "\
 .section tables
-T0: .row [1, 2]
+F0: .frame tapes=(0, 1)
 .section code
 .func main
-    fcall target, T0
+    fcall target, F0
     stp
 .func target
     stp
@@ -1526,7 +1641,7 @@ T0: .row [1, 2]
         let obj = asm_fake(src).unwrap();
         // main blob: ent@0, fcall@1 (opcode + 8-byte hole = 1..10), stp@10.
         // Rel hole at 2..6 (zeroed reloc), frame hole at 6..10 (patched to
-        // T0's blob-local offset, 0).
+        // F0's blob-local offset, 0).
         assert_eq!(obj.blobs[0], vec![0x0E, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0x02]);
         // One relocation: the target symbol at the displacement hole (2).
         assert_eq!(obj.relocations.len(), 1);
@@ -1545,9 +1660,15 @@ T0: .row [1, 2]
                 table_offset: 0
             }]
         );
-        // T0's bytes live in main's table blob (width 2, one exact row).
+        // F0's descriptor bytes live in main's table blob: arity 2, no
+        // exits, both tapes identity (phys 0 / phys 1, empty rmap/wmap).
         let tables = obj.table_blobs.as_ref().unwrap();
-        assert_eq!(tables[0], vec![2, 1, 0, 1, 2]);
+        assert_eq!(
+            tables[0],
+            vec![
+                2, 0, 0, /* tape0 */ 0, 0, 0, 0, 0, /* tape1 */ 1, 0, 0, 0, 0
+            ]
+        );
     }
 
     #[test]
@@ -1564,6 +1685,203 @@ T0: .row [1, 2]
         assert!(
             matches!(e.kind, AsmErrorKind::BadOperand(m) if m.contains("drop the `@`")),
             "{e}"
+        );
+    }
+
+    // -- Frame descriptors (`.frame`/`.map`/`.exits`) -------------------
+
+    #[test]
+    fn frame_descriptor_bytes_and_exit_offsets_are_laid_out() {
+        // A 2-arity frame projecting virtual (0,1) → physical (2,0), with a
+        // non-identity rmap on tape 0 (a `->`, a one-way `=>`, and a hole)
+        // and two exits into the owning function `main`.
+        let src = "\
+.section tables
+F0: .frame tapes=(2, 0)
+    .map 0, rmap=(1->2, 3=>1)
+    .exits done, other
+.section code
+.func main
+    fcall helper, F0
+done:   stp
+other:  stp
+.func helper
+    stp
+";
+        let obj = asm_fake(src).unwrap();
+        let tables = obj.table_blobs.as_ref().unwrap();
+        // main: ent@0, fcall@1 (9 bytes), done: stp@10, other: stp@11.
+        // Descriptor (docs/formats.md (frame descriptors)):
+        //   arity 2, exit_count 2,
+        //   tape0: phys 2, rmap_len 4 → [0,2,hole,1], wmap_len 0,
+        //   tape1: phys 0, rmap_len 0, wmap_len 0,
+        //   exits: done=10, other=11 (u32 LE).
+        let expected = vec![
+            2u8, // arity
+            2, 0, // exit_count
+            2, // tape0 phys
+            4, 0, // rmap_len
+            0, 0, 2, 0, 0xFF, 0xFF, 1, 0, // rmap: 0, 2, hole, 1
+            0, 0, // wmap_len
+            0, // tape1 phys
+            0, 0, // rmap_len
+            0, 0, // wmap_len
+            10, 0, 0, 0, // exit done
+            11, 0, 0, 0, // exit other
+        ];
+        assert_eq!(tables[0], expected);
+    }
+
+    #[test]
+    fn frame_missing_map_is_identity_and_no_exits_is_zero_count() {
+        // A frame with no `.map` and no `.exits`: every tape identity
+        // (both lengths 0), exit_count 0.
+        let src = "\
+.section tables
+F0: .frame tapes=(1, 0, 2)
+.section code
+.func main
+    fcall helper, F0
+    stp
+.func helper
+    stp
+";
+        let obj = asm_fake(src).unwrap();
+        let tables = obj.table_blobs.as_ref().unwrap();
+        assert_eq!(
+            tables[0],
+            vec![
+                3, 0, 0, /* t0 */ 1, 0, 0, 0, 0, /* t1 */ 0, 0, 0, 0, 0, /* t2 */ 2,
+                0, 0, 0, 0
+            ]
+        );
+    }
+
+    /// Assemble a frames program built from a table-section body and a
+    /// `call.m` in `main` referencing `F0`, returning the error.
+    fn asm_frame_err(table_body: &str, exits_labels: &str) -> AsmError {
+        let src = format!(
+            ".section tables\n{table_body}\n.section code\n.func main\n    fcall helper, F0\n{exits_labels}    stp\n.func helper\n    stp\n"
+        );
+        asm_fake(&src).unwrap_err()
+    }
+
+    #[test]
+    fn frame_bad_cases_are_bad_frame() {
+        // Duplicate `.map k`.
+        let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .map 0\n    .map 0", "");
+        assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "dup map: {e}");
+        // k >= arity.
+        let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .map 2", "");
+        assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "k>=arity: {e}");
+        // Map index past 0xFFFE.
+        let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .map 0, rmap=(65535->1)", "");
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "index max: {e}"
+        );
+        // `.exits` twice.
+        let e = asm_frame_err(
+            "F0: .frame tapes=(1, 0)\n    .exits done\n    .exits done",
+            "done:   nop\n",
+        );
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "exits twice: {e}"
+        );
+        // Blank↔blank: 0 -> non-blank.
+        let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .map 0, rmap=(0->3)", "");
+        assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "0->X: {e}");
+        // Blank↔blank: non-blank -> 0.
+        let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .map 0, wmap=(3->0)", "");
+        assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "X->0: {e}");
+        // Exit label absent from the owning function.
+        let e = asm_frame_err("F0: .frame tapes=(1, 0)\n    .exits ghost", "");
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "ghost exit: {e}"
+        );
+    }
+
+    #[test]
+    fn frame_tapes_list_bounds_and_orphans_are_bad_frame() {
+        // Empty tapes list.
+        let e = asm_fake(".section tables\nF0: .frame tapes=()\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "empty tapes: {e}"
+        );
+        // Over-16 tapes list.
+        let seq = vec!["0"; 17].join(", ");
+        let e = asm_fake(&format!(".section tables\nF0: .frame tapes=({seq})\n")).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadFrame(_)), "17 tapes: {e}");
+        // Orphan `.map` (no preceding `.frame`).
+        let e = asm_fake(".section tables\n    .map 0, rmap=(1->2)\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "orphan map: {e}"
+        );
+        // Orphan `.exits`.
+        let e = asm_fake(".section tables\n    .exits foo\n").unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "orphan exits: {e}"
+        );
+    }
+
+    #[test]
+    fn frame_kind_mismatch_both_directions_is_bad_frame() {
+        // `tmatch` (a plain table operand) referencing a `.frame`
+        // descriptor.
+        let src = "\
+.section tables
+F0: .frame tapes=(1, 0)
+.section code
+.func main
+    tmatch F0
+    stp
+";
+        let e = asm_fake(src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "tmatch→frame: {e}"
+        );
+        // `call.m` referencing a match table (the fcall side of handoff e).
+        let src = "\
+.section tables
+T0: .row [1, 2]
+.section code
+.func main
+    fcall helper, T0
+    stp
+.func helper
+    stp
+";
+        let e = asm_fake(src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(_)),
+            "call.m→match: {e}"
+        );
+    }
+
+    #[test]
+    fn signed_function_ints_form_honors_the_arity_check() {
+        // Handoff f: the spelled-out `wr 1, 0` inside a signed function must
+        // honor the routine arity just like `wr [1, 0]` — a width-1 spelled
+        // vector in an arity-2 routine is a `BadVector`.
+        let e =
+            asm_fake(".routine main, tapes=2, alpha=(3, 5)\n.func main\n    vwrite 1\n    stp\n")
+                .unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadVector(m) if m.contains("arity")),
+            "{e}"
+        );
+        // The matching width still assembles in spelled form.
+        assert!(
+            asm_fake(
+                ".routine main, tapes=2, alpha=(3, 5)\n.func main\n    vwrite 1, 2\n    stp\n"
+            )
+            .is_ok()
         );
     }
 

@@ -16,6 +16,51 @@ use super::resolve::FuncRef;
 use super::{LinkError, MapFunction};
 use crate::asm::decode::{self, Body, DecodedOperand};
 use crate::asm::{ArchSyntax, Flow};
+use crate::vm::OperandKind;
+
+/// Which table a fixup hole references, and its owning opcode's offset —
+/// inferred from the referencing operand kind, not the table bytes (a
+/// concatenated table blob is not self-describing). A plain `TableRef`
+/// operand sits one byte after its opcode (`Match` if the opcode falls
+/// through, `Dispatch` if it transfers); a `FramedCall`'s frame half sits
+/// five bytes after its opcode (`Frame`). This is the linker's mirror of
+/// the disassembler's kind inference.
+#[derive(Clone, Copy)]
+enum RefKind {
+    Match,
+    Dispatch,
+    Frame,
+}
+
+/// The `(opcode offset, RefKind)` for a fixup hole, or `None` when neither
+/// a `TableRef` opcode precedes the hole by one byte nor a `FramedCall`
+/// opcode precedes it by five (a malformed fixup).
+fn ref_kind(syntax: &ArchSyntax, blob: &[u8], hole: u32) -> Option<(u32, RefKind)> {
+    if let Some(op) = hole
+        .checked_sub(1)
+        .and_then(|p| blob.get(p as usize))
+        .copied()
+        && let Some(entry) = syntax.by_opcode(op)
+        && entry.operand == OperandKind::TableRef
+    {
+        let kind = if entry.flow == Flow::FallThrough {
+            RefKind::Match
+        } else {
+            RefKind::Dispatch
+        };
+        return Some((hole - 1, kind));
+    }
+    if let Some(op) = hole
+        .checked_sub(5)
+        .and_then(|p| blob.get(p as usize))
+        .copied()
+        && let Some(entry) = syntax.by_opcode(op)
+        && entry.operand == OperandKind::FramedCall
+    {
+        return Some((hole - 5, RefKind::Frame));
+    }
+    None
+}
 
 /// One classified piece of a function's ORIGINAL blob (offsets are
 /// blob-relative, i.e. relative to that function's own `ent`).
@@ -37,6 +82,15 @@ enum Piece {
         orig: u32,
         callee: usize,
     },
+    /// A framed call (`call.m`): a fixed 9-byte instruction — opcode, a
+    /// 4-byte displacement half (patched to the callee like a far call,
+    /// but NEVER relaxed in 5a), and a 4-byte frame-descriptor table half
+    /// (patched by the table-fixup pass). The rel hole is `orig + 1`, the
+    /// frame hole `orig + 5`.
+    FramedCall {
+        orig: u32,
+        callee: usize,
+    },
 }
 
 impl Piece {
@@ -44,7 +98,8 @@ impl Piece {
         match self {
             Piece::Verbatim { orig, .. }
             | Piece::Jump { orig, .. }
-            | Piece::CallSite { orig, .. } => *orig,
+            | Piece::CallSite { orig, .. }
+            | Piece::FramedCall { orig, .. } => *orig,
         }
     }
 }
@@ -59,6 +114,10 @@ pub(super) struct Built {
     pub functions: Vec<MapFunction>,
     pub relaxed_calls: u32,
     pub far_calls: u32,
+    /// True when the reached image carries a frame descriptor or a framed
+    /// call — the linker emits `PROFILE_FRAMES` iff this holds (else
+    /// `PROFILE_BASE`), keeping frameless links byte-identical.
+    pub frames_present: bool,
 }
 
 /// Decode `f`'s original blob into a `Piece` list. Decode failure, a call
@@ -137,6 +196,21 @@ fn classify(syntax: &ArchSyntax, f: &FuncRef) -> Result<Vec<Piece>, LinkError> {
                         consumed_holes.insert(hole);
                         pieces.push(Piece::CallSite { orig: addr, callee });
                     }
+                    // A framed call: the displacement half (hole `addr + 1`)
+                    // relocates to the callee exactly like a far call; the
+                    // frame half (`addr + 5`) is a table fixup, handled by
+                    // the table-fixup pass. Never relaxed in 5a.
+                    (Flow::Call, DecodedOperand::FramedCall { .. }) => {
+                        let hole = addr + 1;
+                        let Some(&callee) = call_holes.get(&hole) else {
+                            return Err(LinkError::MalformedBlob {
+                                symbol: f.name.to_string(),
+                                at: hole,
+                            });
+                        };
+                        consumed_holes.insert(hole);
+                        pieces.push(Piece::FramedCall { orig: addr, callee });
+                    }
                     _ => {
                         pieces.push(Piece::Verbatim {
                             orig: addr,
@@ -175,6 +249,8 @@ fn piece_size(piece: &Piece, is_short: bool) -> u32 {
                 5
             }
         }
+        // opcode + 4-byte displacement + 4-byte frame table ref, fixed.
+        Piece::FramedCall { .. } => 9,
     }
 }
 
@@ -230,14 +306,10 @@ fn append_function_tables(
 ) -> Result<(), LinkError> {
     // Distinct table starts and their kinds; duplicate references to one
     // table collapse to the first classifier.
-    let mut starts: BTreeMap<u32, bool> = BTreeMap::new();
+    let mut starts: BTreeMap<u32, RefKind> = BTreeMap::new();
     for &(hole, table_off) in &f.table_fixups {
-        let is_dispatch = hole
-            .checked_sub(1)
-            .and_then(|pos| f.blob.get(pos as usize).copied())
-            .and_then(|opcode| syntax.by_opcode(opcode))
-            .is_some_and(|entry| entry.flow != Flow::FallThrough);
-        starts.entry(table_off).or_insert(is_dispatch);
+        let kind = ref_kind(syntax, f.blob, hole).map_or(RefKind::Match, |(_, k)| k);
+        starts.entry(table_off).or_insert(kind);
     }
     let malformed = |at: u32| LinkError::MalformedTable {
         symbol: f.name.to_string(),
@@ -247,65 +319,162 @@ fn append_function_tables(
     let tb = f.table;
     let len = tb.len() as u32;
     let mut pos = 0u32;
-    for (&start, &is_dispatch) in &starts {
+    for (&start, &kind) in &starts {
         if start != pos {
             // A gap before this table (uncovered bytes) or an overlap
             // with the previous one.
             return Err(malformed(pos.min(start)));
         }
-        if is_dispatch {
-            let header_end = start.checked_add(2).filter(|&e| e <= len);
-            let Some(header_end) = header_end else {
-                return Err(malformed(start));
-            };
-            let count = u32::from(u16::from_le_bytes([
-                tb[start as usize],
-                tb[start as usize + 1],
-            ]));
-            let end = header_end + 4 * count;
-            if end > len {
-                return Err(malformed(start));
-            }
-            out.extend_from_slice(&tb[start as usize..header_end as usize]);
-            for k in 0..count {
-                let at = header_end + 4 * k;
-                let entry_bytes: [u8; 4] = tb[at as usize..(at + 4) as usize]
-                    .try_into()
-                    .expect("bounds checked above");
-                let orig = u32::from_le_bytes(entry_bytes);
-                // A dispatch entry must land on an instruction boundary
-                // of its owning function; anything else is table data no
-                // rebase can make sense of.
-                let Some(&new) = orig_to_new.get(&orig) else {
-                    return Err(malformed(at));
+        let end = match kind {
+            RefKind::Dispatch => {
+                let header_end = start.checked_add(2).filter(|&e| e <= len);
+                let Some(header_end) = header_end else {
+                    return Err(malformed(start));
                 };
-                out.extend_from_slice(&(code_base + new).to_le_bytes());
+                let count = u32::from(u16::from_le_bytes([
+                    tb[start as usize],
+                    tb[start as usize + 1],
+                ]));
+                let end = header_end + 4 * count;
+                if end > len {
+                    return Err(malformed(start));
+                }
+                out.extend_from_slice(&tb[start as usize..header_end as usize]);
+                for k in 0..count {
+                    let at = header_end + 4 * k;
+                    rebase_entry(tb, at, code_base, orig_to_new, out, &malformed)?;
+                }
+                end
             }
-            pos = end;
-        } else {
-            let header_end = start.checked_add(3).filter(|&e| e <= len);
-            let Some(header_end) = header_end else {
-                return Err(malformed(start));
-            };
-            let width = u32::from(tb[start as usize]);
-            let count = u32::from(u16::from_le_bytes([
-                tb[start as usize + 1],
-                tb[start as usize + 2],
-            ]));
-            let end = header_end + width * count;
-            if end > len {
-                return Err(malformed(start));
+            RefKind::Frame => {
+                append_frame_descriptor(tb, start, len, code_base, orig_to_new, out, &malformed)?
             }
-            // Match rows carry symbol indices, not code offsets — copied
-            // verbatim.
-            out.extend_from_slice(&tb[start as usize..end as usize]);
-            pos = end;
-        }
+            RefKind::Match => {
+                let header_end = start.checked_add(3).filter(|&e| e <= len);
+                let Some(header_end) = header_end else {
+                    return Err(malformed(start));
+                };
+                let width = u32::from(tb[start as usize]);
+                let count = u32::from(u16::from_le_bytes([
+                    tb[start as usize + 1],
+                    tb[start as usize + 2],
+                ]));
+                let end = header_end + width * count;
+                if end > len {
+                    return Err(malformed(start));
+                }
+                // Match rows carry symbol indices, not code offsets —
+                // copied verbatim.
+                out.extend_from_slice(&tb[start as usize..end as usize]);
+                end
+            }
+        };
+        pos = end;
     }
     if pos != len {
         return Err(malformed(pos));
     }
     Ok(())
+}
+
+/// Reads a blob-relative code offset from `tb` at `at`, rebases it through
+/// `orig_to_new` + `code_base` (an off-boundary offset is malformed table
+/// data no rebase can make sense of), and appends the absolute u32 LE.
+/// Shared by dispatch entries and frame exit vectors.
+fn rebase_entry(
+    tb: &[u8],
+    at: u32,
+    code_base: u32,
+    orig_to_new: &HashMap<u32, u32>,
+    out: &mut Vec<u8>,
+    malformed: &impl Fn(u32) -> LinkError,
+) -> Result<(), LinkError> {
+    let bytes: [u8; 4] = tb[at as usize..(at + 4) as usize]
+        .try_into()
+        .expect("bounds checked by caller");
+    let orig = u32::from_le_bytes(bytes);
+    let Some(&new) = orig_to_new.get(&orig) else {
+        return Err(malformed(at));
+    };
+    out.extend_from_slice(&(code_base + new).to_le_bytes());
+    Ok(())
+}
+
+/// Walks a frame descriptor (docs/formats.md (frame descriptors)) by its
+/// self-describing header: `arity u8`, `exit_count u16 LE`, per-tape
+/// `[phys u8, rmap_len u16 + entries, wmap_len u16 + entries]`, then
+/// `exit_count × u32 LE` blob-relative code offsets. The header + maps
+/// copy verbatim (symbol data, not code offsets); the exit vector rebases
+/// exactly like dispatch entries. Returns the descriptor's end offset. A
+/// truncated header, an arity outside 1..=16, or an exit off an
+/// instruction boundary is `MalformedTable` at the offending offset.
+#[allow(clippy::too_many_arguments)]
+fn append_frame_descriptor(
+    tb: &[u8],
+    start: u32,
+    len: u32,
+    code_base: u32,
+    orig_to_new: &HashMap<u32, u32>,
+    out: &mut Vec<u8>,
+    malformed: &impl Fn(u32) -> LinkError,
+) -> Result<u32, LinkError> {
+    let u16_at = |p: u32| -> Option<u32> {
+        if p + 2 > len {
+            return None;
+        }
+        Some(u32::from(u16::from_le_bytes([
+            tb[p as usize],
+            tb[p as usize + 1],
+        ])))
+    };
+    // arity u8, exit_count u16.
+    let mut pos = start;
+    let Some(&arity) = tb.get(pos as usize) else {
+        return Err(malformed(start));
+    };
+    if arity == 0 || arity > 16 {
+        return Err(malformed(start));
+    }
+    pos += 1;
+    let Some(exit_count) = u16_at(pos) else {
+        return Err(malformed(start));
+    };
+    pos += 2;
+    // Per-tape: phys u8, rmap_len u16 + entries, wmap_len u16 + entries.
+    for _ in 0..arity {
+        if pos >= len {
+            return Err(malformed(start));
+        }
+        pos += 1; // phys
+        for _ in 0..2 {
+            let Some(map_len) = u16_at(pos) else {
+                return Err(malformed(start));
+            };
+            pos += 2 + 2 * map_len;
+        }
+    }
+    // The maps end and the exit vector begins here.
+    let exits_start = pos;
+    if exits_start > len {
+        return Err(malformed(start));
+    }
+    // Header + maps copy verbatim (symbol data).
+    out.extend_from_slice(&tb[start as usize..exits_start as usize]);
+    let end = exits_start + 4 * exit_count;
+    if end > len {
+        return Err(malformed(start));
+    }
+    for k in 0..exit_count {
+        rebase_entry(
+            tb,
+            exits_start + 4 * k,
+            code_base,
+            orig_to_new,
+            out,
+            malformed,
+        )?;
+    }
+    Ok(end)
 }
 
 pub(super) fn build(
@@ -371,6 +540,7 @@ pub(super) fn build(
     let mut map_functions = Vec::with_capacity(order.len());
     let mut relaxed_calls = 0u32;
     let mut far_calls = 0u32;
+    let mut frames_present = false;
 
     for (fi, f) in order.iter().enumerate() {
         let pieces = &functions[fi];
@@ -445,6 +615,21 @@ pub(super) fn build(
                         far_calls += 1;
                     }
                 }
+                Piece::FramedCall { orig, callee } => {
+                    // Fixed 9 bytes, never relaxed: opcode + displacement
+                    // (patched to the callee like a far call) + the frame
+                    // table half (copied verbatim; repatched by the
+                    // table-fixup pass below).
+                    frames_present = true;
+                    let opcode = f.blob[*orig as usize];
+                    let new_end = base + piece_offsets[pi] + 9;
+                    let off = i64::from(bases[*callee]) - i64::from(new_end);
+                    let off32 = i32::try_from(off).expect("framed-call offset fits i32");
+                    code.push(opcode);
+                    code.extend(off32.to_le_bytes());
+                    code.extend_from_slice(&f.blob[(*orig + 5) as usize..(*orig + 9) as usize]);
+                    far_calls += 1;
+                }
             }
         }
 
@@ -461,19 +646,29 @@ pub(super) fn build(
             append_function_tables(syntax, f, base, &orig_to_new, &mut tables)?;
         }
         for &(hole, table_off) in &f.table_fixups {
-            // The hole is a TableRef instruction's operand, one byte
-            // past its opcode; a hole whose opcode is not an instruction
-            // boundary is a malformed blob, not a layout bug.
-            let Some(&instr_new) = hole
-                .checked_sub(1)
-                .and_then(|opcode_at| orig_to_new.get(&opcode_at))
-            else {
+            // The hole is a `TableRef` operand (opcode + 1) or the frame
+            // half of a `FramedCall` (opcode + 5). Locate its opcode
+            // boundary by referencing operand kind; a hole whose opcode is
+            // not an instruction boundary is a malformed blob, not a
+            // layout bug.
+            let Some((opcode_at, kind)) = ref_kind(syntax, f.blob, hole) else {
                 return Err(LinkError::MalformedBlob {
                     symbol: f.name.to_string(),
                     at: hole,
                 });
             };
-            let patch_at = (base + instr_new + 1) as usize;
+            if matches!(kind, RefKind::Frame) {
+                frames_present = true;
+            }
+            let Some(&instr_new) = orig_to_new.get(&opcode_at) else {
+                return Err(LinkError::MalformedBlob {
+                    symbol: f.name.to_string(),
+                    at: hole,
+                });
+            };
+            // The operand offset within the instruction (1 or 5) carries
+            // through the relayout unchanged.
+            let patch_at = (base + instr_new + (hole - opcode_at)) as usize;
             code[patch_at..patch_at + 4].copy_from_slice(&(table_base + table_off).to_le_bytes());
         }
 
@@ -519,6 +714,7 @@ pub(super) fn build(
         functions: map_functions,
         relaxed_calls,
         far_calls,
+        frames_present,
     })
 }
 

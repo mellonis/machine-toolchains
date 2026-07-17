@@ -77,6 +77,14 @@ pub enum AsmErrorKind {
     /// that signs any (the MO signature section is parallel to the
     /// blobs — all or none). The carried string is the full message.
     BadSignature(String),
+    /// A `.frame`/`.map`/`.exits` directive-family violation
+    /// (docs/formats.md (frame descriptors)): a duplicate `.map k`, a
+    /// tape index `k` at or past the frame arity, a tapes list empty or
+    /// over 16, a map index/value past `0xFFFE`, a second `.exits`, an
+    /// orphan `.map`/`.exits` with no open `.frame`, a map pair that
+    /// breaks blank↔blank, or an exit label absent from the owning
+    /// function. The carried string is the full message.
+    BadFrame(String),
 }
 
 impl AsmErrorKind {
@@ -102,6 +110,7 @@ impl AsmErrorKind {
             AsmErrorKind::TableDiscipline(_) => "table-discipline",
             AsmErrorKind::UnknownTableLabel(_) => "unknown-table-label",
             AsmErrorKind::BadSignature(_) => "bad-signature",
+            AsmErrorKind::BadFrame(_) => "bad-frame",
         }
     }
 }
@@ -134,6 +143,9 @@ impl std::fmt::Display for AsmErrorKind {
             // Signature messages are composed in full at the raise site
             // (they usually name the function).
             AsmErrorKind::BadSignature(m) => write!(f, "{m}"),
+            // Frame-directive messages are composed in full at the raise
+            // site (they often name the offending `k`, label, or bound).
+            AsmErrorKind::BadFrame(m) => write!(f, "{m}"),
         }
     }
 }
@@ -209,8 +221,9 @@ mod tests {
             AsmErrorKind::TableDiscipline("x"),
             AsmErrorKind::UnknownTableLabel("x".into()),
             AsmErrorKind::BadSignature("x".into()),
+            AsmErrorKind::BadFrame("x".into()),
         ];
-        assert_eq!(kinds.len(), 17);
+        assert_eq!(kinds.len(), 18);
         let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
     }

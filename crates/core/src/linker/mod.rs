@@ -7,6 +7,7 @@ pub(crate) mod resolve;
 use crate::asm::ArchSyntax;
 use crate::formats::executable::Executable;
 use crate::formats::object::ObjectFile;
+use crate::formats::{PROFILE_BASE, PROFILE_FRAMES};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -188,10 +189,17 @@ pub fn link(
     // routine signatures anywhere in the reached set require the
     // sectioned image, whose header fields come from the ENTRY
     // function's signature — tape count from its arity, per-tape
-    // alphabet cardinalities verbatim, profile 0 (base; a nonzero
-    // profile awaits the composition engine). Without either, the
-    // code-only shape is emitted exactly as before tables existed.
+    // alphabet cardinalities verbatim. The profile is `PROFILE_FRAMES`
+    // iff the image carries a frame descriptor or a framed call, else
+    // `PROFILE_BASE` — so frameless links stay byte-identical. Without
+    // either tables or a signature, the code-only shape is emitted
+    // exactly as before tables existed.
     let any_signature = resolved.order.iter().any(|f| f.signature.is_some());
+    let profile = if built.frames_present {
+        PROFILE_FRAMES
+    } else {
+        PROFILE_BASE
+    };
     let executable = if !built.tables.is_empty() || any_signature {
         let entry = &resolved.order[0];
         let Some(sig) = entry.signature else {
@@ -203,7 +211,7 @@ pub fn link(
             built.code,
             built.tables,
             sig.arity,
-            0,
+            profile,
             sig.cardinalities.clone(),
         )
     } else {

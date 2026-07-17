@@ -57,6 +57,14 @@ pub enum AsmItemKind {
     /// either cap off some field character stays Junk and the line
     /// shapes Raw.
     RoutineDirective(RoutineDirectiveCst),
+    /// `.frame`/`.map`/`.exits` — the frame-descriptor directive family
+    /// (docs/formats.md (frame descriptors)), shaped under
+    /// [`AsmCaps::tables`] (+ `rept` for the `(..)` groups, + the arrow
+    /// tokens the tables cap also gates) and only when structurally exact;
+    /// anything else starting one of these words stays a Line (mirror
+    /// `.func`). `.frame` carries the descriptor label; `.map`/`.exits`
+    /// continue the open frame group.
+    FrameDirective(FrameDirectiveCst),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +196,81 @@ pub struct RoutineDirectiveCst {
     pub alpha_span: Span,
     pub span: Span,
     pub trailing: Option<TrailingComment>,
+}
+
+/// One frame-descriptor directive, in one of its three shapes
+/// (docs/formats.md (frame descriptors)). Lossless: every field is parsed
+/// from canonically-spelled tokens, so the printer reconstructs the line
+/// without altering any token's text (mirrors [`RoutineDirectiveCst`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameDirectiveCst {
+    /// `Fname: .frame tapes=(<int>, …)` — opens a descriptor. `arity` is
+    /// the tapes-list length; virtual tape `k` projects to physical tape
+    /// `tapes[k]`.
+    Header(FrameHeaderCst),
+    /// `.map <k>[, rmap=(<pair>, …)][, wmap=(<pair>, …)]` — per-virtual-tape
+    /// symbol maps. `rmap` pairs are PHYSICAL->VIRTUAL (read direction),
+    /// `wmap` pairs VIRTUAL->PHYSICAL (write direction). `->` and `=>` both
+    /// add a pair; `=>` additionally marks it one-way (rmap only) — a
+    /// distinction the composition engine uses, not the wire descriptor.
+    Map(FrameMapCst),
+    /// `.exits <label>, …` — the multi-exit return targets, code labels in
+    /// the owning function.
+    Exits(FrameExitsCst),
+}
+
+/// `Fname: .frame tapes=(<int>, …)`. `span` covers the directive minus any
+/// trailing comment; `tapes_span` covers the whole `(..)` group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameHeaderCst {
+    pub label: LabelCst,
+    pub tapes: Vec<u32>,
+    pub tapes_span: Span,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+/// One `<from> -> <to>` (or `=>`) map pair; `one_way` distinguishes the
+/// `=>` spelling. Values are canonically-spelled u32s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FramePairCst {
+    pub from: u32,
+    pub to: u32,
+    pub one_way: bool,
+}
+
+/// `.map <k>[, rmap=(…)][, wmap=(…)]`. Each map group is `Some` iff its
+/// `rmap=`/`wmap=` clause is present; the group span covers its `(..)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameMapCst {
+    pub k: u32,
+    pub k_span: Span,
+    pub rmap: Option<Vec<FramePairCst>>,
+    pub rmap_span: Option<Span>,
+    pub wmap: Option<Vec<FramePairCst>>,
+    pub wmap_span: Option<Span>,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+/// `.exits <label>, …`. Operands keep their raw label-name slices (comma
+/// split), like a `.targets` directive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameExitsCst {
+    pub targets: Vec<OperandToken>,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+impl FrameDirectiveCst {
+    /// The directive line's span (excluding any trailing comment).
+    pub fn span(&self) -> Span {
+        match self {
+            FrameDirectiveCst::Header(h) => h.span,
+            FrameDirectiveCst::Map(m) => m.span,
+            FrameDirectiveCst::Exits(e) => e.span,
+        }
+    }
 }
 
 /// Total: never fails. Uses the classic assembly grammar
@@ -532,6 +615,27 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
         // `.row` without a bracketed vector — fall through to Line.
     }
 
+    // Frame-descriptor directives (caps.tables): `.frame`/`.map`/`.exits`.
+    // `.frame` carries the descriptor label (exactly one); `.map`/`.exits`
+    // are unlabeled continuations of the open group. Structurally exact
+    // only — anything else degrades to a Line for lower to report
+    // precisely (mirror `.func`/`.routine`).
+    if caps.tables
+        && matches!(word, ".frame" | ".map" | ".exits")
+        && let Some(directive) = frame_directive(
+            word,
+            &labels,
+            line,
+            &body[at + 1..],
+            line_no,
+            span,
+            &trailing,
+            word_token.col + word_token.len,
+        )
+    {
+        return AsmItemKind::FrameDirective(directive);
+    }
+
     // A bracketed operand region on an ordinary instruction line
     // (caps.vectors) is captured as ONE verbatim `[..]` token, exactly
     // like a `.row`'s vector — the interior commas must not split it.
@@ -634,6 +738,195 @@ fn canonical_u32(token: &AsmToken) -> Option<(u32, Span)> {
     };
     let value = text.parse::<u32>().ok()?;
     (*text == value.to_string()).then(|| (value, token.span()))
+}
+
+/// Shapes one frame-descriptor directive (`.frame`/`.map`/`.exits`) from
+/// the tokens after the directive word. Structurally exact only — `None`
+/// degrades the line to a plain Line (mirror `.func`/`.routine`), which
+/// lower reports precisely. `labels` are the leading labels already
+/// parsed: `.frame` requires exactly one (the descriptor name);
+/// `.map`/`.exits` require none.
+#[allow(clippy::too_many_arguments)]
+fn frame_directive(
+    word: &str,
+    labels: &[LabelCst],
+    line: &str,
+    region: &[AsmToken],
+    line_no: u32,
+    span: Span,
+    trailing: &Option<TrailingComment>,
+    after_word_col: u32,
+) -> Option<FrameDirectiveCst> {
+    match word {
+        ".frame" => {
+            let [label] = labels else {
+                return None;
+            };
+            let (tapes, tapes_span) = parse_frame_tapes(region, line_no)?;
+            Some(FrameDirectiveCst::Header(FrameHeaderCst {
+                label: label.clone(),
+                tapes,
+                tapes_span,
+                span,
+                trailing: trailing.clone(),
+            }))
+        }
+        ".map" => {
+            if !labels.is_empty() {
+                return None;
+            }
+            parse_frame_map(region, line_no, span, trailing).map(FrameDirectiveCst::Map)
+        }
+        ".exits" => {
+            if !labels.is_empty() {
+                return None;
+            }
+            let targets = operand_region(line, region, line_no, after_word_col);
+            if targets.is_empty() || targets.iter().any(|t| t.text.is_empty()) {
+                return None;
+            }
+            Some(FrameDirectiveCst::Exits(FrameExitsCst {
+                targets,
+                span,
+                trailing: trailing.clone(),
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// `tapes=(<int>, …)` after the `.frame` word: `Word("tapes") = ( Number
+/// [, Number]* )`, canonically spelled. Returns the phys list and the
+/// `(..)` group span.
+fn parse_frame_tapes(region: &[AsmToken], line_no: u32) -> Option<(Vec<u32>, Span)> {
+    let is = |t: &AsmToken, k: &AsmTokenKind| &t.kind == k;
+    let [tapes_kw, eq, lparen, rest @ ..] = region else {
+        return None;
+    };
+    if word_text(tapes_kw) != Some("tapes")
+        || !is(eq, &AsmTokenKind::Eq)
+        || !is(lparen, &AsmTokenKind::LParen)
+    {
+        return None;
+    }
+    let [inner @ .., rparen] = rest else {
+        return None;
+    };
+    if !is(rparen, &AsmTokenKind::RParen) || inner.is_empty() || inner.len().is_multiple_of(2) {
+        return None; // `()`, a trailing comma, or a doubled one
+    }
+    let mut tapes = Vec::with_capacity(inner.len() / 2 + 1);
+    for (i, tok) in inner.iter().enumerate() {
+        if i % 2 == 0 {
+            tapes.push(canonical_u32(tok)?.0);
+        } else if !is(tok, &AsmTokenKind::Comma) {
+            return None;
+        }
+    }
+    let span = Span::new(line_no, lparen.col, line_no, rparen.col + rparen.len);
+    Some((tapes, span))
+}
+
+/// `.map <k>[, rmap=(<pair>, …)][, wmap=(<pair>, …)]` after the `.map`
+/// word. The two clauses are optional and canonical order — `rmap` before
+/// `wmap`; anything else is `None`.
+fn parse_frame_map(
+    region: &[AsmToken],
+    line_no: u32,
+    span: Span,
+    trailing: &Option<TrailingComment>,
+) -> Option<FrameMapCst> {
+    let [k_tok, rest @ ..] = region else {
+        return None;
+    };
+    let (k, k_span) = canonical_u32(k_tok)?;
+    let mut rest = rest;
+    let (rmap, rmap_span) = match parse_named_pairs(rest, "rmap", line_no) {
+        Some((pairs, group_span, after)) => {
+            rest = after;
+            (Some(pairs), Some(group_span))
+        }
+        None => (None, None),
+    };
+    let (wmap, wmap_span) = match parse_named_pairs(rest, "wmap", line_no) {
+        Some((pairs, group_span, after)) => {
+            rest = after;
+            (Some(pairs), Some(group_span))
+        }
+        None => (None, None),
+    };
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(FrameMapCst {
+        k,
+        k_span,
+        rmap,
+        rmap_span,
+        wmap,
+        wmap_span,
+        span,
+        trailing: trailing.clone(),
+    })
+}
+
+/// `, <name>=( <pair>, … )` — a named map clause. Consumes the leading
+/// comma; returns the parsed pairs, the `(..)` group span, and the tokens
+/// after the closing paren. `None` = the clause is not present/exact.
+fn parse_named_pairs<'a>(
+    rest: &'a [AsmToken],
+    name: &str,
+    line_no: u32,
+) -> Option<(Vec<FramePairCst>, Span, &'a [AsmToken])> {
+    let is = |t: &AsmToken, k: &AsmTokenKind| &t.kind == k;
+    let [comma, kw, eq, lparen, tail @ ..] = rest else {
+        return None;
+    };
+    if !is(comma, &AsmTokenKind::Comma)
+        || word_text(kw) != Some(name)
+        || !is(eq, &AsmTokenKind::Eq)
+        || !is(lparen, &AsmTokenKind::LParen)
+    {
+        return None;
+    }
+    // No nesting inside a pair list, so the first `)` closes the group.
+    let close = tail
+        .iter()
+        .position(|t| matches!(t.kind, AsmTokenKind::RParen))?;
+    let pairs = parse_pairs(&tail[..close])?;
+    let rparen = &tail[close];
+    let group_span = Span::new(line_no, lparen.col, line_no, rparen.col + rparen.len);
+    Some((pairs, group_span, &tail[close + 1..]))
+}
+
+/// A comma-separated list of `<from> (-> | =>) <to>` pairs (canonically
+/// spelled values). An empty token slice is the empty list (`rmap=()` =
+/// identity). `None` on any structural violation.
+fn parse_pairs(inner: &[AsmToken]) -> Option<Vec<FramePairCst>> {
+    let mut pairs = Vec::new();
+    let mut i = 0;
+    while i < inner.len() {
+        let from = canonical_u32(inner.get(i)?)?.0;
+        let one_way = match inner.get(i + 1)?.kind {
+            AsmTokenKind::Arrow => false,
+            AsmTokenKind::FatArrow => true,
+            _ => return None,
+        };
+        let to = canonical_u32(inner.get(i + 2)?)?.0;
+        pairs.push(FramePairCst { from, to, one_way });
+        i += 3;
+        if i < inner.len() {
+            if !matches!(inner[i].kind, AsmTokenKind::Comma) {
+                return None;
+            }
+            i += 1;
+            // A trailing comma with no pair after it is malformed.
+            if i == inner.len() {
+                return None;
+            }
+        }
+    }
+    Some(pairs)
 }
 
 /// The [`TableDirectiveKind`] a leading directive word names, or `None`
@@ -1268,6 +1561,125 @@ L1:     rgt
         // Byte-compat: with caps off `=` (and the parens) stay Junk, so
         // the line is Raw — exactly as before the directive existed.
         let cst = parse_asm_cst(".routine main, tapes=2, alpha=(3, 5)\n");
+        assert!(matches!(&cst.items[0].kind, AsmItemKind::Raw(_)));
+    }
+
+    // -- Frame-descriptor directives (caps.tables + rept + arrows) ------
+
+    fn as_frame(item: &AsmItem) -> &FrameDirectiveCst {
+        match &item.kind {
+            AsmItemKind::FrameDirective(d) => d,
+            other => panic!("expected FrameDirective, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shapes_the_frame_directive_family() {
+        let src = "\
+F0: .frame tapes=(3, 0)
+    .map 0, rmap=(2->1, 4=>0), wmap=(1->2)
+    .exits Lodd, Leven
+";
+        let cst = parse_asm_cst_with(src, caps_all());
+        assert_eq!(cst.items.len(), 3);
+
+        let FrameDirectiveCst::Header(h) = as_frame(&cst.items[0]) else {
+            panic!("not a header: {:?}", cst.items[0].kind)
+        };
+        assert_eq!(h.label.name, "F0");
+        assert_eq!(h.tapes, vec![3, 0]);
+        assert_eq!(h.tapes_span, Span::new(1, 18, 1, 24)); // the `(3, 0)` group
+
+        let FrameDirectiveCst::Map(m) = as_frame(&cst.items[1]) else {
+            panic!("not a map: {:?}", cst.items[1].kind)
+        };
+        assert_eq!(m.k, 0);
+        assert_eq!(
+            m.rmap,
+            Some(vec![
+                FramePairCst {
+                    from: 2,
+                    to: 1,
+                    one_way: false
+                },
+                FramePairCst {
+                    from: 4,
+                    to: 0,
+                    one_way: true
+                },
+            ])
+        );
+        assert_eq!(
+            m.wmap,
+            Some(vec![FramePairCst {
+                from: 1,
+                to: 2,
+                one_way: false
+            }])
+        );
+
+        let FrameDirectiveCst::Exits(e) = as_frame(&cst.items[2]) else {
+            panic!("not exits: {:?}", cst.items[2].kind)
+        };
+        assert_eq!(
+            e.targets
+                .iter()
+                .map(|t| t.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Lodd", "Leven"]
+        );
+    }
+
+    #[test]
+    fn map_clauses_are_each_optional() {
+        // rmap-only, wmap-only, and neither all shape.
+        let cst = parse_asm_cst_with(".map 1, rmap=(2->3)\n", caps_all());
+        let FrameDirectiveCst::Map(m) = as_frame(&cst.items[0]) else {
+            panic!()
+        };
+        assert!(m.rmap.is_some() && m.wmap.is_none());
+
+        let cst = parse_asm_cst_with(".map 1, wmap=(2->3)\n", caps_all());
+        let FrameDirectiveCst::Map(m) = as_frame(&cst.items[0]) else {
+            panic!()
+        };
+        assert!(m.rmap.is_none() && m.wmap.is_some());
+
+        let cst = parse_asm_cst_with(".map 2\n", caps_all());
+        let FrameDirectiveCst::Map(m) = as_frame(&cst.items[0]) else {
+            panic!()
+        };
+        assert!(m.rmap.is_none() && m.wmap.is_none() && m.k == 2);
+    }
+
+    #[test]
+    fn malformed_frame_directives_degrade_to_lines() {
+        for src in [
+            ".frame tapes=(1)\n",                 // no descriptor label
+            "F0: .frame tapes=()\n",              // empty tapes list
+            "F0: .frame tapes=(1,)\n",            // trailing comma
+            "L0: .map 0, rmap=(1->2)\n",          // `.map` must not carry a label
+            ".map 0, wmap=(1->2), rmap=(2->1)\n", // wmap before rmap
+            ".map 0, rmap=(1->)\n",               // pair missing its `to`
+            ".map 0, rmap=(1-2)\n",               // no arrow token (`-` then `2`)
+        ] {
+            let cst = parse_asm_cst_with(src, caps_all());
+            assert!(
+                matches!(
+                    &cst.items[0].kind,
+                    AsmItemKind::Line(_) | AsmItemKind::Raw(_)
+                ),
+                "{src:?} must degrade, got {:?}",
+                cst.items[0].kind
+            );
+        }
+    }
+
+    #[test]
+    fn default_caps_never_shape_frame_directives() {
+        // Byte-compat: with the tables cap off the arrows/parens stay Junk,
+        // so a `.map` line shapes Raw — exactly as before frames existed.
+        let cst = parse_asm_cst(".map 0, rmap=(2->1)\n");
         assert!(matches!(&cst.items[0].kind, AsmItemKind::Raw(_)));
     }
 
