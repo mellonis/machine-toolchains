@@ -6,26 +6,35 @@
 //! reference anything, even names that don't exist. Reachability follows
 //! both relocation call sites and declarative bound-call sites.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use super::LinkError;
-use crate::formats::object::{BlobDebug, ObjectFile, RoutineSig, SymbolDef};
+use crate::formats::object::{BlobDebug, BoundCall, ObjectFile, RoutineSig, SymbolDef};
 
 #[derive(Debug)]
 pub(crate) struct FuncRef<'a> {
     pub name: &'a str,
-    pub blob: &'a [u8],
-    pub debug: Option<&'a BlobDebug>,
+    /// The function's code blob. `Borrowed` straight from the object as
+    /// resolved; the composition engine replaces it with an `Owned`
+    /// rewritten blob (bound calls widened to framed calls) before layout.
+    pub blob: Cow<'a, [u8]>,
+    /// Debug info; `Owned` after the engine shifts label/line offsets past
+    /// a widened bound-call site.
+    pub debug: Option<Cow<'a, BlobDebug>>,
     /// Call sites in blob order: (hole offset in blob, callee index in `order`).
     pub calls: Vec<(u32, usize)>,
     /// Declarative bound-call sites in blob order, mirroring `calls`'
-    /// shape: (operand hole offset in blob, callee index in `order`). The
-    /// binding data itself lives on the source `BoundCall`; the
-    /// composition engine (a later phase-5b task) reads it from there.
-    pub bound: Vec<(u32, usize)>,
+    /// shape: (operand hole offset in blob, callee index in `order`,
+    /// the source record). The composition engine reads the binding from
+    /// the record and rewrites each site to a framed call, after which
+    /// `bound` is emptied.
+    pub bound: Vec<(u32, usize, &'a BoundCall)>,
     /// This function's table blob — its match/dispatch table bytes
     /// (docs/formats.md (.pmo)); empty when the object carries none.
-    pub table: &'a [u8],
+    /// `Owned` after the engine shifts a raw frame descriptor's exit
+    /// offsets past a widened bound-call site.
+    pub table: Cow<'a, [u8]>,
     /// TableRef operand holes within this blob, as (hole offset in blob,
     /// offset into `table`); the layout pass rebases them into the final
     /// table section (docs/formats.md (executable image)).
@@ -105,7 +114,7 @@ pub(crate) fn resolve<'a>(
     // calls/bound sites per discovered function, resolved to final indices
     // as callees are discovered (an index is known the moment it's pushed).
     let mut calls_by_site: HashMap<Site, Vec<(u32, usize)>> = HashMap::new();
-    let mut bound_by_site: HashMap<Site, Vec<(u32, usize)>> = HashMap::new();
+    let mut bound_by_site: HashMap<Site, Vec<(u32, usize, &'a BoundCall)>> = HashMap::new();
 
     // A symbol reference (a relocation callee or a bound callee) resolves
     // to a site the same way: a Local binds directly within its own
@@ -175,7 +184,7 @@ pub(crate) fn resolve<'a>(
                 }
                 Some(callee) => {
                     let idx = reach(callee, &mut index_of, &mut order_sites, &mut queue);
-                    bound.push((bc.offset, idx));
+                    bound.push((bc.offset, idx, bc));
                 }
             }
         }
@@ -213,15 +222,20 @@ pub(crate) fn resolve<'a>(
                 .expect("site came from a Defined or Local symbol");
             FuncRef {
                 name,
-                blob: &object.blobs[site.1 as usize],
-                debug: object.debug.as_ref().map(|d| &d[site.1 as usize]),
+                blob: Cow::Borrowed(&object.blobs[site.1 as usize]),
+                debug: object
+                    .debug
+                    .as_ref()
+                    .map(|d| Cow::Borrowed(&d[site.1 as usize])),
                 calls: calls_by_site.remove(&site).unwrap_or_default(),
                 bound: bound_by_site.remove(&site).unwrap_or_default(),
-                table: object
-                    .table_blobs
-                    .as_ref()
-                    .and_then(|t| t.get(site.1 as usize))
-                    .map_or(&[][..], Vec::as_slice),
+                table: Cow::Borrowed(
+                    object
+                        .table_blobs
+                        .as_ref()
+                        .and_then(|t| t.get(site.1 as usize))
+                        .map_or(&[][..], Vec::as_slice),
+                ),
                 table_fixups: object
                     .table_fixups
                     .iter()
@@ -469,7 +483,9 @@ mod tests {
         let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
         assert_eq!(names, vec!["main", "sub"]);
-        assert_eq!(r.order[0].bound, vec![(1, 1)]); // hole at 1 -> order index 1
+        // hole at 1 -> order index 1, carrying the source record.
+        let bound: Vec<(u32, usize)> = r.order[0].bound.iter().map(|&(o, i, _)| (o, i)).collect();
+        assert_eq!(bound, vec![(1, 1)]);
         assert!(r.order[0].calls.is_empty());
         assert!(r.dropped.is_empty());
     }

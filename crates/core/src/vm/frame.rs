@@ -224,31 +224,37 @@ impl FrameWalk {
     }
 }
 
-/// Test-only descriptor encoder — the inverse of `FrameWalk`, shared by
-/// the frame, core, and driver test modules.
+/// Encode a frame descriptor per the wire layout in the module doc:
+/// `entries` is `(phys, rmap, wmap)` per virtual tape; `exits` are the
+/// blob-relative code offsets (empty for a composition-engine descriptor,
+/// which has no `retx` exits). The composition engine materializes each
+/// synthesized composite through this (docs/formats.md (frame
+/// descriptors)); the frame/core/driver test modules share it too.
+pub(crate) fn descriptor_bytes(entries: &[(u8, &[u16], &[u16])], exits: &[u32]) -> Vec<u8> {
+    let mut out = vec![entries.len() as u8];
+    out.extend((exits.len() as u16).to_le_bytes());
+    for (phys, rmap, wmap) in entries {
+        out.push(*phys);
+        out.extend((rmap.len() as u16).to_le_bytes());
+        for &m in *rmap {
+            out.extend(m.to_le_bytes());
+        }
+        out.extend((wmap.len() as u16).to_le_bytes());
+        for &m in *wmap {
+            out.extend(m.to_le_bytes());
+        }
+    }
+    for &e in exits {
+        out.extend(e.to_le_bytes());
+    }
+    out
+}
+
+/// Test-only region encoder + a re-export of the descriptor encoder, shared
+/// by the frame, core, and driver test modules.
 #[cfg(test)]
 pub(crate) mod test_support {
-    /// Encode a descriptor per the wire layout in the module doc:
-    /// `entries` is `(phys, rmap, wmap)` per virtual tape.
-    pub(crate) fn descriptor_bytes(entries: &[(u8, &[u16], &[u16])], exits: &[u32]) -> Vec<u8> {
-        let mut out = vec![entries.len() as u8];
-        out.extend((exits.len() as u16).to_le_bytes());
-        for (phys, rmap, wmap) in entries {
-            out.push(*phys);
-            out.extend((rmap.len() as u16).to_le_bytes());
-            for &m in *rmap {
-                out.extend(m.to_le_bytes());
-            }
-            out.extend((wmap.len() as u16).to_le_bytes());
-            for &m in *wmap {
-                out.extend(m.to_le_bytes());
-            }
-        }
-        for &e in exits {
-            out.extend(e.to_le_bytes());
-        }
-        out
-    }
+    pub(crate) use super::descriptor_bytes;
 
     /// Encode a frames region (docs/formats.md (frames region)): `K u16`,
     /// `S u16`, directory (`K × u32` descriptor offsets), compose table

@@ -144,7 +144,7 @@ struct RawSite {
 /// CRC-valid, plausible-looking executable. Also raised when a blob's
 /// first byte is not the entry opcode.
 fn classify(syntax: &ArchSyntax, f: &FuncRef) -> Result<Vec<Piece>, LinkError> {
-    let blob = f.blob;
+    let blob: &[u8] = &f.blob;
 
     // Every linked function must begin with its `ent` prologue (the ABI
     // `.func` guarantees). A blob that doesn't would trap at its first
@@ -322,7 +322,7 @@ fn append_function_tables(
     // table collapse to the first classifier.
     let mut starts: BTreeMap<u32, RefKind> = BTreeMap::new();
     for &(hole, table_off) in &f.table_fixups {
-        let kind = ref_kind(syntax, f.blob, hole).map_or(RefKind::Match, |(_, k)| k);
+        let kind = ref_kind(syntax, &f.blob, hole).map_or(RefKind::Match, |(_, k)| k);
         starts.entry(table_off).or_insert(kind);
     }
     let malformed = |at: u32| LinkError::MalformedTable {
@@ -330,7 +330,7 @@ fn append_function_tables(
         at,
     };
 
-    let tb = f.table;
+    let tb: &[u8] = &f.table;
     let len = tb.len() as u32;
     let mut pos = 0u32;
     for (&start, &kind) in &starts {
@@ -690,7 +690,7 @@ pub(super) fn build(
             // boundary by referencing operand kind; a hole whose opcode is
             // not an instruction boundary is a malformed blob, not a
             // layout bug.
-            let Some((opcode_at, kind)) = ref_kind(syntax, f.blob, hole) else {
+            let Some((opcode_at, kind)) = ref_kind(syntax, &f.blob, hole) else {
                 return Err(LinkError::MalformedBlob {
                     symbol: f.name.to_string(),
                     at: hole,
@@ -715,7 +715,7 @@ pub(super) fn build(
             code[patch_at..patch_at + 4].copy_from_slice(&(table_base + table_off).to_le_bytes());
         }
 
-        let (labels, lines) = match f.debug {
+        let (labels, lines) = match &f.debug {
             Some(debug) => {
                 let mut labels = Vec::with_capacity(debug.labels.len());
                 for (name, off) in &debug.labels {

@@ -49,6 +49,21 @@ pub enum LinkError {
     /// executable needs a sectioned header — but the entry function has
     /// no signature to fill it. Carries the entry function's name.
     MissingSignature(String),
+    /// A declarative bound call could not be lowered: the binding is
+    /// illegal (arity, caller/callee symbol range, blank pinning, a
+    /// non-injective completed bijection, a per-direction conflict). The
+    /// message carries the callee name and the specific reason
+    /// (docs/formats.md (bound calls)).
+    BadBinding { callee: String, message: String },
+    /// A frame descriptor is inconsistent with the entry signature: a
+    /// physical-tape index at or past the machine's arity, or an
+    /// undecodable hand-authored descriptor. Carries the owning function's
+    /// name and the specific reason (docs/formats.md (frame descriptors)).
+    BadFrameDescriptor { symbol: String, message: String },
+    /// The composition engine was asked to lower bound calls under a
+    /// mechanism it does not implement yet. FRAMES is complete; `Mono` and
+    /// `Hybrid` land with the stamping engine. Internal inter-task state.
+    UnsupportedCallMech(CallMech),
 }
 
 impl std::fmt::Display for LinkError {
@@ -84,6 +99,17 @@ impl std::fmt::Display for LinkError {
                      sectioned executable header"
                 )
             }
+            Self::BadBinding { callee, message } => {
+                write!(f, "bad binding to `{callee}`: {message}")
+            }
+            Self::BadFrameDescriptor { symbol, message } => {
+                write!(f, "bad frame descriptor in `{symbol}`: {message}")
+            }
+            Self::UnsupportedCallMech(mech) => write!(
+                f,
+                "the {mech} call mechanism is not implemented yet \
+                 (it lands with the stamping engine)"
+            ),
         }
     }
 }

@@ -68,6 +68,19 @@ impl ArchSyntax {
     pub fn is_call(&self, op: u8) -> bool {
         self.by_opcode(op).is_some_and(|e| e.flow == Flow::Call)
     }
+
+    /// The opcode of this dialect's framed call (`call.m`-shape), if it has
+    /// one: the single `FramedCall`-operand entry. The composition engine
+    /// needs it to lower a declarative bound call into a framed call
+    /// without naming any architecture's mnemonic (core is arch-agnostic —
+    /// README (workspace layout)). `None` when the dialect has no framed
+    /// call, which is an error only if a reachable binding needs lowering.
+    pub fn framed_call_opcode(&self) -> Option<u8> {
+        self.entries
+            .iter()
+            .find(|e| e.operand == OperandKind::FramedCall)
+            .map(|e| e.opcode)
+    }
 }
 
 #[cfg(test)]
