@@ -2436,4 +2436,175 @@ T0: .row [1, 2]
         let e = asm_fake(".section tables\n.routine main, tapes=1, alpha=(2)\n").unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::BadTable(_)), "{e}");
     }
+
+    // -- Asm ↔ VM wire agreement (frame descriptors) --------------------
+    //
+    // A property cross-check between the two sides of the frame-descriptor
+    // wire format (docs/formats.md (frame descriptors)): an arbitrary valid
+    // authored frame is assembled (the real lower + emit path) and then
+    // decoded by the VM's `FrameWalk`, and the decoded cache must equal an
+    // independent densification of the authored intent. This is the T5
+    // review gap — the asm builder and the VM decoder are the two ends of
+    // one contract, and nothing forced them to agree byte-for-byte before.
+    mod frame_wire_agreement {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// One authored virtual tape: physical target and sparse maps.
+        /// `rmap` pairs carry the one-way (`=>`) flag; `wmap` never does
+        /// (one-way is read-direction only).
+        #[derive(Debug, Clone)]
+        struct TapeSpec {
+            phys: u8,
+            rmap: Vec<(u16, u16, bool)>,
+            wmap: Vec<(u16, u16)>,
+        }
+
+        /// Keep the first pair for each source index — mirrors authoring
+        /// distinct indices; `build_dense_map` would otherwise let a later
+        /// duplicate win, which the reference densifier does not model.
+        fn dedup3(v: Vec<(u16, u16, bool)>) -> Vec<(u16, u16, bool)> {
+            let mut seen = std::collections::HashSet::new();
+            v.into_iter().filter(|&(f, _, _)| seen.insert(f)).collect()
+        }
+        fn dedup2(v: Vec<(u16, u16)>) -> Vec<(u16, u16)> {
+            let mut seen = std::collections::HashSet::new();
+            v.into_iter().filter(|&(f, _)| seen.insert(f)).collect()
+        }
+
+        /// The independent oracle: the same dense form `build_dense_map`
+        /// materializes — index 0 pinned to blank, unset indices are holes
+        /// (`0xFFFF`), an empty list is the identity map. Distinct sources
+        /// only (see `dedup*`).
+        fn densify(pairs: &[(u16, u16)]) -> Vec<u16> {
+            if pairs.is_empty() {
+                return Vec::new();
+            }
+            let max = pairs.iter().map(|&(f, _)| f).max().unwrap() as usize;
+            let mut t = vec![0xFFFFu16; max + 1];
+            t[0] = 0; // blank pins to blank
+            for &(f, to) in pairs {
+                t[f as usize] = to;
+            }
+            t
+        }
+
+        fn arb_rmap() -> impl Strategy<Value = Vec<(u16, u16, bool)>> {
+            // Sparse sources (1..=6) yield natural holes; `to == 0` folds a
+            // symbol onto blank; the bool is the `->`/`=>` spelling.
+            proptest::collection::vec((1u16..=6, 0u16..=6, any::<bool>()), 0..=4).prop_map(dedup3)
+        }
+        fn arb_wmap() -> impl Strategy<Value = Vec<(u16, u16)>> {
+            proptest::collection::vec((1u16..=6, 0u16..=6), 0..=4).prop_map(dedup2)
+        }
+        fn arb_tape() -> impl Strategy<Value = TapeSpec> {
+            (0u8..=12, arb_rmap(), arb_wmap()).prop_map(|(phys, rmap, wmap)| TapeSpec {
+                phys,
+                rmap,
+                wmap,
+            })
+        }
+        fn arb_frame() -> impl Strategy<Value = (Vec<TapeSpec>, usize)> {
+            (proptest::collection::vec(arb_tape(), 1..=16), 0usize..=3)
+        }
+
+        /// Render authored `.frame`/`.map`/`.exits` source (fake dialect).
+        /// The `fcall` at offset 1 is 9 bytes, so the exit stubs land at
+        /// offsets 10, 11, … — pinned below.
+        fn render(tapes: &[TapeSpec], n_exits: usize) -> String {
+            let mut s = String::from(".section tables\nF0: .frame tapes=(");
+            let list: Vec<String> = tapes.iter().map(|t| t.phys.to_string()).collect();
+            s.push_str(&list.join(", "));
+            s.push_str(")\n");
+            for (k, t) in tapes.iter().enumerate() {
+                if t.rmap.is_empty() && t.wmap.is_empty() {
+                    continue;
+                }
+                s.push_str(&format!("    .map {k}"));
+                if !t.rmap.is_empty() {
+                    let r: Vec<String> = t
+                        .rmap
+                        .iter()
+                        .map(|&(f, to, ow)| format!("{f}{}{to}", if ow { "=>" } else { "->" }))
+                        .collect();
+                    s.push_str(&format!(", rmap=({})", r.join(", ")));
+                }
+                if !t.wmap.is_empty() {
+                    let w: Vec<String> =
+                        t.wmap.iter().map(|&(f, to)| format!("{f}->{to}")).collect();
+                    s.push_str(&format!(", wmap=({})", w.join(", ")));
+                }
+                s.push('\n');
+            }
+            if n_exits > 0 {
+                let e: Vec<String> = (0..n_exits).map(|i| format!("E{i}")).collect();
+                s.push_str(&format!("    .exits {}\n", e.join(", ")));
+            }
+            s.push_str(".section code\n.func main\n    fcall helper, F0\n");
+            if n_exits > 0 {
+                for i in 0..n_exits {
+                    s.push_str(&format!("E{i}: stp\n"));
+                }
+            } else {
+                s.push_str("    stp\n");
+            }
+            s.push_str(".func helper\n    stp\n");
+            s
+        }
+
+        /// Drive a `FrameWalk` over the built blob (base 0); off-the-end or
+        /// malformed is an error, never a panic.
+        fn walk(blob: &[u8]) -> Result<crate::vm::frame::FrameDescriptor, ()> {
+            use crate::vm::frame::{FrameStep, FrameWalk};
+            let mut w = FrameWalk::new(0);
+            let mut input = None;
+            loop {
+                match w.feed(input) {
+                    FrameStep::NeedByte(a) => match blob.get(a as usize) {
+                        Some(&b) => input = Some(b),
+                        None => return Err(()),
+                    },
+                    FrameStep::Done(d) => return Ok(d),
+                    FrameStep::Malformed => return Err(()),
+                }
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(96))]
+
+            #[test]
+            fn authored_frames_decode_through_framewalk((tapes, n_exits) in arb_frame()) {
+                let src = render(&tapes, n_exits);
+                let obj = asm_fake(&src).expect("authored frame assembles");
+                let blobs = obj.table_blobs.as_ref().expect("has a table section");
+                let desc = walk(&blobs[0]).expect("descriptor decodes via FrameWalk");
+
+                // (a) arity + per-tape projection/maps round-trip through the
+                //     assembler bytes and back out of the VM's decoder.
+                prop_assert_eq!(desc.entries.len(), tapes.len());
+                for (k, spec) in tapes.iter().enumerate() {
+                    let rpairs: Vec<(u16, u16)> =
+                        spec.rmap.iter().map(|&(f, to, _)| (f, to)).collect();
+                    prop_assert_eq!(desc.entries[k].phys, spec.phys);
+                    prop_assert_eq!(&desc.entries[k].rmap, &densify(&rpairs));
+                    prop_assert_eq!(&desc.entries[k].wmap, &densify(&spec.wmap));
+
+                    // (b) every non-empty builder-produced map pins entry 0 to
+                    //     blank — the T1 seam invariant.
+                    if !desc.entries[k].rmap.is_empty() {
+                        prop_assert_eq!(desc.entries[k].rmap[0], 0);
+                    }
+                    if !desc.entries[k].wmap.is_empty() {
+                        prop_assert_eq!(desc.entries[k].wmap[0], 0);
+                    }
+                }
+
+                // Exits are blob-relative code offsets: ent@0, fcall@1 (9
+                // bytes), then one-byte `stp` stubs at 10, 11, ….
+                let expected: Vec<u32> = (0..n_exits as u32).map(|i| 10 + i).collect();
+                prop_assert_eq!(desc.exits, expected);
+            }
+        }
+    }
 }

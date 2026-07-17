@@ -348,4 +348,18 @@ mod tests {
         }
         assert!(walk(&blob).is_ok());
     }
+
+    proptest::proptest! {
+        /// Arbitrary/noise descriptor bytes must always terminate the walk in
+        /// a decode, a malformed verdict, or off-the-end (which the core maps
+        /// to a table-bounds trap) — never a panic or a hang. The fixed
+        /// truncation and arity-bound cases above cover specific malformity;
+        /// this fuzzes the whole byte space.
+        #[test]
+        fn framewalk_never_panics_on_noise(
+            noise in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+        ) {
+            let _ = walk(&noise); // returns Ok/Err, never panics or hangs
+        }
+    }
 }
