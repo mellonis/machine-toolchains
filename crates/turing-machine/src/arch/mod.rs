@@ -201,11 +201,14 @@ impl Arch for Tm1 {
                 _ => return Err(Trap::BadOperand { at: 0 }),
             },
             // `call.m target, F`: the framed-call operand carries the rel
-            // displacement and the frame descriptor's table-section offset.
+            // displacement and, post-link, the call SITE index the runtime
+            // composes through (docs/formats.md (frames region)). The
+            // authoring surface names the descriptor `F`; the linker
+            // rewrites the operand half to the site index.
             CALL_M => match operand {
                 Operand::FramedCall { rel, table } => vec![MicroOp::CallFrame {
                     rel: *rel,
-                    frame: *table,
+                    site: *table,
                 }],
                 _ => return Err(Trap::BadOperand { at: 0 }),
             },
@@ -491,21 +494,14 @@ mod tests {
     }
 
     #[test]
-    fn call_m_lowers_the_rel_and_frame_into_a_call_frame() {
+    fn call_m_lowers_the_rel_and_site_into_a_call_frame() {
         let a = Tm1::new(2);
+        // Post-link the operand's second half is the call SITE index; the
+        // arch passes it through verbatim into `CallFrame.site`.
         assert_eq!(
-            a.lower(
-                CALL_M,
-                &Operand::FramedCall {
-                    rel: -12,
-                    table: 40
-                }
-            )
-            .unwrap(),
-            vec![MicroOp::CallFrame {
-                rel: -12,
-                frame: 40
-            }]
+            a.lower(CALL_M, &Operand::FramedCall { rel: -12, table: 3 })
+                .unwrap(),
+            vec![MicroOp::CallFrame { rel: -12, site: 3 }]
         );
         // Wrong operand shape is malformed.
         assert!(a.lower(CALL_M, &Operand::I32(0)).is_err());

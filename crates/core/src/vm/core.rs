@@ -49,16 +49,34 @@ enum Pending {
     Match(MatchWalk),
     Dispatch(DispatchWalk),
     /// A framed call's entry-marker verification (as `EntCheck`, keeping
-    /// the frame offset to activate on a successful push).
+    /// the call SITE index to compose on a successful push).
     EntCheckFrame {
         target: u32,
-        frame: u32,
+        site: u32,
     },
     /// A framed call's return-address push: on Ok the FR pair pushes and
-    /// the descriptor load begins.
+    /// the compose lookup begins.
     PushFrame {
         target: u32,
-        frame: u32,
+        site: u32,
+    },
+    /// Reading the 2-byte `compose[FR][site]` entry after a framed call's
+    /// push — FR is still the caller's active index (docs/formats.md
+    /// (frames region)). `buf` accumulates the LE bytes; `then_ip` is the
+    /// callee entry to continue at once the frame is resolved.
+    ComposeRead {
+        then_ip: u32,
+        addr0: u32,
+        buf: Vec<u8>,
+    },
+    /// Reading the 4-byte `directory[FR-1]` descriptor offset — FR already
+    /// holds the resolved composite index. Shared by the framed-call
+    /// activation and the ret/retx restore-reload. `then_ip` is where
+    /// execution continues once the descriptor cache is filled.
+    DirectoryRead {
+        then_ip: u32,
+        addr0: u32,
+        buf: Vec<u8>,
     },
     /// An in-flight frame-descriptor load; `then_ip` is where execution
     /// continues once the cache is filled.
@@ -74,6 +92,19 @@ enum Pending {
     },
 }
 
+/// The frames region's shape, handed to the core at construction from the
+/// executable header + region header (docs/formats.md (frames region)).
+/// `base` is the region's absolute offset in the tables blob; `composites`
+/// is K (the directory size); `sites` is S (the compose-table column
+/// count). The core computes every compose/directory read address from
+/// these three.
+#[derive(Debug, Clone, Copy)]
+pub struct FramesMeta {
+    pub base: u32,
+    pub composites: u16,
+    pub sites: u16,
+}
+
 pub struct Core<'a> {
     arch: &'a dyn Arch,
     ip: u32,
@@ -86,12 +117,15 @@ pub struct Core<'a> {
     /// Number of physical tape devices visible to `ReadAll` under the
     /// identity frame.
     device_count: u8,
-    /// Whether the frames execution profile is active. Off (the base
+    /// The frames execution profile's region metadata, `Some` iff the
+    /// profile is active (docs/formats.md (frames region)). Off (the base
     /// profile), `Call`/`Ret` behave exactly as always and the frame
     /// instructions trap `ProfileViolation`.
-    frames_enabled: bool,
-    /// The frame register: 0 = identity (no translation); a non-zero
-    /// value is the active descriptor's table-section offset + 1.
+    frames: Option<FramesMeta>,
+    /// The frame register: 0 = the identity composite (no translation); a
+    /// non-zero value is the active COMPOSITE INDEX (1..=K), whose
+    /// descriptor lives at `directory[fr-1]` (docs/formats.md (frames
+    /// region)).
     fr: u32,
     /// Decoded descriptor for the active frame (`Some` iff FR != 0 and
     /// the descriptor load completed).
@@ -115,7 +149,7 @@ impl<'a> Core<'a> {
             phase: Phase::FetchOpcode,
             brk_pending: false,
             device_count: 1,
-            frames_enabled: false,
+            frames: None,
             fr: 0,
             frame_cache: None,
             fr_stack: Vec::new(),
@@ -130,17 +164,25 @@ impl<'a> Core<'a> {
     }
 
     /// Builder: enable the frames execution profile — `Call`/`Ret` keep
-    /// the FR pair stack in step, and `CallFrame`/`RetX` become legal.
-    pub fn with_frames(mut self) -> Self {
-        self.frames_enabled = true;
+    /// the FR pair stack in step, and `CallFrame`/`RetX` become legal. The
+    /// `meta` locates the compose table + directory the core resolves call
+    /// sites through (docs/formats.md (frames region)).
+    pub fn with_frames(mut self, meta: FramesMeta) -> Self {
+        self.frames = Some(meta);
         self
+    }
+
+    /// Whether the frames execution profile is active.
+    fn frames_on(&self) -> bool {
+        self.frames.is_some()
     }
 
     pub fn ip(&self) -> u32 {
         self.ip
     }
 
-    /// The frame register (0 = identity frame).
+    /// The frame register (0 = the identity composite; a non-zero value is
+    /// the active composite index).
     pub fn fr(&self) -> u32 {
         self.fr
     }
@@ -346,7 +388,7 @@ impl<'a> Core<'a> {
             },
             Pending::Push { target } => match resp {
                 BusResponse::Ok => {
-                    if self.frames_enabled {
+                    if self.frames_on() {
                         // Uniform pair discipline: a plain call pushes
                         // the (unchanged) FR beside the return address.
                         self.fr_stack.push(self.fr);
@@ -361,11 +403,11 @@ impl<'a> Core<'a> {
                 BusResponse::StackEmpty => return self.trap(Trap::StackUnderflow),
                 _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
             },
-            Pending::EntCheckFrame { target, frame } => match resp {
+            Pending::EntCheckFrame { target, site } => match resp {
                 BusResponse::Byte(b) if self.arch.is_entry_marker(b) => {
                     self.phase = Phase::Execute {
                         ops,
-                        pending: Pending::PushFrame { target, frame },
+                        pending: Pending::PushFrame { target, site },
                     };
                     return CoreEvent::Request(BusRequest::StackPush { value: self.ip });
                 }
@@ -374,15 +416,83 @@ impl<'a> Core<'a> {
                 }
                 _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
             },
-            Pending::PushFrame { target, frame } => match resp {
+            Pending::PushFrame { target, site } => match resp {
                 BusResponse::Ok => {
                     // Sync discipline: FR mutations ride only successful
                     // bus responses — a refused push leaves FR untouched.
+                    // Pair discipline: push the CALLER's FR (restored on
+                    // return); the composed FR' is resolved next.
                     self.fr_stack.push(self.fr);
-                    self.fr = frame + 1;
-                    return self.start_frame_load(ops, frame, target);
+                    return self.start_compose_read(ops, target, site);
                 }
                 BusResponse::StackFull => return self.trap(Trap::StackOverflow),
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+            Pending::ComposeRead {
+                then_ip,
+                addr0,
+                mut buf,
+            } => match resp {
+                BusResponse::Byte(b) => {
+                    buf.push(b);
+                    if buf.len() < 2 {
+                        let next = addr0 + buf.len() as u32;
+                        self.phase = Phase::Execute {
+                            ops,
+                            pending: Pending::ComposeRead {
+                                then_ip,
+                                addr0,
+                                buf,
+                            },
+                        };
+                        return CoreEvent::Request(BusRequest::FrameRead { addr: next });
+                    }
+                    // compose[FR][site]: 0 is reserved-invalid at runtime —
+                    // the linker never emits a reachable 0 (docs/formats.md
+                    // (frames region)).
+                    let composite = u16::from_le_bytes([buf[0], buf[1]]);
+                    if composite == 0 {
+                        return self.trap(Trap::BadOperand {
+                            at: self.instr_start,
+                        });
+                    }
+                    self.fr = u32::from(composite);
+                    return self.start_directory_read(ops, then_ip);
+                }
+                BusResponse::OutOfTable => {
+                    return self.trap(Trap::TableOutOfBounds {
+                        at: self.instr_start,
+                    });
+                }
+                _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
+            },
+            Pending::DirectoryRead {
+                then_ip,
+                addr0,
+                mut buf,
+            } => match resp {
+                BusResponse::Byte(b) => {
+                    buf.push(b);
+                    if buf.len() < 4 {
+                        let next = addr0 + buf.len() as u32;
+                        self.phase = Phase::Execute {
+                            ops,
+                            pending: Pending::DirectoryRead {
+                                then_ip,
+                                addr0,
+                                buf,
+                            },
+                        };
+                        return CoreEvent::Request(BusRequest::FrameRead { addr: next });
+                    }
+                    let offset = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    return self.start_frame_load(ops, offset, then_ip);
+                }
+                BusResponse::OutOfTable => {
+                    return self.trap(Trap::TableOutOfBounds {
+                        at: self.instr_start,
+                    });
+                }
                 _ => return self.trap(Trap::CodeOutOfBounds { at: self.ip }),
             },
             Pending::FrameLoad { mut walk, then_ip } => match resp {
@@ -426,7 +536,11 @@ impl<'a> Core<'a> {
                     }
                     self.fr = restored;
                     if reload {
-                        return self.start_frame_load(ops, restored - 1, then_ip);
+                        // Restore-reload goes through the directory: FR now
+                        // holds the restored composite index, so its
+                        // descriptor is directory[FR-1] (docs/formats.md
+                        // (frames region)).
+                        return self.start_directory_read(ops, then_ip);
                     }
                     self.ip = then_ip;
                 }
@@ -575,7 +689,7 @@ impl<'a> Core<'a> {
                     Err(trap) => return self.trap(trap),
                 },
                 MicroOp::Ret => {
-                    if self.frames_enabled {
+                    if self.frames_on() {
                         // Pair discipline: pop the FR half too, restore
                         // it, and reload the descriptor if it changed.
                         (BusRequest::StackPop, Pending::PopPair { exit_to: None })
@@ -611,17 +725,17 @@ impl<'a> Core<'a> {
                     }
                     continue;
                 }
-                MicroOp::CallFrame { .. } | MicroOp::RetX { .. } if !self.frames_enabled => {
+                MicroOp::CallFrame { .. } | MicroOp::RetX { .. } if !self.frames_on() => {
                     // Base profile: the frame instructions are outside
                     // the execution profile.
                     return self.trap(Trap::ProfileViolation {
                         at: self.instr_start,
                     });
                 }
-                MicroOp::CallFrame { rel, frame } => match self.jump_target(rel) {
+                MicroOp::CallFrame { rel, site } => match self.jump_target(rel) {
                     Ok(target) => (
                         BusRequest::CodeRead { addr: target },
-                        Pending::EntCheckFrame { target, frame },
+                        Pending::EntCheckFrame { target, site },
                     ),
                     Err(trap) => return self.trap(trap),
                 },
@@ -743,6 +857,59 @@ impl<'a> Core<'a> {
                 at: self.instr_start,
             }),
         }
+    }
+
+    /// Begin the compose lookup for a framed call: read `compose[FR][site]`
+    /// (2 bytes LE) at `base + 4 + K*4 + (FR*S + site)*2` (docs/formats.md
+    /// (frames region)). FR is still the caller's active index. A site
+    /// past the column count is a malformed operand.
+    fn start_compose_read(
+        &mut self,
+        ops: std::collections::VecDeque<MicroOp>,
+        then_ip: u32,
+        site: u32,
+    ) -> CoreEvent {
+        let meta = self.frames.expect("frames profile active on a framed call");
+        let s = u32::from(meta.sites);
+        if site >= s {
+            return self.trap(Trap::BadOperand {
+                at: self.instr_start,
+            });
+        }
+        let k = u32::from(meta.composites);
+        let addr0 = meta.base + 4 + k * 4 + (self.fr * s + site) * 2;
+        self.phase = Phase::Execute {
+            ops,
+            pending: Pending::ComposeRead {
+                then_ip,
+                addr0,
+                buf: Vec::new(),
+            },
+        };
+        CoreEvent::Request(BusRequest::FrameRead { addr: addr0 })
+    }
+
+    /// Begin the directory lookup: read `directory[FR-1]` (4 bytes LE) at
+    /// `base + 4 + (FR-1)*4` (docs/formats.md (frames region)). FR already
+    /// holds the resolved composite index; the descriptor load follows.
+    fn start_directory_read(
+        &mut self,
+        ops: std::collections::VecDeque<MicroOp>,
+        then_ip: u32,
+    ) -> CoreEvent {
+        let meta = self
+            .frames
+            .expect("frames profile active on a directory read");
+        let addr0 = meta.base + 4 + (self.fr - 1) * 4;
+        self.phase = Phase::Execute {
+            ops,
+            pending: Pending::DirectoryRead {
+                then_ip,
+                addr0,
+                buf: Vec::new(),
+            },
+        };
+        CoreEvent::Request(BusRequest::FrameRead { addr: addr0 })
     }
 
     /// Begin a descriptor load: FR is already set; the walk fills the
@@ -1266,7 +1433,60 @@ mod tests {
     // 0x1D retx with k hard-wired (0/1/2).
 
     use crate::vm::arch::test_arch::FRAME2_OFFSET;
-    use crate::vm::frame::test_support::descriptor_bytes;
+    use crate::vm::frame::test_support::{descriptor_bytes, region_bytes};
+
+    /// A single-descriptor frames region (K=1, S=1): the descriptor sits
+    /// at table offset 0, the region follows it. Returns (tables, meta).
+    /// Derived from the region layout (docs/formats.md (frames region)),
+    /// so every FrameRead address below is a layout consequence, not a run
+    /// capture.
+    fn one_frame_tables(descriptor: Vec<u8>) -> (Vec<u8>, FramesMeta) {
+        let base = descriptor.len() as u32;
+        let mut tables = descriptor;
+        tables.extend(region_bytes(&[0], &[&[1], &[1]]));
+        (
+            tables,
+            FramesMeta {
+                base,
+                composites: 1,
+                sites: 1,
+            },
+        )
+    }
+
+    /// FrameRead addresses for ONE framed-call activation through the
+    /// region at `base` (K composites, S sites): `compose[fr][site]` (2
+    /// bytes), then `directory[c-1]` (4 bytes), then the `desc_len`-byte
+    /// descriptor at `desc_off`. `fr` is the CALLER's active index; `c` is
+    /// the resolved composite index.
+    #[allow(clippy::too_many_arguments)]
+    fn activation_reads(
+        base: u32,
+        k: u32,
+        s: u32,
+        fr: u32,
+        site: u32,
+        c: u32,
+        desc_off: u32,
+        desc_len: u32,
+    ) -> Vec<u32> {
+        let compose0 = base + 4 + k * 4 + (fr * s + site) * 2;
+        let dir0 = base + 4 + (c - 1) * 4;
+        let mut v = vec![compose0, compose0 + 1];
+        v.extend(dir0..dir0 + 4);
+        v.extend(desc_off..desc_off + desc_len);
+        v
+    }
+
+    /// FrameRead addresses for a restore-RELOAD (ret/retx back to a
+    /// non-identity composite `c`): `directory[c-1]` (4 bytes) then the
+    /// descriptor — no compose lookup.
+    fn reload_reads(base: u32, c: u32, desc_off: u32, desc_len: u32) -> Vec<u32> {
+        let dir0 = base + 4 + (c - 1) * 4;
+        let mut v: Vec<u32> = (dir0..dir0 + 4).collect();
+        v.extend(desc_off..desc_off + desc_len);
+        v
+    }
 
     /// Scripted driver for frames tests: code + tables (serving TableRead
     /// AND FrameRead) + per-device symbol scripts + a bounded stack.
@@ -1375,15 +1595,16 @@ mod tests {
             c.push(0x02); // stp at 9 — exits[0]
             c
         };
-        let tables = descriptor_bytes(&[(1, &[1, 0], &[1, 0])], &[9]);
-        let desc_len = tables.len() as u32; // 20
+        let descriptor = descriptor_bytes(&[(1, &[1, 0], &[1, 0])], &[9]);
+        let desc_len = descriptor.len() as u32; // 20
+        let (tables, meta) = one_frame_tables(descriptor);
         let mut rig = FramesRig {
             code,
             tables,
             reads: FramesRig::reads_of(&[&[], &[0]]), // dev1 serves phys 0
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, fr_trace) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         // The read went to the PHYSICAL device 1, never to virtual 0.
@@ -1391,9 +1612,13 @@ mod tests {
         assert!(!log.contains(&Rq::DeviceRead { dev: 0 }));
         // rmap[phys 0] = virtual 1 landed in TR.
         assert_eq!(core.tr(), &[1]);
-        // Descriptor bytes were fetched once, sequentially, as FrameReads.
-        assert_eq!(frame_reads(&log), (0..desc_len).collect::<Vec<u32>>());
-        // FR: active (=1) through the framed body, restored to 0 by retx.
+        // FrameReads: compose[0][0], directory[0], then the descriptor once.
+        assert_eq!(
+            frame_reads(&log),
+            activation_reads(meta.base, 1, 1, 0, 0, 1, 0, desc_len)
+        );
+        // FR: the sole composite index (=1) through the framed body,
+        // restored to the identity composite (0) by retx.
         assert_eq!(fr_trace, vec![1, 1, 1, 0]);
         assert_eq!(core.fr(), 0);
     }
@@ -1409,14 +1634,14 @@ mod tests {
             c.push(0x02); // stp at 9
             c
         };
-        let tables = descriptor_bytes(&[(1, &[1, 0], &[1, 0])], &[9]);
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[1, 0], &[1, 0])], &[9]));
         let mut rig = FramesRig {
             code,
             tables,
             reads: FramesRig::reads_of(&[&[], &[1]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         // The move was translated to the physical device too.
@@ -1434,14 +1659,14 @@ mod tests {
             c.push(0x02); // stp at 10
             c
         };
-        let tables = descriptor_bytes(&[(1, &[], &[3])], &[10]);
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[3])], &[10]));
         let mut rig = FramesRig {
             code,
             tables,
             reads: FramesRig::reads_of(&[&[], &[3]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         assert!(log.contains(&Rq::DeviceWrite { dev: 1, index: 3 }));
@@ -1452,13 +1677,14 @@ mod tests {
         let arch = TestArch;
         // A hole under the written symbol.
         let code = framed_program(0x19, &[0x07, 0x80]); // wr v=0 at 7
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[0xFFFF])], &[9]));
         let mut rig = FramesRig {
             code,
-            tables: descriptor_bytes(&[(1, &[], &[0xFFFF])], &[9]),
+            tables,
             reads: FramesRig::reads_of(&[&[], &[]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::UnmappedWrite { at: 7 }));
         // The trap fires at issue — no write request ever reaches the bus.
@@ -1466,13 +1692,14 @@ mod tests {
 
         // Virtual symbol past the map's end.
         let code = framed_program(0x19, &[0x07, 0x81]); // wr v=1
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[3])], &[9]));
         let mut rig = FramesRig {
             code,
-            tables: descriptor_bytes(&[(1, &[], &[3])], &[9]),
+            tables,
             reads: FramesRig::reads_of(&[&[], &[]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::UnmappedWrite { at: 7 }));
     }
@@ -1482,25 +1709,27 @@ mod tests {
         let arch = TestArch;
         // A hole under the physical symbol read back.
         let code = framed_program(0x19, &[0x17]); // read at 7
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[0xFFFF], &[])], &[9]));
         let mut rig = FramesRig {
             code,
-            tables: descriptor_bytes(&[(1, &[0xFFFF], &[])], &[9]),
+            tables,
             reads: FramesRig::reads_of(&[&[], &[0]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::UnmappedRead { at: 7 }));
 
         // Physical symbol past the map's end.
         let code = framed_program(0x19, &[0x17]);
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[1], &[])], &[9]));
         let mut rig = FramesRig {
             code,
-            tables: descriptor_bytes(&[(1, &[1], &[])], &[9]),
+            tables,
             reads: FramesRig::reads_of(&[&[], &[5]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::UnmappedRead { at: 7 }));
     }
@@ -1514,14 +1743,14 @@ mod tests {
             c.push(0x02); // stp at 11
             c
         };
-        let tables = descriptor_bytes(&[(1, &[], &[])], &[11]);
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[])], &[11]));
         let mut rig = FramesRig {
             code,
             tables,
             reads: FramesRig::reads_of(&[&[], &[9, 7]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         assert_eq!(core.tr(), &[9]);
@@ -1533,13 +1762,14 @@ mod tests {
         // Arity-1 frame; 0x14 moves on virtual device 1 → out of frame.
         let arch = TestArch;
         let code = framed_program(0x19, &[0x14]);
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[])], &[9]));
         let mut rig = FramesRig {
             code,
-            tables: descriptor_bytes(&[(1, &[], &[])], &[9]),
+            tables,
             reads: FramesRig::reads_of(&[]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::BadOperand { at: 7 }));
     }
@@ -1584,7 +1814,8 @@ mod tests {
         let mut code = vec![0x18];
         code.extend(framed_program(0x19, &[0x18, 0x1A]));
         code.push(0x02); // stp at 10
-        let tables = descriptor_bytes(&[(2, &[], &[]), (0, &[5, 6], &[])], &[10]);
+        let (tables, meta) =
+            one_frame_tables(descriptor_bytes(&[(2, &[], &[]), (0, &[5, 6], &[])], &[10]));
         let mut rig = FramesRig {
             code,
             tables,
@@ -1593,7 +1824,7 @@ mod tests {
             reads: FramesRig::reads_of(&[&[4, 1], &[5], &[3, 8]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_device_count(3).with_frames();
+        let mut core = Core::new(&arch, 0).with_device_count(3).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         assert_eq!(core.tr(), &[8, 6]); // width 2, both through their maps
@@ -1615,22 +1846,26 @@ mod tests {
             c.push(0x02); // stp at 16
             c
         };
-        let tables = descriptor_bytes(&[(1, &[], &[])], &[16]);
-        let desc_len = tables.len() as u32; // 12
+        let descriptor = descriptor_bytes(&[(1, &[], &[])], &[16]);
+        let desc_len = descriptor.len() as u32; // 12
+        let (tables, meta) = one_frame_tables(descriptor);
         let mut rig = FramesRig {
             code,
             tables,
             reads: FramesRig::reads_of(&[&[], &[7]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, fr_trace) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         // The read AFTER the nested return still routes to phys dev 1.
         assert_eq!(core.tr(), &[7]);
         assert!(log.contains(&Rq::DeviceRead { dev: 1 }));
-        // One descriptor load total — the plain ret did not reload.
-        assert_eq!(frame_reads(&log), (0..desc_len).collect::<Vec<u32>>());
+        // One activation total — the plain ret did not reload the descriptor.
+        assert_eq!(
+            frame_reads(&log),
+            activation_reads(meta.base, 1, 1, 0, 0, 1, 0, desc_len)
+        );
         // callframe, ent, call, ent(sub), ret, read, retx
         assert_eq!(fr_trace, vec![1, 1, 1, 1, 1, 1, 0]);
     }
@@ -1658,13 +1893,26 @@ mod tests {
         let mut tables = desc_a;
         tables.resize(FRAME2_OFFSET as usize, 0xEE);
         tables.extend(desc_b);
+        // Two composites: A (index 1) at offset 0, B (index 2) at
+        // FRAME2_OFFSET. Sites 0/1 are raw, so their columns are constant
+        // across every FR row (docs/formats.md (frames region)).
+        let base = tables.len() as u32; // region follows desc_b
+        tables.extend(region_bytes(
+            &[0, FRAME2_OFFSET],
+            &[&[1, 2], &[1, 2], &[1, 2]],
+        ));
+        let meta = FramesMeta {
+            base,
+            composites: 2,
+            sites: 2,
+        };
         let mut rig = FramesRig {
             code,
             tables,
             reads: FramesRig::reads_of(&[&[], &[4], &[2]]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, fr_trace) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         // Read order: B's read on phys 2, then (after reload) A's on phys 1.
@@ -1678,14 +1926,14 @@ mod tests {
             vec![Rq::DeviceRead { dev: 2 }, Rq::DeviceRead { dev: 1 }]
         );
         assert_eq!(core.tr(), &[4]); // A's read overwrote slot 0 last
-        // Loads: A, then B, then A again (the reload).
-        let mut expected: Vec<u32> = (0..len_a).collect();
-        expected.extend(FRAME2_OFFSET..FRAME2_OFFSET + len_b);
-        expected.extend(0..len_a);
+        // Activations: A (site 0, caller FR 0 → composite 1), then B (site
+        // 1, caller FR 1 → composite 2), then A's reload on B's retx.
+        let mut expected = activation_reads(base, 2, 2, 0, 0, 1, 0, len_a);
+        expected.extend(activation_reads(base, 2, 2, 1, 1, 2, FRAME2_OFFSET, len_b));
+        expected.extend(reload_reads(base, 1, 0, len_a));
         assert_eq!(frame_reads(&log), expected);
-        // callframeA, entA, callframeB, entB, readB, retxB, readA, retxA
-        let fr_b = FRAME2_OFFSET + 1;
-        assert_eq!(fr_trace, vec![1, 1, fr_b, fr_b, fr_b, 1, 1, 0]);
+        // FR is now the composite index: A=1 (outer), B=2 (inner).
+        assert_eq!(fr_trace, vec![1, 1, 2, 2, 2, 1, 1, 0]);
     }
 
     #[test]
@@ -1696,20 +1944,25 @@ mod tests {
         let arch = TestArch;
         let mut code = framed_program(0x19, &[0x0B]); // body: plain ret at 7
         code[5] = 0x02; // the return address (5) holds stp — the happy path
-        let tables = descriptor_bytes(&[(1, &[], &[])], &[9]);
-        let desc_len = tables.len() as u32;
+        let descriptor = descriptor_bytes(&[(1, &[], &[])], &[9]);
+        let desc_len = descriptor.len() as u32;
+        let (tables, meta) = one_frame_tables(descriptor);
         let mut rig = FramesRig {
             code,
             tables,
             reads: FramesRig::reads_of(&[]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Stopped);
         assert_eq!(core.fr(), 0);
-        // No reload on restoring the identity frame.
-        assert_eq!(frame_reads(&log), (0..desc_len).collect::<Vec<u32>>());
+        // Just the one activation — restoring the identity composite reloads
+        // nothing.
+        assert_eq!(
+            frame_reads(&log),
+            activation_reads(meta.base, 1, 1, 0, 0, 1, 0, desc_len)
+        );
     }
 
     #[test]
@@ -1717,13 +1970,14 @@ mod tests {
         // One exit; retx#1 names exit 1 → out of range, pinned at retx.
         let arch = TestArch;
         let code = framed_program(0x19, &[0x1B]); // retx#1 at 7
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[])], &[9]));
         let mut rig = FramesRig {
             code,
-            tables: descriptor_bytes(&[(1, &[], &[])], &[9]),
+            tables,
             reads: FramesRig::reads_of(&[]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::ExitOutOfRange { at: 7 }));
     }
@@ -1738,7 +1992,14 @@ mod tests {
             reads: FramesRig::reads_of(&[]),
             stack_cap: 4,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        // retx at the identity composite traps before any region read, so
+        // the region shape is irrelevant here.
+        let meta = FramesMeta {
+            base: 0,
+            composites: 0,
+            sites: 0,
+        };
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::ExitOutOfRange { at: 0 }));
     }
@@ -1765,20 +2026,22 @@ mod tests {
     fn stack_overflow_on_framed_call_leaves_fr_in_sync() {
         let arch = TestArch;
         // Capacity 0: the first framed call overflows; FR must stay 0.
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[])], &[9]));
         let mut rig = FramesRig {
             code: framed_program(0x19, &[]),
-            tables: descriptor_bytes(&[(1, &[], &[])], &[9]),
+            tables,
             reads: FramesRig::reads_of(&[]),
             stack_cap: 0,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, log, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::StackOverflow));
         assert_eq!(core.fr(), 0);
-        assert!(frame_reads(&log).is_empty()); // no load without a push
+        // No compose/directory/descriptor read without a successful push.
+        assert!(frame_reads(&log).is_empty());
 
         // Capacity 1: frame A activates, the nested framed call
-        // overflows — FR must still be A's, not B's.
+        // overflows — FR must still be A's (composite 1), not B's.
         let mut body = vec![0x1C];
         body.extend(1i32.to_le_bytes());
         body.extend([0x03, 0x0E]);
@@ -1786,13 +2049,23 @@ mod tests {
         let mut tables = desc_a;
         tables.resize(FRAME2_OFFSET as usize, 0xEE);
         tables.extend(descriptor_bytes(&[(2, &[], &[])], &[16]));
+        let base = tables.len() as u32;
+        tables.extend(region_bytes(
+            &[0, FRAME2_OFFSET],
+            &[&[1, 2], &[1, 2], &[1, 2]],
+        ));
+        let meta = FramesMeta {
+            base,
+            composites: 2,
+            sites: 2,
+        };
         let mut rig = FramesRig {
             code: framed_program(0x19, &body),
             tables,
             reads: FramesRig::reads_of(&[]),
             stack_cap: 1,
         };
-        let mut core = Core::new(&arch, 0).with_frames();
+        let mut core = Core::new(&arch, 0).with_frames(meta);
         let (ev, _, _) = rig.run(&mut core);
         assert_eq!(ev, Ev::Trapped(Trap::StackOverflow));
         assert_eq!(core.fr(), 1);
@@ -1808,16 +2081,75 @@ mod tests {
             descriptor_bytes(&[], &[9]),        // arity 0
             descriptor_bytes(&seventeen, &[9]), // arity 17
         ];
-        for tables in cases {
+        // K=1, S=1 region: K(2) + S(2) + directory(4) + compose 2×1(4) = 12
+        // bytes. Placing it FIRST puts the malformed descriptor at the tail
+        // of the blob, so a truncated one runs off the end (OutOfTable) as
+        // it did before the region existed. directory[0] points at it.
+        const REGION_LEN: u32 = 12;
+        for malformed in cases {
+            let mut tables = region_bytes(&[REGION_LEN], &[&[1], &[1]]);
+            assert_eq!(tables.len() as u32, REGION_LEN);
+            tables.extend(malformed);
+            let meta = FramesMeta {
+                base: 0,
+                composites: 1,
+                sites: 1,
+            };
             let mut rig = FramesRig {
                 code: framed_program(0x19, &[]),
                 tables,
                 reads: FramesRig::reads_of(&[]),
                 stack_cap: 4,
             };
-            let mut core = Core::new(&arch, 0).with_frames();
+            let mut core = Core::new(&arch, 0).with_frames(meta);
             let (ev, _, _) = rig.run(&mut core);
             assert_eq!(ev, Ev::Trapped(Trap::TableOutOfBounds { at: 0 }));
         }
+    }
+
+    #[test]
+    fn compose_entry_zero_traps_bad_operand() {
+        // compose[0][0] = 0 is reserved-invalid: the site is unreachable
+        // under the identity composite, so the framed call traps rather
+        // than resolving (the linker never emits a reachable 0).
+        let arch = TestArch;
+        let code = framed_program(0x19, &[]); // site 0
+        let descriptor = descriptor_bytes(&[(1, &[], &[])], &[9]);
+        let base = descriptor.len() as u32;
+        let mut tables = descriptor;
+        tables.extend(region_bytes(&[0], &[&[0], &[1]])); // compose[0][0] = 0
+        let meta = FramesMeta {
+            base,
+            composites: 1,
+            sites: 1,
+        };
+        let mut rig = FramesRig {
+            code,
+            tables,
+            reads: FramesRig::reads_of(&[]),
+            stack_cap: 4,
+        };
+        let mut core = Core::new(&arch, 0).with_frames(meta);
+        let (ev, _, _) = rig.run(&mut core);
+        assert_eq!(ev, Ev::Trapped(Trap::BadOperand { at: 0 }));
+    }
+
+    #[test]
+    fn site_index_past_the_column_count_traps_bad_operand() {
+        // 0x1C is call site 1, but the region declares only S=1 column
+        // (site 0) — an out-of-range site is a malformed operand.
+        let arch = TestArch;
+        let code = framed_program(0x1C, &[]); // site 1
+        let (tables, meta) = one_frame_tables(descriptor_bytes(&[(1, &[], &[])], &[9]));
+        assert_eq!(meta.sites, 1);
+        let mut rig = FramesRig {
+            code,
+            tables,
+            reads: FramesRig::reads_of(&[]),
+            stack_cap: 4,
+        };
+        let mut core = Core::new(&arch, 0).with_frames(meta);
+        let (ev, _, _) = rig.run(&mut core);
+        assert_eq!(ev, Ev::Trapped(Trap::BadOperand { at: 0 }));
     }
 }

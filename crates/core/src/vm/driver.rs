@@ -522,12 +522,24 @@ mod tests {
     fn run_frames_program(profile: TactProfile) -> (RunResult, bool, [Vec<i64>; 2]) {
         // Descriptor at table offset 0: arity 1, virtual 0 → phys 1,
         // swap maps both ways ({0,1} alphabet), one exit. 20 bytes:
-        // 3 header + (1 phys + 2+4 rmap + 2+4 wmap) + 4 exit.
-        let tables = crate::vm::frame::test_support::descriptor_bytes(
+        // 3 header + (1 phys + 2+4 rmap + 2+4 wmap) + 4 exit. A single-
+        // composite frames region (K=1, S=1) follows it: directory[0] = 0,
+        // compose[*][0] = 1 (docs/formats.md (frames region)).
+        let mut tables = crate::vm::frame::test_support::descriptor_bytes(
             &[(1, &[1, 0], &[1, 0])],
             &[11], // exits[0] = the stp
         );
         assert_eq!(tables.len(), 20);
+        let base = tables.len() as u32;
+        tables.extend(crate::vm::frame::test_support::region_bytes(
+            &[0],
+            &[&[1], &[1]],
+        ));
+        let meta = crate::vm::FramesMeta {
+            base,
+            composites: 1,
+            sites: 1,
+        };
         // [0..5] callframe +1 → 6; [5] hlt (return canary — retx must
         // exit, not return); [6] ent; [7] read-all; [8..10] wr v=1;
         // [10] retx#0; [11] stp.
@@ -535,7 +547,7 @@ mod tests {
         code.extend(1i32.to_le_bytes());
         code.extend([0x03, 0x0E, 0x18, 0x07, 0x81, 0x1A, 0x02]);
         let arch = TestArch;
-        let mut core = Core::new(&arch, 0).with_device_count(2).with_frames();
+        let mut core = Core::new(&arch, 0).with_device_count(2).with_frames(meta);
         let mut stack = ReturnStack::new(4);
         let mut tape0 = InfiniteTape::new();
         let mut tape1 = InfiniteTape::new();
@@ -570,22 +582,25 @@ mod tests {
         //   core: callframe fetch 5 + ent-read 1 + push 1 + exec 1 = 8;
         //         ent 2; read-all 2; wr fetch 2 + exec 1 = 3;
         //         retx fetch 1 + pop 1 + exec 1 = 3; stp fetch 1 → 19.
-        //   stall: 20 descriptor bytes × frame_load_cost 1 = 20, plus
-        //          1 read-all read + 1 write + 1 latch read = 23.
+        //   stall: the framed call reads compose[0][0] (2 bytes) + directory
+        //          [0] (4 bytes) + the 20-byte descriptor = 26 FrameReads ×
+        //          frame_load_cost 1, plus 1 read-all read + 1 write + 1
+        //          latch read = 26 + 3 = 29.
         assert_eq!(
             r.stats,
             RunStats {
                 steps: 5,
                 core_tacts: 19,
-                stall_tacts: 23
+                stall_tacts: 29
             }
         );
     }
 
     #[test]
     fn frame_load_cost_prices_descriptor_bytes_only() {
-        // Same program, frame_load_cost 3: only the 20 descriptor bytes
-        // reprice (20 × 3 + 3 device stalls); core tacts are untouched.
+        // Same program, frame_load_cost 3: all 26 frames bytes (compose 2 +
+        // directory 4 + descriptor 20) reprice (26 × 3 + 3 device stalls);
+        // core tacts are untouched.
         let profile = TactProfile {
             move_cost: 1,
             read_cost: 1,
@@ -600,7 +615,7 @@ mod tests {
             RunStats {
                 steps: 5,
                 core_tacts: 19,
-                stall_tacts: 63
+                stall_tacts: 81
             }
         );
     }

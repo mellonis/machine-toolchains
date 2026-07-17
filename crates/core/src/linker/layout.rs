@@ -118,6 +118,20 @@ pub(super) struct Built {
     /// call — the linker emits `PROFILE_FRAMES` iff this holds (else
     /// `PROFILE_BASE`), keeping frameless links byte-identical.
     pub frames_present: bool,
+    /// Offset into `tables` where the emitted frames region begins
+    /// (docs/formats.md (frames region)), or 0 when no framed call is
+    /// present.
+    pub frames_offset: u32,
+}
+
+/// One raw (hand-authored) framed-call site collected during emission: the
+/// absolute code offset of its 4-byte frame half (rewritten to the site
+/// index once the directory is known) and the absolute table offset of the
+/// descriptor it names. Raw sites lower to constant compose columns
+/// (docs/formats.md (frames region)).
+struct RawSite {
+    code_hole: usize,
+    desc_abs: u32,
 }
 
 /// Decode `f`'s original blob into a `Piece` list. Decode failure, a call
@@ -541,12 +555,19 @@ pub(super) fn build(
     let mut relaxed_calls = 0u32;
     let mut far_calls = 0u32;
     let mut frames_present = false;
+    // Raw framed-call sites in (function, piece) emission order; each
+    // becomes a dense 0-based call site with a constant compose column.
+    let mut raw_sites: Vec<RawSite> = Vec::new();
 
     for (fi, f) in order.iter().enumerate() {
         let pieces = &functions[fi];
         let base = bases[fi];
         let piece_offsets = &offsets[fi];
         debug_assert_eq!(code.len() as u32, base);
+        // This function's table base — stable across the code loop below
+        // (tables grow only in the per-function append that follows it), so
+        // a framed call can resolve its descriptor's absolute offset here.
+        let table_base = tables.len() as u32;
 
         // orig blob offset -> new offset within THIS function; needed to
         // resolve jump targets (arbitrary earlier/later instruction
@@ -618,8 +639,10 @@ pub(super) fn build(
                 Piece::FramedCall { orig, callee } => {
                     // Fixed 9 bytes, never relaxed: opcode + displacement
                     // (patched to the callee like a far call) + the frame
-                    // table half (copied verbatim; repatched by the
-                    // table-fixup pass below).
+                    // table half, which becomes the call SITE index once
+                    // the directory is built (docs/formats.md (frames
+                    // region)). A placeholder is emitted here and rewritten
+                    // below.
                     frames_present = true;
                     let opcode = f.blob[*orig as usize];
                     let new_end = base + piece_offsets[pi] + 9;
@@ -627,7 +650,23 @@ pub(super) fn build(
                     let off32 = i32::try_from(off).expect("framed-call offset fits i32");
                     code.push(opcode);
                     code.extend(off32.to_le_bytes());
+                    let code_hole = code.len();
                     code.extend_from_slice(&f.blob[(*orig + 5) as usize..(*orig + 9) as usize]);
+                    // The frame fixup for this site names its descriptor's
+                    // blob-local table offset; its absolute offset is this
+                    // function's table base plus that.
+                    let Some(&(_, table_off)) =
+                        f.table_fixups.iter().find(|(hole, _)| *hole == *orig + 5)
+                    else {
+                        return Err(LinkError::MalformedBlob {
+                            symbol: f.name.to_string(),
+                            at: *orig + 5,
+                        });
+                    };
+                    raw_sites.push(RawSite {
+                        code_hole,
+                        desc_abs: table_base + table_off,
+                    });
                     far_calls += 1;
                 }
             }
@@ -641,7 +680,7 @@ pub(super) fn build(
         // same `orig_to_new` map the jumps above used; then every
         // TableRef operand hole in the just-emitted code is patched from
         // its blob-local table offset to the final section offset.
-        let table_base = tables.len() as u32;
+        debug_assert_eq!(table_base, tables.len() as u32);
         if !f.table.is_empty() || !f.table_fixups.is_empty() {
             append_function_tables(syntax, f, base, &orig_to_new, &mut tables)?;
         }
@@ -658,7 +697,11 @@ pub(super) fn build(
                 });
             };
             if matches!(kind, RefKind::Frame) {
+                // A framed call's frame half is NOT patched to the
+                // descriptor offset; it holds the call site index, written
+                // once the directory is known (below).
                 frames_present = true;
+                continue;
             }
             let Some(&instr_new) = orig_to_new.get(&opcode_at) else {
                 return Err(LinkError::MalformedBlob {
@@ -708,6 +751,47 @@ pub(super) fn build(
         });
     }
 
+    // The frames region (docs/formats.md (frames region)): once every raw
+    // site's descriptor offset is known, build the composite directory
+    // (distinct descriptor offsets in table-section order → indices 1..=K),
+    // rewrite each site's frame half to its dense 0-based site index, and
+    // emit the compose table with a CONSTANT column per raw site.
+    let frames_offset = if raw_sites.is_empty() {
+        0
+    } else {
+        let mut directory: Vec<u32> = raw_sites.iter().map(|s| s.desc_abs).collect();
+        directory.sort_unstable();
+        directory.dedup();
+        let composite_of = |desc_abs: u32| -> u16 {
+            let idx = directory
+                .iter()
+                .position(|&d| d == desc_abs)
+                .expect("every site descriptor is in the directory");
+            u16::try_from(idx + 1).expect("composite index fits u16")
+        };
+        // Rewrite each site's placeholder frame half to its site index.
+        for (site, rs) in raw_sites.iter().enumerate() {
+            let site = u32::try_from(site).expect("site index fits u32");
+            code[rs.code_hole..rs.code_hole + 4].copy_from_slice(&site.to_le_bytes());
+        }
+        let k = u16::try_from(directory.len()).expect("composite count fits u16");
+        let s = u16::try_from(raw_sites.len()).expect("site count fits u16");
+        let frames_offset = u32::try_from(tables.len()).expect("frames offset fits u32");
+        tables.extend(k.to_le_bytes());
+        tables.extend(s.to_le_bytes());
+        for &off in &directory {
+            tables.extend(off.to_le_bytes());
+        }
+        // Rows = active FR 0..=K; every row of a raw site's column carries
+        // the same composite index (the site is context-independent).
+        for _fr in 0..=k {
+            for rs in &raw_sites {
+                tables.extend(composite_of(rs.desc_abs).to_le_bytes());
+            }
+        }
+        frames_offset
+    };
+
     Ok(Built {
         code,
         tables,
@@ -715,6 +799,7 @@ pub(super) fn build(
         relaxed_calls,
         far_calls,
         frames_present,
+        frames_offset,
     })
 }
 

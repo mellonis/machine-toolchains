@@ -5,7 +5,7 @@ use crate::formats::executable::Executable;
 use crate::formats::{PROFILE_BASE, PROFILE_FRAMES};
 
 use super::arch::Arch;
-use super::core::Core;
+use super::core::{Core, FramesMeta};
 use super::debug::DebugSession;
 use super::devices::Tape;
 use super::driver::{ReturnStack, RunLimits, RunResult, TactProfile, run};
@@ -124,6 +124,9 @@ pub struct Machine<'a> {
     /// Per-tape alphabet cardinalities; empty for a v1 code-only image (no
     /// per-tape check runs then).
     alphabet_cardinalities: Vec<u32>,
+    /// Offset into `tables` where the frames region begins (docs/formats.md
+    /// (frames region)); 0 for a non-frames image.
+    frames_offset: u32,
 }
 
 impl<'a> std::fmt::Debug for Machine<'a> {
@@ -154,6 +157,7 @@ impl<'a> Machine<'a> {
                 tape_count: 1,
                 profile: PROFILE_BASE,
                 alphabet_cardinalities: Vec::new(),
+                frames_offset: 0,
             }),
             _ => Err(LoadError::EntryNotEntryMarker { at: entry }),
         }
@@ -181,6 +185,7 @@ impl<'a> Machine<'a> {
         machine.tape_count = exe.tape_count;
         machine.profile = exe.profile;
         machine.alphabet_cardinalities = exe.alphabet_cardinalities.clone();
+        machine.frames_offset = exe.frames_offset;
         Ok(machine)
     }
 
@@ -208,9 +213,30 @@ impl<'a> Machine<'a> {
     fn build_core(&self) -> Core<'a> {
         let core = Core::new(self.arch, self.entry).with_device_count(self.tape_count);
         if self.profile == PROFILE_FRAMES {
-            core.with_frames()
+            core.with_frames(self.frames_meta())
         } else {
             core
+        }
+    }
+
+    /// The frames region's shape for the core (docs/formats.md (frames
+    /// region)): `base` is the header's `frames_offset`; K and S are the
+    /// region header's first two u16s, read directly from the tables blob
+    /// at load time (metadata, not a priced run-time read). A malformed or
+    /// absent header yields zeros — a subsequent framed call then traps
+    /// through the ordinary bounds paths.
+    fn frames_meta(&self) -> FramesMeta {
+        let base = self.frames_offset as usize;
+        let u16_at = |p: usize| -> u16 {
+            match (self.tables.get(p), self.tables.get(p + 1)) {
+                (Some(&lo), Some(&hi)) => u16::from_le_bytes([lo, hi]),
+                _ => 0,
+            }
+        };
+        FramesMeta {
+            base: self.frames_offset,
+            composites: u16_at(base),
+            sites: u16_at(base + 2),
         }
     }
 
@@ -320,7 +346,7 @@ mod tests {
     use crate::vm::debug::{DebugEvent, PauseCause};
     use crate::vm::devices::InfiniteTape;
     use crate::vm::driver::Outcome;
-    use crate::vm::frame::test_support::descriptor_bytes;
+    use crate::vm::frame::test_support::{descriptor_bytes, region_bytes};
     use crate::vm::trap::Trap;
 
     // TestArch entry marker: 0x0E
@@ -546,21 +572,26 @@ mod tests {
     // the core-level frames tests but assembled as a whole v2 image, so
     // the entire Machine load + run_tapes/debug_tapes plumbing runs.
     //   [0]  0x0E  entry marker
-    //   [1]  0x19  callframe rel +1 → 7   [2..6] rel32 = 1
+    //   [1]  0x19  callframe rel +1 → 7 (call site 0)   [2..6] rel32 = 1
     //   [6]  0x03  hlt (return-address canary — retx must not land here)
     //   [7]  0x0E  callee entry marker
     //   [8]  0x18  read-all (framed: arity 1, reads physical tape 1)
     //   [9]  0x1A  retx#0 → exits[0] = 10
     //   [10] 0x02  stp
     // descriptor@0: arity 1, virtual 0 → phys 1, identity maps, exits [10].
+    // A single-composite region (K=1, S=1) follows: directory[0] = 0,
+    // compose[*][0] = 1, so site 0 resolves to the sole descriptor.
     fn frames_image(profile: u8) -> Executable {
         let mut code = vec![0x0E, 0x19];
         code.extend(1u32.to_le_bytes());
         code.push(0x03); // hlt at 6
         code.push(0x0E); // ent at 7
         code.extend([0x18, 0x1A, 0x02]); // read-all, retx#0, stp at 10
-        let tables = descriptor_bytes(&[(1, &[], &[])], &[10]);
+        let mut tables = descriptor_bytes(&[(1, &[], &[])], &[10]);
+        let frames_offset = tables.len() as u32;
+        tables.extend(region_bytes(&[0], &[&[1], &[1]]));
         Executable::sectioned(0x7F, 0, code, tables, 2, profile, Vec::new())
+            .with_frames_offset(frames_offset)
     }
 
     #[test]

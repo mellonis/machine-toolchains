@@ -266,9 +266,18 @@ fn frames_link_selects_the_frames_profile_with_absolute_exits() {
     assert_eq!(exe.code[1], 0x14, "framed-call opcode kept");
     let rel = i32::from_le_bytes(exe.code[2..6].try_into().unwrap());
     assert_eq!(rel, -10, "displacement patched to the callee base");
-    // Exit vector is the descriptor's trailing two u32s: done=10, other=11.
+    // The single framed call becomes site 0 (the frame half is the site
+    // index now, not the descriptor offset).
+    assert_eq!(
+        u32::from_le_bytes(exe.code[6..10].try_into().unwrap()),
+        0,
+        "the raw framed call is site 0"
+    );
+    // The descriptor is the whole tables section EXCEPT the trailing frames
+    // region, so its exit vector's two u32s end right at frames_offset:
+    // done=10, other=11.
     let tables = &exe.tables;
-    let exits_at = tables.len() - 8;
+    let exits_at = exe.frames_offset as usize - 8;
     assert_eq!(&tables[exits_at..exits_at + 4], &10u32.to_le_bytes());
     assert_eq!(&tables[exits_at + 4..exits_at + 8], &11u32.to_le_bytes());
 }
@@ -289,6 +298,78 @@ fn frames_dis_round_trips_the_linked_image() {
     assert!(text.contains(".map    0, rmap=(1->2, 3->1)"), "{text}");
     assert!(text.contains(".exits  done, other"), "{text}");
     assert!(text.contains("fcall   main, F0"), "{text}");
+    let out2 = link(
+        &fake_syntax(),
+        &[asm(&text, false)],
+        &[],
+        LinkOptions::default(),
+    )
+    .expect("re-links");
+    assert_eq!(out2.executable.to_bytes(), out.executable.to_bytes());
+}
+
+/// Two distinct framed calls to two distinct descriptors: the linker
+/// builds a K=2, S=2 frames region and rewrites each call's frame half to
+/// its dense site index. The region bytes are derived independently from
+/// the layout (docs/formats.md (frames region)) and byte-compared.
+const TWO_SITES: &str = "\
+.routine main, tapes=1, alpha=(2)
+.section tables
+F0: .frame tapes=(0)
+    .exits A
+F1: .frame tapes=(0)
+    .exits B
+.section code
+.func main
+        fcall   main, F0
+        fcall   main, F1
+A:      stp
+B:      stp
+";
+
+#[test]
+fn two_raw_sites_build_the_directory_and_constant_compose_columns() {
+    let out = link_one(asm(TWO_SITES, false));
+    let exe = &out.executable;
+    assert_eq!(exe.profile, 1, "two framed calls ⇒ PROFILE_FRAMES");
+    // Each `.frame tapes=(0)` with one exit is 12 bytes: arity(1) +
+    // exit_count(2) + tape0 phys/rmap_len/wmap_len(5) + one exit u32(4). So
+    // F0 sits at 0, F1 at 12, and the region begins at 24.
+    assert_eq!(exe.frames_offset, 24);
+    // The two framed calls become dense sites 0 and 1. ent@0, fcall@1..10
+    // (frame half at 6), fcall@10..19 (frame half at 15).
+    assert_eq!(u32::from_le_bytes(exe.code[6..10].try_into().unwrap()), 0);
+    assert_eq!(u32::from_le_bytes(exe.code[15..19].try_into().unwrap()), 1);
+    // Region: K=2, S=2, directory=[0, 12] (F0, F1 in ascending order),
+    // compose (K+1=3 rows × S=2 cols) all constant columns — site 0 → F0
+    // (composite 1), site 1 → F1 (composite 2).
+    let base = exe.frames_offset as usize;
+    let mut expected = Vec::new();
+    expected.extend(2u16.to_le_bytes()); // K
+    expected.extend(2u16.to_le_bytes()); // S
+    expected.extend(0u32.to_le_bytes()); // directory[0] = F0
+    expected.extend(12u32.to_le_bytes()); // directory[1] = F1
+    for _ in 0..=2u16 {
+        expected.extend(1u16.to_le_bytes()); // compose[F][0] = 1
+        expected.extend(2u16.to_le_bytes()); // compose[F][1] = 2
+    }
+    assert_eq!(&exe.tables[base..], &expected[..]);
+    // The descriptors precede the region untouched: F0 at 0, F1 at 12.
+    assert_eq!(exe.tables[0], 1, "F0 arity"); // arity byte
+    assert_eq!(exe.tables[12], 1, "F1 arity");
+}
+
+#[test]
+fn two_raw_sites_dis_round_trips_byte_identically() {
+    // The strong round trip with a NON-zero descriptor offset (F1 at 12):
+    // dis must resolve site 1 through the region to F1, not read F1's
+    // offset as if it were the operand. Re-asm + re-link reproduces the
+    // region deterministically.
+    let syntax = fake_syntax();
+    let out = link_one(asm(TWO_SITES, true));
+    let text = disassemble_executable(&syntax, &out.executable, Some(&out.map));
+    assert!(text.contains("fcall   main, F0"), "site 0 → F0:\n{text}");
+    assert!(text.contains("fcall   main, F1"), "site 1 → F1:\n{text}");
     let out2 = link(
         &fake_syntax(),
         &[asm(&text, false)],

@@ -249,6 +249,28 @@ pub(crate) mod test_support {
         }
         out
     }
+
+    /// Encode a frames region (docs/formats.md (frames region)): `K u16`,
+    /// `S u16`, directory (`K × u32` descriptor offsets), compose table
+    /// (`(K+1) × S × u16`, one row per active FR 0..=K). `compose` is the
+    /// row-major table the caller supplies verbatim, so a test derives the
+    /// exact bytes from the region layout rather than from a run.
+    pub(crate) fn region_bytes(directory: &[u32], compose: &[&[u16]]) -> Vec<u8> {
+        let k = directory.len() as u16;
+        let s = compose.first().map_or(0, |row| row.len()) as u16;
+        let mut out = Vec::new();
+        out.extend(k.to_le_bytes());
+        out.extend(s.to_le_bytes());
+        for &off in directory {
+            out.extend(off.to_le_bytes());
+        }
+        for row in compose {
+            for &c in *row {
+                out.extend(c.to_le_bytes());
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

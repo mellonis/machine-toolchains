@@ -243,7 +243,7 @@ pub fn link(
         let Some(sig) = entry.signature else {
             return Err(LinkError::MissingSignature(entry.name.to_string()));
         };
-        Executable::sectioned(
+        let exe = Executable::sectioned(
             arch,
             0,
             built.code,
@@ -251,7 +251,14 @@ pub fn link(
             sig.arity,
             profile,
             sig.cardinalities.clone(),
-        )
+        );
+        // A frames image points at its region (docs/formats.md (frames
+        // region)); a frameless one leaves the offset 0 (byte-identity).
+        if built.frames_offset != 0 {
+            exe.with_frames_offset(built.frames_offset)
+        } else {
+            exe
+        }
     } else {
         Executable::code_only(arch, 0, built.code)
     };

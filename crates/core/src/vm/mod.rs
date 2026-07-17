@@ -13,7 +13,7 @@ pub mod trap;
 
 pub use arch::{Arch, MicroOp, Operand, OperandKind, encode_operand};
 pub use bus::{BusRequest, BusResponse, CoreEvent};
-pub use core::Core;
+pub use core::{Core, FramesMeta};
 pub use debug::{DebugEvent, DebugSession, PauseCause};
 pub use devices::{InfiniteTape, StrictTape, Tape, WideTape};
 pub use driver::{Outcome, ReturnStack, RunLimits, RunResult, RunStats, TactProfile, run};

@@ -747,6 +747,36 @@ fn decode_one(syntax: &ArchSyntax, code: &[u8], addr: u32) -> Option<Decoded> {
     decode_at(syntax, code, addr, code.len() as u32)
 }
 
+/// Resolve an executable `call.m` site index to its frame descriptor's
+/// table offset through the frames region (docs/formats.md (frames
+/// region)). A raw hand-authored site has a CONSTANT compose column, so
+/// the identity row (FR=0) resolves it; the value is `directory[c-1]`
+/// where `c = compose[0][site]`. `None` when the image carries no region,
+/// the site is out of range, or the column is reserved-invalid (0).
+fn resolve_site(exe: &Executable, site: u32) -> Option<u32> {
+    let base = exe.frames_offset;
+    if base == 0 {
+        return None;
+    }
+    let tb = &exe.tables;
+    let u16_at = |p: u32| -> Option<u16> {
+        let p = p as usize;
+        Some(u16::from_le_bytes([*tb.get(p)?, *tb.get(p + 1)?]))
+    };
+    let k = u32::from(u16_at(base)?);
+    let s = u32::from(u16_at(base + 2)?);
+    if site >= s {
+        return None;
+    }
+    let composite = u16_at(base + 4 + k * 4 + site * 2)?;
+    if composite == 0 {
+        return None;
+    }
+    let dir_at = base + 4 + (u32::from(composite) - 1) * 4;
+    let bytes = tb.get(dir_at as usize..dir_at as usize + 4)?;
+    Some(u32::from_le_bytes(bytes.try_into().ok()?))
+}
+
 pub fn disassemble_executable(
     syntax: &ArchSyntax,
     exe: &Executable,
@@ -765,6 +795,10 @@ pub fn disassemble_executable(
     // table in `exe.tables`), and every dispatch table's entry addresses.
     let mut table_kinds: BTreeMap<u32, TableKind> = BTreeMap::new();
     let mut dispatch_targets: BTreeSet<u32> = BTreeSet::new();
+    // Maps each discovered `call.m` site index to the descriptor offset it
+    // resolves to through the frames region — the operand carries the site,
+    // but the table label + descriptor render at the descriptor's offset.
+    let mut site_to_desc: HashMap<u32, u32> = HashMap::new();
     while let Some(addr) = work.pop() {
         if addr >= len || instrs.contains_key(&addr) {
             continue;
@@ -799,18 +833,22 @@ pub fn disassemble_executable(
                 }
             }
         }
-        // A framed call names a frame descriptor (`table`) — a Frame table
-        // — and a callee (`target`, a call root). The descriptor's exit
-        // vector holds code addresses the flow walk cannot see, so they
-        // join the work list as label candidates (like dispatch entries).
-        if let DecodedOperand::FramedCall { table, .. } = operand
-            && !table_kinds.contains_key(table)
+        // A framed call names a call SITE (`table`) that resolves through
+        // the frames region to a frame descriptor — a Frame table — and a
+        // callee (`target`, a call root). The descriptor's exit vector
+        // holds code addresses the flow walk cannot see, so they join the
+        // work list as label candidates (like dispatch entries).
+        if let DecodedOperand::FramedCall { table: site, .. } = operand
+            && let Some(desc_off) = resolve_site(exe, *site)
         {
-            table_kinds.insert(*table, TableKind::Frame);
-            if let Some(frame) = parse_frame_descriptor(&exe.tables, *table) {
-                for &exit in &frame.exits {
-                    dispatch_targets.insert(exit);
-                    work.push(exit);
+            site_to_desc.insert(*site, desc_off);
+            if let std::collections::btree_map::Entry::Vacant(slot) = table_kinds.entry(desc_off) {
+                slot.insert(TableKind::Frame);
+                if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
+                    for &exit in &frame.exits {
+                        dispatch_targets.insert(exit);
+                        work.push(exit);
+                    }
                 }
             }
         }
@@ -1039,15 +1077,24 @@ pub fn disassemble_executable(
                         }
                         DecodedOperand::Imm(n) => Some((entry.mnemonic, format!("#{n}"))),
                         // A framed call: the callee is a call root (rendered
-                        // by name); the frame half is the synthesized
-                        // `F`-label of the descriptor at `table`. A target
-                        // that never became a root falls back to `.byte`.
-                        DecodedOperand::FramedCall { target, table } => {
+                        // by name); the frame half is the call SITE index,
+                        // resolved through the region to the synthesized
+                        // `F`-label of its descriptor (raw sites have a
+                        // constant column, so this is faithful). An
+                        // unresolvable site renders `@siteN` (the composition
+                        // engine's non-constant columns arrive later); a
+                        // target that never became a root falls back to
+                        // `.byte`.
+                        DecodedOperand::FramedCall {
+                            target,
+                            table: site,
+                        } => {
                             if roots.binary_search(target).is_ok() {
-                                let frame = table_labels
-                                    .get(table)
+                                let frame = site_to_desc
+                                    .get(site)
+                                    .and_then(|desc_off| table_labels.get(desc_off))
                                     .cloned()
-                                    .unwrap_or_else(|| table.to_string());
+                                    .unwrap_or_else(|| format!("@site{site}"));
                                 Some((entry.mnemonic, format!("{}, {frame}", func_name(*target))))
                             } else {
                                 None
@@ -1600,8 +1647,10 @@ other:  stp
         assert_eq!((done, other), (10, 11));
         let tables = &out.executable.tables;
         // Descriptor: arity 1, exit_count 2, tape0 phys 1 rmap_len 4 (0,2,
-        // hole,1) wmap_len 0, then exits done, other as ABSOLUTE u32 LE.
-        let exits_at = tables.len() - 8;
+        // hole,1) wmap_len 0, then exits done, other as ABSOLUTE u32 LE. The
+        // descriptor ends where the frames region begins, so the exit
+        // vector's two u32s sit just before frames_offset.
+        let exits_at = out.executable.frames_offset as usize - 8;
         assert_eq!(&tables[exits_at..exits_at + 4], &done.to_le_bytes());
         assert_eq!(&tables[exits_at + 4..exits_at + 8], &other.to_le_bytes());
         let text = disassemble_executable(&syntax, &out.executable, Some(&out.map));
