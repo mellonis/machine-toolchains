@@ -459,6 +459,79 @@ fn trap_taxonomy_kinds_are_distinct_and_mode_invariant() {
     assert_ne!("trapped:unmapped-write", "trapped:no-transition");
 }
 
+// ── program (e): a narrower-callee identity binding (the cardinality hole) ───
+
+/// An ALL-IDENTITY binding (`[0]`, no explicit pairs) into a NARROWER callee:
+/// the caller's 4-symbol alphabet passes straight through to a 3-symbol
+/// `bare`, so caller symbol 3 has no image in the callee — a read hole. This
+/// is the shape that must NOT collapse to a plain call: collapsing (the
+/// pre-fix, cardinality-blind behavior) would let physical 3 flow into `bare`
+/// raw and silently miss the `UnmappedRead` trap the hole owes. Because that
+/// miss is mode-consistent — all three modes would collapse identically — the
+/// cross-mode compare alone cannot catch it, so the kind-pinning test below is
+/// the oracle. `bare` walks right transforming data (1→2, 2→1) until a blank
+/// read returns; a symbol-3 read traps.
+const NARROWER_IDENTITY: &str = "\
+.routine main, tapes=1, alpha=(4)
+.routine bare, tapes=1, alpha=(3)
+.section tables
+T:  .row [0]
+    .row [1]
+    .row [2]
+D:  .targets fin, wa, wb
+.section code
+.func main
+        call    bare [0]
+        stp
+.func bare
+scan:   rd
+        mtc     T
+        djmp    D
+wa:     wr      [2]
+        mov     [>]
+        jmp     scan
+wb:     wr      [1]
+        mov     [>]
+        jmp     scan
+fin:    ret
+";
+
+#[test]
+fn narrower_identity_binding_is_equivalent() {
+    assert_equivalent(
+        NARROWER_IDENTITY,
+        &[
+            &[(&[1], 0)],       // data 'a' → transformed to physical 2, stops
+            &[(&[2], 0)],       // data 'b' → transformed to physical 1, stops
+            &[(&[], 0)],        // blank tape → immediate return
+            &[(&[3], 0)],       // the read hole → UnmappedRead in every mode
+            &[(&[1, 2, 3], 0)], // walk two data cells, then hit the hole → trap
+        ],
+    );
+}
+
+#[test]
+fn narrower_identity_binding_reading_the_hole_traps_unmapped_read() {
+    // The oracle the cross-mode compare cannot provide (the miss would be
+    // mode-consistent): the out-of-range read must trap UnmappedRead — NOT
+    // collapse to a plain call and read the symbol raw. Pin the ACTUAL kind in
+    // every mode. A happy-path seed still stops, proving it is the hole symbol
+    // specifically that traps, not the binding as a whole.
+    for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+        let (exe, _) = build(NARROWER_IDENTITY, mech);
+        assert_eq!(
+            run(&exe, &[(&[3], 0)]).outcome,
+            "trapped:unmapped-read",
+            "{mech}: caller symbol 3 has no callee image — the hole must trap"
+        );
+        assert_eq!(
+            run(&exe, &[(&[1], 0)]).outcome,
+            "stopped",
+            "{mech}: an in-range data symbol still runs to a stop"
+        );
+    }
+}
+
 // ── determinism: re-link is byte-identical (image + sidecar) ─────────────────
 
 #[test]
@@ -471,6 +544,7 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         NESTED_TWO_LEVEL,
         EQUAL_SIZE_BIJECTION,
         TRAP_TAXONOMY,
+        NARROWER_IDENTITY,
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
             let a = build_full(src, mech);

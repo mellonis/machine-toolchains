@@ -862,6 +862,37 @@ fn a_projecting_identity_binding_stays_a_framed_call() {
     assert!(out.executable.code.contains(&0x14), "framed call emitted");
 }
 
+/// A full-arity identity binding into a NARROWER callee is NOT a
+/// pass-through: caller symbol 3 has no image in the 3-symbol callee (a read
+/// hole), so the site must stay a framed call and materialize a holey
+/// descriptor — collapsing it would silently drop the `UnmappedRead` trap
+/// (contrast `a_full_identity_binding_collapses_to_a_plain_call`, equal-size).
+#[test]
+fn a_narrower_identity_binding_stays_a_framed_call() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(3)
+.section code
+.func main
+        call    sub [0]
+        stp
+.func sub
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(
+        out.executable.profile, PROFILE_FRAMES,
+        "the cardinality hole keeps the site framed"
+    );
+    let region = parse_region(&out.executable).expect("frames region present");
+    assert_eq!(region.k, 1, "the holey composite is real");
+    assert_eq!(region.s, 1, "the site stays a framed call");
+    assert!(
+        out.executable.code.contains(&0x14),
+        "framed call emitted, not collapsed"
+    );
+}
+
 /// Two sites binding the same callee with the same binding compose to the
 /// same composite — deduped to ONE directory entry, but two columns.
 #[test]
@@ -1089,6 +1120,60 @@ fn an_identity_binding_under_mono_calls_the_original() {
     );
     assert_ne!(out.executable.profile, PROFILE_FRAMES);
     assert!(!out.executable.code.contains(&0x14), "no framed call");
+}
+
+/// A full-arity identity binding into a NARROWER callee does NOT collapse
+/// under mono either: caller symbol 3 has no image in the 3-symbol callee, so
+/// the site is stamped (not lowered to the original) and the stamp gains a
+/// synthesized unmapped-read trap row for the hole symbol. Collapsing to the
+/// original would let physical 3 flow into `sub` raw and miss the trap
+/// (contrast `an_identity_binding_under_mono_calls_the_original`, equal-size).
+#[test]
+fn a_narrower_identity_binding_under_mono_stamps_with_trap_rows() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+    .row [1]
+    .row [2]
+D0: .targets A, B, C
+.section code
+.func main
+        call    sub [0]
+        stp
+.func sub
+        rd
+        tmatch  T0
+        tdispatch D0
+A:      wr [0]
+        ret
+B:      wr [1]
+        ret
+C:      wr [2]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    assert_ne!(
+        out.executable.profile, PROFILE_FRAMES,
+        "mono ⇒ base profile"
+    );
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the narrower callee is stamped, not collapsed to the original: {:?}",
+        stamp_names(&out)
+    );
+    assert!(
+        stamp_names(&out)[0].starts_with("sub$"),
+        "stamp named after the callee: {:?}",
+        stamp_names(&out)
+    );
+    assert!(
+        out.report.synthesized_trap_rows >= 1,
+        "the read hole (physical 3) synthesizes an unmapped-read trap row: {}",
+        out.report.synthesized_trap_rows
+    );
 }
 
 /// A raw `call.m` reached under mono is a contradiction (the base profile has

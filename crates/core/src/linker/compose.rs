@@ -452,16 +452,49 @@ pub(crate) fn compose(
 }
 
 /// True when the composite is the identity endomorphism on its own tapes:
-/// tape `k` -> physical `k`, identity maps, no holes. The composition engine
-/// combines this with a caller-arity equality check (which needs the caller
-/// context this function does not see) to decide §5.6's collapse: a call
-/// whose binding composes to identity lowers to a plain `call`, the callee
-/// inheriting the active frame.
+/// tape `k` -> physical `k`, identity maps, no holes. This inspects only the
+/// SPARSE maps — it says nothing about the target alphabet's width, so
+/// [`is_full_passthrough`] (not this) is the authority for §5.6's collapse.
 pub(crate) fn is_identity(c: &Composite) -> bool {
     c.tapes
         .iter()
         .enumerate()
         .all(|(k, t)| usize::from(t.phys) == k && t.rmap.is_identity() && t.wmap.is_identity())
+}
+
+/// True when the composite is a genuine full pass-through into `callee` and
+/// may be lowered to a plain `call` (§5.6 identity collapse): the callee
+/// inherits the active frame and reads/writes the domain's symbols directly,
+/// with no translation and no trap ever owed.
+///
+/// Beyond [`is_identity`] (identity placement and identity sparse maps —
+/// hence hole-free in the SPARSE form the algebra stores), a true
+/// pass-through also needs the domain and callee alphabets to match on every
+/// tape. The sparse composite does NOT encode cardinality-truncation holes:
+/// an identity map into a NARROWER callee reads every domain symbol as
+/// itself, yet domain symbols at or past the callee's cardinality have no
+/// image there — a read hole the materialized descriptor (frames) or a mono
+/// stamp's synthesized trap rows turn into an `UnmappedRead` trap. Into a
+/// WIDER callee the callee may write symbols with no domain image, a write
+/// hole trapping `UnmappedWrite`. Collapsing such a site to a plain call
+/// discards those traps and lets the out-of-range symbol flow through raw, so
+/// the per-tape cardinalities MUST be equal for the collapse to be sound
+/// (docs/formats.md (bound calls)).
+///
+/// `is_identity` forces tape `k` onto domain tape `k`, so comparing the two
+/// cardinality vectors elementwise is exactly the per-tape check; unequal
+/// arity compares unequal (different lengths) and correctly refuses. Both the
+/// site-level (`engine`, absolutized at the caller) and in-stamp
+/// (`stamp`, composed at the machine) collapse decisions call this one
+/// predicate, so they cannot drift.
+pub(crate) fn is_full_passthrough(
+    c: &Composite,
+    domain_sig: &RoutineSig,
+    callee_sig: &RoutineSig,
+) -> bool {
+    is_identity(c)
+        && c.tapes.len() == domain_sig.arity as usize
+        && domain_sig.cardinalities == callee_sig.cardinalities
 }
 
 /// Normalize in place: canonicalize every tape's maps. Idempotent. The
@@ -774,6 +807,54 @@ mod tests {
             canonical_key(&compose_composites(&e, &id)),
             canonical_key(&e)
         );
+    }
+
+    // ----- full-pass-through collapse predicate ----------------------------
+
+    #[test]
+    fn is_full_passthrough_requires_equal_cardinalities() {
+        // Equal-size identity across every tape: a true pass-through, safe to
+        // collapse to a plain call.
+        assert!(is_full_passthrough(
+            &identity_composite(2, 7),
+            &sig(&[4, 4]),
+            &sig(&[4, 4])
+        ));
+        // A NARROWER callee: the identity map hides a read hole (domain
+        // symbol 3 has no image in a 3-symbol callee) — NOT a pass-through.
+        assert!(!is_full_passthrough(
+            &identity_composite(1, 0),
+            &sig(&[4]),
+            &sig(&[3])
+        ));
+        // A WIDER callee: it can write virtual symbol 3 with no domain image
+        // (a write hole) — NOT a pass-through either. "Hole-free in BOTH
+        // directions" is what equal cardinality buys.
+        assert!(!is_full_passthrough(
+            &identity_composite(1, 0),
+            &sig(&[3]),
+            &sig(&[4])
+        ));
+        // Per-tape, not aggregate: one narrower tape is enough to refuse.
+        assert!(!is_full_passthrough(
+            &identity_composite(2, 0),
+            &sig(&[4, 4]),
+            &sig(&[4, 3])
+        ));
+        // A non-identity composite is never a pass-through, regardless of
+        // matching cardinalities.
+        let swap = Composite {
+            routine: 0,
+            tapes: vec![ctape(0, &[(1, 2), (2, 1)], &[], &[(1, 2), (2, 1)], &[])],
+        };
+        assert!(!is_full_passthrough(&swap, &sig(&[4]), &sig(&[4])));
+        // A projecting identity (fewer tapes than the domain) fails the arity
+        // gate before cardinality is even considered.
+        assert!(!is_full_passthrough(
+            &identity_composite(1, 0),
+            &sig(&[4, 4]),
+            &sig(&[4])
+        ));
     }
 
     // ----- canonicalize / digest -------------------------------------------

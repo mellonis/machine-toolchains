@@ -48,7 +48,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::compose::{
-    Composite, absolutize, canonical_key, compose, identity_composite, is_identity,
+    Composite, absolutize, canonical_key, compose, identity_composite, is_full_passthrough,
 };
 use super::resolve::FuncRef;
 use super::{CallMech, LinkError};
@@ -538,12 +538,13 @@ pub(super) fn scan_sites<'a>(
                         validate_binding(caller_sig, callee_sig, &order[callee].name, record)?;
                     // §5.6 collapse (handoff): a site lowers to a plain call
                     // ONLY when the binding, absolutized at the caller's own
-                    // identity, IS the caller-arity identity — a full
-                    // pass-through. A projecting identity (fewer tapes than
-                    // the caller) fails the arity check and stays a framed
-                    // call.
-                    let collapse = is_identity(&composite)
-                        && composite.tapes.len() == caller_sig.arity as usize;
+                    // identity, is a genuine full pass-through of the caller's
+                    // tapes into the callee — identity placement, identity
+                    // maps, AND equal per-tape alphabets. A narrower or wider
+                    // callee carries a cardinality hole that must trap, and a
+                    // projecting identity (fewer tapes than the caller) fails
+                    // the arity check; both stay framed calls.
+                    let collapse = is_full_passthrough(&composite, caller_sig, callee_sig);
                     out.push(SiteKind::Bound {
                         addr: d.addr,
                         callee,
@@ -1155,6 +1156,32 @@ mod tests {
         let composite = validate_binding(&caller, &callee, "callee", &record)
             .expect("an equal-size one-way collapse is legal");
         assert_eq!(composite.tapes.len(), 1);
+    }
+
+    /// The §5.6 collapse decision is cardinality-aware. An all-identity
+    /// binding whose callee alphabet EQUALS the caller's is a genuine full
+    /// pass-through and collapses; the SAME binding into a NARROWER callee
+    /// hides a read hole (caller symbols past the callee's cardinality have no
+    /// image) that must trap, so it must NOT collapse — collapsing would drop
+    /// the trap. Guards the seam at `scan_sites` (both frames and mono read
+    /// this `collapse` flag).
+    #[test]
+    fn identity_collapse_is_cardinality_aware() {
+        // Equal-size identity binding: collapses.
+        let equal = validate_binding(&sig(&[4]), &sig(&[4]), "callee", &one_tape(vec![]))
+            .expect("an identity binding is legal");
+        assert!(
+            is_full_passthrough(&equal, &sig(&[4]), &sig(&[4])),
+            "an equal-cardinality identity binding is a full pass-through"
+        );
+        // Same identity binding into a narrower callee: still a legal binding,
+        // but NOT a collapse — the cardinality gap is a read hole.
+        let narrower = validate_binding(&sig(&[4]), &sig(&[3]), "callee", &one_tape(vec![]))
+            .expect("an identity binding into a narrower callee is legal");
+        assert!(
+            !is_full_passthrough(&narrower, &sig(&[4]), &sig(&[3])),
+            "a narrower callee keeps its cardinality read hole — no collapse"
+        );
     }
 
     /// The contrast that proves the exclusion — not a blanket skip — is what

@@ -36,7 +36,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::LinkError;
 use super::compose::{
-    Composite, CompositeTape, canonical_key, compose, digest, identity_composite, is_identity,
+    Composite, CompositeTape, canonical_key, compose, digest, identity_composite,
+    is_full_passthrough,
 };
 use super::engine::{
     EngineStats, FramesPlan, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
@@ -425,9 +426,13 @@ fn mono_stamps<'a>(
                     let callee_sig = routine_sig(order, *callee)?;
                     let child = compose(&comp, *callee, &record.binding, callee_sig)
                         .map_err(|e| bad_binding(&order[*callee].name, &e))?;
-                    // A binding that composes back to a full-arity identity is
-                    // a pass-through: it lowers to the original routine.
-                    let idx = if is_identity(&child) && child.tapes.len() == ma {
+                    // A binding that composes back to a genuine full
+                    // pass-through — identity placement and maps AND the callee
+                    // alphabet as wide as the machine's on every tape — lowers
+                    // to the original routine. A narrower or wider callee keeps
+                    // a cardinality hole, so it is stamped instead (its trap
+                    // rows are synthesized from the alphabet gap in build_stamp).
+                    let idx = if is_full_passthrough(&child, machine_sig, callee_sig) {
                         *callee
                     } else {
                         let (idx, dup) = intern(
