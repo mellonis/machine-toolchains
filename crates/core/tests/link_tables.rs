@@ -19,7 +19,7 @@ const ARCH: u8 = 0x7E;
 /// plus nop/stp/ent. Caps all on so `.section`/`.row`/`.targets`/
 /// `.routine` shape.
 fn fake_syntax() -> ArchSyntax {
-    use Flow::{Call, FallThrough as FT, Stop};
+    use Flow::{Branch, Call, FallThrough as FT, Stop};
     ArchSyntax {
         entries: vec![
             SyntaxEntry {
@@ -51,6 +51,15 @@ fn fake_syntax() -> ArchSyntax {
                 mnemonic: "tdispatch",
                 operand: OperandKind::TableRef,
                 flow: Stop,
+            },
+            // A match-flag branch (`jm`-shape): RelI32 Branch to a local
+            // label, unpaired (no short form, so it always takes the far
+            // path — the mono guard's target, not a relaxation case).
+            SyntaxEntry {
+                opcode: 0x22,
+                mnemonic: "jm",
+                operand: OperandKind::RelI32,
+                flow: Branch,
             },
             SyntaxEntry {
                 opcode: 0x21,
@@ -1224,6 +1233,71 @@ C:      wr [2]
         0x80,
         "wr [0] → physical 0"
     );
+}
+
+/// A holey mono binding synthesizes unmapped-read trap rows into the callee's
+/// match table, but only a dispatch jump can route them to the trap stub.
+/// When the callee reads the match result through a conditional branch
+/// instead (no dispatch), a hole symbol would match a prepended trap row and
+/// take the branch as if it had matched — a silent misroute. The stamp is
+/// refused with a clear link error rather than emitted.
+#[test]
+fn a_holey_mono_binding_with_a_branch_fed_match_table_is_a_link_error() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+    .row [1]
+.section code
+.func main
+        call    sub [0{1=>1, 2=>1}]
+        stp
+.func sub
+        rd
+        tmatch  T0
+        jm      L
+        ret
+L:      ret
+";
+    // physical 3 has no virtual image → a read hole → a trap row synthesized
+    // into T0; `jm` reads the match result, so no dispatch consumes it.
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).unwrap_err();
+    assert_eq!(e, LinkError::MonoHoleyMatchBranch("sub".into()));
+}
+
+/// The same misroute, mid-body: a trap-bearing match table feeds a branch,
+/// then a LATER match table feeds a dispatch. An end-of-body-only guard would
+/// see the second table's remap consumed and miss the first — the per-table
+/// guard refuses the stamp when the second `tmatch` would overwrite the first
+/// table's still-pending trap-bearing remap.
+#[test]
+fn a_holey_mono_binding_with_an_unconsumed_earlier_match_table_is_a_link_error() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+T1: .row [0]
+    .row [1]
+D1: .targets A, B
+.section code
+.func main
+        call    sub [0{1=>1, 2=>1}]
+        stp
+.func sub
+        rd
+        tmatch  T0
+        jm      M
+        nop
+M:      rd
+        tmatch  T1
+        tdispatch D1
+A:      ret
+B:      ret
+";
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).unwrap_err();
+    assert_eq!(e, LinkError::MonoHoleyMatchBranch("sub".into()));
 }
 
 /// Hybrid: one image with BOTH a mono-stamped bijection site and a

@@ -67,6 +67,18 @@ enum EntrySrc {
     OldRow(u16),
 }
 
+/// Whether a pending match-row remap carries a synthesized unmapped-read
+/// trap row. Such a remap MUST be consumed by a dispatch rebuild — that is
+/// the only path that routes the prepended trap rows to the trap stub. A
+/// trap-bearing remap left unconsumed (or overwritten by a later match
+/// table) means a hole symbol would match a trap row and be read through a
+/// branch as a real match — the guard in `build_stamp` refuses that stamp.
+fn remap_has_trap(remap: &Option<Vec<EntrySrc>>) -> bool {
+    remap
+        .as_deref()
+        .is_some_and(|r| r.iter().any(|e| matches!(e, EntrySrc::TrapStub)))
+}
+
 /// A rebuilt dispatch entry pending offset resolution: the trap stub (its
 /// stamp-blob offset is known only after the body is emitted) or an original
 /// dispatch target (an old callee-blob code offset, remapped through the
@@ -617,6 +629,13 @@ fn build_stamp(
                     let hole = blob.len() as u32;
                     blob.extend_from_slice(&[0u8; 4]);
                     table_fixups.push((hole, new_off));
+                    // A prior trap-bearing remap that no dispatch consumed
+                    // before this match table replaces it would leave its
+                    // trap rows unrouted — the same misroute the end-of-body
+                    // guard catches, just mid-body.
+                    if remap_has_trap(&pending_remap) {
+                        return Err(LinkError::MonoHoleyMatchBranch(callee.name.to_string()));
+                    }
                     pending_remap = Some(remap);
                 } else {
                     // A dispatch table: rebuild its entries in the rewritten
@@ -667,6 +686,16 @@ fn build_stamp(
                 return Err(LinkError::MonoRawFrame(callee.name.to_string()));
             }
         }
+    }
+
+    // A holey binding synthesizes unmapped-read trap rows into a match table,
+    // and only a dispatch jump routes them to the trap stub. If the body
+    // finishes with a trap-bearing remap no dispatch consumed — the match
+    // table feeds a conditional branch, or nothing reads its result — a hole
+    // symbol would match a prepended trap row and be taken as a real match: a
+    // silent misroute. Refuse the stamp (docs/formats.md (frames profile)).
+    if remap_has_trap(&pending_remap) {
+        return Err(LinkError::MonoHoleyMatchBranch(callee.name.to_string()));
     }
 
     // The shared read-trap stub, appended once after the body (control never

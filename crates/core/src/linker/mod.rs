@@ -73,6 +73,14 @@ pub enum LinkError {
     /// Carries the offending function's name (docs/formats.md (frames
     /// profile)).
     MonoRawFrame(String),
+    /// Under `--call-mech=mono` a holey binding makes the stamp synthesize
+    /// unmapped-read trap rows into the callee's match table — but only a
+    /// dispatch jump routes those rows to the trap stub. This callee reads a
+    /// match result through a conditional branch (or leaves it unconsumed),
+    /// so a hole symbol would match a prepended trap row and take the branch
+    /// as if it had matched: a silent misroute. Carries the callee's name
+    /// (docs/formats.md (frames profile)).
+    MonoHoleyMatchBranch(String),
 }
 
 impl std::fmt::Display for LinkError {
@@ -117,6 +125,13 @@ impl std::fmt::Display for LinkError {
                 "`{symbol}` uses a raw framed call, which the mono call \
                  mechanism cannot lower onto the base profile; build with \
                  --call-mech=frames or hybrid"
+            ),
+            Self::MonoHoleyMatchBranch(symbol) => write!(
+                f,
+                "a holey binding needs `{symbol}`'s match tables consumed by \
+                 dispatch jumps, but `{symbol}` reads a match result through a \
+                 conditional branch; the synthesized unmapped-read trap rows \
+                 would misroute — build with --call-mech=frames or hybrid"
             ),
         }
     }
