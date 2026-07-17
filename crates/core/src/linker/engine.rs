@@ -556,17 +556,25 @@ fn validate_binding(
             }
         }
         // Equal-size alphabets must identity-complete to a bijection: the
-        // read map, filled with identity for unlisted symbols, must be
-        // injective (unequal sizes stay hole-based, no completion).
+        // BIDIRECTIONAL read map, filled with identity for unlisted symbols,
+        // must be injective. One-way `=>` collapses are read-only and are
+        // excluded from the injectivity check (docs/formats.md (bound calls));
+        // they may legally fold several caller symbols onto one callee symbol
+        // even on an equal-size alphabet. Unequal sizes stay hole-based, no
+        // completion.
         let callee_card = callee_sig.cardinalities.get(k).copied().unwrap_or(0);
         if caller_card == callee_card {
-            let tape = &composite.tapes[k];
+            let bidir: HashMap<u16, u16> = tb
+                .pairs
+                .iter()
+                .filter(|p| !p.one_way)
+                .map(|p| (p.src as u16, p.dst as u16))
+                .collect();
             let mut seen: HashSet<u16> = HashSet::new();
             for s in 0..caller_card {
                 let Ok(s16) = u16::try_from(s) else { break };
-                if let Some(v) = tape.rmap.apply(s16)
-                    && !seen.insert(v)
-                {
+                let v = bidir.get(&s16).copied().unwrap_or(s16);
+                if !seen.insert(v) {
                     return Err(LinkError::BadBinding {
                         callee: callee_name.to_string(),
                         message: format!(
