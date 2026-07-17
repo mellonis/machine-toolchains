@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mtc_core::formats::object::ObjectFile;
-use mtc_core::linker::LinkOptions;
+use mtc_core::linker::{CallMech, LinkOptions};
 
 use super::{Args, CliOutput};
 
@@ -57,14 +57,30 @@ const LINK_USAGE: &str = "\
 USAGE: tmt link INPUT.tmo... [-o OUT.tmx] [FLAGS]
 
 FLAGS:
-  --no-relax    keep every call site in far form
-  -L DIR        add a library search directory (repeatable, in order)
-  -l NAME       link NAME.tmo from the search path (repeatable)
-  -v            render the link report (dropped functions, relaxation)
+  --no-relax        keep every call site in far form
+  --entry NAME      link NAME as the program entry (default: main)
+  --call-mech MECH  bound-call lowering: mono | frames | hybrid (default: hybrid)
+  -L DIR            add a library search directory (repeatable, in order)
+  -l NAME           link NAME.tmo from the search path (repeatable)
+  -v                render the link report (dropped functions, relaxation)
 
 Writes OUT.tmx and the OUT.tmx.map sidecar (function ranges + table
 section info; label/line info when the objects carry -g debug data).
 ";
+
+/// Parse `--call-mech` (case-sensitive lowercase); absent selects the
+/// default `Hybrid`.
+fn parse_call_mech(raw: Option<String>) -> Result<CallMech, String> {
+    match raw.as_deref() {
+        None => Ok(CallMech::Hybrid),
+        Some("mono") => Ok(CallMech::Mono),
+        Some("frames") => Ok(CallMech::Frames),
+        Some("hybrid") => Ok(CallMech::Hybrid),
+        Some(other) => Err(format!(
+            "unknown --call-mech `{other}` (expected one of: mono, frames, hybrid)"
+        )),
+    }
+}
 
 pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
@@ -72,6 +88,8 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
         return Ok(CliOutput::ok(LINK_USAGE.into(), String::new()));
     }
     let relax = !args.flag("--no-relax");
+    let entry = args.value("--entry")?;
+    let call_mech = parse_call_mech(args.value("--call-mech")?)?;
     let verbose = args.flag("-v");
     let search_dirs = args.values("-L")?;
     let lib_names = args.values("-l")?;
@@ -95,7 +113,8 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
         &libraries,
         LinkOptions {
             relax,
-            ..Default::default()
+            entry,
+            call_mech,
         },
     )
     .map_err(|e| e.to_string())?;

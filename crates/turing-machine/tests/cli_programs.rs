@@ -359,3 +359,89 @@ fn tape_new_sizes_per_tape_alphabets_from_cardinalities() {
         Some(["0", "1", "2"].map(String::from).as_slice())
     );
 }
+
+/// Assemble `one_tape_program("stp")` into `stem.tmo`, returning the obj
+/// path — the shared prologue for the `link` flag tests below.
+fn asm_one_tape(dir: &Path, stem: &str) -> PathBuf {
+    let src = dir.join(format!("{stem}.tma"));
+    fs::write(&src, one_tape_program("stp")).unwrap();
+    let obj = dir.join(format!("{stem}.tmo"));
+    execute(&args(&[
+        "asm",
+        src.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap();
+    obj
+}
+
+#[test]
+fn link_accepts_entry_and_call_mech_flags() {
+    let dir = scratch("link_flags");
+    let obj = asm_one_tape(&dir, "p");
+    let exe = dir.join("p.tmx");
+    // --call-mech is carried, not yet consumed: all three link identically;
+    // --entry main is the default made explicit.
+    for mech in ["mono", "frames", "hybrid"] {
+        execute(&args(&[
+            "link",
+            obj.to_str().unwrap(),
+            "-o",
+            exe.to_str().unwrap(),
+            "--call-mech",
+            mech,
+            "--entry",
+            "main",
+        ]))
+        .unwrap_or_else(|e| panic!("links with --call-mech {mech}: {e}"));
+        assert!(exe.exists());
+    }
+}
+
+#[test]
+fn link_rejects_an_unknown_call_mech_listing_the_three() {
+    let dir = scratch("link_bad_mech");
+    let obj = asm_one_tape(&dir, "p");
+    let exe = dir.join("p.tmx");
+    let err = execute(&args(&[
+        "link",
+        obj.to_str().unwrap(),
+        "-o",
+        exe.to_str().unwrap(),
+        "--call-mech",
+        "bogus",
+    ]))
+    .unwrap_err();
+    assert!(
+        err.contains("mono") && err.contains("frames") && err.contains("hybrid"),
+        "error should list the three mechanisms: {err}"
+    );
+}
+
+#[test]
+fn link_unknown_entry_is_reported_by_name() {
+    let dir = scratch("link_bad_entry");
+    let obj = asm_one_tape(&dir, "p");
+    let exe = dir.join("p.tmx");
+    let err = execute(&args(&[
+        "link",
+        obj.to_str().unwrap(),
+        "-o",
+        exe.to_str().unwrap(),
+        "--entry",
+        "nope",
+    ]))
+    .unwrap_err();
+    assert!(
+        err.contains("nope"),
+        "error should name the missing entry: {err}"
+    );
+}
+
+#[test]
+fn link_help_lists_the_new_flags() {
+    let out = execute(&args(&["link", "--help"])).unwrap();
+    assert!(out.stdout.contains("--entry"), "{}", out.stdout);
+    assert!(out.stdout.contains("--call-mech"), "{}", out.stdout);
+}
