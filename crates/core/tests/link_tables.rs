@@ -1726,3 +1726,118 @@ fn dis_legend_summarizes_a_context_dependent_site() {
         assert!(text.contains(&format!(";   {c}: ")), "{c} listed:\n{text}");
     }
 }
+
+/// The exit vector of a descriptor at `off` in `tables` (docs/formats.md
+/// (frame descriptors)): arity, exit count, per-tape phys + length-prefixed
+/// rmap/wmap, then the `exit_count` absolute-address u32s.
+fn descriptor_exits(tables: &[u8], off: u32) -> Vec<u32> {
+    let mut p = off as usize;
+    let arity = tables[p];
+    p += 1;
+    let exit_count = u16::from_le_bytes([tables[p], tables[p + 1]]) as usize;
+    p += 2;
+    for _ in 0..arity {
+        p += 1; // phys
+        let rlen = u16::from_le_bytes([tables[p], tables[p + 1]]) as usize;
+        p += 2 + 2 * rlen;
+        let wlen = u16::from_le_bytes([tables[p], tables[p + 1]]) as usize;
+        p += 2 + 2 * wlen;
+    }
+    (0..exit_count)
+        .map(|i| u32::from_le_bytes(tables[p + 4 * i..p + 4 * i + 4].try_into().unwrap()))
+        .collect()
+}
+
+/// Exit vectors follow a WIDENED site, not just a relaxation shift: a raw
+/// `.frame`'s exit label sits AFTER a declarative bound call in the same
+/// function. In FRAMES mode the engine widens that bound call 5 → 9 bytes, so
+/// the exit's code address must shift +4 through the same offset map that
+/// carries jumps and dispatch entries (docs/formats.md (frames region)). The
+/// dual of `frame_exits_follow_a_relaxation_shift`, on the engine's blob
+/// rewrite rather than the linker's relaxation.
+#[test]
+fn frame_exits_follow_an_engine_widened_site() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine helper, tapes=1, alpha=(4)
+.section tables
+F0: .frame tapes=(0)
+    .exits A
+.section code
+.func main
+        fcall   main, F0
+        call    helper [0{1->2, 2->1}]
+A:      stp
+.func helper
+        ret
+";
+    let obj = asm(src, false);
+    // Object: ent@0, fcall@1..10, far bound call@10..15, A: stp@15. F0's exit
+    // is the label A at blob offset 15.
+    assert_eq!(
+        descriptor_exits(&obj.table_blobs.as_ref().unwrap()[0], 0),
+        vec![15]
+    );
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let exe = &out.executable;
+    assert_eq!(exe.profile, PROFILE_FRAMES);
+    // The bound call widened to a 9-byte framed call, pushing A from 15 to 19
+    // (main is the entry at 0, so blob-relative == absolute). F0 is the only
+    // descriptor carrying an exit vector (engine composites have none), so
+    // find it in the directory and read its shifted exit.
+    let region = parse_region(exe).expect("frames region");
+    let f0_exits = region
+        .directory
+        .iter()
+        .map(|&off| descriptor_exits(&exe.tables, off))
+        .find(|ex| !ex.is_empty())
+        .expect("F0's exit vector is in the directory");
+    assert_eq!(f0_exits, vec![19], "the exit followed the +4 widening");
+}
+
+/// Cross-path descriptor dedup isolation: the SAME (routine, composite) pair
+/// reached by two DIFFERENT call chains is ONE directory entry — not one per
+/// path. `main` plain-calls both `A` and `B` (identity context); each binds
+/// `S` the same way, so `S` is reached under one composite via two chains. The
+/// closure must intern it once (docs/formats.md (frames profile)) — distinct
+/// from `frames_report_counts_descriptor_dedup`, whose two sites live in one
+/// function.
+#[test]
+fn a_composite_reached_by_two_chains_is_one_directory_entry() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine A, tapes=1, alpha=(4)
+.routine B, tapes=1, alpha=(4)
+.routine S, tapes=1, alpha=(4)
+.section code
+.func main
+        call    A
+        call    B
+        stp
+.func A
+        call    S [0{1->2, 2->1}]
+        ret
+.func B
+        call    S [0{1->2, 2->1}]
+        ret
+.func S
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    // A and B are plain calls (no composite of their own); only S's shared
+    // composite frames. Two framed sites (A's and B's `call S`), ONE composite.
+    assert_eq!(
+        out.report.composites, 1,
+        "the shared composite is interned once"
+    );
+    let region = parse_region(&out.executable).expect("frames region");
+    assert_eq!(region.k, 1, "one directory entry");
+    assert_eq!(region.s, 2, "two sites feed it");
+    assert_eq!(region.directory.len(), 1);
+    // Both sites, reached under the identity frame (A and B inherit it),
+    // resolve to composite 1.
+    assert_eq!(region.compose[0], vec![1, 1]);
+    // The sidecar carries exactly one binding record, for routine S.
+    assert_eq!(out.map.bindings.len(), 1);
+    assert_eq!(out.map.bindings[0].routine, "S");
+}

@@ -1112,3 +1112,68 @@ fn shift_frame_descriptor(
     }
     Ok(end)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formats::object::{BoundCall, MapPair, RoutineSig, TapeBinding};
+
+    fn sig(cards: &[u32]) -> RoutineSig {
+        RoutineSig {
+            arity: u8::try_from(cards.len()).unwrap(),
+            cardinalities: cards.to_vec(),
+        }
+    }
+
+    fn one_tape(pairs: Vec<MapPair>) -> BoundCall {
+        BoundCall {
+            blob: 0,
+            offset: 0,
+            symbol: 0,
+            binding: vec![TapeBinding {
+                caller_tape: 0,
+                pairs,
+            }],
+        }
+    }
+
+    /// An equal-size (4-symbol) binding with a one-way collapse `2=>1`
+    /// validates: the fat-arrow pair is read-only and excluded from the
+    /// bidirectional injectivity check, so identity completion does NOT see a
+    /// collision on virtual 1 (docs/formats.md (bound calls)). Regression guard
+    /// for the equal-size one-way fix — counting the one-way pair in the
+    /// injectivity check would wrongly reject this legal collapse.
+    #[test]
+    fn equal_size_one_way_collapse_validates() {
+        let caller = sig(&[4]);
+        let callee = sig(&[4]);
+        let record = one_tape(vec![MapPair {
+            src: 2,
+            dst: 1,
+            one_way: true,
+        }]);
+        let composite = validate_binding(&caller, &callee, "callee", &record)
+            .expect("an equal-size one-way collapse is legal");
+        assert_eq!(composite.tapes.len(), 1);
+    }
+
+    /// The contrast that proves the exclusion — not a blanket skip — is what
+    /// makes the collapse legal: the SAME shape as a bidirectional `->` pair
+    /// makes the equal-size identity completion non-injective (caller 1 and
+    /// caller 2 both map to callee 1) and IS rejected.
+    #[test]
+    fn equal_size_two_way_collision_is_rejected() {
+        let caller = sig(&[4]);
+        let callee = sig(&[4]);
+        let record = one_tape(vec![MapPair {
+            src: 2,
+            dst: 1,
+            one_way: false,
+        }]);
+        let err = validate_binding(&caller, &callee, "callee", &record).unwrap_err();
+        assert!(
+            matches!(err, LinkError::BadBinding { .. }),
+            "an equal-size two-way collision must be a BadBinding: {err:?}"
+        );
+    }
+}
