@@ -965,3 +965,44 @@ fn mono_and_hybrid_mechanisms_are_unimplemented() {
         assert_eq!(e, LinkError::UnsupportedCallMech(mech));
     }
 }
+
+/// A raw `call.m` inside an engine-composed routine keeps its constant
+/// compose column — the hand-authored descriptor stays absolute, activated
+/// regardless of the active frame (5a semantics preserved under nesting).
+#[test]
+fn a_raw_call_m_inside_a_composed_routine_has_a_constant_column() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine r, tapes=2, alpha=(4, 4)
+.routine leaf, tapes=2, alpha=(4, 4)
+.section tables
+Fr: .frame  tapes=(0, 1)
+    .map    0, rmap=(1->2)
+.section code
+.func main
+        call    r [0{1->3, 3->1}, 1]
+        stp
+.func r
+        fcall   leaf, Fr
+        ret
+.func leaf
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    let region = parse_region(&out.executable).expect("frames region");
+    // Two directory entries: the engine composite E (main's bound call) and
+    // the raw descriptor Fr. Two framed sites: main's bound call, r's
+    // raw call.m.
+    assert_eq!(region.k, 2);
+    assert_eq!(region.s, 2);
+    // Column 0 (main's bound call) activates E (composite 1) at identity.
+    assert_eq!(region.compose[0][0], 1);
+    // Column 1 (r's raw call.m) is CONSTANT = the raw descriptor's index (2)
+    // in EVERY row — it still activates Fr when r runs under E (row 1).
+    for row in 0..=2 {
+        assert_eq!(
+            region.compose[row][1], 2,
+            "raw call.m column constant at row {row}"
+        );
+    }
+}
