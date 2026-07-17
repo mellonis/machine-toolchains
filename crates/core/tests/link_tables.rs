@@ -7,8 +7,8 @@
 use mtc_core::asm::{
     ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry, assemble, disassemble_executable,
 };
-use mtc_core::formats::object::ObjectFile;
-use mtc_core::linker::{LinkOptions, LinkOutput, link};
+use mtc_core::formats::object::{BoundCall, ObjectFile, Symbol, SymbolDef};
+use mtc_core::linker::{LinkError, LinkOptions, LinkOutput, link};
 use mtc_core::vm::OperandKind;
 
 const ARCH: u8 = 0x7E;
@@ -454,4 +454,119 @@ fn code_only_dis_is_byte_compatible() {
     let text = disassemble_executable(&syntax, &out.executable, Some(&out.map));
     assert!(!text.contains(".routine"), "{text}");
     assert!(!text.contains(".section"), "{text}");
+}
+
+// --- Entry selection and declarative bound-call reachability ---
+//
+// Bound calls carry no assembler surface in the fake dialect, so these
+// build objects directly. Each function is a minimal `ent; stp` body
+// (`[0x0E, 0x02]`, valid fake-dialect code). Bound-call records are added
+// by hand; resolve reads only their `symbol`/`offset`, and the linker
+// refuses a reachable one before layout ever decodes the blob.
+
+/// An object of ent+stp functions named `names`, all `Defined`, blob i
+/// per name i.
+fn bare_object(names: &[&str]) -> ObjectFile {
+    let symbols = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| Symbol {
+            name: (*n).into(),
+            def: SymbolDef::Defined { blob: i as u32 },
+        })
+        .collect();
+    let blobs = names.iter().map(|_| vec![0x0E, 0x02]).collect();
+    ObjectFile::v2(ARCH, symbols, blobs, Vec::new(), None)
+}
+
+#[test]
+fn entry_override_links_a_function_unreachable_from_main() {
+    // `alt` is unreachable from `main`; the default entry drops it, but
+    // `--entry alt` makes it the root and drops `main` instead.
+    let obj = bare_object(&["main", "alt"]);
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        LinkOptions {
+            entry: Some("alt".into()),
+            ..Default::default()
+        },
+    )
+    .expect("links with alt as the entry");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["alt"]);
+    assert_eq!(out.report.dropped, vec!["main".to_string()]);
+}
+
+#[test]
+fn a_reachable_bound_call_is_refused_naming_the_callee() {
+    // `main` bound-calls `sub` (defined). Resolve reaches `sub`, then the
+    // guard refuses the still-unsupported binding, naming the callee.
+    let mut obj = bare_object(&["main", "sub"]);
+    obj.bound_calls.push(BoundCall {
+        blob: 0,
+        offset: 1,
+        symbol: 1, // "sub"
+        binding: Vec::new(),
+    });
+    let e = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(e, LinkError::UnsupportedBindings("sub".into()));
+}
+
+#[test]
+fn a_bound_call_in_a_dropped_function_does_not_poison_the_link() {
+    // `dead` bound-calls `sub`, but nothing reaches `dead` from `main`, so
+    // its binding never runs — the link succeeds (pre-5b the guard fired
+    // on ANY bound call, reachable or not).
+    let mut obj = bare_object(&["main", "sub", "dead"]);
+    obj.bound_calls.push(BoundCall {
+        blob: 2, // "dead"
+        offset: 1,
+        symbol: 1, // "sub"
+        binding: Vec::new(),
+    });
+    let out = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        LinkOptions::default(),
+    )
+    .expect("a dropped function's binding does not poison the link");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["main"]);
+    assert!(out.report.dropped.contains(&"dead".to_string()));
+    assert!(out.report.dropped.contains(&"sub".to_string()));
+}
+
+#[test]
+fn an_unresolved_bound_callee_is_an_unresolved_error() {
+    // `main` bound-calls `ghost`, which no object defines: a bound callee
+    // enters reachability like a relocation callee, so an undefined one
+    // errors as Unresolved.
+    let mut obj = bare_object(&["main"]);
+    obj.symbols.push(Symbol {
+        name: "ghost".into(),
+        def: SymbolDef::External,
+    });
+    obj.bound_calls.push(BoundCall {
+        blob: 0,
+        offset: 1,
+        symbol: 1, // "ghost"
+        binding: Vec::new(),
+    });
+    let e = link(
+        &fake_syntax(),
+        std::slice::from_ref(&obj),
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(e, LinkError::Unresolved(vec!["ghost".into()]));
 }

@@ -1,8 +1,10 @@
 //! Symbol resolution and reachability (docs/stdlib.md (linking)): build
 //! the user+library namespace (user duplicates error, libraries
 //! first-wins and shadowed silently by user definitions), then BFS from
-//! `main` so only reachable functions are linked in — dead functions are
-//! dropped and may reference anything, even names that don't exist.
+//! the entry symbol (default `main`, or the `--entry` override) so only
+//! reachable functions are linked in — dead functions are dropped and may
+//! reference anything, even names that don't exist. Reachability follows
+//! both relocation call sites and declarative bound-call sites.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
@@ -16,6 +18,11 @@ pub(crate) struct FuncRef<'a> {
     pub debug: Option<&'a BlobDebug>,
     /// Call sites in blob order: (hole offset in blob, callee index in `order`).
     pub calls: Vec<(u32, usize)>,
+    /// Declarative bound-call sites in blob order, mirroring `calls`'
+    /// shape: (operand hole offset in blob, callee index in `order`). The
+    /// binding data itself lives on the source `BoundCall`; the
+    /// composition engine (a later phase-5b task) reads it from there.
+    pub bound: Vec<(u32, usize)>,
     /// This function's table blob — its match/dispatch table bytes
     /// (docs/formats.md (.pmo)); empty when the object carries none.
     pub table: &'a [u8],
@@ -43,10 +50,11 @@ type Site = (usize, u32);
 pub(crate) fn resolve<'a>(
     objects: &'a [ObjectFile],
     libraries: &'a [ObjectFile],
+    entry: &str,
 ) -> Result<Resolved<'a>, LinkError> {
     let all: Vec<&ObjectFile> = objects.iter().chain(libraries).collect();
     let Some(first) = all.first() else {
-        return Err(LinkError::NoEntrySymbol);
+        return Err(LinkError::NoEntrySymbol(entry.to_string()));
     };
     let expected = first.arch;
     if let Some(bad) = all.iter().find(|o| o.arch != expected) {
@@ -86,20 +94,49 @@ pub(crate) fn resolve<'a>(
         }
     };
 
-    // BFS from main.
-    let Some(&main_site) = namespace.get("main") else {
-        return Err(LinkError::NoEntrySymbol);
+    // BFS from the entry symbol.
+    let Some(&entry_site) = namespace.get(entry) else {
+        return Err(LinkError::NoEntrySymbol(entry.to_string()));
     };
-    let mut order_sites: Vec<Site> = vec![main_site];
-    let mut index_of: HashMap<Site, usize> = HashMap::from([(main_site, 0)]);
-    let mut queue: VecDeque<Site> = VecDeque::from([main_site]);
+    let mut order_sites: Vec<Site> = vec![entry_site];
+    let mut index_of: HashMap<Site, usize> = HashMap::from([(entry_site, 0)]);
+    let mut queue: VecDeque<Site> = VecDeque::from([entry_site]);
     let mut unresolved: BTreeSet<String> = BTreeSet::new();
-    // calls per discovered function, resolved to final indices as callees
-    // are discovered (an index is known the moment it's pushed).
+    // calls/bound sites per discovered function, resolved to final indices
+    // as callees are discovered (an index is known the moment it's pushed).
     let mut calls_by_site: HashMap<Site, Vec<(u32, usize)>> = HashMap::new();
+    let mut bound_by_site: HashMap<Site, Vec<(u32, usize)>> = HashMap::new();
+
+    // A symbol reference (a relocation callee or a bound callee) resolves
+    // to a site the same way: a Local binds directly within its own
+    // object — never through the namespace, so it can't shadow or be
+    // shadowed (docs/language.md (visibility); docs/stdlib.md (linking)) —
+    // otherwise it goes through the namespace.
+    let resolve_target = |object: &ObjectFile, oi: usize, sym: u32| -> Option<Site> {
+        match object.symbols[sym as usize].def {
+            SymbolDef::Local { blob } => Some((oi, blob)),
+            _ => namespace
+                .get(object.symbols[sym as usize].name.as_str())
+                .copied(),
+        }
+    };
 
     while let Some(site) = queue.pop_front() {
         let object = object_at(site.0);
+
+        // A callee's order index is minted the moment it is first reached.
+        let reach = |callee: Site,
+                     index_of: &mut HashMap<Site, usize>,
+                     order_sites: &mut Vec<Site>,
+                     queue: &mut VecDeque<Site>|
+         -> usize {
+            *index_of.entry(callee).or_insert_with(|| {
+                order_sites.push(callee);
+                queue.push_back(callee);
+                order_sites.len() - 1
+            })
+        };
+
         let mut calls = Vec::new();
         let mut relocs: Vec<_> = object
             .relocations
@@ -108,30 +145,41 @@ pub(crate) fn resolve<'a>(
             .collect();
         relocs.sort_by_key(|r| r.offset);
         for reloc in relocs {
-            let symbol = &object.symbols[reloc.symbol as usize];
-            let target: Option<Site> = match symbol.def {
-                // Locals bind directly within their own object — never
-                // through the namespace, so they can't shadow or be
-                // shadowed (docs/language.md (visibility); docs/stdlib.md
-                // (linking)).
-                SymbolDef::Local { blob } => Some((site.0, blob)),
-                _ => namespace.get(symbol.name.as_str()).copied(),
-            };
-            match target {
+            match resolve_target(object, site.0, reloc.symbol) {
                 None => {
-                    unresolved.insert(symbol.name.clone());
+                    unresolved.insert(object.symbols[reloc.symbol as usize].name.clone());
                 }
                 Some(callee) => {
-                    let idx = *index_of.entry(callee).or_insert_with(|| {
-                        order_sites.push(callee);
-                        queue.push_back(callee);
-                        order_sites.len() - 1
-                    });
+                    let idx = reach(callee, &mut index_of, &mut order_sites, &mut queue);
                     calls.push((reloc.offset, idx));
                 }
             }
         }
         calls_by_site.insert(site, calls);
+
+        // Declarative bound calls (`call name [binding]`) reach their
+        // callee like a relocation does; the composition engine consumes
+        // the binding later. Processed after relocations, so BFS discovery
+        // order is stable for objects that mix both.
+        let mut bound = Vec::new();
+        let mut binds: Vec<_> = object
+            .bound_calls
+            .iter()
+            .filter(|b| b.blob == site.1)
+            .collect();
+        binds.sort_by_key(|b| b.offset);
+        for bc in binds {
+            match resolve_target(object, site.0, bc.symbol) {
+                None => {
+                    unresolved.insert(object.symbols[bc.symbol as usize].name.clone());
+                }
+                Some(callee) => {
+                    let idx = reach(callee, &mut index_of, &mut order_sites, &mut queue);
+                    bound.push((bc.offset, idx));
+                }
+            }
+        }
+        bound_by_site.insert(site, bound);
     }
 
     if !unresolved.is_empty() {
@@ -168,6 +216,7 @@ pub(crate) fn resolve<'a>(
                 blob: &object.blobs[site.1 as usize],
                 debug: object.debug.as_ref().map(|d| &d[site.1 as usize]),
                 calls: calls_by_site.remove(&site).unwrap_or_default(),
+                bound: bound_by_site.remove(&site).unwrap_or_default(),
                 table: object
                     .table_blobs
                     .as_ref()
@@ -195,7 +244,7 @@ pub(crate) fn resolve<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formats::object::{ObjectFile, Relocation, Symbol, SymbolDef};
+    use crate::formats::object::{BoundCall, ObjectFile, Relocation, Symbol, SymbolDef};
 
     /// Object with `funcs` = (name, callees-by-name). Blob content is a
     /// stub: [0x0E] + one 5-byte call hole per callee (opcode 0x21).
@@ -247,7 +296,7 @@ mod tests {
                 ("second", &["helper"]),
             ],
         );
-        let r = resolve(std::slice::from_ref(&a), &[]).unwrap();
+        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
         assert_eq!(names, vec!["main", "helper", "second"]);
         assert_eq!(r.order[0].calls, vec![(2, 1), (7, 2)]); // holes at 2 and 7
@@ -257,7 +306,7 @@ mod tests {
     fn dead_functions_are_dropped_and_may_be_broken() {
         // "dead" calls a missing symbol — fine, it's unreachable.
         let a = obj(0x7E, &[("main", &[]), ("dead", &["missing"])]);
-        let r = resolve(std::slice::from_ref(&a), &[]).unwrap();
+        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
         assert_eq!(r.order.len(), 1);
         assert_eq!(r.order[0].name, "main");
     }
@@ -265,7 +314,7 @@ mod tests {
     #[test]
     fn reachable_unresolved_errors_sorted() {
         let a = obj(0x7E, &[("main", &["zeta", "alpha"])]);
-        let e = resolve(std::slice::from_ref(&a), &[]).unwrap_err();
+        let e = resolve(std::slice::from_ref(&a), &[], "main").unwrap_err();
         assert_eq!(
             e,
             LinkError::Unresolved(vec!["alpha".into(), "zeta".into()])
@@ -278,7 +327,12 @@ mod tests {
         let lib = obj(0x7E, &[("go", &[]), ("unused_pulls_nothing", &["ghost"])]);
         // user's `go` shadows the library's; the library's broken function
         // is never reached, so `ghost` doesn't error.
-        let r = resolve(std::slice::from_ref(&user), std::slice::from_ref(&lib)).unwrap();
+        let r = resolve(
+            std::slice::from_ref(&user),
+            std::slice::from_ref(&lib),
+            "main",
+        )
+        .unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
         assert_eq!(names, vec!["main", "go"]);
         // dropped is name-level, post-shadowing: the library's `go` was
@@ -287,7 +341,12 @@ mod tests {
         assert_eq!(r.dropped, vec!["unused_pulls_nothing".to_string()]);
 
         let needy = obj(0x7E, &[("main", &["go"])]);
-        let r2 = resolve(std::slice::from_ref(&needy), std::slice::from_ref(&lib)).unwrap();
+        let r2 = resolve(
+            std::slice::from_ref(&needy),
+            std::slice::from_ref(&lib),
+            "main",
+        )
+        .unwrap();
         assert_eq!(r2.order.len(), 2); // library's go pulled in
         assert_eq!(r2.dropped, vec!["unused_pulls_nothing".to_string()]);
     }
@@ -296,24 +355,24 @@ mod tests {
     fn duplicate_user_symbols_error_but_library_shadowing_does_not() {
         let a = obj(0x7E, &[("main", &[]), ("f", &[])]);
         let b = obj(0x7E, &[("f", &[])]);
-        let e = resolve(&[a.clone(), b], &[]).unwrap_err();
+        let e = resolve(&[a.clone(), b], &[], "main").unwrap_err();
         assert_eq!(e, LinkError::DuplicateSymbol("f".into()));
         let lib1 = obj(0x7E, &[("f", &[])]);
         let lib2 = obj(0x7E, &[("f", &[])]);
-        assert!(resolve(std::slice::from_ref(&a), &[lib1, lib2]).is_ok()); // first-wins, silent
+        assert!(resolve(std::slice::from_ref(&a), &[lib1, lib2], "main").is_ok()); // first-wins, silent
     }
 
     #[test]
     fn no_main_and_arch_mismatch() {
         let a = obj(0x7E, &[("helper", &[])]);
         assert_eq!(
-            resolve(std::slice::from_ref(&a), &[]).unwrap_err(),
-            LinkError::NoEntrySymbol
+            resolve(std::slice::from_ref(&a), &[], "main").unwrap_err(),
+            LinkError::NoEntrySymbol("main".into())
         );
         let b = obj(0x11, &[("main", &[])]);
         let mixed = [obj(0x7E, &[("x", &[])]), b];
         assert_eq!(
-            resolve(&mixed, &[]).unwrap_err(),
+            resolve(&mixed, &[], "main").unwrap_err(),
             LinkError::ArchMismatch {
                 expected: 0x7E,
                 found: 0x11
@@ -344,7 +403,7 @@ mod tests {
         );
         let b = obj_with_locals(0x7E, &[("api", &["helper"]), ("helper", &[])], &["helper"]);
         let objs = [a, b];
-        let r = resolve(&objs, &[]).unwrap();
+        let r = resolve(&objs, &[], "main").unwrap();
         let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
         // main, its own helper, api, api's own helper: BOTH helpers linked.
         assert_eq!(names, vec!["main", "helper", "api", "helper"]);
@@ -355,7 +414,7 @@ mod tests {
         // Object B's `helper` is local; A's external ref must NOT see it.
         let a = obj(0x7E, &[("main", &["helper"])]);
         let b = obj_with_locals(0x7E, &[("helper", &[])], &["helper"]);
-        let e = resolve(&[a, b], &[]).unwrap_err();
+        let e = resolve(&[a, b], &[], "main").unwrap_err();
         assert_eq!(e, LinkError::Unresolved(vec!["helper".into()]));
     }
 
@@ -366,7 +425,7 @@ mod tests {
         let a = obj(0x7E, &[("main", &["api"]), ("helper", &[])]);
         let b = obj_with_locals(0x7E, &[("api", &["helper"]), ("helper", &[])], &["helper"]);
         let objs = [a, b];
-        let r = resolve(&objs, &[]).unwrap();
+        let r = resolve(&objs, &[], "main").unwrap();
         // api's call resolved into object B (site-identity, not name):
         let api = r.order.iter().position(|f| f.name == "api").unwrap();
         let callee_idx = r.order[api].calls[0].1;
@@ -376,5 +435,70 @@ mod tests {
         // helper must be in dropped (unreached), B's local not reported.
         assert_eq!(r.dropped, vec!["helper".to_string()]);
         assert!(callee_idx < r.order.len());
+    }
+
+    /// Add a bound-call site to `obj`'s blob 0, targeting `callee` by
+    /// name. Resolve reads only the record's `symbol`/`offset` — the
+    /// binding payload is irrelevant to reachability — so it stays empty.
+    fn push_bound(obj: &mut ObjectFile, offset: u32, callee: &str) {
+        let symbol = obj
+            .symbols
+            .iter()
+            .position(|s| s.name == callee)
+            .unwrap_or_else(|| {
+                obj.symbols.push(Symbol {
+                    name: callee.into(),
+                    def: SymbolDef::External,
+                });
+                obj.symbols.len() - 1
+            }) as u32;
+        obj.bound_calls.push(BoundCall {
+            blob: 0,
+            offset,
+            symbol,
+            binding: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn bound_callees_enter_reachability_and_are_not_dropped() {
+        // `sub` is reachable ONLY through a declarative binding, not a
+        // relocation — the BFS must still reach it and keep it in `order`.
+        let mut a = obj(0x7E, &[("main", &[]), ("sub", &[])]);
+        push_bound(&mut a, 1, "sub");
+        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        assert_eq!(names, vec!["main", "sub"]);
+        assert_eq!(r.order[0].bound, vec![(1, 1)]); // hole at 1 -> order index 1
+        assert!(r.order[0].calls.is_empty());
+        assert!(r.dropped.is_empty());
+    }
+
+    #[test]
+    fn entry_override_selects_a_different_root() {
+        // `alt` is unreachable from main; entry=alt makes it the BFS root
+        // and drops main instead.
+        let a = obj(0x7E, &[("main", &[]), ("alt", &[])]);
+        let r = resolve(std::slice::from_ref(&a), &[], "alt").unwrap();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        assert_eq!(names, vec!["alt"]);
+        assert_eq!(r.dropped, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn unresolved_bound_callee_joins_the_unresolved_error() {
+        // A bound call to an undefined symbol errors exactly like an
+        // undefined relocation callee.
+        let mut a = obj(0x7E, &[("main", &[])]);
+        push_bound(&mut a, 1, "ghost");
+        let e = resolve(std::slice::from_ref(&a), &[], "main").unwrap_err();
+        assert_eq!(e, LinkError::Unresolved(vec!["ghost".into()]));
+    }
+
+    #[test]
+    fn missing_entry_symbol_is_named() {
+        let a = obj(0x7E, &[("main", &[])]);
+        let e = resolve(std::slice::from_ref(&a), &[], "start").unwrap_err();
+        assert_eq!(e, LinkError::NoEntrySymbol("start".into()));
     }
 }

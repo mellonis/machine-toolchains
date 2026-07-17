@@ -360,7 +360,7 @@ fn namespaced_main_is_not_the_entry_and_keywords_stay_contextual() {
     )
     .unwrap();
     let e = link(&[out.object], &[], LinkOptions::default()).unwrap_err();
-    assert_eq!(e, LinkError::NoEntrySymbol);
+    assert_eq!(e, LinkError::NoEntrySymbol("main".into()));
     // Even EXPORTED, a namespaced main is qq::main — not the entry.
     let out = compile(
         "namespace qq { export main() { mark; } }",
@@ -368,7 +368,7 @@ fn namespaced_main_is_not_the_entry_and_keywords_stay_contextual() {
     )
     .unwrap();
     let e = link(&[out.object], &[], LinkOptions::default()).unwrap_err();
-    assert_eq!(e, LinkError::NoEntrySymbol);
+    assert_eq!(e, LinkError::NoEntrySymbol("main".into()));
     assert!(
         compile(
             "namespace() { left; } as() { right; } main() { @namespace(); @as(); }",

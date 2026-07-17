@@ -165,12 +165,15 @@ fn binding_call_assembles_records_dis_round_trips_and_link_refuses() {
         "binding call dis ∘ asm:\n{text}"
     );
 
-    // Global Constraint 10: the linker still refuses bound calls, naming
-    // the callee, until the 5b composition engine lands.
+    // A bound callee now enters BFS reachability like a relocation
+    // callee: `plusOne` is an extern here, so it surfaces as an
+    // unresolved symbol. (A REACHABLE, DEFINED bound call is refused with
+    // UnsupportedBindings until the composition engine lands — covered in
+    // the linker's own tests.)
     let e = link(&tm1_syntax(), &[obj], &[], LinkOptions::default()).unwrap_err();
     assert_eq!(
         e,
-        mtc_core::linker::LinkError::UnsupportedBindings("plusOne".into())
+        mtc_core::linker::LinkError::Unresolved(vec!["plusOne".into()])
     );
 }
 

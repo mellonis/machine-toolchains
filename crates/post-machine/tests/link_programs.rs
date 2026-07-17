@@ -72,7 +72,15 @@ fn spec_sample_links_byte_exact_and_runs() {
 fn relaxation_saves_exactly_three_fetch_tacts() {
     let obj = assemble(SPEC_SAMPLE, false).unwrap();
     let relaxed = link(std::slice::from_ref(&obj), &[], LinkOptions::default()).unwrap();
-    let far = link(&[obj], &[], LinkOptions { relax: false }).unwrap();
+    let far = link(
+        &[obj],
+        &[],
+        LinkOptions {
+            relax: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(far.executable.code.len(), relaxed.executable.code.len() + 3);
 
     let reg = registry();

@@ -786,7 +786,16 @@ mod tests {
     fn no_relax_keeps_far_calls() {
         let syntax = syntax_with_short_call();
         let obj = assemble(&syntax, 0x7E, TWO_FUNCS, false).unwrap();
-        let out = link(&syntax, &[obj], &[], LinkOptions { relax: false }).unwrap();
+        let out = link(
+            &syntax,
+            &[obj],
+            &[],
+            LinkOptions {
+                relax: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         // main: [0E][21 off32][02] = 7 bytes; go at 7; call end 6 → off +1.
         assert_eq!(
             out.executable.code,

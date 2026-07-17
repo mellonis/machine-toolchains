@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 pub enum LinkError {
     DuplicateSymbol(String),
     Unresolved(Vec<String>),
-    NoEntrySymbol,
+    /// The BFS entry symbol (default `main`, or the `--entry` override) is
+    /// not defined by any linked object. Carries the entry name so a
+    /// mistyped `--entry` reports the name that was looked up.
+    NoEntrySymbol(String),
     ArchMismatch {
         expected: u8,
         found: u8,
@@ -52,7 +55,7 @@ impl std::fmt::Display for LinkError {
         match self {
             Self::DuplicateSymbol(name) => write!(f, "duplicate symbol: {name}"),
             Self::Unresolved(names) => write!(f, "unresolved symbols: {}", names.join(", ")),
-            Self::NoEntrySymbol => write!(f, "no `main` entry symbol"),
+            Self::NoEntrySymbol(name) => write!(f, "no `{name}` entry symbol"),
             Self::ArchMismatch { expected, found } => write!(
                 f,
                 "architecture mismatch: expected {expected:#04x}, found {found:#04x}"
@@ -86,16 +89,52 @@ impl std::fmt::Display for LinkError {
 
 impl std::error::Error for LinkError {}
 
+/// Which mechanism the composition engine uses to lower a declarative
+/// bound call (docs/formats.md (frames profile)). `Mono` stamps a
+/// rewritten routine copy per composite; `Frames` keeps one generic copy
+/// and resolves the binding through a runtime compose table; `Hybrid`
+/// (the default) classifies per call site. CARRIED by `LinkOptions` but
+/// not yet consumed — the engine that reads it lands in a later
+/// phase-5b task; today all three link identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallMech {
+    Mono,
+    Frames,
+    #[default]
+    Hybrid,
+}
+
+impl std::fmt::Display for CallMech {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Mono => "mono",
+            Self::Frames => "frames",
+            Self::Hybrid => "hybrid",
+        })
+    }
+}
+
 /// Linker knobs; `relax` (default `true`) enables the far→short call
 /// relaxation fixpoint (docs/isa.md; docs/cli.md for `--no-relax`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LinkOptions {
     pub relax: bool,
+    /// BFS entry symbol; `None` selects the default `"main"`. Threaded to
+    /// `resolve` as the reachability root (the `tmt link --entry` flag).
+    pub entry: Option<String>,
+    /// The bound-call lowering mechanism. CARRIED but NOT YET CONSUMED:
+    /// the composition engine that reads this lands in a later phase-5b
+    /// task, so this field affects no output today.
+    pub call_mech: CallMech,
 }
 
 impl Default for LinkOptions {
     fn default() -> Self {
-        Self { relax: true }
+        Self {
+            relax: true,
+            entry: None,
+            call_mech: CallMech::Hybrid,
+        }
     }
 }
 
@@ -162,21 +201,20 @@ pub fn link(
     libraries: &[ObjectFile],
     options: LinkOptions,
 ) -> Result<LinkOutput, LinkError> {
+    let entry = options.entry.as_deref().unwrap_or("main");
+    let resolved = resolve::resolve(objects, libraries, entry)?;
+
     // Declarative call-site binding records are the composition engine's
-    // input; until that lands the linker refuses them outright — even in
-    // functions that would be dropped — rather than silently emitting a
-    // call whose tape binding never happens.
-    for object in objects.iter().chain(libraries) {
-        if let Some(bound) = object.bound_calls.first() {
-            let name = object
-                .symbols
-                .get(bound.symbol as usize)
-                .map_or_else(String::new, |s| s.name.clone());
-            return Err(LinkError::UnsupportedBindings(name));
-        }
+    // input; until that lands the linker refuses them rather than
+    // silently emitting a call whose tape binding never happens. The
+    // refusal is scoped to REACHABLE bound calls (a binding inside a
+    // dropped/shadowed function never runs, so it must not poison the
+    // link); the callee's name comes from the resolved order.
+    if let Some(func) = resolved.order.iter().find(|f| !f.bound.is_empty()) {
+        let callee = &resolved.order[func.bound[0].1];
+        return Err(LinkError::UnsupportedBindings(callee.name.to_string()));
     }
 
-    let resolved = resolve::resolve(objects, libraries)?;
     let arch = objects
         .first()
         .or_else(|| libraries.first())

@@ -263,8 +263,15 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
         libraries.push(stdlib::object().clone());
     }
 
-    let linked =
-        crate::asm::link(&objects, &libraries, LinkOptions { relax }).map_err(|e| e.to_string())?;
+    let linked = crate::asm::link(
+        &objects,
+        &libraries,
+        LinkOptions {
+            relax,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
 
     let target = out_path(Path::new(&inputs[0]), explicit_out, "pmx");
     fs::write(&target, linked.executable.to_bytes())
