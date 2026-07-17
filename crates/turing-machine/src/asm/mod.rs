@@ -175,6 +175,10 @@ pub fn tm1_syntax() -> ArchSyntax {
         }],
         entry_opcode: ENT,
         break_opcode: Some(BRK),
+        // The unmapped-symbol trap the mono-stamping composition engine
+        // synthesizes for a crossed map hole (`trap #0` read, `trap #1`
+        // write) — docs/formats.md (frames profile).
+        trap_opcode: Some(TRAP),
         // TM-1's multi-tape dispatch surface uses the whole sectioned
         // grammar: match/dispatch tables, `.rept` blocks, and `[..]`
         // vector operands.

@@ -44,6 +44,16 @@ pub struct ArchSyntax {
     /// The debugger-break opcode, when the arch has one (drives the
     /// leftover-debugger lint; None = rule silent).
     pub break_opcode: Option<u8>,
+    /// The unmapped-symbol trap opcode, when the arch has one — the
+    /// `trap #kind` instruction the mono-stamping composition engine
+    /// synthesizes for a crossed map hole (kind `0` = unmapped read,
+    /// `1` = unmapped write). It cannot be inferred from the syntax table
+    /// (an `Imm8`-operand entry is ambiguous — a multi-exit return carries
+    /// the same operand kind), so each dialect declares it explicitly.
+    /// `None` when the dialect has no trap instruction, which is an error
+    /// only if a reachable mono binding needs a trap synthesized
+    /// (docs/formats.md (frames profile)).
+    pub trap_opcode: Option<u8>,
     /// Opt-in lexer/parser surface for this dialect. Default (all off)
     /// keeps the classic assembly grammar byte-for-byte.
     pub caps: AsmCaps,
@@ -160,6 +170,7 @@ pub(crate) mod fixture {
             }],
             entry_opcode: 0x0E,
             break_opcode: None,
+            trap_opcode: None,
             caps: AsmCaps::default(),
         }
     }

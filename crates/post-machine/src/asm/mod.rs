@@ -160,6 +160,9 @@ pub fn pm1_syntax() -> ArchSyntax {
         ],
         entry_opcode: ENT,
         break_opcode: Some(BRK),
+        // PM-1 has no trap instruction — a one-tape two-symbol machine has
+        // no symbol maps to cross, so it never needs a synthesized trap.
+        trap_opcode: None,
         // PM-1 `.pma` uses the classic assembly grammar — no vector /
         // substitution / table surface.
         caps: AsmCaps::default(),

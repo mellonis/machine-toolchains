@@ -72,6 +72,33 @@ fn fake_syntax() -> ArchSyntax {
                 operand: OperandKind::FramedCall,
                 flow: Call,
             },
+            // Read/write/move + the trap instruction: the surface the mono
+            // stamping engine projects and synthesizes (a fake mirror of the
+            // TM-1 shapes so core stays arch-agnostic).
+            SyntaxEntry {
+                opcode: 0x04,
+                mnemonic: "rd",
+                operand: OperandKind::None,
+                flow: FT,
+            },
+            SyntaxEntry {
+                opcode: 0x07,
+                mnemonic: "wr",
+                operand: OperandKind::SymbolVec,
+                flow: FT,
+            },
+            SyntaxEntry {
+                opcode: 0x0F,
+                mnemonic: "mov",
+                operand: OperandKind::MoveVec,
+                flow: FT,
+            },
+            SyntaxEntry {
+                opcode: 0x18,
+                mnemonic: "trap",
+                operand: OperandKind::Imm8,
+                flow: FT,
+            },
             SyntaxEntry {
                 opcode: 0x0E,
                 mnemonic: "ent",
@@ -85,6 +112,8 @@ fn fake_syntax() -> ArchSyntax {
         }],
         entry_opcode: 0x0E,
         break_opcode: None,
+        // The unmapped-symbol trap the mono stamping engine synthesizes.
+        trap_opcode: Some(0x18),
         caps: AsmCaps {
             tables: true,
             rept: true,
