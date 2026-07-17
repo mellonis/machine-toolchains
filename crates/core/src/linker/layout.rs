@@ -1049,6 +1049,33 @@ B:      stop
     }
 
     #[test]
+    fn assembled_binding_call_assembles_but_is_refused_at_link() {
+        // The whole T6 gate in one flow: a declarative binding call
+        // assembles (producing the MO record), then the linker refuses it
+        // with `UnsupportedBindings` naming the callee — until the 5b
+        // composition engine can lower it.
+        let syntax = fake_table_syntax();
+        let src = "\
+.func main
+        call    go [2{1->3,2=>0}, 0]
+        stop
+.func go
+        nop
+        ret
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        // Assembly succeeded and recorded the binding (no relocation).
+        assert_eq!(obj.bound_calls.len(), 1);
+        assert_eq!(obj.symbols[obj.bound_calls[0].symbol as usize].name, "go");
+        assert!(obj.relocations.is_empty());
+        let e = link(&syntax, &[obj], &[], LinkOptions::default()).unwrap_err();
+        assert_eq!(
+            e,
+            crate::linker::LinkError::UnsupportedBindings("go".into())
+        );
+    }
+
+    #[test]
     fn tables_without_entry_signature_are_missing_signature() {
         // TABLED_MAIN minus its `.routine` line: table content present,
         // entry unsigned.

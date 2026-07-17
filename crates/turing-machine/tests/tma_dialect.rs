@@ -124,6 +124,56 @@ fn frames_program_assembles_links_and_dis_renders_the_surface() {
     assert_eq!(out.executable.tape_count, 2);
 }
 
+/// A declarative binding call in the real `.tma` dialect: `call name
+/// [binding]` records the tape binding as data for the 5b composition
+/// engine. Entry 0 projects physical tape 2 with a `->` and a one-way
+/// `=>` pair; entry 1 is a bare passthrough. The callee `plusOne` is
+/// undefined here (an extern symbol), like a cross-object call.
+const BINDING_CALL: &str = "\
+.func main
+        call    plusOne [2{1->3,2=>0}, 0]
+        stp
+";
+
+#[test]
+fn binding_call_assembles_records_dis_round_trips_and_link_refuses() {
+    let obj = assemble(BINDING_CALL, false).expect("binding call assembles");
+    // The record carries the callee and the binding; no relocation rides
+    // the (zeroed) call hole.
+    assert_eq!(obj.bound_calls.len(), 1);
+    let bc = &obj.bound_calls[0];
+    assert_eq!(obj.symbols[bc.symbol as usize].name, "plusOne");
+    assert!(obj.relocations.is_empty());
+    assert_eq!(bc.binding.len(), 2);
+    assert_eq!(bc.binding[0].caller_tape, 2);
+    // The one-way bit is real data: the `=>` pair is flagged, the `->` is not.
+    assert!(!bc.binding[0].pairs[0].one_way);
+    assert!(bc.binding[0].pairs[1].one_way);
+    assert_eq!(bc.binding[1].caller_tape, 0);
+    assert!(bc.binding[1].pairs.is_empty());
+
+    // Object dis renders it back, and asm ∘ dis ∘ asm is a byte fixpoint.
+    let text = disassemble_object(&obj);
+    assert!(
+        text.contains("call    plusOne [2{1->3,2=>0}, 0]"),
+        "dis missing the binding call:\n{text}"
+    );
+    let obj2 = assemble(&text, false).expect("rendered binding call re-assembles");
+    assert_eq!(
+        obj.to_bytes(),
+        obj2.to_bytes(),
+        "binding call dis ∘ asm:\n{text}"
+    );
+
+    // Global Constraint 10: the linker still refuses bound calls, naming
+    // the callee, until the 5b composition engine lands.
+    let e = link(&tm1_syntax(), &[obj], &[], LinkOptions::default()).unwrap_err();
+    assert_eq!(
+        e,
+        mtc_core::linker::LinkError::UnsupportedBindings("plusOne".into())
+    );
+}
+
 #[test]
 fn every_mnemonic_assembles_and_object_round_trips() {
     // assemble ∘ dis ∘ assemble is a fixpoint at the object-byte level:
