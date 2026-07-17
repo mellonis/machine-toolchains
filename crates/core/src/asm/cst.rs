@@ -1653,6 +1653,26 @@ F0: .frame tapes=(3, 0)
     }
 
     #[test]
+    fn wmap_one_way_pair_still_shapes_at_the_cst_level() {
+        // A one-way `=>` pair in `wmap` is a *lowering* error (wmap is the
+        // write direction; `=>` is read-direction only), NOT a shaping one:
+        // the CST stays lossless so fmt round-trips the source verbatim and
+        // lowering reports a precise span. The pair carries `one_way: true`.
+        let cst = parse_asm_cst_with(".map 0, wmap=(1=>2)\n", caps_all());
+        let FrameDirectiveCst::Map(m) = as_frame(&cst.items[0]) else {
+            panic!("not a map: {:?}", cst.items[0].kind)
+        };
+        assert_eq!(
+            m.wmap,
+            Some(vec![FramePairCst {
+                from: 1,
+                to: 2,
+                one_way: true
+            }])
+        );
+    }
+
+    #[test]
     fn malformed_frame_directives_degrade_to_lines() {
         for src in [
             ".frame tapes=(1)\n",                 // no descriptor label

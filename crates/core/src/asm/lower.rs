@@ -439,7 +439,24 @@ fn lower_frame_map(m: &FrameMapCst, ctx: &mut LowerCtx) -> Result<(), AsmError> 
         None => Vec::new(),
     };
     let wmap = match &m.wmap {
-        Some(pairs) => build_dense_map(pairs, m.wmap_span.unwrap_or(m.span))?,
+        Some(pairs) => {
+            // The one-way (`=>`) spelling is read-direction only — such a
+            // pair is read-only and excluded from write-back
+            // (docs/formats.md (bound calls)) — so it is legal in `rmap`
+            // but not in `wmap`, the write direction. The shared pair
+            // parser accepts `=>` in either clause and keeps the CST
+            // lossless; the wmap-scoped rejection lives here.
+            if pairs.iter().any(|p| p.one_way) {
+                return Err(err(
+                    m.wmap_span.unwrap_or(m.span),
+                    AsmErrorKind::BadFrame(
+                        "one-way pairs (`=>`) are read-direction only; wmap pairs use `->`"
+                            .to_string(),
+                    ),
+                ));
+            }
+            build_dense_map(pairs, m.wmap_span.unwrap_or(m.span))?
+        }
         None => Vec::new(),
     };
     maps.push(FrameTapeMap { k, rmap, wmap });

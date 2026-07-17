@@ -1804,6 +1804,44 @@ F0: .frame tapes=(1, 0, 2)
     }
 
     #[test]
+    fn wmap_rejects_one_way_pairs_read_direction_only() {
+        // `=>` (one-way) is read-direction only: legal in `rmap`, rejected
+        // in `wmap` (the write direction). The rejection is spanned at the
+        // `wmap=` group and carries the read-direction message.
+        let src = "\
+.section tables
+F0: .frame tapes=(1, 0)
+    .map 0, wmap=(1=>2)
+.section code
+.func main
+    fcall helper, F0
+    stp
+.func helper
+    stp
+";
+        let e = asm_fake(src).unwrap_err();
+        assert!(
+            matches!(e.kind, AsmErrorKind::BadFrame(ref m) if m.contains("read-direction only")),
+            "expected a read-direction BadFrame, got {e}"
+        );
+        assert_eq!(e.span, Span::new(3, 18, 3, 24)); // the `(1=>2)` group
+
+        // Scoped to wmap: the same one-way pair in `rmap` assembles.
+        let ok = "\
+.section tables
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1=>2)
+.section code
+.func main
+    fcall helper, F0
+    stp
+.func helper
+    stp
+";
+        assert!(asm_fake(ok).is_ok(), "rmap=(1=>2) must still assemble");
+    }
+
+    #[test]
     fn frame_tapes_list_bounds_and_orphans_are_bad_frame() {
         // Empty tapes list.
         let e = asm_fake(".section tables\nF0: .frame tapes=()\n").unwrap_err();
