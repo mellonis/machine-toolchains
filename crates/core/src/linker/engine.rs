@@ -190,7 +190,7 @@ pub(super) fn lower<'a>(
                 } => {
                     let callee_sig = routine_sig(&order, *callee)?;
                     let child = compose(&ctx, *callee, &record.binding, callee_sig)
-                        .map_err(|e| bad_binding(order[*callee].name, &e))?;
+                        .map_err(|e| bad_binding(&order[*callee].name, &e))?;
                     let idx = intern_composite(&mut engine_comps, &mut comp_index, child.clone());
                     site_columns
                         .entry((fi, *addr))
@@ -338,7 +338,7 @@ pub(super) fn validate_frame_phys(
                 .and_then(|&op| syntax.by_opcode(op))
                 .is_some_and(|e| e.operand == OperandKind::FramedCall);
             if is_frame {
-                check_descriptor_phys(table, toff, arity, f.name)?;
+                check_descriptor_phys(table, toff, arity, &f.name)?;
             }
         }
     }
@@ -453,7 +453,7 @@ fn scan_sites<'a>(
                 if let Some(&(callee, record)) = bound.get(&hole) {
                     let callee_sig = routine_sig(order, callee)?;
                     let composite =
-                        validate_binding(caller_sig, callee_sig, order[callee].name, record)?;
+                        validate_binding(caller_sig, callee_sig, &order[callee].name, record)?;
                     // §5.6 collapse (handoff): a site lowers to a plain call
                     // ONLY when the binding, absolutized at the caller's own
                     // identity, IS the caller-arity identity — a full
@@ -803,7 +803,7 @@ fn rewrite_blob<'a>(
     // Shift the code offsets held INSIDE the table (dispatch entries and
     // raw `.frame` descriptor exits are blob-relative — docs/formats.md
     // (frame descriptors)); match rows and descriptor maps are symbol data.
-    let new_table = shift_table(syntax, &orig, &f.table, &f.table_fixups, f.name, &shift)?;
+    let new_table = shift_table(syntax, &orig, &f.table, &f.table_fixups, &f.name, &shift)?;
 
     // Shift debug label/line offsets.
     let new_debug = f.debug.as_deref().map(|d| {

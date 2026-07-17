@@ -14,7 +14,10 @@ use crate::formats::object::{BlobDebug, BoundCall, ObjectFile, RoutineSig, Symbo
 
 #[derive(Debug)]
 pub(crate) struct FuncRef<'a> {
-    pub name: &'a str,
+    /// The function's name. `Borrowed` from the object for a resolved
+    /// function; `Owned` for a composition-engine synthetic (a mono stamp
+    /// `<callee>$<digest8>`), which has no backing symbol.
+    pub name: Cow<'a, str>,
     /// The function's code blob. `Borrowed` straight from the object as
     /// resolved; the composition engine replaces it with an `Owned`
     /// rewritten blob (bound calls widened to framed calls) before layout.
@@ -221,7 +224,7 @@ pub(crate) fn resolve<'a>(
                 .map(|s| s.name.as_str())
                 .expect("site came from a Defined or Local symbol");
             FuncRef {
-                name,
+                name: Cow::Borrowed(name),
                 blob: Cow::Borrowed(&object.blobs[site.1 as usize]),
                 debug: object
                     .debug
@@ -311,7 +314,7 @@ mod tests {
             ],
         );
         let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
-        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["main", "helper", "second"]);
         assert_eq!(r.order[0].calls, vec![(2, 1), (7, 2)]); // holes at 2 and 7
     }
@@ -347,7 +350,7 @@ mod tests {
             "main",
         )
         .unwrap();
-        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["main", "go"]);
         // dropped is name-level, post-shadowing: the library's `go` was
         // never a candidate (user's `go` won and IS in the binary), so it
@@ -418,7 +421,7 @@ mod tests {
         let b = obj_with_locals(0x7E, &[("api", &["helper"]), ("helper", &[])], &["helper"]);
         let objs = [a, b];
         let r = resolve(&objs, &[], "main").unwrap();
-        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         // main, its own helper, api, api's own helper: BOTH helpers linked.
         assert_eq!(names, vec!["main", "helper", "api", "helper"]);
     }
@@ -481,7 +484,7 @@ mod tests {
         let mut a = obj(0x7E, &[("main", &[]), ("sub", &[])]);
         push_bound(&mut a, 1, "sub");
         let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
-        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["main", "sub"]);
         // hole at 1 -> order index 1, carrying the source record.
         let bound: Vec<(u32, usize)> = r.order[0].bound.iter().map(|&(o, i, _)| (o, i)).collect();
@@ -496,7 +499,7 @@ mod tests {
         // and drops main instead.
         let a = obj(0x7E, &[("main", &[]), ("alt", &[])]);
         let r = resolve(std::slice::from_ref(&a), &[], "alt").unwrap();
-        let names: Vec<&str> = r.order.iter().map(|f| f.name).collect();
+        let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
         assert_eq!(names, vec!["alt"]);
         assert_eq!(r.dropped, vec!["main".to_string()]);
     }
