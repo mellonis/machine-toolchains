@@ -23,6 +23,11 @@ pub struct Executable {
     pub profile: u8,
     pub alphabet_cardinalities: Vec<u32>,
     pub tables: Vec<u8>,
+    /// Offset INTO the tables section where the frames region begins
+    /// (directory + compose table), or 0 for an image with no frames
+    /// region (docs/formats.md (frames region)). A frames-profile image
+    /// carries a non-zero offset; the base profile leaves it 0.
+    pub frames_offset: u32,
 }
 
 impl Executable {
@@ -36,6 +41,7 @@ impl Executable {
             profile: PROFILE_BASE,
             alphabet_cardinalities: Vec::new(),
             tables: Vec::new(),
+            frames_offset: 0,
         }
     }
 
@@ -58,7 +64,18 @@ impl Executable {
             profile,
             alphabet_cardinalities,
             tables,
+            frames_offset: 0,
         }
+    }
+
+    /// Builder: point the image at its frames region (docs/formats.md
+    /// (frames region)) — the offset into the tables section where the
+    /// composite directory + compose table live. Kept a builder so
+    /// `sectioned`'s arity stays put; the vast majority of sectioned
+    /// images (frameless ones) never call it.
+    pub fn with_frames_offset(mut self, offset: u32) -> Self {
+        self.frames_offset = offset;
+        self
     }
 
     /// True when the image carries no v2-only data and must serialize as v1.
@@ -67,6 +84,7 @@ impl Executable {
             && self.profile == PROFILE_BASE
             && self.alphabet_cardinalities.is_empty()
             && self.tables.is_empty()
+            && self.frames_offset == 0
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -112,6 +130,9 @@ impl Executable {
             &mut out,
             u32::try_from(self.tables.len()).expect("tables fit u32"),
         );
+        // Frames-region offset follows table_size; cardinalities stay LAST
+        // so their variable count remains the trailing header run.
+        put_u32(&mut out, self.frames_offset);
         for &card in &self.alphabet_cardinalities {
             put_u32(&mut out, card);
         }
@@ -158,6 +179,7 @@ impl Executable {
                 let entry = r.u32()?;
                 let code_size = r.u32()? as usize;
                 let table_size = r.u32()? as usize;
+                let frames_offset = r.u32()?;
                 let mut alphabet_cardinalities = Vec::with_capacity(tape_count as usize);
                 for _ in 0..tape_count {
                     alphabet_cardinalities.push(r.u32()?);
@@ -168,6 +190,11 @@ impl Executable {
                 if entry as usize >= code.len() {
                     return Err(FormatError::Malformed("entry offset outside code"));
                 }
+                // A non-zero frames offset must point strictly inside the
+                // tables section — it names the start of the frames region.
+                if frames_offset != 0 && frames_offset as usize >= tables.len() {
+                    return Err(FormatError::Malformed("frames offset outside tables"));
+                }
                 Ok(Self::sectioned(
                     arch,
                     entry,
@@ -176,7 +203,8 @@ impl Executable {
                     tape_count,
                     profile,
                     alphabet_cardinalities,
-                ))
+                )
+                .with_frames_offset(frames_offset))
             }
             other => Err(FormatError::UnsupportedVersion(other)),
         }
@@ -308,7 +336,9 @@ mod tests {
     /// Pins the absolute v2 header byte offsets so a symmetric field
     /// transposition (e.g. swapping tape_count/profile or entry/code_size)
     /// would fail. Layout: magic3 + ver2 + arch1 + flags1 + crc4 +
-    /// tape_count1 + profile1 + entry4 + code_size4 + table_size4 + cards.
+    /// tape_count1 + profile1 + entry4 + code_size4 + table_size4 +
+    /// frames_offset4 + cards. `frames_offset` sits after `table_size` and
+    /// before the variable-length cardinalities, keeping them trailing.
     #[test]
     fn v2_layout_is_exact() {
         let bytes = sample_v2().to_bytes();
@@ -322,12 +352,48 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[13..17].try_into().unwrap()), 0); // entry
         assert_eq!(u32::from_le_bytes(bytes[17..21].try_into().unwrap()), 2); // code_size
         assert_eq!(u32::from_le_bytes(bytes[21..25].try_into().unwrap()), 4); // table_size
-        assert_eq!(u32::from_le_bytes(bytes[25..29].try_into().unwrap()), 3); // cardinality[0]
-        assert_eq!(u32::from_le_bytes(bytes[29..33].try_into().unwrap()), 128); // cardinality[1]
+        assert_eq!(u32::from_le_bytes(bytes[25..29].try_into().unwrap()), 0); // frames_offset (none)
+        assert_eq!(u32::from_le_bytes(bytes[29..33].try_into().unwrap()), 3); // cardinality[0]
+        assert_eq!(u32::from_le_bytes(bytes[33..37].try_into().unwrap()), 128); // cardinality[1]
         // Sections follow the cardinalities: code first, then tables. Pinning
         // both catches a symmetric code|tables swap.
-        assert_eq!(&bytes[33..35], &[0x10, 0x02]); // code section
-        assert_eq!(&bytes[35..39], &[1, 1, 0, 5]); // tables section
+        assert_eq!(&bytes[37..39], &[0x10, 0x02]); // code section
+        assert_eq!(&bytes[39..43], &[1, 1, 0, 5]); // tables section
+    }
+
+    /// An image carrying a frames-region offset round-trips it, serializes
+    /// as v2 (the offset is v2-only data), and pins the offset's byte
+    /// position (25..29, immediately after `table_size`).
+    #[test]
+    fn frames_offset_round_trips_and_is_positioned() {
+        let exe = Executable::sectioned(
+            ARCH_TM1,
+            0,
+            vec![0x10, 0x02],
+            // tables long enough that offset 2 is strictly inside.
+            vec![1, 1, 0, 5, 9, 9],
+            2,
+            PROFILE_FRAMES,
+            vec![3, 128],
+        )
+        .with_frames_offset(2);
+        let bytes = exe.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2);
+        assert_eq!(u32::from_le_bytes(bytes[25..29].try_into().unwrap()), 2);
+        assert_eq!(Executable::from_bytes(&bytes).unwrap(), exe);
+    }
+
+    /// A non-zero frames offset at or past the tables length is rejected —
+    /// it must name a real position inside the tables section.
+    #[test]
+    fn frames_offset_outside_tables_is_rejected() {
+        let mut exe = sample_v2(); // 4-byte tables section
+        exe.frames_offset = 4; // == tables.len(): out of range
+        let bytes = exe.to_bytes();
+        assert!(matches!(
+            Executable::from_bytes(&bytes),
+            Err(FormatError::Malformed("frames offset outside tables"))
+        ));
     }
 
     #[test]
