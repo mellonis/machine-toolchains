@@ -309,14 +309,18 @@ namespaced/nested symbol reference without ambiguity.
 
 ## `.tma` — assembly text (TM-1)
 
-The TM-1 `.tma` dialect version is **0.1** (pre-1.0: the version is `0.N`
+The TM-1 `.tma` dialect version is **0.2** (pre-1.0: the version is `0.N`
 and `N` bumps on any grammar change — the same acceptance-contract shape
 as the `.pma` dialect above). Where PM-1 drives one two-symbol tape, TM-1
 drives up to sixteen tapes, each with its own alphabet, and branches
 through match/dispatch tables rather than the mark register alone. The
 dialect turns on three grammar features the classic `.pma` grammar leaves
 off — a **tables** section, the `.rept` macro, and `[..]` **vector**
-operands — plus a per-routine signature directive.
+operands — plus a per-routine signature directive. Version 0.2 adds the
+**frames** family: the framed call `call.m`, the multi-exit return
+`retx`, the explicit `trap`, the `#imm` immediate operand, and the
+`.frame`/`.map`/`.exits` frame-descriptor directives (and the declarative
+binding-call operand). See *Frame descriptors* below.
 
 ```asm
 .section tables
@@ -357,7 +361,7 @@ per-tape alphabets, which a run validates its tape band against.
 
 ### The mnemonic set
 
-Sixteen mnemonics. The match register (**MR**) is written only by `mtc`;
+Nineteen mnemonics. The match register (**MR**) is written only by `mtc`;
 the vector `rd`/`wr`/`mov` instructions leave it untouched, so `jm`/`jnm`
 test the most recent `mtc` outcome regardless of intervening tape motion.
 
@@ -378,7 +382,14 @@ test the most recent `mtc` outcome regardless of intervening tape motion.
 | `0x0D` | `ent` | — | entry marker — emitted implicitly by `.func`, the runtime call guard |
 | `0x0E` | `brk` | — | debugger break |
 | `0x0F` | `mov` | move vector | move one step per tape (`<` left, `>` right, `.` stay) |
+| `0x11` | `trap` | `#kind` | raise a typed trap: `#0` unmapped-read, `#1` unmapped-write |
+| `0x13` | `call.m` | frame call | framed call — call a routine and activate a frame for it |
+| `0x14` | `retx` | `#k` | multi-exit return — leave the active frame through exit `k` |
 | `0x1B` | `call.s` | label | the **short** form of `call` — see below |
+
+The three frames instructions (`trap`, `call.m`, `retx`) and their
+`#imm` / frame-call operands are detailed under *Framed calls, traps, and
+multi-exit returns* and *Frame descriptors* below.
 
 `call.s` exists in the mnemonic set for disassembly display and link-time
 relaxation only: the assembler always emits far `call` and rejects
@@ -444,6 +455,119 @@ dispatch target — so `.rept` naturally emits value-indexed rows and
 targets. A labeled directive inside a `.rept` emits the **same** label
 every iteration; combined with same-label continuation, that is how a
 `.rept` builds one wide match or dispatch table across its expansion.
+
+### Framed calls, traps, and multi-exit returns
+
+A **framed call** runs a routine under a **frame** — a projection that
+narrows the machine's tapes to the callee's, remapping tape indices and,
+per tape, the symbols read and written. Three mnemonics and one operand
+form make up the surface:
+
+- `call.m <target>, <frame>` — call `<target>` and activate `<frame>`
+  (a `.frame` label in the tables section) for the duration of the call.
+  Inside the callee, tape and symbol references are **virtual**: the frame
+  translates them to physical tapes and symbols. The caller's frame is
+  restored when the callee returns. The operand pairs a rel displacement
+  (the call target) with the frame descriptor's table offset.
+- `retx #k` — return through **exit `k`** of the active frame's exit
+  vector. Unlike `ret`, the pushed return address is discarded; control
+  resumes at the caller-side label recorded as exit `k`. A `k` past the
+  exit vector traps (exit-out-of-range).
+- `trap #kind` — raise a typed trap explicitly: `#0` is unmapped-read,
+  `#1` is unmapped-write. Numeric kinds leave room for named kinds later
+  without a grammar break.
+
+`#<n>` is the **immediate** operand: a single unsigned byte, `0`..=`255`,
+written with a leading `#` (`trap #0`, `retx #1`). It is distinct from a
+symbol or a label — it carries a raw number.
+
+### Frame descriptors
+
+`.frame`/`.map`/`.exits` author a **frame descriptor**: the table-section
+record a `call.m` activates. A descriptor projects the caller's tapes onto
+a narrower callee and, per tape, remaps symbols in each direction.
+
+```asm
+.section tables
+Fh: .frame  tapes=(2, 0)                 ; arity = list length; virtual k → physical tapes[k]
+    .map    0, rmap=(1->1, 3=>0)         ; per virtual tape; at most once per k; omitted ⇒ identity
+    .map    1, wmap=(2->1)
+    .exits  done, alt                     ; optional, once; labels in the owning function
+```
+
+- `.frame <name> tapes=(<p0>, …, <pk>)` opens a labeled group. The list
+  length is the **arity** (the callee's tape count, 1..=16); virtual tape
+  `k` projects onto physical tape `<pk>`.
+- `.map <k>[, rmap=(…)][, wmap=(…)]` continues the group, giving virtual
+  tape `k`'s symbol maps (at most one `.map` per `k`; an omitted map is
+  identity). `rmap` pairs are read maps written **physical→virtual**;
+  `wmap` pairs are write maps written **virtual→physical**.
+- `.exits <label>, …` (at most once) lists the exit vector — the
+  caller-side labels `retx #k` returns to, in the function that names the
+  frame via `call.m`.
+
+**Arrows.** `->` is an ordinary map entry; `=>` marks the pair **one-way**
+— read-direction only. `=>` is legal in `rmap` (the read side) and
+**rejected in `wmap`** (the write side is never one-way). The one-way
+spelling does not change the descriptor bytes — the wire form carries no
+one-way flag — it only constrains where a pair may appear.
+
+**Blank pinning.** Index 0 (the blank symbol) always maps to 0 and cannot
+be re-pointed: a `0->X` pair with `X ≠ 0` is an error, in either map. A
+non-blank symbol **may** fold onto blank, though: `Y->0` in `rmap` reads a
+foreign boundary marker *as* the callee's blank (the canonical marker
+collapse), and `Y->0` in `wmap` erases on write. Only index 0 itself is a
+fixed point; whether a given fold is sound is the composition engine's
+concern, not the raw authoring surface.
+
+**Wire layout.** The descriptor is little-endian and self-describing:
+
+| field | bytes | meaning |
+|---|---|---|
+| arity | `u8` | number of virtual tapes (`1`..=`16`) |
+| exit_count | `u16` | number of exit-vector entries |
+| *per virtual tape (× arity):* | | |
+|  phys | `u8` | physical tape this virtual tape projects onto |
+|  rmap_len | `u16` | read-map length (`0` = identity) |
+|  rmap | rmap_len × `u16` | indexed by **physical** symbol → virtual symbol |
+|  wmap_len | `u16` | write-map length (`0` = identity) |
+|  wmap | wmap_len × `u16` | indexed by **virtual** symbol → physical symbol |
+| exits | exit_count × `u32` | code offsets |
+
+A map entry of `0xFFFF` is a **hole**: crossing it (reading through an
+`rmap` hole, writing through a `wmap` hole) traps; a hole is never a
+symbol. A `*_len` of `0` is the identity map. A dense map always pins
+index 0 to 0. The **exits** are blob-relative code offsets in an object
+file and absolute code addresses after link — the linker rebases them
+through the owning function exactly as it rebases dispatch-table entries.
+
+### Bound calls — the binding call operand
+
+A **binding call** is the declarative, source-level way to spell a framed
+call: instead of naming a hand-authored `.frame`, it lists the caller↔
+callee tape binding inline, and the toolchain derives the frame. It
+assembles to a **bound-call** record on the object.
+
+```asm
+        call    plusOne [2{1->3, 2=>0}, 0]
+```
+
+`call <target> [<entry>, …]` where `entry = <physIdx>` or
+`<physIdx>{<src>-><dst>, <src>=><dst>, …}` — the list **position** is the
+callee's virtual tape, `<physIdx>` is the caller's physical tape it binds
+to, and each brace pair binds symbols. As in `.map`, `->` is a two-way
+pair and `=>` a one-way (read-direction) pair; the one-way bit is recorded
+as real data. In the example, callee virtual tape 0 binds caller physical
+tape 2 (with a two-way `1↔3` and a one-way marker collapse `2⇒0`), and
+callee virtual tape 1 binds physical tape 0 unchanged.
+
+A binding call **assembles** — it is stored as a bound-call record on the
+object, carrying the target and the binding — but does **not** yet link.
+Lowering a binding into a concrete frame (closure analysis, symbol-map
+synthesis, deduplication) is the job of a composition engine that arrives
+in a later phase; until it lands, a program containing a binding call is
+refused at link time, by name. The hand-authored `.frame` form above is
+the way to run a framed call today.
 
 ## `.pmx.map` — link-time sidecar
 
