@@ -389,8 +389,23 @@ fn print_rept(out: &mut String, r: &ReptCst, source: &str) {
 
 /// Operand text verbatim from the CST's `OperandToken`s (never
 /// retokenized/rewritten — leading zeros, sign, spelling all survive),
-/// comma-joined (docs/formats.md (assembly text)).
+/// comma-joined (docs/formats.md (assembly text)). A trailing `[..]`
+/// operand is the one exception: a declarative binding call
+/// (`call name [binding]`) space-separates the target from the bracket,
+/// so a leading operand before a final bracket is joined with a space,
+/// not a comma (docs/formats.md (bound calls)).
 fn join_operands(operands: &[OperandToken]) -> String {
+    if let [lead @ .., last] = operands
+        && !lead.is_empty()
+        && last.text.starts_with('[')
+    {
+        let head = lead
+            .iter()
+            .map(|o| o.text.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{head} {}", last.text);
+    }
     operands
         .iter()
         .map(|o| o.text.as_str())

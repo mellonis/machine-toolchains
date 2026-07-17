@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use super::decode::{Body, Decoded, DecodedOperand, decode_at, decode_stream};
 use super::syntax::{ArchSyntax, Flow};
 use crate::formats::executable::Executable;
-use crate::formats::object::{ObjectFile, SymbolDef};
+use crate::formats::object::{BoundCall, ObjectFile, SymbolDef, TapeBinding};
 use crate::linker::MapFile;
 use crate::vm::OperandKind;
 
@@ -188,6 +188,35 @@ fn dense_map_pairs(dense: &[u16]) -> String {
         .map(|(i, &v)| format!("{i}->{v}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Renders a declarative call's tape binding as `[<entry>, …]`
+/// (docs/formats.md (bound calls)). Each entry is the caller physical
+/// tape, optionally followed by a `{ <pairs> }` symbol map; `->` spells a
+/// bidirectional pair and `=>` a one-way one — the one-way bit IS wire
+/// data here, so it re-emits exactly. Passthrough entries (no pairs) drop
+/// the braces, which the assembler re-parses to the same empty pair list.
+fn render_binding(binding: &[TapeBinding]) -> String {
+    let entries = binding
+        .iter()
+        .map(|tb| {
+            if tb.pairs.is_empty() {
+                return tb.caller_tape.to_string();
+            }
+            let pairs = tb
+                .pairs
+                .iter()
+                .map(|p| {
+                    let arrow = if p.one_way { "=>" } else { "->" };
+                    format!("{}{arrow}{}", p.src, p.dst)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}{{{pairs}}}", tb.caller_tape)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{entries}]")
 }
 
 /// Renders one frame descriptor as `.frame`/`.map`/`.exits` lines. The
@@ -569,6 +598,14 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
             )
         })
         .collect();
+    // bound-call lookup: (blob, hole offset) -> the record. A binding
+    // call's hole carries no relocation — the target and tape binding
+    // ride this record instead (docs/formats.md (bound calls)).
+    let bound_at: BTreeMap<(u32, u32), &BoundCall> = obj
+        .bound_calls
+        .iter()
+        .map(|bc| ((bc.blob, bc.offset), bc))
+        .collect();
 
     for symbol in &obj.symbols {
         let (blob, local) = match symbol.def {
@@ -645,7 +682,19 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                                 reloc_at
                                     .get(&(blob, d.addr + 1))
                                     .map(|name| (*name).to_string())
-                                // None: reloc-less call site -> .byte fallback below.
+                                    // A reloc-less call site is either a
+                                    // declarative binding call (rendered
+                                    // from its record) or a genuine gap
+                                    // (.byte fallback below).
+                                    .or_else(|| {
+                                        bound_at.get(&(blob, d.addr + 1)).map(|bc| {
+                                            format!(
+                                                "{} {}",
+                                                obj.symbols[bc.symbol as usize].name,
+                                                render_binding(&bc.binding),
+                                            )
+                                        })
+                                    })
                             } else if let Some(name) = reloc_at.get(&(blob, d.addr + 1)) {
                                 // Relocated symbol jump — always far in objects.
                                 Some(format!("@{name}"))
@@ -1181,6 +1230,12 @@ mod tests {
                     flow: Call,
                 },
                 SyntaxEntry {
+                    opcode: 0x21,
+                    mnemonic: "call",
+                    operand: OperandKind::RelI32,
+                    flow: Call,
+                },
+                SyntaxEntry {
                     opcode: 0x07,
                     mnemonic: "vwrite",
                     operand: OperandKind::SymbolVec,
@@ -1461,6 +1516,39 @@ F0:     .frame  tapes=(2, 0)
         // Full object round trip (no exits here, so it round-trips at the
         // object level; exit labels round-trip through the linked image).
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
+    }
+
+    #[test]
+    fn binding_call_operand_renders_and_round_trips_with_one_way_bits() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        let syntax = fake_syntax();
+        // A declarative binding call: entry 0 projects physical tape 2 with
+        // a `->` (bidirectional) and a `=>` (one-way) pair; entry 1 is a
+        // bare passthrough of physical tape 0. The one-way bit is wire data
+        // here, so `=>` re-emits verbatim (unlike a frame descriptor).
+        let src = "\
+.func main
+        call    plusOne [2{1->3,2=>0}, 0]
+        stp
+.func plusOne
+        stp
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        assert_eq!(dis, src, "binding-call disassembly:\n{dis}");
+        assert!(dis.contains("call    plusOne [2{1->3,2=>0}, 0]"), "{dis}");
+        // Canonical under fmt (the binding operand rides the grid intact).
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        // Full object round trip: the bound-call records — including every
+        // one_way bit — survive asm ∘ dis ∘ asm exactly.
+        let reasm = assemble(&syntax, 0x7E, &dis, false).unwrap();
+        assert_eq!(reasm.bound_calls, obj.bound_calls);
+        assert_eq!(reasm, obj);
     }
 
     #[test]
