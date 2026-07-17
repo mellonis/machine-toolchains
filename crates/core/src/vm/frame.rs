@@ -3,8 +3,8 @@
 //! them over the bus. Pure state machines — the core owns the bus, this
 //! module owns the descriptor semantics (mirrors `table.rs`).
 //!
-//! Frame descriptor byte layout (normative here until the durable formats
-//! page gains its frame-descriptor section):
+//! Frame descriptor byte layout — the durable reference is docs/formats.md
+//! (frame descriptors); the walk below decodes exactly that wire form:
 //!
 //! ```text
 //! offset 0:  arity       u8   — virtual tapes (1..=16)

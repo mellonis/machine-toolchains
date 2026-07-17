@@ -64,19 +64,71 @@ executable's disassembly name the entry root `main`.
 
 ```
 magic "MX" 0x01 (3) | u16 version = 2 | arch (1) | flags = 0 (1) | crc u32 (4)
-tape_count u8 (1..=16) | profile u8 (0 = base, 1 = frames) | entry u32 | code_size u32 | table_size u32
+tape_count u8 (1..=16) | profile u8 (0 = base, 1 = frames) | entry u32 | code_size u32 | table_size u32 | frames_offset u32
 alphabet_cardinalities: tape_count × u32 | code bytes | table bytes
 ```
 
-Version 2 carries everything version 1 does plus three additions: a
+Version 2 carries everything version 1 does plus four additions: a
 **table section** (`table_size` bytes after the code, holding the VM's
 match/dispatch tables — its table ROM), one **u32 alphabet cardinality per
-tape** (`tape_count` of them, `1..=16` tapes), and a one-byte **processor
-profile** (0 = base, 1 = frames). These fields are stored verbatim; the
-format layer never interprets `arch`, `profile`, or the cardinalities. A
+tape** (`tape_count` of them, `1..=16` tapes), a one-byte **processor
+profile** (0 = base, 1 = frames), and a **`frames_offset` u32** naming where
+the frames region begins inside the table section (0 for an image with no
+frames region — see the frames region below). These fields are stored
+verbatim; the format layer never interprets `arch`, `profile`, or the
+cardinalities. A reader that finds a non-zero `frames_offset` checks the
+whole declared region fits inside the table section before trusting it. A
 version-1 reader still loads any PM-1 image, and a version-2 reader loads
 both — the two shapes share magic and CRC discipline and differ only past
 the version field.
+
+### The frames region
+
+The **frames region** is the runtime data that turns a shared framed-call
+instruction into a per-context frame selection. It lives at `frames_offset`
+inside the table section (never in a separate section — it references
+descriptors already in the table ROM by offset). A base-profile image has
+`frames_offset == 0` and no region; a frames-profile image always carries
+one.
+
+```
+composite_count K   u16 LE      — directory size (distinct composites, 1..=K)
+site_count      S   u16 LE      — compose-table columns (framed call sites)
+directory       K × u32 LE      — descriptor offsets into the table section
+compose         (K+1) × S × u16 LE
+                                — row = active frame FR (0..=K), column = site index,
+                                  entry = composite index (1..=K); 0 = reserved-invalid
+```
+
+Its three parts, in order:
+
+| part | size | meaning |
+|---|---|---|
+| composite_count `K` | `u16 LE` | number of distinct composites — the **directory** length |
+| site_count `S` | `u16 LE` | number of framed call sites — the **compose** table's column count |
+| directory | `K × u32 LE` | one descriptor offset per composite (index `i` ⇒ `directory[i-1]`), pointing into the table section |
+| compose | `(K+1) × S × u16 LE` | a matrix: `compose[FR][site]`, rows are active frames `0..=K`, columns are sites |
+
+**How a framed call resolves.** The frame register `FR` is a **composite
+index**: 0 is the identity context (the machine's own tapes, no
+translation), and `1..=K` name directory entries. A framed call carries a
+**site index** `S` (see the framed-call operand below), and at run time the
+processor performs exactly one compose lookup and one directory read:
+
+```
+FR'         = compose[FR][site]        ; the composite active for the duration of the call
+descriptor  = directory[FR' - 1]       ; its frame-descriptor offset in the table section
+```
+
+then loads that descriptor into the frame cache. On return, `ret`/`retx`
+reload the caller's descriptor the same way (via the directory) when the
+restored `FR` is non-zero. A compose entry of **0 is reserved-invalid** — a
+reachable framed call never yields it (the linker enumerated every
+reachable `(frame, site)` pair at link time), so reading a 0 at run time is
+a malformed-operand trap, not a normal outcome. Every read is a fixed-size
+frame-cache fill priced at call time; nothing is walked per tape access, so
+the per-call cost is **O(1) at any call depth** — the frame stack exists
+only to restore `FR` on return, never to translate.
 
 ## `.pmo` — object file
 
@@ -468,7 +520,14 @@ form make up the surface:
   Inside the callee, tape and symbol references are **virtual**: the frame
   translates them to physical tapes and symbols. The caller's frame is
   restored when the callee returns. The operand pairs a rel displacement
-  (the call target) with the frame descriptor's table offset.
+  (the call target) with a **site index** — a dense per-image number for
+  this call site. The site index is *not* a descriptor offset: at run time
+  the processor reads `compose[FR][site]` to pick the composite active in
+  the current context, then `directory[…]` for its descriptor (the frames
+  region above). A hand-authored `call.m` names one fixed descriptor, so its
+  compose column is constant across every frame; a declarative binding call
+  (below) may resolve to a different composite per calling context through
+  the same instruction.
 - `retx #k` — return through **exit `k`** of the active frame's exit
   vector. Unlike `ret`, the pushed return address is discarded; control
   resumes at the caller-side label recorded as exit `k`. A `k` past the
@@ -562,12 +621,67 @@ tape 2 (with a two-way `1↔3` and a one-way marker collapse `2⇒0`), and
 callee virtual tape 1 binds physical tape 0 unchanged.
 
 A binding call **assembles** — it is stored as a bound-call record on the
-object, carrying the target and the binding — but does **not** yet link.
-Lowering a binding into a concrete frame (closure analysis, symbol-map
-synthesis, deduplication) is the job of a composition engine that arrives
-in a later phase; until it lands, a program containing a binding call is
-refused at link time, by name. The hand-authored `.frame` form above is
-the way to run a framed call today.
+object, carrying the target and the binding — and is **lowered at link
+time** by the composition engine (below). Alongside the hand-authored
+`.frame` form, it is the source-level way to run a framed call.
+
+### The frames profile and the composition engine
+
+At link time a **composition engine** turns declarative binding calls into
+concrete frames. It enumerates the finite set of `(routine, composite)`
+pairs reachable from the entry — the same breadth-first walk as
+reachability, now carrying an active composite that binding calls compose
+onto — in a deterministic order, so builds are reproducible. Bindings
+compose **associatively**; an identity composite collapses away
+(`E ∘ identity = E`), so a binding that resolves to a full pass-through
+lowers to a plain `call` (the callee inherits the caller's frame) and joins
+the ordinary `call → call.s` relaxation. Hole sets compose too: the outer
+holes union the preimages of the inner holes. A one-way `=>` pair
+participates only in the read direction and is excluded from the
+bidirectional bijectivity check.
+
+How a lowered site runs depends on the **call mechanism**, chosen at link
+time (`tmt link --call-mech mono | frames | hybrid`, default hybrid):
+
+- **mono** compiles for the **base profile**: it stamps a specialized copy
+  of the callee per distinct composite, folding the projection and symbol
+  maps into the copy's vectors and match tables. A holey read keeps the
+  trap taxonomy statically — an unmapped-read caller symbol becomes a
+  first-match trap row prepended to every match table, and a write with no
+  physical image becomes a `trap` stub outright. Identical stamps dedup.
+  Mono emits **no frames region**.
+- **frames** compiles for the **frames profile**: one generic copy of each
+  routine, every binding site a `call.m`, and the composites resolved
+  through the frames region's directory and compose table at run time. A
+  crossed hole traps through the descriptor's `0xFFFF` sentinel.
+- **hybrid** (the default) classifies **per site**: a completed bijection
+  (equal-size, no holes, no one-way) stamps like mono; anything holey or
+  one-way frames. An image with at least one framed site carries a frames
+  region; an all-stamped hybrid image has none.
+
+All three mechanisms are **observably equivalent** on the same program and
+tapes — same outcome, same final tapes and heads, and the **same trap
+kind** on a crossed hole or an unmatched read (the offset may differ; the
+kind never does). Two restrictions apply to mono only: a raw
+`.frame`/`call.m` cannot be lowered onto the base profile (it needs the
+frames machinery), and a holey binding whose synthesized trap rows would be
+read by a conditional branch rather than a dispatch jump is refused — the
+prepended trap row could misroute. Both name the offending routine and
+point at `--call-mech=frames` or `hybrid`.
+
+**Link report.** `tmt link -v` renders the composition engine's counters
+(the linker itself never prints — the CLI does):
+
+| field | meaning |
+|---|---|
+| `dropped` | defined-but-unreachable functions, dropped from the image |
+| `relaxed_calls` / `far_calls` | symbol sites narrowed to the short call form, or left far |
+| `instantiations` | mono stamps emitted — one per distinct `(routine, composite)` (0 in frames mode) |
+| `composites` | the directory size `K` — distinct composites in the frames region |
+| `compose_table_bytes` | the compose matrix size, `(K+1) × S × 2` |
+| `dedup_savings` | stamps and descriptors avoided by interning an already-built copy |
+| `synthesized_trap_rows` | unmapped-read trap rows prepended to stamped match tables |
+| `expanded_rows` | extra match rows from one-way collapse expansion (mono) |
 
 ## `.pmx.map` — link-time sidecar
 
@@ -591,6 +705,83 @@ correlation lives in this sidecar (see `docs/cli.md` for sidecar discovery
 rules: an explicit `--map` wins over the `FILE.pmx.map` beside the
 executable, and a missing or unparsable sidecar is silently ignored by
 plain `dis`/`run`, but an unparsable *explicit* `--map` is an error).
+
+### Sidecar bindings
+
+A frames-profile image adds a `bindings` array — one record per composite in
+the frames region's directory, in directory order — so a debugger or
+disassembler can name a frame without decoding descriptor bytes. A frameless
+link omits the key entirely (a pre-bindings sidecar still parses; the field
+defaults empty):
+
+```json
+{
+  "arch": 2,
+  "functions": [ { "name": "main", "start": 0, "end": 10, "labels": [], "lines": [] } ],
+  "bindings": [
+    {
+      "index": 1,
+      "routine": "helper",
+      "label": "helper@[2{1->3},0]",
+      "tapes": [
+        { "phys": 2, "pairs": [[1, 3, false]], "read_holes": [], "write_holes": [2] },
+        { "phys": 0, "pairs": [], "read_holes": [], "write_holes": [] }
+      ]
+    }
+  ]
+}
+```
+
+Each record carries the runtime composite `index` (1-based, its directory
+slot), the callee `routine`, the derived `label` (below), and the per-tape
+**structured truth**: the physical tape `phys` this virtual tape projects
+onto, the non-identity read `pairs` (each `[src, dst, one_way]` — identity
+pairs are implicit), and the explicit `read_holes` / `write_holes`. Both
+engine-synthesized composites and hand-authored `.frame` descriptors get a
+record — the latter decoded from its bytes, the same shape either way.
+Structure is truth; the label is derived from it.
+
+### Binding labels
+
+The human-readable label for a composite follows one canonical grammar,
+shared by the sidecar's `label` field and the `tmt dis` frames legend so a
+composite reads the same everywhere:
+
+```
+label = name "@[" entry ("," entry)* "]"       ; entries join with a bare comma
+entry = physIdx [ "{" pairs "}" ]              ; list position = virtual tape
+pairs = pair ("," pair)*                       ; decimal, sorted by src
+pair  = src "->" dst | src "=>" dst            ; => marks a one-way (read-only) pair
+```
+
+- an equal-size (completed bijection) tape omits identity pairs and the
+  empty `{}`;
+- a holey (unequal-size) tape lists **all** mapped pairs — identity
+  completion does not exist across differently-sized alphabets, so an absent
+  src is a hole (no collision with the identity-omission rule);
+- the blank pair `0->0` is never written;
+- an entry with more than 8 displayed pairs collapses to a **digest**
+  `{#xxxxxxxx}` — the CRC-32 (the container checksum) of the tape's completed
+  dense maps, a content address matched like a short hash, never decoded;
+- when two composites render the same label in one image, the second and
+  later get a deterministic `.2`, `.3`, … suffix. The suffix is display-only;
+  semantics always come from the structured record.
+
+### Image-inspectability principle
+
+A single contract governs the split between the image and its sidecar,
+generalizing the `.pmx` code-image rule:
+
+> Everything the machine executes is inspectable from the image alone; the
+> sidecar adds names and provenance, never semantics.
+
+Without a map, a frames-profile image still shows full index-level mappings
+(descriptors are operational data in the table ROM) and even the label
+digests (they are computable from descriptor content); a mono image is
+concrete, self-contained code — a stripped binary with only names missing.
+Glyph rendering is orthogonal: it comes from a supplied tape's glyph tables,
+not from the map. The sidecar exists to attach names, never to carry
+behavior the image lacks.
 
 ## IR JSON
 
