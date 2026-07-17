@@ -102,6 +102,7 @@ pub(crate) mod fixture {
     /// the assembler never executes, it only needs kinds/sizes).
     /// nop 0x01 | stop 0x02 | wr 0x07 (SymbolVec) | jmp 0x20 far / 0x30 short |
     /// call 0x21 (far, symbol operand) | ret 0x0B | entry marker 0x0E |
+    /// vwrmv 0x19 (WriteMoveVec, two `[..]` groups) |
     /// br 0x22 (RelI8, unpaired — disassembler traversal coverage only; per
     /// framework invariant a RelI8 Jump/Branch not in a relax pair takes the
     /// far path in the assembler, so `br` must not appear in assembler tests)
@@ -156,6 +157,12 @@ pub(crate) mod fixture {
                     mnemonic: "ret",
                     operand: OperandKind::None,
                     flow: Stop,
+                },
+                SyntaxEntry {
+                    opcode: 0x19,
+                    mnemonic: "vwrmv",
+                    operand: OperandKind::WriteMoveVec,
+                    flow: FT,
                 },
                 SyntaxEntry {
                     opcode: 0x0E,

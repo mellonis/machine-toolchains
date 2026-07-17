@@ -294,6 +294,10 @@ impl<'a> Core<'a> {
             OperandKind::RelI32 | OperandKind::TableRef => buf.len() == 4,
             OperandKind::FramedCall => buf.len() == 8,
             OperandKind::SymbolVec | OperandKind::MoveVec => byte & 0x80 != 0,
+            // Two self-delimiting groups back to back; complete once TWO
+            // high-bit terminators have been seen (write group, then move
+            // group).
+            OperandKind::WriteMoveVec => buf.iter().filter(|&&b| b & 0x80 != 0).count() == 2,
         };
         if !complete {
             self.phase = Phase::FetchOperand { opcode, kind, buf };
@@ -319,6 +323,20 @@ impl<'a> Core<'a> {
             // which never reach the core.
             OperandKind::SymbolVec | OperandKind::MoveVec => {
                 Operand::Symbols(buf.iter().map(|b| u32::from(b & 0x7F)).collect())
+            }
+            // Split at the first terminator: the write group precedes the
+            // move group. `complete` above guarantees exactly two
+            // terminators, so the split index exists.
+            OperandKind::WriteMoveVec => {
+                let split = buf
+                    .iter()
+                    .position(|&b| b & 0x80 != 0)
+                    .expect("two terminators")
+                    + 1;
+                Operand::WriteMove {
+                    writes: buf[..split].iter().map(|b| u32::from(b & 0x7F)).collect(),
+                    moves: buf[split..].iter().map(|b| u32::from(b & 0x7F)).collect(),
+                }
             }
         };
         self.finish_fetch(opcode, operand)

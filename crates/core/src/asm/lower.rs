@@ -87,6 +87,13 @@ pub enum SourceOperand {
         target: SpannedName,
         binding: Vec<SourceTapeBinding>,
     },
+    /// A `[w...], [m...]` two-vector operand ([`OperandKind::WriteMoveVec`]):
+    /// the write elements then the move elements, carrying the operand
+    /// region's span for emit-time diagnostics. Element legality per group
+    /// (write vocabulary / move vocabulary) is enforced at the assembler's
+    /// emit arm, like the single-vector kinds; this layer only parses the
+    /// two groups.
+    WriteMoveVectors(Vec<VecElem>, Vec<VecElem>, Span),
 }
 
 /// One virtual-tape binding at a declarative call site: which caller
@@ -881,16 +888,48 @@ fn append_to_run(table: &mut SourceTable, parsed: ParsedDirective) {
 /// LEGALITY per context is the caller's (ultimately the dialect's) call;
 /// this accepts the full element vocabulary.
 fn parse_vector(token: &OperandToken) -> Result<Vec<VecElem>, AsmError> {
-    let inner = token
-        .text
+    parse_vector_text(&token.text, token.span)
+}
+
+/// Splits a two-bracket-group operand `[w...], [m...]` — the verbatim text
+/// the CST captures for a `wrmv`-shaped instruction line (first `[` to
+/// last `]`, one operand token) — into its two group slices. Requires
+/// exactly two `[..]` groups separated by ONE bracket-depth-0 comma;
+/// `None` on any other shape (one group, three groups, unbalanced).
+fn split_two_bracket_groups(text: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    let mut at = None;
+    for (i, c) in text.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            ',' if depth == 0 => {
+                if at.is_some() {
+                    return None; // a third group / extra top-level comma
+                }
+                at = Some(i);
+            }
+            _ => {}
+        }
+    }
+    let at = at?;
+    let first = text[..at].trim();
+    let second = text[at + 1..].trim();
+    (first.starts_with('[')
+        && first.ends_with(']')
+        && second.starts_with('[')
+        && second.ends_with(']'))
+    .then_some((first, second))
+}
+
+/// Parses a verbatim `[..]` vector's text into elements at `span`. The
+/// text-and-span form of [`parse_vector`], shared with the two-vector
+/// `wrmv` classification where each group is a slice of one operand token.
+fn parse_vector_text(text: &str, span: Span) -> Result<Vec<VecElem>, AsmError> {
+    let inner = text
         .strip_prefix('[')
         .and_then(|t| t.strip_suffix(']'))
-        .ok_or_else(|| {
-            err(
-                token.span,
-                AsmErrorKind::BadVector("expected a `[..]` vector"),
-            )
-        })?;
+        .ok_or_else(|| err(span, AsmErrorKind::BadVector("expected a `[..]` vector")))?;
     let mut elems = Vec::new();
     for part in inner.split(',') {
         let elem = match part.trim() {
@@ -901,14 +940,11 @@ fn parse_vector(token: &OperandToken) -> Result<Vec<VecElem>, AsmError> {
             "." => VecElem::Stay,
             // `[]` also lands here: its one split part is empty.
             "" => {
-                return Err(err(
-                    token.span,
-                    AsmErrorKind::BadVector("empty vector element"),
-                ));
+                return Err(err(span, AsmErrorKind::BadVector("empty vector element")));
             }
             payload => VecElem::Payload(payload.parse::<u32>().map_err(|_| {
                 err(
-                    token.span,
+                    span,
                     AsmErrorKind::BadVector(
                         "vector elements are integers or `*`, `-`, `<`, `>`, `.`",
                     ),
@@ -1300,6 +1336,30 @@ fn classify_operand(entry: &SyntaxEntry, instr: &InstrCst) -> Result<SourceOpera
                 instr.word_span,
                 AsmErrorKind::BadOperand("takes a `[..]` move vector"),
             ))
+        }
+        OperandKind::WriteMoveVec => {
+            // `wrmv [w...], [m...]`: the CST captures a bracketed region as
+            // ONE verbatim `[..]` token from the first `[` to the last `]`,
+            // so both groups arrive in a single operand's text. Split at the
+            // depth-0 comma between them into the write and move groups; the
+            // per-group element vocabulary is enforced at emit.
+            let [one] = operands.as_slice() else {
+                return Err(err(
+                    instr.word_span,
+                    AsmErrorKind::BadOperand(
+                        "takes a write vector then a move vector: `[w…], [m…]`",
+                    ),
+                ));
+            };
+            let Some((w_text, m_text)) = split_two_bracket_groups(&one.text) else {
+                return Err(err(
+                    one.span,
+                    AsmErrorKind::BadVector("expected two `[..]` vectors: a write and a move"),
+                ));
+            };
+            let writes = parse_vector_text(w_text, one.span)?;
+            let moves = parse_vector_text(m_text, one.span)?;
+            Ok(SourceOperand::WriteMoveVectors(writes, moves, one.span))
         }
         OperandKind::TableRef => {
             // A table reference is a file-scoped table LABEL (label
@@ -1871,6 +1931,38 @@ L1:     nop
 
         let e = lower_vectors_src(".func f\n        wr [1,,2]\n").unwrap_err();
         assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{e}");
+    }
+
+    #[test]
+    fn write_move_vectors_classify_into_two_groups() {
+        // `wrmv [w...], [m...]` arrives from the CST as ONE bracket token
+        // (`[1, -], [<, .]`); classify splits it into the write group and
+        // the move group, each parsed with the full element vocabulary.
+        let funcs = lower_vectors_src(".func f\n        vwrmv [1, -], [<, .]\n").unwrap();
+        match &funcs[0].items[0] {
+            SourceItem::Instr {
+                operand: SourceOperand::WriteMoveVectors(writes, moves, _),
+                ..
+            } => {
+                assert_eq!(writes, &vec![VecElem::Payload(1), VecElem::Keep]);
+                assert_eq!(moves, &vec![VecElem::MoveLeft, VecElem::Stay]);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_move_bad_group_shapes_are_rejected() {
+        // One bracket group only — the move vector is missing.
+        let e = lower_vectors_src(".func f\n        vwrmv [1, -]\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{e}");
+        // Three groups — an extra top-level comma.
+        let e = lower_vectors_src(".func f\n        vwrmv [1], [<], [>]\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{e}");
+        // No brackets at all — the region comma-splits into two plain
+        // operands, not one bracket token.
+        let e = lower_vectors_src(".func f\n        vwrmv 1, 2\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
     }
 
     #[test]

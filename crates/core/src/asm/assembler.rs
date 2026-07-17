@@ -345,6 +345,14 @@ fn assemble_function(
                             move_vector_element,
                         )?);
                     }
+                    (
+                        OperandKind::WriteMoveVec,
+                        SourceOperand::WriteMoveVectors(writes, moves, vspan),
+                    ) => {
+                        slots.push(write_move_slot(
+                            *opcode, span, *vspan, writes, moves, sig_arity,
+                        )?);
+                    }
                     (OperandKind::RelI8 | OperandKind::RelI32, SourceOperand::SymbolName(name)) => {
                         match entry.flow {
                             Flow::Call => {
@@ -689,6 +697,52 @@ fn vector_slot(
     }
     let encoded = encode_operand(&Operand::Symbols(vals))
         .map_err(|m| err(span, AsmErrorKind::EncodeError(m)))?;
+    let mut bytes = vec![opcode];
+    bytes.extend(encoded);
+    Ok(Slot::Fixed { span, bytes })
+}
+
+/// Encodes a `wrmv [w…], [m…]` two-vector operand into a fixed slot: the
+/// write elements through the write vocabulary, the move elements through
+/// the move vocabulary, then the fused wire form — both self-delimiting
+/// groups back to back (docs/formats.md (assembly text)). In a signed
+/// function BOTH groups must be exactly the routine arity wide; unsigned
+/// functions keep the arch's 1..=16 freedom. `vector_span` carries any
+/// vocabulary / width diagnostic; `span` the slot and any encode failure.
+fn write_move_slot(
+    opcode: u8,
+    span: Span,
+    vector_span: Span,
+    writes: &[VecElem],
+    moves: &[VecElem],
+    sig_arity: Option<u8>,
+) -> Result<Slot, AsmError> {
+    if let Some(arity) = sig_arity
+        && (writes.len() != usize::from(arity) || moves.len() != usize::from(arity))
+    {
+        return Err(err(
+            vector_span,
+            AsmErrorKind::BadVector("vector width does not match the routine arity"),
+        ));
+    }
+    let mut w = Vec::with_capacity(writes.len());
+    for elem in writes {
+        w.push(
+            write_vector_element(elem).map_err(|m| err(vector_span, AsmErrorKind::BadVector(m)))?,
+        );
+    }
+    let mut m = Vec::with_capacity(moves.len());
+    for elem in moves {
+        m.push(
+            move_vector_element(elem)
+                .map_err(|msg| err(vector_span, AsmErrorKind::BadVector(msg)))?,
+        );
+    }
+    let encoded = encode_operand(&Operand::WriteMove {
+        writes: w,
+        moves: m,
+    })
+    .map_err(|msg| err(span, AsmErrorKind::EncodeError(msg)))?;
     let mut bytes = vec![opcode];
     bytes.extend(encoded);
     Ok(Slot::Fixed { span, bytes })
@@ -1369,6 +1423,12 @@ mod tests {
                     opcode: 0x18,
                     mnemonic: "vmove",
                     operand: OperandKind::MoveVec,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x19,
+                    mnemonic: "vwrmv",
+                    operand: OperandKind::WriteMoveVec,
                     flow: FT,
                 },
                 SyntaxEntry {
@@ -2246,6 +2306,78 @@ T0: .row [1, 2]
         }
         let e = asm_fake(".func main\n        vmove [*, .]\n").unwrap_err();
         assert_eq!(e.span, Span::new(2, 15, 2, 21)); // the `[*, .]` region
+    }
+
+    // -- Fused write+move vector operands (WriteMoveVec emit arm) -------
+
+    #[test]
+    fn write_move_vector_assembles_with_both_groups_back_to_back() {
+        let obj =
+            asm_fake(".func main\n        vwrmv [1, -, 2], [<, ., >]\n        stp\n").unwrap();
+        // [ent 0E][vwrmv 19]
+        //   write group: 1, keep 0x7F, 2 (high bit on the last) → 01 7F 82
+        //   move group: < → 1, . → 0, > → 2 (high bit on the last) → 01 00 82
+        // [stp 02]
+        assert_eq!(
+            obj.blobs[0],
+            vec![0x0E, 0x19, 0x01, 0x7F, 0x82, 0x01, 0x00, 0x82, 0x02]
+        );
+    }
+
+    #[test]
+    fn write_move_vocabulary_violations_are_bad_vector() {
+        // The write group takes payloads/keep; a move glyph or wildcard in
+        // it refuses. The move group takes moves only; a payload/keep in it
+        // refuses. The span is the whole `[..], [..]` region's.
+        for bad in [
+            "vwrmv [<], [<]",   // move glyph in the write group
+            "vwrmv [*], [<]",   // wildcard in the write group
+            "vwrmv [127], [<]", // 0x7F would alias keep
+            "vwrmv [1], [1]",   // payload in the move group
+            "vwrmv [1], [-]",   // keep in the move group
+        ] {
+            let src = format!(".func main\n        {bad}\n        stp\n");
+            let e = asm_fake(&src).unwrap_err();
+            assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{bad}: {e}");
+        }
+    }
+
+    #[test]
+    fn signed_function_write_move_checks_both_group_widths() {
+        // `main` is signed at arity 2. A mismatched write group and a
+        // mismatched move group each refuse at the routine arity.
+        for bad in ["vwrmv [1, 2, 3], [<, >]", "vwrmv [1, 2], [<]"] {
+            let src =
+                format!(".routine main, tapes=2, alpha=(3, 5)\n.func main\n    {bad}\n    stp\n");
+            let e = asm_fake(&src).unwrap_err();
+            assert!(
+                matches!(e.kind, AsmErrorKind::BadVector(m) if m.contains("arity")),
+                "{bad}: {e:?}"
+            );
+        }
+        // Both groups at the arity assemble.
+        assert!(
+            asm_fake(
+                ".routine main, tapes=2, alpha=(3, 5)\n.func main\n    vwrmv [1, 2], [<, >]\n    stp\n"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unsigned_write_move_keeps_full_width_freedom() {
+        // No `.routine`: the arch's 1..=16 freedom stands. A width-3 fused
+        // write+move assembles.
+        assert!(asm_fake(".func main\n    vwrmv [1, -, 2], [<, ., >]\n    stp\n").is_ok());
+    }
+
+    #[test]
+    fn write_move_bad_operand_shapes_are_rejected() {
+        // One bracket group only, and a bare (unbracketed) operand.
+        let e = asm_fake(".func main\n    vwrmv [1, 2]\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadVector(_)), "{e}");
+        let e = asm_fake(".func main\n    vwrmv 1, 2\n    stp\n").unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadOperand(_)), "{e}");
     }
 
     // -- Signed-function static vector-width check ----------------------

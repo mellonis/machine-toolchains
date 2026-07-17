@@ -35,6 +35,13 @@ pub(crate) enum DecodedOperand {
         target: u32,
         table: u32,
     },
+    /// A [`OperandKind::WriteMoveVec`] operand: the decoded write payloads
+    /// (`0x7F` = keep) then the move codes (0/1/2), each recovered from its
+    /// self-delimiting group. Rendered `[w…], [m…]` by the disassembler.
+    WriteMove {
+        writes: Vec<u32>,
+        moves: Vec<u32>,
+    },
 }
 
 /// Decode ONE instruction at `addr` within `[addr, end)`. `None` means an
@@ -121,6 +128,27 @@ pub(crate) fn decode_at(syntax: &ArchSyntax, code: &[u8], addr: u32, end: u32) -
                 return None;
             }
             (i - addr, DecodedOperand::Ints(symbols))
+        }
+        // Two self-delimiting groups back to back: walk to the first
+        // terminator (writes), then to the second (moves). Either group
+        // running off the end before its terminator is a truncated operand.
+        OperandKind::WriteMoveVec => {
+            let mut i = addr + 1;
+            let group = |i: &mut u32| -> Option<Vec<u32>> {
+                let mut vals = Vec::new();
+                while *i < end {
+                    let b = code[*i as usize];
+                    vals.push(u32::from(b & 0x7F));
+                    *i += 1;
+                    if b & 0x80 != 0 {
+                        return Some(vals);
+                    }
+                }
+                None
+            };
+            let writes = group(&mut i)?;
+            let moves = group(&mut i)?;
+            (i - addr, DecodedOperand::WriteMove { writes, moves })
         }
     };
     Some(Decoded {

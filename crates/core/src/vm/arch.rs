@@ -33,6 +33,15 @@ pub enum OperandKind {
     /// displacement half relocates like a call target; the offset half is
     /// an absolute table-space address like [`OperandKind::TableRef`].
     FramedCall,
+    /// Two self-delimiting compact groups back to back: a WRITE vector
+    /// then a MOVE vector, each 7-bit payloads with the high bit
+    /// terminating its group ([`OperandKind::SymbolVec`]'s wire form,
+    /// twice). Decodes to [`Operand::WriteMove`]; the write group carries
+    /// per-tape symbol indices (`0x7F` = keep) and the move group per-tape
+    /// move codes (0 = stay, 1 = left, 2 = right). Both groups must be
+    /// non-empty. The fused write+move of one formal step (docs/formats.md
+    /// (assembly text)).
+    WriteMoveVec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +60,13 @@ pub enum Operand {
     FramedCall {
         rel: i32,
         table: u32,
+    },
+    /// An [`OperandKind::WriteMoveVec`] operand: the per-tape write
+    /// symbols (`0x7F` = keep) then the per-tape move codes (0/1/2), each
+    /// group self-delimiting on the wire.
+    WriteMove {
+        writes: Vec<u32>,
+        moves: Vec<u32>,
     },
 }
 
@@ -157,6 +173,29 @@ pub fn encode_operand(operand: &Operand) -> Result<Vec<u8>, &'static str> {
             }
             let mut out: Vec<u8> = init.iter().map(|&s| s as u8).collect();
             out.push(*last as u8 | 0x80);
+            out
+        }
+        // The write group (7-bit payloads, `0x7F` = keep legal, high bit
+        // terminating) immediately followed by the move group (same wire
+        // form, codes 0/1/2 only). Neither group may be empty — an empty
+        // group has no last element to carry its terminator bit.
+        Operand::WriteMove { writes, moves } => {
+            let Some((w_last, w_init)) = writes.split_last() else {
+                return Err("write-move write group must not be empty");
+            };
+            if writes.iter().any(|&s| s > 0x7F) {
+                return Err("write payload exceeds 7 bits");
+            }
+            let Some((m_last, m_init)) = moves.split_last() else {
+                return Err("write-move move group must not be empty");
+            };
+            if moves.iter().any(|&m| m > 2) {
+                return Err("move code exceeds 2");
+            }
+            let mut out: Vec<u8> = w_init.iter().map(|&s| s as u8).collect();
+            out.push(*w_last as u8 | 0x80);
+            out.extend(m_init.iter().map(|&m| m as u8));
+            out.push(*m_last as u8 | 0x80);
             out
         }
     })
@@ -327,5 +366,55 @@ mod tests {
         );
         assert!(encode_operand(&Operand::Symbols(vec![])).is_err());
         assert!(encode_operand(&Operand::Symbols(vec![0x80])).is_err());
+
+        // WriteMove: the write group then the move group, each terminated
+        // by the high bit on its last element. `0x7F` keep encodes as-is
+        // (0xFF once the terminator bit is set); move codes stay 0/1/2.
+        assert_eq!(
+            encode_operand(&Operand::WriteMove {
+                writes: vec![1],
+                moves: vec![2],
+            })
+            .unwrap(),
+            vec![0x81, 0x82]
+        );
+        assert_eq!(
+            encode_operand(&Operand::WriteMove {
+                writes: vec![3, 0x7F],
+                moves: vec![0, 1],
+            })
+            .unwrap(),
+            vec![0x03, 0xFF, 0x00, 0x81]
+        );
+        // Empty either group refuses (no last element for the terminator).
+        assert!(
+            encode_operand(&Operand::WriteMove {
+                writes: vec![],
+                moves: vec![1],
+            })
+            .is_err()
+        );
+        assert!(
+            encode_operand(&Operand::WriteMove {
+                writes: vec![1],
+                moves: vec![],
+            })
+            .is_err()
+        );
+        // A write payload above 7 bits and a move code above 2 both refuse.
+        assert!(
+            encode_operand(&Operand::WriteMove {
+                writes: vec![0x80],
+                moves: vec![0],
+            })
+            .is_err()
+        );
+        assert!(
+            encode_operand(&Operand::WriteMove {
+                writes: vec![0],
+                moves: vec![3],
+            })
+            .is_err()
+        );
     }
 }

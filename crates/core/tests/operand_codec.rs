@@ -19,6 +19,7 @@ impl mtc_core::vm::Arch for CodecArch {
             0x05 => Some(mtc_core::vm::OperandKind::MoveVec),
             0x06 => Some(mtc_core::vm::OperandKind::Imm8),
             0x07 => Some(mtc_core::vm::OperandKind::FramedCall),
+            0x08 => Some(mtc_core::vm::OperandKind::WriteMoveVec),
             _ => None,
         }
     }
@@ -115,6 +116,18 @@ proptest! {
         // whose top bit is set and a table offset above i32::MAX.
         round_trip(0x07, Operand::FramedCall { rel, table });
     }
+
+    #[test]
+    fn write_move_vec_round_trips(
+        writes in proptest::collection::vec(0u32..=0x7F, 1..=16),
+        moves in proptest::collection::vec(0u32..=2, 1..=16),
+    ) {
+        // Two self-delimiting groups back to back: the write payloads
+        // (0x7F = keep is a value, not a terminator) then the move codes
+        // (0/1/2). Both widths 1..=16, independent of each other; the core
+        // splits at the first terminator, so the two groups survive intact.
+        round_trip(0x08, Operand::WriteMove { writes, moves });
+    }
 }
 
 /// Feeds `code` (an opcode + fewer operand bytes than the kind needs) to
@@ -131,6 +144,7 @@ fn expect_trap_on_truncated(code: &[u8]) {
             match opcode {
                 0x06 => Some(mtc_core::vm::OperandKind::Imm8),
                 0x07 => Some(mtc_core::vm::OperandKind::FramedCall),
+                0x08 => Some(mtc_core::vm::OperandKind::WriteMoveVec),
                 _ => None,
             }
         }
@@ -183,4 +197,37 @@ fn empty_vectors_do_not_encode() {
     // self-delimiting via the high bit on the LAST element — an empty
     // vector has no last element to carry it, so encoding refuses.
     assert!(encode_operand(&Operand::Symbols(vec![])).is_err());
+}
+
+#[test]
+fn truncated_write_move_vec_traps_not_panics() {
+    // Opcode alone: no write group at all.
+    expect_trap_on_truncated(&[0x08]);
+    // Mid-write-group: two write bytes with no high-bit terminator, then
+    // the code runs out.
+    expect_trap_on_truncated(&[0x08, 0x01, 0x02]);
+    // Mid-move-group: the write group terminates (0x81) but the move group
+    // starts (0x00) and never terminates.
+    expect_trap_on_truncated(&[0x08, 0x81, 0x00]);
+}
+
+#[test]
+fn write_move_empty_groups_do_not_encode() {
+    // Each group is self-delimiting via the high bit on its LAST element,
+    // so an empty group has no element to carry the terminator — encoding
+    // refuses either empty group.
+    assert!(
+        encode_operand(&Operand::WriteMove {
+            writes: vec![],
+            moves: vec![1]
+        })
+        .is_err()
+    );
+    assert!(
+        encode_operand(&Operand::WriteMove {
+            writes: vec![1],
+            moves: vec![]
+        })
+        .is_err()
+    );
 }

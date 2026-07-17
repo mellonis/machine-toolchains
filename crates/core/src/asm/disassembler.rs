@@ -102,6 +102,35 @@ fn ints_operand_text(syntax: &ArchSyntax, kind: OperandKind, v: &[u32]) -> Strin
     format!("[{}]", elems.join(", "))
 }
 
+/// Renders a decoded `wrmv`-style two-vector operand as `[w…], [m…]`
+/// (docs/formats.md (assembly text)): the write group with `-` for the
+/// keep marker (`0x7F`), the move group with the move glyphs (0 → `.`,
+/// 1 → `<`, 2 → `>`; an out-of-vocabulary code renders raw — defensive,
+/// the assembler never emits one). Independent of `caps.vectors`: the
+/// kind exists only under vector-capable dialects.
+fn write_move_operand_text(writes: &[u32], moves: &[u32]) -> String {
+    let w: Vec<String> = writes
+        .iter()
+        .map(|&e| {
+            if e == 0x7F {
+                "-".to_string()
+            } else {
+                e.to_string()
+            }
+        })
+        .collect();
+    let m: Vec<String> = moves
+        .iter()
+        .map(|&e| match e {
+            0 => ".".to_string(),
+            1 => "<".to_string(),
+            2 => ">".to_string(),
+            other => other.to_string(),
+        })
+        .collect();
+    format!("[{}], [{}]", w.join(", "), m.join(", "))
+}
+
 /// `.byte` fallback: one directive per byte, the label (if any) attached
 /// to the first line.
 fn push_byte_lines(out: &mut String, label: Option<&str>, bytes: &[u8]) {
@@ -703,6 +732,9 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                             }
                         }
                         DecodedOperand::Imm(n) => Some(format!("#{n}")),
+                        DecodedOperand::WriteMove { writes, moves } => {
+                            Some(write_move_operand_text(writes, moves))
+                        }
                         // A framed call: the displacement half relocates
                         // like a call (rendered from the reloc symbol), the
                         // frame half is a table-space label. A missing
@@ -1275,6 +1307,9 @@ pub fn disassemble_executable(
                             }
                         }
                         DecodedOperand::Imm(n) => Some((entry.mnemonic, format!("#{n}"))),
+                        DecodedOperand::WriteMove { writes, moves } => {
+                            Some((entry.mnemonic, write_move_operand_text(writes, moves)))
+                        }
                         // A framed call: the callee is a call root (rendered
                         // by name); the frame half is the call SITE index. A
                         // constant compose column (a hand-authored site, or an
@@ -1364,6 +1399,9 @@ pub fn listing_line(
                     None => format!("{t:#06x}"),
                 },
                 DecodedOperand::Imm(n) => format!("#{n}"),
+                DecodedOperand::WriteMove { writes, moves } => {
+                    write_move_operand_text(&writes, &moves)
+                }
                 DecodedOperand::FramedCall { target, table } => {
                     let tgt = match resolve(target) {
                         Some(name) => format!("{target:#06x} <{name}>"),
@@ -1489,6 +1527,12 @@ mod tests {
                     opcode: 0x18,
                     mnemonic: "vmove",
                     operand: OperandKind::MoveVec,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x19,
+                    mnemonic: "vwrmv",
+                    operand: OperandKind::WriteMoveVec,
                     flow: FT,
                 },
                 SyntaxEntry {
@@ -1654,6 +1698,30 @@ B:  stp
         let dis = disassemble_object(&syntax, &obj);
         assert_eq!(dis, src, "vector disassembly:\n{dis}");
         // Already canonical under fmt, and reassembly is exact.
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
+        assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
+    }
+
+    #[test]
+    fn write_move_vector_renders_two_groups_and_round_trips() {
+        use crate::asm::{AsmCaps, format_asm_with};
+        // A fused `wrmv` renders both groups `[w…], [m…]` — the write group
+        // with `-` for keep, the move group with the move glyphs — and
+        // assemble ∘ dis ∘ assemble is a byte fixpoint.
+        let syntax = fake_syntax();
+        let src = "\
+.func main
+        vwrmv   [1, -, 2], [<, ., >]
+        stp
+";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let dis = disassemble_object(&syntax, &obj);
+        assert_eq!(dis, src, "wrmv disassembly:\n{dis}");
         let caps = AsmCaps {
             tables: true,
             rept: true,

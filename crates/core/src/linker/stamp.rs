@@ -665,6 +665,25 @@ fn build_stamp(
                 };
                 emit_move(&mut blob, entry.opcode, vec, &projs, ma);
             }
+            OperandKind::WriteMoveVec => {
+                // A fused write+move: project both halves like the separate
+                // `wr`/`mov` would be (all writes precede all moves — one
+                // formal step), then re-emit the two-group wire form.
+                let DecodedOperand::WriteMove { writes, moves } = operand else {
+                    unreachable!("WriteMoveVec decodes to WriteMove")
+                };
+                emit_write_move(
+                    &mut blob,
+                    syntax,
+                    entry.opcode,
+                    writes,
+                    moves,
+                    comp,
+                    &projs,
+                    ma,
+                    &callee.name,
+                )?;
+            }
             OperandKind::TableRef => {
                 let DecodedOperand::TableAddr(t_off) = operand else {
                     unreachable!("TableRef decodes to TableAddr")
@@ -872,6 +891,59 @@ fn emit_move(blob: &mut Vec<u8>, opcode: u8, vec: &[u32], projs: &[TapeProj], ma
     }
     blob.push(opcode);
     encode_vec_into(blob, &out);
+}
+
+/// Stamps a fused `wrmv [w…], [m…]` through the composite: the write half
+/// projects exactly as [`emit_write`] does (a virtual write onto a map
+/// hole traps unmapped-write, replacing the whole instruction — the move
+/// never happens under a trap-stop), the move half exactly as
+/// [`emit_move`] does, and the two physical vectors re-emit as the fused
+/// two-group wire form (docs/formats.md (assembly text)). Behaviorally the
+/// stamped `wr; mov` pair, in one instruction.
+#[allow(clippy::too_many_arguments)]
+fn emit_write_move(
+    blob: &mut Vec<u8>,
+    syntax: &ArchSyntax,
+    opcode: u8,
+    writes: &[u32],
+    moves: &[u32],
+    comp: &Composite,
+    projs: &[TapeProj],
+    ma: usize,
+    name: &str,
+) -> Result<(), LinkError> {
+    let mut wout = vec![0x7Fu8; ma]; // keep
+    for k in 0..writes.len().min(comp.tapes.len()) {
+        let v = writes[k];
+        if v == 0x7F {
+            continue; // keep at phys(k)
+        }
+        match write_image(&comp.tapes[k], v as u16, projs[k].phys_card) {
+            Some(p) if p <= 0x7E => wout[projs[k].phys] = p as u8,
+            Some(_) => {
+                return Err(LinkError::BadFrameDescriptor {
+                    symbol: name.to_string(),
+                    message: "a stamped write maps onto a physical symbol past the 7-bit budget"
+                        .to_string(),
+                });
+            }
+            None => {
+                // No physical image: the whole fused step traps
+                // unmapped-write; the move half is dropped (execution stops).
+                blob.push(trap_opcode(syntax, name)?);
+                blob.push(1); // trap #1 (unmapped write)
+                return Ok(());
+            }
+        }
+    }
+    let mut mout = vec![0u8; ma]; // stay
+    for k in 0..moves.len().min(projs.len()) {
+        mout[projs[k].phys] = moves[k] as u8;
+    }
+    blob.push(opcode);
+    encode_vec_into(blob, &wout);
+    encode_vec_into(blob, &mout);
+    Ok(())
 }
 
 /// Encode a self-delimiting symbol/move vector: 7-bit payloads, high bit on
