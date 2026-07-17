@@ -840,19 +840,15 @@ fn trap_opcode(syntax: &ArchSyntax, name: &str) -> Result<u8, LinkError> {
 
 /// Project a write vector to machine width: `phys(k)` gets the callee
 /// element mapped through the write map; every unbound position keeps
-/// (`0x7F`). A payload with no physical image turns the whole instruction
-/// into `trap #1`.
-#[allow(clippy::too_many_arguments)]
-fn emit_write(
-    blob: &mut Vec<u8>,
-    syntax: &ArchSyntax,
-    opcode: u8,
+/// (`0x7F`). Returns `None` at the first payload with no physical image (a
+/// write map hole) — the caller lowers the whole instruction to a trap.
+fn project_writes(
     vec: &[u32],
     comp: &Composite,
     projs: &[TapeProj],
     ma: usize,
     name: &str,
-) -> Result<(), LinkError> {
+) -> Result<Option<Vec<u8>>, LinkError> {
     let mut out = vec![0x7Fu8; ma]; // keep
     for k in 0..vec.len().min(comp.tapes.len()) {
         let v = vec[k];
@@ -868,27 +864,50 @@ fn emit_write(
                         .to_string(),
                 });
             }
-            None => {
-                // No physical image: the whole write traps unmapped-write.
-                blob.push(trap_opcode(syntax, name)?);
-                blob.push(1); // trap #1 (unmapped write)
-                return Ok(());
-            }
+            None => return Ok(None), // write map hole
         }
     }
-    blob.push(opcode);
-    encode_vec_into(blob, &out);
-    Ok(())
+    Ok(Some(out))
 }
 
 /// Project a move vector to machine width: `phys(k)` gets callee tape `k`'s
 /// move code; every unbound position stays (`0`). Moves are physical motion,
 /// so they are not symbol-translated.
-fn emit_move(blob: &mut Vec<u8>, opcode: u8, vec: &[u32], projs: &[TapeProj], ma: usize) {
+fn project_moves(vec: &[u32], projs: &[TapeProj], ma: usize) -> Vec<u8> {
     let mut out = vec![0u8; ma]; // stay
     for k in 0..vec.len().min(projs.len()) {
         out[projs[k].phys] = vec[k] as u8;
     }
+    out
+}
+
+/// Emit a projected write: [`project_writes`] onto the machine width, or a
+/// `trap #1` when a payload has no physical image (an unmapped write).
+#[allow(clippy::too_many_arguments)]
+fn emit_write(
+    blob: &mut Vec<u8>,
+    syntax: &ArchSyntax,
+    opcode: u8,
+    vec: &[u32],
+    comp: &Composite,
+    projs: &[TapeProj],
+    ma: usize,
+    name: &str,
+) -> Result<(), LinkError> {
+    let Some(out) = project_writes(vec, comp, projs, ma, name)? else {
+        // No physical image: the whole write traps unmapped-write.
+        blob.push(trap_opcode(syntax, name)?);
+        blob.push(1); // trap #1 (unmapped write)
+        return Ok(());
+    };
+    blob.push(opcode);
+    encode_vec_into(blob, &out);
+    Ok(())
+}
+
+/// Emit a projected move: [`project_moves`] onto the machine width.
+fn emit_move(blob: &mut Vec<u8>, opcode: u8, vec: &[u32], projs: &[TapeProj], ma: usize) {
+    let out = project_moves(vec, projs, ma);
     blob.push(opcode);
     encode_vec_into(blob, &out);
 }
@@ -912,34 +931,14 @@ fn emit_write_move(
     ma: usize,
     name: &str,
 ) -> Result<(), LinkError> {
-    let mut wout = vec![0x7Fu8; ma]; // keep
-    for k in 0..writes.len().min(comp.tapes.len()) {
-        let v = writes[k];
-        if v == 0x7F {
-            continue; // keep at phys(k)
-        }
-        match write_image(&comp.tapes[k], v as u16, projs[k].phys_card) {
-            Some(p) if p <= 0x7E => wout[projs[k].phys] = p as u8,
-            Some(_) => {
-                return Err(LinkError::BadFrameDescriptor {
-                    symbol: name.to_string(),
-                    message: "a stamped write maps onto a physical symbol past the 7-bit budget"
-                        .to_string(),
-                });
-            }
-            None => {
-                // No physical image: the whole fused step traps
-                // unmapped-write; the move half is dropped (execution stops).
-                blob.push(trap_opcode(syntax, name)?);
-                blob.push(1); // trap #1 (unmapped write)
-                return Ok(());
-            }
-        }
-    }
-    let mut mout = vec![0u8; ma]; // stay
-    for k in 0..moves.len().min(projs.len()) {
-        mout[projs[k].phys] = moves[k] as u8;
-    }
+    let Some(wout) = project_writes(writes, comp, projs, ma, name)? else {
+        // No physical image: the whole fused step traps unmapped-write; the
+        // move half is dropped (execution stops before the projected moves).
+        blob.push(trap_opcode(syntax, name)?);
+        blob.push(1); // trap #1 (unmapped write)
+        return Ok(());
+    };
+    let mout = project_moves(moves, projs, ma);
     blob.push(opcode);
     encode_vec_into(blob, &wout);
     encode_vec_into(blob, &mout);
