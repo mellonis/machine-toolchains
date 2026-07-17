@@ -1607,6 +1607,10 @@ fn frameless_link_has_no_bindings() {
 /// The dis frames legend WITHOUT a map: composites are named from the image
 /// alone (descriptor decode + the site callees), and two identical labels
 /// collide, so the second is `.2` — the same disambiguation the sidecar uses.
+/// Legend composites carry the `C<i>` prefix (directory index, 1-based),
+/// distinct from the code section's `F<n>` frame-descriptor labels (tables
+/// order, 0-based): with two composites the two numberings diverge, so the
+/// legend's `C1`/`C2` and the code's `F0`/`F1` coexist without ambiguity.
 #[test]
 fn dis_legend_names_raw_composites_from_the_image() {
     let out = link_one(asm(TWO_SITES, false));
@@ -1616,10 +1620,26 @@ fn dis_legend_names_raw_composites_from_the_image() {
         text.contains("; frames: 2 composite(s), 2 site(s)"),
         "legend header:\n{text}"
     );
-    assert!(text.contains(";   F1: main@[0]"), "composite 1:\n{text}");
+    assert!(text.contains(";   C1: main@[0]"), "composite 1:\n{text}");
     assert!(
-        text.contains(";   F2: main@[0].2"),
+        text.contains(";   C2: main@[0].2"),
         "collision suffix:\n{text}"
+    );
+    // The code section keeps the 0-based `F<n>` table labels — the same string
+    // family the legend deliberately avoids. `C1` (legend, composite 1) and
+    // `F0` (code, first descriptor) name the SAME descriptor here; the two
+    // prefixes keep them unambiguous where the old shared-`F` scheme collided.
+    assert!(
+        text.contains("fcall   main, F0"),
+        "code site 0 → F0:\n{text}"
+    );
+    assert!(
+        text.contains("fcall   main, F1"),
+        "code site 1 → F1:\n{text}"
+    );
+    assert!(
+        !text.contains(";   F"),
+        "legend uses C, not F, for composites:\n{text}"
     );
     // Both sites are constant, so no site summary line.
     assert!(
@@ -1650,11 +1670,12 @@ fn dis_legend_uses_map_binding_labels() {
         "legend header:\n{text}"
     );
     assert!(
-        text.contains(";   F1: sub@[0{1->2,2->1}, 1]"),
+        text.contains(";   C1: sub@[0{1->2,2->1}, 1]"),
         "map-labeled composite:\n{text}"
     );
     // The one site is constant → rendered by its F-label inline (F0, the
-    // tables-section descriptor label), not `@site`.
+    // tables-section descriptor label), not `@site`. Legend `C1` and code `F0`
+    // name the same descriptor under distinct prefixes.
     assert!(
         text.contains("fcall   sub, F0"),
         "constant site inline:\n{text}"
@@ -1693,7 +1714,7 @@ fn dis_legend_summarizes_a_context_dependent_site() {
         "non-constant site:\n{text}"
     );
     assert!(
-        text.contains(";   site2: [F3, F4]"),
+        text.contains(";   site2: [C3, C4]"),
         "site summary lists both composites:\n{text}"
     );
     // Four composites in the legend, one per directory entry.
@@ -1701,7 +1722,7 @@ fn dis_legend_summarizes_a_context_dependent_site() {
         text.contains("; frames: 4 composite(s), 3 site(s)"),
         "{text}"
     );
-    for f in ["F1", "F2", "F3", "F4"] {
-        assert!(text.contains(&format!(";   {f}: ")), "{f} listed:\n{text}");
+    for c in ["C1", "C2", "C3", "C4"] {
+        assert!(text.contains(&format!(";   {c}: ")), "{c} listed:\n{text}");
     }
 }

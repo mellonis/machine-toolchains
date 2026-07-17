@@ -479,7 +479,7 @@ fn cli_dis_shows_the_frames_legend() {
         out.stdout
     );
     assert!(
-        out.stdout.contains(";   F1: helper@["),
+        out.stdout.contains(";   C1: helper@["),
         "legend names the composite:\n{}",
         out.stdout
     );

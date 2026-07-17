@@ -852,9 +852,14 @@ fn parse_frames_region(exe: &Executable) -> Option<FramesRegion> {
 }
 
 /// The `tmt dis` frames legend (docs/formats.md (frames region)): a comment
-/// block naming every directory composite `F<i>` (`i` = composite index /
-/// frame-register value) by its canonical binding label, then a one-line
-/// summary of each context-dependent site's composites. Labels come from the
+/// block naming every directory composite `C<i>` (`i` = composite index /
+/// frame-register value, 1-based) by its canonical binding label, then a
+/// one-line summary of each context-dependent site's composites. The `C`
+/// prefix is deliberately distinct from the code section's `F<n>` table
+/// labels: `F…` names frame descriptors by tables-section order (0-based),
+/// `C…` names composites by directory index, and with ≥2 composites the two
+/// numberings diverge — sharing `F` would make `F1` ambiguous. Labels come
+/// from the
 /// map sidecar's `bindings` when present; without a map they are derived from
 /// the descriptor bytes alone (image-inspectability), named by the site
 /// callees. Every line is a `;` comment at column 0, so re-assembly ignores it
@@ -899,18 +904,18 @@ fn frames_legend(
     let mut out = String::new();
     out.push_str(&format!("; frames: {k} composite(s), {s} site(s)\n"));
     for (index, label) in &labeled {
-        out.push_str(&format!(";   F{index}: {label}\n"));
+        out.push_str(&format!(";   C{index}: {label}\n"));
     }
     // Context-dependent sites (a row-varying compose column) get a summary of
-    // the composites they can select; constant sites already render their
-    // `F`-label inline in the code.
+    // the composites they can select, by composite index (`C<i>`); constant
+    // sites already render their code-section `F`-label inline in the code.
     for site in 0..s {
         if region.constant(site).is_none() {
             let comps = region.site_composites(site);
             if !comps.is_empty() {
                 let list = comps
                     .iter()
-                    .map(|c| format!("F{c}"))
+                    .map(|c| format!("C{c}"))
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.push_str(&format!(";   site{site}: [{list}]\n"));
