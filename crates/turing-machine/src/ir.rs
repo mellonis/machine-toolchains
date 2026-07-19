@@ -533,14 +533,21 @@ fn lower_rule(
     };
 
     let resolve_state = |name: &str| -> Result<u32, CompileError> {
-        name_to_id.get(name).copied().ok_or(CompileError {
-            span: r.span,
-            // A goto/continuation target that names no concrete state. For a
-            // T4-validated module this can only be a routine STATE PARAMETER
-            // continuation in an emitted routine — a construct whose call-site
-            // threading awaits the composition engine (out of phase-6a scope).
-            kind: CompileErrorKind::UndefinedState(name.to_string()),
-        })
+        if let Some(id) = name_to_id.get(name).copied() {
+            return Ok(id);
+        }
+        // A goto/continuation target that names no concrete state. For a
+        // T4-validated module this is either the routine's own STATE PARAMETER
+        // (a continuation the call site supplies — the composition engine's
+        // work, out of scope here) or a genuine dangling reference. Report each
+        // honestly rather than folding a not-yet-supported construct into
+        // "undefined state".
+        let kind = if ew.state_params.iter().any(|p| p == name) {
+            CompileErrorKind::StateParamContinuationUnsupported(name.to_string())
+        } else {
+            CompileErrorKind::UndefinedState(name.to_string())
+        };
+        Err(CompileError { span: r.span, kind })
     };
     let then_of = |cont: &Continuation| -> Result<IrThen, CompileError> {
         Ok(match cont {
@@ -566,9 +573,12 @@ fn lower_rule(
         Transition2::TrapRead => (IrTransition::TrapRead, true),
         Transition2::TrapWrite => (IrTransition::TrapWrite, true),
         Transition2::Call {
-            target, args, then, ..
+            target,
+            external,
+            args,
+            then,
         } => {
-            let binding = resolve_binding(ew, target, args, expanded, r.span)?;
+            let binding = resolve_binding(ew, target, args, *external, expanded, r.span)?;
             (
                 IrTransition::CallThen {
                     target: target.clone(),
@@ -592,7 +602,14 @@ fn lower_rule(
                 .iter()
                 .find(|b| b.name == *name)
                 .expect("a bind-call names a declared bind");
-            let binding = resolve_binding(ew, &bind.target, &bind.args, expanded, r.span)?;
+            let binding = resolve_binding(
+                ew,
+                &bind.target,
+                &bind.args,
+                bind.external,
+                expanded,
+                r.span,
+            )?;
             (
                 IrTransition::CallThen {
                     target: bind.target.clone(),
@@ -624,29 +641,47 @@ fn resolve_binding(
     host: &ExpandedWorld,
     target: &str,
     args: &[BindingArg],
+    external: bool,
     expanded: &Expanded,
     site: Span,
 ) -> Result<Vec<IrTapeBinding>, CompileError> {
-    // Tape-param args only; state-param continuation args (a routine with
-    // `state` params) are not part of the tape-binding operand — their
-    // threading is the composition engine's, unexercised by the phase-6a
-    // milestone.
-    let tape_args: Vec<&BindingArg> = args
+    // A named binding arg (`name = target`) is a tape-target binding OR a
+    // state-param continuation — a bare name is either, resolution decides.
+    // A call with no named args carries no binding at all (a plain call the
+    // linker resolves), so it needs no callee signature. State-param args do
+    // not match any callee tape and drop out of the loop below; the composition
+    // engine threads them (out of scope here).
+    let named_args: Vec<&BindingArg> = args
         .iter()
         .filter(|a| matches!(&a.value, BindingValue::Named { .. }))
         .collect();
-    if tape_args.is_empty() {
+    if named_args.is_empty() {
         return Ok(Vec::new());
     }
 
-    let callee = expanded.worlds.iter().find(|w| w.name == target).expect(
-        "phase-6a resolves binding maps against a locally-emitted callee; \
-             cross-file external calls with bindings are a link-time concern",
-    );
+    // Binding args need the callee's tape signature to rewrite its rows. That
+    // signature is unknown for a routine defined outside this compilation unit
+    // (imported-to-external / `::`-absolute) — a cross-object concern for the
+    // composition engine, not this lowering. Refuse with a clear error rather
+    // than the earlier panic on the missing world.
+    if external {
+        return Err(CompileError {
+            span: site,
+            kind: CompileErrorKind::ExternalBindingUnsupported(target.to_string()),
+        });
+    }
+
+    // Non-external ⇒ the callee is one of the module's emitted worlds (`expand`
+    // emits the machine and every routine, reachable or not).
+    let callee = expanded
+        .worlds
+        .iter()
+        .find(|w| w.name == target)
+        .expect("a non-external callee is one of the module's emitted worlds");
 
     let mut binding = Vec::with_capacity(callee.tapes.len());
     for ct in &callee.tapes {
-        let Some(arg) = tape_args.iter().find(|a| a.name == ct.name) else {
+        let Some(arg) = named_args.iter().find(|a| a.name == ct.name) else {
             // Every callee tape is bound (T4's arity check); defensive.
             return Err(CompileError {
                 span: site,
@@ -659,7 +694,7 @@ fn resolve_binding(
             ..
         } = &arg.value
         else {
-            unreachable!("tape_args are Named by construction");
+            unreachable!("named_args are Named by construction");
         };
 
         // The host physical tape this callee tape draws from.
@@ -948,6 +983,14 @@ mod tests {
         lower(&ex, &a.resolved).unwrap_or_else(|e| panic!("lower failed: {e}"))
     }
 
+    /// analyze → expand → lower, expecting the front end to pass and lowering
+    /// to fail; returns the lowering `CompileError`.
+    fn lower_err_of(src: &str) -> CompileError {
+        let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
+        let ex = expand(&a.resolved).unwrap_or_else(|e| panic!("expand failed: {e}"));
+        lower(&ex, &a.resolved).expect_err("expected lowering to fail")
+    }
+
     const A1: &str = "\
 alphabet ab { '_', 'a', 'b' }
 machine {
@@ -1220,6 +1263,143 @@ machine {
         );
         validate_world(m).unwrap();
         validate_world(plus).unwrap();
+    }
+
+    /// A call that binds tapes into an EXTERNAL routine (imported, no local
+    /// definition) cannot be lowered — the binding rewrite needs the callee's
+    /// tape signature, which lives in another compilation unit. The reviewer's
+    /// exact repro; the compiler reports a clear error, never panicking. Both
+    /// the with-map and the bindless (`num = t`) forms of the tape binding
+    /// trigger it — the binding operand needs the signature either way.
+    #[test]
+    fn external_call_binding_tapes_is_a_clear_error_not_a_panic() {
+        // With a `with map { … }`.
+        let with_map = "\
+alphabet ab { '_', 'a', 'b' }
+use mylib::plusOne;
+machine {
+  tape t: ab;
+  entry state main {
+    ['a'] -> call plusOne(num = t with map { 'a'->'b' }) then done;
+    [*]   -> stop;
+  }
+  state done { [*] -> stop; }
+}";
+        let e = lower_err_of(with_map);
+        assert_eq!(e.kind.code(), "external-binding-unsupported");
+        assert!(
+            matches!(&e.kind, CompileErrorKind::ExternalBindingUnsupported(n) if n == "mylib::plusOne"),
+            "{:?}",
+            e.kind
+        );
+
+        // Bindless (`num = t`, no map) triggers it too — still a tape binding.
+        let bindless = "\
+alphabet ab { '_', 'a', 'b' }
+use mylib::plusOne;
+machine {
+  tape t: ab;
+  entry state main {
+    ['a'] -> call plusOne(num = t) then done;
+    [*]   -> stop;
+  }
+  state done { [*] -> stop; }
+}";
+        assert_eq!(
+            lower_err_of(bindless).kind.code(),
+            "external-binding-unsupported"
+        );
+    }
+
+    /// The bind-sugar path reaches the same lowering as a direct call, so an
+    /// external bind that binds tapes is the same clear error — with-map and
+    /// bindless alike.
+    #[test]
+    fn external_bind_sugar_binding_tapes_is_a_clear_error() {
+        let with_map = "\
+alphabet ab { '_', 'a', 'b' }
+use mylib::plusOne;
+machine {
+  tape t: ab;
+  bind plusOne(num = t with map { 'a'->'b' }) as h;
+  entry state main { [*] -> call h() then done; }
+  state done { [*] -> stop; }
+}";
+        let e = lower_err_of(with_map);
+        assert_eq!(e.kind.code(), "external-binding-unsupported");
+        assert!(
+            matches!(&e.kind, CompileErrorKind::ExternalBindingUnsupported(n) if n == "mylib::plusOne"),
+            "{:?}",
+            e.kind
+        );
+
+        let bindless = "\
+alphabet ab { '_', 'a', 'b' }
+use mylib::plusOne;
+machine {
+  tape t: ab;
+  bind plusOne(num = t) as h;
+  entry state main { [*] -> call h() then done; }
+  state done { [*] -> stop; }
+}";
+        assert_eq!(
+            lower_err_of(bindless).kind.code(),
+            "external-binding-unsupported"
+        );
+    }
+
+    /// A PLAIN external call — no binding args — still lowers: it becomes a
+    /// `CallThen` with an empty binding the LINKER resolves across objects.
+    #[test]
+    fn plain_external_call_still_lowers() {
+        let src = "\
+alphabet ab { '_', 'a' }
+use lib::ext;
+machine {
+  tape t: ab;
+  entry state go { [*] -> call ext() then done; }
+  state done { [*] -> stop; }
+}";
+        let (ir, _) = lower_of(src);
+        let m = world(&ir, "main");
+        let go = state(m, "go");
+        let call = go
+            .rules
+            .iter()
+            .find_map(|r| match &r.transition {
+                IrTransition::CallThen {
+                    target, binding, ..
+                } => Some((target.clone(), binding.clone())),
+                _ => None,
+            })
+            .expect("a call row");
+        assert_eq!(call.0, "lib::ext");
+        assert!(call.1.is_empty(), "a plain call carries no binding");
+    }
+
+    /// A routine that hands control to one of its own `state` parameters
+    /// (`goto <state-param>`) is a T4-valid definition, but lowering it on its
+    /// own needs the composition engine to thread the continuation from the
+    /// call site. It reports the honest not-yet-supported error, not the
+    /// misleading `undefined-state` (`k` IS a declared parameter).
+    #[test]
+    fn routine_goto_state_param_is_a_clear_error() {
+        let src = "\
+alphabet ab { '_', 'a' }
+routine r(tape t: ab, state k) {
+  entry state s { [*] -> goto k; }
+}
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}";
+        let e = lower_err_of(src);
+        assert_eq!(e.kind.code(), "state-param-continuation-unsupported");
+        assert!(
+            matches!(&e.kind, CompileErrorKind::StateParamContinuationUnsupported(n) if n == "k"),
+            "{:?}",
+            e.kind
+        );
     }
 
     #[test]

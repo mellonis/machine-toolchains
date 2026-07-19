@@ -210,6 +210,23 @@ pub enum CompileErrorKind {
     /// A rule's pattern / write / move vector width does not equal the world's
     /// tape count (a signed-function width mismatch). `expected` is the arity.
     RowWidth { expected: usize, got: usize },
+
+    // -- IR-lowering scope limits (composition engine not yet online) -------
+    /// A `call`/`bind` binds tapes into a routine that is not defined in this
+    /// compilation unit (an imported-to-external or `::`-absolute target). A
+    /// tape-binding operand rewrites the callee's rows through the binding
+    /// map, which needs the callee's tape signature — unknown for an external
+    /// routine until the composition engine crosses object boundaries.
+    /// `name` is the external target. A PLAIN external call (no tape binding)
+    /// stays legal — the linker resolves it. The `graft-call-unsupported`
+    /// analog for cross-object calls.
+    ExternalBindingUnsupported(String),
+    /// A routine body's `goto` (or continuation) targets one of the routine's
+    /// own `state` parameters. Threading a state parameter to its call-site
+    /// continuation is the composition engine's work; a routine that hands
+    /// control to a `state` param cannot yet be lowered on its own. `name` is
+    /// the state parameter.
+    StateParamContinuationUnsupported(String),
 }
 
 impl CompileErrorKind {
@@ -271,6 +288,10 @@ impl CompileErrorKind {
             CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
             CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
             CompileErrorKind::RowWidth { .. } => "row-width",
+            CompileErrorKind::ExternalBindingUnsupported(_) => "external-binding-unsupported",
+            CompileErrorKind::StateParamContinuationUnsupported(_) => {
+                "state-param-continuation-unsupported"
+            }
         }
     }
 }
@@ -528,6 +549,18 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "a rule vector has {got} elements but the world has {expected} tapes"
+                )
+            }
+            CompileErrorKind::ExternalBindingUnsupported(name) => {
+                write!(
+                    f,
+                    "this call binds tapes into `{name}`, which needs `{name}`'s tape signature — unknown for a routine defined outside this compilation unit; compile `{name}` in the same unit (a plain call with no tape binding is fine — the linker resolves it)"
+                )
+            }
+            CompileErrorKind::StateParamContinuationUnsupported(name) => {
+                write!(
+                    f,
+                    "this routine hands control to its `state` parameter `{name}` — threading a state parameter to the call site is not supported yet"
                 )
             }
         }
@@ -2148,10 +2181,12 @@ mod tests {
                 expected: 2,
                 got: 3,
             },
+            CompileErrorKind::ExternalBindingUnsupported("x".into()),
+            CompileErrorKind::StateParamContinuationUnsupported("x".into()),
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 50);
+        assert_eq!(all.len(), 52);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();
