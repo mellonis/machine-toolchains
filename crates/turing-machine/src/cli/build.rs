@@ -90,7 +90,9 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     let explicit_out = args.value("-o")?;
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
-        return Err(format!("compile takes exactly one input\n\n{COMPILE_USAGE}"));
+        return Err(format!(
+            "compile takes exactly one input\n\n{COMPILE_USAGE}"
+        ));
     };
     let input = Path::new(input);
 

@@ -593,7 +593,11 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
         tape.to_str().unwrap(),
     ]))
     .unwrap();
-    assert_eq!(out.code, 3, "A.5 holey read traps (exit 3):\n{}", out.stdout);
+    assert_eq!(
+        out.code, 3,
+        "A.5 holey read traps (exit 3):\n{}",
+        out.stdout
+    );
     assert!(out.stdout.contains("Trapped"), "{}", out.stdout);
 }
 

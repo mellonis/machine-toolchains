@@ -50,7 +50,7 @@ fn object(fixture: &str) -> ObjectFile {
 
 /// Link one object with the given options.
 fn link_with(obj: &ObjectFile, options: LinkOptions) -> Executable {
-    link(&[obj.clone()], &[], options)
+    link(std::slice::from_ref(obj), &[], options)
         .unwrap_or_else(|e| panic!("link failed: {e}"))
         .executable
 }
@@ -206,7 +206,10 @@ fn a6_graph_graft_multi_exit_runs_both_exits() {
     assert_eq!(outcome, Outcome::Stopped);
     let derived = [snap(0, &[3, 0], 1)];
     assert_eq!(snaps, derived);
-    assert_golden("a6_graph_graft_multi_exit.expected.tmt", &block(&derived, &[4]));
+    assert_golden(
+        "a6_graph_graft_multi_exit.expected.tmt",
+        &block(&derived, &[4]),
+    );
 
     // blank-found: seed "y" (cells [2], head 0):
     //   [0]='y' → >     ⇒ head 1
