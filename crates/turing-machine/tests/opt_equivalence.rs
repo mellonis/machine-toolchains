@@ -26,6 +26,7 @@ use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, 
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::asm::link;
 use mtc_turing_machine::compiler::{CompileOptions, CompileOutput, compile};
+use mtc_turing_machine::ir::IrTransition;
 use mtc_turing_machine::optimizer::{OptLevel, pass_names};
 
 // ── harness ──────────────────────────────────────────────────────────────
@@ -33,13 +34,20 @@ use mtc_turing_machine::optimizer::{OptLevel, pass_names};
 /// Compile a `.tmc` source at `level`, disabling the named passes
 /// (`--fno-<pass>`). Returns the whole output so a caller can read the object,
 /// the optimizer report (was a pass real?), or the final IR (did a barrier
-/// hold?).
+/// hold?). The default-OFF `outline` pass stays off (the whole existing suite
+/// runs this way); `object_of_ex` toggles it.
 fn object_of(src: &str, level: OptLevel, disabled: &[&str]) -> CompileOutput {
+    object_of_ex(src, level, disabled, false)
+}
+
+/// `object_of` with an explicit `--foutline` toggle.
+fn object_of_ex(src: &str, level: OptLevel, disabled: &[&str], outline: bool) -> CompileOutput {
     compile(
         src,
         CompileOptions {
             opt_level: level,
             disabled_passes: disabled.iter().map(|s| s.to_string()).collect(),
+            outline,
             ..Default::default()
         },
     )
@@ -189,6 +197,47 @@ fn assert_equivalent(src: &str, cases: &[Case]) {
             );
         }
     }
+}
+
+/// Like [`assert_equivalent`], but ALSO varies the `--foutline` toggle: build
+/// the 2×3 matrix with `outline` OFF and ON (twelve configurations) and assert
+/// the behavioral tuple is identical across all of them on every case. This is
+/// the `--foutline` on/off equivalence check on a program that actually folds.
+fn assert_equivalent_outline(src: &str, cases: &[Case]) {
+    let mut exes: Vec<((bool, OptLevel, CallMech), Executable)> = Vec::new();
+    for outline in [false, true] {
+        for level in [OptLevel::O0, OptLevel::O1] {
+            for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+                let exe = link_mech(&object_of_ex(src, level, &[], outline).object, mech);
+                exes.push(((outline, level, mech), exe));
+            }
+        }
+    }
+    for (i, case) in cases.iter().enumerate() {
+        let results: Vec<((bool, OptLevel, CallMech), Observed)> = exes
+            .iter()
+            .map(|(key, exe)| (*key, run(exe, case)))
+            .collect();
+        let (ref_key, r0) = &results[0];
+        for (key, obs) in &results[1..] {
+            assert_eq!(
+                (&r0.outcome, &r0.snaps, &r0.heads),
+                (&obs.outcome, &obs.snaps, &obs.heads),
+                "outline matrix divergence on case {i} ({case:?}): {ref_key:?} vs {key:?}"
+            );
+        }
+    }
+}
+
+/// Whether any world in `out` still carries a `call … then` transition.
+fn has_any_call(out: &CompileOutput) -> bool {
+    out.ir.worlds.iter().any(|w| {
+        w.states.iter().any(|s| {
+            s.rules
+                .iter()
+                .any(|r| matches!(r.transition, IrTransition::CallThen { .. }))
+        })
+    })
 }
 
 /// Read a committed `.tmc` fixture from `tests/golden/`.
@@ -695,5 +744,137 @@ fn dead_rows_then_dispatch_select_fire_in_one_run() {
     assert_eq!(
         o0.object, floor.object,
         "disabling every pass reproduces -O0 on the shadowed-row program"
+    );
+}
+
+// ── inline: full-passthrough calls collapse (the engine-agreement guard) ─────
+
+/// A machine that walks right swapping 'a'↔'b' by calling a small leaf routine
+/// with the identity binding `t = t` at each cell — a genuine full pass-through
+/// (empty map, equal cardinalities) the linker's composition engine would also
+/// collapse to a plain call. `inline` splices `flip` into `main` at every site,
+/// so no call survives at `-O1`.
+const INLINE_FLIP: &str = "\
+alphabet ab { '_', 'a', 'b' }
+routine flip(tape t: ab) {
+  entry state s {
+    ['a'] -> write ['b'] return;
+    ['b'] -> write ['a'] return;
+    [*]   -> return;
+  }
+}
+machine {
+  tape t: ab;
+  entry state scan {
+    ['a'] -> call flip(t = t) then advance;
+    ['b'] -> call flip(t = t) then advance;
+    [*]   -> stop;
+  }
+  state advance { [*] -> move [>] goto scan; }
+}";
+
+#[test]
+fn inline_full_passthrough_call_is_equivalent_across_the_matrix() {
+    // "ab" (→ "ba"), a lone blank (immediate stop), and "ba" (→ "ab").
+    // Observables agree across the whole 2×3 matrix.
+    assert_equivalent(
+        INLINE_FLIP,
+        &[&[(&[1, 2], 0)], &[(&[], 0)], &[(&[2, 1], 0)]],
+    );
+}
+
+#[test]
+fn inline_collapses_every_full_passthrough_call() {
+    // The engine-agreement observable + non-vacuity: `-O0` keeps the calls to
+    // `flip`; `-O1` has none (the compiler-side full-passthrough twin agreed
+    // with the engine's collapse decision on every site). The pass is reported,
+    // and the do-no-harm floor still reproduces `-O0`.
+    let o0 = object_of(INLINE_FLIP, OptLevel::O0, &[]);
+    let o1 = object_of(INLINE_FLIP, OptLevel::O1, &[]);
+    assert!(has_any_call(&o0), "-O0 keeps the full-passthrough calls");
+    assert!(
+        !has_any_call(&o1),
+        "inline collapsed every full-passthrough call (the engine-agreement observable)"
+    );
+    let fired: Vec<&str> = o1.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(fired.contains(&"inline"), "inline fired: {fired:?}");
+
+    let floor = object_of(INLINE_FLIP, OptLevel::O1, &pass_names());
+    assert_eq!(
+        o0.object, floor.object,
+        "disabling every pass reproduces -O0 on the inline program"
+    );
+}
+
+// ── outline: shared subgraphs fold under --foutline ──────────────────────────
+
+/// Two structurally-identical 7-state exit-free chains — the 'a' branch and the
+/// 'b' branch — each walking the head 7 cells right before converging on the
+/// single junction `mid`. With `--foutline` the two chains fold into ONE shared
+/// routine (each branch's head becomes a bindless call/return trampoline); the
+/// observable head motion is unchanged.
+const OUTLINE_TWIN_CHAINS: &str = "\
+alphabet ab { '_', 'a', 'b' }
+machine {
+  tape t: ab;
+  entry state start {
+    ['a'] -> goto a0;
+    ['b'] -> goto b0;
+    [*]   -> stop;
+  }
+  state a0 { [*] -> move [>] goto a1; }
+  state a1 { [*] -> move [>] goto a2; }
+  state a2 { [*] -> move [>] goto a3; }
+  state a3 { [*] -> move [>] goto a4; }
+  state a4 { [*] -> move [>] goto a5; }
+  state a5 { [*] -> move [>] goto a6; }
+  state a6 { [*] -> move [>] goto mid; }
+  state b0 { [*] -> move [>] goto b1; }
+  state b1 { [*] -> move [>] goto b2; }
+  state b2 { [*] -> move [>] goto b3; }
+  state b3 { [*] -> move [>] goto b4; }
+  state b4 { [*] -> move [>] goto b5; }
+  state b5 { [*] -> move [>] goto b6; }
+  state b6 { [*] -> move [>] goto mid; }
+  state mid { [*] -> stop; }
+}";
+
+#[test]
+fn outline_shared_chains_are_equivalent_on_and_off() {
+    // 'a' and 'b' each walk the head 7 cells right then stop; a blank stops at
+    // once. Observables agree across the whole 2×3 matrix with `--foutline` OFF
+    // AND ON — the fold changes the object, never the run.
+    assert_equivalent_outline(
+        OUTLINE_TWIN_CHAINS,
+        &[&[(&[1], 0)], &[(&[2], 0)], &[(&[], 0)]],
+    );
+}
+
+#[test]
+fn foutline_folds_the_shared_chains_and_is_inert_off() {
+    // Non-vacuity for both sides of the flag: without `--foutline`, `outline`
+    // never fires (default-OFF); with it, `outline` fires and the emitted object
+    // differs (one chain hoisted, both branches trampolined). Without the flag
+    // the two objects would be identical, so the delta is the fold itself.
+    let off = object_of_ex(OUTLINE_TWIN_CHAINS, OptLevel::O1, &[], false);
+    let on = object_of_ex(OUTLINE_TWIN_CHAINS, OptLevel::O1, &[], true);
+    let off_fired: Vec<&str> = off.report.opt.changes.iter().map(|c| c.pass).collect();
+    let on_fired: Vec<&str> = on.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(
+        !off_fired.contains(&"outline"),
+        "outline stays off without --foutline: {off_fired:?}"
+    );
+    assert!(
+        on_fired.contains(&"outline"),
+        "outline fires with --foutline: {on_fired:?}"
+    );
+    assert_ne!(
+        off.object, on.object,
+        "--foutline changes the emitted object (the fold)"
+    );
+    // A synthesized `.outline` routine appears only with the flag.
+    assert!(
+        on.ir.worlds.iter().any(|w| w.name.contains(".outline")),
+        "the hoisted routine is present with --foutline"
     );
 }
