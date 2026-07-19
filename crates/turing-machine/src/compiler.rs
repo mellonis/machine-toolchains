@@ -1542,11 +1542,15 @@ pub struct CompileOptions {
     pub strip_debugger: bool,
     /// `-O0` (default) or `-O1` — identical output until phase 6b.
     pub opt_level: OptLevel,
-    /// Pass names to disable (`--fno-<pass>`); no pass exists yet.
+    /// Pass names to disable (`--fno-<pass>`).
     pub disabled_passes: Vec<String>,
-    /// Capture per-stage IR snapshots (`--emit-ir=<stage>` backing):
-    /// `"lowered"` and `"final"` (no `after:<pass>` until 6b).
+    /// Capture per-stage IR snapshots (`--emit-ir=<stage>` backing): the
+    /// `"lowered"` / `"final"` bookends plus `after:<pass>` for each pass that
+    /// changed the IR.
     pub capture_ir: bool,
+    /// `--foutline`: enable the default-OFF `outline` optimizer pass. Inert
+    /// unless `-O1` is also set (the optimizer runs only at `-O1`).
+    pub outline: bool,
 }
 
 /// Structured stage report — `tmt -v` renders it; the library never prints
@@ -1600,6 +1604,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
             level: options.opt_level,
             disabled: options.disabled_passes.iter().cloned().collect(),
             capture: options.capture_ir,
+            outline: options.outline,
         },
         &mut ir_snapshots,
     );
@@ -2965,7 +2970,11 @@ machine {
     }
 
     #[test]
-    fn o1_is_byte_identical_to_o0_in_6a() {
+    fn o1_is_byte_identical_to_o0_with_empty_pipelines() {
+        // The do-no-harm floor: with no passes registered, `-O1` runs one
+        // empty round and produces the same bytes as `-O0`. This lock stays
+        // green as passes land — each new pass keeps identity under
+        // `--fno-<that-pass>`, and the floor here pins the all-empty base.
         let o0 = compile(A1, CompileOptions::default()).unwrap();
         let o1 = compile(
             A1,
@@ -2979,6 +2988,34 @@ machine {
         assert_eq!(o0.tma, o1.tma);
         assert_eq!(o1.report.opt.rounds, 1);
         assert!(o1.report.opt.changes.is_empty());
+    }
+
+    #[test]
+    fn foutline_threads_through_and_is_inert_until_outline_registers() {
+        // `--foutline` sets `CompileOptions::outline`, which `compile()`
+        // threads into `OptOptions::outline`. The `outline` pass is not yet
+        // registered, so enabling it changes nothing — the object is
+        // byte-identical to the same `-O1` compile without the flag. When the
+        // pass lands, the opt-equivalence matrix takes over checking on/off.
+        let plain = compile(
+            A1,
+            CompileOptions {
+                opt_level: OptLevel::O1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let outlined = compile(
+            A1,
+            CompileOptions {
+                opt_level: OptLevel::O1,
+                outline: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(plain.object, outlined.object);
+        assert_eq!(plain.tma, outlined.tma);
     }
 
     #[test]

@@ -30,6 +30,7 @@ FLAGS:
                      (STAGE: lowered | final; no optimizer passes ship yet,
                       so no after:<pass> stage matches; default final)
   --fno-<pass>       disable one optimizer pass (repeatable; none exist yet)
+  --foutline         enable the default-off `outline` optimizer pass
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
 ";
@@ -81,6 +82,9 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     if args.flag("-O1") {
         options.opt_level = OptLevel::O1;
     }
+    // `--foutline` enables the default-off `outline` pass; it takes effect
+    // only at `-O1` (the optimizer runs nowhere else).
+    options.outline = args.flag("--foutline");
     let emit_asm = args.flag("-S");
     let werror = args.flag("-Werror");
     let verbose = args.flag("-v");

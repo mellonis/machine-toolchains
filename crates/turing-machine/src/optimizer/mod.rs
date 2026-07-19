@@ -1,27 +1,51 @@
-//! `-O1` pass driver for the TM IR — the phase-6a STUB.
+//! `-O1` pass driver for the TM IR. One module per pass; a pass is either
+//! per-world, `fn(&mut IrWorld) -> u32` (PIPELINE), or program-level,
+//! `fn(&mut IrProgram) -> u32` (PROGRAM_PIPELINE — cross-world, run at round
+//! start). Each pass returns its change count; the driver loops the pipelines
+//! to a change-fixpoint, round-capped at [`MAX_ROUNDS`].
 //!
-//! Phase 6a ships the `.tmc` front end and the `-O0` canonical codegen; the
-//! optimizer passes (`inline` / `jump_threading` / `tail_call` / `tail_merge`
-//! / `dce` / `dead_rows` / `dispatch_select`, plus `outline`) land in phase
-//! 6b. Until then this module is the empty scaffold the pipeline plugs into:
-//! [`pass_names`] returns nothing, and [`optimize`] runs a zero-pass fixpoint,
-//! so **`-O1` is byte-identical to `-O0`** — the compiler wires the level
-//! through, the CLI accepts `-O0`/`-O1`/`--fno-<pass>`/`--emit-ir[=STAGE]`,
-//! and no optimizer artifact leaks. The registry emptiness is load-bearing:
-//! an unknown `--fno-<pass>` name checks against this (empty) set, and the
-//! only `--emit-ir` stages that match are `lowered` / `final` (no
-//! `after:<pass>` yet).
+//! The pipelines are the growth points: both consts are **empty here** and
+//! each optimizer pass registers itself into one of them as it lands. The
+//! driver — the fixpoint loop, the disabled-pass and default-off gating, the
+//! per-pass invariant re-check, the snapshot capture, and [`pass_names`] — is
+//! complete and does not change as passes join. Until a pass registers,
+//! `-O1` runs one empty round and converges, so **`-O1` output is
+//! byte-identical to `-O0`** (the do-no-harm floor the compiler locks with a
+//! byte comparison).
+//!
+//! # The equivalence contract (internal — read before touching a pass)
+//!
+//! Every pass returns its change count and MUST preserve: the final tape
+//! contents of every tape, the termination kind (`stp` / `hlt` / which trap
+//! KIND), and every dispatch decision that depends on the match register.
+//! Two things are explicitly excluded and MAY change: resource-limit
+//! outcomes (inlining and tail-calling change the frame-stack depth, so a
+//! stack-overflow trap at `-O0` may legally become a step-limit trap at
+//! `-O1`), and step counts / intermediate states — EXCEPT across an
+//! un-stripped `brk`, which is an observability barrier: no motion or
+//! elimination may cross it, so a debugger attached at `-O1` still sees
+//! honest state there. The optimizer runs BEFORE codegen strips `brk`, so
+//! the barrier always holds when a debugger is attached.
+//!
+//! # Invariant re-check
+//!
+//! Codegen relies on the world invariants (dense ids `id == index`, in-bounds
+//! indices, arity-wide rows, traps only on synthesized rows, every `Goto`
+//! target an existing id). In debug builds the driver re-runs
+//! [`crate::ir::validate_world`] after any pass that reported a change, so a
+//! pass that renumbers or retargets incorrectly fails loudly at the pass that
+//! broke it rather than deep in codegen.
 //!
 //! The public shape mirrors the PM-1 optimizer (`OptLevel` / `OptOptions` /
-//! `OptReport` / `pass_names` / `optimize`) so phase 6b can grow passes into
-//! it exactly as the PM-1 crate does, without touching `compile()`.
+//! `OptReport` / `pass_names` / `optimize`), with `world` where PM-1 has
+//! `function`, so the two crates grow passes into their drivers the same way.
 
 use std::collections::HashSet;
 
-use crate::ir::IrProgram;
+use crate::ir::{IrProgram, IrWorld};
 
 /// The optimization level a compile runs at. `-O0` (default) is plain
-/// codegen; `-O1` runs the pass pipeline — empty in 6a, so identical.
+/// codegen; `-O1` runs the pass pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
     #[default]
@@ -33,17 +57,21 @@ pub enum OptLevel {
 #[derive(Debug, Clone, Default)]
 pub struct OptOptions {
     pub level: OptLevel,
-    /// Pass names to skip (`--fno-<pass>`). Checked against [`pass_names`];
-    /// an unknown name is a CLI error (phase 8 wiring), never silent.
+    /// Pass names to skip (`--fno-<pass>`). Checked against [`pass_names`]; an
+    /// unknown name is a CLI error, never silent.
     pub disabled: HashSet<String>,
     /// Capture an IR snapshot after each pass that changed something
-    /// (`--emit-ir`). No pass changes anything in 6a, so only the pipeline's
-    /// `lowered` / `final` bookends are ever captured (by `compile()`).
+    /// (`--emit-ir`), labelled `after:<pass>`. `compile()` adds the pipeline
+    /// bookends `lowered` / `final` around this call.
     pub capture: bool,
+    /// Enable the default-OFF `outline` pass (`--foutline`). Every other pass
+    /// is default-ON; `outline` is the inverse of `inline` (it hoists shared
+    /// subgraphs into a routine rather than splicing), so it runs only when
+    /// the caller opts in — otherwise it would fight `inline` for a fixpoint.
+    pub outline: bool,
 }
 
-/// One pass's effect on one world in one round (`tmt -v` material). No pass
-/// emits one in 6a; the type exists so 6b passes report exactly as PM-1's do.
+/// One pass's effect on one world in one round (`tmt -v` material).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PassChange {
     pub pass: &'static str,
@@ -57,35 +85,120 @@ pub struct OptReport {
     pub changes: Vec<PassChange>,
 }
 
+type PassFn = fn(&mut IrWorld) -> u32;
+
+/// Per-world passes, in per-round application order. Empty until the passes
+/// land; each registers itself here as it ships. The order carries a
+/// load-bearing constraint once populated — `tail_call` must precede
+/// `tail_merge` (return-chaining would otherwise destroy tail-call's
+/// precondition before it can apply).
+const PIPELINE: &[(&str, PassFn)] = &[];
+
+type ProgramPassFn = fn(&mut IrProgram) -> u32;
+
+/// Program-level passes (cross-world), run at round start. Empty until the
+/// passes land. `inline` splices small callees into their call sites;
+/// `outline` (default-OFF, gated by [`OptOptions::outline`]) is its inverse.
+const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[];
+
 const MAX_ROUNDS: u32 = 10;
 
 /// The canonical `--fno-<pass>` / `--emit-ir=after:<pass>` names, in pipeline
-/// order — **empty in 6a** (no passes yet). The single source of truth other
-/// surfaces (shell completion, the drift guard) read instead of retyping.
+/// order: the program-level passes first, then the per-world pipeline. The
+/// single source of truth other surfaces (shell completion, the drift guard)
+/// read instead of retyping the list. Empty until the passes register.
 pub fn pass_names() -> Vec<&'static str> {
-    Vec::new()
+    let mut names: Vec<&'static str> = PROGRAM_PIPELINE.iter().map(|(name, _)| *name).collect();
+    names.extend(PIPELINE.iter().map(|(name, _)| *name));
+    names
+}
+
+/// Whether a program-level pass should run under `options`: skipped when
+/// `--fno-<pass>` names it, and skipped when it is default-OFF and not
+/// explicitly enabled (`outline` without `--foutline`).
+fn program_pass_enabled(name: &str, options: &OptOptions) -> bool {
+    if options.disabled.contains(name) {
+        return false;
+    }
+    // `outline` is the one default-OFF program pass: it runs only when the
+    // caller opts in via `--foutline`. Every other pass is default-ON.
+    if name == "outline" && !options.outline {
+        return false;
+    }
+    true
 }
 
 /// Run the enabled pipeline to a change-fixpoint (round-capped). `-O0`
-/// returns immediately (`rounds == 0`); `-O1` runs one no-op round and
-/// converges (`rounds == 1`, no changes) — byte-identical output either way
-/// until 6b adds passes. `snapshots` is left untouched here; `compile()`
-/// pushes the `lowered` / `final` bookends around this call.
+/// returns immediately: unoptimized output stays bit-identical to plain
+/// codegen, with no optimizer artifact leaking in. `snapshots` receives an
+/// `after:<pass>` entry for each changed pass when `options.capture` is set;
+/// `compile()` brackets the whole run with `lowered` / `final`.
 pub fn optimize(
     ir: &mut IrProgram,
     options: &OptOptions,
     snapshots: &mut Vec<(String, IrProgram)>,
 ) -> OptReport {
-    // `ir` and `snapshots` are the 6b growth points; touching neither keeps
-    // `-O1` a pure identity today.
-    let _ = (&*ir, &*snapshots);
     let mut report = OptReport::default();
     if options.level == OptLevel::O0 {
         return report;
     }
     loop {
         report.rounds += 1;
-        let round_changes = 0u32; // no passes registered in 6a
+        let mut round_changes = 0u32;
+        for (name, pass) in PROGRAM_PIPELINE {
+            if !program_pass_enabled(name, options) {
+                continue;
+            }
+            let n = pass(ir);
+            if n > 0 {
+                #[cfg(debug_assertions)]
+                for w in &ir.worlds {
+                    if let Err(e) = crate::ir::validate_world(w) {
+                        panic!(
+                            "pass `{name}` broke IR invariants in world `{}`: {e}",
+                            w.name
+                        );
+                    }
+                }
+                report.changes.push(PassChange {
+                    pass: name,
+                    world: "(module)".to_string(),
+                    changes: n,
+                });
+                if options.capture {
+                    snapshots.push((format!("after:{name}"), ir.clone()));
+                }
+            }
+            round_changes += n;
+        }
+        for (name, pass) in PIPELINE {
+            if options.disabled.contains(*name) {
+                continue;
+            }
+            let mut pass_total = 0u32;
+            for w in &mut ir.worlds {
+                let n = pass(w);
+                if n > 0 {
+                    #[cfg(debug_assertions)]
+                    if let Err(e) = crate::ir::validate_world(w) {
+                        panic!(
+                            "pass `{name}` broke IR invariants in world `{}`: {e}",
+                            w.name
+                        );
+                    }
+                    report.changes.push(PassChange {
+                        pass: name,
+                        world: w.name.clone(),
+                        changes: n,
+                    });
+                }
+                pass_total += n;
+            }
+            if options.capture && pass_total > 0 {
+                snapshots.push((format!("after:{name}"), ir.clone()));
+            }
+            round_changes += pass_total;
+        }
         if round_changes == 0 || report.rounds >= MAX_ROUNDS {
             return report;
         }
@@ -96,18 +209,24 @@ pub fn optimize(
 mod tests {
     use super::*;
 
+    fn empty_ir() -> IrProgram {
+        IrProgram {
+            version: crate::ir::TM_IR_VERSION,
+            worlds: Vec::new(),
+            entry_world: None,
+        }
+    }
+
     #[test]
-    fn pass_registry_is_empty_in_6a() {
+    fn pass_registry_is_empty_until_passes_register() {
+        // Both pipelines are empty scaffolding; `pass_names` is their only
+        // reader and reflects it. Filled per task as passes land.
         assert!(pass_names().is_empty());
     }
 
     #[test]
-    fn o0_is_an_immediate_no_op() {
-        let mut ir = IrProgram {
-            version: crate::ir::TM_IR_VERSION,
-            worlds: Vec::new(),
-            entry_world: None,
-        };
+    fn o0_returns_immediately() {
+        let mut ir = empty_ir();
         let mut snaps = Vec::new();
         let report = optimize(&mut ir, &OptOptions::default(), &mut snaps);
         assert_eq!(report.rounds, 0);
@@ -116,12 +235,8 @@ mod tests {
     }
 
     #[test]
-    fn o1_converges_in_one_round_with_no_changes() {
-        let mut ir = IrProgram {
-            version: crate::ir::TM_IR_VERSION,
-            worlds: Vec::new(),
-            entry_world: None,
-        };
+    fn o1_converges_in_one_empty_round() {
+        let mut ir = empty_ir();
         let mut snaps = Vec::new();
         let report = optimize(
             &mut ir,
@@ -131,7 +246,43 @@ mod tests {
             },
             &mut snaps,
         );
+        // One round runs, finds nothing to do (empty pipelines), converges.
         assert_eq!(report.rounds, 1);
         assert!(report.changes.is_empty());
+        assert!(snaps.is_empty());
+    }
+
+    #[test]
+    fn outline_is_the_only_default_off_program_pass() {
+        // Default-ON passes run unless `--fno-<pass>` disables them.
+        let on = OptOptions {
+            level: OptLevel::O1,
+            ..Default::default()
+        };
+        assert!(program_pass_enabled("inline", &on), "inline is default-ON");
+        assert!(
+            !program_pass_enabled("outline", &on),
+            "outline is default-OFF without --foutline"
+        );
+
+        // `--foutline` turns outline on; it does not turn anything else on.
+        let with_outline = OptOptions {
+            outline: true,
+            ..on.clone()
+        };
+        assert!(program_pass_enabled("outline", &with_outline));
+        assert!(program_pass_enabled("inline", &with_outline));
+
+        // `--fno-<pass>` wins even over an explicit `--foutline`.
+        let mut disabled = HashSet::new();
+        disabled.insert("outline".to_string());
+        disabled.insert("inline".to_string());
+        let vetoed = OptOptions {
+            outline: true,
+            disabled,
+            ..on
+        };
+        assert!(!program_pass_enabled("outline", &vetoed));
+        assert!(!program_pass_enabled("inline", &vetoed));
     }
 }

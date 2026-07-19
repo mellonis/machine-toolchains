@@ -642,6 +642,27 @@ fn compile_emit_ir_after_pass_errors_naming_valid_stages() {
 }
 
 #[test]
+fn compile_accepts_and_consumes_foutline() {
+    // `--foutline` must be a recognised flag: the hand-rolled parser rejects
+    // any leftover dashed token as an "unknown flag", so a clean compile here
+    // proves the flag reached `CompileOptions` (was consumed) rather than
+    // falling through to the positional check. Enabling outline is inert until
+    // the pass registers, so the object still writes normally.
+    let dir = scratch("tmc_foutline");
+    let obj = dir.join("a1.tmo");
+    execute(&args(&[
+        "compile",
+        fixture("a1_replace_b.tmc").to_str().unwrap(),
+        "-O1",
+        "--foutline",
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("--foutline must be accepted: {e}"));
+    assert!(obj.exists(), "the object is written with --foutline set");
+}
+
+#[test]
 fn compile_dash_s_emits_reassemblable_tma() {
     let dir = scratch("tmc_dash_s");
     let tma = dir.join("a1.tma");
