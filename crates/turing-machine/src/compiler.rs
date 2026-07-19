@@ -74,6 +74,72 @@ pub enum CompileErrorKind {
     UnknownAttribute(String),
     /// A second `[deprecated]` attribute inside one run.
     DuplicateAttribute,
+
+    // -- resolution / flatten / world checks (this task) -------------------
+    /// An alphabet with no elements — a world needs at least one symbol
+    /// (index 0 is always the blank).
+    EmptyAlphabet,
+    /// The same glyph appears twice in one alphabet. Uniqueness is per
+    /// alphabet; the `name` is the repeated glyph.
+    DuplicateGlyph(String),
+    /// An alphabet resolves to more than 127 symbols. The compact family
+    /// caps at 127; the multi-byte symbol family is a recorded deviation —
+    /// named as not-yet-implemented rather than silently selected.
+    AlphabetTooLarge(usize),
+    /// A glyph range (`'a'..'c'`) whose endpoint is not a single Unicode
+    /// scalar — char ranges walk scalar succession and need scalar ends.
+    RangeEndpointNotScalar,
+    /// A range whose low endpoint exceeds its high endpoint. Ranges are
+    /// inclusive both ends and ascending; there is no descending form.
+    RangeDescending,
+    /// Two entities (alphabet / routine / graph / namespace) share one name
+    /// in one scope. `what` names the EXISTING entity's kind.
+    DuplicateName { name: String, what: &'static str },
+    /// Two imports bind one bare name in one scope (post-alias). The same
+    /// binding in different scopes is legal (inner shadows outer).
+    DuplicateBinding(String),
+    /// A world declares more than 16 tapes (a `machine` block's tape decls
+    /// or a signature's tape params).
+    TooManyTapes(usize),
+    /// A tape (or signature tape param) names an alphabet no scope resolves.
+    UnresolvedAlphabet(String),
+    /// Two tapes share one name in one world.
+    DuplicateTape(String),
+    /// Two states (or a state and a graft instance) share one name in one
+    /// world.
+    DuplicateState(String),
+    /// Two signature parameters share one name.
+    DuplicateParam(String),
+    /// A world's `entry` count is not exactly one (`found` = the count).
+    EntryCount(usize),
+    /// A `return` transition or continuation outside a routine body.
+    ReturnOutsideRoutine,
+    /// `goto` (or bare-name sugar) targeting a bind name — a bind is a call
+    /// target, never a state (the dedicated GC9 error).
+    GotoIntoBind(String),
+    /// `goto` targeting a routine or graph — a reuse target, not a state.
+    GotoNotAState(String),
+    /// `goto`, a continuation, or a state argument naming a name that is not
+    /// a state (or graft instance) in the world.
+    UndefinedState(String),
+    /// A `call`/`graft`/`bind` target resolves to the wrong entity kind.
+    /// `expected` is the noun phrase for the required kind.
+    WrongTargetKind { name: String, expected: &'static str },
+    /// A `graft` target names no graph in scope. A graft needs the graph's
+    /// source, so an unresolved graft target is fatal (unlike a `call`).
+    UndefinedGraph(String),
+    /// A binding argument names a parameter the signature does not declare.
+    UnknownArg(String),
+    /// Two binding arguments share one parameter name.
+    DuplicateArg(String),
+    /// A signature parameter has no binding argument.
+    MissingArg(String),
+    /// A binding argument is the wrong kind for its parameter. `expected` is
+    /// the noun phrase for the required kind.
+    WrongArgKind { name: String, expected: &'static str },
+    /// A tape-parameter argument names a target that is not a tape in the
+    /// enclosing world.
+    UnresolvedTapeTarget(String),
 }
 
 impl CompileErrorKind {
@@ -100,6 +166,30 @@ impl CompileErrorKind {
             CompileErrorKind::DocLineOrder => "doc-line-order",
             CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
             CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
+            CompileErrorKind::EmptyAlphabet => "empty-alphabet",
+            CompileErrorKind::DuplicateGlyph(_) => "duplicate-glyph",
+            CompileErrorKind::AlphabetTooLarge(_) => "alphabet-too-large",
+            CompileErrorKind::RangeEndpointNotScalar => "range-endpoint-not-scalar",
+            CompileErrorKind::RangeDescending => "range-descending",
+            CompileErrorKind::DuplicateName { .. } => "duplicate-name",
+            CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
+            CompileErrorKind::TooManyTapes(_) => "too-many-tapes",
+            CompileErrorKind::UnresolvedAlphabet(_) => "unresolved-alphabet",
+            CompileErrorKind::DuplicateTape(_) => "duplicate-tape",
+            CompileErrorKind::DuplicateState(_) => "duplicate-state",
+            CompileErrorKind::DuplicateParam(_) => "duplicate-param",
+            CompileErrorKind::EntryCount(_) => "entry-count",
+            CompileErrorKind::ReturnOutsideRoutine => "return-outside-routine",
+            CompileErrorKind::GotoIntoBind(_) => "goto-into-bind",
+            CompileErrorKind::GotoNotAState(_) => "goto-not-a-state",
+            CompileErrorKind::UndefinedState(_) => "undefined-state",
+            CompileErrorKind::WrongTargetKind { .. } => "wrong-target-kind",
+            CompileErrorKind::UndefinedGraph(_) => "undefined-graph",
+            CompileErrorKind::UnknownArg(_) => "unknown-arg",
+            CompileErrorKind::DuplicateArg(_) => "duplicate-arg",
+            CompileErrorKind::MissingArg(_) => "missing-arg",
+            CompileErrorKind::WrongArgKind { .. } => "wrong-arg-kind",
+            CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
         }
     }
 }
@@ -196,6 +286,112 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::DuplicateAttribute => {
                 write!(f, "duplicate `[deprecated]` attribute in the same run")
             }
+            CompileErrorKind::EmptyAlphabet => {
+                write!(f, "an alphabet needs at least one symbol")
+            }
+            CompileErrorKind::DuplicateGlyph(g) => {
+                write!(f, "duplicate glyph `{g}` in the alphabet")
+            }
+            CompileErrorKind::AlphabetTooLarge(n) => {
+                write!(
+                    f,
+                    "alphabet resolves to {n} symbols — more than 127 needs the multi-byte symbol family, which is not yet implemented"
+                )
+            }
+            CompileErrorKind::RangeEndpointNotScalar => {
+                write!(
+                    f,
+                    "a glyph range endpoint must be a single Unicode scalar (`'a'..'c'`)"
+                )
+            }
+            CompileErrorKind::RangeDescending => {
+                write!(
+                    f,
+                    "a range must ascend — its low endpoint cannot exceed its high endpoint"
+                )
+            }
+            CompileErrorKind::DuplicateName { name, what } => {
+                write!(
+                    f,
+                    "duplicate name `{name}` — already used by {what} in this scope"
+                )
+            }
+            CompileErrorKind::DuplicateBinding(n) => {
+                write!(
+                    f,
+                    "`{n}` is bound twice — qualify the reference (`ns::{n}`) or disambiguate with `as`"
+                )
+            }
+            CompileErrorKind::TooManyTapes(n) => {
+                write!(f, "{n} tapes — a world has at most 16")
+            }
+            CompileErrorKind::UnresolvedAlphabet(n) => {
+                write!(f, "unknown alphabet `{n}`")
+            }
+            CompileErrorKind::DuplicateTape(n) => {
+                write!(f, "duplicate tape `{n}` in this world")
+            }
+            CompileErrorKind::DuplicateState(n) => {
+                write!(f, "duplicate state `{n}` in this world")
+            }
+            CompileErrorKind::DuplicateParam(n) => {
+                write!(f, "duplicate signature parameter `{n}`")
+            }
+            CompileErrorKind::EntryCount(found) => {
+                if *found == 0 {
+                    write!(
+                        f,
+                        "this world has no entry — mark exactly one `entry state` or `entry graft`"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "this world has {found} entries — exactly one `entry` is allowed"
+                    )
+                }
+            }
+            CompileErrorKind::ReturnOutsideRoutine => {
+                write!(f, "`return` is only allowed inside a routine")
+            }
+            CompileErrorKind::GotoIntoBind(n) => {
+                write!(
+                    f,
+                    "`goto {n}` targets a bind — a bind is a call target, not a state"
+                )
+            }
+            CompileErrorKind::GotoNotAState(n) => {
+                write!(
+                    f,
+                    "`goto {n}` targets a routine or graph, not a state in this world"
+                )
+            }
+            CompileErrorKind::UndefinedState(n) => {
+                write!(f, "`{n}` is not a state in this world")
+            }
+            CompileErrorKind::WrongTargetKind { name, expected } => {
+                write!(f, "`{name}` is not {expected}")
+            }
+            CompileErrorKind::UndefinedGraph(n) => {
+                write!(
+                    f,
+                    "unknown graph `{n}` — a graft needs the graph's source"
+                )
+            }
+            CompileErrorKind::UnknownArg(n) => {
+                write!(f, "`{n}` is not a parameter of this signature")
+            }
+            CompileErrorKind::DuplicateArg(n) => {
+                write!(f, "duplicate binding argument `{n}`")
+            }
+            CompileErrorKind::MissingArg(n) => {
+                write!(f, "missing binding argument for parameter `{n}`")
+            }
+            CompileErrorKind::WrongArgKind { name, expected } => {
+                write!(f, "binding argument `{name}` must be {expected}")
+            }
+            CompileErrorKind::UnresolvedTapeTarget(n) => {
+                write!(f, "`{n}` is not a tape in this world")
+            }
         }
     }
 }
@@ -233,10 +429,43 @@ mod tests {
             CompileErrorKind::DocLineOrder,
             CompileErrorKind::UnknownAttribute("x".into()),
             CompileErrorKind::DuplicateAttribute,
+            CompileErrorKind::EmptyAlphabet,
+            CompileErrorKind::DuplicateGlyph("x".into()),
+            CompileErrorKind::AlphabetTooLarge(200),
+            CompileErrorKind::RangeEndpointNotScalar,
+            CompileErrorKind::RangeDescending,
+            CompileErrorKind::DuplicateName {
+                name: "x".into(),
+                what: "an alphabet",
+            },
+            CompileErrorKind::DuplicateBinding("x".into()),
+            CompileErrorKind::TooManyTapes(17),
+            CompileErrorKind::UnresolvedAlphabet("x".into()),
+            CompileErrorKind::DuplicateTape("x".into()),
+            CompileErrorKind::DuplicateState("x".into()),
+            CompileErrorKind::DuplicateParam("x".into()),
+            CompileErrorKind::EntryCount(0),
+            CompileErrorKind::ReturnOutsideRoutine,
+            CompileErrorKind::GotoIntoBind("x".into()),
+            CompileErrorKind::GotoNotAState("x".into()),
+            CompileErrorKind::UndefinedState("x".into()),
+            CompileErrorKind::WrongTargetKind {
+                name: "x".into(),
+                expected: "a routine",
+            },
+            CompileErrorKind::UndefinedGraph("x".into()),
+            CompileErrorKind::UnknownArg("x".into()),
+            CompileErrorKind::DuplicateArg("x".into()),
+            CompileErrorKind::MissingArg("x".into()),
+            CompileErrorKind::WrongArgKind {
+                name: "x".into(),
+                expected: "a tape target",
+            },
+            CompileErrorKind::UnresolvedTapeTarget("x".into()),
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 15);
+        assert_eq!(all.len(), 39);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();
