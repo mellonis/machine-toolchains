@@ -7,6 +7,7 @@
 pub mod arch;
 pub mod asm;
 pub mod cli;
+pub mod codegen;
 pub mod compiler;
 pub mod cst;
 pub mod expand;
