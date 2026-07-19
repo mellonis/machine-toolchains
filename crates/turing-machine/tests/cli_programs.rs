@@ -124,6 +124,98 @@ fn unknown_subcommand_errors() {
     assert!(execute(&args(&["bogus"])).is_err());
 }
 
+/// The embedded standard library auto-links: a program that transparently
+/// calls `std::binaryNumbersBare::plusOne` links WITHOUT any `-l` flag (the
+/// linker pulls the reachable routine out of the auto-added stdlib object),
+/// and runs to a stop. Passing `--nostdlib` removes the auto-link, so the
+/// same object fails to link with the symbol unresolved.
+///
+/// The call is bindingless (transparent, same-shape tape): a cross-unit
+/// call that BOUND a tape into a stdlib routine would need the routine's
+/// signature at compile time and is rejected (`external-binding-unsupported`),
+/// so identity/same-alphabet transparent calls are the compiled stdlib's
+/// consumption path.
+#[test]
+fn stdlib_auto_links_and_nostdlib_opts_out() {
+    let dir = scratch("stdlib_autolink");
+    let src = dir.join("consumer.tmc");
+    fs::write(
+        &src,
+        "alphabet bits { '_', '0', '1' }\n\
+         machine {\n\
+           tape num: bits;\n\
+           entry state start { [*] -> call std::binaryNumbersBare::plusOne() then done; }\n\
+           state done { [*] -> stop; }\n\
+         }\n",
+    )
+    .unwrap();
+    let obj = dir.join("consumer.tmo");
+    execute(&args(&[
+        "compile",
+        src.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    // link WITHOUT -l → the stdlib auto-links and resolves plusOne.
+    let exe = dir.join("consumer.tmx");
+    execute(&args(&[
+        "link",
+        obj.to_str().unwrap(),
+        "-o",
+        exe.to_str().unwrap(),
+    ]))
+    .expect("stdlib auto-links plusOne without -l");
+
+    // ...and the program runs: plusOne on "1" (leftmost digit at the head)
+    // yields "10", stopping with exit 0.
+    let tape = dir.join("consumer.tmt");
+    execute(&args(&[
+        "tape",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "-o",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "tape",
+        "set",
+        tape.to_str().unwrap(),
+        "--in-place",
+        "--tape",
+        "0",
+        "--cells",
+        "1",
+    ]))
+    .unwrap();
+    let out = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0, "the stdlib call stops:\n{}", out.stdout);
+    assert!(out.stdout.contains("Stopped"), "{}", out.stdout);
+
+    // link WITH --nostdlib → plusOne is unresolved.
+    let err = execute(&args(&[
+        "link",
+        obj.to_str().unwrap(),
+        "--nostdlib",
+        "-o",
+        dir.join("consumer_nostd.tmx").to_str().unwrap(),
+    ]))
+    .expect_err("--nostdlib leaves plusOne unresolved");
+    assert!(
+        err.contains("unresolved") && err.contains("std::binaryNumbersBare::plusOne"),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn full_pipeline_marked_tape_stops_with_exit_0() {
     let dir = scratch("pipeline_stp");

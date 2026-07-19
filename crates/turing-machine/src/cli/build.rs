@@ -1,8 +1,9 @@
 //! Build-side subcommands: compile, asm, link. Mirrors the PM-1 `pmt` shapes
-//! with `.tmc`/`.tma`/`.tmo`/`.tmx` extensions. TM-1 has no embedded stdlib
-//! yet, so `compile` drops PM-1's `--nostdlib` flag (there are no `std::`
-//! twins to auto-link) and `link` drops the stdlib auto-link — every object
-//! comes from the command line or the `-L` search path.
+//! with `.tmc`/`.tma`/`.tmo`/`.tmx` extensions. `link` auto-links the
+//! embedded standard library (`std::binaryNumbers` / `std::binaryNumbersBare`)
+//! lazily via reachability, with `--nostdlib` to opt out — the PM-1 `link`
+//! wiring. `compile` needs no such flag: the stdlib is a link-time input, not
+//! a compile-time one.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -257,6 +258,7 @@ FLAGS:
   --no-relax        keep every call site in far form
   --entry NAME      link NAME as the program entry (default: main)
   --call-mech MECH  bound-call lowering: mono | frames | hybrid (default: hybrid)
+  --nostdlib        do not auto-link the embedded standard library
   -L DIR            add a library search directory (repeatable, in order)
   -l NAME           link NAME.tmo from the search path (repeatable)
   -v                render the link report (dropped functions, relaxation)
@@ -287,6 +289,7 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let relax = !args.flag("--no-relax");
     let entry = args.value("--entry")?;
     let call_mech = parse_call_mech(args.value("--call-mech")?)?;
+    let nostdlib = args.flag("--nostdlib");
     let verbose = args.flag("-v");
     let search_dirs = args.values("-L")?;
     let lib_names = args.values("-l")?;
@@ -303,6 +306,12 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let mut libraries = Vec::new();
     for name in &lib_names {
         libraries.push(find_library(name, &search_dirs)?);
+    }
+    // The embedded stdlib links last (first-wins means -l objects and the
+    // command-line inputs shadow it), lazily via reachability, unless opted
+    // out. Mirrors the pmt `link` wiring.
+    if !nostdlib {
+        libraries.push(crate::stdlib::object().clone());
     }
 
     let linked = crate::asm::link(
