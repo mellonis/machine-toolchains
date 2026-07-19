@@ -786,3 +786,67 @@ fn routine_and_graph_lower_to_distinct_ast_lists() {
     assert_eq!(p.routines[0].name, "r");
     assert_eq!(p.graphs[0].name, "g");
 }
+
+// ---------------------------------------------------------------------------
+// Task-3 handoff top-ups: rule-action ordering, the substitution `%`
+// non-token, the `debugger` flag, and the `{c+0}` corner.
+// ---------------------------------------------------------------------------
+
+const MACHINE_HEAD: &str = "alphabet b { '_', '0', '1' }\nmachine {\n  tape t: b;\n";
+
+fn one_rule(rule: &str) -> String {
+    format!("{MACHINE_HEAD}  entry state s {{ {rule} }}\n}}\n")
+}
+
+#[test]
+fn write_must_precede_move_in_an_action() {
+    // The action grammar is `[write] [move] transition` — `move` before
+    // `write` puts the reserved `write` keyword where a transition is
+    // expected, so it is rejected (§10.3 action order).
+    assert_eq!(
+        err_code(&one_rule("['0'] -> move [>] write ['1'] goto s;")),
+        "unexpected-token"
+    );
+    // The canonical order parses.
+    assert!(parse_src(&one_rule("['0'] -> write ['1'] move [>] goto s;")).is_ok());
+}
+
+#[test]
+fn percent_is_not_a_substitution_operator() {
+    // `%` belongs to `.tma` `.rept` arithmetic, not `.tmc`; it never lexes
+    // (only `+`/`-` deltas exist on a substitution). A lex error, not a
+    // parse error — the character has no `.tmc` token.
+    let e = lex("write [{v%2}]").unwrap_err();
+    assert_eq!(e.kind.code(), "lex-error");
+}
+
+#[test]
+fn debugger_flag_parses_at_the_action_head() {
+    let p = parse_src(&one_rule("['0'] -> debugger write ['1'] goto s;")).unwrap();
+    let rule = &machine(&p).states[0].rules[0];
+    assert!(rule.debugger);
+    assert!(rule.write.is_some());
+    // Without it, the flag is false.
+    let p = parse_src(&one_rule("['0'] -> write ['1'] goto s;")).unwrap();
+    assert!(!machine(&p).states[0].rules[0].debugger);
+}
+
+#[test]
+fn subst_plus_zero_is_pass_through_on_any_binding() {
+    // `{c+0}` (and `{v+0}`) is a zero delta — an explicit identity, equivalent
+    // to `{c}` pass-through. The char-arithmetic prohibition (§10.3, char
+    // arithmetic absent) fires only on a NON-zero delta, so `+0` is accepted
+    // even on a glyph binding; the parser records `delta == 0`.
+    let p = parse_src(&one_rule("['a' as c] -> write [{c+0}] goto s;")).unwrap();
+    let cell = &machine(&p).states[0].rules[0].write.as_ref().unwrap().cells[0];
+    assert!(
+        matches!(&cell.kind, WriteCellKind::Subst { name, delta, .. } if name == "c" && *delta == 0)
+    );
+    // A non-zero delta on a glyph binding is still rejected.
+    assert_eq!(
+        err_code(&one_rule("['a' as c] -> write [{c+1}] goto s;")),
+        "char-arithmetic"
+    );
+    // A non-zero delta on a numeric binding is fine (folded at expansion).
+    assert!(parse_src(&one_rule("[0 as v] -> write [{v+1}] goto s;")).is_ok());
+}
