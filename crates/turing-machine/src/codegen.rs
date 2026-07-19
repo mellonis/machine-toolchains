@@ -105,6 +105,10 @@ enum Term {
     Ret,
     Stop,
     Halt,
+    /// `jmp @<name>` — a relocated external jump to a routine (the `tail_call`
+    /// pass's output). Always emitted (a cross-function transfer is never the
+    /// physically-next block), so it never participates in fall-through elision.
+    TailCall(String),
     TrapRead,
     TrapWrite,
 }
@@ -403,6 +407,7 @@ fn term_of(w: &IrWorld, r: &IrRule) -> Term {
         IrTransition::Return => Term::Ret,
         IrTransition::Stop => Term::Stop,
         IrTransition::Halt => Term::Halt,
+        IrTransition::TailCall { target } => Term::TailCall(target.clone()),
         IrTransition::TrapRead => Term::TrapRead,
         IrTransition::TrapWrite => Term::TrapWrite,
     }
@@ -554,6 +559,10 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
             Term::Ret => e.push(grid(None, "ret", ""), b.term_line),
             Term::Stop => e.push(grid(None, "stp", ""), b.term_line),
             Term::Halt => e.push(grid(None, "hlt", ""), b.term_line),
+            // `jmp @<name>` — the relocated external jump. No fall-through
+            // elision applies: the target is another function, never this
+            // block's physical successor.
+            Term::TailCall(t) => e.push(grid(None, "jmp", &format!("@{t}")), b.term_line),
             Term::TrapRead => e.push(grid(None, "trap", "#0"), b.term_line),
             Term::TrapWrite => e.push(grid(None, "trap", "#1"), b.term_line),
         }

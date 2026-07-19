@@ -15,9 +15,11 @@
 //! changes nothing observable — the `.pmc` dce deletes such blocks the same
 //! way. Part of the `-O1` pipeline (optimizer/mod.rs).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::ir::{IrThen, IrTransition, IrWorld};
+
+use super::renumber_dense;
 
 pub fn run(w: &mut IrWorld) -> u32 {
     // Reachability from the entry over intra-world edges.
@@ -35,7 +37,10 @@ pub fn run(w: &mut IrWorld) -> u32 {
                         work.push(*state);
                     }
                 }
-                IrTransition::Return
+                // A `TailCall` leaves the world (its target is another world),
+                // like the terminators — no intra-world successor.
+                IrTransition::TailCall { .. }
+                | IrTransition::Return
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
@@ -50,34 +55,11 @@ pub fn run(w: &mut IrWorld) -> u32 {
     let deleted = (w.states.len() - seen.len()) as u32;
 
     // Drop the unreachable states (survivors keep emission order), then assign
-    // dense ids and record old → new for the retarget pass. `st.id` is the OLD
-    // id when it is read into the map, and becomes the NEW id right after.
+    // dense ids and retarget the entry + every surviving edge. Every edge
+    // target is a reachable (surviving) state, so the shared renumber never
+    // misses a target.
     w.states.retain(|st| seen.contains(&st.id));
-    let mut remap: HashMap<u32, u32> = HashMap::new();
-    for (new_id, st) in w.states.iter_mut().enumerate() {
-        remap.insert(st.id, new_id as u32);
-        st.id = new_id as u32;
-    }
-
-    // Every edge target is a reachable (surviving) state, so it is in `remap`.
-    w.entry = remap[&w.entry];
-    for st in &mut w.states {
-        for r in &mut st.rules {
-            match &mut r.transition {
-                IrTransition::Goto { state } => *state = remap[state],
-                IrTransition::CallThen { then, .. } => {
-                    if let IrThen::Goto { state } = then {
-                        *state = remap[state];
-                    }
-                }
-                IrTransition::Return
-                | IrTransition::Stop
-                | IrTransition::Halt
-                | IrTransition::TrapRead
-                | IrTransition::TrapWrite => {}
-            }
-        }
-    }
+    renumber_dense(w);
     deleted
 }
 

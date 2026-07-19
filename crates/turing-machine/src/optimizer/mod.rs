@@ -41,12 +41,52 @@
 //! `OptReport` / `pass_names` / `optimize`), with `world` where PM-1 has
 //! `function`, so the two crates grow passes into their drivers the same way.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::ir::{IrProgram, IrWorld};
+use crate::ir::{IrProgram, IrThen, IrTransition, IrWorld};
 
 mod dce;
 mod jump_threading;
+mod tail_call;
+mod tail_merge;
+
+/// Assign dense ids to the states in their current `Vec` order and retarget the
+/// world entry and every intra-world transition (a `goto` and a `call … then
+/// goto` resume) through the old→new id map. The TM IR requires
+/// `state.id == position` (crate::ir `validate_world`), so any pass that
+/// DELETES or MERGES states renumbers with this before returning. `st.id` is
+/// read as the OLD id and overwritten with the new one in the same walk; every
+/// surviving reference must name a surviving state, which the callers ensure
+/// (dce keeps only the reachable set; tail_merge retargets dups onto keepers
+/// before removing them).
+fn renumber_dense(w: &mut IrWorld) {
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    for (new_id, st) in w.states.iter_mut().enumerate() {
+        remap.insert(st.id, new_id as u32);
+        st.id = new_id as u32;
+    }
+    w.entry = remap[&w.entry];
+    for st in &mut w.states {
+        for r in &mut st.rules {
+            match &mut r.transition {
+                IrTransition::Goto { state } => *state = remap[state],
+                IrTransition::CallThen { then, .. } => {
+                    if let IrThen::Goto { state } = then {
+                        *state = remap[state];
+                    }
+                }
+                // Terminals and the cross-world `TailCall` carry no in-world
+                // target to remap.
+                IrTransition::TailCall { .. }
+                | IrTransition::Return
+                | IrTransition::Stop
+                | IrTransition::Halt
+                | IrTransition::TrapRead
+                | IrTransition::TrapWrite => {}
+            }
+        }
+    }
+}
 
 /// The optimization level a compile runs at. `-O0` (default) is plain
 /// codegen; `-O1` runs the pass pipeline.
@@ -97,8 +137,12 @@ type PassFn = fn(&mut IrWorld) -> u32;
 /// tail-call's precondition before it can apply).
 const PIPELINE: &[(&str, PassFn)] = &[
     ("jump-threading", jump_threading::run),
-    // `tail-call` then `tail-merge` slot in here (later task), between
-    // jump-threading and dce — the order constraint above lives at that seam.
+    // `tail-call` MUST precede `tail-merge`: tail-merge's whole-state dedup can
+    // rewrite the graph around a `call … then return` state, destroying the
+    // shape tail-call keys on before it runs. Both sit between jump-threading
+    // and dce (dce then removes any state left unreferenced by the rewrites).
+    ("tail-call", tail_call::run),
+    ("tail-merge", tail_merge::run),
     ("dce", dce::run),
     // `dead-rows` then `dispatch-select` slot in after dce (later task).
 ];
@@ -236,7 +280,10 @@ mod tests {
     fn pass_registry_lists_the_registered_passes() {
         // `pass_names` reflects the pipelines in order: program-level passes
         // first (none yet), then the per-world pipeline. Grows as passes land.
-        assert_eq!(pass_names(), vec!["jump-threading", "dce"]);
+        assert_eq!(
+            pass_names(),
+            vec!["jump-threading", "tail-call", "tail-merge", "dce"]
+        );
     }
 
     #[test]

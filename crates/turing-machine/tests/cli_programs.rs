@@ -604,7 +604,7 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
 // ── compile flags: --emit-ir, -S, -Werror, ir graph ─────────────────────────
 
 #[test]
-fn compile_emit_ir_writes_a_version_1_sidecar() {
+fn compile_emit_ir_writes_a_version_2_sidecar() {
     let dir = scratch("tmc_emit_ir");
     let obj = dir.join("a1.tmo");
     execute(&args(&[
@@ -619,7 +619,7 @@ fn compile_emit_ir_writes_a_version_1_sidecar() {
     assert!(ir_path.exists(), "the --emit-ir sidecar is written");
     let text = fs::read_to_string(&ir_path).unwrap();
     let program = IrProgram::from_json(&text).expect("the sidecar parses as IR JSON");
-    assert_eq!(program.version, 1, "IR version 1");
+    assert_eq!(program.version, 2, "IR version 2");
     assert!(program.worlds.iter().any(|w| w.name == "main"));
 }
 

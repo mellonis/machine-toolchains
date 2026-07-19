@@ -56,7 +56,13 @@ use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, S
 /// The TM IR encoding version. Bumps on any change to the serialized shape
 /// (field names, serde tags). Embedded in every [`IrProgram`] and pinned by a
 /// round-trip test, the `.pmc` `IR_VERSION` discipline.
-pub const TM_IR_VERSION: u32 = 1;
+///
+/// Version 2 adds the two optimizer-shape fields: the [`IrTransition::TailCall`]
+/// terminal (the `tail_call` pass's output) and the [`IrState::dispatch`] hint
+/// (the `dispatch_select` pass's output). Both are internal — no released
+/// artifact carries them — but the version contract moves with ANY serialized
+/// shape change regardless.
+pub const TM_IR_VERSION: u32 = 2;
 
 /// A whole compiled module: its emitted worlds plus the index (into `worlds`)
 /// of the `machine` block — the program entry — or `None` for a library.
@@ -110,7 +116,7 @@ pub struct IrTape {
 }
 
 /// One state: an id, its source name (synthetic for graft-instance internals),
-/// and its rules in priority (row) order.
+/// its rules in priority (row) order, and the codegen dispatch hint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrState {
     pub id: u32,
@@ -118,6 +124,26 @@ pub struct IrState {
     /// Source line of the state's declaration; `0` if unknown.
     pub line: u32,
     pub rules: Vec<IrRule>,
+    /// How codegen should lower this state's match: the [`IrDispatch::Table`]
+    /// canon, or the [`IrDispatch::Branch`] two-row form the `dispatch_select`
+    /// pass selects. Defaults to `Table` (so pre-hint IR and the `-O0` canon
+    /// deserialize unchanged); `validate_world` ignores it beyond its shape.
+    #[serde(default)]
+    pub dispatch: IrDispatch,
+}
+
+/// The codegen lowering hint for a state's match. `Table` is the canonical
+/// `-O0` form (`rd; mtc T<n>; djmp D<n>` over a match/dispatch table pair);
+/// `Branch` is the two-row form (`dispatch_select`'s output). Branch semantics
+/// — a one-row table plus a `jm`/fall-through — land with the `dispatch_select`
+/// pass and its codegen arm; here the enum only reserves the shape so the
+/// single IR version bump carries it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IrDispatch {
+    #[default]
+    Table,
+    Branch,
 }
 
 /// One classical match row (δ): a per-tape pattern, an optional write/move
@@ -199,6 +225,16 @@ pub enum IrTransition {
     Return,
     Stop,
     Halt,
+    /// A tail call to a routine — `jmp @<target>` (the `tail_call` pass's
+    /// output; codegen emits the relocated external jump). Control transfers
+    /// with no return trip, so there is no `then`: the callee's own `return`
+    /// pops the frame the ORIGINAL caller pushed. Never produced by lowering —
+    /// only by the optimizer — and only for a BINDLESS call (a bound call's
+    /// frame discipline forbids it; see the `tail_call` module doc).
+    TailCall {
+        /// Mangled callee routine name.
+        target: String,
+    },
     /// A synthesized unmapped-read trap (`trap #0`).
     TrapRead,
     /// A synthesized unmapped-write trap (`trap #1`).
@@ -295,6 +331,18 @@ impl IrWorld {
                                 let _ = writeln!(edges, "    S{} -->|\"{call}\"| T_hlt", st.id);
                             }
                         }
+                    }
+                    IrTransition::TailCall { target } => {
+                        // A tail call transfers out of this world for good (no
+                        // return trip), so it routes to a shared terminal node,
+                        // its label naming the callee.
+                        declare(&mut out, "T_tail", "tail", &mut terms);
+                        let _ = writeln!(
+                            edges,
+                            "    S{} -->|\"{label} tail {}\"| T_tail",
+                            st.id,
+                            escape(target)
+                        );
                     }
                     IrTransition::Return => {
                         declare(&mut out, "T_ret", "ret", &mut terms);
@@ -460,6 +508,9 @@ fn lower_world(
             name: s.name.clone(),
             line: s.name_span.start.line,
             rules,
+            // Lowering always emits the canonical table form; `dispatch_select`
+            // may switch a state to `Branch` later in the pipeline.
+            dispatch: IrDispatch::Table,
         });
     }
 
@@ -774,7 +825,11 @@ fn unreachable_state_warnings(world: &IrWorld, ew: &ExpandedWorld, warnings: &mu
                         work.push(*state);
                     }
                 }
-                IrTransition::Return
+                // `TailCall` leaves the world (no in-world successor), like the
+                // terminators. Lowering never produces it, but the walk stays
+                // exhaustive so a later intra-world variant must be considered.
+                IrTransition::TailCall { .. }
+                | IrTransition::Return
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
@@ -806,8 +861,11 @@ fn unused_routine_warnings(
     for w in &program.worlds {
         for st in &w.states {
             for r in &st.rules {
-                if let IrTransition::CallThen { target, .. } = &r.transition {
-                    referenced.insert(target.as_str());
+                match &r.transition {
+                    IrTransition::CallThen { target, .. } | IrTransition::TailCall { target } => {
+                        referenced.insert(target.as_str());
+                    }
+                    _ => {}
                 }
             }
         }
@@ -950,7 +1008,11 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                         }
                     }
                 }
-                IrTransition::Return
+                // A `TailCall` names another WORLD (like `CallThen.target`), so
+                // there is no in-world state target to bounds-check — legal
+                // wherever a `CallThen` is, which is anywhere a terminal is.
+                IrTransition::TailCall { .. }
+                | IrTransition::Return
                 | IrTransition::Stop
                 | IrTransition::Halt
                 | IrTransition::TrapRead
@@ -1056,7 +1118,7 @@ machine {
         let (ir, _) = lower_of(A1);
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 1"), "{json}");
+        assert!(json.contains("\"version\": 2"), "{json}");
     }
 
     /// The serde tags are the frozen wire contract. Build one program that
@@ -1119,6 +1181,8 @@ machine {
                                 line: 2,
                             },
                         ],
+                        // The canonical hint (emits `"dispatch": "table"`).
+                        dispatch: IrDispatch::Table,
                     }],
                     local: false,
                     line: 1,
@@ -1137,15 +1201,32 @@ machine {
                         id: 0,
                         name: "s".into(),
                         line: 1,
-                        rules: vec![IrRule {
-                            pattern: vec![IrCell::Wildcard],
-                            write: None,
-                            moves: None,
-                            debugger: false,
-                            transition: IrTransition::Return,
-                            synthesized: false,
-                            line: 1,
-                        }],
+                        rules: vec![
+                            IrRule {
+                                pattern: vec![IrCell::Index { index: 1 }],
+                                write: None,
+                                moves: None,
+                                debugger: false,
+                                // The optimizer-only terminal (emits the
+                                // `"tail_call"` tag); target names another world.
+                                transition: IrTransition::TailCall {
+                                    target: "r2".into(),
+                                },
+                                synthesized: false,
+                                line: 1,
+                            },
+                            IrRule {
+                                pattern: vec![IrCell::Wildcard],
+                                write: None,
+                                moves: None,
+                                debugger: false,
+                                transition: IrTransition::Return,
+                                synthesized: false,
+                                line: 2,
+                            },
+                        ],
+                        // The `dispatch_select` hint (emits `"dispatch": "branch"`).
+                        dispatch: IrDispatch::Branch,
                     }],
                     local: true,
                     line: 1,
@@ -1164,6 +1245,7 @@ machine {
             "\"kind\": \"keep\"",
             "\"kind\": \"goto\"",
             "\"kind\": \"call_then\"",
+            "\"kind\": \"tail_call\"",
             "\"kind\": \"return\"",
             "\"kind\": \"trap_read\"",
             "\"caller_tape\"",
@@ -1177,6 +1259,10 @@ machine {
         assert!(json.contains("\"left\""), "{json}");
         assert!(json.contains("\"right\""), "{json}");
         assert!(json.contains("\"stay\""), "{json}");
+        // The dispatch hint is a bare snake_case string too — both variants
+        // present (the machine state is `table`, the routine state `branch`).
+        assert!(json.contains("\"dispatch\": \"table\""), "{json}");
+        assert!(json.contains("\"dispatch\": \"branch\""), "{json}");
     }
 
     #[test]

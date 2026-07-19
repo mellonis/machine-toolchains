@@ -84,7 +84,11 @@ fn relocated_jmp_transfers_control_across_functions_under_every_mechanism() {
     for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
         let exe = build(mech);
         let (outcome, snap) = run(&exe);
-        assert_eq!(outcome, Outcome::Stopped, "{mech}: the tail jump ran to stp");
+        assert_eq!(
+            outcome,
+            Outcome::Stopped,
+            "{mech}: the tail jump ran to stp"
+        );
         // main wrote 1 at 0 and stepped right; other wrote 2 at 1. Both present
         // ⇒ the relocated jump resolved and transferred into `other`.
         assert_eq!(cell_at(&snap, 0), 1, "{mech}: main's write survived");

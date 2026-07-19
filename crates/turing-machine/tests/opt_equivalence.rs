@@ -359,3 +359,170 @@ fn fno_every_pass_restores_the_do_no_harm_floor() {
         "disabling every pass must reproduce -O0 byte-for-byte"
     );
 }
+
+// ── tail_call: cross-unit bindless tail calls ───────────────────────────────
+
+/// A chain of `n` routines, each in its OWN compilation unit so its call is
+/// EXTERNAL — and therefore BINDLESS (an in-unit call to a tape-bearing routine
+/// requires binding args, which the front end enforces and which excludes it
+/// from `tail_call`). `main` bindless-calls `cl::step1 then stop` (a real call,
+/// never tail-converted — a machine cannot `return`); `step{k}` bindless-
+/// tail-calls `cl::step{k+1} then return`; `step{n}` writes '1' and returns.
+/// The whole chain runs on the one shared tape (identity projection). Returned
+/// unit 0 is `main`; units 1..=n are the steps.
+fn tail_chain_units(n: usize) -> Vec<String> {
+    let mut units = vec![
+        "alphabet bits { '_', '0', '1' }\n\
+         machine { tape t: bits; entry state go { [*] -> call cl::step1() then stop; } }"
+            .to_string(),
+    ];
+    for k in 1..n {
+        units.push(format!(
+            "alphabet bits {{ '_', '0', '1' }}\n\
+             namespace cl {{ export routine step{k}(tape t: bits) {{\n\
+               entry state s {{ [*] -> call cl::step{next}() then return; }}\n\
+             }} }}",
+            next = k + 1
+        ));
+    }
+    units.push(format!(
+        "alphabet bits {{ '_', '0', '1' }}\n\
+         namespace cl {{ export routine step{n}(tape t: bits) {{\n\
+           entry state s {{ [*] -> write ['1'] return; }}\n\
+         }} }}"
+    ));
+    units
+}
+
+/// Compile every unit at `level` and link them together under `mech`.
+fn build_chain(n: usize, level: OptLevel, mech: CallMech) -> Executable {
+    let units = tail_chain_units(n);
+    let objs: Vec<ObjectFile> = units
+        .iter()
+        .map(|u| object_of(u, level, &[]).object)
+        .collect();
+    link(
+        &objs,
+        &[],
+        LinkOptions {
+            call_mech: mech,
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("the {mech} chain link failed: {e}"))
+    .executable
+}
+
+/// Run a linked chain image on one blank `bits` tape with an explicit stack
+/// depth, collecting the same observable tuple as `run`.
+fn run_chain(exe: &Executable, stack_depth: usize) -> Observed {
+    let mut registry = ArchRegistry::new();
+    registry.register(Box::new(Tm1::new(exe.tape_count)));
+    let machine = Machine::from_executable(exe, &registry).expect("loads");
+    let mut tape = WideTape::new(exe.alphabet_cardinalities[0]);
+    let result = {
+        let mut devices: Vec<&mut dyn Tape> = vec![&mut tape as &mut dyn Tape];
+        machine
+            .run_tapes(
+                &mut devices,
+                RunOptions {
+                    stack_depth,
+                    limits: RunLimits {
+                        max_steps: Some(1_000_000),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("run set-up ok")
+    };
+    let snap = tape.to_snapshot();
+    let heads = vec![snap.head];
+    Observed {
+        outcome: outcome_kind(result.outcome),
+        snaps: vec![snap],
+        heads,
+    }
+}
+
+#[test]
+fn tail_call_chain_is_equivalent_across_the_matrix() {
+    // A terminating bindless tail-call chain runs identically across the full
+    // 2×3 matrix (a generous stack, so -O0 does not overflow — the resource
+    // divergence is the SEPARATE test below). The observable tuple must agree.
+    let n = 6;
+    let mut results: Vec<((OptLevel, CallMech), Observed)> = Vec::new();
+    for level in [OptLevel::O0, OptLevel::O1] {
+        for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+            let exe = build_chain(n, level, mech);
+            results.push(((level, mech), run_chain(&exe, 1024)));
+        }
+    }
+    let (ref_key, r0) = &results[0];
+    for (key, obs) in &results[1..] {
+        assert_eq!(
+            (&r0.outcome, &r0.snaps, &r0.heads),
+            (&obs.outcome, &obs.snaps, &obs.heads),
+            "tail-call matrix divergence: {ref_key:?} vs {key:?}"
+        );
+    }
+    // The chain actually ran to the end: it stopped with `step{n}`'s '1' (bits
+    // index 2) on the tape.
+    assert_eq!(r0.outcome, "stopped");
+    assert_eq!(
+        r0.snaps[0].cells.first().copied(),
+        Some(2),
+        "step{n} wrote '1'"
+    );
+}
+
+#[test]
+fn tail_call_shrinks_the_step_object_and_fires() {
+    // A step unit's `call cl::stepK+1; ret` (6 bytes) collapses to `jmp
+    // @cl::stepK+1` (5 bytes) — the object shrinks and the pass is reported.
+    // The `--fno-<every-pass>` floor reproduces -O0 byte-for-byte, so the
+    // shrink is a real transform, not the optimizer disagreeing with itself.
+    let units = tail_chain_units(6);
+    let step = &units[1]; // step1: a bindless-tail-calling step unit
+    let o0 = object_of(step, OptLevel::O0, &[]);
+    let o1 = object_of(step, OptLevel::O1, &[]);
+    assert!(
+        o1.object.to_bytes().len() < o0.object.to_bytes().len(),
+        "-O1 must shrink the tail-calling step: {} -> {}",
+        o0.object.to_bytes().len(),
+        o1.object.to_bytes().len()
+    );
+    let fired: Vec<&str> = o1.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(fired.contains(&"tail-call"), "tail-call fired: {fired:?}");
+
+    let floor = object_of(step, OptLevel::O1, &pass_names());
+    assert_eq!(
+        o0.object, floor.object,
+        "disabling every pass reproduces -O0 on the step unit"
+    );
+}
+
+#[test]
+fn tail_call_eliminates_the_return_stack_growth() {
+    // The equivalence contract (crates/turing-machine/src/optimizer/mod.rs):
+    // "step counts and resource-limit outcomes may change; no motion across an
+    // un-stripped brk." A tail call removes the return-stack push, so a deep
+    // chain that StackOverflows at -O0 on a tiny stack COMPLETES at -O1 on the
+    // same stack. That divergence (trap vs stop) is a resource-limit outcome —
+    // explicitly excluded from the equivalence contract — so it is asserted
+    // here, OUTSIDE `assert_equivalent`, on a stack too small for -O0's frames.
+    let n = 6;
+    let stack = 3; // < n: -O0's per-call return pushes overflow it
+    let o0 = build_chain(n, OptLevel::O0, CallMech::Mono);
+    let o1 = build_chain(n, OptLevel::O1, CallMech::Mono);
+    assert_eq!(
+        run_chain(&o0, stack).outcome,
+        "trapped:stack-overflow",
+        "-O0 keeps a return frame per call and overflows a depth-{stack} stack"
+    );
+    assert_eq!(
+        run_chain(&o1, stack).outcome,
+        "stopped",
+        "-O1 tail-jumps with no push and completes on the same tiny stack"
+    );
+}
