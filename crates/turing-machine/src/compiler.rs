@@ -162,6 +162,9 @@ pub enum CompileErrorKind {
     /// A tape-parameter argument names a target that is not a tape in the
     /// enclosing world.
     UnresolvedTapeTarget(String),
+    /// A `call` on a world-local bind name carries binding arguments. A bind
+    /// is already fully bound at its declaration, so a call on it takes none.
+    BindCallArgs(String),
 }
 
 impl CompileErrorKind {
@@ -212,6 +215,7 @@ impl CompileErrorKind {
             CompileErrorKind::MissingArg(_) => "missing-arg",
             CompileErrorKind::WrongArgKind { .. } => "wrong-arg-kind",
             CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
+            CompileErrorKind::BindCallArgs(_) => "bind-call-args",
         }
     }
 }
@@ -410,6 +414,12 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::UnresolvedTapeTarget(n) => {
                 write!(f, "`{n}` is not a tape in this world")
+            }
+            CompileErrorKind::BindCallArgs(n) => {
+                write!(
+                    f,
+                    "`{n}` is a bind and already bound — a call on it takes no arguments"
+                )
             }
         }
     }
@@ -1314,8 +1324,15 @@ fn resolve_world_reuse(
         let joined = b.target.joined();
         let (target, external) = match scopes.resolve(&joined, ns) {
             Some(r) if r.kind == Some(DefKind::Routine) => (r.full, false),
+            // Imported-to-external or `::`-absolute — resolved at link.
             Some(r) if r.kind.is_none() => (r.full, true),
-            _ => (joined.clone(), true),
+            // A resolved-but-wrong-kind LOCAL target (a graph/alphabet): kept
+            // local (NOT external) so `check_target_kind` reports the
+            // wrong-target-kind error, mirroring how the call path defers to
+            // `check_call_like`. Flagging it external let it slip through as a
+            // misleading bare `undeclared-external` warning instead.
+            Some(r) => (r.full, false),
+            None => (joined.clone(), true),
         };
         rbinds.push(ResolvedBind {
             name: b.as_name.name.clone(),
@@ -1682,6 +1699,14 @@ impl WorldCtx<'_> {
                     // A single-segment target naming a world-local bind is a
                     // bind-call (the bind carries the binding).
                     if target.segments.len() == 1 && binds.contains(joined.as_str()) {
+                        // The bind is already fully bound; arguments on the
+                        // call are a contradiction. Point at the first one.
+                        if let Some(first) = args.first() {
+                            return Err(CompileError {
+                                span: first.span,
+                                kind: CompileErrorKind::BindCallArgs(joined),
+                            });
+                        }
                         continue;
                     }
                     self.check_call_like(
@@ -1709,6 +1734,7 @@ impl WorldCtx<'_> {
                 DefKind::Graph,
                 &states,
                 &tapes,
+                g.target_span,
             )?;
         }
 
@@ -1726,6 +1752,7 @@ impl WorldCtx<'_> {
                 DefKind::Routine,
                 &states,
                 &tapes,
+                b.target_span,
             )?;
         }
         Ok(())
@@ -1737,7 +1764,7 @@ impl WorldCtx<'_> {
         joined: &str,
         target: &QualName,
         args: &[BindingArg],
-        _span: Span,
+        span: Span,
         want: DefKind,
         expected_noun: &'static str,
         states: &HashSet<&str>,
@@ -1748,7 +1775,7 @@ impl WorldCtx<'_> {
         // pass only validates target kind + binding args and warns.
         match self.scopes.resolve(joined, ns) {
             Some(r) if r.kind == Some(want) => {
-                self.check_binding_args(joined, &r.full, args, want, states, tapes)
+                self.check_binding_args(joined, &r.full, args, want, states, tapes, span)
             }
             Some(r) if r.kind.is_some() => Err(CompileError {
                 span: target.span,
@@ -1794,6 +1821,7 @@ impl WorldCtx<'_> {
     /// params take tape targets (world tapes); state params take state names
     /// (same-world states) or terminators. Map LEGALITY (glyph sets, etc.) is
     /// Task 5's — this only checks the kind.
+    #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
         _target_desc: &str,
@@ -1802,6 +1830,9 @@ impl WorldCtx<'_> {
         want: DefKind,
         states: &HashSet<&str>,
         tapes: &HashSet<&str>,
+        // Where a MissingArg points when the call/graft/bind is argless: the
+        // call/graft/bind site itself (there is no first arg to blame).
+        fallback_span: Span,
     ) -> Result<(), CompileError> {
         let _ = want;
         let Some(sig) = self.scopes.sigs.get(sig_key) else {
@@ -1827,8 +1858,9 @@ impl WorldCtx<'_> {
         // Every parameter must be bound.
         for (pname, _) in &sig.params {
             if !arg_seen.contains(pname.as_str()) {
-                // Point at the first arg (or a zero span if argless).
-                let span = args.first().map(|a| a.span).unwrap_or(Span::point(1, 1));
+                // Point at the first arg, or the call/graft/bind site when
+                // there are none to blame.
+                let span = args.first().map(|a| a.span).unwrap_or(fallback_span);
                 return Err(CompileError {
                     span,
                     kind: CompileErrorKind::MissingArg(pname.clone()),
@@ -1990,10 +2022,11 @@ mod tests {
                 expected: "a tape target",
             },
             CompileErrorKind::UnresolvedTapeTarget("x".into()),
+            CompileErrorKind::BindCallArgs("x".into()),
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 39);
+        assert_eq!(all.len(), 40);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();
@@ -2308,6 +2341,12 @@ alphabet b { '_', '0', '1' }
         ));
         assert_eq!(e.kind.code(), "entry-count");
         assert!(matches!(e.kind, CompileErrorKind::EntryCount(2)));
+        // One entry state + one entry graft in the same world is still two.
+        let e = err(
+            "alphabet b { '_', '0' }\ngraph g(tape t: b) { entry state s { [*] -> stop; } }\nmachine { tape t: b; entry state a { [*] -> stop; } entry graft g(t = t) as x; }",
+        );
+        assert_eq!(e.kind.code(), "entry-count");
+        assert!(matches!(e.kind, CompileErrorKind::EntryCount(2)));
     }
 
     #[test]
@@ -2361,6 +2400,36 @@ alphabet b { '_', '0', '1' }
     }
 
     #[test]
+    fn bind_target_must_be_a_routine() {
+        // bind → a LOCAL graph: wrong-target-kind, NOT a misleading external
+        // warning. The error points at the bind target `g` on line 3.
+        let src = "alphabet b { '_', '0' }\ngraph g(tape t: b) { entry state s { [*] -> stop; } }\nmachine { tape t: b; bind g(t = t) as x; entry state s { [*] -> call x() then s; } }";
+        let e = err(src);
+        assert_eq!(e.kind.code(), "wrong-target-kind");
+        assert_eq!(e.span.start.line, 3);
+        assert!(matches!(e.kind, CompileErrorKind::WrongTargetKind { name, .. } if name == "g"));
+        // bind → a LOCAL alphabet: also wrong-target-kind.
+        let src = "alphabet b { '_', '0' }\nmachine { tape t: b; bind b(t = t) as x; entry state s { [*] -> call x() then s; } }";
+        let e = err(src);
+        assert_eq!(e.kind.code(), "wrong-target-kind");
+        assert!(matches!(e.kind, CompileErrorKind::WrongTargetKind { name, .. } if name == "b"));
+        // bind → an imported (genuine external) routine: no error, no warning
+        // (resolved at link — the `::` name is not a bare undeclared).
+        let src = "alphabet b { '_', '0' }\nuse lib::helper;\nmachine { tape t: b; bind helper(t = t) as h; entry state s { [*] -> call h() then s; } }";
+        let a = ok(src);
+        assert!(
+            !a.diagnostics
+                .iter()
+                .any(|d| d.code == "undeclared-external"),
+            "{:?}",
+            a.diagnostics
+        );
+        // bind → an undeclared BARE name: undeclared-external (today's behavior).
+        let src = "alphabet b { '_', '0' }\nmachine { tape t: b; bind ghost(t = t) as h; entry state s { [*] -> call h() then s; } }";
+        assert!(diag_codes(src).contains(&"undeclared-external"));
+    }
+
+    #[test]
     fn binding_argument_arity_and_kind_checks() {
         let prelude = "alphabet b { '_', '0' }\ngraph g(tape t: b, state done) { entry state s { ['0'] -> done; [*] -> move [>] goto s; } }\n";
         // An unknown argument name.
@@ -2391,6 +2460,16 @@ alphabet b { '_', '0', '1' }
             "{prelude}machine {{ tape t: b; entry graft g(t = stop, done = celebrate) as x; state celebrate {{ [*] -> stop; }} }}"
         );
         assert_eq!(code(&src), "wrong-arg-kind");
+    }
+
+    #[test]
+    fn missing_arg_on_an_argless_call_points_at_the_call() {
+        // `helper` needs one tape arg; the call supplies none. The MissingArg
+        // must point at the call site (line 3), not the bogus (1,1) fallback.
+        let src = "alphabet b { '_', '0' }\nroutine helper(tape t: b) { entry state s { [*] -> return; } }\nmachine { tape t: b; entry state s { [*] -> call helper() then s; } }";
+        let e = err(src);
+        assert_eq!(e.kind.code(), "missing-arg");
+        assert_eq!(e.span.start.line, 3);
     }
 
     // -- the canonical examples resolve end-to-end -------------------------
@@ -2458,6 +2537,47 @@ machine {
             &machine.calls[0].target,
             ResolvedCallTarget::Bind { name } if name == "h"
         ));
+    }
+
+    #[test]
+    fn a_call_on_a_bind_passes_no_arguments() {
+        // A bind is already fully bound — arguments on the call are a
+        // contradiction. The error points at the offending arg on line 3.
+        let src = "alphabet b { '_', '0' }\nroutine helper(tape t: b) { entry state s { [*] -> return; } }\nmachine { tape t: b; bind helper(t = t) as h; entry state s { [*] -> call h(x = t) then s; } }";
+        let e = err(src);
+        assert_eq!(e.kind.code(), "bind-call-args");
+        assert_eq!(e.span.start.line, 3);
+        assert!(matches!(e.kind, CompileErrorKind::BindCallArgs(n) if n == "h"));
+    }
+
+    #[test]
+    fn a_bare_name_resolves_innermost_out() {
+        // `foo` is a routine at the top level AND inside `lib`; a call to
+        // `foo` from within `lib::caller` binds the INNER `lib::foo`, never
+        // the top-level one (the scope walk is innermost-out).
+        let src = "\
+alphabet b { '_', '0' }
+routine foo(tape t: b) { entry state s { [*] -> return; } }
+namespace lib {
+  routine foo(tape t: b) { entry state s { [*] -> return; } }
+  routine caller(tape t: b) { entry state s { [*] -> call foo(t = t) then s; } }
+}
+";
+        let a = ok(src);
+        let caller = a
+            .resolved
+            .worlds
+            .iter()
+            .find(|w| w.name == "lib::caller")
+            .expect("lib::caller world");
+        assert_eq!(caller.calls.len(), 1);
+        match &caller.calls[0].target {
+            ResolvedCallTarget::Routine { name, external, .. } => {
+                assert_eq!(name, "lib::foo");
+                assert!(!external);
+            }
+            other => panic!("expected a routine call, got {other:?}"),
+        }
     }
 
     #[test]
