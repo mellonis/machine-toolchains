@@ -1234,6 +1234,16 @@ fn expand_grafts_into<'a>(
     for graft in &host.grafts {
         let graph = graphs[graft.target.as_str()];
         let gx = expand_graph(graft.target.as_str(), graphs, resolved, memo, warn)?;
+        // A grafted graph body must not contain a call yet — splicing it into
+        // host space needs binding composition (not implemented). Detect
+        // before emitting anything; the graft-site span names the
+        // instantiation that can't be done, the message names the call.
+        if let Some(call) = first_grafted_call(&gx.states) {
+            return Err(CompileError {
+                span: graft.target_span,
+                kind: CompileErrorKind::GraftCallUnsupported(call.to_string()),
+            });
+        }
         let (comp, cont) = build_composite(graft, host, graph, &resolved.alphabets)?;
 
         let mut key = graft.target.clone().into_bytes();
@@ -1283,6 +1293,11 @@ fn expand_grafts_into<'a>(
                         Transition2::Goto(name_map.get(n).cloned().unwrap_or_else(|| n.clone()))
                     }
                 }
+                // Return / Stop / Halt / the trap markers carry no name to
+                // rewrite. Call / BindCall would need their binding args and
+                // continuation rewritten into host space, but the guard above
+                // rejects a call-bearing graph before any splice, so they
+                // cannot reach here.
                 other => other.clone(),
             }
         };
@@ -1302,6 +1317,24 @@ fn expand_grafts_into<'a>(
 /// A synthetic-name base from a mangled graph name (bare-label safe).
 fn sanitize(name: &str) -> String {
     name.replace("::", "_").replace([':', '.'], "_")
+}
+
+/// The target of the first `call` in a graph's expanded body (routine call or
+/// bind call), in state-then-rule order, or `None`. A grafted graph body
+/// carrying a call cannot be spliced yet: its binding args still name the
+/// graph's signature tapes and its continuation is a graph-space state, and
+/// the binding composition that would rewrite both into the host is not
+/// implemented. The scan runs at SPLICE time only, so a graph that carries a
+/// call but is never grafted stays legal and dead (it is never expanded).
+fn first_grafted_call(states: &[ExpandedState]) -> Option<&str> {
+    states
+        .iter()
+        .flat_map(|st| &st.rules)
+        .find_map(|r| match &r.transition {
+            Transition2::Call { target, .. } => Some(target.as_str()),
+            Transition2::BindCall { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
 }
 
 /// Expand a graph to its memoized graph-space form: own states range-expanded,
@@ -2245,6 +2278,57 @@ machine { tape w: marks; entry state s { [*] -> stop; } }
         let a = analyze(src).expect("analyze");
         let err = expand(&a.resolved).unwrap_err();
         assert_eq!(err.kind.code(), "graft-cycle");
+    }
+
+    #[test]
+    fn grafting_a_call_bearing_graph_is_a_clear_error() {
+        // A graph whose body calls a routine is legal source (T4 permits it),
+        // but splicing it into a host needs binding composition (not
+        // implemented). Grafting it is a spanned error at the graft site.
+        let src = "\
+alphabet marks { '_', 'x' }
+routine helper(tape t: marks) { entry state h { [*] -> return; } }
+graph g(tape t: marks, state done) {
+  entry state s { [*] -> call helper(t = t) then done; }
+}
+machine {
+  tape w: marks;
+  entry graft g(t = w, done = fin) as x;
+  state fin { [*] -> stop; }
+}
+";
+        let a = analyze(src).expect("analyze");
+        let graft_span = a
+            .resolved
+            .worlds
+            .iter()
+            .find(|w| w.kind == WorldKind::Machine)
+            .expect("machine")
+            .grafts[0]
+            .target_span;
+        let err = expand(&a.resolved).unwrap_err();
+        assert_eq!(err.kind.code(), "graft-call-unsupported");
+        // The span names the graft instantiation, not the call site inside g.
+        assert_eq!(err.span, graft_span);
+    }
+
+    #[test]
+    fn a_call_bearing_graph_left_ungrafted_compiles_clean() {
+        // The SAME graph, defined but never grafted: unreachable source that
+        // is never expanded, so the call-in-graph guard never fires.
+        let src = "\
+alphabet marks { '_', 'x' }
+routine helper(tape t: marks) { entry state h { [*] -> return; } }
+graph g(tape t: marks, state done) {
+  entry state s { [*] -> call helper(t = t) then done; }
+}
+machine {
+  tape w: marks;
+  entry state go { [*] -> stop; }
+}
+";
+        let a = analyze(src).expect("analyze");
+        expand(&a.resolved).expect("ungrafted call-bearing graph expands clean");
     }
 
     #[test]

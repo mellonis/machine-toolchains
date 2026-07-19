@@ -171,6 +171,17 @@ pub enum CompileErrorKind {
     /// cycle of definitions) — infinite expansion. `name` is one graph on the
     /// cycle. Instance-level cycles (continuation loops) stay legal.
     GraftCycle(String),
+    /// A grafted graph's body contains a `call` (a routine call or a bind
+    /// call) — splicing it into the host is not supported yet. The call's
+    /// binding args still name the GRAPH's signature tapes and its `then`
+    /// continuation is a graph-space state; rewriting both into host space
+    /// needs the binding composition that is not implemented, so grafting
+    /// such a graph is a clear error rather than silently-wrong output.
+    /// `name` is the call's target. The check runs at SPLICE time: a graph
+    /// that carries a call but is never grafted stays legal and dead (an
+    /// ungrafted graph is never expanded — the same unreachable-graph
+    /// posture the resolver takes).
+    GraftCallUnsupported(String),
     /// A graft binding's symbol map references a glyph that is not in the tape
     /// it maps (the host tape for the `src`, the graph tape for the `dst`).
     MapSymbolNotInAlphabet(String),
@@ -251,6 +262,7 @@ impl CompileErrorKind {
             CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
             CompileErrorKind::BindCallArgs(_) => "bind-call-args",
             CompileErrorKind::GraftCycle(_) => "graft-cycle",
+            CompileErrorKind::GraftCallUnsupported(_) => "graft-call-unsupported",
             CompileErrorKind::MapSymbolNotInAlphabet(_) => "map-symbol-not-in-alphabet",
             CompileErrorKind::MapBlankPin => "map-blank-pin",
             CompileErrorKind::MapConflict { .. } => "map-conflict",
@@ -468,6 +480,12 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "graph `{n}` grafts itself (directly or through a cycle of graph definitions) — infinite expansion"
+                )
+            }
+            CompileErrorKind::GraftCallUnsupported(name) => {
+                write!(
+                    f,
+                    "this graft splices a graph whose body calls `{name}` — a call inside a grafted graph body is not supported yet; it awaits binding composition"
                 )
             }
             CompileErrorKind::MapSymbolNotInAlphabet(g) => {
@@ -2115,6 +2133,7 @@ mod tests {
             CompileErrorKind::UnresolvedTapeTarget("x".into()),
             CompileErrorKind::BindCallArgs("x".into()),
             CompileErrorKind::GraftCycle("x".into()),
+            CompileErrorKind::GraftCallUnsupported("x".into()),
             CompileErrorKind::MapSymbolNotInAlphabet("x".into()),
             CompileErrorKind::MapBlankPin,
             CompileErrorKind::MapConflict { symbol: "x".into() },
@@ -2132,7 +2151,7 @@ mod tests {
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 49);
+        assert_eq!(all.len(), 50);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();
