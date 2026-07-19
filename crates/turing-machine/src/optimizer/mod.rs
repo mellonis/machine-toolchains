@@ -4,14 +4,15 @@
 //! start). Each pass returns its change count; the driver loops the pipelines
 //! to a change-fixpoint, round-capped at [`MAX_ROUNDS`].
 //!
-//! The pipelines are the growth points: both consts are **empty here** and
-//! each optimizer pass registers itself into one of them as it lands. The
+//! The pipelines are the growth points: each optimizer pass registers itself
+//! into one of them as it lands (per-world [`PIPELINE`] carries `jump-threading`
+//! and `dce` so far; the program-level [`PROGRAM_PIPELINE`] fills later). The
 //! driver — the fixpoint loop, the disabled-pass and default-off gating, the
 //! per-pass invariant re-check, the snapshot capture, and [`pass_names`] — is
-//! complete and does not change as passes join. Until a pass registers,
-//! `-O1` runs one empty round and converges, so **`-O1` output is
-//! byte-identical to `-O0`** (the do-no-harm floor the compiler locks with a
-//! byte comparison).
+//! complete and does not change as passes join. With every pass disabled
+//! (`--fno-<pass>`), `-O1` runs empty rounds and converges, so **`-O1` output
+//! is byte-identical to `-O0`** (the do-no-harm floor the equivalence harness
+//! locks with a byte comparison).
 //!
 //! # The equivalence contract (internal — read before touching a pass)
 //!
@@ -43,6 +44,9 @@
 use std::collections::HashSet;
 
 use crate::ir::{IrProgram, IrWorld};
+
+mod dce;
+mod jump_threading;
 
 /// The optimization level a compile runs at. `-O0` (default) is plain
 /// codegen; `-O1` runs the pass pipeline.
@@ -87,12 +91,17 @@ pub struct OptReport {
 
 type PassFn = fn(&mut IrWorld) -> u32;
 
-/// Per-world passes, in per-round application order. Empty until the passes
-/// land; each registers itself here as it ships. The order carries a
-/// load-bearing constraint once populated — `tail_call` must precede
-/// `tail_merge` (return-chaining would otherwise destroy tail-call's
-/// precondition before it can apply).
-const PIPELINE: &[(&str, PassFn)] = &[];
+/// Per-world passes, in per-round application order; each pass registers itself
+/// here as it ships. The order carries a load-bearing constraint — `tail-call`
+/// must precede `tail-merge` (return-chaining would otherwise destroy
+/// tail-call's precondition before it can apply).
+const PIPELINE: &[(&str, PassFn)] = &[
+    ("jump-threading", jump_threading::run),
+    // `tail-call` then `tail-merge` slot in here (later task), between
+    // jump-threading and dce — the order constraint above lives at that seam.
+    ("dce", dce::run),
+    // `dead-rows` then `dispatch-select` slot in after dce (later task).
+];
 
 type ProgramPassFn = fn(&mut IrProgram) -> u32;
 
@@ -106,7 +115,7 @@ const MAX_ROUNDS: u32 = 10;
 /// The canonical `--fno-<pass>` / `--emit-ir=after:<pass>` names, in pipeline
 /// order: the program-level passes first, then the per-world pipeline. The
 /// single source of truth other surfaces (shell completion, the drift guard)
-/// read instead of retyping the list. Empty until the passes register.
+/// read instead of retyping the list.
 pub fn pass_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = PROGRAM_PIPELINE.iter().map(|(name, _)| *name).collect();
     names.extend(PIPELINE.iter().map(|(name, _)| *name));
@@ -224,10 +233,10 @@ mod tests {
     }
 
     #[test]
-    fn pass_registry_is_empty_until_passes_register() {
-        // Both pipelines are empty scaffolding; `pass_names` is their only
-        // reader and reflects it. Filled per task as passes land.
-        assert!(pass_names().is_empty());
+    fn pass_registry_lists_the_registered_passes() {
+        // `pass_names` reflects the pipelines in order: program-level passes
+        // first (none yet), then the per-world pipeline. Grows as passes land.
+        assert_eq!(pass_names(), vec!["jump-threading", "dce"]);
     }
 
     #[test]

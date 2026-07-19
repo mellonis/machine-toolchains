@@ -12,7 +12,7 @@
 //!
 //! Programs at this stage: the six Appendix A examples plus the nested-graft
 //! case (read from `tests/golden/*.tmc`), a debugger-bearing barrier program,
-//! the do-no-harm floor (GC1: `-O1` with every pass disabled reproduces `-O0`
+//! the do-no-harm floor (`-O1` with every pass disabled reproduces `-O0`
 //! byte-for-byte), and per-pass fixtures added as passes land.
 
 use std::fs;
@@ -264,7 +264,7 @@ fn nested_graft_is_equivalent() {
     );
 }
 
-// ── the brk barrier (GC3) ───────────────────────────────────────────────────
+// ── the brk barrier ─────────────────────────────────────────────────────────
 
 /// A forwarder state that carries a `debugger` (`brk`) row. It has the shape a
 /// motion pass would love to thread through — a single all-wildcard row with no
@@ -299,29 +299,61 @@ fn brk_barrier_holds_across_the_matrix() {
     );
 }
 
-// ── the do-no-harm floor (GC1) ──────────────────────────────────────────────
+// ── jump-threading + dce, and the do-no-harm floor ──────────────────────────
 
-/// A pair of empty forwarders leading to the real work — the shape
-/// jump-threading + dce collapse. Used by the floor test: with every pass
-/// disabled, `-O1` must reproduce `-O0` byte-for-byte on exactly the program
-/// the passes WOULD transform, so the test is not vacuous.
-const FORWARDERS: &str = "\
+/// A terminating program with an off-adjacency empty forwarder: `scan` walks
+/// right over 'a's; on a blank it hops to `hop`, an empty forwarder to
+/// `finish`. `hop` is not the physically-next block, so `-O0` emits a real jump
+/// to it that jump-threading removes (retargeting scan's blank edge straight to
+/// `finish`) and dce then deletes the now-unreachable `hop`. So `-O1` is a
+/// STRICTLY smaller object than `-O0` here — which makes both the pass-fired
+/// fixture and the do-no-harm floor byte-observable, not vacuous.
+const FORWARDER_HOP: &str = "\
 alphabet ab { '_', 'a' }
 machine {
   tape t: ab;
-  entry state go { [*] -> goto fwd; }
-  state fwd      { [*] -> goto done; }
-  state done     { [*] -> stop; }
+  entry state scan {
+    ['a'] -> move [>] goto scan;
+    ['_'] -> goto hop;
+  }
+  state finish { [*] -> write ['a'] stop; }
+  state hop    { [*] -> goto finish; }
 }";
 
 #[test]
+fn jump_threading_and_dce_collapse_the_forwarder() {
+    // Equivalent to -O0 on a blank tape and an 'a' tape across the whole 2×3
+    // matrix.
+    assert_equivalent(FORWARDER_HOP, &[&[(&[], 0)], &[(&[1], 0)]]);
+
+    // Non-vacuous: -O1 shrinks the object, and the report names both passes as
+    // having changed the IR — the equivalence above is a real transform, not a
+    // no-op agreeing with itself.
+    let o0 = object_of(FORWARDER_HOP, OptLevel::O0, &[]);
+    let o1 = object_of(FORWARDER_HOP, OptLevel::O1, &[]);
+    assert!(
+        o1.object.to_bytes().len() < o0.object.to_bytes().len(),
+        "-O1 must shrink the forwarder object: {} -> {}",
+        o0.object.to_bytes().len(),
+        o1.object.to_bytes().len()
+    );
+    let fired: Vec<&str> = o1.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(
+        fired.contains(&"jump-threading"),
+        "jump-threading fired: {fired:?}"
+    );
+    assert!(fired.contains(&"dce"), "dce fired: {fired:?}");
+}
+
+#[test]
 fn fno_every_pass_restores_the_do_no_harm_floor() {
-    // Disabling every registered pass must return the optimizer to identity:
-    // the `-O1` object is byte-identical to `-O0` (the pmc do-no-harm floor
-    // transposed). Reads `pass_names()` so it stays correct as passes land.
+    // Disabling every registered pass returns the optimizer to identity: the
+    // `-O1` object is byte-identical to `-O0` (the pmc do-no-harm floor
+    // transposed). Real because `-O1` WOULD otherwise shrink this program (see
+    // above). Reads `pass_names()` so it stays correct as passes land.
     let disabled = pass_names();
-    let o0 = object_of(FORWARDERS, OptLevel::O0, &[]);
-    let o1 = object_of(FORWARDERS, OptLevel::O1, &disabled);
+    let o0 = object_of(FORWARDER_HOP, OptLevel::O0, &[]);
+    let o1 = object_of(FORWARDER_HOP, OptLevel::O1, &disabled);
     assert_eq!(
         o0.object, o1.object,
         "disabling every pass must reproduce -O0 byte-for-byte"

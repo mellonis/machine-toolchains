@@ -27,9 +27,9 @@ FLAGS:
   --release          preset: -O1 --strip-debugger
   -S                 emit the generated .tma instead of an object
   --emit-ir[=STAGE]  write the world-graph IR JSON next to the output
-                     (STAGE: lowered | final; no optimizer passes ship yet,
-                      so no after:<pass> stage matches; default final)
-  --fno-<pass>       disable one optimizer pass (repeatable; none exist yet)
+                     (STAGE: lowered | final | after:<pass> for a registered
+                      pass; default final)
+  --fno-<pass>       disable one optimizer pass (repeatable)
   --foutline         enable the default-off `outline` optimizer pass
   -Werror            treat warnings as errors
   -v                 render the compile report (passes, rounds)
