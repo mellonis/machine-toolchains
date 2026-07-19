@@ -9,6 +9,7 @@ pub mod asm;
 pub mod cli;
 pub mod compiler;
 pub mod cst;
+pub mod expand;
 pub mod lexer;
 pub mod parser;
 
