@@ -62,11 +62,14 @@ fn cell_at(snap: &TapeSnapshot, pos: i64) -> u8 {
     }
 }
 
-/// A 2-tape machine mono-calls a 1-tape `sub` through a HOLEY, one-way
-/// binding: physical 1 and 2 both read as virtual 1 (a collapse); physical 3
-/// has no virtual image (a read hole). `sub` reads, matches, and dispatches
-/// to a per-virtual-symbol write. `main` seeds physical `{seed}` on tape 0
-/// before the call. Branch B (virtual 1) writes virtual 2 → physical 2.
+/// A 2-tape machine mono-calls a 1-tape `sub` through a HOLEY collapse binding
+/// into a narrower (3-symbol) callee: physical 1 (two-way, so virtual 1 writes
+/// back) and physical 2 (one-way) both read as virtual 1 (a collapse);
+/// physical 3 is unlisted, so across the unequal alphabets it has no virtual
+/// image (a read hole). `sub` reads, matches, and dispatches to a
+/// per-virtual-symbol write. `main` seeds physical `{seed}` on tape 0 before
+/// the call. Branch B (virtual 1) writes virtual 1 → physical 1 (the two-way
+/// pair's write-back).
 fn read_program(seed: u8) -> String {
     format!(
         "\
@@ -80,7 +83,7 @@ D0: .targets A, B, C
 .section code
 .func main
         wr   [{seed}, -]
-        call sub [0{{1=>1, 2=>1}}]
+        call sub [0{{1->1, 2=>1}}]
         stp
 .func sub
         rd
@@ -88,7 +91,7 @@ D0: .targets A, B, C
         djmp D0
 A:      wr [0]
         ret
-B:      wr [2]
+B:      wr [1]
         ret
 C:      wr [1]
         ret
@@ -105,26 +108,26 @@ fn mono_links_to_the_base_profile() {
 
 #[test]
 fn mono_happy_path_reads_dispatches_and_writes() {
-    // Seed physical 1: reads as virtual 1 → branch B → writes virtual 2,
-    // which maps back to physical 2. The stamp read, matched, dispatched,
-    // and wrote entirely on the base profile.
+    // Seed physical 1: reads as virtual 1 → branch B → writes virtual 1,
+    // which the two-way pair maps back to physical 1. The stamp read,
+    // matched, dispatched, and wrote entirely on the base profile.
     let exe = build(&read_program(1), CallMech::Mono);
     let (outcome, snaps) = run(&exe, &[4, 4]);
     assert_eq!(outcome, Outcome::Stopped);
-    assert_eq!(cell_at(&snaps[0], 0), 2, "virtual 1 → B → physical 2");
+    assert_eq!(cell_at(&snaps[0], 0), 1, "virtual 1 → B → physical 1");
 }
 
 #[test]
 fn mono_collapse_maps_two_physical_symbols_to_one_branch() {
     // Seed physical 2: the one-way collapse reads it ALSO as virtual 1, so
-    // it dispatches to the same branch B and produces the same physical 2 —
+    // it dispatches to the same branch B and produces the same physical 1 —
     // the row expansion pointed both preimages at one target.
     let exe = build(&read_program(2), CallMech::Mono);
     let (outcome, snaps) = run(&exe, &[4, 4]);
     assert_eq!(outcome, Outcome::Stopped);
     assert_eq!(
         cell_at(&snaps[0], 0),
-        2,
+        1,
         "physical 2 collapses onto virtual 1"
     );
 }

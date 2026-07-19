@@ -459,18 +459,20 @@ fn trap_taxonomy_kinds_are_distinct_and_mode_invariant() {
     assert_ne!("trapped:unmapped-write", "trapped:no-transition");
 }
 
-// ── program (e): a narrower-callee identity binding (the cardinality hole) ───
+// ── program (e): a narrower-callee binding (the cardinality hole) ────────────
 
-/// An ALL-IDENTITY binding (`[0]`, no explicit pairs) into a NARROWER callee:
-/// the caller's 4-symbol alphabet passes straight through to a 3-symbol
-/// `bare`, so caller symbol 3 has no image in the callee — a read hole. This
-/// is the shape that must NOT collapse to a plain call: collapsing (the
-/// pre-fix, cardinality-blind behavior) would let physical 3 flow into `bare`
-/// raw and silently miss the `UnmappedRead` trap the hole owes. Because that
-/// miss is mode-consistent — all three modes would collapse identically — the
-/// cross-mode compare alone cannot catch it, so the kind-pinning test below is
-/// the oracle. `bare` walks right transforming data (1→2, 2→1) until a blank
-/// read returns; a symbol-3 read traps.
+/// A binding into a NARROWER callee: the caller's 4-symbol alphabet binds to a
+/// 3-symbol `bare`. Because the alphabets differ there is no identity
+/// completion — the in-range data symbols the callee actually uses must be
+/// listed EXPLICITLY (`1->1, 2->2`); an empty `[0]` here would hole every
+/// non-blank symbol. Caller symbol 3 is unlisted, so it has no image in the
+/// callee — a read hole. This is the shape that must NOT collapse to a plain
+/// call: collapsing (the pre-fix, cardinality-blind behavior) would let
+/// physical 3 flow into `bare` raw and silently miss the `UnmappedRead` trap
+/// the hole owes. Because that miss is mode-consistent — all three modes would
+/// collapse identically — the cross-mode compare alone cannot catch it, so the
+/// kind-pinning test below is the oracle. `bare` walks right transforming data
+/// (1→2, 2→1) until a blank read returns; a symbol-3 read traps.
 const NARROWER_IDENTITY: &str = "\
 .routine main, tapes=1, alpha=(4)
 .routine bare, tapes=1, alpha=(3)
@@ -481,7 +483,7 @@ T:  .row [0]
 D:  .targets fin, wa, wb
 .section code
 .func main
-        call    bare [0]
+        call    bare [0{1->1, 2->2}]
         stp
 .func bare
 scan:   rd
@@ -532,6 +534,85 @@ fn narrower_identity_binding_reading_the_hole_traps_unmapped_read() {
     }
 }
 
+// ── program (f): explicit pairs that leave IN-RANGE symbols unlisted ─────────
+
+/// The closed-on-unequal conformance case: an unequal binding with EXPLICIT
+/// pairs that do NOT name every in-range symbol. `main` (tape 0 four-symbol,
+/// tape 1 three-symbol) binds a `sub` (tape 0 three-symbol, tape 1 four-symbol)
+/// with only `1->1` on each tape. Identity completion exists only for
+/// equal-size alphabets, so on both unequal tapes every OTHER non-blank symbol
+/// is a hole — even ones whose index is within the other alphabet:
+///
+/// - tape 0 (caller 4 → callee 3): caller symbol 2 is IN RANGE of the callee
+///   (index 2 < 3) yet unlisted, so reading it traps **UnmappedRead** (pre-fix
+///   it read through by identity); caller symbol 3 is the out-of-range read
+///   hole.
+/// - tape 1 (caller 3 → callee 4): callee symbol 2 is IN RANGE of the caller
+///   (index 2 < 3) yet has no bidirectional pair, so writing it traps
+///   **UnmappedWrite** (pre-fix it wrote through by identity); callee symbol 3
+///   is the out-of-range write hole.
+///
+/// `sub` matches `[1, 0]` → `W` (writes tape-1 virtual 2, the write hole) and
+/// `[1, 1]` → `H` (writes virtual 1 on both tapes, both mapped — the happy
+/// path). All three mechanisms must agree, so `assert_equivalent` carries the
+/// milestone contract and the kind-pinning test below is the trap oracle.
+const IN_RANGE_HOLES: &str = "\
+.routine main, tapes=2, alpha=(4, 3)
+.routine sub,  tapes=2, alpha=(3, 4)
+.section tables
+T:  .row [1, 0]
+    .row [1, 1]
+D:  .targets W, H
+.section code
+.func main
+        call    sub [0{1->1}, 1{1->1}]
+        stp
+.func sub
+        rd
+        mtc     T
+        djmp    D
+W:      wr      [-, 2]
+        ret
+H:      wr      [1, 1]
+        ret
+";
+
+#[test]
+fn in_range_holes_are_equivalent() {
+    assert_equivalent(
+        IN_RANGE_HOLES,
+        &[
+            &[(&[1], 0), (&[1], 0)], // happy: read [1,1] → H, both writes mapped
+            &[(&[1], 0), (&[0], 0)], // read [1,0] → W writes the in-range write hole
+            &[(&[2], 0), (&[0], 0)], // tape-0 in-range read hole
+            &[(&[3], 0), (&[0], 0)], // tape-0 out-of-range read hole
+            &[(&[1], 0), (&[2], 0)], // tape-1 in-range read hole (caller symbol 2)
+        ],
+    );
+}
+
+#[test]
+fn in_range_holes_trap_kinds_are_pinned() {
+    // The oracle the cross-mode compare cannot provide: pin the ACTUAL trap
+    // kinds so an in-range symbol reading/writing through by identity (the
+    // pre-fix bug) would fail here even though all three modes agree.
+    let cases: &[(Case, &str)] = &[
+        (&[(&[2], 0), (&[0], 0)], "trapped:unmapped-read"), // tape-0 caller symbol 2, in range
+        (&[(&[1], 0), (&[0], 0)], "trapped:unmapped-write"), // tape-1 callee symbol 2, in range
+        (&[(&[1], 0), (&[1], 0)], "stopped"),               // both symbols mapped → happy
+    ];
+    for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+        let (exe, _) = build(IN_RANGE_HOLES, mech);
+        for (seed, expected) in cases {
+            assert_eq!(
+                &run(&exe, seed).outcome,
+                expected,
+                "{mech}: seed {seed:?} must be {expected}"
+            );
+        }
+    }
+}
+
 // ── determinism: re-link is byte-identical (image + sidecar) ─────────────────
 
 #[test]
@@ -545,6 +626,7 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         EQUAL_SIZE_BIJECTION,
         TRAP_TAXONOMY,
         NARROWER_IDENTITY,
+        IN_RANGE_HOLES,
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
             let a = build_full(src, mech);

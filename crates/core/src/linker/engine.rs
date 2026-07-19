@@ -207,6 +207,14 @@ pub(super) fn lower_frames<'a>(
         // before it was enqueued).
         let fr_row = comp_index.get(&ckey).copied().unwrap_or(0);
 
+        // The caller's per-virtual-tape cardinalities: the routine's own
+        // signature (the invariant carrier), else the machine signature at
+        // the entry. Load-bearing for the closed-on-unequal binding rule.
+        let caller_cards: &[u32] = order[fi]
+            .signature
+            .map(|s| s.cardinalities.as_slice())
+            .unwrap_or(machine_sig.cardinalities.as_slice());
+
         for site in &sites[fi] {
             match site {
                 SiteKind::Plain { callee, .. } => {
@@ -230,7 +238,7 @@ pub(super) fn lower_frames<'a>(
                     collapse: false,
                 } => {
                     let callee_sig = routine_sig(&order, *callee)?;
-                    let child = compose(&ctx, *callee, &record.binding, callee_sig)
+                    let child = compose(&ctx, caller_cards, *callee, &record.binding, callee_sig)
                         .map_err(|e| bad_binding(&order[*callee].name, &e))?;
                     let (idx, deduped) =
                         intern_composite(&mut engine_comps, &mut comp_index, child.clone());
@@ -596,8 +604,7 @@ fn validate_binding(
     callee_name: &str,
     record: &BoundCall,
 ) -> Result<Composite, LinkError> {
-    let caller_arity = caller_sig.arity as usize;
-    let composite = absolutize(caller_arity, 0, &record.binding, callee_sig)
+    let composite = absolutize(&caller_sig.cardinalities, 0, &record.binding, callee_sig)
         .map_err(|e| bad_binding(callee_name, &e))?;
 
     for (k, tb) in record.binding.iter().enumerate() {

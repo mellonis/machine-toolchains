@@ -371,7 +371,13 @@ fn mono_stamps<'a>(
     // Seed: compose each site's binding at the machine identity.
     for &(fi, addr, callee, record) in seeds {
         let callee_sig = routine_sig(order, callee)?;
-        let child = compose(&id, callee, &record.binding, callee_sig)
+        // The seed's caller (routine `fi`) runs at the machine identity; its
+        // per-tape cardinalities carry the closed-on-unequal binding rule.
+        let caller_cards = order[fi]
+            .signature
+            .map(|s| s.cardinalities.as_slice())
+            .unwrap_or(machine_sig.cardinalities.as_slice());
+        let child = compose(&id, caller_cards, callee, &record.binding, callee_sig)
             .map_err(|e| bad_binding(&order[callee].name, &e))?;
         let (idx, dup) = intern(
             &mut nodes,
@@ -424,7 +430,13 @@ fn mono_stamps<'a>(
                     ..
                 } => {
                     let callee_sig = routine_sig(order, *callee)?;
-                    let child = compose(&comp, *callee, &record.binding, callee_sig)
+                    // The caller is this stamp's own routine; its declared
+                    // cardinalities carry the closed-on-unequal binding rule.
+                    let caller_cards = order[routine]
+                        .signature
+                        .map(|s| s.cardinalities.as_slice())
+                        .unwrap_or(machine_sig.cardinalities.as_slice());
+                    let child = compose(&comp, caller_cards, *callee, &record.binding, callee_sig)
                         .map_err(|e| bad_binding(&order[*callee].name, &e))?;
                     // A binding that composes back to a genuine full
                     // pass-through — identity placement and maps AND the callee

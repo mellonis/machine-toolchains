@@ -862,11 +862,12 @@ fn a_projecting_identity_binding_stays_a_framed_call() {
     assert!(out.executable.code.contains(&0x14), "framed call emitted");
 }
 
-/// A full-arity identity binding into a NARROWER callee is NOT a
-/// pass-through: caller symbol 3 has no image in the 3-symbol callee (a read
-/// hole), so the site must stay a framed call and materialize a holey
-/// descriptor — collapsing it would silently drop the `UnmappedRead` trap
-/// (contrast `a_full_identity_binding_collapses_to_a_plain_call`, equal-size).
+/// An EMPTY binding into a NARROWER callee is NOT a pass-through: across the
+/// unequal alphabets there is no identity completion, so every non-blank
+/// caller symbol is a read hole. The site must stay a framed call and
+/// materialize a holey descriptor — collapsing it would silently drop the
+/// `UnmappedRead` trap (contrast `a_full_identity_binding_collapses_to_a_plain_call`,
+/// equal-size).
 #[test]
 fn a_narrower_identity_binding_stays_a_framed_call() {
     let src = "\
@@ -1122,12 +1123,13 @@ fn an_identity_binding_under_mono_calls_the_original() {
     assert!(!out.executable.code.contains(&0x14), "no framed call");
 }
 
-/// A full-arity identity binding into a NARROWER callee does NOT collapse
-/// under mono either: caller symbol 3 has no image in the 3-symbol callee, so
-/// the site is stamped (not lowered to the original) and the stamp gains a
-/// synthesized unmapped-read trap row for the hole symbol. Collapsing to the
-/// original would let physical 3 flow into `sub` raw and miss the trap
-/// (contrast `an_identity_binding_under_mono_calls_the_original`, equal-size).
+/// An EMPTY binding into a NARROWER callee does NOT collapse under mono
+/// either: across the unequal alphabets there is no identity completion, so
+/// every non-blank caller symbol is a read hole. The site is stamped (not
+/// lowered to the original) and the stamp gains synthesized unmapped-read trap
+/// rows. Collapsing to the original would let those symbols flow into `sub`
+/// raw and miss the trap (contrast
+/// `an_identity_binding_under_mono_calls_the_original`, equal-size).
 #[test]
 fn a_narrower_identity_binding_under_mono_stamps_with_trap_rows() {
     let src = "\
@@ -1171,7 +1173,7 @@ C:      wr [2]
     );
     assert!(
         out.report.synthesized_trap_rows >= 1,
-        "the read hole (physical 3) synthesizes an unmapped-read trap row: {}",
+        "the read holes (every non-blank caller symbol) synthesize unmapped-read trap rows: {}",
         out.report.synthesized_trap_rows
     );
 }
@@ -1202,11 +1204,12 @@ Fr: .frame  tapes=(0, 1)
 }
 
 /// The hand-derived read-table rewrite: a machine-width match table with
-/// synthesized trap rows PREPENDED, a one-way collapse expanding one row into
-/// two, and a no-preimage row DROPPED with the paired dispatch renumbered.
+/// synthesized trap rows PREPENDED, a collapse expanding one row into two,
+/// and a no-preimage row DROPPED with the paired dispatch renumbered.
 /// `main` (1 tape, alphabet 4) mono-calls `sub` (1 tape, alphabet 3) binding
-/// physical 1 and 2 both onto virtual 1 (a one-way collapse); physical 3 has
-/// no virtual image (a read hole).
+/// physical 1 (two-way, so virtual 1 writes back) and physical 2 (one-way)
+/// both onto virtual 1 (a collapse); physical 3 is unlisted, so across the
+/// unequal alphabets it has no virtual image (a read hole).
 #[test]
 fn mono_read_table_rewrite_is_byte_derived() {
     let src = "\
@@ -1219,7 +1222,7 @@ T0: .row [0]
 D0: .targets A, B, C
 .section code
 .func main
-        call    sub [0{1=>1, 2=>1}]
+        call    sub [0{1->1, 2=>1}]
         stp
 .func sub
         rd

@@ -239,8 +239,17 @@ impl std::fmt::Display for ComposeError {
 /// carries every pair, the write map only the bidirectional ones. Validates
 /// arity, caller-tape range, callee-symbol range, per-direction conflicts,
 /// and blank pinning (the authority for GC7's mapping legality).
+///
+/// `caller_cards` is the caller's per-virtual-tape alphabet cardinalities
+/// (its arity is `caller_cards.len()`). It is load-bearing for the
+/// **closed-on-unequal** rule (docs/formats.md (bound calls)): identity
+/// completion exists ONLY for equal-size alphabets. When a bound tape's
+/// caller and callee cardinalities differ, the map is CLOSED — every
+/// non-blank source symbol the binding does not name becomes a hole, so an
+/// unequal binding must list every pair it wants mapped (and an empty
+/// unequal binding holes everything but blank).
 fn binding_to_composite(
-    caller_arity: usize,
+    caller_cards: &[u32],
     callee_routine: usize,
     binding: &[TapeBinding],
     sig: &RoutineSig,
@@ -252,6 +261,7 @@ fn binding_to_composite(
         });
     }
 
+    let caller_arity = caller_cards.len();
     let mut tapes = Vec::with_capacity(binding.len());
     for (k, tb) in binding.iter().enumerate() {
         if usize::from(tb.caller_tape) >= caller_arity {
@@ -265,6 +275,10 @@ fn binding_to_composite(
         // a zero cardinality (which rejects every symbol) rather than panic
         // on an internally malformed signature.
         let card = sig.cardinalities.get(k).copied().unwrap_or(0);
+        let caller_card = caller_cards
+            .get(usize::from(tb.caller_tape))
+            .copied()
+            .unwrap_or(0);
 
         let mut rmap = SparseMap::identity();
         let mut wmap = SparseMap::identity();
@@ -307,6 +321,20 @@ fn binding_to_composite(
             }
         }
 
+        // Closed-on-unequal (docs/formats.md (bound calls)): identity
+        // completion is only for equal-size alphabets. Across differently
+        // sized alphabets the map is closed — a non-blank source symbol the
+        // binding does not name is a hole. Computed from the explicit srcs
+        // still present in `pairs` (identity pairs are stored during
+        // ingestion and only dropped by `canonicalize` below), so an
+        // explicit `k->k` keeps `k` mapped while a truly absent `k` traps.
+        // Read holes are caller symbols with no pair; write holes are callee
+        // symbols with no bidirectional pair writing back.
+        if caller_card != card {
+            close_unlisted(&mut rmap, caller_card);
+            close_unlisted(&mut wmap, card);
+        }
+
         rmap.canonicalize();
         wmap.canonicalize();
         tapes.push(CompositeTape {
@@ -344,6 +372,23 @@ fn insert_checked(
         None => {
             map.pairs.insert(src, dst);
             Ok(())
+        }
+    }
+}
+
+/// Close a map over its `domain_card` source symbols: every non-blank source
+/// index below `domain_card` that no explicit pair names becomes a hole
+/// (docs/formats.md (bound calls) — the closed-on-unequal rule). Blank stays
+/// pinned. Called before [`SparseMap::canonicalize`], so an explicit identity
+/// pair (`k->k`, still in `pairs`) keeps `k` out of the hole set and survives
+/// as identity, while a symbol the binding never named traps.
+fn close_unlisted(map: &mut SparseMap, domain_card: u32) {
+    let listed: BTreeSet<u16> = map.pairs.keys().copied().collect();
+    let upper = domain_card.min(MAX_SYMBOL + 1);
+    for s in 1..upper {
+        let s16 = s as u16;
+        if !listed.contains(&s16) {
+            map.holes.insert(s16);
         }
     }
 }
@@ -427,27 +472,31 @@ pub(crate) fn identity_composite(arity: usize, routine: usize) -> Composite {
 
 /// Absolutize a binding at the machine's top frame (the identity context):
 /// the caller *is* the machine, so `caller_tape` is already a physical
-/// tape. Equivalent to `compose(identity, ...)`.
+/// tape and `machine_cards` are the caller's per-tape cardinalities.
+/// Equivalent to `compose(identity, ...)`.
 pub(crate) fn absolutize(
-    machine_arity: usize,
+    machine_cards: &[u32],
     callee_routine: usize,
     binding: &[TapeBinding],
     sig: &RoutineSig,
 ) -> Result<Composite, ComposeError> {
-    binding_to_composite(machine_arity, callee_routine, binding, sig)
+    binding_to_composite(machine_cards, callee_routine, binding, sig)
 }
 
 /// Compose an outer composite with a binding declared at a call site inside
 /// `outer`'s routine: the binding's caller tapes index `outer`'s virtual
-/// tapes. Validates the binding against `outer`'s arity and the callee
+/// tapes, whose per-tape alphabet cardinalities are `caller_cards` (the
+/// routine's own signature — the invariant carrier across every composite it
+/// runs under). Validates the binding against `outer`'s arity and the callee
 /// signature, then projects it through `outer` (GC6/GC7).
 pub(crate) fn compose(
     outer: &Composite,
+    caller_cards: &[u32],
     callee_routine: usize,
     binding: &[TapeBinding],
     sig: &RoutineSig,
 ) -> Result<Composite, ComposeError> {
-    let inner = binding_to_composite(outer.tapes.len(), callee_routine, binding, sig)?;
+    let inner = binding_to_composite(caller_cards, callee_routine, binding, sig)?;
     Ok(compose_composites(outer, &inner))
 }
 
@@ -593,7 +642,7 @@ mod tests {
     #[test]
     fn arity_mismatch_is_rejected() {
         let s = sig(&[4, 4]);
-        let err = absolutize(3, 0, &[tape(0, vec![])], &s).unwrap_err();
+        let err = absolutize(&[4, 4, 4], 0, &[tape(0, vec![])], &s).unwrap_err();
         assert_eq!(
             err,
             ComposeError::Arity {
@@ -606,7 +655,7 @@ mod tests {
     #[test]
     fn caller_tape_out_of_range_is_rejected() {
         let s = sig(&[4]);
-        let err = absolutize(2, 0, &[tape(5, vec![])], &s).unwrap_err();
+        let err = absolutize(&[4, 4], 0, &[tape(5, vec![])], &s).unwrap_err();
         assert!(matches!(
             err,
             ComposeError::CallerTape { caller_tape: 5, .. }
@@ -616,7 +665,7 @@ mod tests {
     #[test]
     fn callee_symbol_out_of_cardinality_is_rejected() {
         let s = sig(&[3]); // symbols 0,1,2
-        let err = absolutize(1, 0, &[tape(0, vec![pair(1, 7, false)])], &s).unwrap_err();
+        let err = absolutize(&[3], 0, &[tape(0, vec![pair(1, 7, false)])], &s).unwrap_err();
         assert!(matches!(
             err,
             ComposeError::SymbolRange {
@@ -632,7 +681,7 @@ mod tests {
         let s = sig(&[5]);
         // caller symbol 1 mapped to two different callee symbols.
         let err = absolutize(
-            1,
+            &[5],
             0,
             &[tape(0, vec![pair(1, 2, false), pair(1, 3, false)])],
             &s,
@@ -654,7 +703,7 @@ mod tests {
         // two distinct caller symbols fold two-way onto callee 2 => the
         // write-back is ambiguous (injectivity failure).
         let err = absolutize(
-            1,
+            &[5],
             0,
             &[tape(0, vec![pair(1, 2, false), pair(3, 2, false)])],
             &s,
@@ -676,7 +725,7 @@ mod tests {
         // the same collapse, but one-way: legal, because `=>` does not
         // contribute to write-back, so there is no injectivity failure.
         let c = absolutize(
-            1,
+            &[5],
             0,
             &[tape(0, vec![pair(1, 2, true), pair(3, 2, true)])],
             &s,
@@ -691,7 +740,7 @@ mod tests {
     #[test]
     fn blank_read_pin_is_enforced() {
         let s = sig(&[5]);
-        let err = absolutize(1, 0, &[tape(0, vec![pair(0, 2, false)])], &s).unwrap_err();
+        let err = absolutize(&[5], 0, &[tape(0, vec![pair(0, 2, false)])], &s).unwrap_err();
         assert!(matches!(err, ComposeError::Blank { src: 0, dst: 2, .. }));
     }
 
@@ -699,12 +748,72 @@ mod tests {
     fn two_way_collapse_onto_blank_is_rejected_but_one_way_is_allowed() {
         let s = sig(&[5]);
         // two-way `2 -> 0` would un-pin blank on write-back.
-        let err = absolutize(1, 0, &[tape(0, vec![pair(2, 0, false)])], &s).unwrap_err();
+        let err = absolutize(&[5], 0, &[tape(0, vec![pair(2, 0, false)])], &s).unwrap_err();
         assert!(matches!(err, ComposeError::Blank { src: 2, dst: 0, .. }));
         // one-way `2 => 0` is the canonical marker collapse — legal.
-        let c = absolutize(1, 0, &[tape(0, vec![pair(2, 0, true)])], &s).unwrap();
+        let c = absolutize(&[5], 0, &[tape(0, vec![pair(2, 0, true)])], &s).unwrap();
         assert_eq!(c.tapes[0].rmap.apply(2), Some(0));
         assert!(c.tapes[0].wmap.pairs.is_empty());
+    }
+
+    // ----- closed-on-unequal (the bound-calls hole rule) -------------------
+
+    #[test]
+    fn unequal_binding_closes_unlisted_symbols_to_holes() {
+        // Caller 4-symbol, callee 3-symbol (unequal): an explicit pair keeps
+        // its src mapped, but every OTHER non-blank caller symbol becomes a
+        // READ hole — identity completion does not exist across differently
+        // sized alphabets (docs/formats.md (bound calls)). Symmetrically, a
+        // callee symbol with no bidirectional pair writing back is a WRITE
+        // hole. The unlisted-in-range case (caller 2, below the callee's
+        // cardinality) is the conformance point: it must trap, not read
+        // through by identity.
+        let s = sig(&[3]);
+        let c = absolutize(&[4], 0, &[tape(0, vec![pair(1, 1, false)])], &s).unwrap();
+        let t = &c.tapes[0];
+        assert_eq!(t.rmap.apply(0), Some(0), "blank pinned");
+        assert_eq!(t.rmap.apply(1), Some(1), "explicit pair survives");
+        assert_eq!(
+            t.rmap.apply(2),
+            None,
+            "in-range unlisted caller symbol is a hole"
+        );
+        assert_eq!(
+            t.rmap.apply(3),
+            None,
+            "out-of-range caller symbol is a hole"
+        );
+        assert_eq!(t.wmap.apply(0), Some(0), "blank pinned");
+        assert_eq!(
+            t.wmap.apply(1),
+            Some(1),
+            "the bidirectional pair writes back"
+        );
+        assert_eq!(
+            t.wmap.apply(2),
+            None,
+            "callee symbol with no write-back is a hole"
+        );
+    }
+
+    #[test]
+    fn empty_unequal_binding_holes_every_nonblank_symbol() {
+        // An EMPTY pairs list across unequal alphabets holes everything but
+        // blank, both directions — no silent identity across differently
+        // sized alphabets, ever (docs/formats.md (bound calls)).
+        let s = sig(&[3]);
+        let c = absolutize(&[4], 0, &[tape(0, vec![])], &s).unwrap();
+        let t = &c.tapes[0];
+        assert_eq!(t.rmap.apply(0), Some(0));
+        for p in 1..4u16 {
+            assert_eq!(t.rmap.apply(p), None, "read {p} is a hole");
+        }
+        for v in 1..3u16 {
+            assert_eq!(t.wmap.apply(v), None, "write {v} is a hole");
+        }
+        // The equal-size empty binding stays identity (the contrast).
+        let eq = absolutize(&[3], 0, &[tape(0, vec![])], &s).unwrap();
+        assert!(is_identity(&eq));
     }
 
     // ----- absolutize / identity -------------------------------------------
@@ -717,7 +826,7 @@ mod tests {
             tape(2, vec![pair(1, 3, false), pair(2, 0, true)]),
             tape(0, vec![]),
         ];
-        let c = absolutize(4, 9, &binding, &s).unwrap();
+        let c = absolutize(&[4, 4, 4, 4], 9, &binding, &s).unwrap();
         assert_eq!(c.routine, 9);
         assert_eq!(c.tapes[0].phys, 2);
         assert_eq!(c.tapes[0].rmap.apply(1), Some(3)); // read
@@ -740,7 +849,9 @@ mod tests {
         // Inner binding at a call site inside E's routine: callee tape 0
         // binds E's virtual tape 0, remapping virtual 1 -> callee 3.
         let s = sig(&[4]);
-        let composed = compose(&e, 2, &[tape(0, vec![pair(1, 3, false)])], &s).unwrap();
+        // E's single virtual tape is 4-wide, equal to the callee — no closed
+        // holes, so the composed maps are exactly the threaded pairs.
+        let composed = compose(&e, &[4], 2, &[tape(0, vec![pair(1, 3, false)])], &s).unwrap();
         assert_eq!(composed.routine, 2);
         // physical resolves through E: callee tape 0 lands on physical tape 2.
         assert_eq!(composed.tapes[0].phys, 2);
@@ -749,7 +860,7 @@ mod tests {
         // write: callee 3 -> E-virtual 1 -> physical 4.
         assert_eq!(composed.tapes[0].wmap.apply(3), Some(4));
         // compose validates the binding against the OUTER arity (1 tape here).
-        let bad = compose(&e, 2, &[tape(1, vec![])], &s);
+        let bad = compose(&e, &[4], 2, &[tape(1, vec![])], &s);
         assert!(matches!(
             bad,
             Err(ComposeError::CallerTape { caller_tape: 1, .. })
@@ -761,7 +872,7 @@ mod tests {
         let s = sig(&[4, 4]);
         // pass each callee tape straight through, no symbol remaps.
         let binding = vec![tape(0, vec![]), tape(1, vec![])];
-        let c = absolutize(2, 7, &binding, &s).unwrap();
+        let c = absolutize(&[4, 4], 7, &binding, &s).unwrap();
         assert!(is_identity(&c));
     }
 

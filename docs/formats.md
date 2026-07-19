@@ -640,6 +640,19 @@ holes union the preimages of the inner holes. A one-way `=>` pair
 participates only in the read direction and is excluded from the
 bidirectional bijectivity check.
 
+How a binding's symbol maps complete depends on the two tapes' sizes.
+**Equal-size** alphabets identity-complete: a source symbol the binding does
+not name maps to itself (the completed bijection). Across
+**differently-sized** alphabets there is no identity completion — the map is
+**closed**: every non-blank source symbol the binding does not name is a
+hole. Read holes are caller symbols with no read pair; write holes are callee
+symbols with no bidirectional pair writing back. So an unequal binding must
+list every pair it wants mapped: an unlisted symbol traps even when its index
+falls inside the other alphabet, and an *empty* unequal binding holes
+everything but the blank (blank↔blank is always implicit). A one-way `=>`
+pair, being read-only, establishes no write-back, so on an unequal tape the
+symbol it collapses onto is a write hole unless a two-way pair also names it.
+
 How a lowered site runs depends on the **call mechanism**, chosen at link
 time (`tmt link --call-mech mono | frames | hybrid`, default hybrid):
 
