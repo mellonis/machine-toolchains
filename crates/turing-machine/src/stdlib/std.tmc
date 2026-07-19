@@ -281,8 +281,11 @@ namespace std {
       }
     }
 
-    ? Add one to a number. On entry the head is on the leftmost digit; on
-    ? overflow the number grows one cell to the left ('111' → '1000').
+    ? Add one to a number. On entry the head is on the leftmost digit; on exit
+    ? the final head position is data-dependent — it rests on the digit the
+    ? carry settled on (the cell that flipped from '0' to '1'). On overflow the
+    ? number grows one cell to the left ('111' → '1000') and that settling cell
+    ? is the new leading '1'.
     export routine plusOne(tape num: symbols) {
       entry graft plusOneGraph(num = num, done = return) as body;
     }
@@ -304,10 +307,12 @@ namespace std {
       }
     }
 
-    ? Subtract one from a number. On entry the head is on the leftmost digit.
-    ? A borrow that reaches the most significant digit leaves a leading zero
-    ? ('1000' − 1 → '0111'); the result is NOT normalized. An empty region
-    ? (underflow) halts unchanged.
+    ? Subtract one from a number. On entry the head is on the leftmost digit;
+    ? on exit the final head position is data-dependent — it rests on the digit
+    ? the borrow settled on (the cell that flipped from '1' to '0'). A borrow
+    ? that reaches the most significant digit leaves a leading zero ('1000' − 1
+    ? → '0111'); the result is NOT normalized. An empty region (underflow) halts
+    ? unchanged with the head one cell left, on a blank.
     export routine minusOne(tape num: symbols) {
       entry graft minusOneGraph(num = num, done = return) as body;
     }
