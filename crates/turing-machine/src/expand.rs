@@ -33,8 +33,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 
-use crate::compiler::{ResolvedAlphabet, WorldKind};
-use crate::parser::{BindingArg, Continuation, MoveDir};
+use crate::compiler::{CompileError, CompileErrorKind, ResolvedAlphabet, WorldKind};
+use crate::parser::{
+    BindingArg, Continuation, MoveCell, MoveDir, MoveVec, PatternCell, PatternCellKind, Rule,
+    SymLit, Transition, WriteCell, WriteCellKind, WriteVec,
+};
 
 // ---------------------------------------------------------------------------
 // Output — the concrete, index-resolved module Task 6 (IR lowering) consumes.
@@ -135,7 +138,10 @@ pub(crate) enum Transition2 {
         then: Continuation,
     },
     /// A call on a world-local bind name (the bind carries the binding).
-    BindCall { name: String, then: Continuation },
+    BindCall {
+        name: String,
+        then: Continuation,
+    },
     Return,
     Stop,
     Halt,
@@ -314,6 +320,328 @@ fn compose(outer: &Composite, inner: &Composite) -> Composite {
     Composite { tapes }
 }
 
+// ---------------------------------------------------------------------------
+// Range expansion (spec §10.3) — one source rule → concrete index-resolved
+// rows. Pattern ranges / single-with-binding expand cartesian (leftmost tape
+// varies slowest, rightmost fastest — matching the linker's preimage
+// cartesian); `{v±k}` folds per row (numeric, bounds-checked), `{c}` passes the
+// bound glyph through; a range value with no glyph on the tape drops that
+// alternative. Product over 256 warns.
+// ---------------------------------------------------------------------------
+
+/// The product-count above which a rule's expansion warns (spec §10.3 / GC7).
+const PRODUCT_THRESHOLD: usize = 256;
+
+/// One tape's resolution context: its glyph vector (index → glyph) and the
+/// inverse lookup (glyph → index).
+struct TapeInfo {
+    glyphs: Vec<String>,
+    index: HashMap<String, u16>,
+}
+
+impl TapeInfo {
+    fn new(glyphs: &[String]) -> Self {
+        let index = glyphs
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (g.clone(), i as u16))
+            .collect();
+        Self {
+            glyphs: glyphs.to_vec(),
+            index,
+        }
+    }
+
+    fn card(&self) -> usize {
+        self.glyphs.len()
+    }
+
+    fn idx(&self, glyph: &str) -> Option<u16> {
+        self.index.get(glyph).copied()
+    }
+}
+
+/// A symbol bound by a pattern cell's `as v`. `glyph` is what `{v}` writes;
+/// `value` is the number `{v±k}` arithmetic folds (`None` for glyph bindings —
+/// the parser already forbids arithmetic on those).
+#[derive(Debug, Clone)]
+struct BoundVal {
+    glyph: String,
+    value: Option<i64>,
+}
+
+/// The glyph label a symbol literal contributes (numeric → its decimal value).
+fn glyph_label(s: &SymLit) -> String {
+    match s {
+        SymLit::Glyph { value, .. } => value.clone(),
+        SymLit::Number { value, .. } => value.to_string(),
+    }
+}
+
+/// A symbol literal's numeric value, if it is a number literal.
+fn numeric_value(s: &SymLit) -> Option<i64> {
+    match s {
+        SymLit::Number { value, .. } => Some(i64::from(*value)),
+        SymLit::Glyph { .. } => None,
+    }
+}
+
+/// Enumerate a pattern range's `(glyph, value)` members, inclusive/ascending.
+/// Numeric ranges mint decimal glyphs with their value; glyph ranges walk
+/// scalar succession with no value. Descending or non-scalar endpoints error
+/// at `span`.
+fn enumerate_range(
+    lo: &SymLit,
+    hi: &SymLit,
+    span: Span,
+) -> Result<Vec<(String, Option<i64>)>, CompileError> {
+    match (lo, hi) {
+        (SymLit::Number { value: l, .. }, SymLit::Number { value: h, .. }) => {
+            if l > h {
+                return Err(CompileError {
+                    span,
+                    kind: CompileErrorKind::RangeDescending,
+                });
+            }
+            Ok((*l..=*h)
+                .map(|v| (v.to_string(), Some(i64::from(v))))
+                .collect())
+        }
+        (SymLit::Glyph { value: l, .. }, SymLit::Glyph { value: h, .. }) => {
+            let (Some(lc), Some(hc)) = (single_scalar(l), single_scalar(h)) else {
+                return Err(CompileError {
+                    span,
+                    kind: CompileErrorKind::RangeEndpointNotScalar,
+                });
+            };
+            if lc as u32 > hc as u32 {
+                return Err(CompileError {
+                    span,
+                    kind: CompileErrorKind::RangeDescending,
+                });
+            }
+            Ok((lc as u32..=hc as u32)
+                .filter_map(char::from_u32)
+                .map(|c| (c.to_string(), None))
+                .collect())
+        }
+        _ => Err(CompileError {
+            span,
+            kind: CompileErrorKind::RangeEndpointNotScalar,
+        }),
+    }
+}
+
+/// The single Unicode scalar of a glyph, or `None` if it is not exactly one.
+fn single_scalar(g: &str) -> Option<char> {
+    let mut chars = g.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
+}
+
+/// One pattern cell's expansion alternatives: `(concrete cell, optional
+/// binding)`. A wildcard, single symbol, or one row per range member; a range
+/// value with no glyph on the tape drops silently.
+type CellOpt = (Cell, Option<(String, BoundVal)>);
+
+fn cell_options(cell: &PatternCell, ti: &TapeInfo) -> Result<Vec<CellOpt>, CompileError> {
+    let binding = cell.binding.as_ref().map(|b| b.name.clone());
+    match &cell.kind {
+        PatternCellKind::Wildcard => Ok(vec![(Cell::Wild, None)]),
+        PatternCellKind::Single(s) => {
+            let Some(i) = ti.idx(&glyph_label(s)) else {
+                // A single concrete symbol not on this tape can never match —
+                // the rule is dead; drop it (no valid index to lower).
+                return Ok(Vec::new());
+            };
+            let bv = binding.map(|n| {
+                (
+                    n,
+                    BoundVal {
+                        glyph: glyph_label(s),
+                        value: numeric_value(s),
+                    },
+                )
+            });
+            Ok(vec![(Cell::Sym(i), bv)])
+        }
+        PatternCellKind::Range { lo, hi } => {
+            let mut opts = Vec::new();
+            for (glyph, value) in enumerate_range(lo, hi, cell.span)? {
+                if let Some(i) = ti.idx(&glyph) {
+                    let bv = binding.clone().map(|n| (n, BoundVal { glyph, value }));
+                    opts.push((Cell::Sym(i), bv));
+                }
+            }
+            Ok(opts)
+        }
+    }
+}
+
+/// Range-expand one source rule against its world's tape contexts. Rows come
+/// out in expansion order; a product over [`PRODUCT_THRESHOLD`] pushes a
+/// warning to `warn`. The transition is lowered with `lower_tr` (own states
+/// pass state names through; a graft body remaps them at splice).
+fn expand_rule(
+    rule: &Rule,
+    tapes: &[TapeInfo],
+    warn: &mut Vec<Diagnostic>,
+    lower_tr: &impl Fn(&Transition) -> Transition2,
+) -> Result<Vec<ExpandedRule>, CompileError> {
+    let arity = tapes.len();
+    check_width(rule.pattern.cells.len(), arity, rule.span)?;
+    if let Some(w) = &rule.write {
+        check_width(w.cells.len(), arity, w.span)?;
+    }
+    if let Some(m) = &rule.mov {
+        check_width(m.cells.len(), arity, m.span)?;
+    }
+
+    let mut per_cell: Vec<Vec<CellOpt>> = Vec::with_capacity(arity);
+    for (i, cell) in rule.pattern.cells.iter().enumerate() {
+        per_cell.push(cell_options(cell, &tapes[i])?);
+    }
+
+    // Cartesian product, leftmost tape varying slowest (rightmost fastest).
+    let mut combos: Vec<Vec<CellOpt>> = vec![Vec::new()];
+    for opts in &per_cell {
+        let mut next = Vec::with_capacity(combos.len() * opts.len());
+        for combo in &combos {
+            for opt in opts {
+                let mut c = combo.clone();
+                c.push(opt.clone());
+                next.push(c);
+            }
+        }
+        combos = next;
+    }
+
+    if combos.len() > PRODUCT_THRESHOLD {
+        warn.push(Diagnostic {
+            code: "expansion-threshold",
+            span: rule.span,
+            message: format!(
+                "rule expands to {} rows (over {PRODUCT_THRESHOLD}) — the cost is large",
+                combos.len()
+            ),
+            fix: None,
+        });
+    }
+
+    let transition = lower_tr(&rule.transition);
+    let mut out = Vec::with_capacity(combos.len());
+    for combo in combos {
+        let pattern: Vec<Cell> = combo.iter().map(|(c, _)| *c).collect();
+        let env: HashMap<&str, &BoundVal> = combo
+            .iter()
+            .filter_map(|(_, b)| b.as_ref().map(|(n, v)| (n.as_str(), v)))
+            .collect();
+        let write = resolve_write(rule.write.as_ref(), tapes, &env)?;
+        let moves = resolve_moves(rule.mov.as_ref(), arity);
+        out.push(ExpandedRule {
+            pattern,
+            debugger: rule.debugger,
+            write,
+            moves,
+            transition: transition.clone(),
+            span: rule.span,
+        });
+    }
+    Ok(out)
+}
+
+fn check_width(got: usize, expected: usize, span: Span) -> Result<(), CompileError> {
+    if got == expected {
+        Ok(())
+    } else {
+        Err(CompileError {
+            span,
+            kind: CompileErrorKind::RowWidth { expected, got },
+        })
+    }
+}
+
+/// Resolve a write vector to per-tape [`WriteOut`], folding `{v±k}` / `{c}`.
+fn resolve_write(
+    write: Option<&WriteVec>,
+    tapes: &[TapeInfo],
+    env: &HashMap<&str, &BoundVal>,
+) -> Result<Vec<WriteOut>, CompileError> {
+    let arity = tapes.len();
+    let Some(wv) = write else {
+        return Ok(vec![WriteOut::Keep; arity]);
+    };
+    let mut out = Vec::with_capacity(arity);
+    for (i, cell) in wv.cells.iter().enumerate() {
+        out.push(resolve_write_cell(cell, &tapes[i], env)?);
+    }
+    Ok(out)
+}
+
+fn resolve_write_cell(
+    cell: &WriteCell,
+    ti: &TapeInfo,
+    env: &HashMap<&str, &BoundVal>,
+) -> Result<WriteOut, CompileError> {
+    match &cell.kind {
+        WriteCellKind::Keep => Ok(WriteOut::Keep),
+        WriteCellKind::Lit(s) => {
+            let glyph = glyph_label(s);
+            ti.idx(&glyph).map(WriteOut::Sym).ok_or(CompileError {
+                span: cell.span,
+                kind: CompileErrorKind::MapSymbolNotInAlphabet(glyph),
+            })
+        }
+        WriteCellKind::Subst {
+            name,
+            name_span,
+            delta,
+        } => {
+            let bv = env.get(name.as_str()).ok_or_else(|| CompileError {
+                span: *name_span,
+                kind: CompileErrorKind::FoldOutOfAlphabet(format!(
+                    "`{{{name}}}` refers to no pattern binding in this rule"
+                )),
+            })?;
+            let glyph = if *delta == 0 {
+                bv.glyph.clone()
+            } else {
+                // Arithmetic is numeric-only (the parser rejects `{c±k}`).
+                let base = bv.value.ok_or_else(|| CompileError {
+                    span: *name_span,
+                    kind: CompileErrorKind::FoldOutOfAlphabet(format!(
+                        "`{{{name}}}` binds a glyph, which cannot take arithmetic"
+                    )),
+                })?;
+                let folded = base + delta;
+                if folded < 0 {
+                    return Err(CompileError {
+                        span: *name_span,
+                        kind: CompileErrorKind::FoldOutOfAlphabet(format!(
+                            "`{{{name}{delta:+}}}` folds to {folded}, below the alphabet"
+                        )),
+                    });
+                }
+                folded.to_string()
+            };
+            ti.idx(&glyph).map(WriteOut::Sym).ok_or(CompileError {
+                span: *name_span,
+                kind: CompileErrorKind::FoldOutOfAlphabet(format!(
+                    "`{{{name}{delta:+}}}` folds to `{glyph}`, not in the tape's alphabet"
+                )),
+            })
+        }
+    }
+}
+
+/// Resolve a move vector to per-tape [`MoveDir`] (`Stay` default when omitted).
+fn resolve_moves(mov: Option<&MoveVec>, arity: usize) -> Vec<MoveDir> {
+    match mov {
+        None => vec![MoveDir::Stay; arity],
+        Some(mv) => mv.cells.iter().map(|c: &MoveCell| c.dir).collect(),
+    }
+}
+
 #[cfg(test)]
 mod map_tests {
     use super::*;
@@ -387,5 +715,130 @@ mod map_tests {
         assert_eq!(c.tapes[0].phys, 2);
         assert_eq!(c.tapes[0].rmap.apply(4), Some(3)); // host 4 → A 1 → B 3
         assert_eq!(c.tapes[0].wmap.apply(3), Some(4)); // B 3 → A 1 → host 4
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    /// Parse a program and return the machine's `state_idx`-th state's rules.
+    fn machine_rules(src: &str, state_idx: usize) -> Vec<Rule> {
+        let toks = lex(src).expect("lex");
+        let prog = parse(&toks).expect("parse");
+        prog.machine.expect("machine").states[state_idx]
+            .rules
+            .clone()
+    }
+
+    fn ti(glyphs: &[&str]) -> TapeInfo {
+        TapeInfo::new(&glyphs.iter().map(|g| g.to_string()).collect::<Vec<_>>())
+    }
+
+    /// A transition lowerer for own states (goto passes the name through).
+    fn own_tr(t: &Transition) -> Transition2 {
+        match t {
+            Transition::Goto { name, .. } => Transition2::Goto(name.clone()),
+            Transition::Return { .. } => Transition2::Return,
+            Transition::Stop { .. } => Transition2::Stop,
+            Transition::Halt { .. } => Transition2::Halt,
+            Transition::Call { .. } => panic!("no call in these fixtures"),
+        }
+    }
+
+    #[test]
+    fn glyph_range_binding_passes_through_on_the_other_tape() {
+        // A.3's copy rule: `['0'..'1' as c, *] -> write [-, {c}] move [>, >] goto copy`.
+        let src = "\
+alphabet bits { '_', '0', '1' }
+machine {
+  tape src: bits;
+  tape dst: bits;
+  entry state copy {
+    ['0'..'1' as c, *] -> write [-, {c}] move [>, >] goto copy;
+    ['_', *]           -> stop;
+  }
+}
+";
+        let rules = machine_rules(src, 0);
+        let tapes = vec![ti(&["_", "0", "1"]), ti(&["_", "0", "1"])];
+        let mut warn = Vec::new();
+        let rows = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap();
+        assert_eq!(rows.len(), 2);
+        // '0' is index 1, '1' is index 2; `{c}` writes the same glyph on dst.
+        assert_eq!(rows[0].pattern, vec![Cell::Sym(1), Cell::Wild]);
+        assert_eq!(rows[0].write, vec![WriteOut::Keep, WriteOut::Sym(1)]);
+        assert_eq!(rows[1].pattern, vec![Cell::Sym(2), Cell::Wild]);
+        assert_eq!(rows[1].write, vec![WriteOut::Keep, WriteOut::Sym(2)]);
+        assert_eq!(rows[0].moves, vec![MoveDir::Right, MoveDir::Right]);
+        assert_eq!(rows[0].transition, Transition2::Goto("copy".into()));
+        assert!(warn.is_empty());
+    }
+
+    #[test]
+    fn numeric_range_folds_arithmetic_per_row() {
+        // A.4's `[1..125 as v] -> write [{v+1}] stop` on `bytes = 0..126`.
+        let src = "\
+alphabet bytes { 0..126 }
+machine {
+  tape cell: bytes;
+  entry state inc {
+    [1..125 as v] -> write [{v+1}] stop;
+    [126]         -> halt;
+    [0]           -> write [1] stop;
+  }
+}
+";
+        let rules = machine_rules(src, 0);
+        let glyphs: Vec<String> = (0..=126).map(|v| v.to_string()).collect();
+        let tapes = vec![TapeInfo::new(&glyphs)];
+        let mut warn = Vec::new();
+        let rows = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap();
+        assert_eq!(rows.len(), 125);
+        // value == index for this alphabet: v reads index v, writes v+1.
+        assert_eq!(rows[0].pattern, vec![Cell::Sym(1)]);
+        assert_eq!(rows[0].write, vec![WriteOut::Sym(2)]);
+        assert_eq!(rows[124].pattern, vec![Cell::Sym(125)]);
+        assert_eq!(rows[124].write, vec![WriteOut::Sym(126)]);
+        // The `[126] -> halt` and `[0] -> write [1]` rows are singletons.
+        let halt = expand_rule(&rules[1], &tapes, &mut warn, &own_tr).unwrap();
+        assert_eq!(halt.len(), 1);
+        assert_eq!(halt[0].transition, Transition2::Halt);
+    }
+
+    #[test]
+    fn fold_below_or_above_the_alphabet_errors() {
+        let src = "\
+alphabet three { 0..2 }
+machine {
+  tape cell: three;
+  entry state s { [1 as v] -> write [{v+2}] stop; }
+}
+";
+        let rules = machine_rules(src, 0);
+        let tapes = vec![TapeInfo::new(&["0".into(), "1".into(), "2".into()])];
+        let mut warn = Vec::new();
+        let err = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap_err();
+        assert_eq!(err.kind.code(), "fold-out-of-alphabet");
+    }
+
+    #[test]
+    fn a_row_width_mismatch_is_caught() {
+        // Two tapes but a one-wide pattern.
+        let src = "\
+alphabet bits { '_', '0', '1' }
+machine {
+  tape a: bits;
+  tape b: bits;
+  entry state s { ['0'] -> stop; }
+}
+";
+        let rules = machine_rules(src, 0);
+        let tapes = vec![ti(&["_", "0", "1"]), ti(&["_", "0", "1"])];
+        let mut warn = Vec::new();
+        let err = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap_err();
+        assert_eq!(err.kind.code(), "row-width");
     }
 }

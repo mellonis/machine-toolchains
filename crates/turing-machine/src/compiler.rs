@@ -165,6 +165,40 @@ pub enum CompileErrorKind {
     /// A `call` on a world-local bind name carries binding arguments. A bind
     /// is already fully bound at its declaration, so a call on it takes none.
     BindCallArgs(String),
+
+    // -- graft + range expansion (Task 5) ----------------------------------
+    /// A graph definition graft-depends on itself (directly or through a
+    /// cycle of definitions) — infinite expansion. `name` is one graph on the
+    /// cycle. Instance-level cycles (continuation loops) stay legal.
+    GraftCycle(String),
+    /// A graft binding's symbol map references a glyph that is not in the tape
+    /// it maps (the host tape for the `src`, the graph tape for the `dst`).
+    MapSymbolNotInAlphabet(String),
+    /// A graft binding maps the blank off itself — `'_'->X` (blank must read
+    /// as blank) or a two-way `Y->'_'` (its write-back would un-pin blank; a
+    /// read-only `Y=>'_'` collapse is the legal spelling).
+    MapBlankPin,
+    /// A graft binding maps one symbol to two different images in one
+    /// direction — a read collision, or a two-way write-back collision.
+    MapConflict { symbol: String },
+    /// A graft binding on equal-size alphabets is not injective: identity
+    /// completion collides (two symbols would read as one). `symbol` is the
+    /// collision image.
+    MapNotInjective { symbol: String },
+    /// A graft binding omits the symbol map on tapes whose alphabets are not
+    /// glyph-for-glyph equal — an omitted map means identity, which requires
+    /// matching alphabets.
+    IdentityGlyphMismatch,
+    /// A `{v±k}` write substitution folds to a value with no glyph in the
+    /// tape's alphabet (out-of-alphabet arithmetic). `name` is the message.
+    FoldOutOfAlphabet(String),
+    /// Two rules in one state match the same concrete tuple with neither
+    /// carrying a wildcard — an exact-row disjointness violation. The two
+    /// rendered patterns name both offenders.
+    ExactRowConflict { first: String, second: String },
+    /// A rule's pattern / write / move vector width does not equal the world's
+    /// tape count (a signed-function width mismatch). `expected` is the arity.
+    RowWidth { expected: usize, got: usize },
 }
 
 impl CompileErrorKind {
@@ -216,6 +250,15 @@ impl CompileErrorKind {
             CompileErrorKind::WrongArgKind { .. } => "wrong-arg-kind",
             CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
             CompileErrorKind::BindCallArgs(_) => "bind-call-args",
+            CompileErrorKind::GraftCycle(_) => "graft-cycle",
+            CompileErrorKind::MapSymbolNotInAlphabet(_) => "map-symbol-not-in-alphabet",
+            CompileErrorKind::MapBlankPin => "map-blank-pin",
+            CompileErrorKind::MapConflict { .. } => "map-conflict",
+            CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
+            CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
+            CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
+            CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
+            CompileErrorKind::RowWidth { .. } => "row-width",
         }
     }
 }
@@ -419,6 +462,54 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "`{n}` is a bind and already bound — a call on it takes no arguments"
+                )
+            }
+            CompileErrorKind::GraftCycle(n) => {
+                write!(
+                    f,
+                    "graph `{n}` grafts itself (directly or through a cycle of graph definitions) — infinite expansion"
+                )
+            }
+            CompileErrorKind::MapSymbolNotInAlphabet(g) => {
+                write!(f, "map symbol `{g}` is not in the tape's alphabet")
+            }
+            CompileErrorKind::MapBlankPin => {
+                write!(
+                    f,
+                    "a graft map may not move the blank off itself — blank reads and writes as blank (a `Y=>'_'` read-only collapse is allowed)"
+                )
+            }
+            CompileErrorKind::MapConflict { symbol } => {
+                write!(
+                    f,
+                    "graft map sends symbol `{symbol}` to two different images"
+                )
+            }
+            CompileErrorKind::MapNotInjective { symbol } => {
+                write!(
+                    f,
+                    "graft map on an equal-size alphabet is not injective — identity completion collides on `{symbol}`"
+                )
+            }
+            CompileErrorKind::IdentityGlyphMismatch => {
+                write!(
+                    f,
+                    "an omitted graft map means identity, which requires the two tapes to have glyph-for-glyph equal alphabets"
+                )
+            }
+            CompileErrorKind::FoldOutOfAlphabet(m) => {
+                write!(f, "{m}")
+            }
+            CompileErrorKind::ExactRowConflict { first, second } => {
+                write!(
+                    f,
+                    "two rules match the same input with no wildcard between them: `{first}` and `{second}`"
+                )
+            }
+            CompileErrorKind::RowWidth { expected, got } => {
+                write!(
+                    f,
+                    "a rule vector has {got} elements but the world has {expected} tapes"
                 )
             }
         }
@@ -2023,10 +2114,25 @@ mod tests {
             },
             CompileErrorKind::UnresolvedTapeTarget("x".into()),
             CompileErrorKind::BindCallArgs("x".into()),
+            CompileErrorKind::GraftCycle("x".into()),
+            CompileErrorKind::MapSymbolNotInAlphabet("x".into()),
+            CompileErrorKind::MapBlankPin,
+            CompileErrorKind::MapConflict { symbol: "x".into() },
+            CompileErrorKind::MapNotInjective { symbol: "x".into() },
+            CompileErrorKind::IdentityGlyphMismatch,
+            CompileErrorKind::FoldOutOfAlphabet("x".into()),
+            CompileErrorKind::ExactRowConflict {
+                first: "x".into(),
+                second: "y".into(),
+            },
+            CompileErrorKind::RowWidth {
+                expected: 2,
+                got: 3,
+            },
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 40);
+        assert_eq!(all.len(), 49);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();
