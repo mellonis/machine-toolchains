@@ -1,5 +1,6 @@
-//! TM IR → `.tma` text — the spec's `-O0` canonical lowering (§11.1). The
-//! generated text is fed to the core assembler (the compile → assemble
+//! TM IR → `.tma` text — the canonical `-O0` lowering (docs/formats.md (what
+//! the `.tmc` compiler emits)). The generated text is fed to the core
+//! assembler (the compile → assemble
 //! pipeline), which supplies encoding, table-section layout, intra-function
 //! jump relaxation, and the `ent` prologue via `.func` — codegen never
 //! touches bytes and never emits `ent` (the `.func` directive prepends it,
@@ -26,10 +27,11 @@
 //!   `ret`/`stp`/`hlt`, and the synthesized graft-hole traps → `trap #0` /
 //!   `trap #1`.
 //!
-//! **Match-table discipline (§4 / GC4):** the exact rows (every cell concrete)
-//! are sorted lexicographically and their dispatch targets move with them as
-//! pairs — MR numbering and the `.targets` entries are emitted together, so
-//! the sort is behaviour-preserving; partial-wildcard rows keep source order;
+//! **Match-table discipline** (docs/formats.md (match and dispatch tables)):
+//! the exact rows (every cell concrete) are sorted lexicographically and their
+//! dispatch targets move with them as pairs — MR numbering and the `.targets`
+//! entries are emitted together, so the sort is behaviour-preserving;
+//! partial-wildcard rows keep source order;
 //! the catch-all `[*,…]` row is last. No catch-all is synthesized when the
 //! source omits one — a non-match leaves MR = 0 and `djmp` traps, which is the
 //! spec's deliberate NoTransition behaviour. Exact-row disjointness is a
@@ -256,7 +258,8 @@ fn straight_block(w: &IrWorld, st: &IrState, options: CodegenOptions) -> Block {
 
 /// A conditional state's match/dispatch table plus one block per rule (the
 /// dispatch targets), in source (row) order. The table's rows and `.targets`
-/// are ordered per GC4; the blocks stay in source order for readable layout.
+/// are ordered per the match-table discipline (docs/formats.md (match and
+/// dispatch tables)); the blocks stay in source order for readable layout.
 fn conditional(
     w: &IrWorld,
     st: &IrState,
@@ -578,7 +581,7 @@ fn fresh(used: &mut HashSet<String>, base: &str) -> String {
 mod tests {
     use super::*;
 
-    // The six Appendix A programs (spec §A, verbatim). The expected `.tma`
+    // The six canonical example programs (A1–A6), verbatim. The expected `.tma`
     // text below each is HAND-DERIVED from the -O0 canon (row sort, wrmv
     // uniformity, fall-through elision) and confirmed to assemble — never
     // regenerated from output.
@@ -675,7 +678,7 @@ machine {
         emit_program(&ir_of(src), CodegenOptions::default()).text
     }
 
-    /// Every Appendix A example, once emitted, assembles cleanly — the object
+    /// Every example program, once emitted, assembles cleanly — the object
     /// is what the compile pipeline then hands to the linker.
     fn assert_assembles(text: &str) {
         crate::asm::assemble(text, false)

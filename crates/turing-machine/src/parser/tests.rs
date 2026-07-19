@@ -1,4 +1,4 @@
-//! `.tmc` parser battery: the six Appendix A examples parse verbatim, every
+//! `.tmc` parser battery: the six canonical example programs parse verbatim, every
 //! deliberately-absent construct is rejected with its frozen code, reserved
 //! keywords are barred wherever a name is expected, the binding grammar and
 //! doc/deprecated attachment work, and the CST is lossless (no comment
@@ -21,7 +21,7 @@ fn machine(p: &Program) -> &Machine {
 }
 
 // ---------------------------------------------------------------------------
-// Appendix A — the six canonical examples, verbatim, all parse.
+// The six canonical example programs, verbatim, all parse.
 // ---------------------------------------------------------------------------
 
 const A1: &str = "\
@@ -286,7 +286,7 @@ fn a6_graph_graft_with_entry_instance_parses() {
 }
 
 // ---------------------------------------------------------------------------
-// §10.8 — deliberately absent constructs are rejected with the right code.
+// Deliberately absent constructs are rejected with the right code.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -802,7 +802,7 @@ fn one_rule(rule: &str) -> String {
 fn write_must_precede_move_in_an_action() {
     // The action grammar is `[write] [move] transition` — `move` before
     // `write` puts the reserved `write` keyword where a transition is
-    // expected, so it is rejected (§10.3 action order).
+    // expected, so it is rejected.
     assert_eq!(
         err_code(&one_rule("['0'] -> move [>] write ['1'] goto s;")),
         "unexpected-token"
@@ -834,8 +834,8 @@ fn debugger_flag_parses_at_the_action_head() {
 #[test]
 fn subst_plus_zero_is_pass_through_on_any_binding() {
     // `{c+0}` (and `{v+0}`) is a zero delta — an explicit identity, equivalent
-    // to `{c}` pass-through. The char-arithmetic prohibition (§10.3, char
-    // arithmetic absent) fires only on a NON-zero delta, so `+0` is accepted
+    // to `{c}` pass-through. The char-arithmetic prohibition fires only on a
+    // NON-zero delta, so `+0` is accepted
     // even on a glyph binding; the parser records `delta == 0`.
     let p = parse_src(&one_rule("['a' as c] -> write [{c+0}] goto s;")).unwrap();
     let cell = &machine(&p).states[0].rules[0].write.as_ref().unwrap().cells[0];

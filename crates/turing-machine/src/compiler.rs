@@ -136,7 +136,7 @@ pub enum CompileErrorKind {
     /// A `return` transition or continuation outside a routine body.
     ReturnOutsideRoutine,
     /// `goto` (or bare-name sugar) targeting a bind name — a bind is a call
-    /// target, never a state (the dedicated GC9 error).
+    /// target, never a state (its own dedicated error).
     GotoIntoBind(String),
     /// `goto` targeting a routine or graph — a reuse target, not a state.
     GotoNotAState(String),
@@ -1833,7 +1833,7 @@ impl WorldCtx<'_> {
         Ok(())
     }
 
-    /// Exactly one `entry` per world (§10.5).
+    /// Exactly one `entry` per world.
     fn check_entry(&self, world: &ResolvedWorld) -> Result<(), CompileError> {
         let entry_states: Vec<&State> = world.states.iter().filter(|s| s.entry).collect();
         let entry_grafts: Vec<&ResolvedGraft> = world.grafts.iter().filter(|g| g.entry).collect();
@@ -2694,7 +2694,7 @@ alphabet b { '_', '0', '1' }
         // goto a routine (a reuse target, not a state).
         let src = "alphabet b { '_', '0' }\nroutine helper(tape t: b) { entry state s { [*] -> return; } }\nmachine { tape t: b; entry state s { [*] -> goto helper; } }";
         assert_eq!(code(src), "goto-not-a-state");
-        // goto a bind name (GC9).
+        // goto a bind name — a call target, not a state.
         let src = "alphabet b { '_', '0' }\nroutine helper(tape t: b) { entry state s { [*] -> return; } }\nmachine { tape t: b; bind helper(t = t) as h; entry state s { [*] -> goto h; } }";
         assert_eq!(code(src), "goto-into-bind");
     }
@@ -3050,10 +3050,11 @@ machine {
 
     #[test]
     fn compile_handles_a_multi_world_binding_call_and_a_graft() {
-        // A5 (spec §A): a machine + an exported routine, called across
+        // A5: a machine + an exported routine, called across
         // alphabets — codegen emits the binding-call operand, the assembler
-        // records a BoundCall (the linker resolves it in 5b). compile()
-        // returns a well-formed object with both worlds' code.
+        // records a BoundCall (the linker resolves it once the composition
+        // engine lands). compile() returns a well-formed object with both
+        // worlds' code.
         let a5 = "\
 alphabet bits { '_', '0', '1' }
 alphabet wide { '_', 'a', 'b', '0', '1' }
@@ -3080,7 +3081,7 @@ machine {
         assert_eq!(out.object.blobs.len(), 2);
         assert_eq!(out.object.bound_calls.len(), 1);
 
-        // A6 (spec §A): an entry graft splices the graph into the machine —
+        // A6: an entry graft splices the graph into the machine —
         // one emitted world, its entry the spliced instance.
         let a6 = "\
 alphabet marks { '_', 'x', 'y', 'z' }

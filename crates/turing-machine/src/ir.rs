@@ -595,7 +595,7 @@ fn lower_rule(
         Transition2::BindCall { name, then } => {
             // A bind is pure sugar: look up its routine + args in the world's
             // resolved bind table and lower to the same CallThen a direct call
-            // would produce (GC9 — dedup keys on (routine, binding) regardless).
+            // would produce (dedup keys on (routine, binding) regardless).
             let rw = resolved
                 .worlds
                 .iter()

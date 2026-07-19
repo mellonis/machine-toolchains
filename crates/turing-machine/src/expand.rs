@@ -1,5 +1,5 @@
-//! `.tmc` front-end stage 2 — graft splicing + range expansion (spec §10.4 /
-//! §10.3), the compiler-side analog of the linker's mono stamping.
+//! `.tmc` front-end stage 2 — graft splicing + range expansion, the
+//! compiler-side analog of the linker's mono stamping.
 //!
 //! [`expand`] runs after resolution (`compiler::analyze`) and before IR
 //! lowering, matching the pipeline order flatten → GRAFT EXPANSION → RANGE
@@ -335,8 +335,7 @@ fn compose(outer: &Composite, inner: &Composite) -> Composite {
 // read PREIMAGE (multi-preimage expands rows, zero-preimage drops), write cells
 // by the write image (a hole turns the whole rule into a `trap #1` row), and
 // each bound tape's read holes prepend `trap #0` rows to every conditional
-// state (a straight-line state does no `rd`, so a hole under it never traps —
-// spec §5.3).
+// state (a straight-line state does no `rd`, so a hole under it never traps).
 // ---------------------------------------------------------------------------
 
 /// True when every cell is a wildcard.
@@ -345,7 +344,7 @@ fn is_all_wild(pattern: &[Cell]) -> bool {
 }
 
 /// True when the state performs a read (`rd` + match): anything but a single
-/// all-wildcard rule, which codegen lowers to straight-line code (GC3). Only a
+/// all-wildcard rule, which codegen lowers to straight-line code. Only a
 /// reading state gains synthesized read-trap rows.
 fn state_reads(rules: &[ExpandedRule]) -> bool {
     !(rules.len() == 1 && is_all_wild(&rules[0].pattern))
@@ -487,7 +486,7 @@ fn splice_state(
 }
 
 // ---------------------------------------------------------------------------
-// Range expansion (spec §10.3) — one source rule → concrete index-resolved
+// Range expansion — one source rule → concrete index-resolved
 // rows. Pattern ranges / single-with-binding expand cartesian (leftmost tape
 // varies slowest, rightmost fastest — matching the linker's preimage
 // cartesian); `{v±k}` folds per row (numeric, bounds-checked), `{c}` passes the
@@ -495,7 +494,7 @@ fn splice_state(
 // alternative. Product over 256 warns.
 // ---------------------------------------------------------------------------
 
-/// The product-count above which a rule's expansion warns (spec §10.3 / GC7).
+/// The product-count above which a rule's expansion warns.
 const PRODUCT_THRESHOLD: usize = 256;
 
 /// One tape's resolution context: its glyph vector (index → glyph) and the
@@ -1053,7 +1052,7 @@ fn cont_key(cont: &HashMap<String, Transition2>) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Graph-definition acyclicity (spec §10.4): the graft-dependency graph of
+// Graph-definition acyclicity: the graft-dependency graph of
 // graph DEFINITIONS must be acyclic (a self- or mutual graft is infinite
 // expansion). Instance-level cycles (continuation loops) stay legal.
 // ---------------------------------------------------------------------------
@@ -1421,9 +1420,9 @@ fn resolve_aliases(states: &mut [ExpandedState], alias: &HashMap<String, String>
 }
 
 // ---------------------------------------------------------------------------
-// Post-expansion checks (spec §10.7 / §4): exact-row disjointness (a spanned
-// error naming both rules) and cheap shadowed-rule warnings (an identical
-// earlier pattern makes a later rule unreachable).
+// Post-expansion checks: exact-row disjointness (docs/formats.md (match and
+// dispatch tables); a spanned error naming both rules) and cheap shadowed-rule
+// warnings (an identical earlier pattern makes a later rule unreachable).
 // ---------------------------------------------------------------------------
 
 fn render_pattern(pattern: &[Cell], glyphs: &[Vec<String>]) -> String {
