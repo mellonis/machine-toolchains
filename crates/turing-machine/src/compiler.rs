@@ -943,6 +943,17 @@ impl Scopes {
     }
 }
 
+/// The alphabet name each of a signature's tape params references.
+fn tape_alphabet_refs(sig: &crate::parser::Signature) -> Vec<&str> {
+    sig.params
+        .iter()
+        .filter_map(|p| match &p.kind {
+            SigParamKind::Tape { alphabet, .. } => Some(alphabet.as_str()),
+            SigParamKind::State => None,
+        })
+        .collect()
+}
+
 fn sig_info(sig: &crate::parser::Signature) -> SigInfo {
     SigInfo {
         params: sig
@@ -1356,9 +1367,11 @@ struct WorldCtx<'a> {
 impl WorldCtx<'_> {
     /// Run every per-world check across all worlds, in source order.
     fn check_worlds(&mut self, program: &Program, resolved: &Resolved) -> Result<(), CompileError> {
-        // Re-mark import usage for tape alphabets resolved during
-        // `resolve_module` (that pass had no mutable context).
-        self.mark_tape_alphabet_imports(program);
+        // Mark import usage for every reference (tape alphabets, call /
+        // graft / bind targets) — `resolve_module` had no mutable context, so
+        // usage is tallied here over the AST, which still carries the original
+        // (pre-mangling) reference names.
+        self.mark_reference_imports(program);
         for (idx, world) in resolved.worlds.iter().enumerate() {
             let is_routine = world.kind == WorldKind::Routine;
             // Signature params first: a duplicate tape PARAM is reported as
@@ -1375,32 +1388,49 @@ impl WorldCtx<'_> {
         Ok(())
     }
 
-    fn mark_tape_alphabet_imports(&mut self, program: &Program) {
-        let mark = |alphabet: &str, ns: &[String], ctx: &mut Self| {
-            if let Some(r) = ctx.scopes.resolve(alphabet, ns)
+    fn mark_reference_imports(&mut self, program: &Program) {
+        let mark = |name: &str, ns: &[String], ctx: &mut Self| {
+            if let Some(r) = ctx.scopes.resolve(name, ns)
                 && let Some(idx) = r.via_import
             {
                 ctx.imports_used[idx] = true;
             }
         };
-        for r in &program.routines {
-            for p in &r.sig.params {
-                if let SigParamKind::Tape { alphabet, .. } = &p.kind {
-                    mark(alphabet, &r.ns, self);
+        // World-body references share one shape across routine/graph/machine.
+        let mark_world = |sig_alphas: &[&str],
+                          states: &[State],
+                          grafts: &[Graft],
+                          binds: &[Bind],
+                          ns: &[String],
+                          ctx: &mut Self| {
+            for a in sig_alphas {
+                mark(a, ns, ctx);
+            }
+            for s in states {
+                for rule in &s.rules {
+                    if let Transition::Call { target, .. } = &rule.transition {
+                        mark(&target.joined(), ns, ctx);
+                    }
                 }
             }
+            for g in grafts {
+                mark(&g.target.joined(), ns, ctx);
+            }
+            for b in binds {
+                mark(&b.target.joined(), ns, ctx);
+            }
+        };
+        for r in &program.routines {
+            let alphas: Vec<&str> = tape_alphabet_refs(&r.sig);
+            mark_world(&alphas, &r.states, &r.grafts, &r.binds, &r.ns, self);
         }
         for g in &program.graphs {
-            for p in &g.sig.params {
-                if let SigParamKind::Tape { alphabet, .. } = &p.kind {
-                    mark(alphabet, &g.ns, self);
-                }
-            }
+            let alphas: Vec<&str> = tape_alphabet_refs(&g.sig);
+            mark_world(&alphas, &g.states, &g.grafts, &g.binds, &g.ns, self);
         }
         if let Some(m) = &program.machine {
-            for t in &m.tapes {
-                mark(&t.alphabet, &[], self);
-            }
+            let alphas: Vec<&str> = m.tapes.iter().map(|t| t.alphabet.as_str()).collect();
+            mark_world(&alphas, &m.states, &m.grafts, &m.binds, &[], self);
         }
     }
 
@@ -1714,11 +1744,10 @@ impl WorldCtx<'_> {
         tapes: &HashSet<&str>,
         ns: &[String],
     ) -> Result<(), CompileError> {
+        // Import usage is tallied centrally (`mark_reference_imports`); this
+        // pass only validates target kind + binding args and warns.
         match self.scopes.resolve(joined, ns) {
             Some(r) if r.kind == Some(want) => {
-                if let Some(idx) = r.via_import {
-                    self.imports_used[idx] = true;
-                }
                 self.check_binding_args(joined, &r.full, args, want, states, tapes)
             }
             Some(r) if r.kind.is_some() => Err(CompileError {
@@ -1728,13 +1757,9 @@ impl WorldCtx<'_> {
                     expected: expected_noun,
                 },
             }),
-            Some(r) => {
+            Some(_) => {
                 // Absolute-external, or imported-to-external routine — allowed,
-                // resolved at link; no arg check (no local signature). Mark
-                // the import used if it went through one.
-                if let Some(idx) = r.via_import {
-                    self.imports_used[idx] = true;
-                }
+                // resolved at link; no arg check (no local signature).
                 Ok(())
             }
             None => {
@@ -2387,6 +2412,33 @@ alphabet b { '_', '0', '1' }
         assert_eq!(machine.entry.as_deref(), Some("seek"));
         assert_eq!(machine.grafts.len(), 1);
         assert_eq!(machine.grafts[0].target, "findX");
+    }
+
+    #[test]
+    fn graft_and_bind_targets_reached_via_import_mark_the_import_used() {
+        // A graph imported and grafted, plus a routine imported and bound —
+        // neither reference should leave the import looking unused.
+        let src = "\
+alphabet b { '_', '0', '1' }
+namespace lib {
+  export graph g(tape t: b, state done) { entry state s { ['0'] -> done; [*] -> move [>] goto s; } }
+  export routine r(tape t: b) { entry state s { [*] -> return; } }
+}
+use lib::g;
+use lib::r;
+machine {
+  tape t: b;
+  bind r(t = t) as rr;
+  entry graft g(t = t, done = fin) as x;
+  state fin { [*] -> stop; }
+}
+";
+        let a = ok(src);
+        assert!(
+            a.diagnostics.iter().all(|d| d.code != "unused-import"),
+            "{:?}",
+            a.diagnostics
+        );
     }
 
     #[test]
