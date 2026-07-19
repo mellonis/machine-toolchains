@@ -28,6 +28,7 @@ use mtc_turing_machine::asm::link;
 use mtc_turing_machine::compiler::{CompileOptions, CompileOutput, compile};
 use mtc_turing_machine::ir::IrTransition;
 use mtc_turing_machine::optimizer::{OptLevel, pass_names};
+use mtc_turing_machine::stdlib;
 
 // ── harness ──────────────────────────────────────────────────────────────
 
@@ -952,5 +953,192 @@ fn foutline_folds_the_shared_chains_and_is_inert_off() {
     assert!(
         on.ir.worlds.iter().any(|w| w.name.contains(".outline")),
         "the hoisted routine is present with --foutline"
+    );
+}
+
+// ── THE PHASE-6b MILESTONE: the full "everything × everything" matrix ─────────
+
+/// Compile the embedded stdlib SOURCE at `level` (both `brk`-stripped), for the
+/// do-no-harm byte-identity check below. Mirrors `stdlib_golden.rs`'s builder
+/// but compiles fresh at BOTH levels, so the two are an apples-to-apples byte
+/// comparison (the `-O1` side is exactly what `stdlib::object()` caches).
+fn stdlib_object_bytes(level: OptLevel) -> Vec<u8> {
+    compile(
+        stdlib::SOURCE,
+        CompileOptions {
+            opt_level: level,
+            strip_debugger: true,
+            ..Default::default()
+        },
+    )
+    .expect("the embedded stdlib compiles")
+    .object
+    .to_bytes()
+}
+
+/// THE PHASE-6b MILESTONE. One test that aggregates the whole optimizer
+/// equivalence claim over the full program roster × the 2×3 matrix
+/// (`-O0`/`-O1` × mono / frames / hybrid). What it proves — and, just as
+/// importantly, what it does NOT — comes in two distinct halves.
+///
+/// **Part A — the LIVE pass exercise.** The six Appendix A examples, the
+/// nested-graft case, and one fixture per optimizer pass: programs the `-O1`
+/// passes genuinely TRANSFORM (jump-threading + dce, dispatch-select,
+/// dead-rows, inline in both its equal-arity and arity-reducing forms, the
+/// default-off outline, and the multi-unit tail-call chain). Every one runs
+/// identically across the full 2×3 matrix. This half is where the passes'
+/// correctness is actually earned — the per-fixture tests above pin the
+/// non-vacuity (the object shrinks, the pass is reported); this milestone
+/// re-runs the whole set together as the single "everything transforms and
+/// still agrees" assertion. The roster count is pinned so a program silently
+/// dropped from it fails here.
+///
+/// **Part B — the stdlib DO-NO-HARM floor.** The embedded standard library is
+/// a second, DISTINCT kind of evidence. Its routines are hand-written to be
+/// already-optimal, so `-O1` finds nothing to change: the compiled stdlib
+/// object is BYTE-IDENTICAL at `-O0` and `-O1`. That is a do-no-harm
+/// confirmation (the optimizer runs the stdlib as its first live workload and
+/// leaves it untouched), NOT a pass exercise — no stdlib routine drives a
+/// pass. The stdlib's full behavioral 2×3 matrix (every routine × O0/O1 × the
+/// three mechs — 132 runs, derivation-first) already lives in
+/// `stdlib_golden.rs`; this milestone deliberately does NOT re-run it. It
+/// asserts the do-no-harm floor once here and lets the golden file own the
+/// behavioral coverage.
+#[test]
+fn everything_matrix_is_green() {
+    // Part A. Each entry is (label, source, cases); the label documents the
+    // roster and guards that each entry carries a source and at least one seed.
+    // `outline` and the multi-unit tail-call chain use their own harness
+    // (below), so they are not in this single-source list.
+    let roster: Vec<(&str, String, Vec<Case>)> = vec![
+        (
+            "a1_replace_b",
+            golden_src("a1_replace_b.tmc"),
+            vec![&[(&[2, 1, 2], 0)]],
+        ),
+        (
+            "a2_binary_plus_one",
+            golden_src("a2_binary_plus_one.tmc"),
+            vec![&[(&[2, 2], 1)]],
+        ),
+        (
+            "a3_two_tape_copy",
+            golden_src("a3_two_tape_copy.tmc"),
+            vec![&[(&[2, 1], 0), (&[], 0)]],
+        ),
+        (
+            "a4_byte_increment",
+            golden_src("a4_byte_increment.tmc"),
+            vec![&[(&[5], 0)], &[(&[126], 0)], &[(&[], 0)]],
+        ),
+        (
+            "a5_call_across_alphabets",
+            golden_src("a5_call_across_alphabets.tmc"),
+            vec![
+                &[(&[2], 0), (&[4], 0)],
+                &[(&[2], 0), (&[1], 0)],
+                &[(&[2], 0), (&[2], 0)],
+            ],
+        ),
+        (
+            "a6_graph_graft_multi_exit",
+            golden_src("a6_graph_graft_multi_exit.tmc"),
+            vec![&[(&[3, 1], 0)], &[(&[2], 0)]],
+        ),
+        (
+            "nested_graft",
+            golden_src("nested_graft.tmc"),
+            vec![&[(&[1, 2], 0)], &[(&[1], 0)]],
+        ),
+        (
+            "brk_barrier",
+            BRK_BARRIER.to_string(),
+            vec![&[(&[0], 0)], &[(&[1], 0)]],
+        ),
+        (
+            "forwarder_hop",
+            FORWARDER_HOP.to_string(),
+            vec![&[(&[], 0)], &[(&[1], 0)]],
+        ),
+        (
+            "branch_scan",
+            BRANCH_SCAN.to_string(),
+            vec![&[(&[1, 1, 2], 0)], &[(&[0], 0)], &[(&[2], 0)]],
+        ),
+        (
+            "dead_row_shadow",
+            DEAD_ROW_SHADOW.to_string(),
+            vec![
+                &[(&[1, 1, 2], 0), (&[], 0), (&[], 0)],
+                &[(&[0], 0), (&[], 0), (&[], 0)],
+                &[(&[2], 0), (&[], 0), (&[], 0)],
+            ],
+        ),
+        (
+            "inline_flip",
+            INLINE_FLIP.to_string(),
+            vec![&[(&[1, 2], 0)], &[(&[], 0)], &[(&[2, 1], 0)]],
+        ),
+        (
+            "inline_project",
+            INLINE_PROJECT.to_string(),
+            vec![
+                &[(&[1, 2], 0), (&[], 0)],
+                &[(&[], 0), (&[1, 2], 0)],
+                &[(&[2, 1], 0), (&[2, 1], 0)],
+            ],
+        ),
+    ];
+    assert_eq!(
+        roster.len(),
+        13,
+        "the single-source pass-exercise roster: 6 Appendix A + nested graft + \
+         6 pass/barrier fixtures (jump-threading+dce, dispatch-select, \
+         dead-rows, inline ×2, the brk barrier)"
+    );
+    for (label, src, cases) in &roster {
+        assert!(!src.is_empty(), "roster program `{label}` has a source");
+        assert!(
+            !cases.is_empty(),
+            "roster program `{label}` has at least one seed case"
+        );
+        // assert_equivalent's own panic carries the diverging case + config.
+        assert_equivalent(src, cases);
+    }
+
+    // The `--foutline` dimension (twelve configs) on the one program that folds
+    // — covers the outline pass OFF and ON in one shot.
+    assert_equivalent_outline(
+        OUTLINE_TWIN_CHAINS,
+        &[&[(&[1], 0)], &[(&[2], 0)], &[(&[], 0)]],
+    );
+
+    // The multi-unit tail-call chain across the matrix (its own builder — the
+    // units are separate compilation units so the tail call is cross-unit).
+    let n = 6;
+    let mut chain: Vec<((OptLevel, CallMech), Observed)> = Vec::new();
+    for level in [OptLevel::O0, OptLevel::O1] {
+        for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+            chain.push(((level, mech), run_chain(&build_chain(n, level, mech), 1024)));
+        }
+    }
+    let (ref_key, r0) = &chain[0];
+    for (key, obs) in &chain[1..] {
+        assert_eq!(
+            (&r0.outcome, &r0.snaps, &r0.heads),
+            (&obs.outcome, &obs.snaps, &obs.heads),
+            "tail-call chain matrix divergence in the milestone: {ref_key:?} vs {key:?}"
+        );
+    }
+
+    // Part B — the stdlib do-no-harm floor: already-optimal source, so `-O1`
+    // leaves the compiled object byte-identical to `-O0`. The behavioral 2×3
+    // matrix over every routine lives in stdlib_golden.rs (132 runs) and is
+    // NOT re-run here.
+    assert_eq!(
+        stdlib_object_bytes(OptLevel::O0),
+        stdlib_object_bytes(OptLevel::O1),
+        "the embedded stdlib is already-optimal: -O1 leaves it byte-identical \
+         to -O0 (do-no-harm; behavioral coverage lives in stdlib_golden.rs)"
     );
 }

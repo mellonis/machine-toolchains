@@ -145,6 +145,25 @@ fn assert_stdlib_golden(src: &str, width: u32, seed: TapeSnapshot, expected: Tap
     }
 }
 
+// ── stdlib size report (plausibility visibility, not asserted) ──────────────
+
+#[test]
+fn stdlib_object_sizes_are_reported() {
+    // Compile the whole stdlib at both levels and REPORT the object byte
+    // counts (visible under `cargo test -- --nocapture`). The two are
+    // byte-identical — the already-optimal stdlib is the optimizer's do-no-harm
+    // floor, proven in opt_equivalence.rs's milestone — so this makes the
+    // plausible size VISIBLE rather than asserting a bound. The only assertion
+    // is a non-empty object at both levels.
+    let o0 = stdlib_object(OptLevel::O0).to_bytes().len();
+    let o1 = stdlib_object(OptLevel::O1).to_bytes().len();
+    println!("stdlib object size: -O0 {o0} B, -O1 {o1} B (do-no-harm: identical)");
+    assert!(
+        o0 > 0 && o1 > 0,
+        "the stdlib compiles to a non-empty object at both levels"
+    );
+}
+
 // ── std::binaryNumbers (delimited) — the ten routines ───────────────────────
 
 #[test]

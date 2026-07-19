@@ -571,6 +571,16 @@ fn link_help_lists_the_new_flags() {
     let out = execute(&args(&["link", "--help"])).unwrap();
     assert!(out.stdout.contains("--entry"), "{}", out.stdout);
     assert!(out.stdout.contains("--call-mech"), "{}", out.stdout);
+    // `--nostdlib` (T6) is a link flag: its usage row must be present.
+    assert!(out.stdout.contains("--nostdlib"), "{}", out.stdout);
+}
+
+#[test]
+fn compile_help_lists_foutline() {
+    // `--foutline` (T1) is a compile flag; its usage row must be present in
+    // `tmt compile --help`.
+    let out = execute(&args(&["compile", "--help"])).unwrap();
+    assert!(out.stdout.contains("--foutline"), "{}", out.stdout);
 }
 
 // ── .tmc compile → link → run pipeline (exit codes across A.1/A.4/A.5) ──────
@@ -711,6 +721,45 @@ fn compile_emit_ir_writes_a_version_2_sidecar() {
     assert!(ir_path.exists(), "the --emit-ir sidecar is written");
     let text = fs::read_to_string(&ir_path).unwrap();
     let program = IrProgram::from_json(&text).expect("the sidecar parses as IR JSON");
+    assert_eq!(program.version, 2, "IR version 2");
+    assert!(program.worlds.iter().any(|w| w.name == "main"));
+}
+
+#[test]
+fn compile_emit_ir_after_a_real_pass_writes_a_version_2_snapshot() {
+    let dir = scratch("tmc_emit_ir_after");
+    // A forwarder program: `scan` hops to the empty forwarder `hop`, which
+    // `jump-threading` retargets away at -O1 — so `after:jump-threading` names
+    // a snapshot that is actually captured (the pass fires). The snapshot must
+    // parse back as version-2 IR JSON.
+    let src = "\
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state scan {
+    ['a'] -> move [>] goto scan;
+    ['_'] -> goto hop;
+  }
+  state finish { [*] -> write ['a'] stop; }
+  state hop    { [*] -> goto finish; }
+}
+";
+    let srcpath = dir.join("fwd.tmc");
+    fs::write(&srcpath, src).unwrap();
+    let obj = dir.join("fwd.tmo");
+    execute(&args(&[
+        "compile",
+        srcpath.to_str().unwrap(),
+        "-O1",
+        "--emit-ir=after:jump-threading",
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let ir_path = dir.join("fwd.ir.json");
+    assert!(ir_path.exists(), "the after:<pass> IR sidecar is written");
+    let text = fs::read_to_string(&ir_path).unwrap();
+    let program = IrProgram::from_json(&text).expect("the after:<pass> sidecar parses as IR JSON");
     assert_eq!(program.version, 2, "IR version 2");
     assert!(program.worlds.iter().any(|w| w.name == "main"));
 }
