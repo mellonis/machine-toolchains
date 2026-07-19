@@ -25,8 +25,9 @@
 //! (`crates/core/src/linker/{compose,engine}.rs`); the compiler-side checks are
 //! earlier and carry source spans.
 //!
-//! Unused until Task 7 wires `compile()` over it (Task 6 lowers its output);
-//! the in-module tests exercise it meanwhile.
+//! `compile()` (Task 7) wires `expand` into the pipeline (IR lowering
+//! consumes its output). A few internal helpers and struct fields remain
+//! exercised only by the in-module tests for now, hence the module-wide allow.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

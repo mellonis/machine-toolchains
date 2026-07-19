@@ -13,6 +13,7 @@ pub mod cst;
 pub mod expand;
 pub mod ir;
 pub mod lexer;
+pub mod optimizer;
 pub mod parser;
 
 pub use asm::{TM1_TMA_DIALECT_VERSION, tm1_syntax};

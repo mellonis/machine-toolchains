@@ -9,17 +9,22 @@
 //! never prints: fatals flow as span-carrying, coded values and the CLI is
 //! the sole renderer.
 //!
-//! `analyze` and the [`Resolved`] surface have no in-crate caller yet — Task 7
-//! wires `compile()` over them — so the resolution machinery is allowed dead
-//! for now (the in-module tests exercise it); the allow drops once `compile()`
-//! lands.
+//! `compile()` (Task 7) now drives `analyze` → expand → lower → codegen, so
+//! most of the resolution machinery is live. A few analysis-context fields
+//! (e.g. `WorldCtx.resolved`) are retained for the lint / LSP layers that land
+//! in phase 7 and stay exercised only by the in-module tests until then, hence
+//! the module-wide allow.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 
 use mtc_core::diagnostics::{Diagnostic, Span};
+use mtc_core::formats::object::ObjectFile;
 
+use crate::codegen::{CodegenOptions, emit_program};
+use crate::ir::{IrProgram, lower, validate_world};
 use crate::lexer::{Token, lex};
+use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Machine,
     Program, QualName, SigParamKind, State, SymLit, Transition, parse,
@@ -227,6 +232,13 @@ pub enum CompileErrorKind {
     /// control to a `state` param cannot yet be lowered on its own. `name` is
     /// the state parameter.
     StateParamContinuationUnsupported(String),
+
+    // -- codegen / assemble orchestration (Task 7) -------------------------
+    /// A compiler-internal invariant broke: the codegen-produced `.tma`
+    /// failed to assemble, or an IR world the compiler itself built failed
+    /// [`crate::ir::validate_world`]. Never a user error — the message
+    /// carries the underlying diagnostic. The `.pmc` compiler's `Internal`.
+    Internal(String),
 }
 
 impl CompileErrorKind {
@@ -292,6 +304,7 @@ impl CompileErrorKind {
             CompileErrorKind::StateParamContinuationUnsupported(_) => {
                 "state-param-continuation-unsupported"
             }
+            CompileErrorKind::Internal(_) => "internal-error",
         }
     }
 }
@@ -563,6 +576,7 @@ impl std::fmt::Display for CompileErrorKind {
                     "this routine hands control to its `state` parameter `{name}` — threading a state parameter to the call site is not supported yet"
                 )
             }
+            CompileErrorKind::Internal(m) => write!(f, "internal compiler error: {m}"),
         }
     }
 }
@@ -1514,6 +1528,144 @@ fn unused_import_warnings(program: &Program, used: &[bool], diagnostics: &mut Ve
     }
 }
 
+// ---------------------------------------------------------------------------
+// compile() — the end-to-end driver (Task 7). Mirrors the `.pmc` compiler's
+// `compile()` field-for-field, with `.tma` text where PM-1 has `.pma`.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompileOptions {
+    /// `-g`: record label/line debug info in the object, remapped to `.tmc`.
+    pub debug_info: bool,
+    /// `--strip-debugger`: drop `brk` at codegen. The (stub) optimizer runs
+    /// BEFORE stripping, so a future `brk` barrier always holds.
+    pub strip_debugger: bool,
+    /// `-O0` (default) or `-O1` — identical output until phase 6b.
+    pub opt_level: OptLevel,
+    /// Pass names to disable (`--fno-<pass>`); no pass exists yet.
+    pub disabled_passes: Vec<String>,
+    /// Capture per-stage IR snapshots (`--emit-ir=<stage>` backing):
+    /// `"lowered"` and `"final"` (no `after:<pass>` until 6b).
+    pub capture_ir: bool,
+}
+
+/// Structured stage report — `tmt -v` renders it; the library never prints
+/// (the same thin-renderer rule as the linker's `LinkReport`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileReport {
+    pub diagnostics: Vec<Diagnostic>,
+    pub opt: OptReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileOutput {
+    pub object: ObjectFile,
+    /// The generated assembly (`-S` output). The object is assembled from
+    /// exactly this text, so the code bytes can never disagree; under `-g`
+    /// the object's debug LINES are additionally remapped to `.tmc` sources.
+    pub tma: String,
+    /// The FINAL IR (post-optimizer at `-O1`; the lowered IR at `-O0` — the
+    /// same today, the stub being an identity).
+    pub ir: IrProgram,
+    /// Per-stage IR snapshots when `capture_ir` was set; empty otherwise.
+    pub ir_snapshots: Vec<(String, IrProgram)>,
+    pub report: CompileReport,
+}
+
+/// `.tmc` source → object file: analyze → expand → lower → validate →
+/// optimizer stub → emit `.tma` → assemble. Diagnostics accumulate in
+/// pipeline order (analyze's, then expansion's, then IR lowering's).
+///
+/// Two failure modes report as [`CompileErrorKind::Internal`] — both are
+/// compiler bugs, never user errors: an IR world the compiler built failing
+/// [`validate_world`] (the T6 invariant check, run here where `.pmc` runs
+/// `validate_function`), and the generated `.tma` failing to assemble.
+pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
+    let analysis = analyze(source)?;
+    let expanded = crate::expand::expand(&analysis.resolved)?;
+    let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved)?;
+
+    // Validate every compiler-produced world before codegen relies on the
+    // invariants (dense ids, in-bounds indices, arity-wide rows, traps only on
+    // synthesized rows). A failure here is an internal error.
+    validate_ir(&ir)?;
+
+    let mut ir_snapshots = Vec::new();
+    if options.capture_ir {
+        ir_snapshots.push(("lowered".to_string(), ir.clone()));
+    }
+    let opt = optimize(
+        &mut ir,
+        &OptOptions {
+            level: options.opt_level,
+            disabled: options.disabled_passes.iter().cloned().collect(),
+            capture: options.capture_ir,
+        },
+        &mut ir_snapshots,
+    );
+    if options.capture_ir {
+        ir_snapshots.push(("final".to_string(), ir.clone()));
+    }
+
+    let tma = emit_program(
+        &ir,
+        CodegenOptions {
+            strip_debugger: options.strip_debugger,
+        },
+    );
+    let mut object =
+        crate::asm::assemble(&tma.text, options.debug_info).map_err(|e| CompileError {
+            span: Span::point(0, 0),
+            kind: CompileErrorKind::Internal(format!("generated .tma failed to assemble: {e}")),
+        })?;
+    if options.debug_info {
+        remap_debug_lines(&mut object, &tma.line_map);
+    }
+
+    let mut diagnostics = analysis.diagnostics;
+    diagnostics.extend(expanded.diagnostics);
+    diagnostics.extend(ir_warnings);
+
+    Ok(CompileOutput {
+        object,
+        tma: tma.text,
+        ir,
+        ir_snapshots,
+        report: CompileReport { diagnostics, opt },
+    })
+}
+
+/// Run [`validate_world`] over every world of a compiler-produced IR,
+/// wrapping any failure as an [`CompileErrorKind::Internal`] — the T6
+/// invariant gate `compile()` runs before codegen (the `.pmc`
+/// `validate_function` analog). Valid compiler output always passes; a
+/// failure means an upstream stage broke an invariant.
+fn validate_ir(ir: &IrProgram) -> Result<(), CompileError> {
+    for w in &ir.worlds {
+        validate_world(w).map_err(|m| CompileError {
+            span: Span::point(0, 0),
+            kind: CompileErrorKind::Internal(format!("IR validation failed: {m}")),
+        })?;
+    }
+    Ok(())
+}
+
+/// The assembler recorded `(code_offset, tma_line)`; compose with the
+/// codegen's `(tma_line, tmc_line)` map so debug info speaks `.tmc`. Offsets
+/// with no source correspondence are dropped. Mirrors the `.pmc` remap.
+fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
+    let to_tmc: HashMap<u32, u32> = line_map.iter().copied().collect();
+    if let Some(per_blob) = &mut object.debug {
+        for d in per_blob {
+            d.lines = d
+                .lines
+                .iter()
+                .filter_map(|&(off, tma_line)| to_tmc.get(&tma_line).map(|&l| (off, l)))
+                .collect();
+        }
+    }
+}
+
 /// The mutable context threaded through the world-boundary checks.
 struct WorldCtx<'a> {
     scopes: &'a Scopes,
@@ -2183,10 +2335,11 @@ mod tests {
             },
             CompileErrorKind::ExternalBindingUnsupported("x".into()),
             CompileErrorKind::StateParamContinuationUnsupported("x".into()),
+            CompileErrorKind::Internal("x".into()),
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 52);
+        assert_eq!(all.len(), 53);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();
@@ -2754,5 +2907,198 @@ namespace lib {
                 .iter()
                 .all(|w| w.kind != WorldKind::Machine)
         );
+    }
+
+    // -- compile() orchestration (Task 7) ------------------------------------
+
+    const A1: &str = "\
+alphabet ab { '_', 'a', 'b' }
+machine {
+  tape main: ab;
+  entry state scan {
+    ['b'] -> write ['a'] move [>] goto scan;
+    ['a'] ->            move [>] goto scan;
+    ['_'] -> stop;
+  }
+}";
+
+    #[test]
+    fn compile_object_equals_assembly_of_its_emitted_tma() {
+        // The object is assembled from exactly the `.tma` text the output
+        // carries, so a fresh assemble of that text is byte-identical (no
+        // debug info → no line remap to diverge the side table).
+        let out = compile(A1, CompileOptions::default()).unwrap();
+        let direct = crate::asm::assemble(&out.tma, false).unwrap();
+        assert_eq!(out.object, direct);
+        assert!(
+            out.report.diagnostics.is_empty(),
+            "{:?}",
+            out.report.diagnostics
+        );
+    }
+
+    #[test]
+    fn strip_debugger_reaches_the_object_bytes() {
+        let src = "\
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state s { [*] -> debugger move [>] stop; }
+}";
+        let kept = compile(src, CompileOptions::default()).unwrap();
+        assert!(
+            kept.object.blobs[0].contains(&crate::arch::opcodes::BRK),
+            "brk should be present"
+        );
+        let stripped = compile(
+            src,
+            CompileOptions {
+                strip_debugger: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !stripped.object.blobs[0].contains(&crate::arch::opcodes::BRK),
+            "brk should be stripped from the bytes"
+        );
+    }
+
+    #[test]
+    fn o1_is_byte_identical_to_o0_in_6a() {
+        let o0 = compile(A1, CompileOptions::default()).unwrap();
+        let o1 = compile(
+            A1,
+            CompileOptions {
+                opt_level: OptLevel::O1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(o0.object, o1.object);
+        assert_eq!(o0.tma, o1.tma);
+        assert_eq!(o1.report.opt.rounds, 1);
+        assert!(o1.report.opt.changes.is_empty());
+    }
+
+    #[test]
+    fn capture_ir_yields_lowered_and_final_identical_stages() {
+        let out = compile(
+            A1,
+            CompileOptions {
+                capture_ir: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stages: Vec<&str> = out.ir_snapshots.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(stages, vec!["lowered", "final"]);
+        // -O0 with the stub optimizer: the two snapshots are identical.
+        assert_eq!(out.ir_snapshots[0].1, out.ir_snapshots[1].1);
+    }
+
+    #[test]
+    fn debug_info_remaps_object_lines_to_tmc_sources() {
+        let out = compile(
+            A1,
+            CompileOptions {
+                debug_info: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let debug = out.object.debug.as_ref().expect("debug info recorded");
+        let lines = &debug[0].lines;
+        // scan's rd/mtc/djmp derive from the state decl (tmc line 4); the
+        // stop rule from line 7. Both must surface as `.tmc` lines, never the
+        // `.tma` line numbers.
+        assert!(lines.iter().any(|&(_, l)| l == 4), "{lines:?}");
+        assert!(lines.iter().any(|&(_, l)| l == 7), "{lines:?}");
+        // No debug line points past the `.tmc` source (9 lines).
+        assert!(lines.iter().all(|&(_, l)| l <= 9), "{lines:?}");
+    }
+
+    #[test]
+    fn validate_ir_rejects_a_bad_world_as_an_internal_error() {
+        // compile()'s pre-codegen gate. Compiler-produced IR always passes, so
+        // mutate a compiled world to be invalid (a dangling goto) and confirm
+        // the gate wraps the failure as `internal-error` — never a user error.
+        let out = compile(A1, CompileOptions::default()).unwrap();
+        let mut bad = out.ir.clone();
+        bad.worlds[0].states[0].rules[0].transition = crate::ir::IrTransition::Goto { state: 999 };
+        let e = validate_ir(&bad).expect_err("a dangling goto must fail validation");
+        assert_eq!(e.kind.code(), "internal-error");
+        assert!(
+            matches!(&e.kind, CompileErrorKind::Internal(m) if m.contains("validation")),
+            "{:?}",
+            e.kind
+        );
+    }
+
+    #[test]
+    fn internal_error_renders_in_the_house_style() {
+        let e = CompileError {
+            span: Span::point(0, 0),
+            kind: CompileErrorKind::Internal("boom".into()),
+        };
+        assert!(e.to_string().ends_with("[internal-error]"), "{e}");
+        assert!(
+            e.to_string().contains("internal compiler error: boom"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn compile_handles_a_multi_world_binding_call_and_a_graft() {
+        // A5 (spec §A): a machine + an exported routine, called across
+        // alphabets — codegen emits the binding-call operand, the assembler
+        // records a BoundCall (the linker resolves it in 5b). compile()
+        // returns a well-formed object with both worlds' code.
+        let a5 = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b', '0', '1' }
+namespace mylib {
+  export routine plusOne(tape num: bits) {
+    entry state inc {
+      ['1'] -> write ['0'] move [<] goto inc;
+      [*]   -> write ['1'] return;
+    }
+  }
+}
+use mylib::plusOne;
+machine {
+  tape ctl:  bits;
+  tape data: wide;
+  entry state main {
+    ['1', *] -> call plusOne(num = data with map { '0'->'0', '1'->'1' }) then done;
+    [*, *]   -> move [>, .] goto main;
+  }
+  state done { [*, *] -> stop; }
+}";
+        let out = compile(a5, CompileOptions::default()).unwrap();
+        // Two blobs (routine + machine); a bound-call record forces v3 shape.
+        assert_eq!(out.object.blobs.len(), 2);
+        assert_eq!(out.object.bound_calls.len(), 1);
+
+        // A6 (spec §A): an entry graft splices the graph into the machine —
+        // one emitted world, its entry the spliced instance.
+        let a6 = "\
+alphabet marks { '_', 'x', 'y', 'z' }
+export graph findX(tape t: marks, state found, state missing) {
+  entry state walk {
+    ['x'] -> found;
+    ['_'] -> missing;
+    [*]   -> move [>] goto walk;
+  }
+}
+machine {
+  tape work: marks;
+  entry graft findX(t = work, found = celebrate, missing = giveUp) as seek;
+  state celebrate { [*] -> write ['_'] stop; }
+  state giveUp    { [*] -> halt; }
+}";
+        let out = compile(a6, CompileOptions::default()).unwrap();
+        assert_eq!(out.object.blobs.len(), 1);
+        assert!(out.tma.contains(".func main"), "{}", out.tma);
     }
 }

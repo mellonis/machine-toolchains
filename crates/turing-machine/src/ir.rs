@@ -35,8 +35,10 @@
 //! symbols resolved to caller/callee alphabet indices. No blank pin or closure
 //! is applied here — the composition engine does that at link.
 //!
-//! Unused until Task 7 wires `compile()` over it (codegen consumes the output);
-//! the in-module tests exercise the lowering meanwhile.
+//! `compile()` (Task 7) wires the lowering + `validate_world` into the
+//! pipeline and codegen consumes the output; the JSON round-trip
+//! (`to_json`/`from_json`) and `to_mermaid` render surfaces stay dead until
+//! Task 8 wires the `tmt ir` / `--emit-ir` CLI, hence the module-wide allow.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
