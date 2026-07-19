@@ -155,11 +155,10 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
 
 /// `--emit-ir` → `Some(None)`; `--emit-ir=STAGE` → `Some(Some(stage))`.
 /// The stage is validated HERE against the optimizer's pass registry rather
-/// than at write time (pmt's approach): the registry is empty in phase 6a,
-/// so the only stages that resolve are the pipeline bookends `lowered` /
-/// `final`. Requesting `after:<pass>` therefore always fails, with an error
-/// that names the stages that actually exist instead of a late "snapshot not
-/// captured".
+/// than at write time (pmt's approach): the resolvable stages are the pipeline
+/// bookends `lowered` / `final` plus `after:<pass>` for any registered pass, so
+/// an unknown stage fails early with an error naming what exists, not late with
+/// a "snapshot not captured".
 fn take_emit_ir(args: &mut Args) -> Result<Option<Option<String>>, String> {
     if args.flag("--emit-ir") {
         return Ok(Some(None));

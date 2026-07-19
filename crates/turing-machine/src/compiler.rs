@@ -1537,10 +1537,10 @@ fn unused_import_warnings(program: &Program, used: &[bool], diagnostics: &mut Ve
 pub struct CompileOptions {
     /// `-g`: record label/line debug info in the object, remapped to `.tmc`.
     pub debug_info: bool,
-    /// `--strip-debugger`: drop `brk` at codegen. The (stub) optimizer runs
-    /// BEFORE stripping, so a future `brk` barrier always holds.
+    /// `--strip-debugger`: drop `brk` at codegen. The optimizer runs BEFORE
+    /// stripping, so the `brk` barrier always holds.
     pub strip_debugger: bool,
-    /// `-O0` (default) or `-O1` — identical output until phase 6b.
+    /// `-O0` (default) or `-O1` (runs the optimizer pass pipeline).
     pub opt_level: OptLevel,
     /// Pass names to disable (`--fno-<pass>`).
     pub disabled_passes: Vec<String>,
@@ -1568,8 +1568,8 @@ pub struct CompileOutput {
     /// exactly this text, so the code bytes can never disagree; under `-g`
     /// the object's debug LINES are additionally remapped to `.tmc` sources.
     pub tma: String,
-    /// The FINAL IR (post-optimizer at `-O1`; the lowered IR at `-O0` — the
-    /// same today, the stub being an identity).
+    /// The FINAL IR (post-optimizer at `-O1`; the lowered IR at `-O0`, where
+    /// the optimizer is skipped and the two coincide).
     pub ir: IrProgram,
     /// Per-stage IR snapshots when `capture_ir` was set; empty otherwise.
     pub ir_snapshots: Vec<(String, IrProgram)>,
@@ -1577,8 +1577,8 @@ pub struct CompileOutput {
 }
 
 /// `.tmc` source → object file: analyze → expand → lower → validate →
-/// optimizer stub → emit `.tma` → assemble. Diagnostics accumulate in
-/// pipeline order (analyze's, then expansion's, then IR lowering's).
+/// optimize → emit `.tma` → assemble. Diagnostics accumulate in pipeline
+/// order (analyze's, then expansion's, then IR lowering's).
 ///
 /// Two failure modes report as [`CompileErrorKind::Internal`] — both are
 /// compiler bugs, never user errors: an IR world the compiler built failing
@@ -3030,7 +3030,7 @@ machine {
         .unwrap();
         let stages: Vec<&str> = out.ir_snapshots.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(stages, vec!["lowered", "final"]);
-        // -O0 with the stub optimizer: the two snapshots are identical.
+        // -O0 skips the optimizer, so the two snapshots are identical.
         assert_eq!(out.ir_snapshots[0].1, out.ir_snapshots[1].1);
     }
 

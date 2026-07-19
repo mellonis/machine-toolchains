@@ -32,9 +32,9 @@
 //! Codegen relies on the world invariants (dense ids `id == index`, in-bounds
 //! indices, arity-wide rows, traps only on synthesized rows, every `Goto`
 //! target an existing id). In debug builds the driver re-runs
-//! [`crate::ir::validate_world`] after any pass that reported a change, so a
-//! pass that renumbers or retargets incorrectly fails loudly at the pass that
-//! broke it rather than deep in codegen.
+//! [`crate::ir::validate_world`] after EVERY pass (not only ones that reported
+//! a change), so a pass that renumbers or retargets incorrectly fails loudly
+//! at the pass that broke it rather than deep in codegen.
 //!
 //! The public shape mirrors the PM-1 optimizer (`OptLevel` / `OptOptions` /
 //! `OptReport` / `pass_names` / `optimize`), with `world` where PM-1 has
@@ -150,16 +150,20 @@ pub fn optimize(
                 continue;
             }
             let n = pass(ir);
-            if n > 0 {
-                #[cfg(debug_assertions)]
-                for w in &ir.worlds {
-                    if let Err(e) = crate::ir::validate_world(w) {
-                        panic!(
-                            "pass `{name}` broke IR invariants in world `{}`: {e}",
-                            w.name
-                        );
-                    }
+            // Re-check the world invariants after EVERY pass, not only when it
+            // reported a change: a pass that returns 0 but still corrupted the
+            // graph must fail here, at the pass that broke it, rather than deep
+            // in codegen. The `.pmc` driver validates the same way.
+            #[cfg(debug_assertions)]
+            for w in &ir.worlds {
+                if let Err(e) = crate::ir::validate_world(w) {
+                    panic!(
+                        "pass `{name}` broke IR invariants in world `{}`: {e}",
+                        w.name
+                    );
                 }
+            }
+            if n > 0 {
                 report.changes.push(PassChange {
                     pass: name,
                     world: "(module)".to_string(),
@@ -178,14 +182,16 @@ pub fn optimize(
             let mut pass_total = 0u32;
             for w in &mut ir.worlds {
                 let n = pass(w);
+                // Validate after every pass regardless of the change count (see
+                // the program-pass loop above).
+                #[cfg(debug_assertions)]
+                if let Err(e) = crate::ir::validate_world(w) {
+                    panic!(
+                        "pass `{name}` broke IR invariants in world `{}`: {e}",
+                        w.name
+                    );
+                }
                 if n > 0 {
-                    #[cfg(debug_assertions)]
-                    if let Err(e) = crate::ir::validate_world(w) {
-                        panic!(
-                            "pass `{name}` broke IR invariants in world `{}`: {e}",
-                            w.name
-                        );
-                    }
                     report.changes.push(PassChange {
                         pass: name,
                         world: w.name.clone(),
