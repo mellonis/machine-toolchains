@@ -601,3 +601,99 @@ fn dispatch_select_drops_the_dispatch_table_at_o1() {
         "disabling every pass reproduces -O0 on the branch program"
     );
 }
+
+// ── dead_rows, and the dead_rows → dispatch_select interaction ───────────────
+
+/// A three-row machine state where the second row is shadowed by the first: the
+/// partial `['a',*,*]` (row 0) covers the partial `['a','b',*]` (row 1) — same
+/// dispatch band, row 0 earlier — so row 1 can never fire (on any `'a'` input,
+/// codegen tries `['a',*,*]` first). `dead_rows` deletes it, leaving a
+/// selective row and the `[*,*,*]` catch-all, which `dispatch_select` then flips
+/// to the branch form — both passes firing in one `-O1` run. On `'a'` at tape x
+/// the head steps right (loop); on anything else the machine stops.
+const DEAD_ROW_SHADOW: &str = "\
+alphabet abc { '_', 'a', 'b' }
+machine {
+  tape x: abc;
+  tape y: abc;
+  tape z: abc;
+  entry state s {
+    ['a', *, *]   -> move [>, ., .] goto s;
+    ['a', 'b', *] -> move [>, ., .] goto s;
+    [*, *, *]     -> stop;
+  }
+}";
+
+#[test]
+fn dead_rows_shadowed_row_is_equivalent_across_the_matrix() {
+    // "aab" on tape x (walks the two 'a's then stops on 'b'), a lone blank, and
+    // a lone 'b'; tapes y and z blank throughout. The shadowed row never fires
+    // at -O0, so deleting it at -O1 changes nothing across the whole 2×3 matrix.
+    assert_equivalent(
+        DEAD_ROW_SHADOW,
+        &[
+            &[(&[1, 1, 2], 0), (&[], 0), (&[], 0)],
+            &[(&[0], 0), (&[], 0), (&[], 0)],
+            &[(&[2], 0), (&[], 0), (&[], 0)],
+        ],
+    );
+}
+
+#[test]
+fn dead_rows_then_dispatch_select_fire_in_one_run() {
+    // The combined interaction: `dead_rows` deletes the shadowed row (three rows
+    // → two), which exposes the selective-then-catch-all shape `dispatch_select`
+    // flips to a branch — so BOTH passes are reported for one `-O1` compile, and
+    // the emitted `.tma` loses the shadowed `.row` AND the dispatch table.
+    let o0 = object_of(DEAD_ROW_SHADOW, OptLevel::O0, &[]);
+    let o1 = object_of(DEAD_ROW_SHADOW, OptLevel::O1, &[]);
+
+    let fired: Vec<&str> = o1.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(fired.contains(&"dead-rows"), "dead-rows fired: {fired:?}");
+    assert!(
+        fired.contains(&"dispatch-select"),
+        "dispatch-select fired after dead-rows exposed the two-row shape: {fired:?}"
+    );
+
+    // -O0 has three match rows, a dispatch table, and a djmp.
+    assert_eq!(
+        o0.tma.matches(".row").count(),
+        3,
+        "-O0 has 3 rows:\n{}",
+        o0.tma
+    );
+    assert!(
+        o0.tma.contains(".targets"),
+        "-O0 dispatch table:\n{}",
+        o0.tma
+    );
+    assert!(o0.tma.contains("djmp"), "-O0 djmp:\n{}", o0.tma);
+
+    // -O1 has one match row (the surviving selective row), no dispatch table,
+    // and a jm — the shadowed row and the dispatch table are both gone.
+    assert_eq!(
+        o1.tma.matches(".row").count(),
+        1,
+        "-O1 has 1 row:\n{}",
+        o1.tma
+    );
+    assert!(
+        !o1.tma.contains(".targets"),
+        "-O1 no dispatch table:\n{}",
+        o1.tma
+    );
+    assert!(o1.tma.contains("jm"), "-O1 jm:\n{}", o1.tma);
+    assert!(
+        o1.object.to_bytes().len() < o0.object.to_bytes().len(),
+        "-O1 shrinks: {} -> {}",
+        o0.object.to_bytes().len(),
+        o1.object.to_bytes().len()
+    );
+
+    // The do-no-harm floor: disabling every pass reproduces -O0 byte-for-byte.
+    let floor = object_of(DEAD_ROW_SHADOW, OptLevel::O1, &pass_names());
+    assert_eq!(
+        o0.object, floor.object,
+        "disabling every pass reproduces -O0 on the shadowed-row program"
+    );
+}

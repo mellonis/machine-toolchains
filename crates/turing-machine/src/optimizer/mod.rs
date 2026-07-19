@@ -46,6 +46,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ir::{IrProgram, IrThen, IrTransition, IrWorld};
 
 mod dce;
+mod dead_rows;
 mod dispatch_select;
 mod jump_threading;
 mod tail_call;
@@ -145,9 +146,13 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("tail-call", tail_call::run),
     ("tail-merge", tail_merge::run),
     ("dce", dce::run),
+    // `dead-rows` deletes a match row an earlier same-band row already shadows;
+    // it runs BEFORE `dispatch-select` so a three-row state reduced to two rows
+    // can expose the selective-then-catch-all shape dispatch-select flips.
+    ("dead-rows", dead_rows::run),
     // `dispatch-select` flags a two-row selective-then-catch-all state for the
-    // compact `jm`/fall-through lowering; it runs after dce (and, once it
-    // lands, after `dead-rows`, which can reduce a state to that two-row shape).
+    // compact `jm`/fall-through lowering (machine world only — mono-linkability;
+    // see its module doc).
     ("dispatch-select", dispatch_select::run),
 ];
 
@@ -291,6 +296,7 @@ mod tests {
                 "tail-call",
                 "tail-merge",
                 "dce",
+                "dead-rows",
                 "dispatch-select"
             ]
         );
