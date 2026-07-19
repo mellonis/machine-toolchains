@@ -29,14 +29,18 @@
 //! the in-module tests exercise it meanwhile.
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 
-use crate::compiler::{CompileError, CompileErrorKind, ResolvedAlphabet, WorldKind};
+use crate::compiler::{
+    CompileError, CompileErrorKind, Resolved, ResolvedAlphabet, ResolvedCallTarget, ResolvedGraft,
+    ResolvedWorld, WorldKind,
+};
 use crate::parser::{
-    BindingArg, Continuation, MoveCell, MoveDir, MoveVec, PatternCell, PatternCellKind, Rule,
-    SymLit, Transition, WriteCell, WriteCellKind, WriteVec,
+    BindingArg, BindingValue, Continuation, MapArrow, MoveCell, MoveDir, MoveVec, PatternCell,
+    PatternCellKind, Rule, SymLit, SymMap as SrcSymMap, TermKind, Transition, WriteCell,
+    WriteCellKind, WriteVec,
 };
 
 // ---------------------------------------------------------------------------
@@ -644,7 +648,7 @@ fn expand_rule(
     rule: &Rule,
     tapes: &[TapeInfo],
     warn: &mut Vec<Diagnostic>,
-    lower_tr: &impl Fn(&Transition) -> Transition2,
+    lower_tr: &mut impl FnMut(&Transition) -> Transition2,
 ) -> Result<Vec<ExpandedRule>, CompileError> {
     let arity = tapes.len();
     check_width(rule.pattern.cells.len(), arity, rule.span)?;
@@ -800,6 +804,697 @@ fn resolve_moves(mov: Option<&MoveVec>, arity: usize) -> Vec<MoveDir> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Building a graft composite from source binding args (the map legality
+// contract, spanned: blank pinning, per-direction conflicts, equal-size
+// identity-completion injectivity, omitted-map identity requiring equal
+// glyphs). Mirrors `crates/core/src/linker/{compose,engine}.rs`.
+// ---------------------------------------------------------------------------
+
+/// Insert one read/write map pair, rejecting a repeat with a different image.
+fn insert_map_pair(
+    map: &mut SymMap,
+    src: u16,
+    dst: u16,
+    glyph: &str,
+    span: Span,
+) -> Result<(), CompileError> {
+    match map.pairs.get(&src) {
+        Some(&e) if e != dst => Err(CompileError {
+            span,
+            kind: CompileErrorKind::MapConflict {
+                symbol: glyph.to_string(),
+            },
+        }),
+        _ => {
+            map.pairs.insert(src, dst);
+            Ok(())
+        }
+    }
+}
+
+/// Build one bound tape's [`TapeMap`] from its (optional) source symbol map,
+/// resolving `src` glyphs against the host alphabet and `dst` glyphs against
+/// the graph alphabet.
+fn build_tapemap(
+    map: Option<&SrcSymMap>,
+    phys: usize,
+    host_glyphs: &[String],
+    graph_glyphs: &[String],
+    span: Span,
+) -> Result<TapeMap, CompileError> {
+    let host_card = host_glyphs.len();
+    let graph_card = graph_glyphs.len();
+    let Some(m) = map else {
+        // Omitted map = identity, which requires glyph-for-glyph equal tapes.
+        if host_glyphs != graph_glyphs {
+            return Err(CompileError {
+                span,
+                kind: CompileErrorKind::IdentityGlyphMismatch,
+            });
+        }
+        return Ok(TapeMap {
+            phys,
+            host_card,
+            graph_card,
+            rmap: SymMap::identity(),
+            wmap: SymMap::identity(),
+        });
+    };
+
+    let host_idx: HashMap<&str, u16> = host_glyphs
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i as u16))
+        .collect();
+    let graph_idx: HashMap<&str, u16> = graph_glyphs
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (g.as_str(), i as u16))
+        .collect();
+
+    let mut rmap = SymMap::identity();
+    let mut wmap = SymMap::identity();
+    let mut bidir: Vec<(u16, u16)> = Vec::new();
+    for pair in &m.pairs {
+        let src_g = glyph_label(&pair.src);
+        let dst_g = glyph_label(&pair.dst);
+        let src = *host_idx.get(src_g.as_str()).ok_or(CompileError {
+            span: pair.src.span(),
+            kind: CompileErrorKind::MapSymbolNotInAlphabet(src_g.clone()),
+        })?;
+        let dst = *graph_idx.get(dst_g.as_str()).ok_or(CompileError {
+            span: pair.dst.span(),
+            kind: CompileErrorKind::MapSymbolNotInAlphabet(dst_g.clone()),
+        })?;
+        // Blank reads as blank.
+        if src == 0 && dst != 0 {
+            return Err(CompileError {
+                span: pair.span,
+                kind: CompileErrorKind::MapBlankPin,
+            });
+        }
+        insert_map_pair(&mut rmap, src, dst, &src_g, pair.span)?;
+        if pair.arrow == MapArrow::Bidirectional {
+            // A two-way fold onto blank would write blank back as non-blank.
+            if dst == 0 && src != 0 {
+                return Err(CompileError {
+                    span: pair.span,
+                    kind: CompileErrorKind::MapBlankPin,
+                });
+            }
+            insert_map_pair(&mut wmap, dst, src, &dst_g, pair.span)?;
+            bidir.push((src, dst));
+        }
+    }
+    // Canonical: drop identity pairs (stable dedup keys).
+    rmap.pairs.retain(|s, d| s != d);
+    wmap.pairs.retain(|s, d| s != d);
+
+    // Equal-size alphabets must identity-complete to a bijection: the
+    // BIDIRECTIONAL read map, filled with identity, must be injective.
+    if host_card == graph_card {
+        let bmap: HashMap<u16, u16> = bidir.into_iter().collect();
+        let mut seen: HashSet<u16> = HashSet::new();
+        for s in 0..host_card as u16 {
+            let v = bmap.get(&s).copied().unwrap_or(s);
+            if !seen.insert(v) {
+                let g = graph_glyphs
+                    .get(usize::from(v))
+                    .cloned()
+                    .unwrap_or_else(|| v.to_string());
+                return Err(CompileError {
+                    span,
+                    kind: CompileErrorKind::MapNotInjective { symbol: g },
+                });
+            }
+        }
+    }
+    Ok(TapeMap {
+        phys,
+        host_card,
+        graph_card,
+        rmap,
+        wmap,
+    })
+}
+
+/// Build a graft's [`Composite`] (per graph tape) plus its continuation
+/// substitution (graph state-param → the host continuation the graft binds).
+/// The T4 world checks guarantee every parameter is bound with a
+/// kind-correct argument, so the "impossible" branches are invariants.
+fn build_composite(
+    graft: &ResolvedGraft,
+    host: &ResolvedWorld,
+    graph: &ResolvedWorld,
+    alphabets: &HashMap<String, ResolvedAlphabet>,
+) -> Result<(Composite, HashMap<String, Transition2>), CompileError> {
+    let args: HashMap<&str, &BindingArg> =
+        graft.args.iter().map(|a| (a.name.as_str(), a)).collect();
+
+    let mut tapes = Vec::with_capacity(graph.tapes.len());
+    for gt in &graph.tapes {
+        let arg = args
+            .get(gt.name.as_str())
+            .expect("T4 binds every tape parameter");
+        let BindingValue::Named { target, map, .. } = &arg.value else {
+            unreachable!("T4 gives a tape parameter a named tape target");
+        };
+        let phys = host
+            .tapes
+            .iter()
+            .position(|t| &t.name == target)
+            .expect("T4 resolves the tape target to a host tape");
+        let host_glyphs = &alphabets[&host.tapes[phys].alphabet].glyphs;
+        let graph_glyphs = &alphabets[&gt.alphabet].glyphs;
+        tapes.push(build_tapemap(
+            map.as_ref(),
+            phys,
+            host_glyphs,
+            graph_glyphs,
+            arg.span,
+        )?);
+    }
+
+    let mut cont: HashMap<String, Transition2> = HashMap::new();
+    for sp in &graph.state_params {
+        let arg = args
+            .get(sp.as_str())
+            .expect("T4 binds every state parameter");
+        let t2 = match &arg.value {
+            BindingValue::Named { target, .. } => Transition2::Goto(target.clone()),
+            BindingValue::Terminator { kind, .. } => match kind {
+                TermKind::Return => Transition2::Return,
+                TermKind::Stop => Transition2::Stop,
+                TermKind::Halt => Transition2::Halt,
+            },
+        };
+        cont.insert(sp.clone(), t2);
+    }
+    Ok((Composite { tapes }, cont))
+}
+
+/// A deterministic key for a continuation substitution (dedup input).
+fn cont_key(cont: &HashMap<String, Transition2>) -> Vec<u8> {
+    let mut entries: Vec<(&String, String)> = cont
+        .iter()
+        .map(|(k, v)| {
+            let r = match v {
+                Transition2::Goto(n) => format!("g{n}"),
+                Transition2::Return => "r".into(),
+                Transition2::Stop => "s".into(),
+                Transition2::Halt => "h".into(),
+                _ => "?".into(),
+            };
+            (k, r)
+        })
+        .collect();
+    entries.sort();
+    let mut out = Vec::new();
+    for (k, r) in entries {
+        out.extend_from_slice(k.as_bytes());
+        out.push(b'=');
+        out.extend_from_slice(r.as_bytes());
+        out.push(0);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Graph-definition acyclicity (spec §10.4): the graft-dependency graph of
+// graph DEFINITIONS must be acyclic (a self- or mutual graft is infinite
+// expansion). Instance-level cycles (continuation loops) stay legal.
+// ---------------------------------------------------------------------------
+
+fn check_graph_acyclicity(graphs: &HashMap<&str, &ResolvedWorld>) -> Result<(), CompileError> {
+    // 0 = unvisited, 1 = on the current path, 2 = done.
+    let mut color: HashMap<&str, u8> = HashMap::new();
+    for &name in graphs.keys() {
+        if color.get(name).copied().unwrap_or(0) == 0 {
+            acyclicity_dfs(name, graphs, &mut color)?;
+        }
+    }
+    Ok(())
+}
+
+fn acyclicity_dfs<'a>(
+    name: &'a str,
+    graphs: &HashMap<&'a str, &'a ResolvedWorld>,
+    color: &mut HashMap<&'a str, u8>,
+) -> Result<(), CompileError> {
+    color.insert(name, 1);
+    let world = graphs[name];
+    for graft in &world.grafts {
+        // A graft target is always a locally-defined graph (T4's
+        // `undefined-graph`); look up its canonical key in `graphs`.
+        let Some((&target, _)) = graphs.get_key_value(graft.target.as_str()) else {
+            continue;
+        };
+        match color.get(target).copied().unwrap_or(0) {
+            1 => {
+                return Err(CompileError {
+                    span: graft.target_span,
+                    kind: CompileErrorKind::GraftCycle(graft.target.clone()),
+                });
+            }
+            0 => acyclicity_dfs(target, graphs, color)?,
+            _ => {}
+        }
+    }
+    color.insert(name, 2);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// World expansion — own states (range-expanded) + spliced graft instances,
+// with instance dedup and alias resolution. Graphs expand to a memoized
+// graph-space form; the machine and routines emit as `ExpandedWorld`s.
+// ---------------------------------------------------------------------------
+
+/// A graph's expanded graph-space form: its concrete states (own + nested
+/// grafts spliced, still over the graph's own tapes) and its resolved entry
+/// state name. Cached across graft instances.
+#[derive(Debug, Clone)]
+struct GraphExpansion {
+    states: Vec<ExpandedState>,
+    entry: String,
+}
+
+/// A collision-proof world-local name minter: seeded with the world's user
+/// names, each `fresh` returns a name absent from every prior user or minted
+/// name (bumping a numeric suffix), so synthetic instance internals never
+/// clash with a user state or another instance.
+struct NameGen {
+    used: HashSet<String>,
+}
+
+impl NameGen {
+    fn new<I: IntoIterator<Item = String>>(reserved: I) -> Self {
+        Self {
+            used: reserved.into_iter().collect(),
+        }
+    }
+
+    fn fresh(&mut self, base: &str) -> String {
+        if self.used.insert(base.to_string()) {
+            return base.to_string();
+        }
+        let mut i = 1;
+        loop {
+            let cand = format!("{base}_{i}");
+            if self.used.insert(cand.clone()) {
+                return cand;
+            }
+            i += 1;
+        }
+    }
+}
+
+fn tape_infos(
+    world: &ResolvedWorld,
+    alphabets: &HashMap<String, ResolvedAlphabet>,
+) -> Vec<TapeInfo> {
+    world
+        .tapes
+        .iter()
+        .map(|t| TapeInfo::new(&alphabets[&t.alphabet].glyphs))
+        .collect()
+}
+
+/// A world's user-visible state-name space (own states, graft instances,
+/// state params) — the reserved set synthetic names must avoid.
+fn reserved_names(world: &ResolvedWorld) -> Vec<String> {
+    let mut names: Vec<String> = world.states.iter().map(|s| s.name.clone()).collect();
+    names.extend(world.grafts.iter().filter_map(|g| g.as_name.clone()));
+    names.extend(world.state_params.iter().cloned());
+    names
+}
+
+/// Range-expand a world's OWN states (not graft instances), lowering each
+/// rule's transition (calls resolved through the world's call records, in
+/// source order).
+fn expand_own_states(
+    world: &ResolvedWorld,
+    tapes: &[TapeInfo],
+    warn: &mut Vec<Diagnostic>,
+    out: &mut Vec<ExpandedState>,
+) -> Result<(), CompileError> {
+    let calls = &world.calls;
+    let mut cursor = 0usize;
+    for s in &world.states {
+        let mut lower = |t: &Transition| -> Transition2 {
+            match t {
+                Transition::Goto { name, .. } => Transition2::Goto(name.clone()),
+                Transition::Return { .. } => Transition2::Return,
+                Transition::Stop { .. } => Transition2::Stop,
+                Transition::Halt { .. } => Transition2::Halt,
+                Transition::Call { .. } => {
+                    let rc = &calls[cursor];
+                    cursor += 1;
+                    match &rc.target {
+                        ResolvedCallTarget::Routine {
+                            name,
+                            external,
+                            args,
+                        } => Transition2::Call {
+                            target: name.clone(),
+                            external: *external,
+                            args: args.clone(),
+                            then: rc.then.clone(),
+                        },
+                        ResolvedCallTarget::Bind { name } => Transition2::BindCall {
+                            name: name.clone(),
+                            then: rc.then.clone(),
+                        },
+                    }
+                }
+            }
+        };
+        let mut rules = Vec::new();
+        for r in &s.rules {
+            rules.extend(expand_rule(r, tapes, warn, &mut lower)?);
+        }
+        out.push(ExpandedState {
+            name: s.name.clone(),
+            name_span: s.name_span,
+            rules,
+        });
+    }
+    Ok(())
+}
+
+/// Splice every graft instance of `host` into `out`, deduping identical
+/// (graph, binding, continuations) instances (their names alias one entry).
+/// Returns the entry-graft instance's entry-state host name, if any.
+#[allow(clippy::too_many_arguments)]
+fn expand_grafts_into<'a>(
+    host: &ResolvedWorld,
+    resolved: &'a Resolved,
+    graphs: &HashMap<&'a str, &'a ResolvedWorld>,
+    memo: &mut HashMap<String, GraphExpansion>,
+    warn: &mut Vec<Diagnostic>,
+    namegen: &mut NameGen,
+    out: &mut Vec<ExpandedState>,
+    alias: &mut HashMap<String, String>,
+) -> Result<Option<String>, CompileError> {
+    let mut dedup: HashMap<Vec<u8>, String> = HashMap::new();
+    let mut graft_entry: Option<String> = None;
+
+    for graft in &host.grafts {
+        let graph = graphs[graft.target.as_str()];
+        let gx = expand_graph(graft.target.as_str(), graphs, resolved, memo, warn)?;
+        let (comp, cont) = build_composite(graft, host, graph, &resolved.alphabets)?;
+
+        let mut key = graft.target.clone().into_bytes();
+        key.push(0);
+        key.extend(comp.key());
+        key.push(0);
+        key.extend(cont_key(&cont));
+
+        let instance = match &graft.as_name {
+            Some(n) => n.clone(),
+            None => namegen.fresh(&format!("{}__entry", sanitize(&graft.target))),
+        };
+
+        if let Some(canonical) = dedup.get(&key) {
+            // Identical instance: alias this name to the existing entry state.
+            alias.insert(instance.clone(), canonical.clone());
+            if graft.entry {
+                graft_entry = Some(canonical.clone());
+            }
+            continue;
+        }
+
+        // A fresh splice: map every graph-space state name to a host name
+        // (the entry → the instance name; internals → collision-proof synth).
+        let mut name_map: HashMap<String, String> = HashMap::new();
+        for st in &gx.states {
+            let host_name = if st.name == gx.entry {
+                instance.clone()
+            } else {
+                namegen.fresh(&format!("{instance}__{}", st.name))
+            };
+            name_map.insert(st.name.clone(), host_name);
+        }
+        let params: HashSet<&str> = graph.state_params.iter().map(String::as_str).collect();
+        let host_arity = host.tapes.len();
+
+        let remap = |t2: &Transition2| -> Transition2 {
+            match t2 {
+                Transition2::Goto(n) => {
+                    if let Some(c) = cont.get(n) {
+                        c.clone()
+                    } else if params.contains(n.as_str()) {
+                        // A state param with no binding arg — T4 forbids this;
+                        // pass through defensively.
+                        t2.clone()
+                    } else {
+                        Transition2::Goto(name_map.get(n).cloned().unwrap_or_else(|| n.clone()))
+                    }
+                }
+                other => other.clone(),
+            }
+        };
+
+        for st in &gx.states {
+            let host_name = &name_map[&st.name];
+            out.push(splice_state(st, &comp, host_arity, host_name, &remap));
+        }
+        dedup.insert(key, instance.clone());
+        if graft.entry {
+            graft_entry = Some(instance);
+        }
+    }
+    Ok(graft_entry)
+}
+
+/// A synthetic-name base from a mangled graph name (bare-label safe).
+fn sanitize(name: &str) -> String {
+    name.replace("::", "_").replace([':', '.'], "_")
+}
+
+/// Expand a graph to its memoized graph-space form: own states range-expanded,
+/// nested grafts spliced, aliases resolved. The graft-dependency DAG being
+/// acyclic, the recursion terminates.
+fn expand_graph<'a>(
+    name: &str,
+    graphs: &HashMap<&'a str, &'a ResolvedWorld>,
+    resolved: &'a Resolved,
+    memo: &mut HashMap<String, GraphExpansion>,
+    warn: &mut Vec<Diagnostic>,
+) -> Result<GraphExpansion, CompileError> {
+    if let Some(gx) = memo.get(name) {
+        return Ok(gx.clone());
+    }
+    let world = graphs[name];
+    let tapes = tape_infos(world, &resolved.alphabets);
+    let mut states = Vec::new();
+    expand_own_states(world, &tapes, warn, &mut states)?;
+    let mut namegen = NameGen::new(reserved_names(world));
+    let mut alias = HashMap::new();
+    let graft_entry = expand_grafts_into(
+        world,
+        resolved,
+        graphs,
+        memo,
+        warn,
+        &mut namegen,
+        &mut states,
+        &mut alias,
+    )?;
+    resolve_aliases(&mut states, &alias);
+    let entry = world_entry(world, graft_entry, &alias);
+    let gx = GraphExpansion { states, entry };
+    memo.insert(name.to_string(), gx.clone());
+    Ok(gx)
+}
+
+/// A world's entry-state name: its own `entry state`, or its `entry graft`'s
+/// spliced entry (resolved through the dedup alias).
+fn world_entry(
+    world: &ResolvedWorld,
+    graft_entry: Option<String>,
+    alias: &HashMap<String, String>,
+) -> String {
+    let own = world
+        .states
+        .iter()
+        .find(|s| s.entry)
+        .map(|s| s.name.clone());
+    let e = own
+        .or(graft_entry)
+        .expect("T4 gives every world exactly one entry");
+    resolve_alias(&e, alias)
+}
+
+fn resolve_alias(name: &str, alias: &HashMap<String, String>) -> String {
+    alias.get(name).cloned().unwrap_or_else(|| name.to_string())
+}
+
+/// Rewrite every transition target (goto / call continuation) through the
+/// dedup alias, so a goto onto a deduplicated instance reaches the survivor.
+fn resolve_aliases(states: &mut [ExpandedState], alias: &HashMap<String, String>) {
+    if alias.is_empty() {
+        return;
+    }
+    for st in states {
+        for r in &mut st.rules {
+            match &mut r.transition {
+                Transition2::Goto(n) => *n = resolve_alias(n, alias),
+                Transition2::Call { then, .. } | Transition2::BindCall { then, .. } => {
+                    if let Continuation::State { name, span } = then {
+                        *then = Continuation::State {
+                            name: resolve_alias(name, alias),
+                            span: *span,
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-expansion checks (spec §10.7 / §4): exact-row disjointness (a spanned
+// error naming both rules) and cheap shadowed-rule warnings (an identical
+// earlier pattern makes a later rule unreachable).
+// ---------------------------------------------------------------------------
+
+fn render_pattern(pattern: &[Cell], glyphs: &[Vec<String>]) -> String {
+    let cells: Vec<String> = pattern
+        .iter()
+        .enumerate()
+        .map(|(k, c)| match c {
+            Cell::Wild => "*".to_string(),
+            Cell::Sym(i) => glyphs
+                .get(k)
+                .and_then(|g| g.get(usize::from(*i)))
+                .cloned()
+                .unwrap_or_else(|| i.to_string()),
+        })
+        .collect();
+    format!("[{}]", cells.join(", "))
+}
+
+fn check_state_rows(
+    state: &ExpandedState,
+    glyphs: &[Vec<String>],
+    warn: &mut Vec<Diagnostic>,
+) -> Result<(), CompileError> {
+    for j in 0..state.rules.len() {
+        let pj = &state.rules[j].pattern;
+        for i in 0..j {
+            if state.rules[i].pattern == *pj {
+                if is_all_wild(pj) || pj.iter().any(|c| matches!(c, Cell::Wild)) {
+                    // A partial/full wildcard duplicate is a shadow (the later
+                    // row is unreachable); warn, don't fail.
+                    warn.push(Diagnostic {
+                        code: "shadowed-rule",
+                        span: state.rules[j].span,
+                        message: format!(
+                            "this rule is unreachable — an earlier rule has the same pattern {}",
+                            render_pattern(pj, glyphs)
+                        ),
+                        fix: None,
+                    });
+                } else {
+                    // Two exact (wildcard-free) rows matching the same tuple.
+                    return Err(CompileError {
+                        span: state.rules[j].span,
+                        kind: CompileErrorKind::ExactRowConflict {
+                            first: render_pattern(&state.rules[i].pattern, glyphs),
+                            second: render_pattern(pj, glyphs),
+                        },
+                    });
+                }
+                break; // first earlier match is enough
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The stage entry point.
+// ---------------------------------------------------------------------------
+
+/// Expand a resolved module: graft splicing then range expansion, producing
+/// worlds whose states carry only concrete, index-resolved rules (Task 6 input).
+pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
+    let graphs: HashMap<&str, &ResolvedWorld> = resolved
+        .worlds
+        .iter()
+        .filter(|w| w.kind == WorldKind::Graph)
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    check_graph_acyclicity(&graphs)?;
+
+    let mut memo: HashMap<String, GraphExpansion> = HashMap::new();
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut worlds: Vec<ExpandedWorld> = Vec::new();
+    let mut entry_world = None;
+
+    for (idx, world) in resolved.worlds.iter().enumerate() {
+        if world.kind == WorldKind::Graph {
+            continue; // graphs are consumed by grafting, never emitted
+        }
+        if Some(idx) == resolved.entry_world {
+            entry_world = Some(worlds.len());
+        }
+        let tapes = tape_infos(world, &resolved.alphabets);
+        let mut states = Vec::new();
+        expand_own_states(world, &tapes, &mut diagnostics, &mut states)?;
+        let mut namegen = NameGen::new(reserved_names(world));
+        let mut alias = HashMap::new();
+        let graft_entry = expand_grafts_into(
+            world,
+            resolved,
+            &graphs,
+            &mut memo,
+            &mut diagnostics,
+            &mut namegen,
+            &mut states,
+            &mut alias,
+        )?;
+        resolve_aliases(&mut states, &alias);
+        let entry = Some(world_entry(world, graft_entry, &alias));
+
+        let per_tape_glyphs: Vec<Vec<String>> = world
+            .tapes
+            .iter()
+            .map(|t| resolved.alphabets[&t.alphabet].glyphs.clone())
+            .collect();
+        for st in &states {
+            check_state_rows(st, &per_tape_glyphs, &mut diagnostics)?;
+        }
+
+        worlds.push(ExpandedWorld {
+            kind: world.kind,
+            name: world.name.clone(),
+            tapes: world
+                .tapes
+                .iter()
+                .map(|t| ExpandedTape {
+                    name: t.name.clone(),
+                    alphabet: t.alphabet.clone(),
+                    cardinality: t.cardinality,
+                })
+                .collect(),
+            state_params: world.state_params.clone(),
+            entry,
+            states,
+        });
+    }
+
+    Ok(Expanded {
+        alphabets: resolved.alphabets.clone(),
+        worlds,
+        entry_world,
+        diagnostics,
+    })
+}
+
 #[cfg(test)]
 mod map_tests {
     use super::*;
@@ -923,7 +1618,7 @@ machine {
         let rules = machine_rules(src, 0);
         let tapes = vec![ti(&["_", "0", "1"]), ti(&["_", "0", "1"])];
         let mut warn = Vec::new();
-        let rows = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap();
+        let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
         assert_eq!(rows.len(), 2);
         // '0' is index 1, '1' is index 2; `{c}` writes the same glyph on dst.
         assert_eq!(rows[0].pattern, vec![Cell::Sym(1), Cell::Wild]);
@@ -953,7 +1648,7 @@ machine {
         let glyphs: Vec<String> = (0..=126).map(|v| v.to_string()).collect();
         let tapes = vec![TapeInfo::new(&glyphs)];
         let mut warn = Vec::new();
-        let rows = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap();
+        let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
         assert_eq!(rows.len(), 125);
         // value == index for this alphabet: v reads index v, writes v+1.
         assert_eq!(rows[0].pattern, vec![Cell::Sym(1)]);
@@ -961,7 +1656,7 @@ machine {
         assert_eq!(rows[124].pattern, vec![Cell::Sym(125)]);
         assert_eq!(rows[124].write, vec![WriteOut::Sym(126)]);
         // The `[126] -> halt` and `[0] -> write [1]` rows are singletons.
-        let halt = expand_rule(&rules[1], &tapes, &mut warn, &own_tr).unwrap();
+        let halt = expand_rule(&rules[1], &tapes, &mut warn, &mut own_tr).unwrap();
         assert_eq!(halt.len(), 1);
         assert_eq!(halt[0].transition, Transition2::Halt);
     }
@@ -978,7 +1673,7 @@ machine {
         let rules = machine_rules(src, 0);
         let tapes = vec![TapeInfo::new(&["0".into(), "1".into(), "2".into()])];
         let mut warn = Vec::new();
-        let err = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap_err();
+        let err = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap_err();
         assert_eq!(err.kind.code(), "fold-out-of-alphabet");
     }
 
@@ -996,7 +1691,7 @@ machine {
         let rules = machine_rules(src, 0);
         let tapes = vec![ti(&["_", "0", "1"]), ti(&["_", "0", "1"])];
         let mut warn = Vec::new();
-        let err = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap_err();
+        let err = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap_err();
         assert_eq!(err.kind.code(), "row-width");
     }
 }
@@ -1261,5 +1956,223 @@ mod oracle_tests {
                 prop_assert_eq!(&a, &b, "tuple {:?}: splice {:?} vs walk {:?}", tuple, a, b);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod expand_tests {
+    //! End-to-end: `analyze` (T4) then [`expand`], over the spec's graft
+    //! example A.6, instance dedup, a holey graft (trap synthesis), and the
+    //! graph-definition acyclicity guard.
+    use super::*;
+    use crate::compiler::analyze;
+
+    fn expand_ok(src: &str) -> Expanded {
+        let a = analyze(src).unwrap_or_else(|e| panic!("analyze failed: {e}"));
+        expand(&a.resolved).unwrap_or_else(|e| panic!("expand failed: {e}"))
+    }
+
+    fn machine(ex: &Expanded) -> &ExpandedWorld {
+        ex.worlds
+            .iter()
+            .find(|w| w.kind == WorldKind::Machine)
+            .expect("a machine world")
+    }
+
+    fn state<'a>(w: &'a ExpandedWorld, name: &str) -> &'a ExpandedState {
+        w.states.iter().find(|s| s.name == name).unwrap_or_else(|| {
+            panic!(
+                "state {name} not found in {:?}",
+                w.states.iter().map(|s| &s.name).collect::<Vec<_>>()
+            )
+        })
+    }
+
+    const A6: &str = "\
+alphabet marks { '_', 'x', 'y', 'z' }
+
+export graph findX(tape t: marks, state found, state missing) {
+  entry state walk {
+    ['x'] -> found;
+    ['_'] -> missing;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+machine {
+  tape work: marks;
+
+  entry graft findX(t = work, found = celebrate, missing = giveUp) as seek;
+
+  state celebrate { [*] -> write ['_'] stop; }
+  state giveUp    { [*] -> halt; }
+}
+";
+
+    #[test]
+    fn a6_graft_splices_the_entry_and_substitutes_continuations() {
+        let ex = expand_ok(A6);
+        // Graphs are consumed — only the machine remains.
+        assert!(ex.worlds.iter().all(|w| w.kind != WorldKind::Graph));
+        let m = machine(&ex);
+        assert_eq!(m.entry.as_deref(), Some("seek"));
+        assert!(ex.diagnostics.is_empty(), "{:?}", ex.diagnostics);
+
+        // `seek` is findX's `walk` spliced: marks is identity (equal glyphs),
+        // so no trap rows; 'x' → celebrate, '_' → giveUp, else move right.
+        let seek = state(m, "seek");
+        assert_eq!(seek.rules.len(), 3);
+        assert_eq!(seek.rules[0].pattern, vec![Cell::Sym(1)]); // 'x' at index 1
+        assert_eq!(
+            seek.rules[0].transition,
+            Transition2::Goto("celebrate".into())
+        );
+        assert_eq!(seek.rules[1].pattern, vec![Cell::Sym(0)]); // '_' at index 0
+        assert_eq!(seek.rules[1].transition, Transition2::Goto("giveUp".into()));
+        assert_eq!(seek.rules[2].pattern, vec![Cell::Wild]);
+        assert_eq!(seek.rules[2].moves, vec![MoveDir::Right]);
+        assert_eq!(seek.rules[2].transition, Transition2::Goto("seek".into()));
+
+        // The own states survived unchanged.
+        assert_eq!(state(m, "celebrate").rules[0].write, vec![WriteOut::Sym(0)]);
+        assert_eq!(state(m, "giveUp").rules[0].transition, Transition2::Halt);
+    }
+
+    #[test]
+    fn two_identical_grafts_dedup_to_one_fragment() {
+        // A graph grafted twice with identical bindings + continuations: one
+        // set of spliced states; the second instance name aliases the first.
+        let src = "\
+alphabet marks { '_', 'x' }
+graph g(tape t: marks, state done) {
+  entry state walk { ['x'] -> done; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  entry graft g(t = work, done = fin) as a;
+  graft g(t = work, done = fin) as b;
+  state fin { [*] -> stop; }
+  state kick { [*] -> goto b; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        // Only ONE spliced walk fragment (named `a`); `b` did not add states.
+        assert!(m.states.iter().any(|s| s.name == "a"));
+        assert!(!m.states.iter().any(|s| s.name == "b"));
+        // `goto b` was rewritten to the surviving instance `a`.
+        let kick = state(m, "kick");
+        assert_eq!(kick.rules[0].transition, Transition2::Goto("a".into()));
+        assert_eq!(m.entry.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_holey_graft_synthesizes_trap_read_rows() {
+        // Host tape `quad` (4 symbols) grafts a graph over `bits` (3 symbols)
+        // with an empty (identity) map: the extra host symbol `q` (index 3)
+        // has no in-range image on the 3-symbol graph tape — a read hole ⇒ a
+        // trap-read row prepended to the reading state. (This mirrors the
+        // linker's model, where a hole is a symbol whose mapped image falls
+        // outside the graph alphabet; in-range unlisted symbols read through
+        // by identity, they do NOT trap.)
+        let src = "\
+alphabet bits { '_', '0', '1' }
+alphabet quad { '_', '0', '1', 'q' }
+graph flip(tape t: bits, state done) {
+  entry state go { ['0'] -> write ['1'] done; ['1'] -> write ['0'] done; [*] -> done; }
+}
+machine {
+  tape data: quad;
+  entry graft flip(t = data with map { }, done = fin) as f;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let f = state(m, "f");
+        // One read hole (`q` = index 3) prepends one trap-read row, first.
+        let traps: Vec<&ExpandedRule> = f
+            .rules
+            .iter()
+            .filter(|r| r.transition == Transition2::TrapRead)
+            .collect();
+        assert_eq!(traps.len(), 1, "{:?}", f.rules);
+        assert_eq!(f.rules[0].transition, Transition2::TrapRead);
+        assert_eq!(f.rules[0].pattern, vec![Cell::Sym(3)]); // 'q'
+        // The real rows read/write the identity-mapped bits symbols.
+        let real: Vec<&ExpandedRule> = f
+            .rules
+            .iter()
+            .filter(|r| matches!(r.transition, Transition2::Goto(_)))
+            .collect();
+        // '0'(idx1) → write '1'(idx2); '1'(idx2) → write '0'(idx1).
+        assert!(
+            real.iter()
+                .any(|r| r.pattern == vec![Cell::Sym(1)] && r.write == vec![WriteOut::Sym(2)])
+        );
+        assert!(
+            real.iter()
+                .any(|r| r.pattern == vec![Cell::Sym(2)] && r.write == vec![WriteOut::Sym(1)])
+        );
+    }
+
+    #[test]
+    fn a_write_hole_becomes_a_trap_write_row() {
+        // Graph over `bits` writes '1'; host tape has only '_' (1 symbol), so
+        // the graph symbol '1' has no host write image ⇒ trap-write.
+        // (The graph tape is wider than the host — a write hole.)
+        let src = "\
+alphabet bits { '_', '0', '1' }
+alphabet one  { '_' }
+graph w(tape t: bits, state done) {
+  entry state s { [*] -> write ['1'] done; }
+}
+machine {
+  tape z: one;
+  entry graft w(t = z with map { }, done = fin) as g;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let g = state(m, "g");
+        // The single all-wildcard rule writes graph '1' — no host image.
+        assert!(
+            g.rules
+                .iter()
+                .any(|r| r.transition == Transition2::TrapWrite)
+        );
+    }
+
+    #[test]
+    fn a_self_grafting_graph_is_a_cycle_error() {
+        let src = "\
+alphabet marks { '_', 'x' }
+graph loop(tape t: marks) {
+  entry graft loop(t = t) as inner;
+}
+machine { tape w: marks; entry state s { [*] -> stop; } }
+";
+        let a = analyze(src).expect("analyze");
+        let err = expand(&a.resolved).unwrap_err();
+        assert_eq!(err.kind.code(), "graft-cycle");
+    }
+
+    #[test]
+    fn an_exact_row_conflict_after_expansion_is_a_static_error() {
+        // Overlapping numeric ranges expand to a shared concrete row `[2]`.
+        let src = "\
+alphabet bytes { 0..4 }
+machine {
+  tape c: bytes;
+  entry state s {
+    [1..2] -> write [0] stop;
+    [2..3] -> write [1] stop;
+  }
+}
+";
+        let a = analyze(src).expect("analyze");
+        let err = expand(&a.resolved).unwrap_err();
+        assert_eq!(err.kind.code(), "exact-row-conflict");
     }
 }
