@@ -76,6 +76,10 @@ pub enum TokenKind {
     Dot,
     /// `-` when it does not begin an `->` (write-vector "keep").
     Dash,
+    /// `+` — the write-vector substitution's positive delta (`{v+1}`); the
+    /// negative form reuses [`TokenKind::Dash`] (`{v-1}`). `+` never begins a
+    /// multi-character operator, so it is always this single token.
+    Plus,
     /// `=` when it does not begin a `=>` (binding `name = target`).
     Eq,
     /// `*` — the wildcard pattern element.
@@ -471,6 +475,7 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
         // imposes no adjacency rule on it.
         let single = match c {
             '!' => Some(TokenKind::Bang),
+            '+' => Some(TokenKind::Plus),
             ',' => Some(TokenKind::Comma),
             ';' => Some(TokenKind::Semi),
             '*' => Some(TokenKind::Star),
@@ -754,6 +759,37 @@ mod tests {
             kinds("- >"),
             vec![TokenKind::Dash, TokenKind::Gt, TokenKind::Eof]
         );
+    }
+
+    #[test]
+    fn write_vector_substitution_shapes_lex() {
+        use TokenKind::*;
+        // `{v}` pass-through, `{v+1}` positive delta, `{v-1}` negative delta.
+        assert_eq!(
+            kinds("[{v}, {v+1}, {v-1}]"),
+            vec![
+                LBracket,
+                LBrace,
+                Ident("v".into()),
+                RBrace,
+                Comma,
+                LBrace,
+                Ident("v".into()),
+                Plus,
+                Number(1, "1".into()),
+                RBrace,
+                Comma,
+                LBrace,
+                Ident("v".into()),
+                Dash,
+                Number(1, "1".into()),
+                RBrace,
+                RBracket,
+                Eof,
+            ]
+        );
+        // A lone `+` is always a single Plus token.
+        assert_eq!(kinds("+"), vec![Plus, Eof]);
     }
 
     #[test]
