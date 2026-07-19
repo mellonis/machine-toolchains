@@ -1056,7 +1056,6 @@ fn resolve_module(
             r.exported,
             &r.ns,
             &r.sig,
-            &[],
             &r.states,
             &r.grafts,
             &r.binds,
@@ -1072,7 +1071,6 @@ fn resolve_module(
             g.exported,
             &g.ns,
             &g.sig,
-            &[],
             &g.states,
             &g.grafts,
             &g.binds,
@@ -1102,14 +1100,12 @@ fn resolve_world(
     exported: bool,
     ns: &[String],
     sig: &crate::parser::Signature,
-    machine_tapes: &[crate::parser::TapeDecl],
     states: &[State],
     grafts: &[Graft],
     binds: &[Bind],
     scopes: &Scopes,
     alphabets: &HashMap<String, ResolvedAlphabet>,
 ) -> Result<ResolvedWorld, CompileError> {
-    let _ = machine_tapes;
     // Tapes: from the signature's tape params (routine/graph).
     let mut tapes: Vec<ResolvedTape> = Vec::new();
     let mut state_params: Vec<String> = Vec::new();
@@ -1130,6 +1126,7 @@ fn resolve_world(
         }
     }
     let (grafts, binds, entry) = resolve_world_reuse(grafts, binds, states, ns, scopes)?;
+    let calls = resolve_world_calls(states, &binds, ns, scopes);
     Ok(ResolvedWorld {
         kind,
         name,
@@ -1142,8 +1139,56 @@ fn resolve_world(
         grafts,
         binds,
         entry,
-        calls: Vec::new(),
+        calls,
     })
+}
+
+/// Resolve every `call` transition in a world's rules to a [`ResolvedCall`]
+/// (structure only; arg + kind validation is `check_worlds`). A single-segment
+/// target naming a world-local bind is a bind-call; everything else resolves
+/// as a routine, carrying its raw binding args and an `external` flag for a
+/// target this module does not define.
+fn resolve_world_calls(
+    states: &[State],
+    binds: &[ResolvedBind],
+    ns: &[String],
+    scopes: &Scopes,
+) -> Vec<ResolvedCall> {
+    let bind_names: HashSet<&str> = binds.iter().map(|b| b.name.as_str()).collect();
+    let mut calls = Vec::new();
+    for s in states {
+        for rule in &s.rules {
+            if let Transition::Call {
+                target,
+                args,
+                then,
+                span,
+            } = &rule.transition
+            {
+                let joined = target.joined();
+                let resolved = if target.segments.len() == 1 && bind_names.contains(joined.as_str())
+                {
+                    ResolvedCallTarget::Bind { name: joined }
+                } else {
+                    let (name, external) = match scopes.resolve(&joined, ns) {
+                        Some(r) => (r.full, r.kind != Some(DefKind::Routine)),
+                        None => (joined, true),
+                    };
+                    ResolvedCallTarget::Routine {
+                        name,
+                        external,
+                        args: args.clone(),
+                    }
+                };
+                calls.push(ResolvedCall {
+                    span: *span,
+                    target: resolved,
+                    then: then.clone(),
+                });
+            }
+        }
+    }
+    calls
 }
 
 fn resolve_machine_world(
@@ -1164,6 +1209,7 @@ fn resolve_machine_world(
         });
     }
     let (grafts, binds, entry) = resolve_world_reuse(&m.grafts, &m.binds, &m.states, &[], scopes)?;
+    let calls = resolve_world_calls(&m.states, &binds, &[], scopes);
     Ok(ResolvedWorld {
         kind: WorldKind::Machine,
         name: "main".to_string(),
@@ -1176,7 +1222,7 @@ fn resolve_machine_world(
         grafts,
         binds,
         entry,
-        calls: Vec::new(),
+        calls,
     })
 }
 
@@ -2104,8 +2150,15 @@ machine {
         assert_eq!(a.resolved.entry_world, Some(a.resolved.worlds.len() - 1));
         // A.5 resolves cleanly (the import IS used → no unused-import).
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
-        // The call resolved to the mangled routine.
-        assert!(machine.calls.is_empty()); // calls are wired in Task 6; T4 checks only
+        // The `call plusOne(…)` resolved to the mangled routine (via import).
+        assert_eq!(machine.calls.len(), 1);
+        match &machine.calls[0].target {
+            ResolvedCallTarget::Routine { name, external, .. } => {
+                assert_eq!(name, "mylib::plusOne");
+                assert!(!external);
+            }
+            other => panic!("expected a routine call, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2334,6 +2387,25 @@ alphabet b { '_', '0', '1' }
         assert_eq!(machine.entry.as_deref(), Some("seek"));
         assert_eq!(machine.grafts.len(), 1);
         assert_eq!(machine.grafts[0].target, "findX");
+    }
+
+    #[test]
+    fn a_call_on_a_bind_name_resolves_to_a_bind_call() {
+        let src = "alphabet b { '_', '0' }\nroutine helper(tape t: b) { entry state s { [*] -> return; } }\nmachine { tape t: b; bind helper(t = t) as h; entry state s { [*] -> call h() then s; } }";
+        let a = ok(src);
+        let machine = a
+            .resolved
+            .worlds
+            .iter()
+            .find(|w| w.kind == WorldKind::Machine)
+            .unwrap();
+        assert_eq!(machine.binds.len(), 1);
+        assert_eq!(machine.binds[0].target, "helper");
+        assert_eq!(machine.calls.len(), 1);
+        assert!(matches!(
+            &machine.calls[0].target,
+            ResolvedCallTarget::Bind { name } if name == "h"
+        ));
     }
 
     #[test]
