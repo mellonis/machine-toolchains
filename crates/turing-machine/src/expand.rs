@@ -2175,4 +2175,68 @@ machine {
         let err = expand(&a.resolved).unwrap_err();
         assert_eq!(err.kind.code(), "exact-row-conflict");
     }
+
+    /// The graft map-legality contract (spanned), mirroring the linker.
+    fn graft_err(map: &str, host_alpha: &str, graph_alpha: &str) -> &'static str {
+        let src = format!(
+            "\
+alphabet ga {{ {graph_alpha} }}
+alphabet ha {{ {host_alpha} }}
+graph g(tape t: ga, state done) {{ entry state s {{ [*] -> done; }} }}
+machine {{ tape w: ha; entry graft g(t = w{map}, done = fin) as x; state fin {{ [*] -> stop; }} }}
+"
+        );
+        let a = analyze(&src).expect("analyze");
+        expand(&a.resolved).unwrap_err().kind.code()
+    }
+
+    #[test]
+    fn graft_map_legality_errors() {
+        // Omitted map on unequal glyph sets — identity needs equal alphabets.
+        assert_eq!(
+            graft_err("", "'_', '0'", "'_', '0', '1'"),
+            "identity-glyph-mismatch"
+        );
+        // Blank pinned: `'_'->'0'` moves blank off itself.
+        assert_eq!(
+            graft_err(" with map { '_'->'0' }", "'_', '0', '1'", "'_', '0', '1'"),
+            "map-blank-pin"
+        );
+        // A map symbol not in the tape's alphabet (`z` absent on the host).
+        assert_eq!(
+            graft_err(" with map { 'z'->'0' }", "'_', '0', '1'", "'_', '0', '1'"),
+            "map-symbol-not-in-alphabet"
+        );
+        // A read conflict: `'0'` sent to two different images.
+        assert_eq!(
+            graft_err(
+                " with map { '0'->'0', '0'->'1' }",
+                "'_', '0', '1'",
+                "'_', '0', '1'"
+            ),
+            "map-conflict"
+        );
+        // Equal-size non-injective: bidir `'0'->'1'` collides with identity 1.
+        assert_eq!(
+            graft_err(" with map { '0'->'1' }", "'_', '0', '1'", "'_', '0', '1'"),
+            "map-not-injective"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_wildcard_rule_warns_shadowed() {
+        let src = "\
+alphabet b { '_', '0' }
+machine {
+  tape t: b;
+  entry state s { [*] -> stop; [*] -> halt; }
+}
+";
+        let ex = expand_ok(src);
+        assert!(
+            ex.diagnostics.iter().any(|d| d.code == "shadowed-rule"),
+            "{:?}",
+            ex.diagnostics
+        );
+    }
 }
