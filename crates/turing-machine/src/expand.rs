@@ -321,6 +321,164 @@ fn compose(outer: &Composite, inner: &Composite) -> Composite {
 }
 
 // ---------------------------------------------------------------------------
+// The splice — map a graph's (already range-expanded, graph-space) states to
+// host width through a [`Composite`], the compiler-side analog of
+// `crates/core/src/linker/stamp.rs::build_stamp`. Pattern cells map by the
+// read PREIMAGE (multi-preimage expands rows, zero-preimage drops), write cells
+// by the write image (a hole turns the whole rule into a `trap #1` row), and
+// each bound tape's read holes prepend `trap #0` rows to every conditional
+// state (a straight-line state does no `rd`, so a hole under it never traps —
+// spec §5.3).
+// ---------------------------------------------------------------------------
+
+/// True when every cell is a wildcard.
+fn is_all_wild(pattern: &[Cell]) -> bool {
+    pattern.iter().all(|c| matches!(c, Cell::Wild))
+}
+
+/// True when the state performs a read (`rd` + match): anything but a single
+/// all-wildcard rule, which codegen lowers to straight-line code (GC3). Only a
+/// reading state gains synthesized read-trap rows.
+fn state_reads(rules: &[ExpandedRule]) -> bool {
+    !(rules.len() == 1 && is_all_wild(&rules[0].pattern))
+}
+
+/// The cartesian product of per-position option lists, position order
+/// preserved and each list's order kept (mirrors the linker's `cartesian`:
+/// the last position varies fastest).
+fn cartesian(opts: &[(usize, Vec<Cell>)]) -> Vec<Vec<(usize, Cell)>> {
+    let mut result: Vec<Vec<(usize, Cell)>> = vec![Vec::new()];
+    for (pos, vals) in opts {
+        let mut next = Vec::with_capacity(result.len() * vals.len());
+        for combo in &result {
+            for &v in vals {
+                let mut c = combo.clone();
+                c.push((*pos, v));
+                next.push(c);
+            }
+        }
+        result = next;
+    }
+    result
+}
+
+/// Synthesized read-trap rows, first-match: one per bound-tape read hole, in
+/// tape order then ascending hole symbol (matching the linker's prepend order).
+fn trap_read_rows(comp: &Composite, host_arity: usize, span: Span) -> Vec<ExpandedRule> {
+    let mut rows = Vec::new();
+    for t in &comp.tapes {
+        for u in t.holes() {
+            let mut pattern = vec![Cell::Wild; host_arity];
+            pattern[t.phys] = Cell::Sym(u);
+            rows.push(ExpandedRule {
+                pattern,
+                debugger: false,
+                write: vec![WriteOut::Keep; host_arity],
+                moves: vec![MoveDir::Stay; host_arity],
+                transition: Transition2::TrapRead,
+                span,
+            });
+        }
+    }
+    rows
+}
+
+/// Map one graph-space rule to host width. Returns the host rows (several under
+/// one-way preimage collapse; empty when a read cell has zero preimage — the
+/// rule is dead). A write with no host image makes every row a `trap #1`.
+fn map_rule(
+    rule: &ExpandedRule,
+    comp: &Composite,
+    host_arity: usize,
+    remap_tr: &impl Fn(&Transition2) -> Transition2,
+) -> Vec<ExpandedRule> {
+    // Write + move projection (independent of which read preimage matched).
+    let mut write_hole = false;
+    let mut host_write = vec![WriteOut::Keep; host_arity];
+    let mut host_moves = vec![MoveDir::Stay; host_arity];
+    for (k, t) in comp.tapes.iter().enumerate() {
+        if let WriteOut::Sym(gv) = rule.write[k] {
+            match t.write_image(gv) {
+                Some(p) => host_write[t.phys] = WriteOut::Sym(p),
+                None => write_hole = true,
+            }
+        }
+        host_moves[t.phys] = rule.moves[k];
+    }
+
+    // Read projection: per bound tape, the preimage (or wildcard).
+    let mut opts: Vec<(usize, Vec<Cell>)> = Vec::with_capacity(comp.tapes.len());
+    for (k, t) in comp.tapes.iter().enumerate() {
+        match rule.pattern[k] {
+            Cell::Wild => opts.push((t.phys, vec![Cell::Wild])),
+            Cell::Sym(gv) => {
+                let pre = t.preimage(gv);
+                if pre.is_empty() {
+                    return Vec::new(); // no host symbol reads as this cell — dead
+                }
+                opts.push((t.phys, pre.into_iter().map(Cell::Sym).collect()));
+            }
+        }
+    }
+
+    let transition = if write_hole {
+        Transition2::TrapWrite
+    } else {
+        remap_tr(&rule.transition)
+    };
+    cartesian(&opts)
+        .into_iter()
+        .map(|combo| {
+            let mut pattern = vec![Cell::Wild; host_arity];
+            for (pos, c) in combo {
+                pattern[pos] = c;
+            }
+            ExpandedRule {
+                pattern,
+                debugger: rule.debugger,
+                write: if write_hole {
+                    vec![WriteOut::Keep; host_arity]
+                } else {
+                    host_write.clone()
+                },
+                moves: if write_hole {
+                    vec![MoveDir::Stay; host_arity]
+                } else {
+                    host_moves.clone()
+                },
+                transition: transition.clone(),
+                span: rule.span,
+            }
+        })
+        .collect()
+}
+
+/// Splice one graph-space state into host width under `comp`: prepend read-trap
+/// rows to a reading state, then map every rule. `remap_tr` renames the
+/// state's transitions (own states → synthetic/instance names, state-params →
+/// the graft's continuation substitution).
+fn splice_state(
+    gstate: &ExpandedState,
+    comp: &Composite,
+    host_arity: usize,
+    host_name: &str,
+    remap_tr: &impl Fn(&Transition2) -> Transition2,
+) -> ExpandedState {
+    let mut rules = Vec::new();
+    if state_reads(&gstate.rules) {
+        rules.extend(trap_read_rows(comp, host_arity, gstate.name_span));
+    }
+    for r in &gstate.rules {
+        rules.extend(map_rule(r, comp, host_arity, remap_tr));
+    }
+    ExpandedState {
+        name: host_name.to_string(),
+        name_span: gstate.name_span,
+        rules,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Range expansion (spec §10.3) — one source rule → concrete index-resolved
 // rows. Pattern ranges / single-with-binding expand cartesian (leftmost tape
 // varies slowest, rightmost fastest — matching the linker's preimage
@@ -840,5 +998,268 @@ machine {
         let mut warn = Vec::new();
         let err = expand_rule(&rules[0], &tapes, &mut warn, &own_tr).unwrap_err();
         assert_eq!(err.kind.code(), "row-width");
+    }
+}
+
+#[cfg(test)]
+mod oracle_tests {
+    //! The load-bearing guard (the plan's oracle): a graft instance's spliced
+    //! rows, run first-match over every concrete host tuple, agree with walking
+    //! the ORIGINAL graph rules through the symbol maps per symbol (read
+    //! host→graph, hole ⇒ trap-read; match the graph rules; write graph→host,
+    //! hole ⇒ trap-write). The same map model both sides — this proves the
+    //! splice's preimage expansion, first-match ordering, and trap synthesis
+    //! preserve the graph's semantics under any (holey, one-way, collapsing)
+    //! binding.
+    use super::*;
+    use proptest::prelude::*;
+
+    /// The observable of one host tuple: a trap, a fired source rule (with its
+    /// projected write/move), or no match.
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        TrapRead,
+        TrapWrite,
+        Fired(usize, Vec<WriteOut>, Vec<MoveDir>),
+        NoMatch,
+    }
+
+    fn host_matches(pattern: &[Cell], tuple: &[u16]) -> bool {
+        pattern.iter().zip(tuple).all(|(c, &t)| match c {
+            Cell::Wild => true,
+            Cell::Sym(s) => *s == t,
+        })
+    }
+
+    fn graph_matches(pattern: &[Cell], g: &[u16]) -> bool {
+        pattern.iter().zip(g).all(|(c, &gv)| match c {
+            Cell::Wild => true,
+            Cell::Sym(s) => *s == gv,
+        })
+    }
+
+    /// (a) — first-match over the spliced rows.
+    fn actual(spliced: &[ExpandedRule], tuple: &[u16]) -> Outcome {
+        for r in spliced {
+            if host_matches(&r.pattern, tuple) {
+                return match &r.transition {
+                    Transition2::TrapRead => Outcome::TrapRead,
+                    Transition2::TrapWrite => Outcome::TrapWrite,
+                    Transition2::Goto(n) => {
+                        Outcome::Fired(n.parse().unwrap(), r.write.clone(), r.moves.clone())
+                    }
+                    other => panic!("unexpected transition {other:?}"),
+                };
+            }
+        }
+        Outcome::NoMatch
+    }
+
+    /// Project a fired graph rule's write/move to host width; a write hole makes
+    /// it a trap-write (the same formula [`map_rule`] uses).
+    fn classify(idx: usize, r: &ExpandedRule, comp: &Composite, host_arity: usize) -> Outcome {
+        let mut write_hole = false;
+        let mut hw = vec![WriteOut::Keep; host_arity];
+        let mut hm = vec![MoveDir::Stay; host_arity];
+        for (k, t) in comp.tapes.iter().enumerate() {
+            if let WriteOut::Sym(gv) = r.write[k] {
+                match t.write_image(gv) {
+                    Some(p) => hw[t.phys] = WriteOut::Sym(p),
+                    None => write_hole = true,
+                }
+            }
+            hm[t.phys] = r.moves[k];
+        }
+        if write_hole {
+            Outcome::TrapWrite
+        } else {
+            Outcome::Fired(idx, hw, hm)
+        }
+    }
+
+    /// (b) — walk the original graph rules through the maps per symbol.
+    fn reference(state: &ExpandedState, comp: &Composite, tuple: &[u16], cond: bool) -> Outcome {
+        let host_arity = tuple.len();
+        if !cond {
+            // Straight-line: no `rd`, the single all-wildcard rule fires.
+            return classify(0, &state.rules[0], comp, host_arity);
+        }
+        let mut g = vec![0u16; comp.tapes.len()];
+        for (k, t) in comp.tapes.iter().enumerate() {
+            match t.read_image(tuple[t.phys]) {
+                None => return Outcome::TrapRead, // first hole in tape order
+                Some(v) => g[k] = v,
+            }
+        }
+        for (idx, r) in state.rules.iter().enumerate() {
+            if graph_matches(&r.pattern, &g) {
+                return classify(idx, r, comp, host_arity);
+            }
+        }
+        Outcome::NoMatch
+    }
+
+    /// A per-tape map: identity default, some remaps, some explicit holes.
+    /// `dst`/`whole` range beyond the graph alphabet to also mint cardinality
+    /// holes. Blank (0) stays identity, non-hole (a realistic pinned blank).
+    fn tape(
+        host_card: usize,
+        graph_card: usize,
+        rdst: &[u16],
+        rhole: &[bool],
+        wdst: &[u16],
+        whole: &[bool],
+        phys: usize,
+    ) -> TapeMap {
+        let mut rmap = SymMap::identity();
+        for s in 1..host_card {
+            if rhole[s] {
+                rmap.holes.insert(s as u16);
+            } else if usize::from(rdst[s]) != s {
+                rmap.pairs.insert(s as u16, rdst[s]);
+            }
+        }
+        let mut wmap = SymMap::identity();
+        for v in 1..graph_card {
+            if whole[v] {
+                wmap.holes.insert(v as u16);
+            } else if usize::from(wdst[v]) != v {
+                wmap.pairs.insert(v as u16, wdst[v]);
+            }
+        }
+        TapeMap {
+            phys,
+            host_card,
+            graph_card,
+            rmap,
+            wmap,
+        }
+    }
+
+    /// One tape's random spec: cards plus remap/hole vectors sized to the cards.
+    fn tape_spec() -> impl Strategy<Value = (usize, usize, Vec<u16>, Vec<bool>, Vec<u16>, Vec<bool>)>
+    {
+        (2usize..=4, 2usize..=4).prop_flat_map(|(hc, gc)| {
+            (
+                Just(hc),
+                Just(gc),
+                proptest::collection::vec(0u16..6, hc),
+                proptest::collection::vec(any::<bool>(), hc),
+                proptest::collection::vec(0u16..6, gc),
+                proptest::collection::vec(any::<bool>(), gc),
+            )
+        })
+    }
+
+    /// A graph rule: per tape a wildcard or a concrete graph symbol; a write
+    /// keep or a concrete graph symbol; a move. Symbols stay in each tape's
+    /// graph alphabet. The transition encodes the source rule index.
+    fn rule_spec(
+        gcards: Vec<usize>,
+    ) -> impl Strategy<Value = (Vec<Option<u16>>, Vec<Option<u16>>, Vec<u8>)> {
+        let pat: Vec<_> = gcards
+            .iter()
+            .map(|&gc| proptest::option::of(0u16..gc as u16))
+            .collect();
+        let wr: Vec<_> = gcards
+            .iter()
+            .map(|&gc| proptest::option::of(0u16..gc as u16))
+            .collect();
+        let mv: Vec<_> = gcards.iter().map(|_| 0u8..3).collect();
+        (pat, wr, mv)
+    }
+
+    fn mv_of(n: u8) -> MoveDir {
+        match n {
+            0 => MoveDir::Left,
+            1 => MoveDir::Right,
+            _ => MoveDir::Stay,
+        }
+    }
+
+    fn build_rule(idx: usize, pat: &[Option<u16>], wr: &[Option<u16>], mv: &[u8]) -> ExpandedRule {
+        ExpandedRule {
+            pattern: pat
+                .iter()
+                .map(|o| o.map_or(Cell::Wild, Cell::Sym))
+                .collect(),
+            debugger: false,
+            write: wr
+                .iter()
+                .map(|o| o.map_or(WriteOut::Keep, WriteOut::Sym))
+                .collect(),
+            moves: mv.iter().map(|&n| mv_of(n)).collect(),
+            transition: Transition2::Goto(idx.to_string()),
+            span: Span::point(1, 1),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(400))]
+        #[test]
+        fn graft_splice_matches_per_symbol_walk(
+            specs in proptest::collection::vec(tape_spec(), 1..=2),
+            n_rules in 1usize..=4,
+            seed in any::<u64>(),
+        ) {
+            let arity = specs.len();
+            let comp = Composite {
+                tapes: specs
+                    .iter()
+                    .enumerate()
+                    .map(|(k, (hc, gc, rdst, rhole, wdst, whole))| {
+                        tape(*hc, *gc, rdst, rhole, wdst, whole, k)
+                    })
+                    .collect(),
+            };
+            let host_cards: Vec<usize> = specs.iter().map(|(hc, ..)| *hc).collect();
+            let graph_cards: Vec<usize> = specs.iter().map(|(_, gc, ..)| *gc).collect();
+
+            // Deterministic pseudo-random graph rules from `seed` (a fresh
+            // proptest sub-generation would need nested runners; a splitmix
+            // walk over the seed keeps it flat and reproducible).
+            let mut st = seed;
+            let mut next = || {
+                st = st.wrapping_add(0x9E3779B97F4A7C15);
+                let mut z = st;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+                z ^ (z >> 31)
+            };
+            let mut rules = Vec::new();
+            for idx in 0..n_rules {
+                let mut pat = Vec::new();
+                let mut wr = Vec::new();
+                let mut mv = Vec::new();
+                for &gc in &graph_cards {
+                    // wildcard 1-in-3, else a concrete symbol.
+                    pat.push(if next() % 3 == 0 { None } else { Some((next() % gc as u64) as u16) });
+                    wr.push(if next() % 2 == 0 { None } else { Some((next() % gc as u64) as u16) });
+                    mv.push((next() % 3) as u8);
+                }
+                rules.push(build_rule(idx, &pat, &wr, &mv));
+            }
+            let state = ExpandedState {
+                name: "s".into(),
+                name_span: Span::point(1, 1),
+                rules,
+            };
+            let cond = state_reads(&state.rules);
+            let spliced = splice_state(&state, &comp, arity, "s", &|t| t.clone());
+
+            // Enumerate every host tuple and compare.
+            let total: usize = host_cards.iter().product();
+            for n in 0..total {
+                let mut tuple = vec![0u16; arity];
+                let mut rem = n;
+                for k in 0..arity {
+                    tuple[k] = (rem % host_cards[k]) as u16;
+                    rem /= host_cards[k];
+                }
+                let a = actual(&spliced.rules, &tuple);
+                let b = reference(&state, &comp, &tuple, cond);
+                prop_assert_eq!(&a, &b, "tuple {:?}: splice {:?} vs walk {:?}", tuple, a, b);
+            }
+        }
     }
 }
