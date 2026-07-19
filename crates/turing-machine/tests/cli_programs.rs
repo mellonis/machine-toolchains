@@ -5,8 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mtc_core::formats::tapeblock::TapeBlockFile;
+use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use mtc_turing_machine::cli::{execute, execute_with};
+use mtc_turing_machine::ir::IrProgram;
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -16,6 +17,37 @@ fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// A committed `.tmc` fixture under `tests/golden/` (the Appendix A set +
+/// the nested-graft case), shared with `tmc_golden.rs`.
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name)
+}
+
+/// `compile FIXTURE.tmc -> stem.tmo`, `link -> stem.tmx` (default mech).
+/// Returns the executable path — the shared prologue for the `.tmc`
+/// pipeline tests below.
+fn compile_and_link(dir: &Path, stem: &str, fixture_name: &str) -> PathBuf {
+    let obj = dir.join(format!("{stem}.tmo"));
+    execute(&args(&[
+        "compile",
+        fixture(fixture_name).to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let exe = dir.join(format!("{stem}.tmx"));
+    execute(&args(&[
+        "link",
+        obj.to_str().unwrap(),
+        "-o",
+        exe.to_str().unwrap(),
+    ]))
+    .unwrap();
+    exe
 }
 
 /// A one-tape program that reads its head, matches the single row `[1]`,
@@ -447,4 +479,256 @@ fn link_help_lists_the_new_flags() {
     let out = execute(&args(&["link", "--help"])).unwrap();
     assert!(out.stdout.contains("--entry"), "{}", out.stdout);
     assert!(out.stdout.contains("--call-mech"), "{}", out.stdout);
+}
+
+// ── .tmc compile → link → run pipeline (exit codes across A.1/A.4/A.5) ──────
+
+#[test]
+fn compile_link_run_a1_stops_with_exit_0() {
+    let dir = scratch("tmc_a1");
+    let exe = compile_and_link(&dir, "a1", "a1_replace_b.tmc");
+    let tape = dir.join("a1.tmt");
+    execute(&args(&[
+        "tape",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "-o",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    // ab card 3 → labels "0"/"1"/"2"; seed "bab" = indices [2,1,2], head 0.
+    execute(&args(&[
+        "tape",
+        "set",
+        tape.to_str().unwrap(),
+        "--in-place",
+        "--cells",
+        "212",
+    ]))
+    .unwrap();
+    let out = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0, "A.1 stops (exit 0):\n{}", out.stdout);
+    assert!(out.stdout.contains("Stopped"), "{}", out.stdout);
+}
+
+#[test]
+fn compile_link_run_a4_overflow_halts_with_exit_2() {
+    let dir = scratch("tmc_a4");
+    let exe = compile_and_link(&dir, "a4", "a4_byte_increment.tmc");
+    // A.4's `bytes` alphabet is 127 wide; the overflow value 126 has the
+    // multi-char glyph "126", which `tape set --cells` (one char per cell)
+    // cannot spell — so build the one-cell seed block directly.
+    let tape = dir.join("a4.tmt");
+    let block = TapeBlockFile {
+        alphabet: (0..127u32).map(|i| i.to_string()).collect(),
+        tapes: vec![TapeSnapshot {
+            origin: 0,
+            cells: vec![126],
+            head: 0,
+            alphabet: None,
+        }],
+    };
+    fs::write(&tape, block.to_bytes()).unwrap();
+    let out = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 2, "A.4 overflow halts (exit 2):\n{}", out.stdout);
+    assert!(out.stdout.contains("Halted"), "{}", out.stdout);
+}
+
+#[test]
+fn compile_link_run_a5_holey_read_traps_with_exit_3() {
+    let dir = scratch("tmc_a5");
+    // Default mech (hybrid); the trap is mode-independent.
+    let exe = compile_and_link(&dir, "a5", "a5_call_across_alphabets.tmc");
+    let tape = dir.join("a5.tmt");
+    execute(&args(&[
+        "tape",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "-o",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    // ctl (tape 0, card 3): index 2 = '1' triggers the call.
+    execute(&args(&[
+        "tape",
+        "set",
+        tape.to_str().unwrap(),
+        "--in-place",
+        "--tape",
+        "0",
+        "--cells",
+        "2",
+    ]))
+    .unwrap();
+    // data (tape 1, card 5): index 1 = 'a', a holey wide symbol → unmapped-read.
+    execute(&args(&[
+        "tape",
+        "set",
+        tape.to_str().unwrap(),
+        "--in-place",
+        "--tape",
+        "1",
+        "--cells",
+        "1",
+    ]))
+    .unwrap();
+    let out = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 3, "A.5 holey read traps (exit 3):\n{}", out.stdout);
+    assert!(out.stdout.contains("Trapped"), "{}", out.stdout);
+}
+
+// ── compile flags: --emit-ir, -S, -Werror, ir graph ─────────────────────────
+
+#[test]
+fn compile_emit_ir_writes_a_version_1_sidecar() {
+    let dir = scratch("tmc_emit_ir");
+    let obj = dir.join("a1.tmo");
+    execute(&args(&[
+        "compile",
+        fixture("a1_replace_b.tmc").to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+        "--emit-ir",
+    ]))
+    .unwrap();
+    let ir_path = dir.join("a1.ir.json");
+    assert!(ir_path.exists(), "the --emit-ir sidecar is written");
+    let text = fs::read_to_string(&ir_path).unwrap();
+    let program = IrProgram::from_json(&text).expect("the sidecar parses as IR JSON");
+    assert_eq!(program.version, 1, "IR version 1");
+    assert!(program.worlds.iter().any(|w| w.name == "main"));
+}
+
+#[test]
+fn compile_emit_ir_after_pass_errors_naming_valid_stages() {
+    let dir = scratch("tmc_emit_ir_bad");
+    let obj = dir.join("a1.tmo");
+    // No optimizer passes ship in 6a, so `after:<pass>` never matches the
+    // (empty) registry; the error names the stages that do exist.
+    let err = execute(&args(&[
+        "compile",
+        fixture("a1_replace_b.tmc").to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+        "--emit-ir=after:inline",
+    ]))
+    .unwrap_err();
+    assert!(err.contains("lowered") && err.contains("final"), "{err}");
+    assert!(err.contains("after:inline"), "{err}");
+}
+
+#[test]
+fn compile_dash_s_emits_reassemblable_tma() {
+    let dir = scratch("tmc_dash_s");
+    let tma = dir.join("a1.tma");
+    execute(&args(&[
+        "compile",
+        fixture("a1_replace_b.tmc").to_str().unwrap(),
+        "-S",
+        "-o",
+        tma.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(tma.exists(), "the -S .tma text is written");
+    // The emitted assembly re-assembles cleanly through `tmt asm`.
+    let obj = dir.join("a1.tmo");
+    execute(&args(&[
+        "asm",
+        tma.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("emitted .tma must re-assemble: {e}"));
+    assert!(obj.exists());
+}
+
+#[test]
+fn compile_werror_escalates_a_warning() {
+    let dir = scratch("tmc_werror");
+    // A local (unexported), uncalled routine draws an `unused-routine` warning.
+    let src = "\
+alphabet ab { '_', 'a' }
+routine helper(tape t: ab) { entry state s { [*] -> return; } }
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}
+";
+    let srcpath = dir.join("warn.tmc");
+    fs::write(&srcpath, src).unwrap();
+    let obj = dir.join("warn.tmo");
+    // Plain compile: succeeds, the warning renders on stderr.
+    let out = execute(&args(&[
+        "compile",
+        srcpath.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        out.stderr.contains("warning:") && out.stderr.contains("helper"),
+        "plain compile warns: {}",
+        out.stderr
+    );
+    // -Werror: the same warning is now fatal.
+    let err = execute(&args(&[
+        "compile",
+        srcpath.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+        "-Werror",
+    ]))
+    .unwrap_err();
+    assert!(
+        err.contains("treated as errors"),
+        "-Werror escalates: {err}"
+    );
+}
+
+#[test]
+fn ir_graph_renders_mermaid_and_filters_by_world() {
+    let dir = scratch("tmc_ir_graph");
+    let obj = dir.join("a1.tmo");
+    execute(&args(&[
+        "compile",
+        fixture("a1_replace_b.tmc").to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+        "--emit-ir",
+    ]))
+    .unwrap();
+    let ir_path = dir.join("a1.ir.json");
+    let out = execute(&args(&["ir", "graph", ir_path.to_str().unwrap()])).unwrap();
+    assert!(out.stdout.contains("flowchart TD"), "{}", out.stdout);
+    assert!(out.stdout.contains("%% main"), "{}", out.stdout);
+    // `--function` (pmt's flag name) filters by world name; a miss is by name.
+    let err = execute(&args(&[
+        "ir",
+        "graph",
+        ir_path.to_str().unwrap(),
+        "--function",
+        "nope",
+    ]))
+    .unwrap_err();
+    assert!(err.contains("nope"), "{err}");
 }
