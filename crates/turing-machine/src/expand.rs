@@ -159,9 +159,12 @@ pub(crate) enum Transition2 {
 
 // ---------------------------------------------------------------------------
 // The symbol-map algebra — reimplemented compiler-side (the linker's
-// `compose.rs` is core-private). Identity-default reads with cardinality
-// holes, one-way `=>` collapse excluded from write-back, blank pinned, and
-// the equal-size identity-completion injectivity check.
+// `compose.rs` is core-private). Equal-size alphabets identity-complete
+// unlisted symbols (with the injectivity check); across differently-sized
+// alphabets the map is CLOSED — every unlisted non-blank source is a hole (no
+// identity completion). One-way `=>` collapse excluded from write-back, blank
+// pinned. The holes live in the SymMap (minted by `close_unlisted` at build
+// time), so the read/write image methods stay pure lookups.
 // ---------------------------------------------------------------------------
 
 /// A partial symbol map, identity for unlisted symbols; `holes` trap. Mirrors
@@ -833,6 +836,24 @@ fn insert_map_pair(
     }
 }
 
+/// Close a map over its `domain_card` source symbols: every non-blank source
+/// index below `domain_card` that no explicit pair names becomes a hole
+/// (docs/formats.md (bound calls) — the closed-on-unequal rule; identity
+/// completion exists only for equal-size alphabets). Blank stays pinned.
+/// Called before the identity-pair `retain` in [`build_tapemap`], so an
+/// explicit `k->k` (still in `pairs`) keeps `k` out of the hole set and
+/// survives as identity, while a symbol the binding never named traps.
+fn close_unlisted(map: &mut SymMap, domain_card: usize) {
+    let listed: BTreeSet<u16> = map.pairs.keys().copied().collect();
+    let upper = domain_card.min(usize::from(u16::MAX));
+    for s in 1..upper {
+        let s16 = s as u16;
+        if !listed.contains(&s16) {
+            map.holes.insert(s16);
+        }
+    }
+}
+
 /// Build one bound tape's [`TapeMap`] from its (optional) source symbol map,
 /// resolving `src` glyphs against the host alphabet and `dst` glyphs against
 /// the graph alphabet.
@@ -906,6 +927,16 @@ fn build_tapemap(
             insert_map_pair(&mut wmap, dst, src, &dst_g, pair.span)?;
             bidir.push((src, dst));
         }
+    }
+    // Closed-on-unequal (docs/formats.md (bound calls)): identity completion
+    // exists only for equal-size alphabets. Across differently-sized tapes
+    // every non-blank source the map does not name is a hole — computed from
+    // the explicit srcs still in `pairs`, before the identity-pair retain
+    // below, so an explicit `k->k` survives as identity while a truly absent
+    // symbol traps.
+    if host_card != graph_card {
+        close_unlisted(&mut rmap, host_card);
+        close_unlisted(&mut wmap, graph_card);
     }
     // Canonical: drop identity pairs (stable dedup keys).
     rmap.pairs.retain(|s, d| s != d);
@@ -1508,39 +1539,49 @@ mod map_tests {
     }
 
     #[test]
-    fn identity_read_and_write_with_cardinality_holes() {
-        // host wider (5) than graph (3), remap the two out-of-range symbols
-        // (3→1, 4→2). In-range unlisted symbols keep identity (1→1, 2→2).
+    fn unequal_tape_closes_unlisted_reads_to_holes() {
+        // host wider (5) than graph (3), remap two symbols (3→1, 4→2). Across
+        // the unequal alphabets there is no identity completion, so every
+        // OTHER non-blank host symbol (1, 2) is a read hole — even though its
+        // index is within the graph alphabet. This is what build_tapemap
+        // mints; construct the closed maps the same way and assert the methods.
+        let mut rmap = m(&[(3, 1), (4, 2)]);
+        close_unlisted(&mut rmap, 5); // host_card
+        rmap.pairs.retain(|s, d| s != d);
         let t = TapeMap {
             phys: 0,
             host_card: 5,
             graph_card: 3,
-            rmap: m(&[(3, 1), (4, 2)]),
+            rmap,
             wmap: m(&[(1, 3), (2, 4)]),
         };
-        assert_eq!(t.read_image(0), Some(0));
-        assert_eq!(t.read_image(1), Some(1)); // identity default, in range
-        assert_eq!(t.read_image(3), Some(1)); // remapped
-        // no host symbol is a hole here (every image < 3).
-        assert!(t.holes().is_empty());
-        // graph 1 has preimage {1 (identity), 3 (remap)} ascending.
-        assert_eq!(t.preimage(1), vec![1, 3]);
-        assert_eq!(t.preimage(2), vec![2, 4]);
+        assert_eq!(t.read_image(0), Some(0)); // blank pinned
+        assert_eq!(t.read_image(1), None); // in-range unlisted ⇒ hole
+        assert_eq!(t.read_image(3), Some(1)); // explicit remap
+        assert_eq!(t.holes(), vec![1, 2]);
+        // graph 1's only preimage is the explicit remap (3); the identity 1 is
+        // now a hole, not a preimage.
+        assert_eq!(t.preimage(1), vec![3]);
+        assert_eq!(t.preimage(2), vec![4]);
         assert_eq!(t.write_image(1), Some(3));
     }
 
     #[test]
-    fn out_of_range_symbol_is_a_read_hole() {
-        // host (4) → graph (3), symbol 3 unremapped: identity image 3 ≥ 3 ⇒ hole.
+    fn empty_unequal_tape_holes_every_nonblank_read() {
+        // host (4) → graph (3), empty map: no silent identity across unequal
+        // alphabets, so every non-blank host symbol (1, 2, 3) is a read hole.
+        let mut rmap = SymMap::identity();
+        close_unlisted(&mut rmap, 4); // host_card
         let t = TapeMap {
             phys: 0,
             host_card: 4,
             graph_card: 3,
-            rmap: SymMap::identity(),
+            rmap,
             wmap: SymMap::identity(),
         };
-        assert_eq!(t.read_image(3), None);
-        assert_eq!(t.holes(), vec![3]);
+        assert_eq!(t.read_image(0), Some(0));
+        assert_eq!(t.read_image(1), None);
+        assert_eq!(t.holes(), vec![1, 2, 3]);
     }
 
     #[test]
@@ -1794,9 +1835,11 @@ mod oracle_tests {
         Outcome::NoMatch
     }
 
-    /// A per-tape map: identity default, some remaps, some explicit holes.
-    /// `dst`/`whole` range beyond the graph alphabet to also mint cardinality
-    /// holes. Blank (0) stays identity, non-hole (a realistic pinned blank).
+    /// A per-tape map matching what build_tapemap mints: explicit remaps,
+    /// explicit holes, and — on UNEQUAL alphabets — the closed-on-unequal
+    /// completion (every non-blank source the map does not name becomes a
+    /// hole). `dst`/`whole` range beyond the target alphabet to also mint
+    /// out-of-range holes. Blank (0) stays pinned.
     fn tape(
         host_card: usize,
         graph_card: usize,
@@ -1821,6 +1864,12 @@ mod oracle_tests {
             } else if usize::from(wdst[v]) != v {
                 wmap.pairs.insert(v as u16, wdst[v]);
             }
+        }
+        // Closed-on-unequal, exactly as build_tapemap: unlisted non-blank
+        // source symbols become holes across differently-sized alphabets.
+        if host_card != graph_card {
+            close_unlisted(&mut rmap, host_card);
+            close_unlisted(&mut wmap, graph_card);
         }
         TapeMap {
             phys,
@@ -2068,13 +2117,13 @@ machine {
 
     #[test]
     fn a_holey_graft_synthesizes_trap_read_rows() {
-        // Host tape `quad` (4 symbols) grafts a graph over `bits` (3 symbols)
-        // with an empty (identity) map: the extra host symbol `q` (index 3)
-        // has no in-range image on the 3-symbol graph tape — a read hole ⇒ a
-        // trap-read row prepended to the reading state. (This mirrors the
-        // linker's model, where a hole is a symbol whose mapped image falls
-        // outside the graph alphabet; in-range unlisted symbols read through
-        // by identity, they do NOT trap.)
+        // Host tape `quad` (4 symbols) grafts a graph over `bits` (3 symbols).
+        // Across the unequal alphabets there is no identity completion, so the
+        // in-range data symbols the graph uses must be listed explicitly
+        // (`'0'->'0', '1'->'1'`); the extra host symbol `q` (index 3) is
+        // unlisted — a read hole ⇒ a trap-read row prepended to the reading
+        // state. (An empty map here would hole `'0'` and `'1'` too — see
+        // `a_holey_graft_holes_an_unlisted_in_range_symbol` for that rule.)
         let src = "\
 alphabet bits { '_', '0', '1' }
 alphabet quad { '_', '0', '1', 'q' }
@@ -2083,7 +2132,7 @@ graph flip(tape t: bits, state done) {
 }
 machine {
   tape data: quad;
-  entry graft flip(t = data with map { }, done = fin) as f;
+  entry graft flip(t = data with map { '0'->'0', '1'->'1' }, done = fin) as f;
   state fin { [*] -> stop; }
 }
 ";
@@ -2099,7 +2148,7 @@ machine {
         assert_eq!(traps.len(), 1, "{:?}", f.rules);
         assert_eq!(f.rules[0].transition, Transition2::TrapRead);
         assert_eq!(f.rules[0].pattern, vec![Cell::Sym(3)]); // 'q'
-        // The real rows read/write the identity-mapped bits symbols.
+        // The real rows read/write the explicitly-mapped bits symbols.
         let real: Vec<&ExpandedRule> = f
             .rules
             .iter()
@@ -2114,6 +2163,46 @@ machine {
             real.iter()
                 .any(|r| r.pattern == vec![Cell::Sym(2)] && r.write == vec![WriteOut::Sym(1)])
         );
+    }
+
+    #[test]
+    fn a_holey_graft_holes_an_unlisted_in_range_symbol() {
+        // The closed-on-unequal conformance case at the graft level: host `h3`
+        // (3 symbols) grafts a graph over `g4` (4 symbols) mapping only
+        // `'a'->'a'`. Host `'b'` (index 2) is UNLISTED — and its index is
+        // within the graph's 4-symbol alphabet, so pre-fix it read through by
+        // identity. Under the closed-on-unequal rule it is a read hole and
+        // synthesizes a trap-read row. The reading graph state is what makes
+        // the hole observable (a straight-line state does no `rd`).
+        let src = "\
+alphabet h3 { '_', 'a', 'b' }
+alphabet g4 { '_', 'a', 'b', 'c' }
+graph g(tape t: g4, state done) {
+  entry state s { ['a'] -> done; [*] -> done; }
+}
+machine {
+  tape w: h3;
+  entry graft g(t = w with map { 'a'->'a' }, done = fin) as x;
+  state fin { [*] -> stop; }
+}
+";
+        let ex = expand_ok(src);
+        let m = machine(&ex);
+        let x = state(m, "x");
+        // Host 'b' (index 2, in range of the 4-symbol graph) is a read hole.
+        let traps: Vec<&ExpandedRule> = x
+            .rules
+            .iter()
+            .filter(|r| r.transition == Transition2::TrapRead)
+            .collect();
+        assert_eq!(
+            traps.len(),
+            1,
+            "one in-range read hole ('b'): {:?}",
+            x.rules
+        );
+        assert_eq!(x.rules[0].transition, Transition2::TrapRead);
+        assert_eq!(x.rules[0].pattern, vec![Cell::Sym(2)]); // 'b'
     }
 
     #[test]
