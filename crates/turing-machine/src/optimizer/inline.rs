@@ -3,36 +3,61 @@
 //! call barrier is what lets the per-world passes see across the old boundary.
 //! Part of the `-O1` pipeline.
 //!
-//! # Which calls collapse
+//! # Which calls splice
 //!
 //! A `call target(binding) then cont` is a splice site only when the binding is
-//! a genuine **full pass-through** into an in-unit callee — the exact shape the
-//! linker's composition engine would already collapse to a plain call
-//! (docs/formats.md (bound calls)). Two forms qualify:
+//! a genuine **full pass-through** into an in-unit callee — no symbol map, no
+//! hole ever owed, identity tape placement (docs/formats.md (bound calls)).
+//! Three forms qualify:
 //!
 //! * a **bindless** call (empty binding) — a plain same-frame call: callee tape
 //!   `k` IS caller tape `k`, no maps, no traps ever owed. The front end never
 //!   mints one in-unit for a tape-bearing routine (it always binds), so the
 //!   only bindless in-unit calls are the ones `outline` synthesizes; inline
-//!   must still handle them, since it runs after outline in the round.
-//! * a **full-passthrough bound** call — identity placement (callee tape `k`
-//!   drawn from caller tape `k`), the whole-alphabet identity map (an EMPTY pair
-//!   list, hole-free by construction), and equal per-tape cardinalities (so no
-//!   read/write hole is ever owed). This is the engine's `is_full_passthrough`
-//!   (crates/core compose.rs) restricted to what the `.tmc` front end mints for
-//!   a `t = t` argument. An explicit map — even all-identity pairs — is
-//!   conservatively refused: a partial pair list encodes cardinality-truncation
-//!   holes the materialized descriptor traps on, and the compose engine, not
-//!   this pass, is the authority on those. Because the predicate is a faithful
-//!   twin of the engine's, an opt-equivalence test compiles a program the engine
-//!   WOULD collapse and asserts no call survives inline — the anti-drift guard
-//!   keeping the two in lockstep.
+//!   must still handle them, since it runs after outline in the round. The
+//!   guard still checks the bound prefix's per-tape cardinalities match the
+//!   caller's — the outline trampoline shares the caller's exact signature, so
+//!   it stays trivially eligible, but a future bindless producer with a
+//!   narrower or wider callee could not splice out-of-range symbol indices.
+//! * an **equal-arity full-passthrough bound** call — identity placement
+//!   (callee tape `k` drawn from caller tape `k`), the whole-alphabet identity
+//!   map (an EMPTY pair list, hole-free by construction), and equal per-tape
+//!   cardinalities (so no read/write hole is ever owed).
+//! * an **arity-reducing identity projection** — the same identity placement
+//!   and empty maps, but a callee of SMALLER arity than the caller (callee tape
+//!   `k` drawn from caller tape `k` for `k < callee.arity`; the caller's extra
+//!   tapes stay unbound). Each spliced row widens to the caller's arity with
+//!   wildcard / keep / stay on those unbound tapes — the identity on them — so
+//!   the splice reads and writes nothing there.
+//!
+//! An explicit map — even all-identity pairs — is conservatively refused on
+//! either bound form: a partial pair list encodes cardinality-truncation holes
+//! the materialized descriptor traps on, and the compose engine, not this pass,
+//! is the authority on those.
+//!
+//! # Relation to the engine's collapse — a SOUND SUPERSET, not a twin
+//!
+//! This pass's splice decision is a sound SUPERSET of the linker composition
+//! engine's `is_full_passthrough` collapse (crates/core compose.rs). The two
+//! AGREE on the equal-arity forms — a same-arity full pass-through the engine
+//! would lower to a plain `call` is exactly what inline splices, and an
+//! opt-equivalence fixture compiles such a program and asserts no call survives.
+//! They DIVERGE in the arity dimension: the engine's collapse demands equal
+//! arity (its per-tape cardinality vectors compare unequal on different lengths
+//! and refuse), so it deliberately keeps an arity-reducing projection as a
+//! framed call — but inline splices it anyway. The splice is sound regardless
+//! of arity: equal per-tape cardinalities on the bound prefix owe no read/write
+//! hole, identity placement needs no per-rule remap, and the wildcard/keep/stay
+//! padding is the identity on every unbound tape. The projection path is proven
+//! behaviorally in the opt-equivalence matrix — a projecting call composed
+//! framed at `-O0`, spliced at `-O1`, with observably identical runs (including
+//! trap kinds, and an unbound tape's data left untouched) across mono / frames
+//! / hybrid.
 //!
 //! A **permuted** projection (callee tape `k` drawn from caller tape `p(k)`,
 //! `p ≠ identity`) is map-free and would be sound to splice with a per-rule
-//! tape-index permutation, but the engine's `is_full_passthrough` refuses it
-//! (it demands identity placement), so inlining it would break the twin. It is
-//! left out; identity placement is the whole of the projection this pass takes.
+//! tape-index permutation, but this pass demands identity placement and leaves
+//! it out; identity placement is the whole of the projection inline takes.
 //!
 //! # Callee eligibility
 //!
@@ -90,12 +115,24 @@ fn rule_count(w: &IrWorld) -> usize {
     w.states.iter().map(|st| st.rules.len()).sum()
 }
 
-/// Whether the binding at a call site is a full pass-through into `callee` — the
-/// compiler-side twin of the engine's `is_full_passthrough` (see the module
-/// doc). `caller.arity >= callee.arity` is checked at the site, not here.
+/// Whether the binding at a call site is a full pass-through into `callee` — a
+/// sound SUPERSET of the engine's `is_full_passthrough`, agreeing on equal
+/// arity and additionally accepting arity-reducing identity projections the
+/// engine keeps framed (see the module doc). `caller.arity >= callee.arity` is
+/// checked at the site, not here.
 fn is_full_passthrough(binding: &[IrTapeBinding], caller: &IrWorld, callee: &IrWorld) -> bool {
     if binding.is_empty() {
-        return true;
+        // A bindless call binds callee tape `k` to caller tape `k` implicitly.
+        // The `.tmc` front end never mints one in-unit; the only producer today
+        // is the outline trampoline, which shares the caller's exact tape
+        // signature. Still guard the bound prefix's per-tape cardinalities so a
+        // future bindless producer with a mismatched callee cannot splice
+        // symbol indices out of the caller tape's range.
+        return (0..callee.arity as usize).all(|k| {
+            k < caller.tapes.len()
+                && k < callee.tapes.len()
+                && caller.tapes[k].cardinality == callee.tapes[k].cardinality
+        });
     }
     binding.len() == callee.arity as usize
         && binding.iter().enumerate().all(|(k, tb)| {
@@ -415,6 +452,111 @@ machine {
         let spliced = &main.states[2];
         assert_eq!(spliced.rules[0].transition, IrTransition::Goto { state: 1 });
         validate_world(main).unwrap();
+    }
+
+    #[test]
+    fn a_bindless_call_with_a_mismatched_callee_is_refused() {
+        // A bindless call whose callee tape is WIDER than the caller's
+        // (cardinality 3 vs 2). No `.tmc` can produce this today — the front end
+        // always binds in-unit tape-bearing routines, and outline synthesizes
+        // only same-signature trampolines — so it is hand-built at the IR level.
+        // The callee writes symbol index 2, valid in its own 3-wide alphabet but
+        // out of range on the caller's 2-wide tape; splicing it would inject an
+        // out-of-range write, so the bindless cardinality guard refuses and the
+        // call survives.
+        let caller_tapes = vec![IrTape {
+            name: "t".into(),
+            alphabet: "ab".into(),
+            cardinality: 2,
+        }];
+        let callee_tapes = vec![IrTape {
+            name: "t".into(),
+            alphabet: "abc".into(),
+            cardinality: 3,
+        }];
+        let machine = IrWorld {
+            name: "main".into(),
+            kind: IrWorldKind::Machine,
+            arity: 1,
+            tapes: caller_tapes,
+            entry: 0,
+            states: vec![
+                IrState {
+                    id: 0,
+                    name: "m".into(),
+                    line: 0,
+                    rules: vec![IrRule {
+                        pattern: vec![IrCell::Wildcard],
+                        write: None,
+                        moves: None,
+                        debugger: false,
+                        transition: IrTransition::CallThen {
+                            target: "r".into(),
+                            binding: vec![],
+                            then: IrThen::Goto { state: 1 },
+                        },
+                        synthesized: false,
+                        line: 0,
+                    }],
+                    dispatch: IrDispatch::Table,
+                },
+                IrState {
+                    id: 1,
+                    name: "done".into(),
+                    line: 0,
+                    rules: vec![IrRule {
+                        pattern: vec![IrCell::Wildcard],
+                        write: None,
+                        moves: None,
+                        debugger: false,
+                        transition: IrTransition::Stop,
+                        synthesized: false,
+                        line: 0,
+                    }],
+                    dispatch: IrDispatch::Table,
+                },
+            ],
+            local: false,
+            line: 0,
+        };
+        let routine = IrWorld {
+            name: "r".into(),
+            kind: IrWorldKind::Routine,
+            arity: 1,
+            tapes: callee_tapes,
+            entry: 0,
+            states: vec![IrState {
+                id: 0,
+                name: "s".into(),
+                line: 0,
+                rules: vec![IrRule {
+                    pattern: vec![IrCell::Wildcard],
+                    write: Some(vec![IrWrite::Index { index: 2 }]),
+                    moves: None,
+                    debugger: false,
+                    transition: IrTransition::Return,
+                    synthesized: false,
+                    line: 0,
+                }],
+                dispatch: IrDispatch::Table,
+            }],
+            local: true,
+            line: 0,
+        };
+        let mut ir = IrProgram {
+            version: crate::ir::TM_IR_VERSION,
+            worlds: vec![machine, routine],
+            entry_world: Some(0),
+        };
+        assert_eq!(
+            run(&mut ir),
+            0,
+            "the mismatched bindless call is not inlined"
+        );
+        assert!(
+            any_callthen(world(&ir, "main")),
+            "the call to the wider-alphabet callee survives"
+        );
     }
 
     #[test]

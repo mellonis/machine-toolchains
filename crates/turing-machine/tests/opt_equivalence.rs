@@ -747,13 +747,16 @@ fn dead_rows_then_dispatch_select_fire_in_one_run() {
     );
 }
 
-// ── inline: full-passthrough calls collapse (the engine-agreement guard) ─────
+// ── inline: equal-arity full-passthroughs collapse (the engine agrees here) ──
 
 /// A machine that walks right swapping 'a'↔'b' by calling a small leaf routine
-/// with the identity binding `t = t` at each cell — a genuine full pass-through
-/// (empty map, equal cardinalities) the linker's composition engine would also
-/// collapse to a plain call. `inline` splices `flip` into `main` at every site,
-/// so no call survives at `-O1`.
+/// with the identity binding `t = t` at each cell — a genuine EQUAL-ARITY full
+/// pass-through (empty map, equal cardinalities) the linker's composition
+/// engine would also collapse to a plain call. This is the agreement side of
+/// inline's sound-superset predicate (crates/turing-machine/src/optimizer/inline.rs):
+/// where the callee's arity matches the caller's, inline and the engine make the
+/// same collapse decision. `inline` splices `flip` into `main` at every site, so
+/// no call survives at `-O1`.
 const INLINE_FLIP: &str = "\
 alphabet ab { '_', 'a', 'b' }
 routine flip(tape t: ab) {
@@ -785,16 +788,17 @@ fn inline_full_passthrough_call_is_equivalent_across_the_matrix() {
 
 #[test]
 fn inline_collapses_every_full_passthrough_call() {
-    // The engine-agreement observable + non-vacuity: `-O0` keeps the calls to
-    // `flip`; `-O1` has none (the compiler-side full-passthrough twin agreed
-    // with the engine's collapse decision on every site). The pass is reported,
-    // and the do-no-harm floor still reproduces `-O0`.
+    // The engine-agreement observable (equal-arity side) + non-vacuity: `-O0`
+    // keeps the calls to `flip`; `-O1` has none. On the equal-arity full
+    // pass-through the engine would collapse too, so inline and the engine agree
+    // on every site. The pass is reported, and the do-no-harm floor still
+    // reproduces `-O0`.
     let o0 = object_of(INLINE_FLIP, OptLevel::O0, &[]);
     let o1 = object_of(INLINE_FLIP, OptLevel::O1, &[]);
     assert!(has_any_call(&o0), "-O0 keeps the full-passthrough calls");
     assert!(
         !has_any_call(&o1),
-        "inline collapsed every full-passthrough call (the engine-agreement observable)"
+        "inline collapsed every equal-arity full-passthrough call (the engine agrees here)"
     );
     let fired: Vec<&str> = o1.report.opt.changes.iter().map(|c| c.pass).collect();
     assert!(fired.contains(&"inline"), "inline fired: {fired:?}");
@@ -803,6 +807,78 @@ fn inline_collapses_every_full_passthrough_call() {
     assert_eq!(
         o0.object, floor.object,
         "disabling every pass reproduces -O0 on the inline program"
+    );
+}
+
+// ── inline: the arity-reducing projection (the SUPERSET boundary) ────────────
+
+/// A 2-tape machine that walks right over its `data` tape swapping 'a'↔'b' by
+/// calling a 1-tape leaf routine through the identity-placement projection
+/// binding `t = data` — callee tape 0 drawn from caller tape 0, empty map,
+/// equal cardinalities, the caller's `aux` tape left unbound. This is the
+/// arity-reducing projection the engine deliberately KEEPS framed (its collapse
+/// requires equal arity) but inline splices anyway — the sound-superset boundary
+/// (crates/turing-machine/src/optimizer/inline.rs). At `-O0` every site is a
+/// real framed/composed call; at `-O1` each is the widened splice (`flip`'s rows
+/// padded to arity 2 with wildcard/keep/stay on the unbound `aux`). The two must
+/// run observably identically across the whole matrix, and the unbound tape's
+/// data must survive untouched — the padding-is-identity observable.
+const INLINE_PROJECT: &str = "\
+alphabet ab { '_', 'a', 'b' }
+routine flip(tape t: ab) {
+  entry state s {
+    ['a'] -> write ['b'] return;
+    ['b'] -> write ['a'] return;
+    [*]   -> return;
+  }
+}
+machine {
+  tape data: ab;
+  tape aux: ab;
+  entry state scan {
+    ['a', *] -> call flip(t = data) then advance;
+    ['b', *] -> call flip(t = data) then advance;
+    [*, *]   -> stop;
+  }
+  state advance { [*, *] -> move [>, .] goto scan; }
+}";
+
+#[test]
+fn inline_arity_reducing_projection_is_equivalent_across_the_matrix() {
+    // Three cases across the full 2×3 matrix. The last two carry data on the
+    // UNBOUND `aux` tape that the splice's wildcard/keep/stay padding must leave
+    // untouched — the padding-is-identity observable that would break if the
+    // widened splice diverged from `-O0`'s framed call.
+    assert_equivalent(
+        INLINE_PROJECT,
+        &[
+            &[(&[1, 2], 0), (&[], 0)],     // data "ab" → "ba"; aux blank
+            &[(&[], 0), (&[1, 2], 0)],     // data blank (stop); aux "ab" untouched
+            &[(&[2, 1], 0), (&[2, 1], 0)], // data "ba" → "ab"; aux "ba" untouched
+        ],
+    );
+}
+
+#[test]
+fn inline_splices_the_arity_reducing_projection() {
+    // Non-vacuity for the superset boundary: `-O0` keeps the projecting calls to
+    // `flip` (the engine keeps them framed — its collapse demands equal arity);
+    // `-O1` has none (inline widens and splices them). The pass is reported, and
+    // the do-no-harm floor still reproduces `-O0`.
+    let o0 = object_of(INLINE_PROJECT, OptLevel::O0, &[]);
+    let o1 = object_of(INLINE_PROJECT, OptLevel::O1, &[]);
+    assert!(has_any_call(&o0), "-O0 keeps the projecting calls (framed)");
+    assert!(
+        !has_any_call(&o1),
+        "inline widened and spliced every arity-reducing projection"
+    );
+    let fired: Vec<&str> = o1.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(fired.contains(&"inline"), "inline fired: {fired:?}");
+
+    let floor = object_of(INLINE_PROJECT, OptLevel::O1, &pass_names());
+    assert_eq!(
+        o0.object, floor.object,
+        "disabling every pass reproduces -O0 on the projection program"
     );
 }
 
