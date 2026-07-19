@@ -361,18 +361,16 @@ namespaced/nested symbol reference without ambiguity.
 
 ## `.tma` — assembly text (TM-1)
 
-The TM-1 `.tma` dialect version is **0.2** (pre-1.0: the version is `0.N`
+The TM-1 `.tma` dialect version is **0.3** (pre-1.0: the version is `0.N`
 and `N` bumps on any grammar change — the same acceptance-contract shape
 as the `.pma` dialect above). Where PM-1 drives one two-symbol tape, TM-1
 drives up to sixteen tapes, each with its own alphabet, and branches
 through match/dispatch tables rather than the mark register alone. The
 dialect turns on three grammar features the classic `.pma` grammar leaves
 off — a **tables** section, the `.rept` macro, and `[..]` **vector**
-operands — plus a per-routine signature directive. Version 0.2 adds the
-**frames** family: the framed call `call.m`, the multi-exit return
-`retx`, the explicit `trap`, the `#imm` immediate operand, and the
-`.frame`/`.map`/`.exits` frame-descriptor directives (and the declarative
-binding-call operand). See *Frame descriptors* below.
+operands — plus a per-routine signature directive. Version 0.3 adds the
+fused write+move mnemonic `wrmv` (a rule's whole write+move action in one
+instruction). Its full version history is at the end of this section.
 
 ```asm
 .section tables
@@ -413,9 +411,10 @@ per-tape alphabets, which a run validates its tape band against.
 
 ### The mnemonic set
 
-Nineteen mnemonics. The match register (**MR**) is written only by `mtc`;
-the vector `rd`/`wr`/`mov` instructions leave it untouched, so `jm`/`jnm`
-test the most recent `mtc` outcome regardless of intervening tape motion.
+Twenty mnemonics. The match register (**MR**) is written only by `mtc`;
+the vector `rd`/`wr`/`mov`/`wrmv` instructions leave it untouched, so
+`jm`/`jnm` test the most recent `mtc` outcome regardless of intervening
+tape motion.
 
 | opcode | mnemonic | operand | meaning |
 |---|---|---|---|
@@ -435,6 +434,7 @@ test the most recent `mtc` outcome regardless of intervening tape motion.
 | `0x0E` | `brk` | — | debugger break |
 | `0x0F` | `mov` | move vector | move one step per tape (`<` left, `>` right, `.` stay) |
 | `0x11` | `trap` | `#kind` | raise a typed trap: `#0` unmapped-read, `#1` unmapped-write |
+| `0x12` | `wrmv` | write + move vectors | fused write-then-move: write one symbol per tape, then move one step per tape, in one instruction |
 | `0x13` | `call.m` | frame call | framed call — call a routine and activate a frame for it |
 | `0x14` | `retx` | `#k` | multi-exit return — leave the active frame through exit `k` |
 | `0x1B` | `call.s` | label | the **short** form of `call` — see below |
@@ -451,7 +451,7 @@ short range, exactly as PM-1 does.
 
 ### Vector operands
 
-Three instructions and the `.row` directive take a bracketed vector with
+Four instructions and the `.row` directive take a bracketed vector with
 **one element per tape**, left to right. The element vocabulary depends on
 where the vector appears:
 
@@ -461,6 +461,15 @@ where the vector appears:
   cell; `-` **keeps** the cell untouched (no write on that tape).
 - **move vectors** (`mov [..]`): `>` steps that head right, `<` left, `.`
   stays put.
+
+`wrmv [w…], [m…]` takes **two** vectors — a write vector then a move
+vector, comma-separated — and fuses a rule's whole write+move action into
+one instruction. It is exactly `wr [w…]` followed by `mov [m…]`: **all
+writes precede all moves**, so a tape's write lands before its head moves
+off the cell. This is the `-O0` codegen canon for a conditional rule's
+action (the compiler elides it entirely when the action is all-keep +
+all-stay). A hand-written `wr`/`mov` pair remains equally valid;
+`wrmv` is the fused spelling, not a new capability.
 
 ### Match and dispatch tables
 
@@ -695,6 +704,32 @@ point at `--call-mech=frames` or `hybrid`.
 | `dedup_savings` | stamps and descriptors avoided by interning an already-built copy |
 | `synthesized_trap_rows` | unmapped-read trap rows prepended to stamped match tables |
 | `expanded_rows` | extra match rows from one-way collapse expansion (mono) |
+
+### What the `.tmc` compiler emits
+
+The `.tmc` language front end (`tmt compile`) generates this dialect and
+nothing exotic: a conditional state lowers to `rd` / `mtc` / `djmp` over a
+match table whose **exact rows are sorted and pairwise disjoint** with the
+wildcard rows following (the table discipline above), a rule's write+move
+action lowers to a single `wrmv` (elided when it is all-keep + all-stay),
+and a cross-alphabet `call` lowers to the **binding-call operand** —
+never a hand-authored `.frame`. So a compiled object always reaches the
+link stage as ordinary code plus bound-call records, and the choice of
+call mechanism stays a link-time decision independent of the source.
+
+### Dialect version history
+
+- **0.1** — the initial TM-1 assembly surface: the base mnemonics, the
+  sectioned `.routine` / `.section` / `.row` / `.targets` / `.rept`
+  directives, and the `[..]` write- and move-vector operand forms.
+- **0.2** — the **frames** family: the framed call `call.m`, the
+  multi-exit return `retx`, the explicit `trap`, the `#imm` immediate
+  operand, the `.frame` / `.map` / `.exits` frame descriptors, and the
+  declarative binding-call operand.
+- **0.3** — additive: the fused write+move mnemonic `wrmv [w…], [m…]` —
+  the write vector then the move vector in one instruction (all writes
+  precede all moves). It is the `-O0` codegen canon for a rule's action;
+  no earlier program changes meaning.
 
 ## `.pmx.map` — link-time sidecar
 
