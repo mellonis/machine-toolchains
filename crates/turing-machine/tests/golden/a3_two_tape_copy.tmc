@@ -1,0 +1,11 @@
+alphabet bits { '_', '0', '1' }
+
+machine {
+  tape src: bits;
+  tape dst: bits;
+
+  entry state copy {
+    ['0'..'1' as c, *] -> write [-, {c}] move [>, >] goto copy;
+    ['_', *]           -> stop;
+  }
+}

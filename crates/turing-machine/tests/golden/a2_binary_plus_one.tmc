@@ -1,0 +1,11 @@
+alphabet bits { '_', '0', '1' }
+
+machine {
+  tape num: bits;                    // head on the least significant digit
+
+  entry state inc {
+    ['1'] -> write ['0'] move [<] goto inc;   // carry
+    ['0'] -> write ['1'] stop;
+    ['_'] -> write ['1'] stop;
+  }
+}

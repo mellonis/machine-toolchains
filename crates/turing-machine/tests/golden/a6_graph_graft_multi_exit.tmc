@@ -1,0 +1,18 @@
+alphabet marks { '_', 'x', 'y', 'z' }
+
+export graph findX(tape t: marks, state found, state missing) {
+  entry state walk {
+    ['x'] -> found;
+    ['_'] -> missing;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+machine {
+  tape work: marks;
+
+  entry graft findX(t = work, found = celebrate, missing = giveUp) as seek;
+
+  state celebrate { [*] -> write ['_'] stop; }
+  state giveUp    { [*] -> halt; }
+}

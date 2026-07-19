@@ -1,0 +1,32 @@
+? Nested graft: a graph grafts another graph, two levels deep.
+? findXthenY grafts findX to reach an 'x', then walks on to a 'y';
+? the machine grafts findXthenY. Splicing recurses through both levels.
+
+alphabet marks { '_', 'x', 'y' }
+
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk {
+    ['x'] -> found;
+    ['_'] -> missing;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+graph findXthenY(tape t: marks, state gotBoth, state gaveUp) {
+  entry graft findX(t = t, found = seekY, missing = gaveUp) as scanX;
+
+  state seekY {
+    ['y'] -> gotBoth;
+    ['_'] -> gaveUp;
+    [*]   -> move [>] goto seekY;
+  }
+}
+
+machine {
+  tape work: marks;
+
+  entry graft findXthenY(t = work, gotBoth = win, gaveUp = lose) as run;
+
+  state win  { [*] -> write ['_'] stop; }
+  state lose { [*] -> halt; }
+}

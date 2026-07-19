@@ -1,0 +1,11 @@
+alphabet bytes { 0..126 }            // 127 symbols; blank = index 0, glyph "0"
+
+machine {
+  tape cell: bytes;
+
+  entry state inc {
+    [1..125 as v] -> write [{v+1}] stop;
+    [126]         -> halt;             // overflow
+    [0]           -> write [1] stop;   // blank cell = value 0
+  }
+}

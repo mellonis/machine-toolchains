@@ -1,0 +1,25 @@
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b', '0', '1' }
+
+namespace mylib {
+  export routine plusOne(tape num: bits) {
+    entry state inc {
+      ['1'] -> write ['0'] move [<] goto inc;
+      [*]   -> write ['1'] return;
+    }
+  }
+}
+
+use mylib::plusOne;
+
+machine {
+  tape ctl:  bits;
+  tape data: wide;
+
+  entry state main {
+    ['1', *] -> call plusOne(num = data with map { '0'->'0', '1'->'1' }) then done;
+    [*, *]   -> move [>, .] goto main;
+  }
+
+  state done { [*, *] -> stop; }
+}

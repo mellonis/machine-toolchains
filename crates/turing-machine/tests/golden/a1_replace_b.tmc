@@ -1,0 +1,13 @@
+? Walk right; replace every 'b' with 'a'; stop at the first blank.
+
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape main: ab;
+
+  entry state scan {
+    ['b'] -> write ['a'] move [>] goto scan;
+    ['a'] ->            move [>] goto scan;
+    ['_'] -> stop;
+  }
+}
