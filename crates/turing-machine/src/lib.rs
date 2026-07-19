@@ -8,7 +8,10 @@ pub mod arch;
 pub mod asm;
 pub mod cli;
 pub mod compiler;
+pub mod cst;
 pub mod lexer;
+pub mod parser;
 
 pub use asm::{TM1_TMA_DIALECT_VERSION, tm1_syntax};
 pub use compiler::{CompileError, CompileErrorKind};
+pub use parser::TMC_LANG_VERSION;

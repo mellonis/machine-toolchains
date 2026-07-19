@@ -31,8 +31,9 @@ pub enum CompileErrorKind {
     /// The parser needed one thing and saw another. `what` names what was
     /// expected; `found` describes the token actually present.
     Expected { what: &'static str, found: String },
-    /// A reserved keyword used where a name is expected. `what` names the
-    /// position ("an alphabet", "a routine", "a state", "a path segment", …).
+    /// A reserved keyword used where a name is expected. `what` is the noun
+    /// phrase for the position ("a state name", "an alphabet name", "a path
+    /// segment", …) — the same phrase the `Expected` error would use.
     ReservedName { name: String, what: &'static str },
     /// More than one `machine { … }` block in a single file — a program has
     /// exactly one; a library file has none. (The zero-in-a-program case is a
@@ -124,7 +125,10 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(f, "expected {what}, found {found}")
             }
             CompileErrorKind::ReservedName { name, what } => {
-                write!(f, "`{name}` is a reserved keyword and cannot name {what}")
+                write!(
+                    f,
+                    "`{name}` is a reserved keyword and cannot be used as {what}"
+                )
             }
             CompileErrorKind::MultipleMachines => {
                 write!(
@@ -175,10 +179,7 @@ impl std::fmt::Display for CompileErrorKind {
                 )
             }
             CompileErrorKind::DanglingDocRun => {
-                write!(
-                    f,
-                    "doc/attention run is not attached to a declaration"
-                )
+                write!(f, "doc/attention run is not attached to a declaration")
             }
             CompileErrorKind::DocLineOrder => {
                 write!(
