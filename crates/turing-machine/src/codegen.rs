@@ -47,8 +47,8 @@ use std::collections::HashSet;
 use mtc_core::asm::grid_line as grid;
 
 use crate::ir::{
-    IrCell, IrMove, IrProgram, IrRule, IrState, IrTapeBinding, IrThen, IrTransition, IrWorld,
-    IrWrite,
+    IrCell, IrDispatch, IrMove, IrProgram, IrRule, IrState, IrTapeBinding, IrThen, IrTransition,
+    IrWorld, IrWrite,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -109,6 +109,12 @@ enum Term {
     /// pass's output). Always emitted (a cross-function transfer is never the
     /// physically-next block), so it never participates in fall-through elision.
     TailCall(String),
+    /// `jm <label>` — the conditional jump at a Branch-flagged state's head
+    /// (the `dispatch_select` pass's output): jump to the selective rule's block
+    /// when the match register is set (its one-row table matched), otherwise
+    /// fall through to the catch-all rule's block. Always emitted — it is the
+    /// match arm, not the fall-through, so it never participates in elision.
+    JumpIfMatch(String),
     TrapRead,
     TrapWrite,
 }
@@ -133,7 +139,9 @@ struct Block {
 }
 
 /// A match table plus its dispatch table, in emitted MR order (row K → target
-/// K, both 1-based via `djmp`).
+/// K, both 1-based via `djmp`). An EMPTY `targets` marks the match-only variant
+/// a Branch state emits — one match row, no `D<n>: .targets` line, the no-match
+/// case handled by `jm`'s fall-through rather than a `djmp`.
 struct Table {
     label_t: String,
     label_d: String,
@@ -207,6 +215,15 @@ fn build_world_plan(w: &IrWorld, options: CodegenOptions, table_idx: &mut usize)
         let st = &w.states[i];
         if is_straight_line(st) {
             blocks.push(straight_block(w, st, options));
+        } else if st.dispatch == IrDispatch::Branch {
+            // The `dispatch_select` pass's two-row form: one match row + `jm` +
+            // the catch-all as fall-through (no dispatch table). `branch` builds
+            // the whole state (head, catch-all, hit blocks) itself.
+            let n = *table_idx;
+            *table_idx += 1;
+            let (table, branch_blocks) = branch(w, st, options, n, &mut used);
+            tables.push(table);
+            blocks.extend(branch_blocks);
         } else {
             let n = *table_idx;
             *table_idx += 1;
@@ -322,6 +339,89 @@ fn conditional(
         .collect();
 
     (table, blocks)
+}
+
+/// A Branch-flagged state's lowering (the `dispatch_select` pass's output). The
+/// state is exactly a selective first rule then an all-wildcard catch-all
+/// second rule, and it lowers to three blocks — a head that matches the ONE
+/// selective row and `jm`s to the hit block when it matched (`mtc` sets the
+/// match register to 1 for the single row, 0 otherwise; `jm` fires iff it is
+/// non-zero), the catch-all rule INLINE as the fall-through, and the selective
+/// rule's block reached only through the `jm`. The match table carries only the
+/// selective row and NO dispatch table: a no-match falls through to the
+/// catch-all, which is precisely the two-row match semantics the canonical
+/// `mtc`/`djmp` table would give (docs/formats.md (match and dispatch tables)).
+fn branch(
+    w: &IrWorld,
+    st: &IrState,
+    options: CodegenOptions,
+    n: usize,
+    used: &mut HashSet<String>,
+) -> (Table, Vec<Block>) {
+    debug_assert!(
+        st.rules.len() == 2
+            && st.rules[1]
+                .pattern
+                .iter()
+                .all(|c| matches!(c, IrCell::Wildcard))
+            && !st.rules[0]
+                .pattern
+                .iter()
+                .all(|c| matches!(c, IrCell::Wildcard)),
+        "a Branch state is a selective first rule then an all-wildcard catch-all"
+    );
+    let selective = &st.rules[0];
+    let catch_all = &st.rules[1];
+
+    // The hit block is reached only through `jm`, so it always prints its label
+    // (like a dispatch target); the catch-all block is reached by fall-through
+    // and needs no printed label.
+    let hit_label = fresh(used, &format!("{}__m", st.name));
+    let fall_label = fresh(used, &format!("{}__c", st.name));
+
+    // A match-only table: one row (the selective pattern), empty targets so
+    // `emit_table` omits the `D<n>` line — `jm`'s fall-through, not a `djmp`,
+    // handles the no-match case.
+    let table = Table {
+        label_t: format!("T{n}"),
+        label_d: format!("D{n}"),
+        rows: vec![selective.pattern.clone()],
+        targets: Vec::new(),
+    };
+
+    let head = Block {
+        label: st.name.clone(),
+        force_label: false,
+        body: vec![
+            Instr {
+                mnemonic: "rd",
+                operand: String::new(),
+                line: st.line,
+            },
+            Instr {
+                mnemonic: "mtc",
+                operand: format!("T{n}"),
+                line: st.line,
+            },
+        ],
+        term: Term::JumpIfMatch(hit_label.clone()),
+        term_line: st.line,
+    };
+    let fall = Block {
+        label: fall_label,
+        force_label: false,
+        body: rule_body(catch_all, options),
+        term: term_of(w, catch_all),
+        term_line: catch_all.line,
+    };
+    let hit = Block {
+        label: hit_label,
+        force_label: true,
+        body: rule_body(selective, options),
+        term: term_of(w, selective),
+        term_line: selective.line,
+    };
+    (table, vec![head, fall, hit])
 }
 
 /// A rule's body: an optional `brk` (unless stripped) then an optional fused
@@ -486,7 +586,11 @@ fn emit_table(t: &Table, e: &mut Emitter) {
         };
         e.push(grid(label, ".row", &op), 0);
     }
-    e.push(grid(Some(&t.label_d), ".targets", &t.targets.join(", ")), 0);
+    // A match-only table (the Branch form) has no dispatch targets — emit the
+    // `D<n>: .targets …` line only for the canonical table+`djmp` form.
+    if !t.targets.is_empty() {
+        e.push(grid(Some(&t.label_d), ".targets", &t.targets.join(", ")), 0);
+    }
 }
 
 /// Emit one world's `.routine` signature + `.func` + laid-out blocks.
@@ -563,6 +667,9 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
             // elision applies: the target is another function, never this
             // block's physical successor.
             Term::TailCall(t) => e.push(grid(None, "jmp", &format!("@{t}")), b.term_line),
+            // `jm <label>` — the Branch head's conditional jump. Always emitted
+            // (the match arm, never the fall-through), so no elision applies.
+            Term::JumpIfMatch(t) => e.push(grid(None, "jm", t), b.term_line),
             Term::TrapRead => e.push(grid(None, "trap", "#0"), b.term_line),
             Term::TrapWrite => e.push(grid(None, "trap", "#1"), b.term_line),
         }
@@ -973,6 +1080,48 @@ machine {
         // The instruction stream is otherwise unchanged; both assemble.
         assert_assembles(&kept);
         assert_assembles(&stripped);
+    }
+
+    #[test]
+    fn branch_lowering_emits_jm_with_a_match_only_table() {
+        // The `dispatch_select` output: a two-row selective-then-catch-all state
+        // (the UTM's Tzero shape) lowers to a ONE-row match table (the selective
+        // row), `mtc`/`jm` to the hit block, and the catch-all inline as the
+        // fall-through — no dispatch table, no `djmp`. Applied by hand here so
+        // codegen is exercised in isolation from the pass. Hand-derived from the
+        // canon: on 'a' (index 1) the one-row table matches → `jm scan__m`
+        // (write 'b', step right, loop back to `scan`); otherwise fall through
+        // to the catch-all `stp`.
+        use crate::ir::IrDispatch;
+        let src = "\
+alphabet ab { '_', 'a', 'b' }
+machine {
+  tape t: ab;
+  entry state scan {
+    ['a'] -> write ['b'] move [>] goto scan;
+    [*]   -> stop;
+  }
+}";
+        let mut ir = ir_of(src);
+        ir.worlds[0].states[0].dispatch = IrDispatch::Branch;
+        let out = emit_program(&ir, CodegenOptions::default()).text;
+        let expected = "\
+.section tables
+T0:     .row    [1]
+.section code
+.routine main, tapes=1, alpha=(3)
+.func main
+scan:
+        rd
+        mtc     T0
+        jm      scan__m
+        stp
+scan__m:
+        wrmv    [2], [>]
+        jmp     scan
+";
+        assert_eq!(out, expected);
+        assert_assembles(&out);
     }
 
     #[test]

@@ -46,6 +46,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ir::{IrProgram, IrThen, IrTransition, IrWorld};
 
 mod dce;
+mod dispatch_select;
 mod jump_threading;
 mod tail_call;
 mod tail_merge;
@@ -144,7 +145,10 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("tail-call", tail_call::run),
     ("tail-merge", tail_merge::run),
     ("dce", dce::run),
-    // `dead-rows` then `dispatch-select` slot in after dce (later task).
+    // `dispatch-select` flags a two-row selective-then-catch-all state for the
+    // compact `jm`/fall-through lowering; it runs after dce (and, once it
+    // lands, after `dead-rows`, which can reduce a state to that two-row shape).
+    ("dispatch-select", dispatch_select::run),
 ];
 
 type ProgramPassFn = fn(&mut IrProgram) -> u32;
@@ -282,7 +286,13 @@ mod tests {
         // first (none yet), then the per-world pipeline. Grows as passes land.
         assert_eq!(
             pass_names(),
-            vec!["jump-threading", "tail-call", "tail-merge", "dce"]
+            vec![
+                "jump-threading",
+                "tail-call",
+                "tail-merge",
+                "dce",
+                "dispatch-select"
+            ]
         );
     }
 

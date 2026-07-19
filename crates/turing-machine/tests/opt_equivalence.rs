@@ -526,3 +526,78 @@ fn tail_call_eliminates_the_return_stack_growth() {
         "-O1 tail-jumps with no push and completes on the same tiny stack"
     );
 }
+
+// ── dispatch_select: the two-row branch lowering ─────────────────────────────
+
+/// A machine-world state with the two-row branch shape: a selective first row
+/// (`['a']`) then an all-wildcard catch-all (`[*]`). `dispatch_select` flips it
+/// to the `jm`/fall-through form at -O1, dropping the dispatch table. On 'a' it
+/// writes 'b' and steps right (loop); on any other symbol it stops.
+const BRANCH_SCAN: &str = "\
+alphabet ab { '_', 'a', 'b' }
+machine {
+  tape t: ab;
+  entry state scan {
+    ['a'] -> write ['b'] move [>] goto scan;
+    [*]   -> stop;
+  }
+}";
+
+#[test]
+fn dispatch_select_branch_is_equivalent_across_the_matrix() {
+    // "aab" (walks two 'a'→'b' then stops on 'b'), a lone blank, and a lone 'b'
+    // (immediate stop). Observables agree across the whole 2×3 matrix.
+    assert_equivalent(
+        BRANCH_SCAN,
+        &[&[(&[1, 1, 2], 0)], &[(&[0], 0)], &[(&[2], 0)]],
+    );
+}
+
+#[test]
+fn dispatch_select_drops_the_dispatch_table_at_o1() {
+    // Non-vacuity + the shape delta: -O0 lowers the two-row state to a match
+    // table + a dispatch table consumed by `djmp`; -O1 flips it to `mtc`/`jm`
+    // with a ONE-row match-only table and NO dispatch table. So the `.targets`
+    // line and the `djmp` disappear, the `jm` appears, and the object shrinks by
+    // the dropped dispatch table.
+    let o0 = object_of(BRANCH_SCAN, OptLevel::O0, &[]);
+    let o1 = object_of(BRANCH_SCAN, OptLevel::O1, &[]);
+
+    assert!(
+        o0.tma.contains("djmp"),
+        "-O0 dispatches via djmp:\n{}",
+        o0.tma
+    );
+    assert!(
+        o0.tma.contains(".targets"),
+        "-O0 emits a dispatch table:\n{}",
+        o0.tma
+    );
+    assert!(o1.tma.contains("jm"), "-O1 branches via jm:\n{}", o1.tma);
+    assert!(!o1.tma.contains("djmp"), "-O1 drops the djmp:\n{}", o1.tma);
+    assert!(
+        !o1.tma.contains(".targets"),
+        "-O1 drops the dispatch table:\n{}",
+        o1.tma
+    );
+    assert!(
+        o1.object.to_bytes().len() < o0.object.to_bytes().len(),
+        "-O1 must shrink by the dropped dispatch table: {} -> {}",
+        o0.object.to_bytes().len(),
+        o1.object.to_bytes().len()
+    );
+
+    let fired: Vec<&str> = o1.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(
+        fired.contains(&"dispatch-select"),
+        "dispatch-select fired: {fired:?}"
+    );
+
+    // The do-no-harm floor still holds with dispatch-select in the pipeline:
+    // disabling every pass reproduces -O0 byte-for-byte.
+    let floor = object_of(BRANCH_SCAN, OptLevel::O1, &pass_names());
+    assert_eq!(
+        o0.object, floor.object,
+        "disabling every pass reproduces -O0 on the branch program"
+    );
+}
