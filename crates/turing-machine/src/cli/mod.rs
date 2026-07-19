@@ -1,8 +1,8 @@
 //! The `tmt` command-line tool: a thin renderer over the library API.
 //! Libraries never print; every byte of terminal output originates here.
-//! The sibling of `crates/post-machine/src/cli/mod.rs` — this is the
-//! minimal TM-1 front (asm / link / dis / run / tape); the `.tmc` compiler
-//! subcommands join in a later phase.
+//! The sibling of `crates/post-machine/src/cli/mod.rs` — the TM-1 front
+//! (compile / asm / link / dis / run / tape / ir), mirroring `pmt`'s shapes
+//! with `.tmc`/`.tma`/`.tmo`/`.tmx`/`.tmt` extensions.
 //!
 //! `CliOutput` and the hand-rolled `Args` scanner below are copied
 //! verbatim-adapted from the PM-1 `pmt` CLI. Hoisting the shared shell
@@ -39,11 +39,13 @@ tmt — Turing-machine toolchain (TM-1)
 USAGE: tmt <SUBCOMMAND> [ARGS]
 
 SUBCOMMANDS:
-  asm    .tma assembly -> .tmo object
-  link   .tmo objects -> .tmx executable (+ .tmx.map sidecar)
-  dis    disassemble a .tmo or .tmx (--listing for the address view)
-  run    execute a .tmx on a multi-tape .tmt block
-  tape   new/set/show .tmt tape-block snapshots
+  compile  .tmc source -> .tmo object (-S for .tma, --emit-ir for world IR JSON)
+  asm      .tma assembly -> .tmo object
+  link     .tmo objects -> .tmx executable (+ .tmx.map sidecar)
+  dis      disassemble a .tmo or .tmx (--listing for the address view)
+  run      execute a .tmx on a multi-tape .tmt block
+  tape     new/set/show .tmt tape-block snapshots
+  ir       render --emit-ir JSON (ir graph -> Mermaid)
 
 Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 ";
@@ -60,18 +62,22 @@ pub fn execute_with(
 ) -> Result<CliOutput, String> {
     match args.first().map(String::as_str) {
         None | Some("--help") | Some("-h") => Ok(CliOutput::ok(USAGE.into(), String::new())),
+        // Line order mirrors `pmt --version`: tool / language / dialect.
         Some("--version") => Ok(CliOutput::ok(
             format!(
-                "tmt {}\ntma dialect (tm-1) {}\n",
+                "tmt {}\ntmc language {}\ntma dialect (tm-1) {}\n",
                 env!("CARGO_PKG_VERSION"),
+                crate::parser::TMC_LANG_VERSION,
                 crate::asm::TM1_TMA_DIALECT_VERSION
             ),
             String::new(),
         )),
+        Some("compile") => build::compile(&args[1..]),
         Some("asm") => build::asm(&args[1..]),
         Some("link") => build::link(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),
         Some("tape") => inspect::tape(&args[1..]),
+        Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }

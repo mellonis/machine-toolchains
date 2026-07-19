@@ -14,6 +14,8 @@ use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use mtc_core::formats::{ContainerKind, sniff};
 use mtc_core::linker::MapFile;
 
+use crate::ir::IrProgram;
+
 use super::{Args, CliOutput, render_tape};
 
 const DIS_USAGE: &str = "\
@@ -261,6 +263,46 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
 
     fs::write(&dest, block.to_bytes()).map_err(|e| format!("cannot write {dest}: {e}"))?;
     Ok(CliOutput::ok(String::new(), String::new()))
+}
+
+const IR_USAGE: &str = "\
+USAGE: tmt ir graph FILE.ir.json [--function NAME]
+
+Renders --emit-ir output as a Mermaid flowchart (one per world). The filter
+flag keeps pmt's `--function` name for cross-tool muscle memory; a TM world
+IS the unit here (the `machine` block or a routine), so NAME is a world name.
+";
+
+pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
+    match raw.first().map(String::as_str) {
+        Some("graph") => ir_graph(&raw[1..]),
+        _ => Ok(CliOutput::ok(IR_USAGE.into(), String::new())),
+    }
+}
+
+fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    let filter = args.value("--function")?;
+    let inputs = args.positionals()?;
+    let [input] = inputs.as_slice() else {
+        return Err(format!("ir graph takes exactly one file\n\n{IR_USAGE}"));
+    };
+    let text = fs::read_to_string(input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    let program = IrProgram::from_json(&text).map_err(|e| format!("{input}: {e}"))?;
+    let mut out = String::new();
+    for world in &program.worlds {
+        if filter.as_deref().is_some_and(|f| f != world.name) {
+            continue;
+        }
+        out.push_str(&format!("%% {}\n{}\n", world.name, world.to_mermaid()));
+    }
+    if out.is_empty() {
+        return Err(match filter {
+            Some(f) => format!("no world `{f}` in {input}"),
+            None => format!("{input}: no worlds"),
+        });
+    }
+    Ok(CliOutput::ok(out, String::new()))
 }
 
 fn tape_show(raw: &[String]) -> Result<CliOutput, String> {

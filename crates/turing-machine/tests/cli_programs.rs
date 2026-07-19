@@ -63,16 +63,19 @@ fn asm_and_link(dir: &Path, stem: &str, source: &str) -> PathBuf {
 }
 
 #[test]
-fn version_reports_exactly_two_lines() {
+fn version_reports_tool_language_and_dialect() {
     let out = execute(&args(&["--version"])).unwrap();
+    // Line order mirrors `pmt --version`: tool / language / dialect.
     assert_eq!(
         out.stdout,
         format!(
-            "tmt {}\ntma dialect (tm-1) {}\n",
+            "tmt {}\ntmc language {}\ntma dialect (tm-1) {}\n",
             env!("CARGO_PKG_VERSION"),
+            mtc_turing_machine::TMC_LANG_VERSION,
             mtc_turing_machine::TM1_TMA_DIALECT_VERSION
         )
     );
+    assert_eq!(mtc_turing_machine::TMC_LANG_VERSION, "0.1");
     assert_eq!(mtc_turing_machine::TM1_TMA_DIALECT_VERSION, "0.3");
     assert_eq!(out.code, 0);
 }
