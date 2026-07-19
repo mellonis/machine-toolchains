@@ -1,0 +1,350 @@
+// The tmt standard library: binary-number arithmetic on a tape, offered in
+// two number representations. These are ports of the binary-number libraries
+// from the turing-machine-js project, rebuilt in .tmc.
+//
+// Two namespaces expose the SAME operations over different representations,
+// so the trade-off between alphabet size and state-graph size stays visible:
+//
+//   std::binaryNumbers      5-symbol DELIMITED  { '_', '^', '$', '0', '1' }
+//     A number is written ^…$; a tape may hold several, blank-separated
+//     (… ^101$ _ ^10$ …). The '^'/'$' markers cost extra states per
+//     algorithm but buy safe multi-number navigation.
+//
+//   std::binaryNumbersBare  3-symbol BARE       { '_', '0', '1' }
+//     A number is a bare run of '0'/'1' cells with blanks on both sides and
+//     no markers. One number per region; the graphs are much smaller.
+//
+// Each namespace exports its representation alphabet as `symbols`, so a
+// caller can declare a compatible tape (tape num: std::binaryNumbers::symbols)
+// or write a map against it.
+//
+// Anatomy — the facade pattern. Each operation's behavior is defined ONCE as
+// an `export graph` with explicit exit continuations: the `done` state
+// parameter is where control leaves the graph. A one-line `export routine`
+// facade grafts that graph with `done = return`, giving the operation a
+// call-able form. A consumer then chooses per use site — `call` the facade
+// (one shared body, a dynamic return) or `graft` the graph (a private copy
+// with static continuations). Both forms are exported because the library
+// ships as source. Where an operation is inherently a composition of calls
+// (`minusOne`, and the cross-representation `invertNumber`) it is a plain
+// routine, because a graph cannot contain a call.
+//
+// Convention: the tape parameter is `num`; a behavior graph is named
+// `<op>Graph` and its facade `<op>`. The `?` lines on each entity are its
+// normative contract, including where the head sits on entry and on exit.
+
+namespace std {
+  namespace binaryNumbers {
+    ? The delimited representation's alphabet: blank, the start marker '^',
+    ? the end marker '$', and the two digits '0' and '1'. A number is the
+    ? run '^' digits… '$'; a tape may carry several, separated by blanks.
+    export alphabet symbols { '_', '^', '$', '0', '1' }
+
+    ? Behavior graph for goToNumber: walk right until the first '$', then
+    ? leave via `done` with the head on that '$'.
+    export graph goToNumberGraph(tape num: symbols, state done) {
+      entry state walk {
+        ['$'] -> done;
+        [*]   -> move [>] goto walk;
+      }
+    }
+
+    ? Walk right to the current number's end marker. On entry the head is on
+    ? the number (any cell up to and including its '$'); on exit it rests on
+    ? that '$'. The tape is unchanged.
+    export routine goToNumber(tape num: symbols) {
+      entry graft goToNumberGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for goToNumbersStart: walk left until the first '^',
+    ? then leave via `done` with the head on that '^'.
+    export graph goToNumbersStartGraph(tape num: symbols, state done) {
+      entry state walk {
+        ['^'] -> done;
+        [*]   -> move [<] goto walk;
+      }
+    }
+
+    ? Walk left to the current number's start marker. On entry the head is on
+    ? the number (any cell from its '^' rightward); on exit it rests on that
+    ? '^'. The tape is unchanged.
+    export routine goToNumbersStart(tape num: symbols) {
+      entry graft goToNumbersStartGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for goToNextNumber: step one cell right, then walk right
+    ? to the following number's '$' (reusing goToNumberGraph). Exits via
+    ? `done` on that '$'.
+    export graph goToNextNumberGraph(tape num: symbols, state done) {
+      entry state step { [*] -> move [>] goto scan; }
+      graft goToNumberGraph(num = num, done = done) as scan;
+    }
+
+    ? Move to the next number's end marker. On entry the head is on the
+    ? current number's '$' (or the blank gap after it); it steps right and
+    ? then walks to the next number's '$', where it stops. Unchanged tape.
+    export routine goToNextNumber(tape num: symbols) {
+      entry graft goToNextNumberGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for goToPreviousNumber: step one cell left, then walk
+    ? left to the previous number's '$'. Exits via `done` on that '$'.
+    export graph goToPreviousNumberGraph(tape num: symbols, state done) {
+      entry state step { [*] -> move [<] goto scan; }
+      state scan {
+        ['$'] -> done;
+        [*]   -> move [<] goto scan;
+      }
+    }
+
+    ? Move to the previous number's end marker. On entry the head is on the
+    ? current number's '$' (or the blank gap after it); it steps left and
+    ? then walks back to the previous number's '$', where it stops. The tape
+    ? is unchanged.
+    export routine goToPreviousNumber(tape num: symbols) {
+      entry graft goToPreviousNumberGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for deleteNumber. On a number cell it goes to the '^'
+    ? and sweeps right erasing '^', digits, and '$' (writing blanks) until
+    ? the number is gone; on a blank it does nothing. Exits via `done`.
+    export graph deleteNumberGraph(tape num: symbols, state done) {
+      entry state dispatch {
+        ['_'] -> done;
+        [*]   -> goto toStart;
+      }
+      graft goToNumbersStartGraph(num = num, done = erase) as toStart;
+      state erase {
+        ['$'] -> write ['_'] done;
+        [*]   -> write ['_'] move [>] goto erase;
+      }
+    }
+
+    ? Erase a whole number in place. On entry the head is on the number
+    ? (any cell); on exit every cell of '^'…'$' is blank and the head rests
+    ? on the erased '$' cell. A head that is not on a number leaves the tape
+    ? untouched.
+    export routine deleteNumber(tape num: symbols) {
+      entry graft deleteNumberGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for normalizeNumber. On a number cell it goes to the
+    ? '^', erases the '^' and every leading '0', then re-plants a fresh '^'
+    ? just before the first '1' (or before '$' when the number was all
+    ? zeros, preserving 0 as '^$'), and walks right to '$'. On a blank it
+    ? does nothing. Exits via `done` on the '$'.
+    export graph normalizeNumberGraph(tape num: symbols, state done) {
+      entry state dispatch {
+        ['_'] -> done;
+        [*]   -> goto toStart;
+      }
+      graft goToNumbersStartGraph(num = num, done = moveStart) as toStart;
+      state moveStart {
+        ['^'] -> write ['_'] move [>] goto moveStart;
+        ['0'] -> write ['_'] move [>] goto moveStart;
+        ['1'] -> move [<] goto putNewStart;
+        ['$'] -> move [<] goto putNewStart;
+      }
+      state putNewStart {
+        ['_'] -> write ['^'] goto scan;
+      }
+      graft goToNumberGraph(num = num, done = done) as scan;
+    }
+
+    ? Strip a number's leading zeros. On entry the head is on the number; on
+    ? exit the head rests on '$' and the number carries no leading '0'. The
+    ? value zero keeps its representation '^$'. A head not on a number leaves
+    ? the tape untouched.
+    export routine normalizeNumber(tape num: symbols) {
+      entry graft normalizeNumberGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for plusOne. Walk right to '$', step left onto the least
+    ? significant digit, and carry left: '0' → '1' (done), '1' → '0' and keep
+    ? carrying. When the carry reaches '^' it overflows — the '^' becomes a
+    ? '1', a fresh '^' is planted one cell further left, and the old leading
+    ? '1's are rewritten to '0'. On a blank the graph does nothing. Exits via
+    ? `done` on the '$'.
+    export graph plusOneGraph(tape num: symbols, state done) {
+      entry state seek {
+        ['^'] -> move [>] goto seek;
+        ['0'] -> move [>] goto seek;
+        ['1'] -> move [>] goto seek;
+        ['$'] -> move [<] goto carry;
+        ['_'] -> done;
+      }
+      state carry {
+        ['0'] -> write ['1'] move [>] goto fill;
+        ['1'] -> move [<] goto carry;
+        ['^'] -> write ['1'] move [<] goto addStart;
+      }
+      state fill {
+        ['1'] -> write ['0'] move [>] goto fill;
+        ['$'] -> done;
+      }
+      state addStart {
+        ['_'] -> write ['^'] move [>] goto addStart;
+        ['1'] -> move [>] goto fill;
+      }
+    }
+
+    ? Add one to a number. On entry the head is on the number; on exit it
+    ? rests on '$'. On overflow the number grows one cell to the left (the
+    ? '^' relocates), so '^111$' becomes '^1000$'. A head not on a number
+    ? leaves the tape untouched.
+    export routine plusOne(tape num: symbols) {
+      entry graft plusOneGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for minusOneFast: the direct-borrow subtractor. Walk
+    ? right to '$', step left onto the least significant digit, and borrow
+    ? left: '1' → '0' (done), '0' → '1' and keep borrowing, '^' → underflow.
+    ? It then falls into normalizeNumberGraph to strip the leading zero a
+    ? borrow chain leaves behind ('^1000$' − 1 → '^0111$' → '^111$'). On a
+    ? blank the graph does nothing. Exits via `done` on the '$'.
+    export graph minusOneFastGraph(tape num: symbols, state done) {
+      entry state seek {
+        ['^'] -> move [>] goto seek;
+        ['0'] -> move [>] goto seek;
+        ['1'] -> move [>] goto seek;
+        ['$'] -> move [<] goto borrow;
+        ['_'] -> done;
+      }
+      state borrow {
+        ['1'] -> write ['0'] goto normalize;
+        ['0'] -> write ['1'] move [<] goto borrow;
+        ['^'] -> goto normalize;
+      }
+      graft normalizeNumberGraph(num = num, done = done) as normalize;
+    }
+
+    ? Subtract one by direct borrow, auto-normalizing the result. On entry
+    ? the head is on the number; on exit it rests on '$' with no leading
+    ? zero. Zero stays zero ('^$' − 1 → '^$'). A head not on a number leaves
+    ? the tape untouched.
+    export routine minusOneFast(tape num: symbols) {
+      entry graft minusOneFastGraph(num = num, done = return) as body;
+    }
+
+    ? Flip every bit of a number, implemented ACROSS representations: it
+    ? walks to the first digit and calls std::binaryNumbersBare::invertNumber
+    ? with the markers collapsed one-way onto the callee's blank
+    ? ('^' => '_', '$' => '_'). The markers read as the bare blank and
+    ? survive the call because bare invert never writes a blank. On entry the
+    ? head is on the number; on exit it rests on '$'. A head not on a number
+    ? still walks left to the '^' first, so it must start on a number.
+    export routine invertNumber(tape num: symbols) {
+      entry state toStart {
+        ['^'] -> move [>] goto atFirstDigit;
+        [*]   -> move [<] goto toStart;
+      }
+      state atFirstDigit {
+        [*] -> call std::binaryNumbersBare::invertNumber(
+                 num = num with map { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+               ) then return;
+      }
+    }
+
+    ? Subtract one via the two's-complement identity x − 1 == ~(~x + 1): a
+    ? composition of invertNumber, plusOne, invertNumber, normalizeNumber
+    ? run in sequence on the same tape. On entry the head is on the number;
+    ? on exit it rests on '$' with no leading zero ('^1$' − 1 → '^$'). This
+    ? is the deliberately heavy subtractor; minusOneFast is the direct one.
+    export routine minusOne(tape num: symbols) {
+      entry state s1 { [*] -> call invertNumber(num = num)    then s2; }
+      state s2       { [*] -> call plusOne(num = num)         then s3; }
+      state s3       { [*] -> call invertNumber(num = num)    then s4; }
+      state s4       { [*] -> call normalizeNumber(num = num) then return; }
+    }
+  }
+
+  namespace binaryNumbersBare {
+    ? The bare representation's alphabet: blank and the two digits '0' and
+    ? '1'. A number is a contiguous run of digits with blanks on both sides
+    ? and no markers; the head starts at the leftmost digit.
+    export alphabet symbols { '_', '0', '1' }
+
+    ? Behavior graph for plusOne. Walk right to the trailing blank, step left
+    ? onto the least significant digit, and carry left: '1' → '0' and keep
+    ? carrying, '0' → '1' (done), blank → '1' (done, overflow extends the
+    ? number one cell to the left). Exits via `done`.
+    export graph plusOneGraph(tape num: symbols, state done) {
+      entry state seek {
+        ['0'] -> move [>] goto seek;
+        ['1'] -> move [>] goto seek;
+        ['_'] -> move [<] goto carry;
+      }
+      state carry {
+        ['1'] -> write ['0'] move [<] goto carry;
+        ['0'] -> write ['1'] done;
+        ['_'] -> write ['1'] done;
+      }
+    }
+
+    ? Add one to a number. On entry the head is on the leftmost digit; on
+    ? overflow the number grows one cell to the left ('111' → '1000').
+    export routine plusOne(tape num: symbols) {
+      entry graft plusOneGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for minusOne. Walk right to the trailing blank, step
+    ? left onto the least significant digit, and borrow left: '0' → '1' and
+    ? keep borrowing, '1' → '0' (done), blank → done (underflow: the region
+    ? was empty). Exits via `done`.
+    export graph minusOneGraph(tape num: symbols, state done) {
+      entry state seek {
+        ['0'] -> move [>] goto seek;
+        ['1'] -> move [>] goto seek;
+        ['_'] -> move [<] goto borrow;
+      }
+      state borrow {
+        ['0'] -> write ['1'] move [<] goto borrow;
+        ['1'] -> write ['0'] done;
+        ['_'] -> done;
+      }
+    }
+
+    ? Subtract one from a number. On entry the head is on the leftmost digit.
+    ? A borrow that reaches the most significant digit leaves a leading zero
+    ? ('1000' − 1 → '0111'); the result is NOT normalized. An empty region
+    ? (underflow) halts unchanged.
+    export routine minusOne(tape num: symbols) {
+      entry graft minusOneGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for invertNumber: sweep right flipping each bit, halt at
+    ? the trailing blank. Exits via `done` on that blank.
+    export graph invertNumberGraph(tape num: symbols, state done) {
+      entry state sweep {
+        ['0'] -> write ['1'] move [>] goto sweep;
+        ['1'] -> write ['0'] move [>] goto sweep;
+        ['_'] -> done;
+      }
+    }
+
+    ? Flip every bit of a number. On entry the head is on the leftmost digit;
+    ? on exit it rests on the trailing blank.
+    export routine invertNumber(tape num: symbols) {
+      entry graft invertNumberGraph(num = num, done = return) as body;
+    }
+
+    ? Behavior graph for normalizeNumber: erase leading '0's moving right
+    ? until a '1'; if the whole number was zeros, restore a single '0' so the
+    ? value zero keeps its representation. Exits via `done`.
+    export graph normalizeNumberGraph(tape num: symbols, state done) {
+      entry state sweep {
+        ['0'] -> write ['_'] move [>] goto sweep;
+        ['1'] -> done;
+        ['_'] -> write ['0'] done;
+      }
+    }
+
+    ? Strip a number's leading zeros. On entry the head is on the leftmost
+    ? digit; on exit it rests on the first '1' (or on the single restored
+    ? '0' when the number was all zeros). The value zero keeps its
+    ? representation.
+    export routine normalizeNumber(tape num: symbols) {
+      entry graft normalizeNumberGraph(num = num, done = return) as body;
+    }
+  }
+}
