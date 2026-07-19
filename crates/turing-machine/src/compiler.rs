@@ -2991,12 +2991,12 @@ machine {
     }
 
     #[test]
-    fn foutline_threads_through_and_is_inert_until_outline_registers() {
-        // `--foutline` sets `CompileOptions::outline`, which `compile()`
-        // threads into `OptOptions::outline`. The `outline` pass is not yet
-        // registered, so enabling it changes nothing — the object is
-        // byte-identical to the same `-O1` compile without the flag. When the
-        // pass lands, the opt-equivalence matrix takes over checking on/off.
+    fn foutline_threads_through_and_is_inert_on_a_program_without_sharing() {
+        // `--foutline` sets `CompileOptions::outline`, which `compile()` threads
+        // into `OptOptions::outline`. A1 has no repeated exit-free subgraph, so
+        // the registered `outline` pass finds nothing to hoist — the object is
+        // byte-identical to the same `-O1` compile without the flag. The
+        // on/off-with-real-sharing check lives in the opt-equivalence matrix.
         let plain = compile(
             A1,
             CompileOptions {

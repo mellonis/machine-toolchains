@@ -627,18 +627,24 @@ fn compile_emit_ir_writes_a_version_2_sidecar() {
 fn compile_emit_ir_after_pass_errors_naming_valid_stages() {
     let dir = scratch("tmc_emit_ir_bad");
     let obj = dir.join("a1.tmo");
-    // No optimizer passes ship in 6a, so `after:<pass>` never matches the
-    // (empty) registry; the error names the stages that do exist.
+    // `after:<pass>` resolves for a REGISTERED pass now; an unregistered name
+    // fails early with an error listing the stages that do exist — the bookends
+    // plus every registered `after:<pass>` (so `after:inline`/`after:outline`
+    // appear in the list, and the bogus `after:nowhere` is rejected).
     let err = execute(&args(&[
         "compile",
         fixture("a1_replace_b.tmc").to_str().unwrap(),
         "-o",
         obj.to_str().unwrap(),
-        "--emit-ir=after:inline",
+        "--emit-ir=after:nowhere",
     ]))
     .unwrap_err();
     assert!(err.contains("lowered") && err.contains("final"), "{err}");
     assert!(err.contains("after:inline"), "{err}");
+    assert!(
+        err.contains("after:nowhere"),
+        "the bogus stage is named: {err}"
+    );
 }
 
 #[test]

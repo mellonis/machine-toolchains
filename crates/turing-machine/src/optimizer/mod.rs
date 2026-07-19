@@ -5,11 +5,12 @@
 //! to a change-fixpoint, round-capped at [`MAX_ROUNDS`].
 //!
 //! The pipelines are the growth points: each optimizer pass registers itself
-//! into one of them as it lands (per-world [`PIPELINE`] carries `jump-threading`
-//! and `dce` so far; the program-level [`PROGRAM_PIPELINE`] fills later). The
-//! driver — the fixpoint loop, the disabled-pass and default-off gating, the
-//! per-pass invariant re-check, the snapshot capture, and [`pass_names`] — is
-//! complete and does not change as passes join. With every pass disabled
+//! into one of them. The program-level [`PROGRAM_PIPELINE`] runs `inline` then
+//! `outline` (cross-world sharing) at round start; the per-world [`PIPELINE`]
+//! then runs `jump-threading`, `tail-call`, `tail-merge`, `dce`, `dead-rows`,
+//! and `dispatch-select`. The driver — the fixpoint loop, the disabled-pass and
+//! default-off gating, the per-pass invariant re-check, the snapshot capture,
+//! and [`pass_names`] — does not change as passes join. With every pass disabled
 //! (`--fno-<pass>`), `-O1` runs empty rounds and converges, so **`-O1` output
 //! is byte-identical to `-O0`** (the do-no-harm floor the equivalence harness
 //! locks with a byte comparison).
@@ -48,7 +49,9 @@ use crate::ir::{IrProgram, IrThen, IrTransition, IrWorld};
 mod dce;
 mod dead_rows;
 mod dispatch_select;
+mod inline;
 mod jump_threading;
+mod outline;
 mod tail_call;
 mod tail_merge;
 
@@ -158,10 +161,15 @@ const PIPELINE: &[(&str, PassFn)] = &[
 
 type ProgramPassFn = fn(&mut IrProgram) -> u32;
 
-/// Program-level passes (cross-world), run at round start. Empty until the
-/// passes land. `inline` splices small callees into their call sites;
-/// `outline` (default-OFF, gated by [`OptOptions::outline`]) is its inverse.
-const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[];
+/// Program-level passes (cross-world), run at round start. `inline` splices
+/// small full-passthrough leaf callees into their call sites; `outline`
+/// (default-OFF, gated by [`OptOptions::outline`]) is its inverse — it hoists
+/// repeated exit-free subgraphs into a shared routine. `inline` runs FIRST so
+/// its splices settle before `outline` looks for sharing, and the two size
+/// thresholds are disjoint (outline.rs states both) so a hoisted routine is
+/// never small enough for `inline` to immediately splice back.
+const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] =
+    &[("inline", inline::run), ("outline", outline::run)];
 
 const MAX_ROUNDS: u32 = 10;
 
@@ -292,6 +300,8 @@ mod tests {
         assert_eq!(
             pass_names(),
             vec![
+                "inline",
+                "outline",
                 "jump-threading",
                 "tail-call",
                 "tail-merge",
