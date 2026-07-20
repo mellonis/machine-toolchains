@@ -178,8 +178,10 @@ e.tmc:9:41: lint: identity pair `0 -> 0` is redundant — an identity mapping al
 ### binding-product-threshold
 
 A rule whose range cells expand to a large cartesian product of match
-rows. Each cell contributes one row per in-alphabet member of its range;
-a wildcard or a concrete single contributes one. Past the expander's own
+rows. Despite the name, this has nothing to do with a `call`'s or a
+`bind`'s bindings — what it measures is one rule's own pattern. Each
+cell contributes one row per in-alphabet member of its range; a wildcard
+or a concrete single contributes one. Past the expander's own
 cutoff (256 rows) the rule is reported, because a single source line
 quietly becoming hundreds of emitted rows is worth knowing about before
 it shows up as image size.

@@ -122,7 +122,7 @@ to that token's column:
 ```
 [*] -> call aRatherLongRoutineNameHere(
          someTapeName = someTapeName,
-         done = return
+         anotherTapeName = scratch
        ) then fin;
 ```
 
