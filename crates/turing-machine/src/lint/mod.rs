@@ -106,6 +106,8 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-graft-instance", rules::unused_graft_instance::check),
     ("deprecated-call", rules::deprecated_call::check),
     ("dead-rule", rules::dead_rule::check),
+    ("redundant-identity-pairs", rules::redundant_identity_pairs::check),
+    ("binding-product-threshold", rules::binding_product_threshold::check),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the

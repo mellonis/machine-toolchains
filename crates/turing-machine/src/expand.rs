@@ -440,8 +440,10 @@ fn splice_state(
 // alternative. Product over 256 warns.
 // ---------------------------------------------------------------------------
 
-/// The product-count above which a rule's expansion warns.
-const PRODUCT_THRESHOLD: usize = 256;
+/// The product-count above which a rule's expansion warns. Shared with the
+/// `.tmc` lint's `binding-product-threshold` rule, the source-level mirror of
+/// this same warning, so the two agree on the cutoff.
+pub(crate) const PRODUCT_THRESHOLD: usize = 256;
 
 /// One tape's resolution context: the inverse lookup (glyph → index).
 struct TapeInfo {
