@@ -108,6 +108,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("dead-rule", rules::dead_rule::check),
     ("redundant-identity-pairs", rules::redundant_identity_pairs::check),
     ("binding-product-threshold", rules::binding_product_threshold::check),
+    ("writes-through-collapse", rules::writes_through_collapse::check),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the

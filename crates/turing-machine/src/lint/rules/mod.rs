@@ -13,3 +13,4 @@ pub(crate) mod unused_graft_instance;
 pub(crate) mod unused_graph;
 pub(crate) mod unused_import;
 pub(crate) mod unused_routine;
+pub(crate) mod writes_through_collapse;
