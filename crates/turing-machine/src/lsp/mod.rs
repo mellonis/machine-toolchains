@@ -47,6 +47,8 @@ use crate::parser::{Doc, Program};
 
 mod complete;
 mod context;
+#[cfg(test)]
+mod e2e;
 mod navigate;
 mod quickfix;
 mod roster;

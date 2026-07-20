@@ -678,6 +678,7 @@ mod tests {
                 "ir",
                 "lint",
                 "fmt",
+                "lsp",
                 "completions"
             ]
         );
