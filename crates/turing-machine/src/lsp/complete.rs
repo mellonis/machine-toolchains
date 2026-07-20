@@ -59,7 +59,8 @@ fn candidates(cursor: &Cursor, roster: Option<&Roster>) -> Vec<Candidate> {
             keywords(&words, span)
         }
         Context::AlphabetRef => match roster {
-            Some(roster) => named(
+            Some(roster) => named_decls(
+                roster,
                 roster.alphabet_names(),
                 CandidateKind::Module,
                 "alphabet",
@@ -203,15 +204,23 @@ fn transition_targets(cursor: &Cursor, roster: Option<&Roster>, span: Span) -> V
 /// right.
 fn target_names(kind: CallKind, cursor: &Cursor, roster: &Roster, span: Span) -> Vec<Candidate> {
     match kind {
-        CallKind::Graft => named(roster.graph_names(), CandidateKind::Function, "graph", span),
-        CallKind::Bind => named(
+        CallKind::Graft => named_decls(
+            roster,
+            roster.graph_names(),
+            CandidateKind::Function,
+            "graph",
+            span,
+        ),
+        CallKind::Bind => named_decls(
+            roster,
             roster.routine_names(),
             CandidateKind::Function,
             "routine",
             span,
         ),
         CallKind::Call => {
-            let mut out = named(
+            let mut out = named_decls(
+                roster,
                 roster.routine_names(),
                 CandidateKind::Function,
                 "routine",
@@ -320,7 +329,7 @@ fn importable(roster: &Roster, span: Span) -> Vec<Candidate> {
         // therefore drops them — which is what a `use` path wants, since
         // it names full paths and re-importing an alias is not one.
         if roster.has_alphabet(&name) {
-            out.push(one(name, CandidateKind::Module, "alphabet", span));
+            out.push(decl(roster, name, CandidateKind::Module, "alphabet", span));
         }
     }
     for (name, world) in &roster.worlds {
@@ -329,7 +338,13 @@ fn importable(roster: &Roster, span: Span) -> Vec<Candidate> {
             WorldKind::Graph => "graph",
             WorldKind::Machine => continue,
         };
-        out.push(one(name.clone(), CandidateKind::Function, detail, span));
+        out.push(decl(
+            roster,
+            name.clone(),
+            CandidateKind::Function,
+            detail,
+            span,
+        ));
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out
@@ -357,6 +372,32 @@ fn literal(text: &str, detail: &str, span: Span) -> Candidate {
         insert_text: text.to_string(),
         detail: Some(detail.to_string()),
         deprecated: false,
+    }
+}
+
+/// Declaration-name candidates: [`named`], plus each name's own deprecation
+/// tag. Only DECLARATIONS can be deprecated — routines, graphs, alphabets —
+/// so the lookup lives at those call sites rather than inside [`one`], which
+/// also serves states, graft instances and bind instances (names that carry no
+/// doc of their own and would silently borrow a same-spelled declaration's).
+fn named_decls(
+    roster: &Roster,
+    names: Vec<String>,
+    kind: CandidateKind,
+    detail: &str,
+    span: Span,
+) -> Vec<Candidate> {
+    names
+        .into_iter()
+        .map(|name| decl(roster, name, kind, detail, span))
+        .collect()
+}
+
+/// One declaration-name candidate, tagged from the roster.
+fn decl(roster: &Roster, name: String, kind: CandidateKind, detail: &str, span: Span) -> Candidate {
+    Candidate {
+        deprecated: roster.is_deprecated(&name),
+        ..one(name, kind, detail, span)
     }
 }
 

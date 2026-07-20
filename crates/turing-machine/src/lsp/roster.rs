@@ -9,7 +9,7 @@
 //! NAMES and GLYPHS can ever be one edit old; nothing positional is
 //! retained.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::compiler::{Resolved, WorldKind, full_name};
 use crate::parser::{AlphabetElem, Program, SymLit};
@@ -125,6 +125,13 @@ pub(crate) struct Roster {
     pub(crate) graphs: Vec<String>,
     /// `use` bindings: the bare name a path binds → its full path.
     pub(crate) imports: Vec<(String, String)>,
+    /// Mangled names of declarations carrying a `! [deprecated]` doc line —
+    /// routines, graphs and alphabets alike, since `Resolved.docs` documents
+    /// all three. Kept here rather than read off the resolved module at
+    /// request time so a completion list stays correctly tagged under the
+    /// names-only staleness exception: a name that survives a failed
+    /// re-analysis keeps the deprecation it was distilled with.
+    pub(crate) deprecated: HashSet<String>,
 }
 
 impl Roster {
@@ -146,6 +153,12 @@ impl Roster {
                         .collect();
                     (name.clone(), entries)
                 })
+                .collect(),
+            deprecated: resolved
+                .docs
+                .iter()
+                .filter(|(_, doc)| doc.deprecated.is_some())
+                .map(|(name, _)| name.clone())
                 .collect(),
             ..Roster::default()
         };
@@ -242,6 +255,20 @@ impl Roster {
     /// True when the roster knows an alphabet by that mangled name.
     pub(crate) fn has_alphabet(&self, mangled: &str) -> bool {
         self.alphabets.contains_key(mangled)
+    }
+
+    /// True when the declaration named `written` carries a deprecation. The
+    /// name is taken as a completion candidate spells it — a mangled name, or
+    /// the bare spelling a `use` bound — which is exactly the two forms
+    /// [`Roster::with_import_aliases`] and [`Roster::alphabet_names`] offer.
+    /// Anything else (a state, a bind instance, a keyword) is simply absent
+    /// from the set and reads `false`.
+    pub(crate) fn is_deprecated(&self, written: &str) -> bool {
+        self.deprecated.contains(written)
+            || self
+                .imports
+                .iter()
+                .any(|(binding, full)| binding == written && self.deprecated.contains(full))
     }
 
     fn with_import_aliases(&self, mangled: &[String]) -> Vec<String> {

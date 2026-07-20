@@ -475,6 +475,35 @@ machine {
 }
 
 #[test]
+fn a_call_target_candidate_carries_its_targets_deprecation() {
+    // The same declaration the diagnostic tags and hover spells out must
+    // arrive tagged in the completion list too — an editor that strikes
+    // through a deprecated name at the call site should strike it through in
+    // the list the call site was picked from.
+    let head = "\
+alphabet bits { '_', '1' }
+
+? still here, but on the way out.
+! [deprecated] use fresh instead.
+routine stale(tape t: bits) { entry state s { [*] -> return; } }
+routine fresh(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call ";
+    let tail = "(t = ctl) then main;\n  }\n}\n";
+    let got = complete_typing(head, "fresh", tail);
+    let tagged = |name: &str| {
+        got.iter()
+            .find(|c| c.label == name)
+            .unwrap_or_else(|| panic!("{name} missing from {:?}", labels(&got)))
+            .deprecated
+    };
+    assert!(tagged("stale"), "the deprecated routine should be tagged");
+    assert!(!tagged("fresh"), "the live routine should not be tagged");
+}
+
+#[test]
 fn a_graft_target_offers_graphs_only() {
     let head = "\
 alphabet bits { '_', '1' }
