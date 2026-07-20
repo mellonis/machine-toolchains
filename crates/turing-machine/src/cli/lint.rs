@@ -3,10 +3,11 @@
 //! 0 = clean, 1 = findings or errors anywhere. Mirrors `pmt lint`'s shape —
 //! dirs-and-files positionals, per-file `tmt.json` union, batch-keeps-going —
 //! with two `.tmc`-family differences: a `--warn` flag turns on the opt-in
-//! rules, and there is no `--fix` (no `.tmc` rule emits a machine-applicable
-//! fix yet — it arrives with the fix-bearing `.tma` route in a later task).
-//! `.tma` linting is not wired yet: a `.tma` PATH is recognized but reported
-//! as not-yet-implemented rather than silently skipped.
+//! rules, and there is no `--fix` (no `.tmc` or `.tma` rule emits a
+//! machine-applicable fix — the fix surface is the PM-1 crate's for now).
+//! Both languages lint by extension: `.tmc` through the `.tmc` rule table,
+//! `.tma` through core's five arch-agnostic asm rules plus the TM-1
+//! additions.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -24,9 +25,9 @@ USAGE: tmt lint PATH... [--exclude PATH]... [--allow CODE]... [--warn CODE]... [
 
 PATH is a .tmc or .tma file, or a directory; directories are walked
 recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). .tmc sources lint through the .tmc rule table.
-.tma linting arrives in a later tooling task — a .tma PATH is recognized
-but reported as not yet implemented.
+dot-entries skipped). .tmc sources lint through the .tmc rule table;
+.tma sources through the five arch-agnostic asm rules plus the TM-1
+additions (shadowed rows, retx exit bounds, unused rept vars).
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -120,14 +121,28 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
                 Err(e @ LintError::UnknownAllowCode(_)) => return Err(e.to_string()),
             },
             Some("tma") => {
-                // Recognized, not yet wired (the next tooling task lands it) —
-                // reported, not silently skipped. Batch continues.
-                any = true;
-                let _ = writeln!(
-                    stderr,
-                    "{}: error: .tma lint is not yet implemented",
-                    file.display()
-                );
+                // Cheap per-file re-check over the shared namespace: the flag
+                // allow was validated once up front, but a per-file `tmt.json`
+                // may have merged codes in. `lint_tma` does not validate allow
+                // itself (core's asm lint owns none of it), so this crate does
+                // — same as the `.tmc` route above and pmt's `.pma` route.
+                if let Err(e) = crate::lint::validate_allow(&effective_allow) {
+                    return Err(e.to_string());
+                }
+                match crate::lint::tma::lint_tma(&source, &effective_allow) {
+                    Ok(diags) => {
+                        if !diags.is_empty() {
+                            any = true;
+                        }
+                        render_findings(&mut stdout, file, &diags);
+                    }
+                    Err(e) => {
+                        // Per-file fatal (the assemble gate): report, keep
+                        // going (batch model, same shape as the `.tmc` route).
+                        any = true;
+                        render_fatal(&mut stderr, file, e.span, &e.kind, e.kind.code());
+                    }
+                }
             }
             _ => {
                 // Only reachable for an explicitly listed file — the directory

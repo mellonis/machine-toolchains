@@ -87,30 +87,76 @@ fn an_unknown_allow_code_aborts_the_whole_run() {
     assert!(err.contains("no-such"), "{err}");
 }
 
+/// A clean `.tma`: assembles, no rule fires.
+const TMA_CLEAN: &str = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section code
+.func main
+        stp
+";
+
+/// A dirty `.tma`: a partial match row `[1, 2, *]` shadowed by the earlier
+/// `[1, *, *]` — one shadowed-wildcard-rows finding.
+const TMA_DIRTY: &str = "\
+.routine main, tapes=3, alpha=(3, 3, 3)
+.section tables
+T0: .row [1, *, *]
+    .row [1, 2, *]
+    .row [*, *, *]
+.section code
+.func main
+        rd
+        mtc T0
+        stp
+";
+
 #[test]
-fn a_tma_path_is_recognized_but_not_yet_implemented() {
-    let dir = scratch("tma");
-    let f = write(&dir, "a.tma", "; placeholder\n");
+fn a_clean_tma_file_is_silent_and_exits_zero() {
+    let dir = scratch("tma-clean");
+    let f = write(&dir, "a.tma", TMA_CLEAN);
+    let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0, "stdout: {} stderr: {}", out.stdout, out.stderr);
+    assert!(out.stdout.is_empty(), "{}", out.stdout);
+}
+
+#[test]
+fn a_dirty_tma_file_reports_and_exits_one() {
+    let dir = scratch("tma-dirty");
+    let f = write(&dir, "a.tma", TMA_DIRTY);
     let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
     assert_eq!(out.code, 1);
     assert!(
-        out.stderr.contains("not yet implemented"),
-        "stderr: {}",
-        out.stderr
+        out.stdout.contains("can never match"),
+        "stdout: {}",
+        out.stdout
     );
 }
 
 #[test]
+fn a_tma_allow_flag_suppresses_a_tm_addition() {
+    let dir = scratch("tma-allow");
+    let f = write(&dir, "a.tma", TMA_DIRTY);
+    let out = execute(&args(&[
+        "lint",
+        f.to_str().unwrap(),
+        "--allow",
+        "shadowed-wildcard-rows",
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0, "stdout: {} stderr: {}", out.stdout, out.stderr);
+}
+
+#[test]
 fn a_directory_walks_both_extensions_and_keeps_going() {
-    // A dirty .tmc (finding) and a .tma (not-yet-implemented) under one dir —
-    // both are visited; exit 1.
+    // A dirty .tmc (finding) and a dirty .tma (finding) under one dir — both
+    // are visited and reported; exit 1.
     let dir = scratch("walk");
     write(&dir, "m.tmc", DIRTY);
-    write(&dir, "a.tma", "; placeholder\n");
+    write(&dir, "a.tma", TMA_DIRTY);
     let out = execute(&args(&["lint", dir.to_str().unwrap()])).unwrap();
     assert_eq!(out.code, 1);
     assert!(out.stdout.contains("leftover 'debugger'"), "{}", out.stdout);
-    assert!(out.stderr.contains("not yet implemented"), "{}", out.stderr);
+    assert!(out.stdout.contains("can never match"), "{}", out.stdout);
 }
 
 #[test]
