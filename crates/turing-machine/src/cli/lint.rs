@@ -165,10 +165,9 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
 
 /// Walk one PATH argument. Returns how many `.tmc`/`.tma` files the PATH
 /// yielded BEFORE exclusion (zero = the caller's typo error); excluded files
-/// are counted but not collected. Mirrors `pmt lint`'s walk; `.tma` is
-/// collected so the directory sweep is complete even though its lint is not
-/// wired yet.
-fn collect_sources(
+/// are counted but not collected. Mirrors `pmt lint`'s walk. Shared with
+/// `tmt fmt` (`super::fmt`), which walks the same `.tmc`/`.tma` set.
+pub(super) fn collect_sources(
     path: &Path,
     excludes: &[PathBuf],
     out: &mut Vec<PathBuf>,
@@ -219,7 +218,8 @@ fn collect_sources(
 }
 
 /// The per-file fatal line: `{file}:{line}:{col}: error: {kind} [{code}]`.
-fn render_fatal(
+/// Shared with `tmt fmt` (`super::fmt`) for its per-file parse fatals.
+pub(super) fn render_fatal(
     stderr: &mut String,
     file: &Path,
     span: Span,

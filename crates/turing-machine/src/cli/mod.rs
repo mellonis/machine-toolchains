@@ -11,6 +11,7 @@
 //! more plainly than a premature abstraction.
 
 mod build;
+mod fmt;
 mod inspect;
 mod lint;
 mod run;
@@ -47,7 +48,8 @@ SUBCOMMANDS:
   run      execute a .tmx on a multi-tape .tmt block
   tape     new/set/show .tmt tape-block snapshots
   ir       render --emit-ir JSON (ir graph -> Mermaid)
-  lint     hygiene findings over .tmc sources (.tma arrives later)
+  lint     hygiene findings over .tmc and .tma sources
+  fmt      canonical formatting for .tma sources (.tmc arrives later)
 
 Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 ";
@@ -82,6 +84,7 @@ pub fn execute_with(
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
         Some("lint") => lint::lint(&args[1..]),
+        Some("fmt") => fmt::fmt(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
 }
