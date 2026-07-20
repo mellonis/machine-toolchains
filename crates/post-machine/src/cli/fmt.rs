@@ -1,6 +1,5 @@
-//! `pmt fmt` (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`,
-//! "CLI: pmt fmt" — the durable `docs/cli.md` section lands with the
-//! docs task): thin renderer over the fmt library. The library
+//! `pmt fmt` (`docs/cli.md (pmt fmt)`): thin renderer over the fmt
+//! library. The library
 //! [`format`](crate::fmt::format) stays print-free (`crate::fmt`'s own
 //! doc comment) — this module is the ONLY place that prints or touches
 //! the filesystem for the fmt surface, same discipline as

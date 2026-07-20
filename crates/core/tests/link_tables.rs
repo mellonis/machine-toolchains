@@ -814,7 +814,7 @@ fn a_site_reached_under_two_contexts_has_a_row_dependent_column() {
     assert_eq!(region.compose[2][1], 0);
 }
 
-/// A full-arity identity binding collapses to a plain call (§5.6): no framed
+/// A full-arity identity binding collapses to a plain call: no framed
 /// site, no frames region — the callee inherits the caller's frame.
 #[test]
 fn a_full_identity_binding_collapses_to_a_plain_call() {
@@ -840,8 +840,8 @@ fn a_full_identity_binding_collapses_to_a_plain_call() {
 }
 
 /// A projecting identity binding (fewer tapes than the caller) is NOT a
-/// pass-through and stays a framed call — the projection guard on the §5.6
-/// collapse rule (a 1-tape identity composite under a 2-tape caller).
+/// pass-through and stays a framed call — the projection guard on the
+/// identity-collapse rule (a 1-tape identity composite under a 2-tape caller).
 #[test]
 fn a_projecting_identity_binding_stays_a_framed_call() {
     let src = "\
@@ -1100,7 +1100,7 @@ fn mono_dedups_equal_composites() {
 }
 
 /// A full-arity identity binding collapses to a plain call into the ORIGINAL
-/// routine — no stamp, no frames (§5.6).
+/// routine — no stamp, no frames.
 #[test]
 fn an_identity_binding_under_mono_calls_the_original() {
     let src = "\

@@ -142,9 +142,8 @@ const SIMPLE: &[&str] = &[
     // statements (spec "Imports" — order and grouping preserved
     // verbatim).
     "use a, b::c as d;\nmain() { @a(); @d(); }",
-    // Task 8a: the literal `export` keyword on `main`, preserved verbatim
-    // even though `main`'s auto-export makes it semantically redundant
-    // (fmt design doc §D).
+    // The literal `export` keyword on `main`, preserved verbatim
+    // even though `main`'s auto-export makes it semantically redundant.
     "export main() { right; }",
     // Task 8b §B: spaced-form normalization — a spaced label (`1 :
     // right`) normalizes to tight (`1: right`) because the CST never

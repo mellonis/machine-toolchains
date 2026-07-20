@@ -270,7 +270,7 @@ fn value_action(hint: &ValueHint) -> String {
 }
 
 /// The plain extension-filtered glob action, with no directory
-/// alternative — every non-`dirs` entry (design doc §6.1).
+/// alternative — every non-`dirs` entry.
 fn glob_action(extensions: &[String]) -> String {
     match extensions {
         [] => "_files".to_string(),
@@ -282,8 +282,8 @@ fn glob_action(extensions: &[String]) -> String {
 /// `dirs: true` (`pmt lint`'s positional and its `--exclude`) also
 /// accepts a directory as a complete answer, not just a waypoint on the
 /// way to a matching file — plain `_files -g` lets you traverse through
-/// directories but never offers one as the finished argument. Per the
-/// design doc (§6.1), this renders as a zsh `_alternative` combining the
+/// directories but never offers one as the finished argument. So this
+/// renders as a zsh `_alternative` combining the
 /// extension-filtered glob with a bare directory completion
 /// (`_files -/`). The glob action is embedded as an `_alternative`
 /// `tag:description:action` sub-spec, so its own double quotes are
@@ -441,7 +441,7 @@ mod tests {
         let script = render(&registry());
         // `lint` and `fmt` each have a positional and an `--exclude` that
         // both accept a `.pmc`/`.pma` file OR a directory as a complete
-        // answer (design doc §6.1) — 2 commands x 2 sites = 4 occurrences.
+        // answer — 2 commands x 2 sites = 4 occurrences.
         let expected = "_alternative \"files:file:_files -g \\\"*.(pmc|pma)\\\"\" \"dirs:directory:_files -/\"";
         assert!(
             script.contains(expected),

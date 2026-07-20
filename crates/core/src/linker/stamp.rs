@@ -136,7 +136,7 @@ pub(super) fn lower_mono<'a>(
 
     // Seed the stamp closure from every non-collapse bound site reachable at
     // the machine's own frame; collapse sites lower to a plain call into the
-    // original routine (§5.6), never a stamp.
+    // original routine (the identity collapse), never a stamp.
     let mut seeds: Vec<(usize, u32, usize, &BoundCall)> = Vec::new();
     for (fi, in_world) in id_world.iter().enumerate() {
         if !in_world {

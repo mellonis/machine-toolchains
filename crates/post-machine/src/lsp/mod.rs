@@ -312,8 +312,7 @@ fn merged_diagnostics(state: &DocState) -> Vec<ServiceDiagnostic> {
 /// line, then each attention prose line as its own `note: ` line — a
 /// blank line between the three GROUPS (paragraphs / deprecated /
 /// attention), never markdown. `None` when the doc has nothing to show
-/// at all — the CONTENT-EMPTINESS gate (docs/superpowers/specs/
-/// 2026-07-12-pmc-doc-lines-attributes-design.md): an empty-`?`-only
+/// at all — the CONTENT-EMPTINESS gate: an empty-`?`-only
 /// run reduces to `Some(FnDoc)` with every field empty, and `doc.is_some()`
 /// alone is NOT sufficient to show a hover — that must never surface as
 /// a blank popup.
@@ -1655,7 +1654,7 @@ export main() {
         assert_eq!(edits[0].new_text, canonical);
 
         // completion on the .pma doc: the real pma service's
-        // operand-hint `detail` (the #25 fold-in) reaches the wire —
+        // operand-hint `detail` reaches the wire —
         // the mapping itself is proven generically in core against a
         // fake service; this is the one spot-check that the real
         // service's candidates carry it through the real dual-service

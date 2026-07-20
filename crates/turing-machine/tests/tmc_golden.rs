@@ -14,7 +14,7 @@
 //! A.5 is exercised THREE WAYS — a happy path plus the two holey-map trap
 //! seeds (`'a'` / `'b'` under the call, both `unmapped-read`) — across ALL
 //! THREE `--call-mech` modes. The compiler's object is mode-independent: one
-//! `.tmo`, three links, identical observable behaviour (spec §11.1).
+//! `.tmo`, three links, identical observable behaviour.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -117,6 +117,11 @@ impl<'a> DebugSession<'a> {
     /// resolved-but-not-yet-loaded composite index — FR is set from
     /// `compose[FR][site]` before its descriptor finishes loading, and the
     /// trap freezes state there. Harmless: it is simply the FR at trap time.
+    ///
+    /// Resolving that composite index to its per-tape binding maps or
+    /// canonical label is a debugger-tooling concern layered on the
+    /// `.pmx.map` sidecar, not a VM accessor — deliberately deferred until a
+    /// debugger surfaces it.
     pub fn fr(&self) -> u32 {
         self.core.fr()
     }

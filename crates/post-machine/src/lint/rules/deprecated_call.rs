@@ -1,8 +1,7 @@
 //! `deprecated-call` (docs/lint.md): a call whose resolved target
 //! carries a `! [deprecated]` doc line. `flatten` already mangles a
 //! call's `Item::Call::name` onto the same fully-qualified form it keys
-//! `ctx.docs` by (`docs/superpowers/specs/
-//! 2026-07-12-pmc-doc-lines-attributes-design.md`), so this rule is a
+//! `ctx.docs` by, so this rule is a
 //! direct map lookup — no separate resolution walk. Report-only: there
 //! is no mechanical fix for "stop calling this function". Recursion is
 //! not exempt — a deprecated function calling itself is flagged like any

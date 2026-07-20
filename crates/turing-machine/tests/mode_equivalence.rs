@@ -190,8 +190,8 @@ fn cell_at(snap: &TapeSnapshot, pos: i64) -> u8 {
 /// markers) declaratively calls a bare-representation callee (3-symbol: 0 blank,
 /// 1/2 data) through a HOLEY ONE-WAY binding. The two markers collapse onto the
 /// callee's blank (`3=>0, 4=>0`) — the canonical "run a bare routine inside a
-/// delimited region, markers read as blank, left intact" shape from the spec's
-/// §5. The callee walks right transforming data (1→2, 2→1) until it reads a
+/// delimited region, markers read as blank, left intact" shape. The callee
+/// walks right transforming data (1→2, 2→1) until it reads a
 /// blank (a marker or a real blank), then returns.
 const CROSS_ALPHABET: &str = "\
 .routine main, tapes=1, alpha=(5)
@@ -645,7 +645,7 @@ fn every_program_relinks_byte_identically_in_every_mode() {
     }
 }
 
-// ── depth-independence (§5.2): O(1) frame overhead per composed call ─────────
+// ── depth-independence: O(1) frame overhead per composed call ────────────────
 
 /// A pure forwarder ladder: `main → … → S`, each level a `call.m` under a
 /// 4-cycle permutation of the 5-symbol alphabet (`(1 2 3 4)`). The 4-cycle has

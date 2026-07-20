@@ -578,9 +578,7 @@ mod tests {
 
     /// `undefined-label`'s span is the REFERENCE's own token — the `goto`
     /// target, a builtin/call successor's number, or a check arm's number
-    /// — not the old degenerate `Span::point(line, 1)`
-    /// (docs/superpowers/plans/2026-07-10-lsp-plan2-pmc-service.md, Task
-    /// 2; one of the plan's two sanctioned output changes).
+    /// — not the old degenerate `Span::point(line, 1)`.
     #[test]
     fn undefined_labels_error_with_the_reference_span_not_column_one() {
         let e = lower(&parse(&lex("f() { goto 9; }").unwrap()).unwrap()).unwrap_err();

@@ -503,7 +503,7 @@ pub(crate) fn compose(
 /// True when the composite is the identity endomorphism on its own tapes:
 /// tape `k` -> physical `k`, identity maps, no holes. This inspects only the
 /// SPARSE maps — it says nothing about the target alphabet's width, so
-/// [`is_full_passthrough`] (not this) is the authority for §5.6's collapse.
+/// [`is_full_passthrough`] (not this) is the authority for the identity collapse.
 pub(crate) fn is_identity(c: &Composite) -> bool {
     c.tapes
         .iter()
@@ -512,8 +512,9 @@ pub(crate) fn is_identity(c: &Composite) -> bool {
 }
 
 /// True when the composite is a genuine full pass-through into `callee` and
-/// may be lowered to a plain `call` (§5.6 identity collapse): the callee
-/// inherits the active frame and reads/writes the domain's symbols directly,
+/// may be lowered to a plain `call` — the identity collapse described in
+/// docs/formats.md (the composition engine). The callee inherits the active
+/// frame and reads/writes the domain's symbols directly,
 /// with no translation and no trap ever owed.
 ///
 /// Beyond [`is_identity`] (identity placement and identity sparse maps —

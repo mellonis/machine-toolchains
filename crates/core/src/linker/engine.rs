@@ -16,7 +16,7 @@
 //! - keeps ONE generic copy of each routine (the code is
 //!   context-independent — the context lives in the compose table); every
 //!   bound-call site becomes a framed call, or a plain call when the
-//!   binding is a full pass-through (§5.6 identity collapse);
+//!   binding is a full pass-through (the identity collapse);
 //! - enumerates the finite closure of `(routine, composite)` pairs reached
 //!   from the entry at identity — following plain calls (context
 //!   preserved) and bound calls (context composed) — deterministically
@@ -118,7 +118,7 @@ pub(super) enum SiteKind<'a> {
     /// hole is `addr + 1`) — the mono stamper keys its retargeting by it.
     Plain { addr: u32, callee: usize },
     /// A declarative bound call. `collapse` marks a full pass-through that
-    /// lowers to a plain call (§5.6).
+    /// lowers to a plain call (the identity collapse).
     Bound {
         addr: u32,
         callee: usize,
@@ -544,7 +544,7 @@ pub(super) fn scan_sites<'a>(
                     let callee_sig = routine_sig(order, callee)?;
                     let composite =
                         validate_binding(caller_sig, callee_sig, &order[callee].name, record)?;
-                    // §5.6 collapse (handoff): a site lowers to a plain call
+                    // Identity collapse (handoff): a site lowers to a plain call
                     // ONLY when the binding, absolutized at the caller's own
                     // identity, is a genuine full pass-through of the caller's
                     // tapes into the callee — identity placement, identity
@@ -594,7 +594,7 @@ pub(super) fn scan_sites<'a>(
 
 /// Validate one binding once (docs/formats.md (bound calls)) and return its
 /// composite absolutized at the caller's own identity — the reference used
-/// for the §5.6 collapse decision. Core legality comes through `absolutize`
+/// for the identity-collapse decision. Core legality comes through `absolutize`
 /// (arity, caller-tape range, callee-symbol range, blank pinning,
 /// per-direction conflict), plus the two checks the algebra leaves to the
 /// linker: the caller symbol range and the equal-size bijection completion.
@@ -816,7 +816,7 @@ fn rewrite_blob<'a>(
                     .expect("mnemonic came from a successful decode");
                 if let Some(&(callee, collapse)) = bound_at.get(&addr) {
                     if collapse {
-                        // §5.6 collapse: keep the 5-byte call, promote the
+                        // Identity collapse: keep the 5-byte call, promote the
                         // bound hole to a relocation — layout relaxes it.
                         new_blob.extend_from_slice(&orig[addr as usize..(addr + len) as usize]);
                         new_calls.push((new_addr + 1, callee));
@@ -1165,7 +1165,7 @@ mod tests {
         assert_eq!(composite.tapes.len(), 1);
     }
 
-    /// The §5.6 collapse decision is cardinality-aware. An all-identity
+    /// The identity-collapse decision is cardinality-aware. An all-identity
     /// binding whose callee alphabet EQUALS the caller's is a genuine full
     /// pass-through and collapses; the SAME binding into a NARROWER callee
     /// hides a read hole (caller symbols past the callee's cardinality have no

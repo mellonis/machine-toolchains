@@ -263,6 +263,9 @@ impl MapFile {
 
 /// Structured account of what the linker did — the CLI renders it under
 /// `-v` (docs/cli.md); libraries never print (library-first principle).
+/// The counters are image-level aggregates (their meanings are tabulated in
+/// docs/formats.md (the composition engine)); a per-routine breakdown is
+/// deferred until a consumer needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkReport {
     /// Defined but unreachable, sorted (see `resolve::Resolved::dropped`).

@@ -885,6 +885,11 @@ pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
         ..
     } = ctx;
     unused_import_warnings(&program, &imports_used, &mut diagnostics);
+    // Only unused-import is raised here (unused-routine is raised during IR
+    // lowering). The sibling unused-graph / unused-binding /
+    // unused-graft-instance warnings of the same hygiene family are
+    // deliberately deferred to the TM lint layer rather than shipped as
+    // compiler diagnostics.
     Ok(Analysis {
         tokens,
         program,

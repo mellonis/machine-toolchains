@@ -1,6 +1,5 @@
-//! `.pmc` pretty-printer
-//! (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "Formatting
-//! model"). Thin renderer, same discipline as [`crate::compile`] and
+//! `.pmc` pretty-printer (`docs/fmt.md`). Thin renderer, same discipline
+//! as [`crate::compile`] and
 //! [`crate::lint`]: [`format`] returns a `Result` and never prints — the
 //! future `cli/fmt.rs` is the only place that renders errors or touches
 //! the filesystem.
@@ -271,8 +270,7 @@ fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
 /// same shape, just one indent level deeper and (per the grammar) never
 /// `has_export`.
 ///
-/// **Export keyword, verbatim** (fmt design doc §D — resolves what was
-/// Task-4's "Known CST information-loss gap"): `f.has_export` records
+/// **Export keyword, verbatim**: `f.has_export` records
 /// whether the author literally wrote `export`, independent of
 /// `f.exported` (which additionally folds in top-level `main`'s
 /// auto-export — `parser.rs`'s `f.exported = exported || (ns.is_empty()
@@ -1949,7 +1947,7 @@ mod tests {
         assert_eq!(twice, once, "not idempotent for {src:?}");
     }
 
-    // -- #19 review carry-over: a leading-zero spelling survives outside
+    // A leading-zero spelling survives outside
     // a label DEFINITION too — a CHECK ARM and a SUCCESSOR are both
     // number-carrying operands rendered through `render_check_arm`/
     // `render_successor`, the same written-text discipline pinned for
@@ -1978,9 +1976,7 @@ mod tests {
         );
     }
 
-    // -- fmt build Task 1: doc/attention runs
-    // (`docs/superpowers/specs/2026-07-12-pmc-doc-lines-attributes-\
-    // design.md`, "fmt") -----------------------------------------------
+    // -- doc/attention runs (`docs/fmt.md`, doc and attention runs) ------
     //
     // Printing rules under test: a run's own lines print immediately
     // above the bound declaration, at the declaration's OWN indent

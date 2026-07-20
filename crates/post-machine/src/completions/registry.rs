@@ -324,8 +324,7 @@ fn lint_spec() -> CommandSpec {
 /// Mirrors [`lint_spec`]: same positional shape (`.pmc`/`.pma` files or
 /// dirs, `--exclude` repeatable), plus `--check` and `--lang` (docs/cli.md
 /// (pmt fmt)). The `-` stdin form isn't a registry entry — it's a single
-/// bare token, not a completable path shape
-/// (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "CLI: pmt fmt").
+/// bare token, not a completable path shape.
 fn fmt_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["fmt"]),

@@ -1,14 +1,11 @@
-//! Lossless concrete syntax tree (CST) node types for `.pmc`
-//! (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "Architecture:
-//! one unified lossless CST").
+//! Lossless concrete syntax tree (CST) node types for `.pmc` — one unified
+//! lossless CST for the parser, formatter, and LSP.
 //!
 //! **Types only — nothing here is built or consumed yet.** A future
 //! `parse_cst` produces a [`Cst`] from a `WithComments` token stream, and
 //! a future `lower_cst` copies it into the existing [`crate::parser::Program`]
 //! AST (the compiler's and lint's unchanged path); the pretty-printer
-//! walks the [`Cst`] directly. Both are out of scope for this module —
-//! see the design doc's "Architecture" section for the C1 lower-copy
-//! split.
+//! walks the [`Cst`] directly. Both are out of scope for this module.
 //!
 //! # The lossless contract
 //!
@@ -121,9 +118,8 @@ pub enum TopKind {
     Function(FunctionCst),
 }
 
-/// A same-line trailing comment plus its SOURCE column
-/// (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "Trailing
-/// comments"). The column is needed to detect whether the author aligned
+/// A same-line trailing comment plus its SOURCE column (`docs/fmt.md`,
+/// comments). The column is needed to detect whether the author aligned
 /// a RUN of trailing `//`s in source — it plays no role in the AST:
 /// `lower_cst` ignores this whole type, same as it ignores [`Comment`]
 /// itself.
@@ -215,8 +211,8 @@ pub struct FunctionCst {
     /// Column of the name token.
     pub col: u32,
     /// Extent: the header's first token → the closing `}`'s end — the
-    /// `export` keyword's start when present (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`
-    /// §declaration header lists `export name() {` as a header instance),
+    /// `export` keyword's start when present (`export name() {` is one
+    /// header form),
     /// otherwise the name token's start. A nested function is never
     /// exported, so its extent always starts at its name token. For
     /// hit-testing and document-symbol ranges.
@@ -341,8 +337,8 @@ pub struct CommaItem {
     pub item: Item,
     pub leading: Vec<Comment>,
     /// Whether the author put a newline before this item, inside its
-    /// comma group (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`,
-    /// "Comma-group layout") — the first entry's is always `false`. Set
+    /// comma group (`docs/fmt.md`, comma groups) — the first entry's is
+    /// always `false`. Set
     /// from token line numbers (item K's first token on a later line than
     /// item K-1's last token), not from comment positions.
     /// [`crate::parser::lower_cst`] drops it too, like `leading`.

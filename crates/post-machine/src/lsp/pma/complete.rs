@@ -131,8 +131,8 @@ fn mk_candidate_with_detail(
     }
 }
 
-/// The operand-hint `detail` for a mnemonic candidate (the #25 fold-in;
-/// design spec, Candidate-reshape paragraph), derived from the entry's
+/// The operand-hint `detail` for a mnemonic candidate, derived from the
+/// entry's
 /// `OperandKind`/`Flow` alone — ONE mapping, so a future mnemonic added
 /// to `pm1_syntax()` gets a hint automatically rather than needing a
 /// per-mnemonic case here. `None`-operand entries (`nop`, `stp`, `ret`,

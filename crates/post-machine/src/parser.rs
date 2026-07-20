@@ -89,8 +89,8 @@ pub struct Function {
     /// full symbol joins namespaces with `::` and nesting with `.` —
     /// `std::api.helper`.
     pub ns: Vec<String>,
-    /// The bound `?`/`!` run (`docs/superpowers/specs/
-    /// 2026-07-12-pmc-doc-lines-attributes-design.md`), reduced from
+    /// The bound `?`/`!` run — `docs/language.md (doc lines and attention
+    /// lines)` — reduced from
     /// [`crate::cst::FunctionCst::doc_run`] by [`lower_cst`]. `None` for
     /// an undocumented function (an empty `doc_run`); every compiler
     /// pass past `lower_cst` ignores this field — `flatten` copies it
@@ -100,8 +100,8 @@ pub struct Function {
     pub doc: Option<FnDoc>,
 }
 
-/// One function's reduced doc/attention run (docs/superpowers/specs/
-/// 2026-07-12-pmc-doc-lines-attributes-design.md): paragraphs from `?`
+/// One function's reduced doc/attention run (`docs/language.md`, doc lines
+/// and attention lines): paragraphs from `?`
 /// lines, bare-prose `!` lines, and the `[deprecated]` attribute's
 /// message, with spans and raw sigil/attribute text dropped — a future
 /// hover/lint consumer reads this shape, not the CST's.
@@ -269,9 +269,8 @@ fn describe(kind: &TokenKind) -> String {
     }
 }
 
-/// tokens → AST, via the lossless CST
-/// (docs/superpowers/specs/2026-07-07-pmc-fmt-design.md, "Architecture:
-/// one unified lossless CST"). The compiler consumes the `Program`; fmt
+/// tokens → AST, via the one unified lossless CST. The compiler consumes
+/// the `Program`; fmt
 /// reads the CST directly through [`parse_cst`]. The signature is
 /// unchanged from the pre-C1 parser — verified byte-identical, for the
 /// whole CST migration, against a frozen pre-C1 reference
@@ -464,9 +463,8 @@ struct CommentAt {
     comment: Comment,
     /// The comment's own start line (for `blank_before` gaps).
     line: u32,
-    /// The comment's own start column (`docs/superpowers/specs/
-    /// 2026-07-07-pmc-fmt-design.md`, "Trailing comments" — the
-    /// alignment rule's source-column detection; brief §A).
+    /// The comment's own start column (`docs/fmt.md`, comments) — the
+    /// trailing-comment alignment rule's source-column detection.
     col: u32,
     /// Number of significant tokens preceding this comment — the `pos`
     /// the significant-token walk is at when the comment is "pending".
@@ -992,8 +990,8 @@ impl Parser<'_> {
                         .span
                         .end,
                 };
-                // One TopItem for the whole grouped list (fmt design doc §C
-                // "Imports: grouping fix") — `blank_before` reads the `use`
+                // One TopItem for the whole grouped `use` list — `blank_before`
+                // reads the `use`
                 // keyword's own line, matching what the FIRST path would
                 // have reported under the old per-path scheme.
                 let blank_before = use_line > self.prev_end_line + 1;
@@ -1126,8 +1124,8 @@ impl Parser<'_> {
             // `cst.rs`'s `FunctionCst::span` doc. `doc_run` is empty
             // unless the loop above just collected and validated one.
             let mut f = self.function(export_start, doc_run)?;
-            // The literal keyword presence (fmt design doc §D "Export
-            // keyword verbatim") — unlike `exported` below, this does NOT
+            // The literal keyword presence — unlike `exported` below, this
+            // does NOT
             // fold in `main`'s auto-export.
             f.has_export = exported;
             // Only the un-namespaced top-level `main` auto-exports (and is
@@ -2193,9 +2191,8 @@ main() {
         assert_eq!((span.start.col, span.end.col), (16, 27)); // "check(1, !)"
     }
 
-    /// docs/superpowers/plans/2026-07-10-lsp-plan2-pmc-service.md (Task
-    /// 2): character-precise reference spans, exact `Span::new(...)`
-    /// values against the fixture's actual layout —
+    /// Character-precise reference spans: exact `Span::new(...)` values
+    /// against the fixture's actual layout —
     /// `f() { 1: right(2); check(1, !); goto 1; left, mark(3); }`.
     #[test]
     fn reference_spans_on_goto_check_and_builtin_successors() {
@@ -2687,9 +2684,8 @@ main() { right; }
         assert_eq!((e.span.start.line, e.span.start.col), (1, 4));
     }
 
-    /// WARM-UP pin (T2 review carry-over): `parse_attr`'s column math
-    /// (`docs/superpowers/specs/2026-07-12-pmc-doc-lines-attributes-design.md`)
-    /// is char-counted throughout (`Token::len`, `text.chars().count()`),
+    /// `parse_attr`'s column math is char-counted throughout
+    /// (`Token::len`, `text.chars().count()`),
     /// never byte-counted — a non-ASCII payload AFTER the attribute
     /// (`café`, where `é` is one `char` but two UTF-8 bytes) must not
     /// perturb the attribute name's own span, since nothing about
