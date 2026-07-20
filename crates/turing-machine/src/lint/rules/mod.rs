@@ -8,6 +8,7 @@ pub(crate) mod dead_rule;
 pub(crate) mod deprecated_call;
 pub(crate) mod leftover_debugger;
 pub(crate) mod redundant_identity_pairs;
+pub(crate) mod state_may_trap;
 pub(crate) mod unused_binding;
 pub(crate) mod unused_graft_instance;
 pub(crate) mod unused_graph;

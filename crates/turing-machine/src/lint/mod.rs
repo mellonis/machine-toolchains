@@ -114,7 +114,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
 /// The opt-in rule table: off by default, run only when `--warn` names the
 /// code (the totality lints, deliberately noisy). In the known-code namespace
 /// (so a shared allow-list may still name one) but never run unless enabled.
-pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[];
+pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[("state-may-trap", rules::state_may_trap::check)];
 
 /// True when `code` names any rule in this crate's `.tmc` tables OR core's
 /// arch-agnostic asm rule table (`mtc_core::asm::lint::RULES`) — the shared
@@ -219,6 +219,8 @@ machine {
     #[test]
     fn validate_allow_accepts_known_codes_and_rejects_unknown_ones() {
         assert!(validate_allow(&["leftover-debugger".to_string()]).is_ok());
+        // The opt-in rule is a known code too (a shared allow-list may name it).
+        assert!(validate_allow(&["state-may-trap".to_string()]).is_ok());
         assert!(validate_allow(&[]).is_ok());
         let err = validate_allow(&["no-such-rule".to_string()]).unwrap_err();
         assert!(matches!(err, LintError::UnknownAllowCode(ref c) if c == "no-such-rule"));
