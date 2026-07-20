@@ -4,7 +4,7 @@ import {
   LanguageClient, LanguageClientOptions, ServerOptions,
 } from 'vscode-languageclient/node';
 
-// The oldest `tmt` this extension has been exercised against. A binary
+// The oldest `tmt` this extension targets as its tested floor. A binary
 // reporting older gets a warning, never a hard failure — the extension is
 // a thin client and an older server simply answers less. Bump this in the
 // same commit that raises the extension's own version whenever a newly

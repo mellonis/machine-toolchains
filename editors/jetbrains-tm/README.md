@@ -24,14 +24,18 @@ and a `.tma` file coexist in one session without perturbing each other.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.0. It has been tested against `tmt` 0.2.0; on
-  startup it runs `tmt --version` and shows a warning notification (not a
-  hard failure) if the binary reports something older, or an error
-  notification if the binary can't be found at all. The plugin's own
-  version number and the tested `tmt` version are independent numbers.
-- Built and verified against **LSP4IJ 0.20.1** on an IntelliJ Platform
-  2024.3 baseline (IntelliJ IDEA Community works — no Ultimate-only APIs
-  are used).
+- This plugin is version 0.1.0, targeting `tmt` 0.2.0 as its tested
+  floor: on startup it runs `tmt --version` and shows a warning
+  notification (not a hard failure) if the binary reports something
+  older, or an error notification if the binary can't be found at all.
+  The plugin's own version number and the `tmt` floor version are
+  independent numbers.
+- Built against **LSP4IJ 0.20.1** on an IntelliJ Platform 2024.3
+  baseline — the Gradle build resolves and compiles against both pinned
+  versions, which demonstrates API compatibility; the build target is
+  IntelliJ IDEA Community, so no Ultimate-only APIs are referenced. None
+  of this has been exercised in a running IDE yet — whether the plugin
+  actually loads and behaves correctly there is unobserved.
 
 This plugin and the PM-1 one (`editors/jetbrains-pm/`) are independent and
 can be installed side by side — they carry distinct plugin ids, claim
@@ -66,9 +70,10 @@ sideloaded plugin is installed from a local file, not from the Marketplace,
 so the IDE has no opportunity to resolve and auto-install a declared plugin
 dependency the way it would for a Marketplace install. Skipping this step
 leaves this plugin disabled with an unsatisfied-dependency error. The
-shipped build was verified against LSP4IJ 0.20.1; a newer 0.x/1.x release
-should work unless its own compatibility range excludes this plugin's
-IntelliJ Platform baseline (2024.3).
+shipped build was compiled against LSP4IJ 0.20.1 — a build-time
+compatibility check, not a runtime one; a newer 0.x/1.x release should
+work unless its own compatibility range excludes this plugin's IntelliJ
+Platform baseline (2024.3).
 
 ## Build and sideload the plugin
 
@@ -92,8 +97,10 @@ already have on disk without a separate install.)
 2. Pick `build/distributions/tmc-0.1.0.zip`.
 3. Restart the IDE when prompted.
 
-This works on Community editions — the plugin is built against the IntelliJ
-Platform Community baseline and uses no Ultimate-only APIs.
+The plugin is built against the IntelliJ Platform Community baseline and
+references no Ultimate-only APIs — a build-time fact, not a runtime one;
+whether it actually works on Community editions has not yet been
+observed in a running IDE.
 
 ## Settings
 

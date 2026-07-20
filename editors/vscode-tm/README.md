@@ -17,10 +17,10 @@ a `.tma` file coexist in one session without perturbing each other.
 
 - A `tmt` binary reachable on `PATH`, or pointed to with the `tmt.path`
   setting (below).
-- This extension is version 0.1.0. It has been tested against `tmt` 0.2.0;
-  on activation it runs `tmt --version` and shows a warning (not a hard
-  failure) if the binary reports something older. The extension's own
-  version number and the tested `tmt` version are independent numbers.
+- This extension is version 0.1.0, targeting `tmt` 0.2.0 as its tested
+  floor: on activation it runs `tmt --version` and shows a warning (not a
+  hard failure) if the binary reports something older. The extension's own
+  version number and the `tmt` floor version are independent numbers.
 
 ## Install the server
 

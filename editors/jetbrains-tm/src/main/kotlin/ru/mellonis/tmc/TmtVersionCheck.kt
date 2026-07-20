@@ -15,7 +15,7 @@ import java.util.concurrent.TimeoutException
 private const val NOTIFICATION_GROUP_ID = "ru.mellonis.tmc"
 
 /**
- * The oldest `tmt` this plugin has been exercised against. A binary
+ * The oldest `tmt` this plugin targets as its tested floor. A binary
  * reporting older gets a warning, never a hard failure — the plugin is a
  * thin client and an older server simply answers less. Bump this in the
  * same commit that raises the plugin's own version whenever a newly

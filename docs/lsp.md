@@ -300,10 +300,10 @@ args = ["lsp"]
 
 ### Editor shells
 
-This repository ships two ready-made editor integrations under
-`editors/`: a VS Code extension (`editors/vscode-pm/`) and a JetBrains
-plugin (`editors/jetbrains-pm/`), both thin shells over `pmt lsp` plus
-the standalone build/lint/format commands. Both are sideload-only —
+This repository ships a PM-1 editor integration pair under `editors/`:
+a VS Code extension (`editors/vscode-pm/`) and a JetBrains plugin
+(`editors/jetbrains-pm/`), both thin shells over `pmt lsp` plus the
+standalone build/lint/format commands. Both are sideload-only —
 built locally from source, with no marketplace listing — and each
 directory's `README.md` carries its own install, build, and sideload
 instructions plus a manual test checklist. The wiring above talks to
