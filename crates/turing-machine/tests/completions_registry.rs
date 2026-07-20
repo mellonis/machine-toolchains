@@ -83,10 +83,10 @@ fn parse_usage_subcommands(help: &str) -> Vec<String> {
 }
 
 /// The maintained expectation of `tmt`'s dispatched top-level surface.
-/// `lsp` is deliberately absent: it is not wired yet, and registering a
-/// subcommand the parser rejects would fail the probe below — the change
-/// that adds the subcommand adds its registry entry and this row
-/// together.
+/// The set is checked in both directions against the registry AND against
+/// the `SUBCOMMANDS:` block of the CLI's own help text, so a subcommand
+/// can never be wired into the dispatcher without also being registered
+/// here and documented there.
 const EXPECTED_TOP_LEVEL: &[&str] = &[
     "compile",
     "asm",
@@ -97,6 +97,7 @@ const EXPECTED_TOP_LEVEL: &[&str] = &[
     "ir",
     "lint",
     "fmt",
+    "lsp",
     "completions",
 ];
 
@@ -214,9 +215,18 @@ fn top_level_subcommands_match_the_maintained_list_cli_help_and_the_real_parser(
     );
 
     // Parser probe: the real dispatcher must accept each one — i.e. NOT
-    // the `execute_with` catch-all's "unknown subcommand" error.
+    // the `execute_with` catch-all's "unknown subcommand" error. `lsp` is
+    // special-cased to `--help`: a bare `tmt lsp` hands real stdio to the
+    // server loop and would block this test process forever waiting for a
+    // client that will never connect. `tmt lsp --help` returns before any
+    // stdio is touched and still proves the dispatcher knows the name.
     for name in &expected {
-        let out = execute(&args(&[name]));
+        let probe: Vec<String> = if name == "lsp" {
+            args(&["lsp", "--help"])
+        } else {
+            args(&[name])
+        };
+        let out = execute(&probe);
         let unknown_subcommand =
             matches!(&out, Err(message) if message.contains("unknown subcommand"));
         assert!(

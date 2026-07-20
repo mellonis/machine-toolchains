@@ -17,7 +17,7 @@ pub mod fmt;
 pub mod ir;
 pub mod lexer;
 pub mod lint;
-pub mod lsp;
+mod lsp;
 pub mod optimizer;
 pub mod parser;
 pub mod stdlib;

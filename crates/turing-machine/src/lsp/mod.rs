@@ -50,11 +50,13 @@ mod context;
 mod navigate;
 mod quickfix;
 mod roster;
+mod tma;
 mod tokens;
 
 pub(crate) use roster::Roster;
+pub(crate) use tma::TmaLanguageService;
 
-pub struct TmcLanguageService {
+pub(crate) struct TmcLanguageService {
     docs: HashMap<String, DocState>,
     /// IDE-settings allow-list: `None` = never configured; `Ok` = valid
     /// codes; `Err` = human-readable reason (surfaces as invalid-config).
@@ -74,7 +76,7 @@ impl Default for TmcLanguageService {
 }
 
 impl TmcLanguageService {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         TmcLanguageService {
             docs: HashMap::new(),
             ide_allow: None,

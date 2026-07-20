@@ -503,6 +503,14 @@ fn ir_graph_spec() -> CommandSpec {
     }
 }
 
+fn lsp_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["lsp"]),
+        positional: Positional::None,
+        flags: vec![FlagSpec::boolean("--help", "show subcommand help")],
+    }
+}
+
 fn completions_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["completions"]),
@@ -529,6 +537,7 @@ fn top_level_help(name: &str) -> &'static str {
         "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
         "lint" => "hygiene findings over .tmc and .tma sources",
         "fmt" => "canonical formatting for .tmc and .tma sources",
+        "lsp" => "run the LSP server on stdio",
         "completions" => "emit a shell completion script (zsh; bash/fish follow-on)",
         _ => "",
     }
@@ -575,14 +584,10 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing the real, currently-dispatched `tmt` surface:
-/// nine top-level subcommands (`compile`/`asm`/`link`/`dis`/`run`/`tape`/
-/// `ir`/`lint`/`fmt`, `tape` and `ir` nested) plus `completions` itself.
-/// Deliberately absent: `tmt lsp`, which is not dispatched yet — an entry
-/// for a subcommand the parser rejects would fail the drift guard, so it
-/// gets registered by the change that wires it, alongside the matching
-/// row in `tests/completions_registry.rs`'s `EXPECTED_TOP_LEVEL`. Also
-/// absent, permanently: `tape build`, which is PM-1-only glyph-pattern
-/// sugar (`cli/inspect.rs` says why TM-1 has no analogue).
+/// ten top-level subcommands (`compile`/`asm`/`link`/`dis`/`run`/`tape`/
+/// `ir`/`lint`/`fmt`/`lsp`, `tape` and `ir` nested) plus `completions`
+/// itself. Absent, permanently: `tape build`, which is PM-1-only
+/// glyph-pattern sugar (`cli/inspect.rs` says why TM-1 has no analogue).
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
@@ -596,6 +601,7 @@ pub fn registry() -> Registry {
         ir_graph_spec(),
         lint_spec(),
         fmt_spec(),
+        lsp_spec(),
         completions_spec(),
     ];
     let root = root_spec(&commands);
