@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "TMC",
-  "comment": "TM-1 .tmc source (docs/tmt/language.md, once it lands). Every reserved keyword lives in a repository rule whose key starts with `keyword`; the drift guard in crates/turing-machine/tests/editor_grammar.rs parses those alternations and asserts SET EQUALITY with mtc_turing_machine::lexer::RESERVED, so adding a keyword to the language, dropping one from the grammar, or inventing one here all fail the test. The `declaration` rule repeats a few of those words in a capture so the name after them colors as an entity; that copy is cosmetic and deliberately outside the guard's set. Identifiers use the pragmatic ASCII class [A-Za-z_][A-Za-z0-9_]* even though the lexer additionally accepts Unicode letters — best-effort highlighting, not a full identifier class.",
+  "comment": "TM-1 .tmc source (docs/tmt/language.md). Every reserved keyword lives in a repository rule whose key starts with `keyword`; the drift guard in crates/turing-machine/tests/editor_grammar.rs parses those alternations and asserts SET EQUALITY with mtc_turing_machine::lexer::RESERVED, so adding a keyword to the language, dropping one from the grammar, or inventing one here all fail the test. The `declaration` rule repeats a few of those words in a capture so the name after them colors as an entity; that copy is cosmetic and deliberately outside the guard's set. Identifiers use the pragmatic ASCII class [A-Za-z_][A-Za-z0-9_]* even though the lexer additionally accepts Unicode letters — best-effort highlighting, not a full identifier class.",
   "scopeName": "source.tmc",
   "patterns": [
     { "include": "#attentionLine" },

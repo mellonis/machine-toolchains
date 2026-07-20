@@ -7,7 +7,7 @@ use crate::parser::{PatternCell, PatternCellKind, SymLit};
 
 /// The glyph label a symbol literal denotes. A numeric literal's identity is
 /// its value's decimal string (`05` and `5` both label `"5"`), matching the
-/// alphabet-resolution rule (docs/language.md (alphabets), once it lands).
+/// alphabet-resolution rule (docs/tmt/language.md (alphabets)).
 pub(crate) fn glyph_label(s: &SymLit) -> String {
     match s {
         SymLit::Glyph { value, .. } => value.clone(),
