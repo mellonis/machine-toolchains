@@ -100,7 +100,9 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
         return Err(format!("--lang applies to stdin (-) only\n\n{FMT_USAGE}"));
     }
     if paths.is_empty() {
-        return Err(format!("fmt takes at least one PATH (or `-`)\n\n{FMT_USAGE}"));
+        return Err(format!(
+            "fmt takes at least one PATH (or `-`)\n\n{FMT_USAGE}"
+        ));
     }
 
     let mut files: Vec<PathBuf> = Vec::new();

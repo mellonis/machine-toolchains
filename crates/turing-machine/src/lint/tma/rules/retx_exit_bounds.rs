@@ -41,46 +41,49 @@ struct Retx {
     span: Span,
 }
 
+/// Push the open frame group's `(label, exit count)` to `out` and clear it.
+fn close_frame(open: &mut Option<(String, usize)>, out: &mut Vec<(String, usize)>) {
+    if let Some(frame) = open.take() {
+        out.push(frame);
+    }
+}
+
+/// Parse a `#<n>` immediate operand's numeric value.
+fn parse_imm(text: &str) -> Option<usize> {
+    text.trim().strip_prefix('#').and_then(|n| n.parse().ok())
+}
+
 pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
     let mut frame_exits: Vec<(String, usize)> = Vec::new();
     let mut calls: Vec<(String, String)> = Vec::new(); // (callee, frame label)
     let mut retxs: Vec<Retx> = Vec::new();
 
     let mut current_func: Option<&str> = None;
-    // The frame-descriptor group being accumulated: (label, exit count).
+    // The frame-descriptor group being accumulated: (label, exit count). It is
+    // extended by `.map`/`.exits` continuation lines and closed (pushed to
+    // `frame_exits`) by anything else — a `.frame` header, a `.func`, an
+    // instruction line, a `.section`. Comments are trivia and pass through.
     let mut open_frame: Option<(String, usize)> = None;
 
     for item in &ctx.cst.items {
-        // A frame group ends at anything that is not one of its own
-        // continuation directives (or a comment, which is trivia).
-        let is_frame_continuation = matches!(
-            &item.kind,
-            AsmItemKind::FrameDirective(FrameDirectiveCst::Map(_) | FrameDirectiveCst::Exits(_))
-                | AsmItemKind::Comment(_)
-        );
-        if !is_frame_continuation && !matches!(&item.kind, AsmItemKind::FrameDirective(_)) {
-            if let Some(frame) = open_frame.take() {
-                frame_exits.push(frame);
-            }
-        }
-
         match &item.kind {
-            AsmItemKind::Func(f) => current_func = Some(&f.name),
-            AsmItemKind::FrameDirective(fd) => match fd {
-                FrameDirectiveCst::Header(h) => {
-                    if let Some(frame) = open_frame.take() {
-                        frame_exits.push(frame);
-                    }
-                    open_frame = Some((h.label.name.clone(), 0));
+            AsmItemKind::Comment(_) => {}
+            AsmItemKind::FrameDirective(FrameDirectiveCst::Map(_)) => {} // continues the group
+            AsmItemKind::FrameDirective(FrameDirectiveCst::Exits(e)) => {
+                if let Some(frame) = &mut open_frame {
+                    frame.1 = e.targets.len();
                 }
-                FrameDirectiveCst::Exits(e) => {
-                    if let Some(frame) = &mut open_frame {
-                        frame.1 = e.targets.len();
-                    }
-                }
-                FrameDirectiveCst::Map(_) => {}
-            },
+            }
+            AsmItemKind::FrameDirective(FrameDirectiveCst::Header(h)) => {
+                close_frame(&mut open_frame, &mut frame_exits);
+                open_frame = Some((h.label.name.clone(), 0));
+            }
+            AsmItemKind::Func(f) => {
+                close_frame(&mut open_frame, &mut frame_exits);
+                current_func = Some(&f.name);
+            }
             AsmItemKind::Line(line) => {
+                close_frame(&mut open_frame, &mut frame_exits);
                 let Some(instr) = &line.instr else { continue };
                 match instr.word.as_str() {
                     "call.m" => {
@@ -95,7 +98,7 @@ pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
                     }
                     "retx" => {
                         if let (Some(func), Some(op)) = (current_func, instr.operands.first())
-                            && let Some(k) = op.text.trim().strip_prefix('#').and_then(|n| n.parse::<usize>().ok())
+                            && let Some(k) = parse_imm(&op.text)
                         {
                             retxs.push(Retx {
                                 owner: func.to_string(),
@@ -107,12 +110,10 @@ pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
                     _ => {}
                 }
             }
-            _ => {}
+            _ => close_frame(&mut open_frame, &mut frame_exits),
         }
     }
-    if let Some(frame) = open_frame.take() {
-        frame_exits.push(frame);
-    }
+    close_frame(&mut open_frame, &mut frame_exits);
 
     for retx in &retxs {
         // The distinct in-file frame labels bound to this routine.

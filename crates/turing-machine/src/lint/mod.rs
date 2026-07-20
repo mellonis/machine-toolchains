@@ -249,7 +249,10 @@ machine {
             "retx-exit-bounds",
             "rept-var-unused",
         ] {
-            assert!(!RULES.iter().any(|(c, _)| *c == code), "{code} is a .tma addition, not a .tmc rule");
+            assert!(
+                !RULES.iter().any(|(c, _)| *c == code),
+                "{code} is a .tma addition, not a .tmc rule"
+            );
             assert!(tma::TMA_RULES.iter().any(|(c, _)| *c == code));
             assert!(validate_allow(&[code.to_string()]).is_ok());
         }

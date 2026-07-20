@@ -187,6 +187,10 @@ T0: .row [*, {v+1}]
         stp
 ";
         let f = findings(src);
-        assert_eq!(f.len(), 1, "a bare `v` in a comment is not a substitution use: {f:?}");
+        assert_eq!(
+            f.len(),
+            1,
+            "a bare `v` in a comment is not a substitution use: {f:?}"
+        );
     }
 }
