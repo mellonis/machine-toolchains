@@ -929,3 +929,62 @@ fn the_service_declares_the_tmc_language_and_its_watched_config() {
     assert_eq!(service.watched_globs(), ["**/tmt.json"]);
     assert!(!service.trigger_characters().is_empty());
 }
+
+#[test]
+fn formatting_relocates_a_comment_out_of_a_binding_list() {
+    // The formatter's one documented exception: a comment inside a binding
+    // list, a signature parameter list, or an alphabet body cannot stay
+    // where it was written and becomes an own-line comment after the
+    // enclosing item. The service inherits that verbatim — it is worth
+    // pinning here so the behaviour is visibly the formatter's contract
+    // and not a surprise introduced by the LSP path.
+    let src = "\
+alphabet bits { '_', '1' }
+
+routine r(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  bind r(t = ctl /* why */) as r1;
+  entry state main { [*] -> call r1() then main; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let formatted = service.format(&uri).expect("formatted");
+    assert!(formatted.contains("/* why */"), "{formatted}");
+    assert!(!formatted.contains("ctl /* why */"), "{formatted}");
+    // Still idempotent through the service after the relocation.
+    service.did_update(&uri, &formatted);
+    assert_eq!(service.format(&uri).as_deref(), Some(formatted.as_str()));
+}
+
+#[test]
+fn every_request_survives_every_truncation_of_a_real_document() {
+    // The position walks are full of index arithmetic over a token stream
+    // that may end anywhere, which is exactly what a document being typed
+    // looks like. Every prefix of a real document is fed through every
+    // request; the assertion is that the service answers at all.
+    let mut service = TmcLanguageService::new();
+    let uri = "untitled:doc.tmc".to_string();
+    for cut in 0..=CROSS_WORLD.len() {
+        if !CROSS_WORLD.is_char_boundary(cut) {
+            continue;
+        }
+        let src = &CROSS_WORLD[..cut];
+        service.did_update(&uri, src);
+        let pos = pos_at_byte(src, cut);
+        service.completion(&uri, pos);
+        service.definition(&uri, pos);
+        service.hover(&uri, pos);
+        service.code_actions(
+            &uri,
+            Span {
+                start: pos,
+                end: pos,
+            },
+        );
+        service.document_symbols(&uri);
+        service.semantic_tokens(&uri);
+        service.format(&uri);
+    }
+}
