@@ -31,8 +31,8 @@ use mtc_core::lsp::{DefTarget, HoverContent};
 use super::{DocState, render_doc, span_touches};
 use crate::compiler::{Resolved, WorldKind, full_name};
 use crate::parser::{
-    Alphabet, Bind, BindingArg, BindingValue, Continuation, Graft, Program, Signature,
-    SigParamKind, State, Transition,
+    Alphabet, Bind, BindingArg, BindingValue, Continuation, Graft, Program, SigParamKind,
+    Signature, State, Transition,
 };
 
 /// What the cursor is on, in resolved terms.
@@ -250,8 +250,7 @@ fn reference_in_world(
             ));
         }
         if span_touches(*alphabet_span, pos) {
-            let mangled =
-                resolve_written(program, alphabet, world.ns, alphabet_exists(program))?;
+            let mangled = resolve_written(program, alphabet, world.ns, alphabet_exists(program))?;
             return Some((Target::Alphabet(mangled), *alphabet_span));
         }
     }

@@ -95,7 +95,10 @@ enum Frame {
     Namespace(String),
     /// A `machine` / `routine N` / `graph N` block; the name is as
     /// WRITTEN (`machine` becomes the mangled `main` at lookup time).
-    World { name: String, machine: bool },
+    World {
+        name: String,
+        machine: bool,
+    },
     Alphabet,
     State,
     Map,

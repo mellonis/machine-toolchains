@@ -59,7 +59,12 @@ fn candidates(cursor: &Cursor, roster: Option<&Roster>) -> Vec<Candidate> {
             keywords(&words, span)
         }
         Context::AlphabetRef => match roster {
-            Some(roster) => named(roster.alphabet_names(), CandidateKind::Module, "alphabet", span),
+            Some(roster) => named(
+                roster.alphabet_names(),
+                CandidateKind::Module,
+                "alphabet",
+                span,
+            ),
             None => Vec::new(),
         },
         Context::VectorCell { kind, index } => vector_cell(*kind, *index, cursor, roster, span),
@@ -194,12 +199,7 @@ fn transition_targets(cursor: &Cursor, roster: Option<&Roster>, span: Span) -> V
 /// for a call or a bind, graphs for a graft, plus — for a call only — the
 /// enclosing world's bind instances, which are call targets in their own
 /// right.
-fn target_names(
-    kind: CallKind,
-    cursor: &Cursor,
-    roster: &Roster,
-    span: Span,
-) -> Vec<Candidate> {
+fn target_names(kind: CallKind, cursor: &Cursor, roster: &Roster, span: Span) -> Vec<Candidate> {
     match kind {
         CallKind::Graft => named(roster.graph_names(), CandidateKind::Function, "graph", span),
         CallKind::Bind => named(
@@ -341,12 +341,7 @@ fn literal(text: &str, detail: &str, span: Span) -> Candidate {
     }
 }
 
-fn named(
-    names: Vec<String>,
-    kind: CandidateKind,
-    detail: &str,
-    span: Span,
-) -> Vec<Candidate> {
+fn named(names: Vec<String>, kind: CandidateKind, detail: &str, span: Span) -> Vec<Candidate> {
     names
         .into_iter()
         .map(|name| one(name, kind, detail, span))

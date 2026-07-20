@@ -55,10 +55,7 @@ fn classify(sig: &[Token], i: usize, token: &Token) -> Option<(u32, u32)> {
                 return Some((TOKEN_TYPE_NAMESPACE, 0));
             }
             let prev = i.checked_sub(1);
-            if matches!(
-                prev.map(|j| &sig[j].kind),
-                Some(TokenKind::ColonColon)
-            ) {
+            if matches!(prev.map(|j| &sig[j].kind), Some(TokenKind::ColonColon)) {
                 return Some((TOKEN_TYPE_FUNCTION, 0));
             }
             // `tape NAME : ALPHABET` — the slot after the colon is a type.

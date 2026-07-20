@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Pos, Span};
+use mtc_core::diagnostics::{Applicability, Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
@@ -65,6 +65,12 @@ pub struct TmcLanguageService {
     ide_warn: Option<Result<Vec<String>, String>>,
     /// `tmt.json` parse cache keyed by winner path; (mtime, outcome).
     config_cache: HashMap<PathBuf, (SystemTime, Result<Vec<String>, String>)>,
+}
+
+impl Default for TmcLanguageService {
+    fn default() -> Self {
+        TmcLanguageService::new()
+    }
 }
 
 impl TmcLanguageService {
@@ -471,7 +477,12 @@ impl LanguageService for TmcLanguageService {
     fn token_legend(&self) -> (&'static [&'static str], &'static [&'static str]) {
         (
             &[
-                "namespace", "type", "function", "variable", "string", "number",
+                "namespace",
+                "type",
+                "function",
+                "variable",
+                "string",
+                "number",
             ],
             &["declaration"],
         )

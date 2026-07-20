@@ -7,6 +7,7 @@
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mtc_core::diagnostics::{Edit, Fix};
 use serde_json::json;
 
 use super::*;
@@ -43,12 +44,6 @@ fn pos_at_byte(src: &str, byte_idx: usize) -> Pos {
         None => prefix.chars().count() as u32 + 1,
     };
     Pos { line, col }
-}
-
-/// The position just past `anchor`'s first occurrence — where a cursor sits
-/// when the user has typed exactly that much.
-fn pos_end_of(src: &str, anchor: &str) -> Pos {
-    pos_after(src, anchor, anchor.len())
 }
 
 fn span_of(src: &str, anchor: &str) -> Span {
@@ -571,7 +566,10 @@ alphabet bits { '_', '1' }
 machine {
   tape ctl: bits;
   ";
-    let inside = labels(&complete_between(head, "\n  entry state s { [*] -> stop; }\n}\n"));
+    let inside = labels(&complete_between(
+        head,
+        "\n  entry state s { [*] -> stop; }\n}\n",
+    ));
     assert!(inside.contains(&"state".to_string()), "{inside:?}");
     assert!(inside.contains(&"tape".to_string()), "{inside:?}");
     assert!(!inside.contains(&"machine".to_string()), "{inside:?}");
@@ -584,7 +582,10 @@ alphabet bits { '_', '1' }
 
 routine r(tape t: bits) {
   ";
-    let got = labels(&complete_between(head, "\n  entry state s { [*] -> return; }\n}\n"));
+    let got = labels(&complete_between(
+        head,
+        "\n  entry state s { [*] -> return; }\n}\n",
+    ));
     assert!(got.contains(&"state".to_string()), "{got:?}");
     assert!(!got.contains(&"tape".to_string()), "{got:?}");
 }
@@ -701,7 +702,9 @@ fn hovering_a_routine_shows_its_signature_with_tape_alphabets_and_its_doc() {
         .hover(&uri, pos_after(CROSS_WORLD, "call plusOne", 5))
         .expect("a hover");
     assert!(
-        hover.text.contains("routine mylib::plusOne(tape num: bits)"),
+        hover
+            .text
+            .contains("routine mylib::plusOne(tape num: bits)"),
         "{}",
         hover.text
     );
@@ -720,7 +723,9 @@ fn hovering_a_graph_shows_its_state_parameters_too() {
         .hover(&uri, pos_after(CROSS_WORLD, "graft findX", 6))
         .expect("a hover");
     assert!(
-        hover.text.contains("graph findX(tape t: wide, state found)"),
+        hover
+            .text
+            .contains("graph findX(tape t: wide, state found)"),
         "{}",
         hover.text
     );
@@ -733,7 +738,9 @@ fn hovering_a_bind_shows_the_resolved_binding() {
         .hover(&uri, pos_after(CROSS_WORLD, "call inc1", 5))
         .expect("a hover");
     assert!(
-        hover.text.contains("bind mylib::plusOne(num = ctl) as inc1"),
+        hover
+            .text
+            .contains("bind mylib::plusOne(num = ctl) as inc1"),
         "{}",
         hover.text
     );
@@ -753,7 +760,11 @@ fn hovering_an_alphabet_lists_its_symbols() {
 fn hovering_something_undocumented_and_unnameable_shows_nothing() {
     let (mut service, uri) = opened(TWO_TAPE);
     // A move direction is not a reference to anything.
-    assert!(service.hover(&uri, pos_after(TWO_TAPE, "move [>", 6)).is_none());
+    assert!(
+        service
+            .hover(&uri, pos_after(TWO_TAPE, "move [>", 6))
+            .is_none()
+    );
 }
 
 // -- quickfixes ----------------------------------------------------------
@@ -826,7 +837,7 @@ fn a_lint_finding_that_carries_a_fix_becomes_an_action() {
         code: "dead-rule",
         span: Span::new(4, 3, 4, 9),
         message: "unreachable".to_string(),
-        fix: Some(mtc_core::diagnostics::Fix {
+        fix: Some(Fix {
             description: "delete the rule".to_string(),
             applicability: Applicability::MachineApplicable,
             edits: vec![Edit {
@@ -835,7 +846,7 @@ fn a_lint_finding_that_carries_a_fix_becomes_an_action() {
             }],
         }),
     };
-    let overlapping = actions_from_findings(&[finding.clone()], Span::new(4, 5, 4, 6));
+    let overlapping = actions_from_findings(std::slice::from_ref(&finding), Span::new(4, 5, 4, 6));
     assert_eq!(overlapping.len(), 1);
     assert_eq!(overlapping[0].title, "delete the rule");
     assert!(overlapping[0].preferred);

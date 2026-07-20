@@ -36,7 +36,10 @@ impl GlyphEntry {
         if self.numeric {
             self.label.clone()
         } else {
-            format!("'{}'", self.label.replace('\\', "\\\\").replace('\'', "\\'"))
+            format!(
+                "'{}'",
+                self.label.replace('\\', "\\\\").replace('\'', "\\'")
+            )
         }
     }
 }
@@ -233,9 +236,7 @@ impl Roster {
 /// ones that spell as bare decimals rather than quoted glyphs. Numeric
 /// ranges contribute every value in the range without expanding any glyph
 /// range, since a glyph range's labels spell quoted either way.
-fn numeric_labels(
-    program: Option<&Program>,
-) -> HashMap<String, std::collections::HashSet<String>> {
+fn numeric_labels(program: Option<&Program>) -> HashMap<String, std::collections::HashSet<String>> {
     let mut out: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let Some(program) = program else {
         return out;

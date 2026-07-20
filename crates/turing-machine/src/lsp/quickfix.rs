@@ -55,12 +55,7 @@ struct BodyExtent {
 /// body the unresolved `goto` sits in, with a catch-all rule of the right
 /// arity that stops. The arity matters — a stub with the wrong vector
 /// width would trade one error for another.
-fn state_stub(
-    cst: &Cst,
-    program: Option<&Program>,
-    name: &str,
-    at: Span,
-) -> Option<Action> {
+fn state_stub(cst: &Cst, program: Option<&Program>, name: &str, at: Span) -> Option<Action> {
     let extent = enclosing_body(cst, program, at)?;
     let cells = vec!["*"; extent.arity.max(1)].join(", ");
     // Insert on its own line just before the closing brace, at the
@@ -199,19 +194,11 @@ fn quoted(label: &str) -> String {
 
 /// The binding argument whose span covers `at`, with the mangled names of
 /// the world it is written in and the world it targets.
-fn binding_argument_at<'a>(
-    program: &'a Program,
-    at: Span,
-) -> Option<(&'a BindingArg, String, String)> {
+fn binding_argument_at(program: &Program, at: Span) -> Option<(&BindingArg, String, String)> {
     let mut sites: Vec<(&[BindingArg], String, String, &[String])> = Vec::new();
     if let Some(m) = &program.machine {
         for graft in &m.grafts {
-            sites.push((
-                &graft.args,
-                "main".to_string(),
-                graft.target.joined(),
-                &[],
-            ));
+            sites.push((&graft.args, "main".to_string(), graft.target.joined(), &[]));
         }
         for bind in &m.binds {
             sites.push((&bind.args, "main".to_string(), bind.target.joined(), &[]));
