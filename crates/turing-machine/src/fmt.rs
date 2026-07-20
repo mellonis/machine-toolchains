@@ -975,3 +975,6 @@ fn render_bind(b: &BindCst, blank_before: bool, indent: usize) -> Rendered {
     Rendered::new(leads_with_blank(blank_before, &b.doc_run), code)
         .with_trailing(b.trailing.as_ref())
 }
+
+#[cfg(test)]
+mod tests;
