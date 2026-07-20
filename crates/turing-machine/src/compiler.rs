@@ -203,14 +203,21 @@ pub enum CompileErrorKind {
     /// glyph-for-glyph equal — an omitted map means identity, which requires
     /// matching alphabets.
     IdentityGlyphMismatch,
-    /// A `{v±k}` write substitution folds to a value with no glyph in the
-    /// tape's alphabet (out-of-alphabet arithmetic). `name` is the message.
+    /// A write substitution folds to a value with no glyph in the tape's
+    /// alphabet (an out-of-alphabet fold result). `name` is the message.
     FoldOutOfAlphabet(String),
-    /// A write-cell fold expression uses a shape whose evaluation is not yet
-    /// implemented (anything past a bare name or `{name±int}`). `name` is the
-    /// message. A transitional bound while fold-expression evaluation is
-    /// under construction.
-    FoldExprUnsupported(String),
+    /// A `%` in a write-cell fold has a zero modulus (division by zero). The
+    /// `%` semantics mirror the assembler's `.rept` substitution exactly
+    /// (docs/tmt/language.md (substitution)).
+    FoldZeroModulus,
+    /// A `%` in a write-cell fold produces a negative remainder — reachable
+    /// only when the left operand went negative through subtraction, which
+    /// the assembler rejects rather than wrapping. When the modulus is a
+    /// positive integer literal, `hint_modulus` carries it so the diagnostic
+    /// can teach the `{(v+N-1)%N}` wrapping-decrement idiom.
+    FoldNegativeRemainder { hint_modulus: Option<i64> },
+    /// A write-cell fold overflows `i64` during evaluation.
+    FoldOverflow,
     /// Two rules in one state match the same concrete tuple with neither
     /// carrying a wildcard — an exact-row disjointness violation. The two
     /// rendered patterns name both offenders.
@@ -301,7 +308,9 @@ impl CompileErrorKind {
             CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
             CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
             CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
-            CompileErrorKind::FoldExprUnsupported(_) => "fold-expr-unsupported",
+            CompileErrorKind::FoldZeroModulus => "zero-modulus",
+            CompileErrorKind::FoldNegativeRemainder { .. } => "negative-remainder",
+            CompileErrorKind::FoldOverflow => "fold-overflow",
             CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
             CompileErrorKind::RowWidth { .. } => "row-width",
             CompileErrorKind::ExternalBindingUnsupported(_) => "external-binding-unsupported",
@@ -556,8 +565,20 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::FoldOutOfAlphabet(m) => {
                 write!(f, "{m}")
             }
-            CompileErrorKind::FoldExprUnsupported(m) => {
-                write!(f, "{m}")
+            CompileErrorKind::FoldZeroModulus => {
+                write!(f, "zero modulus in fold (`% 0`)")
+            }
+            CompileErrorKind::FoldNegativeRemainder { hint_modulus } => match hint_modulus {
+                Some(n) => write!(
+                    f,
+                    "negative remainder in fold; for a wrapping decrement write {{(v+{})%{}}}",
+                    n - 1,
+                    n
+                ),
+                None => write!(f, "negative remainder in fold"),
+            },
+            CompileErrorKind::FoldOverflow => {
+                write!(f, "fold arithmetic overflows i64")
             }
             CompileErrorKind::ExactRowConflict { first, second } => {
                 write!(
@@ -2446,7 +2467,9 @@ mod tests {
             CompileErrorKind::MapNotInjective { symbol: "x".into() },
             CompileErrorKind::IdentityGlyphMismatch,
             CompileErrorKind::FoldOutOfAlphabet("x".into()),
-            CompileErrorKind::FoldExprUnsupported("x".into()),
+            CompileErrorKind::FoldZeroModulus,
+            CompileErrorKind::FoldNegativeRemainder { hint_modulus: None },
+            CompileErrorKind::FoldOverflow,
             CompileErrorKind::ExactRowConflict {
                 first: "x".into(),
                 second: "y".into(),
@@ -2461,7 +2484,7 @@ mod tests {
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 54);
+        assert_eq!(all.len(), 56);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();

@@ -4,7 +4,7 @@
 //! [`expand`] runs after resolution (`compiler::analyze`) and before IR
 //! lowering, matching the pipeline order flatten → GRAFT EXPANSION → RANGE
 //! EXPANSION → `ir::lower`. It turns the [`crate::compiler::Resolved`] module
-//! (rules still in SOURCE form: ranges, pattern bindings, `{v±k}`/`{c}`
+//! (rules still in SOURCE form: ranges, pattern bindings, `{…}` fold
 //! substitutions, graft declarations) into an [`Expanded`] module whose states
 //! carry only CONCRETE, index-resolved rules — no ranges, no bindings, no
 //! grafts. Trap rows synthesized for a graft's holey binding survive as
@@ -435,9 +435,10 @@ fn splice_state(
 // Range expansion — one source rule → concrete index-resolved
 // rows. Pattern ranges / single-with-binding expand cartesian (leftmost tape
 // varies slowest, rightmost fastest — matching the linker's preimage
-// cartesian); `{v±k}` folds per row (numeric, bounds-checked), `{c}` passes the
-// bound glyph through; a range value with no glyph on the tape drops that
-// alternative. Product over 256 warns.
+// cartesian); a `{…}` substitution folds per row — a bare name passes the
+// bound glyph through, any operator applies numeric i64 arithmetic
+// (`+ - * %`, bounds-checked against the tape alphabet); a range value with no
+// glyph on the tape drops that alternative. Product over 256 warns.
 // ---------------------------------------------------------------------------
 
 /// The product-count above which a rule's expansion warns. Shared with the
@@ -465,9 +466,9 @@ impl TapeInfo {
     }
 }
 
-/// A symbol bound by a pattern cell's `as v`. `glyph` is what `{v}` writes;
-/// `value` is the number `{v±k}` arithmetic folds (`None` for glyph bindings —
-/// the parser already forbids arithmetic on those).
+/// A symbol bound by a pattern cell's `as v`. `glyph` is what a bare `{v}`
+/// passthrough writes; `value` is the number fold arithmetic reads (`None` for
+/// glyph bindings — the parser forbids arithmetic on those).
 #[derive(Debug, Clone)]
 struct BoundVal {
     glyph: String,
@@ -665,7 +666,7 @@ fn check_width(got: usize, expected: usize, span: Span) -> Result<(), CompileErr
     }
 }
 
-/// Resolve a write vector to per-tape [`WriteOut`], folding `{v±k}` / `{c}`.
+/// Resolve a write vector to per-tape [`WriteOut`], folding each `{…}` cell.
 fn resolve_write(
     write: Option<&WriteVec>,
     tapes: &[TapeInfo],
@@ -697,77 +698,128 @@ fn resolve_write_cell(
             })
         }
         WriteCellKind::Subst { expr } => {
-            // Transitional bridge while fold-expression evaluation is under
-            // construction: only a bare name and `{name±int}` fold here; any
-            // richer expression is a clear error, never silently wrong output.
-            let (name, name_span, delta) = simple_fold(expr)?;
-            let bv = env.get(name).ok_or_else(|| CompileError {
-                span: name_span,
-                kind: CompileErrorKind::FoldOutOfAlphabet(format!(
-                    "`{{{name}}}` refers to no pattern binding in this rule"
-                )),
-            })?;
-            let glyph = if delta == 0 {
-                bv.glyph.clone()
-            } else {
-                // Arithmetic is numeric-only (the parser rejects `{c±k}`).
-                let base = bv.value.ok_or_else(|| CompileError {
-                    span: name_span,
-                    kind: CompileErrorKind::FoldOutOfAlphabet(format!(
-                        "`{{{name}}}` binds a glyph, which cannot take arithmetic"
-                    )),
-                })?;
-                let folded = base + delta;
-                if folded < 0 {
-                    return Err(CompileError {
-                        span: name_span,
+            // A single top-level bare name is the passthrough form: it writes
+            // the bound symbol AS READ, legal for a glyph OR a numeric binding.
+            // Anything applying an operator is a numeric fold, evaluated over
+            // the row's bindings (docs/tmt/language.md (substitution)). The
+            // numeric-only rule for arithmetic is enforced at parse time
+            // (`char-arithmetic`), so evaluation trusts it.
+            let glyph = match &expr.kind {
+                FoldExprKind::Var(name) => env
+                    .get(name.as_str())
+                    .map(|bv| bv.glyph.clone())
+                    .ok_or_else(|| CompileError {
+                        span: expr.span,
                         kind: CompileErrorKind::FoldOutOfAlphabet(format!(
-                            "`{{{name}{delta:+}}}` folds to {folded}, below the alphabet"
+                            "`{{{name}}}` refers to no pattern binding in this rule"
                         )),
-                    });
-                }
-                folded.to_string()
+                    })?,
+                _ => eval_fold(expr, env)
+                    .map_err(|e| fold_eval_error(e, expr.span))?
+                    .to_string(),
             };
             ti.idx(&glyph).map(WriteOut::Sym).ok_or(CompileError {
-                span: name_span,
+                span: expr.span,
                 kind: CompileErrorKind::FoldOutOfAlphabet(format!(
-                    "`{{{name}{delta:+}}}` folds to `{glyph}`, not in the tape's alphabet"
+                    "`{glyph}` is not a symbol in this tape's alphabet"
                 )),
             })
         }
     }
 }
 
-/// Extract `(name, name_span, delta)` from the two fold shapes this
-/// transitional bridge evaluates — a bare `{name}` (delta 0) and `{name±int}`
-/// — rejecting anything richer with a clear, spanned error. Replaced by full
-/// fold-expression evaluation once that lands.
-fn simple_fold(expr: &FoldExprNode) -> Result<(&str, Span, i64), CompileError> {
-    let unsupported = || CompileError {
-        span: expr.span,
-        kind: CompileErrorKind::FoldExprUnsupported(
-            "this fold expression is not yet evaluated — only a bare name or `{name±int}` folds \
-             for now"
-                .to_string(),
-        ),
-    };
-    match &expr.kind {
-        FoldExprKind::Var(name) => Ok((name.as_str(), expr.span, 0)),
-        FoldExprKind::Bin { op, lhs, rhs }
-            if matches!(op, FoldOp::Add | FoldOp::Sub)
-                && matches!(lhs.kind, FoldExprKind::Var(_))
-                && matches!(rhs.kind, FoldExprKind::Int(_)) =>
-        {
-            let FoldExprKind::Var(name) = &lhs.kind else {
-                unreachable!("guarded by the match arm")
-            };
-            let FoldExprKind::Int(n) = rhs.kind else {
-                unreachable!("guarded by the match arm")
-            };
-            let delta = if *op == FoldOp::Sub { -n } else { n };
-            Ok((name.as_str(), lhs.span, delta))
+/// A fold-evaluation failure, mapped to a spanned [`CompileError`] by
+/// [`fold_eval_error`]. Kept distinct from [`CompileError`] so [`eval_fold`]
+/// recurses without threading a span through every node.
+enum FoldEvalError {
+    /// A fold references a name bound by no pattern cell in the rule.
+    UnknownBinding(String),
+    /// A glyph binding reached fold arithmetic — a front-end invariant break
+    /// (the parser rejects arithmetic on glyph bindings), never user-facing.
+    GlyphArithmetic(String),
+    /// `% 0` — a zero modulus.
+    ZeroModulus,
+    /// A negative remainder; `hint_modulus` is the `%` right operand when it is
+    /// a positive integer literal (drives the wrapping-decrement idiom hint).
+    NegativeRemainder { hint_modulus: Option<i64> },
+    /// An `i64` overflow during evaluation.
+    Overflow,
+}
+
+/// Map a [`FoldEvalError`] to a spanned [`CompileError`] at `span` (the whole
+/// substitution expression).
+fn fold_eval_error(e: FoldEvalError, span: Span) -> CompileError {
+    let kind = match e {
+        FoldEvalError::UnknownBinding(name) => CompileErrorKind::FoldOutOfAlphabet(format!(
+            "`{{{name}}}` refers to no pattern binding in this rule"
+        )),
+        FoldEvalError::GlyphArithmetic(name) => CompileErrorKind::Internal(format!(
+            "glyph binding `{name}` reached fold arithmetic — the parser should reject this"
+        )),
+        FoldEvalError::ZeroModulus => CompileErrorKind::FoldZeroModulus,
+        FoldEvalError::NegativeRemainder { hint_modulus } => {
+            CompileErrorKind::FoldNegativeRemainder { hint_modulus }
         }
-        _ => Err(unsupported()),
+        FoldEvalError::Overflow => CompileErrorKind::FoldOverflow,
+    };
+    CompileError { span, kind }
+}
+
+/// Evaluate a write-cell fold over `i64` against the row's binding environment
+/// (every named binding across the row's pattern cells), mirroring the
+/// assembler's substitution evaluator (crates/core `asm/subst.rs` — the `%`
+/// semantics are the same contract): `%` is Rust's remainder, a negative
+/// remainder (reachable only through subtraction) is an error rather than a
+/// wrap, and a zero modulus or `i64` overflow is an error, never a panic
+/// (docs/tmt/language.md (substitution)).
+fn eval_fold(expr: &FoldExprNode, env: &HashMap<&str, &BoundVal>) -> Result<i64, FoldEvalError> {
+    match &expr.kind {
+        FoldExprKind::Int(n) => Ok(*n),
+        FoldExprKind::Var(name) => {
+            let Some(bv) = env.get(name.as_str()) else {
+                return Err(FoldEvalError::UnknownBinding(name.clone()));
+            };
+            match bv.value {
+                Some(v) => Ok(v),
+                None => {
+                    // A glyph binding under arithmetic is parse-rejected
+                    // (`char-arithmetic`); reaching here is a front-end
+                    // invariant break — error rather than write a wrong glyph.
+                    debug_assert!(false, "glyph binding `{name}` reached fold arithmetic");
+                    Err(FoldEvalError::GlyphArithmetic(name.clone()))
+                }
+            }
+        }
+        FoldExprKind::Bin { op, lhs, rhs } => {
+            let l = eval_fold(lhs, env)?;
+            let r = eval_fold(rhs, env)?;
+            match op {
+                FoldOp::Add => l.checked_add(r).ok_or(FoldEvalError::Overflow),
+                FoldOp::Sub => l.checked_sub(r).ok_or(FoldEvalError::Overflow),
+                FoldOp::Mul => l.checked_mul(r).ok_or(FoldEvalError::Overflow),
+                FoldOp::Rem => {
+                    // `checked_rem` is `None` for both a zero divisor and the
+                    // `i64::MIN % -1` overflow — disambiguate on the divisor,
+                    // matching subst.rs.
+                    let rem = l.checked_rem(r).ok_or(if r == 0 {
+                        FoldEvalError::ZeroModulus
+                    } else {
+                        FoldEvalError::Overflow
+                    })?;
+                    if rem < 0 {
+                        // The idiom hint applies only when the modulus is a
+                        // positive integer literal (`{(v-1)%N}`); an expression
+                        // or non-positive modulus gets the plain message.
+                        let hint_modulus = match &rhs.kind {
+                            FoldExprKind::Int(n) if *n > 0 => Some(*n),
+                            _ => None,
+                        };
+                        return Err(FoldEvalError::NegativeRemainder { hint_modulus });
+                    }
+                    Ok(rem)
+                }
+            }
+        }
     }
 }
 
@@ -1694,6 +1746,68 @@ machine {
         let mut warn = Vec::new();
         let err = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap_err();
         assert_eq!(err.kind.code(), "fold-out-of-alphabet");
+    }
+
+    #[test]
+    fn fold_modulo_wrap_expands_all_rows() {
+        // a6 = 0..5 (glyph == index). `[0..5 as v] -> write [{(v+1)%6}]` folds
+        // per row; reading 5 WRAPS to (5+1)%6 = 0. Derive every row's write.
+        let src = "\
+alphabet a6 { 0..5 }
+machine {
+  tape t: a6;
+  entry state inc { [0..5 as v] -> write [{(v+1)%6}] stop; }
+}
+";
+        let rules = machine_rules(src, 0);
+        let glyphs: Vec<String> = (0..=5).map(|v| v.to_string()).collect();
+        let tapes = vec![TapeInfo::new(&glyphs)];
+        let mut warn = Vec::new();
+        let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
+        assert_eq!(rows.len(), 6);
+        for v in 0u16..6 {
+            assert_eq!(rows[usize::from(v)].pattern, vec![Cell::Sym(v)]);
+            // Index == value for this alphabet: the write index is (v+1)%6.
+            assert_eq!(rows[usize::from(v)].write, vec![WriteOut::Sym((v + 1) % 6)]);
+        }
+        // The wrap made explicit: reading 5 writes 0.
+        assert_eq!(rows[5].write, vec![WriteOut::Sym(0)]);
+        assert!(warn.is_empty());
+    }
+
+    #[test]
+    fn fold_multi_var_expands_four_rows() {
+        // Two bindings in one row — the environment holds BOTH, and the fold
+        // reads several: `[0..1 as a, 0..1 as b] -> write [{a+b}, -]`. Four
+        // rows, leftmost (a) slowest: (0,0)->0 (0,1)->1 (1,0)->1 (1,1)->2 on x.
+        let src = "\
+alphabet a3 { 0..2 }
+alphabet a2 { 0..1 }
+machine {
+  tape x: a3;
+  tape y: a2;
+  entry state sum { [0..1 as a, 0..1 as b] -> write [{a+b}, -] stop; }
+}
+";
+        let rules = machine_rules(src, 0);
+        let tapes = vec![
+            TapeInfo::new(&["0".into(), "1".into(), "2".into()]),
+            TapeInfo::new(&["0".into(), "1".into()]),
+        ];
+        let mut warn = Vec::new();
+        let rows = expand_rule(&rules[0], &tapes, &mut warn, &mut own_tr).unwrap();
+        assert_eq!(rows.len(), 4);
+        let expect = [
+            (Cell::Sym(0), Cell::Sym(0), WriteOut::Sym(0)),
+            (Cell::Sym(0), Cell::Sym(1), WriteOut::Sym(1)),
+            (Cell::Sym(1), Cell::Sym(0), WriteOut::Sym(1)),
+            (Cell::Sym(1), Cell::Sym(1), WriteOut::Sym(2)),
+        ];
+        for (row, (a, b, w)) in rows.iter().zip(expect) {
+            assert_eq!(row.pattern, vec![a, b]);
+            assert_eq!(row.write, vec![w, WriteOut::Keep]);
+        }
+        assert!(warn.is_empty());
     }
 
     #[test]
