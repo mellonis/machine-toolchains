@@ -285,10 +285,21 @@ fn block(snaps: &[TapeSnapshot; 4]) -> TapeBlockFile {
 /// (bf source, golden file, expected first output byte). The output byte is
 /// spelled out so the test pins the reference interpreter to a hand-computed
 /// value, not merely to itself.
+///
+/// Coverage note: the first two cases never enter a loop with a ZERO control
+/// cell, so neither one exercises the skip-FORWARD scanner — `[` always finds
+/// a non-zero cell and falls straight into the body. `bf_skip` closes that
+/// hole with a loop that is skipped before it ever runs, and nests a second
+/// loop inside the skipped body so the nesting counter is pushed twice and
+/// popped twice: the pop-check is taken on both of its branches (still
+/// nested, then empty). Without this case the whole forward-scan path —
+/// five of the machine's states — is dead under test on both the assembly
+/// and the `.tmc` port.
 fn cases() -> Vec<(&'static str, &'static str, u8)> {
     vec![
         ("+++.", "bf_add.expected.tmt", 3),
         ("++[>+++<-]>.", "bf_loop.expected.tmt", 6),
+        ("[[+]+]++.", "bf_skip.expected.tmt", 2),
     ]
 }
 
