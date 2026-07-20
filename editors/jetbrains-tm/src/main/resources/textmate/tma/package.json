@@ -1,0 +1,7 @@
+{
+  "name": "tma",
+  "contributes": {
+    "languages": [{ "id": "tma", "extensions": [".tma"] }],
+    "grammars": [{ "language": "tma", "scopeName": "source.tma", "path": "./tma.tmLanguage.json" }]
+  }
+}

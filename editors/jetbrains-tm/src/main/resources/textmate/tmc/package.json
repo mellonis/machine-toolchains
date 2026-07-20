@@ -1,0 +1,7 @@
+{
+  "name": "tmc",
+  "contributes": {
+    "languages": [{ "id": "tmc", "extensions": [".tmc"] }],
+    "grammars": [{ "language": "tmc", "scopeName": "source.tmc", "path": "./tmc.tmLanguage.json" }]
+  }
+}
