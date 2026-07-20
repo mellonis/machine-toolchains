@@ -22,12 +22,13 @@ use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::ObjectFile;
 
 use crate::codegen::{CodegenOptions, emit_program};
+use crate::cst::Cst;
 use crate::ir::{IrProgram, lower, validate_world};
-use crate::lexer::{Token, lex};
+use crate::lexer::{LexMode, Token, lex, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Machine,
-    Program, QualName, SigParamKind, State, SymLit, Transition, parse,
+    Program, QualName, SigParamKind, State, SymLit, Transition, lower_cst, parse, parse_cst,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -867,10 +868,30 @@ pub(crate) struct Analysis {
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
     let tokens = lex(source)?;
     let program = parse(&tokens)?;
-    check_duplicate_bindings(&program)?;
-    let scopes = Scopes::build(&program)?;
-    let alphabets = resolve_all_alphabets(&program, &scopes)?;
-    let resolved = resolve_module(&program, &scopes, alphabets)?;
+    let (resolved, diagnostics) = resolve_program(&program)?;
+    Ok(Analysis {
+        tokens,
+        program,
+        resolved,
+        diagnostics,
+    })
+}
+
+/// The resolution stage shared by [`analyze`] and [`analyze_staged`]:
+/// everything after the parse — duplicate-binding check → scope build →
+/// alphabet resolution → module resolution → per-world checks → unused-import
+/// warnings. Returns the resolved module plus its accumulated non-fatal
+/// diagnostics, or the first fatal at its offending span.
+///
+/// Only unused-import is raised here (unused-routine is raised during IR
+/// lowering). The sibling unused-graph / unused-binding /
+/// unused-graft-instance warnings of the same hygiene family are deliberately
+/// deferred to the TM lint layer rather than shipped as compiler diagnostics.
+fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), CompileError> {
+    check_duplicate_bindings(program)?;
+    let scopes = Scopes::build(program)?;
+    let alphabets = resolve_all_alphabets(program, &scopes)?;
+    let resolved = resolve_module(program, &scopes, alphabets)?;
     let mut ctx = WorldCtx {
         scopes: &scopes,
         resolved: &resolved,
@@ -878,24 +899,101 @@ pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
         warned_undeclared: HashSet::new(),
         diagnostics: Vec::new(),
     };
-    ctx.check_worlds(&program, &resolved)?;
+    ctx.check_worlds(program, &resolved)?;
     let WorldCtx {
         imports_used,
         mut diagnostics,
         ..
     } = ctx;
-    unused_import_warnings(&program, &imports_used, &mut diagnostics);
-    // Only unused-import is raised here (unused-routine is raised during IR
-    // lowering). The sibling unused-graph / unused-binding /
-    // unused-graft-instance warnings of the same hygiene family are
-    // deliberately deferred to the TM lint layer rather than shipped as
-    // compiler diagnostics.
-    Ok(Analysis {
-        tokens,
-        program,
-        resolved,
-        diagnostics,
-    })
+    unused_import_warnings(program, &imports_used, &mut diagnostics);
+    Ok((resolved, diagnostics))
+}
+
+/// The language-service pipeline entry (the `.pmc` compiler's `analyze_staged`
+/// twin): every stage's outcome, retained independently, so a document that
+/// fails partway through still serves whatever the earlier stages produced.
+/// Fields go `None` past the first failure; `fatal` carries that one error.
+///
+/// The shape is broken out field-by-field rather than embedding a success-only
+/// bundle: the flat `program` must survive a *resolve*-stage fatal (an editor
+/// still highlights a program whose semantics don't check out), which a
+/// bundle present only on full success could not express.
+#[derive(Debug)]
+pub(crate) struct TmcStagedAnalysis {
+    /// WithComments token stream — `None` only if lexing itself failed.
+    pub tokens: Option<Vec<Token>>,
+    /// The lossless CST — `None` if lexing or parsing failed.
+    pub cst: Option<Cst>,
+    /// The flat program (`lower_cst` is infallible, so present whenever the
+    /// CST is), retained even when the resolve stage then fails.
+    pub program: Option<Program>,
+    /// The resolved module — `Some` only when the whole resolve stage ran
+    /// clean; `Resolved.docs` carries the doc map hover / the deprecation lint
+    /// read.
+    pub resolved: Option<Resolved>,
+    /// Non-fatal diagnostics produced so far. TM emits none before the resolve
+    /// stage completes (unused-import is raised last), so this is empty at
+    /// every failure break point and populated only alongside a `Some`
+    /// `resolved` — but the field is always present, carrying whatever was
+    /// produced.
+    pub diagnostics: Vec<Diagnostic>,
+    /// The first (only) fatal, at whichever stage produced it.
+    pub fatal: Option<CompileError>,
+}
+
+/// lex (WithComments) → `parse_cst` → `lower_cst` → the resolve stage,
+/// retaining each stage's outcome instead of stopping at the first failure.
+/// `lower_cst` is infallible, so once parsing succeeds the flat `program` is
+/// always available; the resolve stage ([`resolve_program`]) is the only
+/// post-parse source of a fatal, and its non-fatal diagnostics ride alongside
+/// a clean resolve. Additive: [`analyze`] and [`compile`] are unchanged, so a
+/// partial fatal a document recovers from never leaks into the batch pipeline.
+pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
+    let tokens = match lex_with(source, LexMode::WithComments) {
+        Ok(tokens) => tokens,
+        Err(fatal) => {
+            return TmcStagedAnalysis {
+                tokens: None,
+                cst: None,
+                program: None,
+                resolved: None,
+                diagnostics: Vec::new(),
+                fatal: Some(fatal),
+            };
+        }
+    };
+    let cst = match parse_cst(&tokens) {
+        Ok(cst) => cst,
+        Err(fatal) => {
+            return TmcStagedAnalysis {
+                tokens: Some(tokens),
+                cst: None,
+                program: None,
+                resolved: None,
+                diagnostics: Vec::new(),
+                fatal: Some(fatal),
+            };
+        }
+    };
+    let program = lower_cst(&cst);
+    match resolve_program(&program) {
+        Ok((resolved, diagnostics)) => TmcStagedAnalysis {
+            tokens: Some(tokens),
+            cst: Some(cst),
+            program: Some(program),
+            resolved: Some(resolved),
+            diagnostics,
+            fatal: None,
+        },
+        Err(fatal) => TmcStagedAnalysis {
+            tokens: Some(tokens),
+            cst: Some(cst),
+            program: Some(program),
+            resolved: None,
+            diagnostics: Vec::new(),
+            fatal: Some(fatal),
+        },
+    }
 }
 
 /// Two imports binding one bare name in one scope collide — the `.pmc`
@@ -2263,6 +2361,7 @@ impl WorldCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     /// Every `CompileErrorKind` code is a stable kebab identifier, and no two
     /// variants share one — the CLI and the language server key on these.
@@ -3143,5 +3242,149 @@ machine {
         let out = compile(a6, CompileOptions::default()).unwrap();
         assert_eq!(out.object.blobs.len(), 1);
         assert!(out.tma.contains(".func main"), "{}", out.tma);
+    }
+
+    // -- staged analysis (the language-service substrate) ------------------
+
+    #[test]
+    fn analyze_staged_agrees_with_analyze_on_valid_source() {
+        // A leading comment proves `staged.tokens` is a genuine WithComments
+        // stream (not merely coincidentally equal to the comment-free stream
+        // because the fixture had nothing to filter). On a clean source the
+        // staged path's success fields reproduce `analyze()`'s output exactly,
+        // and `compile()` still succeeds — the seam is purely additive.
+        let src = format!("// leading comment\n{A1}");
+        let staged = analyze_staged(&src);
+        assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
+        let tokens = staged.tokens.as_ref().expect("lexing succeeded");
+        assert!(staged.cst.is_some(), "parsing succeeded");
+        let program = staged.program.as_ref().expect("lowering succeeded");
+        let resolved = staged.resolved.as_ref().expect("resolve succeeded");
+
+        let a = analyze(&src).unwrap();
+
+        // WithComments genuinely in effect: the leading comment must surface
+        // as a Comment token, or the filter below is a no-op.
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t.kind, crate::lexer::TokenKind::Comment(_))),
+            "leading comment should surface as a Comment token"
+        );
+        // The comment-filtered WithComments stream is byte-identical to
+        // `analyze()`'s WithoutComments stream.
+        let significant: Vec<_> = tokens
+            .iter()
+            .filter(|t| !matches!(t.kind, crate::lexer::TokenKind::Comment(_)))
+            .map(|t| t.kind.clone())
+            .collect();
+        let expected: Vec<_> = a.tokens.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(significant, expected);
+
+        assert_eq!(program, &a.program);
+        assert_eq!(resolved, &a.resolved);
+        assert_eq!(staged.diagnostics, a.diagnostics);
+
+        assert!(compile(&src, CompileOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn analyze_staged_agrees_with_analyze_at_every_broken_stage() {
+        // Each source breaks at exactly one stage; the fatal `analyze_staged`
+        // reports at its final stage agrees, by code, with what the
+        // all-or-nothing `analyze` and the full `compile` report.
+        let cases = [
+            // Unterminated block comment — a lexical fatal.
+            ("lex", "/* never closed"),
+            // A bare closing brace at the top level — lexes, then fails the
+            // grammar walk.
+            ("parse", "}"),
+            // A `goto` at an undefined state — parses, fails the world checks.
+            (
+                "resolve",
+                "alphabet b { '_' }\nmachine { tape t: b; entry state s { [*] -> goto missing; } }",
+            ),
+        ];
+        for (stage, src) in cases {
+            let staged_code = analyze_staged(src).fatal.map(|e| e.kind.code());
+            let analyze_code = analyze(src).err().map(|e| e.kind.code());
+            let compile_code = compile(src, CompileOptions::default())
+                .err()
+                .map(|e| e.kind.code());
+            assert!(staged_code.is_some(), "{stage}: staged should carry a fatal");
+            assert_eq!(staged_code, analyze_code, "{stage}: staged vs analyze");
+            assert_eq!(staged_code, compile_code, "{stage}: staged vs compile");
+        }
+    }
+
+    #[test]
+    fn analyze_staged_degrades_partially_at_each_break_point() {
+        // lex-fail: nothing survives.
+        let s = analyze_staged("/* never closed");
+        assert!(s.tokens.is_none());
+        assert!(s.cst.is_none());
+        assert!(s.program.is_none());
+        assert!(s.resolved.is_none());
+        assert_eq!(s.fatal.unwrap().kind.code(), "lex-error");
+
+        // parse-fail: tokens survive, nothing past the CST.
+        let s = analyze_staged("}");
+        assert!(s.tokens.is_some(), "lexing still succeeded");
+        assert!(s.cst.is_none());
+        assert!(s.program.is_none());
+        assert!(s.resolved.is_none());
+        assert!(s.fatal.is_some());
+
+        // resolve-fail: tokens + CST + the flat program survive; the resolved
+        // module does not, and no diagnostics leak out of a mid-resolve fatal.
+        let s = analyze_staged(
+            "alphabet b { '_' }\nmachine { tape t: b; entry state s { [*] -> goto missing; } }",
+        );
+        assert!(s.tokens.is_some());
+        assert!(s.cst.is_some());
+        assert!(s.program.is_some(), "program survives a resolve fatal");
+        assert!(s.resolved.is_none());
+        assert!(s.diagnostics.is_empty());
+        assert_eq!(s.fatal.unwrap().kind.code(), "undefined-state");
+
+        // success: every stage's product is present.
+        let s = analyze_staged(A1);
+        assert!(s.tokens.is_some());
+        assert!(s.cst.is_some());
+        assert!(s.program.is_some());
+        assert!(s.resolved.is_some());
+        assert!(s.fatal.is_none());
+    }
+
+    /// A modest fragment vocabulary spanning the `.tmc` grammar's keywords,
+    /// punctuation, and a few literal glyphs — enough that a random join
+    /// tokenizes into something the parser and resolver actually walk (arbitrary
+    /// `String`s mostly die at the lexer).
+    const TMC_FRAGMENTS: &[&str] = &[
+        "alphabet", "machine", "routine", "graph", "namespace", "use", "export", "tape", "state",
+        "entry", "graft", "bind", "call", "then", "goto", "move", "write", "return", "stop",
+        "halt", "as", "debugger", "{", "}", "[", "]", "(", ")", ";", ",", ":", "->", "=>", "..",
+        "*", "::", "'_'", "'a'", "'0'", "0", "1", "t", "s", "b", "// c\n", "? doc\n", "! attn\n",
+    ];
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// `analyze_staged` returns a staged result on any input — it never
+        /// panics (no unwrap, no slice, no overflow) on arbitrary text.
+        #[test]
+        fn analyze_staged_never_panics_on_arbitrary_input(src in any::<String>()) {
+            let _ = analyze_staged(&src);
+        }
+
+        /// The same, on random joins of `.tmc` fragments — inputs that reach
+        /// deeper into the parser and resolver than raw noise does.
+        #[test]
+        fn analyze_staged_never_panics_on_tmc_fragments(
+            frags in proptest::collection::vec(prop::sample::select(TMC_FRAGMENTS), 0..48),
+        ) {
+            let src = frags.join(" ");
+            let _ = analyze_staged(&src);
+        }
     }
 }
