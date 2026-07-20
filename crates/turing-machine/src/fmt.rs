@@ -551,20 +551,30 @@ fn render_rule(rule: &Rule, grid: &Grid, indent: usize) -> String {
             grid.mov,
         ),
     ];
-    // Trailing columns collapse: pad past a segment this rule skips only when
-    // a later segment fills one.
+    // Trailing columns collapse: padding exists only to line up what comes
+    // AFTER it, so a rule pads a column it skips (and its own last column is
+    // never padded) exactly while a later segment still has to be reached.
     let last_used = segments.iter().rposition(|(present, _, _)| *present);
     for (i, (present, text, column)) in segments.iter().enumerate() {
-        if *column == 0 || last_used.is_none_or(|last| i > last) {
-            continue;
+        match last_used {
+            Some(last) if i < last => {
+                if *column == 0 {
+                    continue;
+                }
+                if *present {
+                    line.push_str(text);
+                    line.push_str(&" ".repeat(column - text.chars().count()));
+                } else {
+                    line.push_str(&" ".repeat(*column));
+                }
+                line.push(' ');
+            }
+            Some(last) if i == last => {
+                line.push_str(text);
+                line.push(' ');
+            }
+            _ => {}
         }
-        if *present {
-            line.push_str(text);
-            line.push_str(&" ".repeat(column - text.chars().count()));
-        } else {
-            line.push_str(&" ".repeat(*column));
-        }
-        line.push(' ');
     }
 
     let col = line.chars().count();
@@ -734,12 +744,13 @@ fn render_machine(m: &MachineCst, blank_before: bool, indent: usize) -> Rendered
 /// shared rule grid are known before any of its members is rendered.
 fn render_world_items(items: &[WorldItem], indent: usize) -> Vec<Rendered> {
     let inline = inline_state_runs(items, indent);
+    let tape_names = tape_name_widths(items);
     items
         .iter()
         .enumerate()
         .map(|(i, item)| match &item.kind {
             WorldKind::Comment(c) => Rendered::new(item.blank_before, comment_line(c, indent)),
-            WorldKind::Tape(t) => render_tape(t, item.blank_before, indent),
+            WorldKind::Tape(t) => render_tape(t, tape_names[i], item.blank_before, indent),
             WorldKind::Graft(g) => render_graft(g, item.blank_before, indent),
             WorldKind::Bind(b) => render_bind(b, item.blank_before, indent),
             WorldKind::State(s) => match &inline[i] {
@@ -894,8 +905,45 @@ fn render_rule_item(item: &RuleItem, grid: &Grid, indent: usize) -> Rendered {
     }
 }
 
-fn render_tape(t: &TapeCst, blank_before: bool, indent: usize) -> Rendered {
-    let code = format!("{}tape {}: {};", " ".repeat(indent), t.name, t.alphabet);
+/// Per world item, the name width a tape declaration pads to. A run of
+/// adjacent `tape` declarations (no blank line, nothing else between them) is
+/// a little table of its own: the alphabets line up in one column.
+fn tape_name_widths(items: &[WorldItem]) -> Vec<usize> {
+    let mut out = vec![0usize; items.len()];
+    let name = |item: &WorldItem| match &item.kind {
+        WorldKind::Tape(t) => Some(t.name.chars().count()),
+        _ => None,
+    };
+    let mut i = 0;
+    while i < items.len() {
+        let Some(first) = name(&items[i]) else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        let mut end = i + 1;
+        let mut width = first;
+        while end < items.len() && !items[end].blank_before {
+            let Some(next) = name(&items[end]) else { break };
+            width = width.max(next);
+            end += 1;
+        }
+        for slot in out.iter_mut().take(end).skip(start) {
+            *slot = width;
+        }
+        i = end;
+    }
+    out
+}
+
+fn render_tape(t: &TapeCst, name_width: usize, blank_before: bool, indent: usize) -> Rendered {
+    let code = format!(
+        "{}tape {}:{} {};",
+        " ".repeat(indent),
+        t.name,
+        " ".repeat(name_width.saturating_sub(t.name.chars().count())),
+        t.alphabet
+    );
     Rendered::new(blank_before, code).with_trailing(t.trailing.as_ref())
 }
 

@@ -2,9 +2,10 @@
 //! thin renderer over the formatters. The `.tma` side wires core's
 //! canonical-grid printer (`mtc_core::asm::format_asm_with` under
 //! `tm1_syntax()`'s caps, so sections / table directives / `.rept` blocks /
-//! frame descriptors / vector operands all normalize); the `.tmc` side awaits
-//! its own formatter in a later tooling task and reports not-yet-implemented,
-//! not a silent skip. Batch model (`PATH...`) is IDENTICAL to `tmt lint`'s, so
+//! frame descriptors / vector operands all normalize); the `.tmc` side wires
+//! the crate's own CST printer ([`crate::fmt::format`]). Both are
+//! whitespace-only and idempotent, so `--check` is a safe CI gate for either
+//! language. Batch model (`PATH...`) is IDENTICAL to `tmt lint`'s, so
 //! it shares [`super::lint::collect_sources`] rather than duplicating the
 //! walk, and the per-file parse fatal reuses [`super::lint::render_fatal`].
 //! Mirrors the PM-1 `pmt fmt` shape (`crates/post-machine/src/cli/fmt.rs`).
@@ -30,9 +31,9 @@ recursively for *.tmc and *.tma (sorted order, symlinks not followed,
 dot-entries skipped). `-` reads one source from stdin and writes the
 result to stdout; it cannot be combined with PATH arguments.
 
-.tma sources format through the canonical assembly grid. .tmc formatting
-arrives in a later tooling task — a .tmc PATH (or `--lang tmc`) is
-recognized but reported as not yet implemented.
+.tma sources format through the canonical assembly grid; .tmc sources
+through the language's own canonical form (the state-block grid, the
+80-column argument-list threshold). Both rewrites are whitespace-only.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -62,16 +63,19 @@ fn parse_lang(value: Option<&str>) -> Result<Lang, String> {
     }
 }
 
-/// The message a `.tmc` fmt request reports until the formatter lands. Kept
-/// in one place so the batch and stdin routes read identically.
-const TMC_NOT_YET: &str = ".tmc fmt is not yet implemented (arrives in a later tooling task)";
-
 /// Format one `.tma` source through core's canonical grid under the TM-1
 /// caps. `Err` is the structural gate (a Raw, non-assembly line); everything
 /// else formats. The span/kind/code triple renders through [`render_fatal`].
 fn format_tma(source: &str) -> Result<String, (mtc_core::diagnostics::Span, String, &'static str)> {
     format_asm_with(source, tm1_syntax().caps)
         .map_err(|e| (e.span, e.kind.to_string(), e.kind.code()))
+}
+
+/// Format one `.tmc` source. A lex/parse fatal reports through the same
+/// span/kind/code triple as the `.tma` route, so both languages render one
+/// diagnostic shape.
+fn format_tmc(source: &str) -> Result<String, (mtc_core::diagnostics::Span, String, &'static str)> {
+    crate::fmt::format(source).map_err(|e| (e.span, e.kind.to_string(), e.kind.code()))
 }
 
 pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
@@ -123,32 +127,29 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     for file in &files {
         let source =
             fs::read_to_string(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
-        match file.extension().and_then(|x| x.to_str()) {
-            Some("tma") => match format_tma(&source) {
-                Ok(formatted) => {
-                    if formatted != source {
-                        would_change = true;
-                        if check {
-                            let _ = writeln!(stdout, "{}", file.display());
-                        } else {
-                            fs::write(file, &formatted)
-                                .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
-                        }
+        let formatted = match file.extension().and_then(|x| x.to_str()) {
+            Some("tma") => Some(format_tma(&source)),
+            Some("tmc") => Some(format_tmc(&source)),
+            _ => None,
+        };
+        match formatted {
+            Some(Ok(formatted)) => {
+                if formatted != source {
+                    would_change = true;
+                    if check {
+                        let _ = writeln!(stdout, "{}", file.display());
+                    } else {
+                        fs::write(file, &formatted)
+                            .map_err(|e| format!("cannot write {}: {e}", file.display()))?;
                     }
                 }
-                Err((span, kind, code)) => {
-                    // Per-file fatal: report, keep going (batch model).
-                    had_error = true;
-                    render_fatal(&mut stderr, file, span, &kind, code);
-                }
-            },
-            Some("tmc") => {
-                // Recognized, formatter not wired yet — reported, not silently
-                // skipped, batch continues (same shape T2 used for `.tma` lint).
-                had_error = true;
-                let _ = writeln!(stderr, "{}: error: {TMC_NOT_YET}", file.display());
             }
-            _ => {
+            Some(Err((span, kind, code))) => {
+                // Per-file fatal: report, keep going (batch model).
+                had_error = true;
+                render_fatal(&mut stderr, file, span, &kind, code);
+            }
+            None => {
                 // Only reachable for an explicitly listed file — the directory
                 // walk only ever collects `.tmc`/`.tma` extensions.
                 had_error = true;
@@ -176,25 +177,26 @@ fn fmt_stdin(check: bool, lang: Lang) -> Result<CliOutput, String> {
     std::io::stdin()
         .read_to_string(&mut source)
         .map_err(|e| format!("cannot read stdin: {e}"))?;
-    match lang {
-        Lang::Tmc => Err(TMC_NOT_YET.to_string()),
-        Lang::Tma => match format_tma(&source) {
-            Ok(formatted) => {
-                if check {
-                    Ok(CliOutput {
-                        stdout: String::new(),
-                        stderr: String::new(),
-                        code: u8::from(formatted != source),
-                    })
-                } else {
-                    Ok(CliOutput::ok(formatted, String::new()))
-                }
+    let result = match lang {
+        Lang::Tmc => format_tmc(&source),
+        Lang::Tma => format_tma(&source),
+    };
+    match result {
+        Ok(formatted) => {
+            if check {
+                Ok(CliOutput {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    code: u8::from(formatted != source),
+                })
+            } else {
+                Ok(CliOutput::ok(formatted, String::new()))
             }
-            Err((span, kind, code)) => {
-                let mut stderr = String::new();
-                render_fatal(&mut stderr, Path::new("<stdin>"), span, &kind, code);
-                Err(stderr.trim_end().to_string())
-            }
-        },
+        }
+        Err((span, kind, code)) => {
+            let mut stderr = String::new();
+            render_fatal(&mut stderr, Path::new("<stdin>"), span, &kind, code);
+            Err(stderr.trim_end().to_string())
+        }
     }
 }

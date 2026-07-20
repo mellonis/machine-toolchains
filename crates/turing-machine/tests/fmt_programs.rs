@@ -146,34 +146,78 @@ fn fmt_rejects_an_unknown_lang() {
     assert!(err.contains("takes tmc or tma"), "{err}");
 }
 
+/// A small `.tmc` program in canonical form (its own crate-side battery
+/// proves the whole corpus round-trips; here it only has to be a file the CLI
+/// leaves alone).
+const TMC_CANONICAL: &str = "\
+alphabet ab { '_', 'a' }
+
+machine {
+  tape main: ab;
+
+  entry state scan {
+    ['a'] -> write ['_'] move [>] goto scan;
+    [*]   -> stop;
+  }
+}
+";
+
 #[test]
-fn fmt_tmc_is_reported_as_not_yet_implemented() {
+fn fmt_rewrites_a_tmc_file() {
     let dir = scratch("tmc");
-    let f = write(&dir, "m.tmc", "machine { }\n");
+    let messy = "alphabet ab{'_','a'}\nmachine{\ntape main:ab;\nentry state scan{\n['a']->write['_'] move[>] goto scan;\n[*]->stop;\n}\n}\n";
+    let f = write(&dir, "m.tmc", messy);
     let out = execute(&args(&["fmt", f.to_str().unwrap()])).unwrap();
-    assert_eq!(out.code, 1);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    let formatted = fs::read_to_string(&f).unwrap();
     assert!(
-        out.stderr.contains("not yet implemented"),
-        "stderr: {}",
-        out.stderr
+        formatted.contains("    ['a'] -> write ['_'] move [>] goto scan;"),
+        "{formatted}"
     );
+    // Second run is a no-op — the canonical form is a fixed point.
+    let out = execute(&args(&["fmt", "--check", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0, "stdout: {}", out.stdout);
 }
 
 #[test]
-fn fmt_directory_walks_both_extensions() {
-    // A .tma (reformatted) and a .tmc (not-yet-implemented) under one dir:
-    // the .tma is handled, the .tmc reported; exit 1 (the .tmc error).
-    let dir = scratch("walk");
+fn fmt_check_leaves_a_canonical_tmc_file_alone() {
+    let dir = scratch("tmc-canonical");
+    let f = write(&dir, "m.tmc", TMC_CANONICAL);
+    let out = execute(&args(&["fmt", "--check", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0, "stdout: {}", out.stdout);
+    assert_eq!(fs::read_to_string(&f).unwrap(), TMC_CANONICAL);
+}
+
+#[test]
+fn fmt_reports_a_tmc_parse_fatal_and_keeps_going() {
+    // Batch model: a broken `.tmc` is one diagnostic, not an abort — the
+    // `.tma` sibling in the same run is still formatted.
+    let dir = scratch("tmc-fatal");
     write(&dir, "a.tma", FRAMES);
-    write(&dir, "m.tmc", "machine { }\n");
+    let broken = write(&dir, "m.tmc", "machine {\n");
     let out = execute(&args(&["fmt", "--check", dir.to_str().unwrap()])).unwrap();
     assert_eq!(out.code, 1);
     assert!(out.stdout.contains("a.tma"), "stdout: {}", out.stdout);
     assert!(
-        out.stderr.contains("not yet implemented"),
+        out.stderr.contains(broken.file_name().unwrap().to_str().unwrap()),
         "stderr: {}",
         out.stderr
     );
+    assert!(out.stderr.contains("error:"), "stderr: {}", out.stderr);
+}
+
+#[test]
+fn fmt_directory_walks_both_extensions() {
+    // A .tma and a .tmc under one dir, both off-grid: `--check` lists both
+    // and exits 1.
+    let dir = scratch("walk");
+    write(&dir, "a.tma", FRAMES);
+    write(&dir, "m.tmc", "machine{\ntape t:ab;\n}\n");
+    let out = execute(&args(&["fmt", "--check", dir.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    assert!(out.stdout.contains("a.tma"), "stdout: {}", out.stdout);
+    assert!(out.stdout.contains("m.tmc"), "stdout: {}", out.stdout);
+    assert!(out.stderr.is_empty(), "stderr: {}", out.stderr);
 }
 
 #[test]
