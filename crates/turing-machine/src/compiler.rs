@@ -206,6 +206,11 @@ pub enum CompileErrorKind {
     /// A `{v±k}` write substitution folds to a value with no glyph in the
     /// tape's alphabet (out-of-alphabet arithmetic). `name` is the message.
     FoldOutOfAlphabet(String),
+    /// A write-cell fold expression uses a shape whose evaluation is not yet
+    /// implemented (anything past a bare name or `{name±int}`). `name` is the
+    /// message. A transitional bound while fold-expression evaluation is
+    /// under construction.
+    FoldExprUnsupported(String),
     /// Two rules in one state match the same concrete tuple with neither
     /// carrying a wildcard — an exact-row disjointness violation. The two
     /// rendered patterns name both offenders.
@@ -296,6 +301,7 @@ impl CompileErrorKind {
             CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
             CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
             CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
+            CompileErrorKind::FoldExprUnsupported(_) => "fold-expr-unsupported",
             CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
             CompileErrorKind::RowWidth { .. } => "row-width",
             CompileErrorKind::ExternalBindingUnsupported(_) => "external-binding-unsupported",
@@ -548,6 +554,9 @@ impl std::fmt::Display for CompileErrorKind {
                 )
             }
             CompileErrorKind::FoldOutOfAlphabet(m) => {
+                write!(f, "{m}")
+            }
+            CompileErrorKind::FoldExprUnsupported(m) => {
                 write!(f, "{m}")
             }
             CompileErrorKind::ExactRowConflict { first, second } => {
@@ -2437,6 +2446,7 @@ mod tests {
             CompileErrorKind::MapNotInjective { symbol: "x".into() },
             CompileErrorKind::IdentityGlyphMismatch,
             CompileErrorKind::FoldOutOfAlphabet("x".into()),
+            CompileErrorKind::FoldExprUnsupported("x".into()),
             CompileErrorKind::ExactRowConflict {
                 first: "x".into(),
                 second: "y".into(),
@@ -2451,7 +2461,7 @@ mod tests {
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 53);
+        assert_eq!(all.len(), 54);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();

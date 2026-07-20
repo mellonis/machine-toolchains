@@ -175,6 +175,55 @@ machine {
     );
 }
 
+// -- write-cell fold expressions --------------------------------------------
+
+#[test]
+fn a_fold_expression_prints_tight_with_minimal_parens() {
+    // Sprinkled spaces collapse; parens survive only where precedence needs
+    // them. `(v+1)` must stay parenthesized under `%` (an `Add` under a
+    // tighter `Rem`).
+    check(
+        "\
+machine {
+entry state s {
+[0..9 as v] -> write [{ ( v + 1 ) % 6 }] goto s;
+}
+}
+",
+        "\
+machine {
+  entry state s {
+    [0..9 as v] -> write [{(v+1)%6}] goto s;
+  }
+}
+",
+    );
+}
+
+#[test]
+fn a_fold_expression_drops_parens_precedence_makes_redundant() {
+    // `v*2` binds tighter than `+1`, so no parens are printed; left-
+    // associative `-` keeps its natural left-to-right reading unparenthesized.
+    check(
+        "\
+machine {
+entry state s {
+[0..9 as v] -> write [{ v * 2 + 1 }] goto s;
+[0..9 as w] -> write [{ w - 3 - 1 }] goto s;
+}
+}
+",
+        "\
+machine {
+  entry state s {
+    [0..9 as v] -> write [{v*2+1}] goto s;
+    [0..9 as w] -> write [{w-3-1}] goto s;
+  }
+}
+",
+    );
+}
+
 // -- single-line states -----------------------------------------------------
 
 #[test]

@@ -37,9 +37,9 @@ use crate::compiler::{
     ResolvedWorld, WorldKind,
 };
 use crate::parser::{
-    BindingArg, BindingValue, Continuation, MapArrow, MoveCell, MoveDir, MoveVec, PatternCell,
-    PatternCellKind, Rule, SymLit, SymMap as SrcSymMap, TermKind, Transition, WriteCell,
-    WriteCellKind, WriteVec,
+    BindingArg, BindingValue, Continuation, FoldExprKind, FoldExprNode, FoldOp, MapArrow, MoveCell,
+    MoveDir, MoveVec, PatternCell, PatternCellKind, Rule, SymLit, SymMap as SrcSymMap, TermKind,
+    Transition, WriteCell, WriteCellKind, WriteVec,
 };
 
 // ---------------------------------------------------------------------------
@@ -696,23 +696,23 @@ fn resolve_write_cell(
                 kind: CompileErrorKind::MapSymbolNotInAlphabet(glyph),
             })
         }
-        WriteCellKind::Subst {
-            name,
-            name_span,
-            delta,
-        } => {
-            let bv = env.get(name.as_str()).ok_or_else(|| CompileError {
-                span: *name_span,
+        WriteCellKind::Subst { expr } => {
+            // Transitional bridge while fold-expression evaluation is under
+            // construction: only a bare name and `{name±int}` fold here; any
+            // richer expression is a clear error, never silently wrong output.
+            let (name, name_span, delta) = simple_fold(expr)?;
+            let bv = env.get(name).ok_or_else(|| CompileError {
+                span: name_span,
                 kind: CompileErrorKind::FoldOutOfAlphabet(format!(
                     "`{{{name}}}` refers to no pattern binding in this rule"
                 )),
             })?;
-            let glyph = if *delta == 0 {
+            let glyph = if delta == 0 {
                 bv.glyph.clone()
             } else {
                 // Arithmetic is numeric-only (the parser rejects `{c±k}`).
                 let base = bv.value.ok_or_else(|| CompileError {
-                    span: *name_span,
+                    span: name_span,
                     kind: CompileErrorKind::FoldOutOfAlphabet(format!(
                         "`{{{name}}}` binds a glyph, which cannot take arithmetic"
                     )),
@@ -720,7 +720,7 @@ fn resolve_write_cell(
                 let folded = base + delta;
                 if folded < 0 {
                     return Err(CompileError {
-                        span: *name_span,
+                        span: name_span,
                         kind: CompileErrorKind::FoldOutOfAlphabet(format!(
                             "`{{{name}{delta:+}}}` folds to {folded}, below the alphabet"
                         )),
@@ -729,12 +729,45 @@ fn resolve_write_cell(
                 folded.to_string()
             };
             ti.idx(&glyph).map(WriteOut::Sym).ok_or(CompileError {
-                span: *name_span,
+                span: name_span,
                 kind: CompileErrorKind::FoldOutOfAlphabet(format!(
                     "`{{{name}{delta:+}}}` folds to `{glyph}`, not in the tape's alphabet"
                 )),
             })
         }
+    }
+}
+
+/// Extract `(name, name_span, delta)` from the two fold shapes this
+/// transitional bridge evaluates — a bare `{name}` (delta 0) and `{name±int}`
+/// — rejecting anything richer with a clear, spanned error. Replaced by full
+/// fold-expression evaluation once that lands.
+fn simple_fold(expr: &FoldExprNode) -> Result<(&str, Span, i64), CompileError> {
+    let unsupported = || CompileError {
+        span: expr.span,
+        kind: CompileErrorKind::FoldExprUnsupported(
+            "this fold expression is not yet evaluated — only a bare name or `{name±int}` folds \
+             for now"
+                .to_string(),
+        ),
+    };
+    match &expr.kind {
+        FoldExprKind::Var(name) => Ok((name.as_str(), expr.span, 0)),
+        FoldExprKind::Bin { op, lhs, rhs }
+            if matches!(op, FoldOp::Add | FoldOp::Sub)
+                && matches!(lhs.kind, FoldExprKind::Var(_))
+                && matches!(rhs.kind, FoldExprKind::Int(_)) =>
+        {
+            let FoldExprKind::Var(name) = &lhs.kind else {
+                unreachable!("guarded by the match arm")
+            };
+            let FoldExprKind::Int(n) = rhs.kind else {
+                unreachable!("guarded by the match arm")
+            };
+            let delta = if *op == FoldOp::Sub { -n } else { n };
+            Ok((name.as_str(), lhs.span, delta))
+        }
+        _ => Err(unsupported()),
     }
 }
 

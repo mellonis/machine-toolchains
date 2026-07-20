@@ -192,12 +192,13 @@ fn a3_two_tape_copy_parses_range_binding_and_substitution() {
         r0.pattern.cells[1].kind,
         PatternCellKind::Wildcard
     ));
-    // write `[-, {c}]` — keep then a substitution pass-through (delta 0).
+    // write `[-, {c}]` — keep then a substitution pass-through (a bare name).
     let w = r0.write.as_ref().expect("has a write vector");
     assert!(matches!(w.cells[0].kind, WriteCellKind::Keep));
     assert!(matches!(
         &w.cells[1].kind,
-        WriteCellKind::Subst { name, delta: 0, .. } if name == "c"
+        WriteCellKind::Subst { expr }
+            if matches!(&expr.kind, FoldExprKind::Var(name) if name == "c")
     ));
 }
 
@@ -211,11 +212,17 @@ fn a4_byte_increment_parses_number_ranges_and_plus_delta() {
     ));
     let inc = &machine(&p).states[0];
     assert_eq!(inc.rules.len(), 3);
-    // `[1..125 as v] -> write [{v+1}] stop;`
+    // `[1..125 as v] -> write [{v+1}] stop;` — now a `Bin{Add, Var, Int}`.
     let w = inc.rules[0].write.as_ref().unwrap();
     assert!(matches!(
         &w.cells[0].kind,
-        WriteCellKind::Subst { name, delta: 1, .. } if name == "v"
+        WriteCellKind::Subst { expr }
+            if matches!(
+                &expr.kind,
+                FoldExprKind::Bin { op: FoldOp::Add, lhs, rhs }
+                    if matches!(&lhs.kind, FoldExprKind::Var(n) if n == "v")
+                        && matches!(&rhs.kind, FoldExprKind::Int(1))
+            )
     ));
     // `[126] -> halt;`
     assert!(matches!(inc.rules[1].transition, Transition::Halt { .. }));
@@ -788,8 +795,8 @@ fn routine_and_graph_lower_to_distinct_ast_lists() {
 }
 
 // ---------------------------------------------------------------------------
-// Task-3 handoff top-ups: rule-action ordering, the substitution `%`
-// non-token, the `debugger` flag, and the `{c+0}` corner.
+// Rule-action ordering, the substitution `%` fold operator, the `debugger`
+// flag, and the `{c+0}` corner.
 // ---------------------------------------------------------------------------
 
 const MACHINE_HEAD: &str = "alphabet b { '_', '0', '1' }\nmachine {\n  tape t: b;\n";
@@ -812,12 +819,11 @@ fn write_must_precede_move_in_an_action() {
 }
 
 #[test]
-fn percent_is_not_a_substitution_operator() {
-    // `%` belongs to `.tma` `.rept` arithmetic, not `.tmc`; it never lexes
-    // (only `+`/`-` deltas exist on a substitution). A lex error, not a
-    // parse error — the character has no `.tmc` token.
-    let e = lex("write [{v%2}]").unwrap_err();
-    assert_eq!(e.kind.code(), "lex-error");
+fn percent_is_a_fold_operator() {
+    // `%` is the remainder operator in a write-cell fold expression — the
+    // substitution grammar matches the assembler's (`+ - * %`, parens, i64),
+    // so `{v%2}` on a numeric binding parses.
+    assert!(parse_src(&one_rule("[0..9 as v] -> write [{v%2}] goto s;")).is_ok());
 }
 
 #[test]
@@ -832,21 +838,66 @@ fn debugger_flag_parses_at_the_action_head() {
 }
 
 #[test]
-fn subst_plus_zero_is_pass_through_on_any_binding() {
-    // `{c+0}` (and `{v+0}`) is a zero delta — an explicit identity, equivalent
-    // to `{c}` pass-through. The char-arithmetic prohibition fires only on a
-    // NON-zero delta, so `+0` is accepted
-    // even on a glyph binding; the parser records `delta == 0`.
-    let p = parse_src(&one_rule("['a' as c] -> write [{c+0}] goto s;")).unwrap();
+fn only_a_bare_name_is_pass_through() {
+    // Passthrough is a bare name — `FoldExprKind::Var` at top level, no
+    // operators. `{c}` on a glyph binding is legal.
+    let p = parse_src(&one_rule("['a' as c] -> write [{c}] goto s;")).unwrap();
     let cell = &machine(&p).states[0].rules[0].write.as_ref().unwrap().cells[0];
-    assert!(
-        matches!(&cell.kind, WriteCellKind::Subst { name, delta, .. } if name == "c" && *delta == 0)
+    assert!(matches!(
+        &cell.kind,
+        WriteCellKind::Subst { expr }
+            if matches!(&expr.kind, FoldExprKind::Var(name) if name == "c")
+    ));
+    // `{c+0}` is no longer a passthrough — it is a fold (an `Add`
+    // application), so on a glyph binding it is char arithmetic. The old
+    // delta-0-is-identity special case does not survive the expression
+    // grammar.
+    assert_eq!(
+        err_code(&one_rule("['a' as c] -> write [{c+0}] goto s;")),
+        "char-arithmetic"
     );
-    // A non-zero delta on a glyph binding is still rejected.
+    // `{c+1}` on a glyph binding stays char arithmetic.
     assert_eq!(
         err_code(&one_rule("['a' as c] -> write [{c+1}] goto s;")),
         "char-arithmetic"
     );
-    // A non-zero delta on a numeric binding is fine (folded at expansion).
+    // Arithmetic on a numeric binding is fine (folded at expansion),
+    // including the identity `{v+0}`.
+    assert!(parse_src(&one_rule("[0 as v] -> write [{v+0}] goto s;")).is_ok());
     assert!(parse_src(&one_rule("[0 as v] -> write [{v+1}] goto s;")).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Fold expressions: a write-cell substitution accepts the assembler's full
+// arithmetic grammar (`+ - * %`, parens, i64), not just `{name±int}`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fold_expr_modulo_parses() {
+    // A numeric range binding and a `%` fold — must parse.
+    let src = one_rule("[0..5 as v] -> write [{(v+1)%6}] move [>] goto s;");
+    assert!(parse_src(&src).is_ok());
+}
+
+#[test]
+fn fold_expr_precedence_and_multi_var() {
+    // `b*2` binds tighter than `a+`, and two distinct vars in one expression
+    // are legal.
+    let src = one_rule("[0..2 as a, 0..2 as b] -> write [{a+b*2}, -] move [>, .] goto s;");
+    assert!(parse_src(&src).is_ok());
+}
+
+#[test]
+fn fold_expr_char_arithmetic_still_rejected() {
+    // A glyph binding inside a non-bare expression is char arithmetic, even
+    // through parens and `%`.
+    let src = one_rule("['a'..'c' as c] -> write [{(c+1)%3}] move [>] goto s;");
+    assert_eq!(err_code(&src), "char-arithmetic");
+}
+
+#[test]
+fn fold_expr_bare_var_stays_passthrough_for_glyphs() {
+    // A bare name keeps passthrough semantics — legal on a glyph binding.
+    let src = one_rule("['a'..'c' as c] -> write [{c}] move [>] goto s;");
+    assert!(parse_src(&src).is_ok());
 }

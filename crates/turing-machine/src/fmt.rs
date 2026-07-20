@@ -122,9 +122,9 @@ use crate::cst::{
 };
 use crate::lexer::{Comment, LexMode, lex_with};
 use crate::parser::{
-    AlphabetElem, BindingArg, BindingValue, Continuation, MapArrow, MoveDir, MoveVec, Pattern,
-    PatternCell, PatternCellKind, Rule, SigParamKind, Signature, SymLit, SymMap, TermKind,
-    Transition, WriteCellKind, WriteVec, parse_cst,
+    AlphabetElem, BindingArg, BindingValue, Continuation, FoldExprKind, FoldExprNode, FoldOp,
+    MapArrow, MoveDir, MoveVec, Pattern, PatternCell, PatternCellKind, Rule, SigParamKind,
+    Signature, SymLit, SymMap, TermKind, Transition, WriteCellKind, WriteVec, parse_cst,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -393,14 +393,55 @@ fn write_vec_text(vec: &WriteVec) -> String {
         .map(|cell| match &cell.kind {
             WriteCellKind::Keep => "-".to_string(),
             WriteCellKind::Lit(sym) => sym_text(sym),
-            WriteCellKind::Subst { name, delta, .. } => match delta.cmp(&0) {
-                std::cmp::Ordering::Equal => format!("{{{name}}}"),
-                std::cmp::Ordering::Greater => format!("{{{name}+{delta}}}"),
-                std::cmp::Ordering::Less => format!("{{{name}-{}}}", delta.unsigned_abs()),
-            },
+            WriteCellKind::Subst { expr } => format!("{{{}}}", fold_expr_text(expr)),
         })
         .collect();
     format!("write [{}]", cells.join(", "))
+}
+
+/// Print a write-cell fold expression tight — no spaces, minimal parentheses
+/// (docs/tmt/language.md (substitution)). Precedence levels: atoms bind
+/// tightest, then `*`/`%`, then `+`/`-`. A child is wrapped only when its own
+/// precedence is looser than the parent's, plus the right operand of a
+/// same-precedence node (the operators are left-associative, so `a-(b-c)`
+/// must keep its parens).
+fn fold_expr_text(expr: &FoldExprNode) -> String {
+    fn prec(kind: &FoldExprKind) -> u8 {
+        match kind {
+            FoldExprKind::Var(_) | FoldExprKind::Int(_) => 3,
+            FoldExprKind::Bin {
+                op: FoldOp::Mul | FoldOp::Rem,
+                ..
+            } => 2,
+            FoldExprKind::Bin {
+                op: FoldOp::Add | FoldOp::Sub,
+                ..
+            } => 1,
+        }
+    }
+    fn go(node: &FoldExprNode, parent_prec: u8, is_right: bool) -> String {
+        match &node.kind {
+            FoldExprKind::Var(name) => name.clone(),
+            FoldExprKind::Int(n) => n.to_string(),
+            FoldExprKind::Bin { op, lhs, rhs } => {
+                let p = prec(&node.kind);
+                let sym = match op {
+                    FoldOp::Add => "+",
+                    FoldOp::Sub => "-",
+                    FoldOp::Mul => "*",
+                    FoldOp::Rem => "%",
+                };
+                let body = format!("{}{sym}{}", go(lhs, p, false), go(rhs, p, true));
+                if p < parent_prec || (p == parent_prec && is_right) {
+                    format!("({body})")
+                } else {
+                    body
+                }
+            }
+        }
+    }
+    // The whole expression sits under no parent — level 0 wraps nothing.
+    go(expr, 0, false)
 }
 
 fn move_vec_text(vec: &MoveVec) -> String {
