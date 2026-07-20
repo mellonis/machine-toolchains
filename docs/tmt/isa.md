@@ -199,21 +199,16 @@ is the *only* thing that writes MR.
 **`djmp <table>`** indexes a dispatch table by MR: MR = 1 selects the
 first target, MR = 2 the second, and so on.
 
-**Table discipline** is enforced by the assembler, not by the walk: all
-rows share one width; exact rows (no wildcard) come first, sorted and
-pairwise disjoint; wildcard rows follow in source order; an all-wildcard
-catch-all, if present, is last. Violations are fatal assembly errors
-under the code `table-discipline`, not lint findings:
+**Table discipline** — the ordering and width rules a match table's rows
+must satisfy — is enforced by the assembler, not by the walk; the rules
+and what they buy are `docs/core.md (match tables)`. In TM-1 a violation
+is a fatal assembly error under the code `table-discipline`, not a lint
+finding:
 
 ```
 error: exact rows must be sorted and pairwise disjoint [table-discipline]
 error: the all-wildcard row must be last [table-discipline]
 ```
-
-Sorted-and-disjoint exact rows mean the walk's first-match rule can
-never be the difference between two exact rows, so a table's meaning
-does not depend on the order the author happened to write them in. The
-catch-all-last rule means a catch-all never shadows a row behind it.
 
 **When nothing matches**, MR stays 0, and what happens next is the
 program's choice:
@@ -228,10 +223,9 @@ Both are load-bearing idioms. A dispatch table shorter than the MR it is
 handed traps `DispatchOutOfRange` — a table with rows the dispatch has no
 targets for is caught at run time, not silently.
 
-One caveat about the discipline: it governs **authored** tables. The
-linker's mono lowering (below) rewrites rows through a symbol-map
-preimage and prepends trap rows, and the tables it emits preserve
-first-match *meaning* rather than source sortedness.
+One caveat worth carrying into the next section: the discipline governs
+**authored** tables. The linker's mono lowering (below) emits rows that
+preserve first-match *meaning* rather than source sortedness.
 
 ## The frames execution profile
 

@@ -222,10 +222,23 @@ width, or a width wider than the latched TR) is a trap, not a panic. A
 dispatch table is the companion jump vector: `DispatchJump` indexes it by
 MR, which is why an MR of 0 traps rather than dispatching.
 
-Row discipline — exact rows first, sorted and pairwise disjoint;
-wildcard rows after in source order; an all-wildcard catch-all only
-last; one width for all rows — is enforced by the assembler, not the
-walk (`docs/formats.md (assembly text)`).
+**Row discipline** — one width for every row; exact rows (no wildcard)
+first, sorted and pairwise disjoint; wildcard rows after in source
+order; an all-wildcard catch-all, if present, only last — is enforced by
+the assembler, not by the walk. It is a property of first-match
+semantics rather than of any one architecture, so the check lives in the
+core assembler and every table-carrying dialect inherits it.
+
+Sorted, pairwise-disjoint exact rows mean first-match can never be the
+tiebreak between two exact rows, so a table's meaning does not depend on
+the order the author happened to write them in; catch-all-last means a
+catch-all never shadows a row behind it. How a dialect spells the
+resulting error is its own business.
+
+The discipline governs **authored** tables. Tables the linker emits —
+mono lowering rewrites rows through a symbol-map preimage and prepends
+trap rows — preserve first-match *meaning* rather than source
+sortedness.
 
 ## Timing model (tacts)
 
@@ -505,9 +518,18 @@ framed call cannot be lowered onto the base profile, which has no
 compose machinery to activate a descriptor with. And a holey binding
 whose synthesized trap rows would be consumed by a conditional branch
 rather than a dispatch jump is refused, since the prepended row could
-misroute the branch. Both errors name the offending routine. `hybrid`
-delegates to the mono path wholesale when every bound site in the image
-is a bijection, and inherits both restrictions in that case.
+misroute the branch. Both errors name the offending routine.
+
+`hybrid` inherits those restrictions only where it actually stamps.
+Because an identity binding collapses to a plain call, it never seeds a
+stamp — so what matters is whether any site is a **non-collapsing**
+bijection. Hybrid delegates to the mono path wholesale, restrictions and
+all, exactly when at least one bound site is a non-collapsing bijection
+and none is holey or one-way. With no such site it is pure frames, and a
+raw framed call elsewhere in the image links fine. With both kinds
+present it takes the mixed path, where the restrictions bind only the
+stamped closure reached from the bijection seeds, not the image at
+large.
 
 ## The thin-renderer rule
 

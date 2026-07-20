@@ -463,11 +463,10 @@ Consecutive directives under the **same label** accrue into one table, so
 a wide dispatch table can be built one entry at a time — the idiom a
 `.rept` uses to emit a value-indexed table.
 
-Match tables carry a **row discipline** — one width for every row, exact
-rows first and sorted, wildcard rows after, a catch-all last — which the
-assembler checks and reports as a fatal error under the code
-`table-discipline`. The discipline itself, and what it buys, are
-`docs/tmt/isa.md (match and dispatch)`.
+Match tables carry a **row discipline** the assembler checks, reporting a
+violation as a fatal error under the code `table-discipline`. The rules
+and what they buy are `docs/core.md (match tables)`; the TM-1 error
+spellings are `docs/tmt/isa.md (match and dispatch)`.
 
 ### The compact symbol family (the `0x7F` rule)
 
@@ -476,9 +475,17 @@ element, holding a 7-bit symbol index in `0`..=`126`. The value `0x7F` is
 **reserved as the transparent marker** — a match-row byte of `0x7F`
 matches any latched symbol (this is what `*` compiles to), and a write
 element of `0x7F` keeps the cell (what `-` compiles to). Reserving `0x7F`
-is why the compact family caps alphabets at **127 symbols**: every payload
-index must stay at or below `0x7E`. An alphabet wider than 127 symbols
-needs a wider symbol family, which the compact grammar does not yet reach.
+is why a compact operand can **name** only indices `0`..=`126`: every
+payload index must stay at or below `0x7E`, and a `wr` or `.row` element
+outside that range is a fatal `bad-vector` error.
+
+This is a limit on what an instruction can *mention*, not on how wide a
+tape's alphabet may be. A `.routine` may declare a cardinality above 127
+— such an image assembles, links, mints a tape and runs — the symbols
+past index 126 simply have no compact spelling, so no `wr` or `.row` can
+name them. (The `.tmc` front end is stricter: it rejects an alphabet
+resolving to more than 127 symbols, since a compiled program must be able
+to name every symbol it declares.)
 
 ### The `.rept` macro
 
