@@ -1,5 +1,5 @@
-//! `tmt lint` (docs/cli.md, once it lands; substance in prose until then): a
-//! thin renderer over the `.tmc` lint library. Findings go to stdout; exit
+//! `tmt lint` (docs/tmt/cli.md (tmt lint)): a thin renderer over the `.tmc`
+//! lint library. Findings go to stdout; exit
 //! 0 = clean, 1 = findings or errors anywhere. Mirrors `pmt lint`'s shape —
 //! dirs-and-files positionals, per-file `tmt.json` union, batch-keeps-going —
 //! with two `.tmc`-family differences: a `--warn` flag turns on the opt-in

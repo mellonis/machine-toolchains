@@ -1,5 +1,4 @@
-//! `tmt fmt` (docs/cli.md, once it lands; substance in prose until then): a
-//! thin renderer over the formatters. The `.tma` side wires core's
+//! `tmt fmt` (docs/tmt/cli.md (tmt fmt)): a thin renderer over the formatters. The `.tma` side wires core's
 //! canonical-grid printer (`mtc_core::asm::format_asm_with` under
 //! `tm1_syntax()`'s caps, so sections / table directives / `.rept` blocks /
 //! frame descriptors / vector operands all normalize); the `.tmc` side wires

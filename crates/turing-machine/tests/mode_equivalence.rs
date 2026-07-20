@@ -785,7 +785,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 /// once, then `link --call-mech mono|frames|hybrid` and `run` each image over
 /// the same seeded tape. The exit codes must be identical — the CLI path
 /// carries the same three-mode equivalence the library harness proves, and
-/// `--call-mech` is wired end to end (docs/cli.md, once it lands).
+/// `--call-mech` is wired end to end (docs/tmt/cli.md (--call-mech)).
 #[test]
 fn program_a_runs_identically_via_the_cli_in_all_three_modes() {
     use mtc_turing_machine::cli::execute;
