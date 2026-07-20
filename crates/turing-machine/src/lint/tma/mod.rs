@@ -47,6 +47,16 @@
 //! error when validated for a `.tmc` file, and vice versa. There is no
 //! `--warn` opt-in tier on the `.tma` side — all three additions are
 //! default-on.
+//!
+//! # A known gap this layer should close
+//!
+//! A `.map` clause that repeats a source symbol (`rmap=(1->2, 1->3)`) is
+//! silently accepted by the assembler, last write winning — the emitted
+//! object is identical to the one `1->3` alone produces. That is worth a
+//! finding, and it belongs here rather than in the language server: a rule
+//! added to this layer reaches both `tmt lint` and the editor through the
+//! one `lint_tma` call, whereas a server-only check would raise a
+//! diagnostic in the editor that the command line never reports.
 
 pub(crate) mod rules;
 
