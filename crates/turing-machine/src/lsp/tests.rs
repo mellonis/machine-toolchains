@@ -52,7 +52,18 @@ fn pos_end_of(src: &str, anchor: &str) -> Pos {
 }
 
 fn span_of(src: &str, anchor: &str) -> Span {
-    let start = pos_after(src, anchor, 0);
+    span_of_nth(src, anchor, 0)
+}
+
+/// The span of `anchor`'s `n`th occurrence (0-based) — how a test names
+/// the DECLARATION of a name that is also referenced earlier in the file.
+fn span_of_nth(src: &str, anchor: &str, n: usize) -> Span {
+    let start = src
+        .match_indices(anchor)
+        .nth(n)
+        .unwrap_or_else(|| panic!("{anchor:?} occurrence {n} not found in fixture"))
+        .0;
+    let start = pos_at_byte(src, start);
     Span::new(
         start.line,
         start.col,
@@ -68,6 +79,29 @@ fn opened(src: &str) -> (TmcLanguageService, String) {
     let uri = "untitled:doc.tmc".to_string();
     service.did_update(&uri, src);
     (service, uri)
+}
+
+/// Applies one edit to `src`, so an assertion can be about the TEXT the
+/// fix produces rather than about coordinates.
+fn apply(src: &str, edit: &Edit) -> String {
+    let byte_of = |pos: Pos| {
+        let mut line = 1;
+        let mut col = 1;
+        for (i, c) in src.char_indices() {
+            if line == pos.line && col == pos.col {
+                return i;
+            }
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        src.len()
+    };
+    let (start, end) = (byte_of(edit.span.start), byte_of(edit.span.end));
+    format!("{}{}{}", &src[..start], edit.replacement, &src[end..])
 }
 
 fn labels(candidates: &[Candidate]) -> Vec<String> {
@@ -129,7 +163,7 @@ machine {
 
   entry state main {
     ['1', *] -> call plusOne(num = ctl) then done;
-    [*, *] -> call inc1 then done;
+    [*, *] -> call inc1() then done;
   }
 
   graft findX(t = data, found = done) as seek;
@@ -317,8 +351,26 @@ machine {
 
 // -- completions ---------------------------------------------------------
 
-/// Cursor completion in a document assembled as `prefix + suffix`, with the
-/// cursor exactly between the two — the shape a half-typed line really has.
+/// Completion at the seam of `prefix + suffix`, after the document has
+/// SETTLED as `prefix + settled + suffix`.
+///
+/// This is the real editor sequence, and the only one that exercises the
+/// service honestly: a document that resolved, then an edit that broke it
+/// (a half-typed cell rarely parses), then a completion request. The names
+/// come from the roster the settled text left behind; the position comes
+/// from the broken text's own tokens.
+fn complete_typing(prefix: &str, settled: &str, suffix: &str) -> Vec<Candidate> {
+    let mut service = TmcLanguageService::new();
+    let uri = "untitled:doc.tmc".to_string();
+    service.did_update(&uri, &format!("{prefix}{settled}{suffix}"));
+    let src = format!("{prefix}{suffix}");
+    let pos = pos_at_byte(&src, prefix.len());
+    service.did_update(&uri, &src);
+    service.completion(&uri, pos)
+}
+
+/// Completion in a document that needs no repair — `prefix + suffix` is
+/// already valid, so the roster is the current one.
 fn complete_between(prefix: &str, suffix: &str) -> Vec<Candidate> {
     let src = format!("{prefix}{suffix}");
     let pos = pos_at_byte(&src, prefix.len());
@@ -341,14 +393,14 @@ machine {
     let tail = "] -> stop;\n  }\n}\n";
 
     // Cell 0 draws from `ctl`'s alphabet…
-    let first = labels(&complete_between(head, tail));
+    let first = labels(&complete_typing(head, "*, *", tail));
     assert!(first.contains(&"'0'".to_string()), "{first:?}");
     assert!(first.contains(&"'1'".to_string()), "{first:?}");
     assert!(!first.contains(&"'a'".to_string()), "{first:?}");
     assert!(first.contains(&"*".to_string()), "{first:?}");
 
     // …and cell 1 from `data`'s, which is the whole point.
-    let second = labels(&complete_between(&format!("{head}'0', "), tail));
+    let second = labels(&complete_typing(&format!("{head}'0', "), "*", tail));
     assert!(second.contains(&"'a'".to_string()), "{second:?}");
     assert!(second.contains(&"'b'".to_string()), "{second:?}");
     assert!(!second.contains(&"'1'".to_string()), "{second:?}");
@@ -365,9 +417,9 @@ machine {
   tape data: wide;
 
   entry state main {
-    [*, *] -> write [*, ";
+    [*, *] -> write ['0', ";
     let tail = "] stop;\n  }\n}\n";
-    let got = labels(&complete_between(head, tail));
+    let got = labels(&complete_typing(head, "'a'", tail));
     assert!(got.contains(&"-".to_string()), "{got:?}");
     assert!(got.contains(&"'a'".to_string()), "{got:?}");
     assert!(!got.contains(&"'1'".to_string()), "{got:?}");
@@ -384,7 +436,7 @@ machine {
   entry state main {
     [*] -> move [";
     let tail = "] stop;\n  }\n}\n";
-    let got = labels(&complete_between(head, tail));
+    let got = labels(&complete_typing(head, ".", tail));
     assert_eq!(got, vec!["<", ">", "."]);
 }
 
@@ -402,7 +454,7 @@ machine {
   graft g(t = ctl, done = fin) as seek;
   entry state main { [*] -> goto ";
     let tail = ";\n  }\n  state fin { [*] -> stop; }\n}\n";
-    let got = labels(&complete_between(head, tail));
+    let got = labels(&complete_typing(head, "fin", tail));
     assert!(got.contains(&"main".to_string()), "{got:?}");
     assert!(got.contains(&"fin".to_string()), "{got:?}");
     assert!(got.contains(&"seek".to_string()), "{got:?}");
@@ -420,8 +472,8 @@ machine {
   tape ctl: bits;
   bind r(t = ctl) as r1;
   entry state main { [*] -> call ";
-    let tail = " then main;\n  }\n}\n";
-    let got = labels(&complete_between(head, tail));
+    let tail = "() then main;\n  }\n}\n";
+    let got = labels(&complete_typing(head, "r1", tail));
     assert!(got.contains(&"r".to_string()), "{got:?}");
     assert!(got.contains(&"r1".to_string()), "{got:?}");
     assert!(!got.contains(&"g".to_string()), "{got:?}");
@@ -439,7 +491,7 @@ machine {
   tape ctl: bits;
   entry graft ";
     let tail = "(t = ctl, done = fin) as seek;\n  state fin { [*] -> stop; }\n}\n";
-    let got = labels(&complete_between(head, tail));
+    let got = labels(&complete_typing(head, "g", tail));
     assert!(got.contains(&"g".to_string()), "{got:?}");
     assert!(!got.contains(&"r".to_string()), "{got:?}");
 }
@@ -455,11 +507,15 @@ machine {
   tape ctl: bits;
   entry graft g(";
     let tail = ") as seek;\n  state fin { [*] -> stop; }\n}\n";
-    let names = labels(&complete_between(head, tail));
+    let names = labels(&complete_typing(head, "t = ctl, done = fin", tail));
     assert!(names.contains(&"t".to_string()), "{names:?}");
     assert!(names.contains(&"done".to_string()), "{names:?}");
 
-    let values = labels(&complete_between(&format!("{head}t = "), tail));
+    let values = labels(&complete_typing(
+        &format!("{head}t = "),
+        "ctl, done = fin",
+        tail,
+    ));
     assert!(values.contains(&"ctl".to_string()), "{values:?}");
     assert!(values.contains(&"fin".to_string()), "{values:?}");
 }
@@ -478,12 +534,12 @@ machine {
     let tail = " }) then main;\n  }\n}\n";
 
     // Left of the arrow: the HOST tape's alphabet (`data`, wide).
-    let src_side = labels(&complete_between(head, tail));
+    let src_side = labels(&complete_typing(head, "'a' -> '1'", tail));
     assert!(src_side.contains(&"'a'".to_string()), "{src_side:?}");
     assert!(!src_side.contains(&"'1'".to_string()), "{src_side:?}");
 
     // Right of it: the CALLEE tape parameter's alphabet (`num`, bits).
-    let dst_side = labels(&complete_between(&format!("{head}'a' -> "), tail));
+    let dst_side = labels(&complete_typing(&format!("{head}'a' -> "), "'1'", tail));
     assert!(dst_side.contains(&"'1'".to_string()), "{dst_side:?}");
     assert!(!dst_side.contains(&"'a'".to_string()), "{dst_side:?}");
 }
@@ -497,7 +553,7 @@ alphabet wide { '_', 'a' }
 machine {
   tape ctl: ";
     let tail = ";\n  entry state main { [*] -> stop; }\n}\n";
-    let got = labels(&complete_between(head, tail));
+    let got = labels(&complete_typing(head, "bits", tail));
     assert!(got.contains(&"bits".to_string()), "{got:?}");
     assert!(got.contains(&"wide".to_string()), "{got:?}");
 }
@@ -573,8 +629,8 @@ fn a_goto_navigates_to_the_state_it_names() {
     let target = service
         .definition(&uri, pos_after(TWO_TAPE, "goto done", 6))
         .expect("a definition");
-    assert_eq!(target.span, span_of(TWO_TAPE, "done { [*, *] -> stop"));
-    assert_eq!(target.origin, Some(span_of(TWO_TAPE, "done;")));
+    assert_eq!(target.span, span_of_nth(TWO_TAPE, "done", 1));
+    assert_eq!(target.origin, Some(span_of_nth(TWO_TAPE, "done", 0)));
 }
 
 #[test]
@@ -583,7 +639,7 @@ fn a_graft_instance_navigates_to_the_graph_it_splices() {
     let target = service
         .definition(&uri, pos_after(CROSS_WORLD, "as seek", 3))
         .expect("a definition");
-    assert_eq!(target.span, span_of(CROSS_WORLD, "findX(tape t"));
+    assert_eq!(target.span, span_of_nth(CROSS_WORLD, "findX", 0));
 }
 
 #[test]
@@ -592,7 +648,7 @@ fn a_call_target_navigates_through_the_import_to_the_routine() {
     let target = service
         .definition(&uri, pos_after(CROSS_WORLD, "call plusOne", 5))
         .expect("a definition");
-    assert_eq!(target.span, span_of(CROSS_WORLD, "plusOne(tape num"));
+    assert_eq!(target.span, span_of_nth(CROSS_WORLD, "plusOne", 0));
 }
 
 #[test]
@@ -601,7 +657,7 @@ fn a_call_on_a_bind_instance_navigates_to_the_bind_not_a_routine() {
     let target = service
         .definition(&uri, pos_after(CROSS_WORLD, "call inc1", 5))
         .expect("a definition");
-    assert_eq!(target.span, span_of(CROSS_WORLD, "inc1;"));
+    assert_eq!(target.span, span_of_nth(CROSS_WORLD, "inc1", 0));
 }
 
 #[test]
@@ -610,7 +666,7 @@ fn a_tape_declarations_alphabet_navigates_to_the_alphabet() {
     let target = service
         .definition(&uri, pos_after(CROSS_WORLD, "tape ctl: bits", 10))
         .expect("a definition");
-    assert_eq!(target.span, span_of(CROSS_WORLD, "bits { '_', '0', '1' }"));
+    assert_eq!(target.span, span_of_nth(CROSS_WORLD, "bits", 0));
 }
 
 #[test]
@@ -619,7 +675,7 @@ fn a_use_path_navigates_to_the_routine_it_imports() {
     let target = service
         .definition(&uri, pos_after(CROSS_WORLD, "use mylib::plusOne", 5))
         .expect("a definition");
-    assert_eq!(target.span, span_of(CROSS_WORLD, "plusOne(tape num"));
+    assert_eq!(target.span, span_of_nth(CROSS_WORLD, "plusOne", 0));
 }
 
 #[test]
@@ -633,7 +689,7 @@ fn definition_survives_a_resolve_stage_fatal() {
     let target = service
         .definition(&uri, pos_after(&broken, "call plusOne", 5))
         .expect("a definition");
-    assert_eq!(target.span, span_of(&broken, "plusOne(tape num"));
+    assert_eq!(target.span, span_of_nth(&broken, "plusOne", 0));
 }
 
 // -- hover ---------------------------------------------------------------
@@ -717,7 +773,7 @@ fn an_unresolved_goto_offers_a_state_stub_of_the_right_arity() {
         "  state nowhere { [*, *] -> stop; }\n"
     );
     // Inserted on the world's closing-brace line, at column 1.
-    let close_line = src.lines().count() as u32 - 1;
+    let close_line = src.lines().count() as u32;
     assert_eq!(actions[0].edits[0].span.start.line, close_line);
 }
 
@@ -751,22 +807,40 @@ machine {
         fix.edits[0].replacement,
         " with map { 'q' -> 'x', 'r' -> 'y' }"
     );
-    // Appended right after the bound tape name, where the map belongs.
-    assert_eq!(fix.edits[0].span.start, span_of(src, "work,").start.into_end(2));
+    // A zero-width insertion right after the bound tape name: applying it
+    // produces the argument the compiler would have accepted.
+    assert_eq!(fix.edits[0].span.start, fix.edits[0].span.end);
+    assert!(
+        apply(src, &fix.edits[0]).contains("t = work with map { 'q' -> 'x', 'r' -> 'y' }"),
+        "{}",
+        apply(src, &fix.edits[0])
+    );
 }
 
 #[test]
-fn a_lint_fix_still_reaches_code_actions() {
-    let src = "\
-alphabet bits { '_', '1' }
-machine {
-  tape t: bits;
-  entry state s { [*] -> debugger stop; }
-}
-";
-    let (mut service, uri) = opened(src);
-    let actions = service.code_actions(&uri, span_of(src, "debugger"));
-    assert!(!actions.is_empty(), "the lint channel contributed nothing");
+fn a_lint_finding_that_carries_a_fix_becomes_an_action() {
+    // No `.tmc` lint rule ships a `Fix` yet, so this exercises the
+    // conversion itself rather than any one rule: the day a rule gains a
+    // fix, it reaches the client through exactly this path.
+    let finding = Diagnostic {
+        code: "dead-rule",
+        span: Span::new(4, 3, 4, 9),
+        message: "unreachable".to_string(),
+        fix: Some(mtc_core::diagnostics::Fix {
+            description: "delete the rule".to_string(),
+            applicability: Applicability::MachineApplicable,
+            edits: vec![Edit {
+                span: Span::new(4, 3, 4, 9),
+                replacement: String::new(),
+            }],
+        }),
+    };
+    let overlapping = actions_from_findings(&[finding.clone()], Span::new(4, 5, 4, 6));
+    assert_eq!(overlapping.len(), 1);
+    assert_eq!(overlapping[0].title, "delete the rule");
+    assert!(overlapping[0].preferred);
+    // A request elsewhere in the document gets nothing.
+    assert!(actions_from_findings(&[finding], Span::new(9, 1, 9, 2)).is_empty());
 }
 
 // -- symbols, tokens, formatting -----------------------------------------
@@ -843,19 +917,4 @@ fn the_service_declares_the_tmc_language_and_its_watched_config() {
     assert_eq!(service.extensions(), [".tmc"]);
     assert_eq!(service.watched_globs(), ["**/tmt.json"]);
     assert!(!service.trigger_characters().is_empty());
-}
-
-/// Helper for the map-fix span assertion: the position `n` characters past
-/// a span's start (the anchor there is `work,`, whose tape name is 4 long).
-trait IntoEnd {
-    fn into_end(self, chars: u32) -> Pos;
-}
-
-impl IntoEnd for Pos {
-    fn into_end(self, chars: u32) -> Pos {
-        Pos {
-            line: self.line,
-            col: self.col + chars,
-        }
-    }
 }

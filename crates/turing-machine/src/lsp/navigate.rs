@@ -315,8 +315,11 @@ fn reference_in_world(
         }
         for rule in &state.rules {
             match &rule.transition {
-                Transition::Goto { name, span, .. } if span_touches(*span, pos) => {
-                    return Some((world_local(world, name), *span));
+                Transition::Goto { name, span, .. } => {
+                    let at = name_span(*span, name);
+                    if span_touches(at, pos) {
+                        return Some((world_local(world, name), at));
+                    }
                 }
                 Transition::Call {
                     target, args, then, ..
@@ -338,10 +341,11 @@ fn reference_in_world(
                             resolve_written(program, &written, world.ns, world_exists(program))?;
                         return Some((Target::World(mangled), target.span));
                     }
-                    if let Continuation::State { name, span } = then
-                        && span_touches(*span, pos)
-                    {
-                        return Some((world_local(world, name), *span));
+                    if let Continuation::State { name, span } = then {
+                        let at = name_span(*span, name);
+                        if span_touches(at, pos) {
+                            return Some((world_local(world, name), at));
+                        }
                     }
                     if let Some(hit) = binding_args_reference(program, world, args, pos) {
                         return Some(hit);
@@ -352,6 +356,26 @@ fn reference_in_world(
         }
     }
     None
+}
+
+/// The span of the NAME inside a transition slot's span. A `goto NAME`
+/// carries the keyword in its span, which would underline `goto done`
+/// rather than `done`; anchoring on the end and stepping back the name's
+/// own length narrows it without assuming how much whitespace the author
+/// put between the two. Slots whose span is already just the name come
+/// through unchanged.
+fn name_span(span: Span, name: &str) -> Span {
+    let len = name.chars().count() as u32;
+    if span.end.line != span.start.line || span.end.col < span.start.col + len {
+        return span;
+    }
+    Span {
+        start: Pos {
+            line: span.end.line,
+            col: span.end.col - len,
+        },
+        end: span.end,
+    }
 }
 
 /// A world-local name in a transition slot: a graft instance if one is

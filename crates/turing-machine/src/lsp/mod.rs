@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use mtc_core::diagnostics::{Applicability, Diagnostic, Pos, Span};
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
