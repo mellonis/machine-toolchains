@@ -171,6 +171,10 @@ descriptor, and what it costs, is `docs/tmt/isa.md (framed calls)`.
 
 ## `.pmo` / `.tmo` — object file
 
+**MO** is the object container both toolchains emit: relocatable code plus
+the symbol, signature, table, and binding records the linker consumes. A
+`.pmo` and a `.tmo` are the same `MO` format at different arch bytes.
+
 ```
 magic "MO" 0x01
 u16 format version (readers accept 1..=3; writers emit
