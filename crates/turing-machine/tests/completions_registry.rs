@@ -25,6 +25,12 @@
 //! `Args` scanner offers no reflection over `cli/build.rs`'s match arms,
 //! so that direction relies on careful authorship at review time, not a
 //! mechanical check — the same limitation the PM-1 guard records.
+//!
+//! One more soft spot worth naming: the parser probe is vacuous for the
+//! `--fno-` family specifically. `take_disabled_passes` strips ANY token
+//! with that prefix without validating the suffix, so `--fno-nonsense`
+//! would sail through the probe too. The pass-name cross-check above is
+//! the only thing standing behind those spellings.
 
 use mtc_turing_machine::cli::execute;
 use mtc_turing_machine::completions::registry::{
