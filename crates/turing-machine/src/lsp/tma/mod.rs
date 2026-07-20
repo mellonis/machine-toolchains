@@ -176,7 +176,9 @@ fn walk(items: &[AsmItem], nonblank: &[u32], cursor: &mut usize, out: &mut Vec<F
                 advance_past(nonblank, cursor, rept.endr_span.end.line);
             }
             _ => {
-                let Some(span) = item_span(item) else { continue };
+                let Some(span) = item_span(item) else {
+                    continue;
+                };
                 advance_past(nonblank, cursor, span.end.line);
                 out.push(FlatItem {
                     line: span.start.line,
@@ -280,7 +282,9 @@ pub(crate) fn doc_callable_names(flat: &[FlatItem]) -> BTreeSet<&str> {
 /// document, paired with the label that names it — what an `mtc`/`djmp`
 /// operand refers to. A table's label sits on its FIRST row, so only labeled
 /// directives are entries.
-pub(crate) fn doc_tables(flat: &[FlatItem]) -> impl Iterator<Item = (&str, Span, &TableDirectiveCst)> {
+pub(crate) fn doc_tables(
+    flat: &[FlatItem],
+) -> impl Iterator<Item = (&str, Span, &TableDirectiveCst)> {
     flat_items(flat).filter_map(|item| match &item.kind {
         AsmItemKind::TableDirective(d) => d
             .labels

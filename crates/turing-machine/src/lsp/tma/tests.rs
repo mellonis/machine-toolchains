@@ -367,7 +367,8 @@ fn a_framed_calls_two_operands_navigate_to_the_callee_and_to_the_frame() {
         .definition(URI, CALLM_TARGET)
         .expect("helper is defined in this document");
     assert_eq!(
-        callee.span, helper_func_name(),
+        callee.span,
+        helper_func_name(),
         "the `.func helper` body, preferred over the `.routine` signature"
     );
 
@@ -560,7 +561,9 @@ done:   stp
         "{messages:?}"
     );
     assert!(
-        messages.iter().any(|m| m.contains("at most once per frame")),
+        messages
+            .iter()
+            .any(|m| m.contains("at most once per frame")),
         "{messages:?}"
     );
 }
@@ -687,10 +690,11 @@ fn the_word_position_offers_every_mnemonic_and_directive() {
         assert!(names.contains(&expected.to_string()), "{names:?}");
     }
     assert!(candidates.iter().all(|c| c.kind == CandidateKind::Keyword));
-    assert!(candidates.iter().all(|c| c.replace_span == Span {
-        start: pos,
-        end: pos
-    }));
+    assert!(candidates.iter().all(|c| c.replace_span
+        == Span {
+            start: pos,
+            end: pos
+        }));
 }
 
 #[test]
@@ -782,7 +786,11 @@ B:      nop
 fn an_immediate_operand_offers_nothing() {
     let mut service = opened(FULL);
     // `retx #1`'s own operand slot.
-    assert!(service.completion(URI, Pos { line: 21, col: 18 }).is_empty());
+    assert!(
+        service
+            .completion(URI, Pos { line: 21, col: 18 })
+            .is_empty()
+    );
 }
 
 #[test]

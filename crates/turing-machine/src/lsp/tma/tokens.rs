@@ -69,7 +69,12 @@ pub(super) fn semantic_tokens(state: &TmaDocState) -> Vec<SemToken> {
                     }
                     TableDirectiveKind::Targets | TableDirectiveKind::Target => {
                         for operand in &d.operands {
-                            push_code_label_ref(&code_labels, &operand.text, operand.span, &mut out);
+                            push_code_label_ref(
+                                &code_labels,
+                                &operand.text,
+                                operand.span,
+                                &mut out,
+                            );
                         }
                     }
                 }
