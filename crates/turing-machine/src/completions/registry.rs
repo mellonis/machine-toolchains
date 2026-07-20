@@ -579,9 +579,10 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 /// `ir`/`lint`/`fmt`, `tape` and `ir` nested) plus `completions` itself.
 /// Deliberately absent: `tmt lsp`, which is not dispatched yet — an entry
 /// for a subcommand the parser rejects would fail the drift guard, so it
-/// gets registered by the change that wires it. Also absent, permanently:
-/// `tape build`, which is PM-1-only glyph-pattern sugar (`cli/inspect.rs`
-/// says why TM-1 has no analogue).
+/// gets registered by the change that wires it, alongside the matching
+/// row in `tests/completions_registry.rs`'s `EXPECTED_TOP_LEVEL`. Also
+/// absent, permanently: `tape build`, which is PM-1-only glyph-pattern
+/// sugar (`cli/inspect.rs` says why TM-1 has no analogue).
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),

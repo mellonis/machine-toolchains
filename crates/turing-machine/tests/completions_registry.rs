@@ -17,14 +17,20 @@
 //!    `cli::execute` — `cli::Args::positionals` rejects any unrecognized
 //!    dashed token with an "unknown flag" error, so a registry entry with
 //!    a typo or an invented flag would surface that error here;
-//!  - the registry's top-level subcommand-name set matches both the
-//!    CLI's own top-level `--help` text and the real parser.
+//!  - the registry's top-level subcommand-name set is an EXACT match,
+//!    both directions, against the `SUBCOMMANDS:` block parsed out of the
+//!    CLI's own top-level `--help` text, and against the real parser — a
+//!    subcommand wired into the dispatcher and documented in `--help` but
+//!    never added to the registry (or the reverse: a stale registry entry
+//!    for a subcommand `--help` no longer lists) fails loudly here
+//!    instead of passing silently.
 //!
 //! What is NOT (and structurally cannot be) checked here: that the real
-//! parser doesn't accept a flag the registry is MISSING. The hand-rolled
+//! parser doesn't accept a FLAG the registry is MISSING. The hand-rolled
 //! `Args` scanner offers no reflection over `cli/build.rs`'s match arms,
 //! so that direction relies on careful authorship at review time, not a
-//! mechanical check — the same limitation the PM-1 guard records.
+//! mechanical check — the same limitation the PM-1 guard records. (The
+//! analogous gap at the subcommand level is the one closed above.)
 //!
 //! One more soft spot worth naming: the parser probe is vacuous for the
 //! `--fno-` family specifically. `take_disabled_passes` strips ANY token
@@ -48,6 +54,32 @@ fn find<'a>(reg: &'a Registry, path: &[&str]) -> &'a CommandSpec {
         .iter()
         .find(|c| c.path == target)
         .unwrap_or_else(|| panic!("no registry entry for {path:?}"))
+}
+
+/// Parses the ordered subcommand-name list out of the `SUBCOMMANDS:`
+/// block in `tmt --help`'s rendered `USAGE` text. The block is an
+/// indented list under a `SUBCOMMANDS:` header; parsing stops at the
+/// first blank line or the first non-indented line, whichever comes
+/// first, and each kept line contributes its first whitespace-separated
+/// word as the subcommand name.
+fn parse_usage_subcommands(help: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut in_block = false;
+    for line in help.lines() {
+        if !in_block {
+            if line.trim() == "SUBCOMMANDS:" {
+                in_block = true;
+            }
+            continue;
+        }
+        if line.trim().is_empty() || !line.starts_with(char::is_whitespace) {
+            break;
+        }
+        if let Some(name) = line.split_whitespace().next() {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 /// The maintained expectation of `tmt`'s dispatched top-level surface.
@@ -157,14 +189,29 @@ fn top_level_subcommands_match_the_maintained_list_cli_help_and_the_real_parser(
     );
 
     // The CLI's own top-level `--help` text (`cli/mod.rs`'s `USAGE`) must
-    // still mention every one of them.
+    // list EXACTLY this set — not merely mention each name somewhere in
+    // the text, which would pass even if `--help` documented a
+    // subcommand this list (and the registry) never heard of. A future
+    // subcommand wired into the dispatcher and documented in `SUBCOMMANDS:`
+    // but never added to the registry (the `tmt lsp` scenario) now fails
+    // loudly here instead of passing silently.
     let help = execute(&[]).unwrap().stdout;
-    for name in &expected {
-        assert!(
-            help.contains(name.as_str()),
-            "`tmt --help` no longer mentions `{name}`: {help}"
-        );
-    }
+    let mut usage_names = parse_usage_subcommands(&help);
+    usage_names.sort();
+    let missing_from_usage: Vec<&String> = expected
+        .iter()
+        .filter(|n| !usage_names.contains(n))
+        .collect();
+    let missing_from_expected: Vec<&String> = usage_names
+        .iter()
+        .filter(|n| !expected.contains(n))
+        .collect();
+    assert!(
+        missing_from_usage.is_empty() && missing_from_expected.is_empty(),
+        "the `SUBCOMMANDS:` block in `tmt --help` and `EXPECTED_TOP_LEVEL` disagree: \
+         `SUBCOMMANDS:` is missing {missing_from_usage:?}, `EXPECTED_TOP_LEVEL` is missing \
+         {missing_from_expected:?} (help block parsed as {usage_names:?})"
+    );
 
     // Parser probe: the real dispatcher must accept each one — i.e. NOT
     // the `execute_with` catch-all's "unknown subcommand" error.
@@ -299,16 +346,19 @@ fn call_mech_choices_are_all_accepted_by_the_real_parser() {
     assert!(matches!(&bogus, Err(message) if message.contains("unknown --call-mech")));
 }
 
-/// `fmt --lang` is the other closed value set (`cli/fmt.rs::parse_lang`),
-/// and the only one whose accepting path this guard cannot drive: the
-/// language word is validated on the stdin (`-`) route ONLY, and a probe
-/// that took that route would read this test process's stdin to EOF —
-/// hanging an interactive `cargo test` run. So the check is one-sided
-/// here: a bad word must be rejected (that error is raised before stdin
-/// is ever touched), and the registry must advertise exactly the words
-/// the CLI's own usage text documents.
+/// `fmt --lang` is the other closed value set (`cli/fmt.rs::parse_lang`).
+/// The language word is validated on the stdin (`-`) route only, so
+/// driving the real accepting path in-process would read this test
+/// process's own stdin to EOF — hanging an interactive `cargo test` run.
+/// Spawning the real `tmt` binary with stdin wired to `Stdio::null()`
+/// sidesteps that: `fmt_stdin` reads stdin to EOF before touching the
+/// language choice, and a null stdin hits EOF immediately, so the
+/// process returns right away rather than blocking (verified directly:
+/// `tmt fmt --check --lang tmc - < /dev/null` returns immediately).
+/// Precedent for spawning the binary this way: `cli_programs.rs` in the
+/// PM-1 crate, and `completions_zsh.rs` alongside this file.
 #[test]
-fn fmt_lang_choices_match_the_documented_set_and_a_bad_word_is_rejected() {
+fn fmt_lang_choices_match_the_documented_set_and_are_accepted_by_the_real_binary() {
     let reg = registry();
     let fmt = find(&reg, &["fmt"]);
     let lang = fmt
@@ -321,18 +371,27 @@ fn fmt_lang_choices_match_the_documented_set_and_a_bad_word_is_rejected() {
     };
     assert_eq!(langs, &args(&["tmc", "tma"]));
 
-    // `parse_lang` runs before the stdin read, so this rejection path
-    // never blocks; its message names the accepted words, which is what
-    // ties the registry's list to the parser's.
+    // Real accepting-path probe: each advertised word must not be
+    // rejected by the actual binary as an unknown language.
+    for language in langs {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_tmt"))
+            .args(["fmt", "--check", "--lang", language, "-"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("failed to spawn tmt");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("`--lang` takes"),
+            "`tmt fmt --check --lang {language} -` was rejected as an unknown language: {stderr}"
+        );
+    }
+
+    // Rejection path, still driven in-process: `parse_lang` runs before
+    // stdin is ever touched, so a bad word errors immediately without
+    // needing a subprocess.
     let bogus = execute(&args(&["fmt", "--lang", "not-a-language", "-"]));
     let Err(message) = &bogus else {
         panic!("a bad --lang should be rejected: {bogus:?}");
     };
     assert!(message.contains("`--lang` takes"), "{message}");
-    for language in langs {
-        assert!(
-            message.contains(language.as_str()),
-            "the parser's own --lang error should name `{language}`: {message}"
-        );
-    }
 }
