@@ -25,10 +25,21 @@
 //! hand-authored case is one descriptor per callee, resolved exactly. The
 //! lint runs behind the assemble fatal gate, so `k`, the frame descriptors,
 //! and the `call.m` operands are all well-formed by the time it is reached.
+//!
+//! # `.rept` bodies
+//!
+//! `call.m` bindings inside a `.rept` body are collected too, so a routine
+//! bound to one frame at top level and another inside a `.rept` reads as
+//! multiply-bound (ambiguous) rather than as a single unambiguous binding. A
+//! templated frame operand such as `F{v}` resolves to no in-file descriptor
+//! and so counts as an unknown-arity binding, which the ambiguity discipline
+//! above turns into a silent skip — the sound direction. A `retx` inside a
+//! `.rept` body is itself not scanned: a completeness-only limitation that
+//! can only miss a finding, never produce a wrong one.
 
 use std::collections::BTreeSet;
 
-use mtc_core::asm::cst::{AsmItemKind, FrameDirectiveCst};
+use mtc_core::asm::cst::{AsmItem, AsmItemKind, FrameDirectiveCst, OperandToken};
 use mtc_core::diagnostics::{Diagnostic, Span};
 
 use crate::lint::tma::TmaLintContext;
@@ -51,6 +62,39 @@ fn close_frame(open: &mut Option<(String, usize)>, out: &mut Vec<(String, usize)
 /// Parse a `#<n>` immediate operand's numeric value.
 fn parse_imm(text: &str) -> Option<usize> {
     text.trim().strip_prefix('#').and_then(|n| n.parse().ok())
+}
+
+/// Record a `call.m`'s `(callee, frame label)` binding, if both operands are
+/// present.
+fn push_call(operands: &[OperandToken], calls: &mut Vec<(String, String)>) {
+    if let (Some(target), Some(frame)) = (operands.first(), operands.get(1)) {
+        calls.push((
+            target.text.trim().to_string(),
+            frame.text.trim().to_string(),
+        ));
+    }
+}
+
+/// Collect `call.m` bindings inside a `.rept` body — a routine bound to one
+/// frame at top level and another inside a `.rept` is correctly seen as
+/// multiply-bound. Only `call.m` is scanned here: a `retx` inside a `.rept`
+/// body is deliberately not (see the module doc — a completeness-only limit,
+/// never a wrong finding). Nested `.rept` cannot occur in a shaped body (the
+/// CST degrades it), but recursion keeps the scan total.
+fn collect_rept_calls(items: &[AsmItem], calls: &mut Vec<(String, String)>) {
+    for item in items {
+        match &item.kind {
+            AsmItemKind::Line(line) => {
+                if let Some(instr) = &line.instr
+                    && instr.word == "call.m"
+                {
+                    push_call(&instr.operands, calls);
+                }
+            }
+            AsmItemKind::Rept(rept) => collect_rept_calls(&rept.body, calls),
+            _ => {}
+        }
+    }
 }
 
 pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
@@ -86,16 +130,7 @@ pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
                 close_frame(&mut open_frame, &mut frame_exits);
                 let Some(instr) = &line.instr else { continue };
                 match instr.word.as_str() {
-                    "call.m" => {
-                        if let (Some(target), Some(frame)) =
-                            (instr.operands.first(), instr.operands.get(1))
-                        {
-                            calls.push((
-                                target.text.trim().to_string(),
-                                frame.text.trim().to_string(),
-                            ));
-                        }
-                    }
+                    "call.m" => push_call(&instr.operands, &mut calls),
                     "retx" => {
                         if let (Some(func), Some(op)) = (current_func, instr.operands.first())
                             && let Some(k) = parse_imm(&op.text)
@@ -110,6 +145,12 @@ pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
                     _ => {}
                 }
             }
+            // A `.rept` is structural (it closes an open frame group), but its
+            // body still carries `call.m` bindings the ambiguity check needs.
+            AsmItemKind::Rept(rept) => {
+                close_frame(&mut open_frame, &mut frame_exits);
+                collect_rept_calls(&rept.body, &mut calls);
+            }
             _ => close_frame(&mut open_frame, &mut frame_exits),
         }
     }
@@ -122,22 +163,27 @@ pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
             .filter(|(callee, _)| *callee == retx.owner)
             .map(|(_, frame)| frame.as_str())
             .collect();
-        // Keep only those whose descriptor is in this file.
-        let resolvable: Vec<usize> = labels
+        // Each governing descriptor's exit count, `None` when the descriptor
+        // is not in this file — a cross-file frame, or a `.rept` substitution
+        // template like `F{v}`. An unresolved label is a binding of UNKNOWN
+        // arity, so it must not be dropped: dropping it would leave a lone
+        // resolvable sibling looking unambiguous and invent a finding.
+        let counts: Vec<Option<usize>> = labels
             .iter()
-            .filter_map(|label| {
+            .map(|label| {
                 frame_exits
                     .iter()
                     .find(|(name, _)| name == label)
                     .map(|(_, count)| *count)
             })
             .collect();
-        // Exactly one governing descriptor → an unambiguous bound. Zero
-        // (cross-file / unresolved) or several distinct → skip.
-        if resolvable.len() != 1 {
+        // Exactly one governing descriptor, and its exit count known → an
+        // unambiguous bound. Zero (cross-file), several distinct descriptors,
+        // or an unknown-arity binding all leave the count context-dependent.
+        if counts.len() != 1 {
             continue;
         }
-        let count = resolvable[0];
+        let Some(count) = counts[0] else { continue };
         if retx.k >= count {
             out.push(Diagnostic {
                 code: "retx-exit-bounds",
@@ -248,6 +294,38 @@ F2: .frame tapes=(1, 0)
 .func main
         call.m helper, F1
         call.m helper, F2
+a1:     stp
+b0:     stp
+b1:     stp
+b2:     hlt
+.func helper
+        wr   [1, -]
+        retx #2
+";
+        assert!(findings(src).is_empty(), "{:?}", findings(src));
+    }
+
+    #[test]
+    fn a_call_m_binding_inside_a_rept_body_is_seen() {
+        // `helper` is bound to F1 (1 exit) at top level AND to F2 (3 exits)
+        // from inside a `.rept` body. Seeing only the top-level F1 would
+        // misread the routine as unambiguously one-exit and wrongly flag
+        // `retx #2`; the `.rept` binding makes it multiply-bound, so the
+        // governing count is context-dependent → silent.
+        let src = "\
+.routine main, tapes=2, alpha=(2, 2)
+.routine helper, tapes=2, alpha=(2, 2)
+.section tables
+F1: .frame tapes=(1, 0)
+    .exits a1
+F2: .frame tapes=(1, 0)
+    .exits b0, b1, b2
+.section code
+.func main
+        call.m helper, F1
+        .rept v, 0, 0
+        call.m helper, F2
+        .endr
 a1:     stp
 b0:     stp
 b1:     stp

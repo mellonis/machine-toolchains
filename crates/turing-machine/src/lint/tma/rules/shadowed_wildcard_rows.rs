@@ -26,13 +26,18 @@
 //! # What it sees
 //!
 //! Consecutive `.row` directives form one match table (a labeled row opens a
-//! new table; unlabeled rows extend it — mirroring the assembler's grouping);
-//! `.rept` bodies are scanned as their own tables. A row with a cell that is
-//! not a plain wildcard or decimal index — a `.rept` substitution template
-//! `{…}` inside a body — is opaque and takes no part in cover reasoning
-//! (never covers, never reported). The lint runs behind the assemble fatal
-//! gate, so every top-level `.row` is a well-formed match row by the time it
-//! is reached.
+//! new table; unlabeled rows extend it — mirroring the assembler's grouping).
+//! That mirror is deliberately approximate on one point: the assembler
+//! CONTINUES a labeled row whose name matches the already-open table (the
+//! `.rept` same-name path), where this lint flushes on EVERY labeled row —
+//! strictly more splitting, so a row can only land in a smaller candidate set
+//! than the assembler's, never a larger one; soundness holds and only
+//! completeness diverges. `.rept` bodies are scanned as their own tables. A
+//! row with a cell that is not a plain wildcard or decimal index — a `.rept`
+//! substitution template `{…}` inside a body — is opaque and takes no part in
+//! cover reasoning (never covers, never reported). The lint runs behind the
+//! assemble fatal gate, so every top-level `.row` is a well-formed match row
+//! by the time it is reached.
 
 use mtc_core::asm::cst::{AsmItem, AsmItemKind, TableDirectiveCst, TableDirectiveKind};
 use mtc_core::diagnostics::{Diagnostic, Span};
