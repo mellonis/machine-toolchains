@@ -1,8 +1,7 @@
-//! `pmt fmt` property tests
-//! (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "Contracts").
-//! Complements `tests/fmt_programs.rs`'s hand-picked/corpus checks with a
-//! generator of GRAMMAR-VALID `.pmc` programs (docs/pmt/language.md), asserting
-//! two properties the printer must hold over every one of them:
+//! `pmt fmt` property tests. Complements `tests/fmt_programs.rs`'s
+//! hand-picked/corpus checks with a generator of GRAMMAR-VALID `.pmc`
+//! programs (docs/pmt/language.md), asserting two properties the printer
+//! must hold over every one of them:
 //!
 //! 1. **Idempotence**: `format(format(x)?)? == format(x)?`.
 //! 2. **Token equivalence**: lexing `x` and `format(x)?` `WithoutComments`

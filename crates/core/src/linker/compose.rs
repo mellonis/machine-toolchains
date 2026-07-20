@@ -238,7 +238,9 @@ impl std::fmt::Display for ComposeError {
 /// virtual tapes, resolved later by [`compose_composites`]); the read map
 /// carries every pair, the write map only the bidirectional ones. Validates
 /// arity, caller-tape range, callee-symbol range, per-direction conflicts,
-/// and blank pinning (the authority for GC7's mapping legality).
+/// and blank pinning — together the full legality contract a binding must
+/// satisfy to become a composite; this is the only place that contract is
+/// checked.
 ///
 /// `caller_cards` is the caller's per-virtual-tape alphabet cardinalities
 /// (its arity is `caller_cards.len()`). It is load-bearing for the
@@ -488,7 +490,10 @@ pub(crate) fn absolutize(
 /// tapes, whose per-tape alphabet cardinalities are `caller_cards` (the
 /// routine's own signature — the invariant carrier across every composite it
 /// runs under). Validates the binding against `outer`'s arity and the callee
-/// signature, then projects it through `outer` (GC6/GC7).
+/// signature under the same legality contract [`binding_to_composite`]
+/// enforces, then projects it through `outer` by composing the two
+/// composites' sparse maps — any hole in either one's domain propagates
+/// into the result.
 pub(crate) fn compose(
     outer: &Composite,
     caller_cards: &[u32],
@@ -638,7 +643,7 @@ mod tests {
         }
     }
 
-    // ----- ingestion: legality (GC7) ---------------------------------------
+    // ----- ingestion: legality (arity, ranges, conflicts, blank pinning) ---
 
     #[test]
     fn arity_mismatch_is_rejected() {
@@ -1099,7 +1104,7 @@ mod tests {
         /// The load-bearing oracle: for every physical symbol, walking the
         /// two composites step by step yields the same read result (value or
         /// hole) as the single composed read map, and likewise for writes.
-        /// This is the direct check of GC6's hole law
+        /// This is the direct check of the hole-composition law
         /// (outer holes ∪ preimages of inner holes) and of map composition.
         #[test]
         fn compose_matches_step_by_step_simulation(

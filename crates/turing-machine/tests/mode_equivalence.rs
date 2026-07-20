@@ -12,7 +12,8 @@
 //!
 //! - a trap's `at` offset — mono and frames lay code out differently, so the
 //!   faulting address legitimately differs; the trap KIND is the invariant
-//!   (the trap-taxonomy claim, GC5);
+//!   (the trap-taxonomy claim: trap kind, not the faulting address, is the
+//!   cross-mechanism invariant);
 //! - `stats`/`ip`/`stack` — a stamp and a compose-table lookup cost different
 //!   tacts by design (the O(1)-per-call frame overhead is measured separately,
 //!   in the depth-independence test below).
@@ -53,9 +54,11 @@ fn build(src: &str, mech: CallMech) -> (Executable, LinkReport) {
 }
 
 /// A trap's KIND, stripped of its `at` offset (docs/formats.md (frames
-/// profile), GC5). Exhaustive on purpose: a new `Trap` variant must be named
-/// here rather than silently folded into a catch-all, which could mask a
-/// cross-mode divergence into two distinct kinds reading as one.
+/// profile) — the trap-taxonomy claim: trap kind, not the faulting address,
+/// is the cross-mechanism invariant). Exhaustive on purpose: a new `Trap`
+/// variant must be named here rather than silently folded into a catch-all,
+/// which could mask a cross-mode divergence into two distinct kinds reading
+/// as one.
 fn trap_kind(t: Trap) -> &'static str {
     match t {
         Trap::InvalidOpcode { .. } => "invalid-opcode",
@@ -397,8 +400,9 @@ fn hybrid_stamps_the_bijection_frames_does_not() {
 /// | (1, 0)              | [2, 0]       | MR 2 → C writes virtual 1 → physical 2 (ok) |
 ///
 /// The trap KIND must be identical across all three modes: mono raises it
-/// through synthesized rows / `trap` stubs, frames through map sentinels — the
-/// deepest claim of the design (GC5).
+/// through synthesized rows / `trap` stubs, frames through map sentinels —
+/// the trap-taxonomy claim, the deepest cross-mechanism equivalence this
+/// design makes.
 const TRAP_TAXONOMY: &str = "\
 .routine main, tapes=2, alpha=(4, 3)
 .routine sub,  tapes=2, alpha=(3, 4)

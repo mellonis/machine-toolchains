@@ -1,10 +1,8 @@
-//! `pmt fmt` objective-guard harness
-//! (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "Contracts").
-//! Three corpus-wide checks that hold for every input the pretty-printer
-//! claims to support: idempotence, behaviour preservation (compiled
-//! bytes unchanged at `-O0` and `-O1`), and comment fidelity. This is the
-//! objective backstop for the whole fmt build — reviewer approval does
-//! NOT substitute for these passing.
+//! `pmt fmt` objective-guard harness. Three corpus-wide checks that hold
+//! for every input the pretty-printer claims to support: idempotence,
+//! behaviour preservation (compiled bytes unchanged at `-O0` and `-O1`),
+//! and comment fidelity. This is the objective backstop for the whole
+//! fmt build — reviewer approval does NOT substitute for these passing.
 //!
 //! At this task (fmt build Tasks 4-8b) the pretty-printer implements the
 //! TRIVIAL subset plus label/command-column alignment plus comma-group
@@ -196,9 +194,9 @@ const SIMPLE: &[&str] = &[
     // job (docs/pmt/fmt.md, docs/pmt/lint.md). Right-aligns by the WRITTEN
     // width of "007:" (4 chars), not the canonical value's width.
     "main() {\n    007: right;\n    goto 007;\n}\n",
-    // fmt build Task 1 (`docs/superpowers/specs/2026-07-12-pmc-doc-lines-\
-    // attributes-design.md`, "fmt"): the canonical doc/attention-run
-    // shape — a top-level function documented with a two-paragraph doc
+    // The canonical doc/attention-run shape (docs/pmt/language.md (run
+    // shape and attachment)): a top-level function documented with a
+    // two-paragraph doc
     // (an empty `?` line breaks the paragraph) and a `[deprecated]`
     // attention line with a message, plus a nested function with its own
     // one-line doc, run printed at the nested indent. Already fmt-clean
