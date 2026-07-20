@@ -1,5 +1,4 @@
-//! Match-table walk (spec: docs/isa.md (match tables) once phase 8 lands;
-//! until then the layout comment below is normative). Pure state machine:
+//! Match-table walk (docs/core.md (match tables)). Pure state machine:
 //! the core owns the bus, this module owns the table semantics.
 //!
 //! Match table byte layout (compact family — one byte per row position):

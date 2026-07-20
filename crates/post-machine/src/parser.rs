@@ -1,4 +1,4 @@
-//! `.pmc` recursive-descent parser (docs/language.md): tokens → AST.
+//! `.pmc` recursive-descent parser (docs/pmt/language.md): tokens → AST.
 
 use std::collections::HashSet;
 
@@ -11,12 +11,12 @@ use crate::cst::{
 };
 use crate::lexer::{Comment, Token, TokenKind};
 
-/// docs/language.md: words that cannot name a function.
+/// docs/pmt/language.md: words that cannot name a function.
 pub const RESERVED: [&str; 8] = [
     "goto", "check", "left", "right", "mark", "unmark", "halt", "debugger",
 ];
 
-/// The `.pmc` language acceptance-contract version (docs/language.md):
+/// The `.pmc` language acceptance-contract version (docs/pmt/language.md):
 /// pre-1.0 the version is 0.N and N bumps on ANY grammar change; at a
 /// declared 1.0 the axes activate (major = breaking, minor = additive).
 /// No patch digit — spec-text corrections are errata;
@@ -25,7 +25,7 @@ pub const RESERVED: [&str; 8] = [
 /// made this 0.2 (the v1 grammar is retroactively 0.1). Doc lines (`?`)
 /// and attention lines (`!`) — plus the accompanying acceptance change
 /// that a line-leading `!` is always an attention line, never a
-/// successor — made this 0.3 (docs/language.md "Doc lines and attention
+/// successor — made this 0.3 (docs/pmt/language.md "Doc lines and attention
 /// lines").
 pub const PMC_LANG_VERSION: &str = "0.3";
 
@@ -81,7 +81,7 @@ pub struct Function {
     /// Nesting is always local; flatten computes this for top-level
     /// functions as `!exported`.
     pub local: bool,
-    /// Nested function definitions (docs/language.md (visibility)), hoisted and visible to
+    /// Nested function definitions (docs/pmt/language.md (visibility)), hoisted and visible to
     /// their own siblings and enclosing scope's body; emptied by flatten.
     pub nested: Vec<Function>,
     /// Enclosing namespace path (parser-set on top-level definitions;
@@ -89,7 +89,7 @@ pub struct Function {
     /// full symbol joins namespaces with `::` and nesting with `.` —
     /// `std::api.helper`.
     pub ns: Vec<String>,
-    /// The bound `?`/`!` run — `docs/language.md (doc lines and attention
+    /// The bound `?`/`!` run — `docs/pmt/language.md (doc lines and attention
     /// lines)` — reduced from
     /// [`crate::cst::FunctionCst::doc_run`] by [`lower_cst`]. `None` for
     /// an undocumented function (an empty `doc_run`); every compiler
@@ -100,7 +100,7 @@ pub struct Function {
     pub doc: Option<FnDoc>,
 }
 
-/// One function's reduced doc/attention run (`docs/language.md`, doc lines
+/// One function's reduced doc/attention run (`docs/pmt/language.md`, doc lines
 /// and attention lines): paragraphs from `?`
 /// lines, bare-prose `!` lines, and the `[deprecated]` attribute's
 /// message, with spans and raw sigil/attribute text dropped — a future
@@ -130,7 +130,7 @@ pub struct Label {
     pub span: Span,
     /// The number as WRITTEN — digits only, leading zeros preserved.
     /// The printer emits this verbatim instead of re-deriving text from
-    /// `value` (docs/fmt.md: fmt never touches a token).
+    /// `value` (docs/pmt/fmt.md: fmt never touches a token).
     pub written: String,
 }
 
@@ -182,7 +182,7 @@ pub enum Item {
         /// `Some` iff `succ` is `Successor::Label` — parallels
         /// `succ_label_span`. The printer emits this verbatim instead of
         /// re-deriving text from the `Successor::Label` payload
-        /// (docs/fmt.md: fmt never touches a token).
+        /// (docs/pmt/fmt.md: fmt never touches a token).
         succ_label_written: Option<String>,
         line: u32,
     },
@@ -231,7 +231,7 @@ pub enum Item {
         label_span: Span,
         /// The target number as WRITTEN (leading zeros preserved). The
         /// printer emits this verbatim instead of re-deriving text from
-        /// `label` (docs/fmt.md: fmt never touches a token).
+        /// `label` (docs/pmt/fmt.md: fmt never touches a token).
         label_written: String,
         line: u32,
     },
@@ -257,7 +257,7 @@ fn describe(kind: &TokenKind) -> String {
         // this variant, so this arm is unreachable in practice.
         TokenKind::Comment(_) => "a comment".into(),
         // Doc/attention lines are semantic tokens the lexer emits on
-        // BOTH modes (docs/language.md (doc lines)), so — unlike
+        // BOTH modes (docs/pmt/language.md (doc lines)), so — unlike
         // Comment above — this parser DOES see them. At item position
         // (top level or in a body) a `?`/`!` line starts a run, handled
         // by `Parser::doc_run` before this ever runs; one reaching HERE
@@ -463,7 +463,7 @@ struct CommentAt {
     comment: Comment,
     /// The comment's own start line (for `blank_before` gaps).
     line: u32,
-    /// The comment's own start column (`docs/fmt.md`, comments) — the
+    /// The comment's own start column (`docs/pmt/fmt.md`, comments) — the
     /// trailing-comment alignment rule's source-column detection.
     col: u32,
     /// Number of significant tokens preceding this comment — the `pos`
@@ -580,7 +580,7 @@ impl Parser<'_> {
         self.top_items(&[], None).map(|(items, _, _)| items)
     }
 
-    /// Collects a doc/attention run (docs/language.md (doc lines))
+    /// Collects a doc/attention run (docs/pmt/language.md (doc lines))
     /// starting at the current position — the caller has already
     /// confirmed `self.peek()` is `DocLine`/`AttentionLine`. A run is one
     /// optional contiguous `?` block then one optional contiguous `!`
@@ -671,7 +671,7 @@ impl Parser<'_> {
     }
 
     /// Parses a leading `[ident]` attribute off an attention line's raw
-    /// payload (docs/language.md (doc lines)): the exact shape `[`,
+    /// payload (docs/pmt/language.md (doc lines)): the exact shape `[`,
     /// ident, `]` at the payload's very start — anything else means "no
     /// attribute", the whole line is free prose (`None`). `token` is the
     /// `AttentionLine` token the payload came from, needed to translate
@@ -806,7 +806,7 @@ impl Parser<'_> {
                     kind: TopKind::Comment(comment),
                 });
             }
-            // Doc/attention run (docs/language.md (doc lines)): a `?`/`!`
+            // Doc/attention run (docs/pmt/language.md (doc lines)): a `?`/`!`
             // line at item position starts a run that must bind to the
             // NEXT function declaration at this scope — anything else
             // next (`use`, `namespace`, the block terminator, Eof, a
@@ -1250,7 +1250,7 @@ impl Parser<'_> {
                     "`}` to close the function body",
                 ));
             }
-            // Doc/attention run (docs/language.md (doc lines)): a `?`/`!`
+            // Doc/attention run (docs/pmt/language.md (doc lines)): a `?`/`!`
             // line at body item position starts a run that must bind to
             // the NEXT nested function definition — anything else next
             // (a statement, the closing `}`, `export` before a nested
@@ -1421,7 +1421,7 @@ impl Parser<'_> {
         let mut last_item_end_line = self.tokens[self.pos - 1].line;
         while matches!(self.peek().kind, TokenKind::Comma) {
             let comma = self.peek().clone();
-            // Whatever precedes a `,` must be bare (docs/language.md).
+            // Whatever precedes a `,` must be bare (docs/pmt/language.md).
             match &items.last().expect("items is never empty").item {
                 Item::Check { .. } => {
                     return Err(Self::err_at(
@@ -1623,7 +1623,7 @@ impl Parser<'_> {
                         if matches!(self.peek().kind, TokenKind::LParen) {
                             let lparen = self.peek().clone();
                             self.bump();
-                            // docs/language.md: parens on a builtin, if
+                            // docs/pmt/language.md: parens on a builtin, if
                             // present, must carry a successor — empty `()` is
                             // no longer fall-through sugar. Builtins-only:
                             // `successor()` (shared with calls) is untouched,
@@ -1947,7 +1947,7 @@ main() {
     #[test]
     fn reserved_and_at_rules() {
         // At top level a reserved-word ident is now a `TopLevelStatement`
-        // (docs/language.md) — the naming check runs only once a keyword
+        // (docs/pmt/language.md) — the naming check runs only once a keyword
         // has consumed the leading token (e.g. `export <reserved>()`).
         let e = parse_src("check() { }").unwrap_err();
         assert!(
@@ -1966,14 +1966,14 @@ main() {
         let e = parse_src("f() { flip; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "flip"));
 
-        // A user function called without `@` is the same error (docs/language.md).
+        // A user function called without `@` is the same error (docs/pmt/language.md).
         let e = parse_src("f() { goToEnd(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "goToEnd"));
     }
 
     #[test]
     fn empty_builtin_parens_are_a_syntax_error() {
-        // docs/language.md: `()` on a tape builtin, if written, must carry
+        // docs/pmt/language.md: `()` on a tape builtin, if written, must carry
         // a successor — empty parens are no longer fall-through sugar.
         for name in ["left", "right", "mark", "unmark"] {
             let e = parse_src(&format!("f() {{ {name}(); }}")).unwrap_err();
@@ -2411,7 +2411,7 @@ main() {
         assert!(parse_src("f() { } main() { @f(); }").is_ok());
     }
 
-    // -- Doc/attention runs (docs/language.md (doc lines)) ----------------
+    // -- Doc/attention runs (docs/pmt/language.md (doc lines)) ----------------
     //
     // Grammar-fixed run order (`?` block, then `!` block), attachment to
     // the next `FunctionCst` at the run's own scope, and the two

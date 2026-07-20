@@ -1,5 +1,5 @@
 //! Traps: the processor's controlled stop on an execution error
-//! (docs/isa.md (execution)).
+//! (docs/core.md (execution)).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceFault {

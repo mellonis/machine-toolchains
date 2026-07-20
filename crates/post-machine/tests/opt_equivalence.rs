@@ -77,7 +77,7 @@ fn check_fold_shrinks_and_preserves() {
 #[test]
 fn jump_threading_shrinks_and_preserves() {
     // NOT a forward-adjacent chain: codegen's fall-through layout invariant
-    // (docs/language.md (optimization)) already elides those at -O0.
+    // (docs/pmt/language.md (optimization)) already elides those at -O0.
     // Here the hop is backward: -O0 emits `jmp L2; wr 1; stp; L2: jmp L1`
     // (8 bytes); -O1 threads goto-2 through the empty forwarder to the
     // mark block, dce deletes the forwarder, fall-through absorbs the

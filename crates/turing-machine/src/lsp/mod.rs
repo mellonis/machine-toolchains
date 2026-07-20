@@ -1,9 +1,9 @@
 //! The `.tmc` language service: implements `mtc_core::lsp::LanguageService`
-//! over the real TM-1 front end. Owns per-document staged
+//! over the real TM-1 front end (docs/lsp.md). Owns per-document staged
 //! state, the diagnostic merge (fatal / compile warnings / lint findings),
 //! and both configuration channels (`tmt.json` project files and IDE
 //! settings). Library-only — rendering and stdio belong to the CLI
-//! (docs/cli.md (thin-renderer rule)).
+//! (docs/core.md (thin-renderer rule)).
 //!
 //! # Which stages the diagnostics come from
 //!

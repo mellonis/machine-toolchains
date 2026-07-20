@@ -1,5 +1,5 @@
 //! Synchronous driver: answers the sans-I/O core's bus requests against
-//! in-memory components and does all tact accounting (docs/isa.md
+//! in-memory components and does all tact accounting (docs/core.md
 //! (timing model)).
 
 use super::bus::{BusRequest, BusResponse, CoreEvent};
@@ -101,7 +101,7 @@ pub struct RunResult {
     pub stack: Vec<u32>,
 }
 
-/// One instruction boundary of the sync driver (docs/isa.md (timing
+/// One instruction boundary of the sync driver (docs/core.md (timing
 /// model) accounting). `started` is the fresh/resume flag: `false` before
 /// the first call. Callers must not call again after `Finished` (the core
 /// is in its terminal phase).
@@ -217,7 +217,7 @@ pub(crate) fn step_instruction(
             }
             CoreEvent::Step | CoreEvent::Break => {
                 stats.steps += 1;
-                stats.core_tacts += 1; // execute base (docs/isa.md (timing model))
+                stats.core_tacts += 1; // execute base (docs/core.md (timing model))
                 if limits.max_steps.is_some_and(|max| stats.steps >= max) {
                     return StepEvent::Finished(Outcome::Trapped(Trap::StepLimit));
                 }
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn call_costs_eight_with_rel32() {
         // [0]=call +1 (target 6 = entry), [5]=stop, [6]=entry, [7]=ret
-        // call: fetch 5 + ent-read 1 + push 1 + exec 1 = 8 core (docs/isa.md (timing model))
+        // call: fetch 5 + ent-read 1 + push 1 + exec 1 = 8 core (docs/core.md (timing model))
         // entry(Nop): 2; ret: fetch 1 + pop 1 + exec 1 = 3; stop: 1
         let code = [0x0A, 0x01, 0x00, 0x00, 0x00, 0x02, 0x0E, 0x0B];
         let (r, _) = drive(&code, RunLimits::default(), TactProfile::ELECTRONIC);
@@ -578,7 +578,7 @@ mod tests {
         // The write's trailing latch re-read the cell (now 0) → virtual
         // 1 == the match index → mf true (both maps proven live).
         assert!(mf);
-        // Tacts (docs/isa.md (timing model) shape):
+        // Tacts (docs/core.md (timing model) shape):
         //   core: callframe fetch 5 + ent-read 1 + push 1 + exec 1 = 8;
         //         ent 2; read-all 2; wr fetch 2 + exec 1 = 3;
         //         retx fetch 1 + pop 1 + exec 1 = 3; stp fetch 1 → 19.

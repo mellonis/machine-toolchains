@@ -3,7 +3,7 @@
 `pmt fmt` reprints a `.pmc` file to one canonical layout — indentation,
 label/command alignment, comma-group line breaks, blank lines, and
 comment position. It is the fix side of `pmt lint`'s `line-too-long`
-finding (`docs/lint.md`): a line that only needs rewrapping, fmt rewraps
+finding (`docs/pmt/lint.md`): a line that only needs rewrapping, fmt rewraps
 it. fmt changes whitespace and comment placement only — it never touches
 a token. Leading zeros on a label stay leading zeros, `@goToEnd` stays
 `@goToEnd`; renaming, reordering `use` paths, and rewriting numbers are
@@ -144,9 +144,24 @@ past 80 characters, that one line falls back to a single space instead
 (and may then be reported by `line-too-long`); the rest of the run stays
 aligned.
 
+Because the aligned-or-ragged verdict is read off the author's source
+columns, `pmt fmt`'s output is **not** a pure function of the token
+stream: two files with identical tokens, differing only in where the
+`//` sat, format differently — one keeps an aligned column, the other
+gets one space per comment. What the author's columns decide is only
+whether to align; the column itself is always recomputed, so an
+author-aligned run typically lands somewhere other than where it was
+written.
+
+**The `.tmc` formatter does not work this way.** `tmt fmt` aligns any
+run of two or more unconditionally and never reads source columns at all
+(`docs/tmt/fmt.md`). Someone formatting both languages should expect a
+ragged run of trailing comments to survive `pmt fmt` untouched and to
+come out aligned under `tmt fmt`.
+
 ## Doc and attention runs
 
-A `?`/`!` run (`docs/language.md`, doc lines and attention lines) prints
+A `?`/`!` run (`docs/pmt/language.md`, doc lines and attention lines) prints
 directly above the function declaration it binds to, at that
 declaration's own indent — column 0 for a top-level function, body
 indent for a nested one, the same indent the header line itself prints
@@ -157,7 +172,7 @@ canonical space is the only thing normalized — the text itself is a
 token like any other and is never touched, so a `[deprecated]`
 attribute's `! [deprecated] message` shape carries straight through with
 no special-casing. There is no wrapping: a run line over 80 characters
-stays as written and is `line-too-long`'s business (`docs/lint.md`), not
+stays as written and is `line-too-long`'s business (`docs/pmt/lint.md`), not
 fmt's — the same split this page draws for any single unbreakable
 command.
 
@@ -212,7 +227,7 @@ is never rewritten, so running fmt does not churn file modification
 times across a clean tree. `--check` writes nothing: it lists the path
 of every file whose formatted text would differ, and exits 1 if any
 did (0 if none did) — the CI-friendly mode. `-` reads one source from
-stdin — `.pmc` by default, or `.pma` under `--lang pma` (`docs/cli.md`)
+stdin — `.pmc` by default, or `.pma` under `--lang pma` (`docs/pmt/cli.md`)
 — and writes the formatted text to stdout, for editors without an LSP
 hooked up and for shell pipelines or git filters; `-` cannot be
 combined with `PATH` arguments. `- --check` mirrors the same semantics

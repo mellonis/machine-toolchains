@@ -73,7 +73,7 @@ pub enum SymbolDef {
     },
     /// Defined but NOT exported: bound directly within its own object,
     /// invisible to cross-object resolution (docs/formats.md (.pmo);
-    /// docs/stdlib.md for the linking-visibility rule this backs).
+    /// docs/core.md (linking) for the visibility rule this backs).
     Local {
         blob: u32,
     },

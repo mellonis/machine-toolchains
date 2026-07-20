@@ -1,4 +1,4 @@
-//! The sans-I/O processor core (docs/isa.md): a pure transition function
+//! The sans-I/O processor core (docs/core.md): a pure transition function
 //! from bus responses to bus requests. Owns registers and the in-flight
 //! instruction; performs no I/O; knows no opcodes (that's the Arch).
 
@@ -203,7 +203,7 @@ impl<'a> Core<'a> {
         self.mr = u32::from(mf);
     }
 
-    /// The match register (docs/isa.md (registers)): 0 = no row matched.
+    /// The match register (docs/core.md (registers)): 0 = no row matched.
     /// MF is formally `MR != 0`; 1-bit-flag architectures only ever write 0/1 here.
     pub fn mr(&self) -> u32 {
         self.mr
@@ -979,7 +979,8 @@ impl<'a> Core<'a> {
         CoreEvent::Request(BusRequest::FrameRead { addr })
     }
 
-    /// Operands are relative to the END of the instruction (docs/isa.md);
+    /// Operands are relative to the END of the instruction (docs/core.md
+    /// (the architecture contract));
     /// at execute time `self.ip` == instr_end (fetch advanced it).
     fn jump_target(&self, off: i32) -> Result<u32, Trap> {
         let target = i64::from(self.ip) + i64::from(off);

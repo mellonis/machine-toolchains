@@ -1,14 +1,14 @@
-//! `tmt fmt` (docs/cli.md, once it lands; substance in prose until then): a
-//! thin renderer over the formatters. The `.tma` side wires core's
-//! canonical-grid printer (`mtc_core::asm::format_asm_with` under
-//! `tm1_syntax()`'s caps, so sections / table directives / `.rept` blocks /
-//! frame descriptors / vector operands all normalize); the `.tmc` side wires
-//! the crate's own CST printer ([`crate::fmt::format`]). Both are
-//! whitespace-only and idempotent, so `--check` is a safe CI gate for either
-//! language. Batch model (`PATH...`) is IDENTICAL to `tmt lint`'s, so
-//! it shares [`super::lint::collect_sources`] rather than duplicating the
-//! walk, and the per-file parse fatal reuses [`super::lint::render_fatal`].
-//! Mirrors the PM-1 `pmt fmt` shape (`crates/post-machine/src/cli/fmt.rs`).
+//! `tmt fmt` (docs/tmt/cli.md (tmt fmt)): a thin renderer over the
+//! formatters. The `.tma` side wires core's canonical-grid printer
+//! (`mtc_core::asm::format_asm_with` under `tm1_syntax()`'s caps, so
+//! sections / table directives / `.rept` blocks / frame descriptors /
+//! vector operands all normalize); the `.tmc` side wires the crate's own
+//! CST printer ([`crate::fmt::format`]). Both are whitespace-only and
+//! idempotent, so `--check` is a safe CI gate for either language. Batch
+//! model (`PATH...`) is IDENTICAL to `tmt lint`'s, so it shares
+//! [`super::lint::collect_sources`] rather than duplicating the walk, and
+//! the per-file parse fatal reuses [`super::lint::render_fatal`]. Mirrors
+//! the PM-1 `pmt fmt` shape (`crates/post-machine/src/cli/fmt.rs`).
 
 use std::fmt::Write as _;
 use std::fs;

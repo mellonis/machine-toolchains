@@ -1,4 +1,4 @@
-//! PM-1 assembly: the docs/isa.md mnemonic table bound to the core framework.
+//! PM-1 assembly: the docs/pmt/isa.md mnemonic table bound to the core framework.
 
 use mtc_core::asm::{ArchSyntax, AsmCaps, AsmError, Flow, RelaxPair, SyntaxEntry};
 use mtc_core::formats::ARCH_PM1;
@@ -55,7 +55,7 @@ pub fn pm1_syntax() -> ArchSyntax {
                 operand: SymbolVec,
                 flow: FT,
             },
-            // Fused write+move (docs/isa.md): `wr x; lft` / `wr x; rgt` in
+            // Fused write+move (docs/pmt/isa.md): `wr x; lft` / `wr x; rgt` in
             // one fetch. No short forms, so no relax pairs.
             SyntaxEntry {
                 opcode: WRL,

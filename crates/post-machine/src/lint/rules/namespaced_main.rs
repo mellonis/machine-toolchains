@@ -1,4 +1,4 @@
-//! `namespaced-main` (docs/lint.md): a function named `main` inside a
+//! `namespaced-main` (docs/pmt/lint.md): a function named `main` inside a
 //! namespace. Only the un-namespaced top-level `main` is the program
 //! entry, and a namespaced `main` is not auto-exported either — it
 //! silently becomes an ordinary local function. Almost always a

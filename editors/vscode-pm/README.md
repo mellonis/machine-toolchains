@@ -62,7 +62,7 @@ Reload the window (or restart VS Code) after installing or upgrading.
 | Setting | Default | Meaning |
 |---|---|---|
 | `pmt.path` | `pmt` | Path (or bare command resolved on `PATH`) to the `pmt` binary. The extension launches it as `pmt lsp` for the language server, and reuses the same path for the auto-provided tasks below. |
-| `pmt.lint.allow` | `[]` | Lint codes to suppress, forwarded to the server and kept live as you edit the setting. This list is union-merged with any `pmt.json` project file the server discovers for the open document — either source suppressing a code is enough to suppress it, and neither can un-suppress a code the other disables. See `docs/lint.md` in this repository for the rule catalog and the `pmt.json` schema. |
+| `pmt.lint.allow` | `[]` | Lint codes to suppress, forwarded to the server and kept live as you edit the setting. This list is union-merged with any `pmt.json` project file the server discovers for the open document — either source suppressing a code is enough to suppress it, and neither can un-suppress a code the other disables. See `docs/pmt/lint.md` in this repository for the rule catalog and the `pmt.json` schema. |
 
 `pmt.path` is read once, at activation — the extension does not watch
 it for live changes. After editing it, reload the window (Command
@@ -151,7 +151,7 @@ and `*` glyphs in the tape argument reach `pmt` exactly as written instead
 of being reinterpreted by a shell. Swap the `link`/`run` arguments for
 whatever the program under test actually needs — additional `.pmo` inputs,
 `--tape-block`, `--max-steps`, and so on are all documented in
-`docs/cli.md` in this repository.
+`docs/pmt/cli.md` in this repository.
 
 ## Manual test checklist
 
@@ -216,7 +216,7 @@ main() {
       open and the `leftover-debugger` finding still showing (previous
       step), create a `pmt.json` file next to it containing
       `{"lint": {"allow": ["leftover-debugger"]}}` (schema:
-      `docs/lint.md` in this repository). Confirm the squiggle on
+      `docs/pmt/lint.md` in this repository). Confirm the squiggle on
       `debugger;` disappears **without touching any VS Code setting** —
       this is the server's `workspace/didChangeWatchedFiles` watch firing
       on the on-disk file, not the `pmt.lint.allow` setting. Delete

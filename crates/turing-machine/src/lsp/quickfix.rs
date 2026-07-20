@@ -1,4 +1,4 @@
-//! Quickfixes derived from a fatal.
+//! Quickfixes derived from a fatal (docs/lsp.md (code actions)).
 //!
 //! The lint layer's own findings already carry `Fix`es, and those convert
 //! mechanically. The two fixes here are different in kind: they are built

@@ -1,4 +1,4 @@
-//! Ring-shaped bounded tape — the historical `TBelt` (docs/isa.md (the
+//! Ring-shaped bounded tape — the historical `TBelt` (docs/core.md (the
 //! tape and device bus); docs/history.md).
 
 use super::Tape;

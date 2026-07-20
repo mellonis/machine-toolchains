@@ -1,4 +1,4 @@
-//! `shadowed-import` (docs/lint.md): a function definition whose name
+//! `shadowed-import` (docs/pmt/lint.md): a function definition whose name
 //! outranks an import binding of the same bare name in the SAME scope —
 //! legal (definitions always win), but a bare `@name()` call silently
 //! hits the local function while the `use` line suggests the external.

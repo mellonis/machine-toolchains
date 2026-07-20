@@ -1,11 +1,11 @@
 //! The `.tma` language service: implements `mtc_core::lsp::LanguageService`
-//! over the TM-1 assembly front end. The sibling of the PM-1 crate's `.pma`
-//! service — same feature set (diagnostics, completions with operand hints,
-//! go-to-definition, quickfixes, semantic tokens, formatting; no hover, since
-//! assembly text has no doc-line grammar), reusing this crate's own
-//! config-resolution and code-action machinery from `lsp/mod.rs` rather than
-//! duplicating it. Library-only — rendering and stdio belong to the CLI
-//! (docs/cli.md (thin-renderer rule)).
+//! over the TM-1 assembly front end (docs/lsp.md). The sibling of the PM-1
+//! crate's `.pma` service — same feature set (diagnostics, completions with
+//! operand hints, go-to-definition, quickfixes, semantic tokens, formatting;
+//! no hover, since assembly text has no doc-line grammar), reusing this
+//! crate's own config-resolution and code-action machinery from `lsp/mod.rs`
+//! rather than duplicating it. Library-only — rendering and stdio belong to the CLI
+//! (docs/core.md (thin-renderer rule)).
 //!
 //! # Where the diagnostics come from
 //!

@@ -1,4 +1,4 @@
-//! One file per assembly lint rule (docs/lint.md). Each rule exposes
+//! One file per assembly lint rule (docs/core.md (assembly lint)). Each rule exposes
 //! `pub(crate) fn check(&AsmLintContext, &mut Vec<Diagnostic>)` and is
 //! registered in `super::RULES` under its defect-named code.
 

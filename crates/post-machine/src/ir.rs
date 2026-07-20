@@ -1,4 +1,4 @@
-//! Per-function CFG IR (docs/language.md (the IR artifact); docs/formats.md
+//! Per-function CFG IR (docs/pmt/language.md (the IR artifact); docs/formats.md
 //! (IR JSON)): a versioned, documented JSON artifact, not an internal
 //! detail. Lowering makes every statement successor an explicit block edge.
 
@@ -27,7 +27,7 @@ pub struct IrFunction {
     /// Entry is `blocks[0]`. Ids are unique within the function but need
     /// not stay dense once optimizer passes delete blocks.
     pub blocks: Vec<IrBlock>,
-    /// Hidden-by-default visibility (docs/language.md (visibility)): `true` unless the
+    /// Hidden-by-default visibility (docs/pmt/language.md (visibility)): `true` unless the
     /// source marked the function `export` (`main` is always exported).
     pub local: bool,
 }
@@ -357,7 +357,7 @@ fn lower_function(
             }
             Close::None => {
                 if is_last_stmt {
-                    // Falling off the end — implicit return (docs/language.md).
+                    // Falling off the end — implicit return (docs/pmt/language.md).
                     let mut b = current.take().expect("block open");
                     b.term = IrTerm::Return;
                     b.term_line = stmt.line;

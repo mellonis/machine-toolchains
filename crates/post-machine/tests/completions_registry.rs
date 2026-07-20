@@ -128,7 +128,7 @@ fn top_level_subcommands_match_the_maintained_list_cli_help_and_the_real_parser(
     // the `execute_with` catch-all's "unknown subcommand" error. `lsp`
     // is special-cased to `--help`: a bare `pmt lsp` hands real stdio to
     // the LSP server loop and would block this test process waiting for
-    // a client that will never connect (docs/cli.md (pmt lsp)) — `pmt
+    // a client that will never connect (docs/pmt/cli.md (pmt lsp)) — `pmt
     // lsp --help` still proves the real dispatcher recognizes it as a
     // known subcommand without ever touching stdio.
     for name in &expected {

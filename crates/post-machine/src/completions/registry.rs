@@ -1,5 +1,5 @@
 //! The single-source-of-truth CLI-surface registry that drives shell
-//! completion (`pmt completions <shell>`, docs/cli.md (pmt completions)).
+//! completion (`pmt completions <shell>`, docs/pmt/cli.md (pmt completions)).
 //! Every field here must trace to a flag or positional the hand-rolled
 //! parser (`cli::Args`, `cli/build.rs`, `cli/inspect.rs`, `cli/run.rs`)
 //! actually accepts — the drift guard in
@@ -24,7 +24,7 @@ pub struct FlagSpec {
     /// The literal token the parser matches (`-o`, `--emit-ir`), or — for
     /// [`FlagKind::SuffixFamily`] — the shared prefix (`--fno-`).
     pub name: String,
-    /// A short completion-menu blurb (not a copy of docs/cli.md's prose —
+    /// A short completion-menu blurb (not a copy of docs/pmt/cli.md's prose —
     /// shell-completion descriptions are conventionally terser).
     pub help: String,
     pub kind: FlagKind,
@@ -34,7 +34,7 @@ pub struct FlagSpec {
     /// Flags sharing a group are mutually exclusive (`-O0`/`-O1`;
     /// `--tape-block`/`--tape`). The parser itself does not enforce this
     /// (whichever is scanned last wins, or there's an explicit runtime
-    /// check — docs/cli.md) but a completion script can still steer the
+    /// check — docs/pmt/cli.md) but a completion script can still steer the
     /// user away from the clash.
     pub exclusive_group: Option<String>,
     /// Set when a flag is meaningful only alongside another — e.g.
@@ -203,7 +203,7 @@ fn strings(words: &[&str]) -> Vec<String> {
 }
 
 /// `--fno-<pass>` and `--emit-ir=after:<pass>` both read the optimizer's
-/// own pass-name list (docs/language.md (optimization)) rather than a
+/// own pass-name list (docs/pmt/language.md (optimization)) rather than a
 /// retyped copy — that list is what the drift guard checks this against.
 fn emit_ir_choices() -> Vec<String> {
     let mut choices = vec!["lowered".to_string(), "final".to_string()];
@@ -292,7 +292,7 @@ fn link_spec() -> CommandSpec {
 
 /// A `.pmc`/`.pma`-filtered `FileHint` that ALSO accepts directories
 /// (`lint` and `fmt` both walk directories recursively for `*.pmc` and
-/// `*.pma`, docs/lint.md / docs/cli.md).
+/// `*.pma`, docs/pmt/lint.md / docs/pmt/cli.md).
 fn source_or_dir() -> FileHint {
     FileHint {
         extensions: strings(&["pmc", "pma"]),
@@ -322,7 +322,7 @@ fn lint_spec() -> CommandSpec {
 }
 
 /// Mirrors [`lint_spec`]: same positional shape (`.pmc`/`.pma` files or
-/// dirs, `--exclude` repeatable), plus `--check` and `--lang` (docs/cli.md
+/// dirs, `--exclude` repeatable), plus `--check` and `--lang` (docs/pmt/cli.md
 /// (pmt fmt)). The `-` stdin form isn't a registry entry — it's a single
 /// bare token, not a completable path shape.
 fn fmt_spec() -> CommandSpec {
@@ -517,14 +517,14 @@ fn completions_spec() -> CommandSpec {
 
 /// Short one-line glosses for the top-level subcommand list, reusing the
 /// wording from the CLI's own top-level `--help` text (`cli/mod.rs`'s
-/// `USAGE` constant / docs/cli.md's opening block) rather than
+/// `USAGE` constant / docs/pmt/cli.md's opening block) rather than
 /// re-authoring a third copy.
 fn top_level_help(name: &str) -> &'static str {
     match name {
         "compile" => ".pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)",
         "asm" => ".pma assembly -> .pmo object",
         "link" => ".pmo objects -> .pmx executable (+ .pmx.map sidecar)",
-        "lint" => "lint .pmc/.pma sources (hygiene findings; docs/lint.md)",
+        "lint" => "lint .pmc/.pma sources (hygiene findings; docs/pmt/lint.md)",
         "fmt" => "format .pmc/.pma sources in place (--check to preview; -)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
         "run" => "execute a .pmx on a tape",

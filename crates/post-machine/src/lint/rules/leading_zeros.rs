@@ -1,4 +1,4 @@
-//! `leading-zeros` (docs/lint.md): a numeric token written with leading
+//! `leading-zeros` (docs/pmt/lint.md): a numeric token written with leading
 //! zeros. The lexer parses digit runs straight to `u32`, so `007` and `7`
 //! denote the same label while looking unrelated. Token-level — fires on
 //! definitions, goto targets, check arms, and call successors alike, and

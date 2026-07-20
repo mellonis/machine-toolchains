@@ -582,8 +582,8 @@ impl std::fmt::Display for CompileErrorKind {
 impl std::error::Error for CompileError {}
 
 // ---------------------------------------------------------------------------
-// Alphabet resolution — elements to glyph vectors (docs/language.md
-// (alphabets), once that page lands; substance in prose until then).
+// Alphabet resolution — elements to glyph vectors
+// (docs/tmt/language.md (alphabets)).
 // ---------------------------------------------------------------------------
 
 /// A resolved alphabet: its glyphs in position order (index = position; index

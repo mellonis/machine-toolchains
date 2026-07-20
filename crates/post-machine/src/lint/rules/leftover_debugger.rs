@@ -1,4 +1,4 @@
-//! `leftover-debugger` (docs/lint.md): a `debugger` statement in source.
+//! `leftover-debugger` (docs/pmt/lint.md): a `debugger` statement in source.
 //! Builds strip breakpoints with `--strip-debugger`, and an un-stripped
 //! `brk` is an optimizer observability barrier — shipping one also
 //! pessimizes `-O1` output. Delete-fix only for a lone, unlabeled

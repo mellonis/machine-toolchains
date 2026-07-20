@@ -42,7 +42,7 @@ alphabet ops { ' ', '+', '-', '<', '>', '.', '[', ']', 'H' }
 ? Cell values for the data and output tapes: 127 symbols whose index IS the
 ? value. Index 127 is reserved as the match wildcard in the compact symbol
 ? family, so the ring is 0..126 rather than a full byte — see
-? docs/formats.md (the .tma dialect).
+? docs/formats.md (the compact symbol family).
 alphabet bytes { 0..126 }
 
 ? The bracket-nesting counter: a unary stack, one '*' per level.

@@ -1,4 +1,4 @@
-//! Symbol resolution and reachability (docs/stdlib.md (linking)): build
+//! Symbol resolution and reachability (docs/core.md (linking)): build
 //! the user+library namespace (user duplicates error, libraries
 //! first-wins and shadowed silently by user definitions), then BFS from
 //! the entry symbol (default `main`, or the `--entry` override) so only
@@ -122,7 +122,7 @@ pub(crate) fn resolve<'a>(
     // A symbol reference (a relocation callee or a bound callee) resolves
     // to a site the same way: a Local binds directly within its own
     // object — never through the namespace, so it can't shadow or be
-    // shadowed (docs/language.md (visibility); docs/stdlib.md (linking)) —
+    // shadowed (docs/core.md (linking)) —
     // otherwise it goes through the namespace.
     let resolve_target = |object: &ObjectFile, oi: usize, sym: u32| -> Option<Site> {
         match object.symbols[sym as usize].def {

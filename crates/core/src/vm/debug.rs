@@ -1,4 +1,4 @@
-//! Interactive debugger session (docs/isa.md (DebugSession)): the same
+//! Interactive debugger session (docs/core.md (DebugSession)): the same
 //! surface shape as turing-machine-js v7 sessions — the session owns the
 //! run; step/pause with a cause; depth-based stepIn/stepOver/stepOut
 //! (depth is just SP). Sync v1: external pause/run-interval throttle is

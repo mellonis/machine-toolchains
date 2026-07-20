@@ -1,7 +1,7 @@
 //! `pmt lsp`: runs the `.pmc`/`.pma` language server on stdio until the
 //! client exits. The only place in the CLI that hands real stdio to
 //! library code — everything else stays a thin renderer over an
-//! in-memory result (docs/cli.md (thin-renderer rule)); the server loop
+//! in-memory result (docs/pmt/cli.md (thin-renderer rule)); the server loop
 //! itself writes protocol frames straight to the writer it is given.
 
 use super::{Args, CliOutput};

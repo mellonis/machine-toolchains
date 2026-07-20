@@ -197,7 +197,7 @@ fn stdlib_compiles_clean_and_exports_exactly_the_roster() {
 
 #[test]
 fn user_namespace_injection_overrides_a_std_routine() {
-    // docs/stdlib.md interposition: same-namespace export, user beats library.
+    // docs/pmt/stdlib.md interposition: same-namespace export, user beats library.
     let (marks, head) = run_std(
         "namespace std { export goToEnd() { 1: left(!); } }\n\
          use std::goToEnd; main() { @goToEnd(!); }",

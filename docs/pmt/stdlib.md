@@ -1,7 +1,7 @@
 # Standard library
 
 `pmt link` always adds a prebuilt `std.pmo` as an implicit last library
-unless `--nostdlib` is given (`docs/cli.md`). It ships written in `.pmc`
+unless `--nostdlib` is given (`docs/pmt/cli.md`). It ships written in `.pmc`
 itself — dogfooding the compiler — and its golden tests double as compiler
 tests. All eleven routines take no arguments and share one vocabulary: a
 **section** is a maximal run of marked cells on the tape.
@@ -12,7 +12,7 @@ Every routine's precondition and postcondition below mirrors the `?` doc
 lines in `crates/post-machine/src/stdlib/std.pmc` — the text an editor
 surfaces on hover for a `std::` call — which is itself the source of
 truth these are compiled from. Under `--strict-cells`
-(`docs/isa.md (execution)`), a routine that writes assumes its stated
+(`docs/pmt/isa.md (execution)`), a routine that writes assumes its stated
 precondition holds: `eraseSection` and the `remove*` routines only unmark
 cells that are marked, and `appendMark`/`prependMark` only mark cells that
 are blank, whenever their precondition is met — so strict-cells mode does
@@ -60,7 +60,7 @@ head.
   ```
   This is the same symbol, and user code beats the library in that
   arbitration — accidental collision is impossible (local symbols are
-  invisible to cross-object resolution, `docs/language.md (visibility)`),
+  invisible to cross-object resolution, `docs/pmt/language.md (visibility)`),
   while a deliberate override is explicit.
 - **Interposition vs optimization (semantic-binding caveat):** `-O1`'s
   inline pass binds intra-module calls at compile time. That means
@@ -70,5 +70,5 @@ head.
   the same semantic-binding default mainstream compilers use. Whether
   `std.pmo` itself needs to be fully interposable (built with
   `--fno-inline`) is a build-configuration decision, not a language rule;
-  see `docs/language.md (optimization)` for the general interposition
+  see `docs/pmt/language.md (optimization)` for the general interposition
   caveat.

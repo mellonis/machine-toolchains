@@ -48,7 +48,7 @@ directory through its ancestors and reading the FIRST `pmt.json` it
 finds — nearest wins, and a `pmt.json` further up the tree is never
 merged in, even when the nearer one exists. Two input files linted in
 the same run may therefore end up governed by two different project
-files, or by none. `--no-config` (`docs/cli.md`) skips this discovery
+files, or by none. `--no-config` (`docs/pmt/cli.md`) skips this discovery
 altogether, for CI invocations that want purely flag-driven behavior.
 
 Wherever more than one source can name an allow-list for a file — the
@@ -126,7 +126,7 @@ move it out.
 
 A line longer than 80 characters (character count). Report-only: where
 to break a statement is layout policy, a formatter's job — `pmt fmt`
-(`docs/fmt.md`) rewraps an overlong comma group by greedy-filling it
+(`docs/pmt/fmt.md`) rewraps an overlong comma group by greedy-filling it
 across lines. A line overlong for a different reason — a single long
 command with no comma to break on, or a trailing comment that pushes an
 otherwise-short line past 80 — has no break point fmt can introduce, so
@@ -161,7 +161,7 @@ at the later definition, naming the earlier one. No fix.
 ### deprecated-call
 
 A call whose target carries a `[deprecated]` doc attribute
-(`docs/language.md`). The message is the attribute's own text when it
+(`docs/pmt/language.md`). The message is the attribute's own text when it
 carries one, appended after the finding's headline. Recursion is not
 exempt — a deprecated function calling itself is reported like any
 other caller. No fix: there is no mechanical rewrite for "stop calling
@@ -210,5 +210,5 @@ long stays reported after formatting.
 An instruction using the target architecture's declared debugger-break
 opcode — a forgotten debugging aid left in shipped source. This rule is
 silent for an architecture that declares no such opcode; PM-1 declares
-one (its `brk` instruction, `docs/isa.md`), so linting `.pma` picks it
+one (its `brk` instruction, `docs/pmt/isa.md`), so linting `.pma` picks it
 up automatically. Fix (requires `--force`): remove the instruction.

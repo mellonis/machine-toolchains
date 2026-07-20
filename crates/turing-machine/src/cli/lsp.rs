@@ -1,7 +1,7 @@
 //! `tmt lsp`: runs the `.tmc`/`.tma` language server on stdio until the client
 //! exits. The only place in this CLI that hands real stdio to library code —
 //! everything else stays a thin renderer over an in-memory result
-//! (docs/cli.md (thin-renderer rule)); the server loop itself writes protocol
+//! (docs/core.md (thin-renderer rule)); the server loop itself writes protocol
 //! frames straight to the writer it is given.
 
 use super::{Args, CliOutput};

@@ -1,5 +1,6 @@
-//! Semantic tokens for `.tma`: walked straight off the total CST, so this
-//! always answers a full stream even over a document that fails to assemble.
+//! Semantic tokens for `.tma` (docs/lsp.md (semantic tokens)): walked
+//! straight off the total CST, so this always answers a full stream even
+//! over a document that fails to assemble.
 //!
 //! The legend adds one distinction PM-1 assembly has no need for: a table or
 //! frame label rides `type` rather than `variable`, because a dispatch table

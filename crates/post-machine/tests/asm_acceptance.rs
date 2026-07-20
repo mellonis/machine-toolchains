@@ -35,7 +35,7 @@ main() {
 ";
 
 /// Labels, `check`, and an explicit `goto` (a scan-to-blank loop, unlike
-/// the docs/language.md sample which never needs `goto` because both its
+/// the docs/pmt/language.md sample which never needs `goto` because both its
 /// `check` arms are label-local).
 const LABELS_AND_BRANCHES: &str = "\
 scan() {
@@ -311,7 +311,7 @@ fn rejections_pin_kind_and_span_start() {
 
 // --- Property 4: the fused write+move mnemonics assemble and disassemble --
 
-/// The fused `wrl`/`wrr` opcodes (docs/isa.md) reach the assembler and
+/// The fused `wrl`/`wrr` opcodes (docs/pmt/isa.md) reach the assembler and
 /// disassembler by name through `pm1_syntax()`: a `.pma` function using
 /// both assembles, and its disassembly names each mnemonic with its
 /// symbol operand.

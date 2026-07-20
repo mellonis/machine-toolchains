@@ -25,8 +25,8 @@
 //! Codegen does NOT lower rows in source order. It re-bands a conditional
 //! state's rows into `[exact rows, sorted] ++ [partial rows, source order] ++
 //! [catch-all rows, source order]` and the match engine takes the FIRST row that
-//! matches in that emitted order (crate::codegen; docs/formats.md (match and
-//! dispatch tables)). So an earlier SOURCE row shadows a later one it covers
+//! matches in that emitted order (crate::codegen; docs/tmt/isa.md (match and
+//! dispatch)). So an earlier SOURCE row shadows a later one it covers
 //! only when both land in the same band, where source order equals the emitted
 //! (runtime) order:
 //!   * two exact rows cannot cover each other (front-end disjointness) — vacuous;

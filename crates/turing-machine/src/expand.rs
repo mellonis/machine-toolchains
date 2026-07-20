@@ -167,7 +167,7 @@ pub(crate) enum Transition2 {
 // ---------------------------------------------------------------------------
 
 /// A partial symbol map, identity for unlisted symbols; `holes` trap. Mirrors
-/// the linker's `SparseMap` (docs/formats.md (frames profile)).
+/// the linker's `SparseMap` (docs/core.md (the composition engine)).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SymMap {
     pairs: BTreeMap<u16, u16>,
@@ -1359,8 +1359,8 @@ fn resolve_aliases(states: &mut [ExpandedState], alias: &HashMap<String, String>
 }
 
 // ---------------------------------------------------------------------------
-// Post-expansion checks: exact-row disjointness (docs/formats.md (match and
-// dispatch tables); a spanned error naming both rules) and cheap shadowed-rule
+// Post-expansion checks: exact-row disjointness (docs/tmt/isa.md (match and
+// dispatch); a spanned error naming both rules) and cheap shadowed-rule
 // warnings (an identical earlier pattern makes a later rule unreachable).
 // ---------------------------------------------------------------------------
 

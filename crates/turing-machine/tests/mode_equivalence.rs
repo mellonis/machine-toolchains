@@ -1,8 +1,8 @@
 //! The phase-5 milestone: **three-mode equivalence**. Mono, frames, and
 //! hybrid lower the same declarative bound-call programs three different ways —
 //! stamped copies, a runtime compose table, or a per-site mix — yet they MUST
-//! be observably identical on the same programs and tapes (docs/formats.md
-//! (frames profile), the mode semantics summary). This harness mirrors
+//! be observably identical on the same programs and tapes (docs/core.md
+//! (the composition engine), the mode semantics summary). This harness mirrors
 //! `crates/post-machine/tests/opt_equivalence.rs`: `build`/`run`/
 //! `assert_equivalent`, one `.tma` source per program, the full behavioral
 //! tuple compared across modes.
@@ -12,7 +12,8 @@
 //!
 //! - a trap's `at` offset — mono and frames lay code out differently, so the
 //!   faulting address legitimately differs; the trap KIND is the invariant
-//!   (the trap-taxonomy claim, GC5);
+//!   (the trap-taxonomy claim: trap kind, not the faulting address, is the
+//!   cross-mechanism invariant);
 //! - `stats`/`ip`/`stack` — a stamp and a compose-table lookup cost different
 //!   tacts by design (the O(1)-per-call frame overhead is measured separately,
 //!   in the depth-independence test below).
@@ -52,10 +53,13 @@ fn build(src: &str, mech: CallMech) -> (Executable, LinkReport) {
     (out.executable, out.report)
 }
 
-/// A trap's KIND, stripped of its `at` offset (docs/formats.md (frames
-/// profile), GC5). Exhaustive on purpose: a new `Trap` variant must be named
-/// here rather than silently folded into a catch-all, which could mask a
-/// cross-mode divergence into two distinct kinds reading as one.
+/// A trap's KIND, stripped of its `at` offset (docs/core.md (the
+/// composition engine) — the trap-taxonomy claim: trap kind, not the
+/// faulting address, is the cross-mechanism invariant). Exhaustive on
+/// purpose: a new `Trap`
+/// variant must be named here rather than silently folded into a catch-all,
+/// which could mask a cross-mode divergence into two distinct kinds reading
+/// as one.
 fn trap_kind(t: Trap) -> &'static str {
     match t {
         Trap::InvalidOpcode { .. } => "invalid-opcode",
@@ -397,8 +401,9 @@ fn hybrid_stamps_the_bijection_frames_does_not() {
 /// | (1, 0)              | [2, 0]       | MR 2 → C writes virtual 1 → physical 2 (ok) |
 ///
 /// The trap KIND must be identical across all three modes: mono raises it
-/// through synthesized rows / `trap` stubs, frames through map sentinels — the
-/// deepest claim of the design (GC5).
+/// through synthesized rows / `trap` stubs, frames through map sentinels —
+/// the trap-taxonomy claim, the deepest cross-mechanism equivalence this
+/// design makes.
 const TRAP_TAXONOMY: &str = "\
 .routine main, tapes=2, alpha=(4, 3)
 .routine sub,  tapes=2, alpha=(3, 4)
@@ -619,7 +624,7 @@ fn in_range_holes_trap_kinds_are_pinned() {
 fn every_program_relinks_byte_identically_in_every_mode() {
     // Reproducible builds: the closure BFS is deterministic, so linking the
     // same program under the same mechanism twice yields byte-identical bytes
-    // AND an identical sidecar JSON (docs/formats.md (frames profile)).
+    // AND an identical sidecar JSON (docs/core.md (the composition engine)).
     for src in [
         CROSS_ALPHABET,
         NESTED_TWO_LEVEL,
@@ -780,7 +785,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 /// once, then `link --call-mech mono|frames|hybrid` and `run` each image over
 /// the same seeded tape. The exit codes must be identical — the CLI path
 /// carries the same three-mode equivalence the library harness proves, and
-/// `--call-mech` is wired end to end (docs/cli.md).
+/// `--call-mech` is wired end to end (docs/tmt/cli.md (--call-mech)).
 #[test]
 fn program_a_runs_identically_via_the_cli_in_all_three_modes() {
     use mtc_turing_machine::cli::execute;

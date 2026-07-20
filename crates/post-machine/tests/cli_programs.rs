@@ -220,7 +220,7 @@ fn emit_ir_duplicate_stage_labels_resolve_last_wins() {
 
     let cli_ir = fs::read_to_string(dir.join("multi.ir.json")).unwrap();
 
-    // Verify the CLI result matches the last snapshot (docs/cli.md: repeated
+    // Verify the CLI result matches the last snapshot (docs/pmt/cli.md: repeated
     // stages resolve last-wins).
     assert_eq!(
         cli_ir, last_snapshot,

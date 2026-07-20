@@ -1,4 +1,4 @@
-//! `.pmc` lexer (docs/language.md): source text → tokens with line:col.
+//! `.pmc` lexer (docs/pmt/language.md): source text → tokens with line:col.
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use mtc_core::diagnostics::Span;
@@ -8,7 +8,7 @@ pub enum TokenKind {
     Ident(String),
     /// The parsed value, plus the digits as WRITTEN (leading zeros
     /// preserved) — a lossless printer needs the spelling, not just the
-    /// value (docs/fmt.md: fmt never touches a token).
+    /// value (docs/pmt/fmt.md: fmt never touches a token).
     Number(u32, String),
     At,
     Bang,
@@ -28,12 +28,12 @@ pub enum TokenKind {
     /// so callers on the default path see an unchanged token stream.
     Comment(Comment),
     /// `?` as the first non-whitespace character of a line — a doc line
-    /// (docs/language.md (doc lines)). Payload is the raw text after the
+    /// (docs/pmt/language.md (doc lines)). Payload is the raw text after the
     /// sigil, minus ONE leading space if present (canonical), verbatim
     /// otherwise. Semantic, not trivia: emitted in both [`LexMode`]s.
     DocLine(String),
     /// `!` as the first non-whitespace character of a line — an
-    /// attention line (docs/language.md (doc lines)). Same payload rule
+    /// attention line (docs/pmt/language.md (doc lines)). Same payload rule
     /// as [`TokenKind::DocLine`]. `!` anywhere else on a line still lexes
     /// as [`TokenKind::Bang`].
     AttentionLine(String),
@@ -48,7 +48,7 @@ pub enum CommentKind {
     Block,
 }
 
-/// A comment retained as trivia (docs/language.md), produced only in
+/// A comment retained as trivia (docs/pmt/language.md), produced only in
 /// [`LexMode::WithComments`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Comment {
@@ -91,7 +91,7 @@ impl Token {
     }
 }
 
-/// Identifier rule (docs/language.md): Unicode; first char alphabetic or
+/// Identifier rule (docs/pmt/language.md): Unicode; first char alphabetic or
 /// `_`, then alphanumeric or `_` — the same classes as the `.pma` symbol
 /// grammar (docs/formats.md (assembly text)), so every `.pmc` name
 /// survives the trip through generated assembly.
@@ -164,7 +164,7 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
             cur.bump();
             continue;
         }
-        // Positional doc/attention lines (docs/language.md (doc lines)):
+        // Positional doc/attention lines (docs/pmt/language.md (doc lines)):
         // `?`/`!` as the first non-whitespace character of a line consume
         // to end of line as one token. `own_line` is the same
         // line-start flag `Comment::own_line` reads below — a `?`/`!`
@@ -280,7 +280,7 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
         }
         if c == '@' {
             cur.bump();
-            // Sigil adjacency (docs/language.md): `@` is part of the
+            // Sigil adjacency (docs/pmt/language.md): `@` is part of the
             // callee name's spelling — whitespace, digits, punctuation,
             // comments, or end of input after it are lex errors.
             if !cur.peek().is_some_and(is_ident_start) {
@@ -665,7 +665,7 @@ mod tests {
     fn bang_inside_parens_is_unaffected_by_doc_lines() {
         // Pins the pre-existing successor/check-arm `!` lexing: mid-line
         // `!` stays TokenKind::Bang exactly as before doc/attention lines
-        // existed (docs/language.md (doc lines)).
+        // existed (docs/pmt/language.md (doc lines)).
         assert_eq!(
             kinds("right(!);"),
             vec![
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn question_mark_mid_line_still_errors() {
         // Pins the pre-existing lex error: only a LINE-START `?` is a doc
-        // line (docs/language.md (doc lines)); anywhere else it is still
+        // line (docs/pmt/language.md (doc lines)); anywhere else it is still
         // today's "unexpected character" error.
         let e = lex("x ? y").unwrap_err();
         assert_eq!((e.span.start.line, e.span.start.col), (1, 3));
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn doc_and_attention_lines_emit_in_both_lex_modes() {
-        // Semantic, not trivia (docs/language.md (doc lines)): unlike
+        // Semantic, not trivia (docs/pmt/language.md (doc lines)): unlike
         // Comment, both LexMode variants emit these tokens.
         let src = "? doc\n! attn";
         for mode in [LexMode::WithoutComments, LexMode::WithComments] {

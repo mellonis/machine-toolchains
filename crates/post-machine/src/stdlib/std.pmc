@@ -1,7 +1,7 @@
-// The pmt standard library (dogfooding: written in .pmc; docs/stdlib.md).
+// The pmt standard library (dogfooding: written in .pmc; docs/pmt/stdlib.md).
 // Section = maximal run of marked cells. The `?` doc lines below are
 // the normative contract (also each routine's hover text);
-// docs/stdlib.md mirrors their semantics.
+// docs/pmt/stdlib.md mirrors their semantics.
 //
 // Under --strict-cells note: routines that write assume the stated
 // precondition; eraseSection/remove* unmark only marked cells and

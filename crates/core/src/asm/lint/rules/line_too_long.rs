@@ -1,4 +1,4 @@
-//! `line-too-long` (docs/lint.md): a source line longer than 80
+//! `line-too-long` (docs/core.md (assembly lint)): a source line longer than 80
 //! characters (char count, not bytes). Report-only — mirrors the
 //! `.pmc` rule of the same name: rewrapping is a formatter's job, not
 //! lint's.

@@ -52,7 +52,7 @@ pub struct ArchSyntax {
     /// the same operand kind), so each dialect declares it explicitly.
     /// `None` when the dialect has no trap instruction, which is an error
     /// only if a reachable mono binding needs a trap synthesized
-    /// (docs/formats.md (frames profile)).
+    /// (docs/core.md (the composition engine)).
     pub trap_opcode: Option<u8>,
     /// Opt-in lexer/parser surface for this dialect. Default (all off)
     /// keeps the classic assembly grammar byte-for-byte.

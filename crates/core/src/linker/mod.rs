@@ -1,5 +1,5 @@
 //! `MO` objects → `MX` executables: symbol resolution, reachability,
-//! layout, and relaxation (docs/stdlib.md (linking)).
+//! layout, and relaxation (docs/core.md (linking)).
 
 pub(crate) mod binding_label;
 pub(crate) mod compose;
@@ -72,8 +72,8 @@ pub enum LinkError {
     /// A raw hand-authored framed call (`call.m` / a `.frame` descriptor)
     /// was reached under `--call-mech=mono`: a mono image runs on the base
     /// profile, which has no frames machinery to activate the descriptor.
-    /// Carries the offending function's name (docs/formats.md (frames
-    /// profile)).
+    /// Carries the offending function's name (docs/core.md (the composition
+    /// engine)).
     MonoRawFrame(String),
     /// Under `--call-mech=mono` a holey binding makes the stamp synthesize
     /// unmapped-read trap rows into the callee's match table — but only a
@@ -81,7 +81,7 @@ pub enum LinkError {
     /// match result through a conditional branch (or leaves it unconsumed),
     /// so a hole symbol would match a prepended trap row and take the branch
     /// as if it had matched: a silent misroute. Carries the callee's name
-    /// (docs/formats.md (frames profile)).
+    /// (docs/core.md (the composition engine)).
     MonoHoleyMatchBranch(String),
 }
 
@@ -168,7 +168,7 @@ impl std::fmt::Display for CallMech {
 }
 
 /// Linker knobs; `relax` (default `true`) enables the far→short call
-/// relaxation fixpoint (docs/isa.md; docs/cli.md for `--no-relax`).
+/// relaxation fixpoint (docs/core.md (relaxation); `--no-relax` opts out).
 #[derive(Debug, Clone)]
 pub struct LinkOptions {
     pub relax: bool,
@@ -262,9 +262,10 @@ impl MapFile {
 }
 
 /// Structured account of what the linker did — the CLI renders it under
-/// `-v` (docs/cli.md); libraries never print (library-first principle).
+/// `-v` (docs/core.md (the link report)); libraries never print
+/// (library-first principle).
 /// The counters are image-level aggregates (their meanings are tabulated in
-/// docs/formats.md (the composition engine)); a per-routine breakdown is
+/// docs/core.md (the composition engine)); a per-routine breakdown is
 /// deferred until a consumer needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkReport {
@@ -306,7 +307,7 @@ pub struct LinkOutput {
     pub report: LinkReport,
 }
 
-/// `MO` objects → `MX` executable (docs/stdlib.md (linking)): resolve
+/// `MO` objects → `MX` executable (docs/core.md (linking)): resolve
 /// symbols and reachability, then lay out, relax, and emit code for the
 /// reached functions.
 pub fn link(
@@ -334,7 +335,7 @@ pub fn link(
     } else if resolved.order.iter().any(|f| !f.bound.is_empty()) {
         // A reachable declarative bound call needs the machine signature
         // (arity + cardinalities) to compose against; an unsigned entry
-        // has none (docs/formats.md (frames profile)).
+        // has none (docs/core.md (the composition engine)).
         return Err(LinkError::MissingSignature(
             resolved.order[0].name.to_string(),
         ));
@@ -342,9 +343,9 @@ pub fn link(
 
     // The composition engine lowers declarative bound calls in FRAMES mode:
     // it rewrites each reachable routine's bound-call sites into framed
-    // calls and computes the runtime compose table (docs/formats.md (frames
-    // profile)). It is a no-op for bindingless links, keeping them on the
-    // byte-identical 5a/T2 path.
+    // calls and computes the runtime compose table (docs/core.md (the
+    // composition engine)). It is a no-op for bindingless links, keeping
+    // them on the byte-identical bindingless path.
     let (order, frames_plan, stats) = match entry_sig {
         Some(sig) => engine::lower(syntax, resolved.order, sig, options.call_mech)?,
         None => (resolved.order, None, engine::EngineStats::default()),

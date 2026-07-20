@@ -1,6 +1,6 @@
 //! The composition engine: the link-time pre-pass between `resolve` and
 //! `layout` that lowers declarative bound calls under the FRAMES mechanism
-//! (docs/formats.md (frames profile)). It cannot run inside layout —
+//! (docs/core.md (the composition engine)). It cannot run inside layout —
 //! layout is decode-once/shrink-only and injects no code — so it runs
 //! first, rewriting each reachable routine's bound-call sites into framed
 //! calls and computing the runtime compose table that selects a composite
@@ -70,7 +70,7 @@ pub(super) enum DirSource {
     Raw { func: usize, table_offset: u32 },
 }
 
-/// Composition-engine counters surfaced in the link report (docs/cli.md (the
+/// Composition-engine counters surfaced in the link report (docs/core.md (the
 /// link report)). Frames lowering fills `dedup_savings` (descriptor
 /// interning); mono/hybrid stamping fills the rest. The directory size and
 /// compose-matrix byte count are layout's to report (it emits the region), so
@@ -165,9 +165,10 @@ pub(super) fn lower<'a>(
 }
 
 /// FRAMES lowering: keep one generic copy of each routine and resolve every
-/// bound-call site through the runtime compose table (docs/formats.md (frames
-/// profile)). Extracted from `lower` so hybrid can invoke it on an order whose
-/// mono-classified bound sites have already been rewritten to plain calls.
+/// bound-call site through the runtime compose table (docs/core.md (the
+/// composition engine)). Extracted from `lower` so hybrid can invoke it on
+/// an order whose mono-classified bound sites have already been rewritten
+/// to plain calls.
 pub(super) fn lower_frames<'a>(
     syntax: &ArchSyntax,
     order: Vec<FuncRef<'a>>,

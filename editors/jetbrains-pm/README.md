@@ -97,7 +97,7 @@ IntelliJ Platform Community baseline and uses no Ultimate-only APIs.
 | Field | Default | Meaning |
 |---|---|---|
 | pmt binary path | `pmt` | Path (or bare command resolved on `PATH`) to the `pmt` binary. The plugin launches it as `pmt lsp` for the language server, and reuses the same path for run configurations (below). |
-| Lint allow-list (comma-separated) | *(empty)* | Lint codes to suppress, forwarded to the server and kept live as you edit the setting — no IDE or server restart needed. This list is union-merged with any `pmt.json` project file the server discovers for the open document — either source suppressing a code is enough to suppress it, and neither can un-suppress a code the other disables. See `docs/lint.md` in this repository for the rule catalog and the `pmt.json` schema. |
+| Lint allow-list (comma-separated) | *(empty)* | Lint codes to suppress, forwarded to the server and kept live as you edit the setting — no IDE or server restart needed. This list is union-merged with any `pmt.json` project file the server discovers for the open document — either source suppressing a code is enough to suppress it, and neither can un-suppress a code the other disables. See `docs/pmt/lint.md` in this repository for the rule catalog and the `pmt.json` schema. |
 
 Changing the allow-list and applying the settings page pushes the new list
 straight to every already-running `pmt lsp` server (one per open project)
@@ -228,7 +228,7 @@ main() {
 - [x] **Config file-watch — `pmt.json` on disk**: with `check.pmc` still
       open and `debugger;` squiggled again (previous step left it that
       way), create a `pmt.json` file next to it containing
-      `{"lint": {"allow": ["leftover-debugger"]}}` (schema: `docs/lint.md`
+      `{"lint": {"allow": ["leftover-debugger"]}}` (schema: `docs/pmt/lint.md`
       in this repository). Confirm the squiggle disappears **without
       touching Settings | Tools | pmt** — this exercises LSP4IJ's support
       for the server's `workspace/didChangeWatchedFiles` registration,
@@ -250,7 +250,7 @@ main() {
       Then add a `pmt` run configuration with subcommand `run` and
       arguments `check.pmx --tape " * *"`, and run it. Confirm the console
       shows the run's tape output and the process's exit code (0 = the
-      program executed `stp`, 2 = `hlt`, 3 = a trap — see `docs/cli.md`).
+      program executed `stp`, 2 = `hlt`, 3 = a trap — see `docs/pmt/cli.md`).
       ```text
       /Users/mellonis/.cargo/bin/pmt run check.pmx --tape " * *"
       outcome: Halted

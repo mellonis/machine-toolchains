@@ -1,4 +1,4 @@
-//! Semantic tokens.
+//! Semantic tokens (docs/lsp.md (semantic tokens)).
 //!
 //! Emitted from the significant token stream rather than the CST, for the
 //! same reason classification is: highlighting must not switch off the

@@ -1,5 +1,5 @@
 //! The first COMPILED Post-machine programs — the golden compile → link
-//! → run path: `.pmc` → compile → link → run, pinning the docs/language.md
+//! → run path: `.pmc` → compile → link → run, pinning the docs/pmt/language.md
 //! sample end to end.
 
 use mtc_core::linker::LinkOptions;
@@ -10,7 +10,7 @@ use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::ir::IrProgram;
 use mtc_post_machine::optimizer::OptLevel;
 
-/// docs/language.md's source sample, verbatim modulo comments.
+/// docs/pmt/language.md's source sample, verbatim modulo comments.
 const SPEC_PMC: &str = "\
 goToEnd() {
 1:  right;

@@ -141,7 +141,7 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
             Some(label) => out
                 .ir_snapshots
                 .iter()
-                .rev() // repeated stages resolve last-wins (docs/cli.md)
+                .rev() // repeated stages resolve last-wins (docs/pmt/cli.md)
                 .find(|(l, _)| l == label)
                 .map(|(_, program)| program.to_json())
                 .ok_or_else(|| format!("no IR snapshot labeled `{label}` was captured"))?,
@@ -294,7 +294,7 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput::ok(String::new(), stderr))
 }
 
-/// `app.pmx` → `app.pmx.map` (docs/cli.md; docs/formats.md: the sidecar
+/// `app.pmx` → `app.pmx.map` (docs/pmt/cli.md; docs/formats.md: the sidecar
 /// keeps the full executable name).
 fn sidecar_path(target: &Path) -> PathBuf {
     let mut s = target.as_os_str().to_owned();

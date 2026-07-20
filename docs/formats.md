@@ -1,12 +1,28 @@
 # File formats
 
-All multi-byte integers are little-endian. This page covers the five
-binary/text containers (`.pmo`, `.pmx`, `.pmt`, `.pma`, and the `.tma`
-assembly text), the `.pmx.map` sidecar, and the IR JSON artifact. PM-1's
-opcode semantics are `docs/isa.md`; the `pmt` subcommands that read and
-write these files are `docs/cli.md`. (The `.tma` assembly is a TM-1
-format, read and written by `tmt`; its command-line documentation arrives
-with the TM-1 tooling docs.)
+All multi-byte integers are little-endian. This page covers the three
+binary container formats — objects, executables and tape blocks — the two
+assembly text dialects, the link-time map sidecar, and the IR JSON
+artifact. It is a **wire-format** page: what the bytes and the text mean,
+never what the machine does with them. Opcode and execution semantics are
+`docs/pmt/isa.md` for PM-1 and `docs/tmt/isa.md` for TM-1; the parts of the
+virtual machine, assembler and linker that neither architecture owns are
+`docs/core.md`.
+
+Both toolchains write the same three containers under their own
+extensions, and each has its own assembly dialect:
+
+| | objects | executables | tape blocks | assembly text |
+|---|---|---|---|---|
+| `pmt` (PM-1) | `.pmo` | `.pmx` (+ `.pmx.map`) | `.pmt` | `.pma` |
+| `tmt` (TM-1) | `.tmo` | `.tmx` (+ `.tmx.map`) | `.tmt` | `.tma` |
+
+The `pmt` subcommands that read and write these files are
+`docs/pmt/cli.md`; the `tmt` ones are `docs/tmt/cli.md`. One section below
+describes each container once, for both toolchains; where their contents
+differ, the difference is called out in that section rather than split into
+a second one. The two assembly dialects, being different languages, get a
+section each.
 
 ## Shared conventions
 
@@ -16,11 +32,15 @@ byte marks header-layout generations and doubles as a text-file guard; a
 `u16 format version` field inside each header covers evolution within an
 epoch. Each container dispatches on its own version field — MO reads
 `1..=3`, MX and MT read `1..=2` today, selecting the layout from that field
-and never from the extension. The containers are shared across present and future machine
+and never from the extension. The containers are shared across the machine
 toolchains built on this codebase: the file *extension* carries the
-toolchain flavor (`.pmo`/`.pmx`/`.pmt` from `pmt`), while the magic plus an
-`arch` byte identify the actual content. Tools never dispatch on file
-extensions — only on the sniffed magic.
+toolchain flavor — `.pmo`/`.pmx`/`.pmt` from `pmt`, `.tmo`/`.tmx`/`.tmt`
+from `tmt` — while the magic plus an `arch` byte identify the actual
+content. A `.pmo` and a `.tmo` are both `MO 0x01`; a `.pmx` and a `.tmx` are
+both `MX 0x01`; a `.pmt` and a `.tmt` are both `MT 0x01`. **Neither
+toolchain ever dispatches on a file extension** — only on the sniffed
+magic, so a container renamed to the wrong extension still reads correctly,
+and one handed to the wrong subcommand is rejected for what it *is*.
 
 **CRC-32** (IEEE 802.3, reflected, polynomial `0xEDB88320`) covers the
 whole file with the 4-byte CRC field itself zeroed. Writers zero the field,
@@ -29,16 +49,38 @@ compute the CRC over the whole buffer, and stamp it in last; every reader
 else — a mismatch is a clean "corrupt file" error, never a trap mid-run.
 
 `sniff(bytes)` identifies a container from its first 3 bytes
-(`ContainerKind::Object` / `Executable` / `TapeBlock`), used by `pmt dis` to
-accept either a `.pmo` or a `.pmx` on the same command line.
+(`ContainerKind::Object` / `Executable` / `TapeBlock`). It is what lets
+`pmt dis` and `tmt dis` accept either an object or an executable on the same
+command line, and what turns a mistaken argument into a diagnosis rather
+than a decode failure — `tmt dis` handed a tape block answers "that is a
+tape block — use `tmt tape show`".
 
-## `.pmx` — executable
+The `arch` byte says which architecture the content is for; what each tool
+does with it differs. A loader refuses an image it cannot execute — `pmt
+run` on a TM-1 executable reports `unknown architecture 0x02`. A
+disassembler does not check it: `dis` is an arch-agnostic framework driven
+by the mnemonic table its own tool supplies, so each toolchain's `dis`
+decodes the other's image against the wrong table and prints something that
+is well-formed but meaningless. Read an image with the `dis` of the
+toolchain that wrote it.
+
+## `.pmx` / `.tmx` — executable
+
+A `.pmx` is an **executable image**: the linker's output, a pure code
+image with the tape supplied separately at run time.
 
 An `.pmx` reader dispatches on the `u16 format version` field: **version 1**
-is the code-only image PM-1 emits, **version 2** is a sectioned image that
-adds a table section plus per-tape alphabet cardinalities and a processor
-profile. The magic and `sniff()` are identical across both versions —
-version selection is the header field alone, never the extension.
+is the code-only image, **version 2** is a sectioned image adding a table
+section plus per-tape alphabet cardinalities and a processor profile. The
+linker picks by **content, not by toolchain**: the sectioned shape is
+emitted when the reached set carries table content or a routine signature,
+and the code-only shape otherwise. In practice that means every `pmt link`
+output is version 1 — PM-1's dialect has neither tables nor signatures —
+and every `tmt link` output is version 2, since a TM-1 program's entry
+carries a `.routine` signature naming its tape count and alphabets.
+
+The magic and `sniff()` are identical across both versions — version
+selection is the header field alone, never the extension.
 
 ### Version 1 (code-only)
 
@@ -58,7 +100,7 @@ The initial tape contents are **not** embedded in a `.pmx` — they are
 supplied to the VM at run time (`pmt run app.pmx --tape "..*..***" --head 2`,
 or a loaded `.pmt`, or via the API directly). `entry offset` is validated to
 be inside the code section, and the loader additionally checks that byte is
-`ent` before running (`docs/isa.md`). The linker guarantees the
+`ent` before running (`docs/pmt/isa.md`). The linker guarantees the
 **`.pmx entry`** symbol is literally `main`, which is what lets a bare
 executable's disassembly name the entry root `main`.
 
@@ -111,28 +153,27 @@ Its three parts, in order:
 | directory | `K × u32 LE` | one descriptor offset per composite (index `i` ⇒ `directory[i-1]`), pointing into the table section |
 | compose | `(K+1) × S × u16 LE` | a matrix: `compose[FR][site]`, rows are active frames `0..=K`, columns are sites |
 
-**How a framed call resolves.** The frame register `FR` is a **composite
-index**: 0 is the identity context (the machine's own tapes, no
-translation), and `1..=K` name directory entries. A framed call carries a
-**site index** `S` (see the framed-call operand below), and at run time the
-processor performs exactly one compose lookup and one directory read:
+**How the fields index each other.** The frame register `FR` is a
+**composite index**: 0 is the identity context, and `1..=K` name directory
+entries. A framed call carries a **site index** (the framed-call operand
+below), and the two tables resolve it in one lookup each:
 
 ```
 FR'         = compose[FR][site]        ; the composite active for the duration of the call
 descriptor  = directory[FR' - 1]       ; its frame-descriptor offset in the table section
 ```
 
-then loads that descriptor into the frame cache. On return, `ret`/`retx`
-reload the caller's descriptor the same way (via the directory) when the
-restored `FR` is non-zero. A compose entry of **0 is reserved-invalid** — a
-reachable framed call never yields it (the linker enumerated every
-reachable `(frame, site)` pair at link time), so reading a 0 at run time is
-a malformed-operand trap, not a normal outcome. Every read is a fixed-size
-frame-cache fill priced at call time; nothing is walked per tape access, so
-the per-call cost is **O(1) at any call depth** — the frame stack exists
-only to restore `FR` on return, never to translate.
+A compose entry of **0 is reserved-invalid** — a reachable framed call
+never yields it (the linker enumerated every reachable `(frame, site)`
+pair at link time), so reading a 0 at run time is a malformed-operand
+trap, not a normal outcome. What the processor then does with the
+descriptor, and what it costs, is `docs/tmt/isa.md (framed calls)`.
 
-## `.pmo` — object file
+## `.pmo` / `.tmo` — object file
+
+**MO** is the object container both toolchains emit: relocatable code plus
+the symbol, signature, table, and binding records the linker consumes. A
+`.pmo` and a `.tmo` are the same `MO` format at different arch bytes.
 
 ```
 magic "MO" 0x01
@@ -175,15 +216,16 @@ bound calls:    u32 count, then per bound call: u32 blob, u32 offset,
 Symbol kind 2 (**Local**) was added in object format version 2: a local
 symbol is defined but not exported — bound directly within its own object,
 invisible to cross-object resolution, so it can neither shadow nor be
-shadowed (`docs/language.md (visibility)`, `docs/stdlib.md`). Version-1
+shadowed (`docs/pmt/language.md (visibility)`, `docs/pmt/stdlib.md`). Version-1
 object bytes (no locals) still decode under a later reader.
 
 Object format version 3 was added for generic-routine composition: it
 appends four record kinds — routine signatures, per-routine table blobs,
 table fixups, and bound calls. An object carrying any of them serializes as
 version 3; a plain PM-1 object, with none present, still serializes
-byte-for-byte as version 2, and that is what the compiler and assembler
-emit. A reader accepts 1..=3 and rejects a pre-version-3 object that sets
+byte-for-byte as version 2. In practice `pmt compile`/`pmt asm` emit
+version 2 and `tmt compile`/`tmt asm` emit version 3, since every TM-1
+object carries at least a routine signature. A reader accepts 1..=3 and rejects a pre-version-3 object that sets
 either version-3 flag bit. The signature and table-blob sections are gated
 by flags bits 1 and 2; the table-fixup and bound-call sections are
 unconditional — a version-3 object always writes both counts, zero when the
@@ -219,17 +261,20 @@ format.
 
 Per-function granularity is what gives the linker dead-function
 elimination and leaves link-time inlining open as a future extension. A
-"library" is simply a `.pmo` with many functions — only what `main`
-transitively reaches gets linked in (`docs/stdlib.md`).
+"library" is simply an object with many functions — only what the entry
+transitively reaches gets linked in (`docs/pmt/stdlib.md`,
+`docs/tmt/stdlib.md`).
 
-## `.pmt` — tape-block snapshot
+## `.pmt` / `.tmt` — tape-block snapshot
 
 Binary tape-block state — one or more tapes with their heads, usable as
-`pmt run` input and output; golden tests diff final blocks as files.
+`pmt run` / `tmt run` input and output; golden tests diff final blocks as
+files.
 
-An `.pmt` reader dispatches on the `u16 format version` field: **version 1**
-carries a single shared block alphabet (what PM-1 emits), **version 2** lets
-each tape carry its own glyph table. The magic and `sniff()` are identical
+A reader dispatches on the `u16 format version` field: **version 1** carries
+a single shared block alphabet (what `pmt` emits, PM-1 being single-tape and
+single-alphabet), **version 2** lets each tape carry its own glyph table
+(what `tmt` emits, a TM-1 program's tapes commonly differing in alphabet). The magic and `sniff()` are identical
 across both versions — version selection is the header field alone.
 
 ### Version 1 (shared alphabet)
@@ -266,22 +311,30 @@ loads both shapes.
 The alphabet travels WITH the tape data — a `.pmt` renders using its own
 glyphs (index 0 is blank by convention). **Glyphs live ONLY on the tape
 side.** A tape block's alphabet is the authoritative rendering source; with
-no tape block at hand, tooling falls back to the architecture module's
-default glyphs (PM-1: `" "` for blank, `"*"` for mark — the PM-1 arch
-module's `DEFAULT_GLYPHS` constant). Code-side artifacts — `.pmo`, `.pmx`, and the
-`.pmx.map` sidecar — carry symbol indices only, never glyphs, matching the
+no tape block at hand, tooling falls back to whatever default the
+architecture can supply. PM-1 has a fixed pair — `" "` for blank, `"*"` for
+mark — because its alphabet is fixed at two symbols. TM-1 has no fixed
+alphabet and therefore no fixed glyphs: `tmt tape new` reads the per-tape
+cardinalities out of the executable's header and labels each tape's symbols
+with the decimal strings `0`…`card-1`, which the author then edits or
+replaces. Code-side artifacts — objects, executables, and the map
+sidecar — carry symbol indices only, never glyphs, matching the
 hardware-realizability rule that the processor never sees glyphs
-(`docs/isa.md`).
+(`docs/pmt/isa.md`).
 
 CLI: `pmt tape build " * * *" --head 3 -o in.pmt`, `pmt tape show in.pmt`,
 `pmt run app.pmx --tape-block in.pmt [--save-tape-block out.pmt]`
-(`docs/cli.md`).
+(`docs/pmt/cli.md`). The TM-1 side starts from the executable rather than
+from a literal, since the tape count and each tape's cardinality are
+properties of the program: `tmt tape new --from app.tmx -o in.tmt`, then
+`tmt tape set in.tmt --in-place --tape 1 --cells "0110"`, and
+`tmt tape show in.tmt` (`docs/tmt/cli.md`).
 
 ## `.pma` — assembly text
 
 The PM-1 `.pma` dialect version is **0.3** (pre-1.0: the version is `0.N`
 and `N` bumps on any grammar change, the same acceptance-contract shape as
-the `.pmc` language version in `docs/language.md`). See "Dialect version
+the `.pmc` language version in `docs/pmt/language.md`). See "Dialect version
 history" below for what each version changed.
 
 ```asm
@@ -307,7 +360,7 @@ more (the name plus its `:`) moves to its own line rather than sharing
 the instruction's line, so a long label never pushes the mnemonic column
 out of alignment; a field of 7 characters or fewer stays inline. `pmt dis`
 output is always valid assembler input — round-tripping through `asm`
-reproduces the original bytes exactly. `pmt fmt` (`docs/cli.md`) is the
+reproduces the original bytes exactly. `pmt fmt` (`docs/pmt/cli.md`) is the
 tool that enforces this grid on hand-written `.pma` source — `pmt compile
 -S` and `pmt dis` already emit it directly, so formatting their output is
 always a no-op.
@@ -342,7 +395,7 @@ into another function's middle that lands on no known root falls back to
 lines and in jump/call operands — accept `::`-separated segments of
 dotted identifiers (`std::api.helper`: the namespace part is everything
 before the LAST `::`, the function-nesting part is everything after;
-`docs/language.md (symbol grammar)`). **Labels are letters, digits, and
+`docs/pmt/language.md (symbol grammar)`). **Labels are letters, digits, and
 underscores only** — Unicode letters are legal (matching identifiers
 elsewhere in the toolchain), but the label grammar does not accept `::`
 or `.`, which is what lets the parser tell a label (`L1:`) apart from a
@@ -359,7 +412,7 @@ namespaced/nested symbol reference without ambiguity.
   them.
 - **0.3** — additive: the fused write+move mnemonics `wrl` and `wrr` join
   the mnemonic set (each takes a one-element symbol vector like `wr`). No
-  existing program changes meaning; the accepted set only grew (`docs/isa.md`).
+  existing program changes meaning; the accepted set only grew (`docs/pmt/isa.md`).
 
 ## `.tma` — assembly text (TM-1)
 
@@ -392,13 +445,14 @@ L_halt: stp
 One instruction (or one table directive) per line, `;` line comments, the
 same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
 8, operands at 16, comments at 32); the parser accepts any whitespace on
-input, and `pmt fmt` / `tmt dis` emit the grid. `tmt dis` output is always
+input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis` output is always
 valid assembler input and round-trips to the original bytes.
 
 ### Sections and the routine signature
 
 A `.tma` file is split into two sections. `.section tables` holds the
-match and dispatch tables; `.section code` holds the functions. The
+match tables, the dispatch tables, and the frame descriptors;
+`.section code` holds the functions. The
 default section is `code`, so a file may omit `.section code`. Only table
 directives are legal in the tables section, and only functions/code in the
 code section.
@@ -413,43 +467,28 @@ per-tape alphabets, which a run validates its tape band against.
 
 ### The mnemonic set
 
-Twenty mnemonics. The match register (**MR**) is written only by `mtc`;
-the vector `rd`/`wr`/`mov`/`wrmv` instructions leave it untouched, so
-`jm`/`jnm` test the most recent `mtc` outcome regardless of intervening
-tape motion.
+The dialect accepts twenty mnemonics. The opcode table — each mnemonic's
+byte, operand shape, and semantics — is `docs/tmt/isa.md (instruction
+set)`. What belongs here is how they are *spelled*:
 
-| opcode | mnemonic | operand | meaning |
-|---|---|---|---|
-| `0x01` | `nop` | — | no-op |
-| `0x02` | `stp` | — | stop — clean termination (`tmt run` exits 0) |
-| `0x03` | `hlt` | — | halt (`tmt run` exits 2) |
-| `0x04` | `rd` | — | latch every tape head into its match slot in one fetch |
-| `0x05` | `mtc` | table | walk a match table against the latched heads, setting MR |
-| `0x06` | `djmp` | table | dispatch: jump through the table indexed by MR |
-| `0x07` | `wr` | symbol vector | write one symbol per tape (`-` keeps a cell) |
-| `0x08` | `jmp` | label | unconditional jump |
-| `0x09` | `jm` | label | jump if the last `mtc` matched a row (MR ≠ 0) |
-| `0x0A` | `jnm` | label | jump if the last `mtc` matched no row (MR = 0) |
-| `0x0B` | `call` | symbol | call a routine; the width is chosen at link time |
-| `0x0C` | `ret` | — | return from a call |
-| `0x0D` | `ent` | — | entry marker — emitted implicitly by `.func`, the runtime call guard |
-| `0x0E` | `brk` | — | debugger break |
-| `0x0F` | `mov` | move vector | move one step per tape (`<` left, `>` right, `.` stay) |
-| `0x11` | `trap` | `#kind` | raise a typed trap: `#0` unmapped-read, `#1` unmapped-write |
-| `0x12` | `wrmv` | write + move vectors | fused write-then-move: write one symbol per tape, then move one step per tape, in one instruction |
-| `0x13` | `call.m` | frame call | framed call — call a routine and activate a frame for it |
-| `0x14` | `retx` | `#k` | multi-exit return — leave the active frame through exit `k` |
-| `0x1B` | `call.s` | label | the **short** form of `call` — see below |
-
-The three frames instructions (`trap`, `call.m`, `retx`) and their
-`#imm` / frame-call operands are detailed under *Framed calls, traps, and
-multi-exit returns* and *Frame descriptors* below.
-
-`call.s` exists in the mnemonic set for disassembly display and link-time
-relaxation only: the assembler always emits far `call` and rejects
-`call.s <target>` in source (the width is linker-selected). The linker's
-relaxation fixpoint narrows a far `call` to `call.s` when the target is in
-short range, exactly as PM-1 does.
+- **Jump and call targets are labels**; `call` additionally accepts a
+  routine symbol. `call.s` exists in the mnemonic table for disassembly
+  display and link-time relaxation only: the assembler always emits far
+  `call` and rejects `call.s <target>` in source, because the width is
+  linker-selected. The linker's relaxation fixpoint narrows a far `call`
+  to `call.s` when the target is in short range, exactly as PM-1 does.
+- **`mtc` and `djmp` take a table label** defined in the tables section.
+- **`wr`, `mov`, and `wrmv` take bracketed vectors** — see *Vector
+  operands* below; `wrmv` takes two, comma-separated.
+- **`trap` and `retx` take an immediate.** `#<n>` is a single unsigned
+  byte, `0`..=`255`, written with a leading `#` (`trap #0`, `retx #1`).
+  It is distinct from a symbol or a label — it carries a raw number.
+- **`call.m <target>, <frame>`** pairs a call target with a `.frame`
+  label from the tables section. The operand's two halves are a rel
+  displacement and, after link, a call-site index (see *The frames
+  region* above).
+- **`ent` is emitted implicitly by `.func`** and is the runtime call
+  guard; it is never written by hand.
 
 ### Vector operands
 
@@ -465,26 +504,15 @@ where the vector appears:
   stays put.
 
 `wrmv [w…], [m…]` takes **two** vectors — a write vector then a move
-vector, comma-separated — and fuses a rule's whole write+move action into
-one instruction. It is exactly `wr [w…]` followed by `mov [m…]`: **all
-writes precede all moves**, so a tape's write lands before its head moves
-off the cell. This is the `-O0` codegen canon for a conditional rule's
-action (the compiler elides it entirely when the action is all-keep +
-all-stay). A hand-written `wr`/`mov` pair remains equally valid;
-`wrmv` is the fused spelling, not a new capability.
+vector, comma-separated — fusing a rule's whole write+move action into
+one instruction. Its execution order is `docs/tmt/isa.md (reading,
+writing and moving)`. A hand-written `wr`/`mov` pair remains equally
+valid; `wrmv` is the fused spelling, not a new capability.
 
 ### Match and dispatch tables
 
 A **match table** is a labeled run of `.row` directives. Each row is one
-vector; a run of rows under one label forms the table `mtc` walks. The
-walk returns the 1-based index of the first row every tape matches — this
-number is the match register (MR) — or 0 if no row matches. Table
-discipline: all rows share one width (1..=16); **exact** rows (no
-wildcard) come first, sorted and pairwise disjoint; **wildcard** rows
-follow in source order; an **all-wildcard** catch-all, if present, is
-last. A table with no catch-all leaves MR = 0 on an unmatched head, and a
-following `djmp` on MR = 0 traps — a machine can get an invalid-symbol
-fault for free by omitting the catch-all.
+vector; a run of rows under one label forms the table `mtc` walks.
 
 A **dispatch table** is a labeled run of `.targets`/`.target` directives:
 `.targets L1, …, Lk` lists the targets indexed by MR (MR = 1 selects
@@ -493,6 +521,11 @@ Consecutive directives under the **same label** accrue into one table, so
 a wide dispatch table can be built one entry at a time — the idiom a
 `.rept` uses to emit a value-indexed table.
 
+Match tables carry a **row discipline** the assembler checks, reporting a
+violation as a fatal error under the code `table-discipline`. The rules
+and what they buy are `docs/core.md (match tables)`; the TM-1 error
+spellings are `docs/tmt/isa.md (match and dispatch)`.
+
 ### The compact symbol family (the `0x7F` rule)
 
 TM-1 tables and vectors use the **compact** symbol family: one byte per
@@ -500,9 +533,17 @@ element, holding a 7-bit symbol index in `0`..=`126`. The value `0x7F` is
 **reserved as the transparent marker** — a match-row byte of `0x7F`
 matches any latched symbol (this is what `*` compiles to), and a write
 element of `0x7F` keeps the cell (what `-` compiles to). Reserving `0x7F`
-is why the compact family caps alphabets at **127 symbols**: every payload
-index must stay at or below `0x7E`. An alphabet wider than 127 symbols
-needs a wider symbol family, which the compact grammar does not yet reach.
+is why a compact operand can **name** only indices `0`..=`126`: every
+payload index must stay at or below `0x7E`, and a `wr` or `.row` element
+outside that range is a fatal `bad-vector` error.
+
+This is a limit on what an instruction can *mention*, not on how wide a
+tape's alphabet may be. A `.routine` may declare a cardinality above 127
+— such an image assembles, links, mints a tape and runs — the symbols
+past index 126 simply have no compact spelling, so no `wr` or `.row` can
+name them. (The `.tmc` front end is stricter: it rejects an alphabet
+resolving to more than 127 symbols, since a compiled program must be able
+to name every symbol it declares.)
 
 ### The `.rept` macro
 
@@ -519,43 +560,13 @@ targets. A labeled directive inside a `.rept` emits the **same** label
 every iteration; combined with same-label continuation, that is how a
 `.rept` builds one wide match or dispatch table across its expansion.
 
-### Framed calls, traps, and multi-exit returns
-
-A **framed call** runs a routine under a **frame** — a projection that
-narrows the machine's tapes to the callee's, remapping tape indices and,
-per tape, the symbols read and written. Three mnemonics and one operand
-form make up the surface:
-
-- `call.m <target>, <frame>` — call `<target>` and activate `<frame>`
-  (a `.frame` label in the tables section) for the duration of the call.
-  Inside the callee, tape and symbol references are **virtual**: the frame
-  translates them to physical tapes and symbols. The caller's frame is
-  restored when the callee returns. The operand pairs a rel displacement
-  (the call target) with a **site index** — a dense per-image number for
-  this call site. The site index is *not* a descriptor offset: at run time
-  the processor reads `compose[FR][site]` to pick the composite active in
-  the current context, then `directory[…]` for its descriptor (the frames
-  region above). A hand-authored `call.m` names one fixed descriptor, so its
-  compose column is constant across every frame; a declarative binding call
-  (below) may resolve to a different composite per calling context through
-  the same instruction.
-- `retx #k` — return through **exit `k`** of the active frame's exit
-  vector. Unlike `ret`, the pushed return address is discarded; control
-  resumes at the caller-side label recorded as exit `k`. A `k` past the
-  exit vector traps (exit-out-of-range).
-- `trap #kind` — raise a typed trap explicitly: `#0` is unmapped-read,
-  `#1` is unmapped-write. Numeric kinds leave room for named kinds later
-  without a grammar break.
-
-`#<n>` is the **immediate** operand: a single unsigned byte, `0`..=`255`,
-written with a leading `#` (`trap #0`, `retx #1`). It is distinct from a
-symbol or a label — it carries a raw number.
-
 ### Frame descriptors
 
 `.frame`/`.map`/`.exits` author a **frame descriptor**: the table-section
 record a `call.m` activates. A descriptor projects the caller's tapes onto
-a narrower callee and, per tape, remaps symbols in each direction.
+a narrower callee and, per tape, remaps symbols in each direction — what
+the processor does with it while the callee runs is `docs/tmt/isa.md (the
+frames execution profile)`.
 
 ```asm
 .section tables
@@ -633,25 +644,13 @@ callee virtual tape 1 binds physical tape 0 unchanged.
 
 A binding call **assembles** — it is stored as a bound-call record on the
 object, carrying the target and the binding — and is **lowered at link
-time** by the composition engine (below). Alongside the hand-authored
+time** by the composition engine (`docs/core.md (the composition
+engine)`; what the three mechanisms produce for a TM-1 image is
+`docs/tmt/isa.md (call mechanisms)`). Alongside the hand-authored
 `.frame` form, it is the source-level way to run a framed call.
 
-### The frames profile and the composition engine
-
-At link time a **composition engine** turns declarative binding calls into
-concrete frames. It enumerates the finite set of `(routine, composite)`
-pairs reachable from the entry — the same breadth-first walk as
-reachability, now carrying an active composite that binding calls compose
-onto — in a deterministic order, so builds are reproducible. Bindings
-compose **associatively**; an identity composite collapses away
-(`E ∘ identity = E`), so a binding that resolves to a full pass-through
-lowers to a plain `call` (the callee inherits the caller's frame) and joins
-the ordinary `call → call.s` relaxation. Hole sets compose too: the outer
-holes union the preimages of the inner holes. A one-way `=>` pair
-participates only in the read direction and is excluded from the
-bidirectional bijectivity check.
-
-How a binding's symbol maps complete depends on the two tapes' sizes.
+**Completing a binding.** How a binding's symbol maps complete depends on
+the two tapes' sizes.
 **Equal-size** alphabets identity-complete: a source symbol the binding does
 not name maps to itself (the completed bijection). Across
 **differently-sized** alphabets there is no identity completion — the map is
@@ -664,55 +663,12 @@ everything but the blank (blank↔blank is always implicit). A one-way `=>`
 pair, being read-only, establishes no write-back, so on an unequal tape the
 symbol it collapses onto is a write hole unless a two-way pair also names it.
 
-How a lowered site runs depends on the **call mechanism**, chosen at link
-time (`tmt link --call-mech mono | frames | hybrid`, default hybrid):
-
-- **mono** compiles for the **base profile**: it stamps a specialized copy
-  of the callee per distinct composite, folding the projection and symbol
-  maps into the copy's vectors and match tables. A holey read keeps the
-  trap taxonomy statically — an unmapped-read caller symbol becomes a
-  first-match trap row prepended to every match table, and a write with no
-  physical image becomes a `trap` stub outright. Identical stamps dedup.
-  Mono emits **no frames region**.
-- **frames** compiles for the **frames profile**: one generic copy of each
-  routine, every binding site a `call.m`, and the composites resolved
-  through the frames region's directory and compose table at run time. A
-  crossed hole traps through the descriptor's `0xFFFF` sentinel.
-- **hybrid** (the default) classifies **per site**: a completed bijection
-  (equal-size, no holes, no one-way) stamps like mono; anything holey or
-  one-way frames. An image with at least one framed site carries a frames
-  region; an all-stamped hybrid image has none.
-
-All three mechanisms are **observably equivalent** on the same program and
-tapes — same outcome, same final tapes and heads, and the **same trap
-kind** on a crossed hole or an unmatched read (the offset may differ; the
-kind never does). Two restrictions apply to mono only: a raw
-`.frame`/`call.m` cannot be lowered onto the base profile (it needs the
-frames machinery), and a holey binding whose synthesized trap rows would be
-read by a conditional branch rather than a dispatch jump is refused — the
-prepended trap row could misroute. Both name the offending routine and
-point at `--call-mech=frames` or `hybrid`.
-
-**Link report.** `tmt link -v` renders the composition engine's counters
-(the linker itself never prints — the CLI does):
-
-| field | meaning |
-|---|---|
-| `dropped` | defined-but-unreachable functions, dropped from the image |
-| `relaxed_calls` / `far_calls` | symbol sites narrowed to the short call form, or left far |
-| `instantiations` | mono stamps emitted — one per distinct `(routine, composite)` (0 in frames mode) |
-| `composites` | the directory size `K` — distinct composites in the frames region |
-| `compose_table_bytes` | the compose matrix size, `(K+1) × S × 2` |
-| `dedup_savings` | stamps and descriptors avoided by interning an already-built copy |
-| `synthesized_trap_rows` | unmapped-read trap rows prepended to stamped match tables |
-| `expanded_rows` | extra match rows from one-way collapse expansion (mono) |
-
 ### What the `.tmc` compiler emits
 
 The `.tmc` language front end (`tmt compile`) generates this dialect and
 nothing exotic: a conditional state lowers to `rd` / `mtc` / `djmp` over a
-match table whose **exact rows are sorted and pairwise disjoint** with the
-wildcard rows following (the table discipline above), a rule's write+move
+match table satisfying the row discipline (`docs/tmt/isa.md (match and
+dispatch)`), a rule's write+move
 action lowers to a single `wrmv` (elided when it is all-keep + all-stay),
 and a cross-alphabet `call` lowers to the **binding-call operand** —
 never a hand-authored `.frame`. So a compiled object always reaches the
@@ -733,12 +689,13 @@ call mechanism stays a link-time decision independent of the source.
   precede all moves). It is the `-O0` codegen canon for a rule's action;
   no earlier program changes meaning.
 
-## `.pmx.map` — link-time sidecar
+## `.pmx.map` / `.tmx.map` — link-time sidecar
 
-Written next to a `.pmx` by `pmt link` as `<output>.pmx.map`: a JSON
-document with the architecture byte and, per linked function, its absolute
-code range, label offsets, and source line map (the label/line data is
-empty unless the linked objects carried `-g` debug info):
+Written next to the executable by the linker — `<output>.pmx.map` from
+`pmt link`, `<output>.tmx.map` from `tmt link` — as a JSON document with
+the architecture byte and, per linked function, its absolute code range,
+label offsets, and source line map (the label/line data is empty unless the
+linked objects carried `-g` debug info):
 
 ```json
 {
@@ -751,7 +708,7 @@ empty unless the linked objects carried `-g` debug info):
 ```
 
 The `.pmx` itself stays a pure code image — all naming and debug
-correlation lives in this sidecar (see `docs/cli.md` for sidecar discovery
+correlation lives in this sidecar (see `docs/pmt/cli.md` for sidecar discovery
 rules: an explicit `--map` wins over the `FILE.pmx.map` beside the
 executable, and a missing or unparsable sidecar is silently ignored by
 plain `dis`/`run`, but an unparsable *explicit* `--map` is an error).
@@ -835,7 +792,17 @@ behavior the image lacks.
 
 ## IR JSON
 
-`pmt compile --emit-ir` (`docs/language.md (the IR artifact)`) writes a
+Each compiler can write its intermediate representation as a **versioned,
+documented JSON document** rather than keep it an internal detail. The two
+are different artifacts with independent version counters, because the two
+languages lower to different shapes: `.pmc` is imperative and lowers to a
+per-function control-flow graph of basic blocks; `.tmc` is a set of
+transition rules and lowers to a per-world state graph. Neither reader
+accepts the other's document.
+
+### The `.pmc` CFG IR
+
+`pmt compile --emit-ir` (`docs/pmt/language.md (the IR artifact)`) writes a
 versioned JSON document: `IR_VERSION = 4`.
 
 ```json
@@ -872,3 +839,79 @@ Per-terminator tags (`kind` field, snake_case): `fall_through` (`to`),
 `tail_call` (`name`) — the last is optimizer-produced only (never emitted
 by lowering) and replaces a trailing `call` + `return` with a direct jump
 to the callee.
+
+### The `.tmc` state-graph IR
+
+`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 2`. The
+form follows the model — a Turing world is a set of states, each a
+priority-ordered list of classical match rows, so the document is a graph of
+states rather than a CFG of basic blocks. `tmt ir graph` renders one of its
+worlds as a diagram (`docs/tmt/cli.md`).
+
+```json
+{
+  "version": 2,
+  "worlds": [
+    {
+      "name": "main",
+      "kind": "machine",
+      "arity": 1,
+      "tapes": [{ "name": "main", "alphabet": "ab", "cardinality": 3 }],
+      "entry": 0,
+      "states": [
+        {
+          "id": 0,
+          "name": "scan",
+          "line": 8,
+          "rules": [
+            {
+              "pattern": [{ "kind": "index", "index": 2 }],
+              "write": [{ "kind": "index", "index": 1 }],
+              "moves": ["right"],
+              "transition": { "kind": "goto", "state": 0 },
+              "line": 9
+            }
+          ],
+          "dispatch": "table"
+        }
+      ],
+      "local": false,
+      "line": 5
+    }
+  ],
+  "entry_world": 0
+}
+```
+
+The document is **index-only**: patterns and write vectors carry symbol
+indices, never glyphs — the processor never sees glyphs, so neither does the
+IR. Each tape's alphabet *name* and cardinality ride along for readability
+and for index-bound validation; the glyph tables stay in the presentation
+layers (the map sidecar, tape blocks).
+
+- `kind` per world is `machine` or `routine`. Graphs do not survive to the
+  IR — they have been spliced into their hosts by then.
+- State ids are dense (`0..states.len()`) in emission order: a world's own
+  states in source order, then its spliced graft instances. The entry state
+  is *named* by `entry`, not moved to position zero, so every rule's `line`
+  keeps pointing at the source it came from.
+- Per-cell tags (`kind` field): a pattern cell is `wildcard` or `index`
+  (carrying `index`); a write cell is `keep` or `index`. Moves are `left`,
+  `right`, `stay`. `write` and `moves` are omitted entirely when the whole
+  vector is the identity — all-keep, all-stay — which is the same condition
+  under which codegen elides the action instruction.
+- Per-transition tags (`kind` field, snake_case): `goto` (`state`),
+  `call_then` (`target`, an optional `binding`, and a `then` resume point
+  that is itself a `goto`/`return`/`stop`/`halt`), `return`, `stop`, `halt`,
+  `tail_call` (`target`), and the two synthesized trap terminals `trap_read`
+  and `trap_write`. A `binding` entry carries the same per-callee-tape data
+  the `.tma` binding-call operand does: `caller_tape`, plus each authored
+  `src`/`dst` pair resolved to caller and callee alphabet indices, with
+  one-way pairs flagged. No blank pin or closure is applied here — the
+  composition engine does that at link time.
+- `dispatch` is a codegen hint, `table` (the canonical form: a match table
+  plus an indexed jump) or `branch` (the two-row form the optimizer's
+  dispatch-selection pass picks). `tail_call`, `branch`, and the `debugger`
+  and `synthesized` row flags are the shapes only the optimizer or the
+  compiler's own splicing produce; a `-O0` document carries none of them but
+  `synthesized`.

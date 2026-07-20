@@ -1887,7 +1887,7 @@ A:      stp
 /// reached by two DIFFERENT call chains is ONE directory entry — not one per
 /// path. `main` plain-calls both `A` and `B` (identity context); each binds
 /// `S` the same way, so `S` is reached under one composite via two chains. The
-/// closure must intern it once (docs/formats.md (frames profile)) — distinct
+/// closure must intern it once (docs/core.md (the composition engine)) — distinct
 /// from `frames_report_counts_descriptor_dedup`, whose two sites live in one
 /// function.
 #[test]

@@ -1,9 +1,9 @@
-//! `unreachable-code` (docs/lint.md): an item with no label sitting
+//! `unreachable-code` (docs/core.md (assembly lint)): an item with no label sitting
 //! right after an unconditional jump or stop. Arch-agnostic — the
 //! arming condition is the syntax entry's [`Flow`], not any specific
 //! mnemonic: `Stop` and `Jump` arm it (there is provably no fall-through
 //! successor); `Branch` does not (a conditional branch may fall
-//! through, docs/isa.md (control flow)). A label resets the arm — it is
+//! through, docs/core.md (control flow)). A label resets the arm — it is
 //! a fresh entry point, reachable from wherever jumps to it — even when
 //! the labeled item is itself a terminator, which re-arms for whatever
 //! follows.

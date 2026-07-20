@@ -1,4 +1,4 @@
-//! `unused-label` (docs/lint.md): a label nothing in its function
+//! `unused-label` (docs/core.md (assembly lint)): a label nothing in its function
 //! references via a jump/call name operand. Function-scoped, the same
 //! scope as label resolution — `SourceOperand::SymbolName` (`@name`)
 //! targets a function symbol, never a local label, so it never counts

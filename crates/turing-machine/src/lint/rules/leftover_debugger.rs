@@ -1,5 +1,5 @@
 //! `leftover-debugger`: a `debugger` marker left on a rule. It lowers to a
-//! `brk` (docs/isa.md (debug break)); an un-stripped `brk` is an optimizer
+//! `brk` (docs/core.md (debug break)); an un-stripped `brk` is an optimizer
 //! observability barrier, so shipping one also pessimizes `-O1` output.
 //! Report-only — a `debugger` sits inside a rule action, so there is no
 //! whole-line deletion a source-level fix could offer safely.

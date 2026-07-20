@@ -1,8 +1,7 @@
-//! The phase-6a MILESTONE: the spec's six Appendix A `.tmc` examples
-//! (docs/superpowers/specs/2026-07-16-tm1-and-tmt-design.md, Appendix A)
+//! The six Appendix A `.tmc` examples from the frozen TM-1 design record
 //! compile, link, and RUN, plus a nested-graft case beyond Appendix A. Each
-//! fixture is the VERBATIM spec text (comments and doc lines included), kept
-//! as a durable teaching file under `tests/golden/`.
+//! fixture is the VERBATIM design-record text (comments and doc lines
+//! included), kept as a durable teaching file under `tests/golden/`.
 //!
 //! Discipline, mirroring the PM-1 `golden_programs.rs` and the UTM
 //! `golden_programs.rs`: every expected final state is DERIVED BY HAND in

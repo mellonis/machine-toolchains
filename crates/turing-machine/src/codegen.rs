@@ -27,7 +27,7 @@
 //!   `ret`/`stp`/`hlt`, and the synthesized graft-hole traps → `trap #0` /
 //!   `trap #1`.
 //!
-//! **Match-table discipline** (docs/formats.md (match and dispatch tables)):
+//! **Match-table discipline** (docs/tmt/isa.md (match and dispatch)):
 //! the exact rows (every cell concrete) are sorted lexicographically and their
 //! dispatch targets move with them as pairs — MR numbering and the `.targets`
 //! entries are emitted together, so the sort is behaviour-preserving;
@@ -279,8 +279,8 @@ fn straight_block(w: &IrWorld, st: &IrState, options: CodegenOptions) -> Block {
 
 /// A conditional state's match/dispatch table plus one block per rule (the
 /// dispatch targets), in source (row) order. The table's rows and `.targets`
-/// are ordered per the match-table discipline (docs/formats.md (match and
-/// dispatch tables)); the blocks stay in source order for readable layout.
+/// are ordered per the match-table discipline (docs/tmt/isa.md (match and
+/// dispatch)); the blocks stay in source order for readable layout.
 fn conditional(
     w: &IrWorld,
     st: &IrState,
@@ -350,7 +350,7 @@ fn conditional(
 /// rule's block reached only through the `jm`. The match table carries only the
 /// selective row and NO dispatch table: a no-match falls through to the
 /// catch-all, which is precisely the two-row match semantics the canonical
-/// `mtc`/`djmp` table would give (docs/formats.md (match and dispatch tables)).
+/// `mtc`/`djmp` table would give (docs/tmt/isa.md (match and dispatch)).
 fn branch(
     w: &IrWorld,
     st: &IrState,
