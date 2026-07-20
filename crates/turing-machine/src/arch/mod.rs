@@ -193,11 +193,10 @@ impl Arch for Tm1 {
             }
             // `wrmv [w…], [m…]`: the fused write+move of one formal step.
             // ALL writes precede ALL moves — behaviorally the `wr; mov`
-            // pair (docs/tmt/isa.md (reading, writing and moving)). The
-            // two vectors share one arity; a width mismatch, an
-            // empty/over-16 group, or an
-            // out-of-vocabulary payload is a malformed operand (house
-            // style: the arch rejects at lower, not the wire codec).
+            // pair (docs/tmt/isa.md (reading, writing and moving)). The two
+            // vectors share one arity; a width mismatch, an empty/over-16
+            // group, or an out-of-vocabulary payload is a malformed operand
+            // (house style: the arch rejects at lower, not the wire codec).
             WRMV => {
                 let (writes, moves) = match operand {
                     Operand::WriteMove { writes, moves } => (writes, moves),

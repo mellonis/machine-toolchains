@@ -560,8 +560,8 @@ fn write_image(t: &CompositeTape, v: u16, phys_card: u32) -> Option<u16> {
 }
 
 /// Re-emit the callee's generic body at the machine width, projecting every
-/// tape op and match/dispatch table through the composite (docs/formats.md
-/// (frames profile)).
+/// tape op and match/dispatch table through the composite (docs/core.md (the
+/// composition engine)).
 fn build_stamp(
     syntax: &ArchSyntax,
     callee: &FuncRef,

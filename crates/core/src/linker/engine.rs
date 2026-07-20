@@ -166,9 +166,9 @@ pub(super) fn lower<'a>(
 
 /// FRAMES lowering: keep one generic copy of each routine and resolve every
 /// bound-call site through the runtime compose table (docs/core.md (the
-/// composition engine)). Extracted from `lower` so hybrid can invoke it
-/// on an order whose
-/// mono-classified bound sites have already been rewritten to plain calls.
+/// composition engine)). Extracted from `lower` so hybrid can invoke it on
+/// an order whose mono-classified bound sites have already been rewritten
+/// to plain calls.
 pub(super) fn lower_frames<'a>(
     syntax: &ArchSyntax,
     order: Vec<FuncRef<'a>>,

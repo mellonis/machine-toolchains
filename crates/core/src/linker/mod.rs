@@ -72,8 +72,8 @@ pub enum LinkError {
     /// A raw hand-authored framed call (`call.m` / a `.frame` descriptor)
     /// was reached under `--call-mech=mono`: a mono image runs on the base
     /// profile, which has no frames machinery to activate the descriptor.
-    /// Carries the offending function's name (docs/formats.md (frames
-    /// profile)).
+    /// Carries the offending function's name (docs/core.md (the composition
+    /// engine)).
     MonoRawFrame(String),
     /// Under `--call-mech=mono` a holey binding makes the stamp synthesize
     /// unmapped-read trap rows into the callee's match table — but only a
@@ -343,9 +343,9 @@ pub fn link(
 
     // The composition engine lowers declarative bound calls in FRAMES mode:
     // it rewrites each reachable routine's bound-call sites into framed
-    // calls and computes the runtime compose table (docs/formats.md (frames
-    // profile)). It is a no-op for bindingless links, keeping them on the
-    // byte-identical 5a/T2 path.
+    // calls and computes the runtime compose table (docs/core.md (the
+    // composition engine)). It is a no-op for bindingless links, keeping
+    // them on the byte-identical bindingless path.
     let (order, frames_plan, stats) = match entry_sig {
         Some(sig) => engine::lower(syntax, resolved.order, sig, options.call_mech)?,
         None => (resolved.order, None, engine::EngineStats::default()),
