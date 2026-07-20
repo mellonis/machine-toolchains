@@ -11,7 +11,7 @@ const CRC_OFFSET: usize = 6;
 /// (docs/formats.md).
 pub const MT_FORMAT_VERSION_V1: u16 = 1;
 /// Per-tape glyph tables: at least one tape carries its own `alphabet`
-/// (docs/formats.md). Emit/parse lands in a later task.
+/// (docs/formats.md). Emitted by `to_bytes_v2`, parsed by `from_body_v2`.
 pub const MT_FORMAT_VERSION_V2: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

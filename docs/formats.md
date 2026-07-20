@@ -1,10 +1,12 @@
 # File formats
 
-All multi-byte integers are little-endian. This page covers the four
-binary/text containers (`.pmo`, `.pmx`, `.pmt`, `.pma`), the `.pmx.map`
-sidecar, and the IR JSON artifact. PM-1's opcode semantics are
-`docs/isa.md`; the `pmt` subcommands that read and write these files are
-`docs/cli.md`.
+All multi-byte integers are little-endian. This page covers the five
+binary/text containers (`.pmo`, `.pmx`, `.pmt`, `.pma`, and the `.tma`
+assembly text), the `.pmx.map` sidecar, and the IR JSON artifact. PM-1's
+opcode semantics are `docs/isa.md`; the `pmt` subcommands that read and
+write these files are `docs/cli.md`. (The `.tma` assembly is a TM-1
+format, read and written by `tmt`; its command-line documentation arrives
+with the TM-1 tooling docs.)
 
 ## Shared conventions
 

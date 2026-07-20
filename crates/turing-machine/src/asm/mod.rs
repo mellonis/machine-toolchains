@@ -15,9 +15,10 @@ use crate::arch::opcodes::*;
 /// TM-1 `.tma` dialect version — an acceptance contract (same kind of
 /// contract as the `.pmc` language version and PM-1's `.pma` dialect):
 /// pre-1.0 it is 0.N and N bumps on ANY grammar change. 0.1: the initial
-/// TM-1 assembly surface — the sixteen mnemonics below plus the sectioned
-/// `.routine` / `.section` / `.row` / `.targets` / `.rept` directives and
-/// the `[..]` write- and move-vector operand forms. 0.2: the frames
+/// TM-1 assembly surface — sixteen mnemonics (0.2 and 0.3 add four more to
+/// the table below) plus the sectioned `.routine` / `.section` / `.row` /
+/// `.targets` / `.rept` directives and the `[..]` write- and move-vector
+/// operand forms. 0.2: the frames
 /// instructions — `trap #kind`, the framed call `call.m target, F`, and the
 /// multi-exit return `retx #k` — with the `#imm` immediate operand form.
 /// 0.3: the fused write+move `wrmv [w…], [m…]` — the write vector then the

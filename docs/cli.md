@@ -21,7 +21,7 @@ SUBCOMMANDS:
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
-  tape         build/show .pmt tape-block snapshots
+  tape         build/new/set/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
