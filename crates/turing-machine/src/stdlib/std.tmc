@@ -142,8 +142,8 @@ namespace std {
       state moveStart {
         ['^'] -> write ['_'] move [>] goto moveStart;
         ['0'] -> write ['_'] move [>] goto moveStart;
-        ['1'] -> move [<] goto putNewStart;
-        ['$'] -> move [<] goto putNewStart;
+        ['1'] ->             move [<] goto putNewStart;
+        ['$'] ->             move [<] goto putNewStart;
       }
       state putNewStart {
         ['_'] -> write ['^'] goto scan;
@@ -175,7 +175,7 @@ namespace std {
       }
       state carry {
         ['0'] -> write ['1'] move [>] goto fill;
-        ['1'] -> move [<] goto carry;
+        ['1'] ->             move [<] goto carry;
         ['^'] -> write ['1'] move [<] goto addStart;
       }
       state fill {
@@ -184,7 +184,7 @@ namespace std {
       }
       state addStart {
         ['_'] -> write ['^'] move [>] goto addStart;
-        ['1'] -> move [>] goto fill;
+        ['1'] ->             move [>] goto fill;
       }
     }
 
@@ -251,9 +251,9 @@ namespace std {
     ? on exit it rests on '$' with no leading zero ('^1$' − 1 → '^$'). This
     ? is the deliberately heavy subtractor; minusOneFast is the direct one.
     export routine minusOne(tape num: symbols) {
-      entry state s1 { [*] -> call invertNumber(num = num)    then s2; }
-      state s2       { [*] -> call plusOne(num = num)         then s3; }
-      state s3       { [*] -> call invertNumber(num = num)    then s4; }
+      entry state s1 { [*] -> call invertNumber(num = num) then s2; }
+      state s2       { [*] -> call plusOne(num = num) then s3; }
+      state s3       { [*] -> call invertNumber(num = num) then s4; }
       state s4       { [*] -> call normalizeNumber(num = num) then return; }
     }
   }
