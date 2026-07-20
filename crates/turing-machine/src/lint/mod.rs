@@ -99,6 +99,10 @@ type Rule = fn(&LintContext, &mut Vec<Diagnostic>);
 pub(crate) const RULES: &[(&str, Rule)] = &[
     ("leftover-debugger", rules::leftover_debugger::check),
     ("unused-import", rules::unused_import::check),
+    ("unused-routine", rules::unused_routine::check),
+    ("unused-graph", rules::unused_graph::check),
+    ("unused-binding", rules::unused_binding::check),
+    ("unused-graft-instance", rules::unused_graft_instance::check),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the
