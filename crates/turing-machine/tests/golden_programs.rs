@@ -402,33 +402,35 @@ fn the_tmc_port_and_the_assembly_agree_tape_for_tape() {
 /// machine traps exactly as the hand-written dispatch table does.
 #[test]
 fn the_tmc_port_traps_on_a_program_symbol_with_no_rule() {
-    let exe = utm_from_tmc(OptLevel::O1);
-    let mut registry = ArchRegistry::new();
-    registry.register(Box::new(Tm1::new(exe.tape_count)));
-    let machine = Machine::from_executable(&exe, &registry).expect("loads");
+    for opt in opt_levels() {
+        let exe = utm_from_tmc(opt);
+        let mut registry = ArchRegistry::new();
+        registry.register(Box::new(Tm1::new(exe.tape_count)));
+        let machine = Machine::from_executable(&exe, &registry).expect("loads");
 
-    let mut prog = WideTape::new(WIDTHS[0]);
-    let mut data = WideTape::new(WIDTHS[1]);
-    let mut out = WideTape::new(WIDTHS[2]);
-    let mut cnt = WideTape::new(WIDTHS[3]);
-    let mut devices: Vec<&mut dyn Tape> = vec![&mut prog, &mut data, &mut out, &mut cnt];
-    let result = machine
-        .run_tapes(
-            &mut devices,
-            RunOptions {
-                limits: RunLimits {
-                    max_steps: Some(1_000),
+        let mut prog = WideTape::new(WIDTHS[0]);
+        let mut data = WideTape::new(WIDTHS[1]);
+        let mut out = WideTape::new(WIDTHS[2]);
+        let mut cnt = WideTape::new(WIDTHS[3]);
+        let mut devices: Vec<&mut dyn Tape> = vec![&mut prog, &mut data, &mut out, &mut cnt];
+        let result = machine
+            .run_tapes(
+                &mut devices,
+                RunOptions {
+                    limits: RunLimits {
+                        max_steps: Some(1_000),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
-                ..Default::default()
-            },
-        )
-        .expect("run set-up ok");
-    assert!(
-        matches!(result.outcome, Outcome::Trapped(Trap::NoTransition { .. })),
-        "the .tmc port traps on an unmatched program symbol: {:?}",
-        result.outcome
-    );
+            )
+            .expect("run set-up ok");
+        assert!(
+            matches!(result.outcome, Outcome::Trapped(Trap::NoTransition { .. })),
+            "the .tmc port traps on an unmatched program symbol at {opt:?}: {:?}",
+            result.outcome
+        );
+    }
 }
 
 #[test]

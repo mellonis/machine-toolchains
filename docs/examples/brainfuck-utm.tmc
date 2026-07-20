@@ -5,6 +5,16 @@
 ? equivalent by execution: one set of golden tape snapshots, two independent
 ? implementations.
 ?
+? Equivalent means SAME FINAL TAPES AND SAME OUTCOME — not the same number of
+? steps. Do not treat the two files as interchangeable for timing work. This
+? one runs a few percent longer, and the difference is a code-generation
+? artifact rather than anything about the algorithm: a bare `goto` rule emits
+? a dispatch-vector entry pointing at a one-instruction jump stub, where the
+? assembly's `.targets` names the destination body directly, so every
+? dispatch here costs one extra jump. Part of that is paid back because
+? codegen fuses a rule's write and move into a single `wrmv`, which the
+? hand-written file spells as two instructions.
+?
 ? Read it as a companion piece. The assembly file teaches the ISA — match
 ? tables, dispatch vectors, `.rept` macros. This file teaches what the
 ? language gives you above them: a state is a state, a range is a range, and
@@ -130,10 +140,11 @@ machine {
   // -------------------------------------------------------------------------
   // '[' and ']' — the zero test
   //
-  // Both bracket handlers test the data cell for zero and differ only in which
-  // way the false branch goes. The wildcard rule is written last: rules are
-  // tried in source order, so `[*, 0, *, *]` (data is zero) is checked first
-  // and the catch-all carries "anything else".
+  // Both bracket handlers test the data cell for zero, and both branches
+  // swap between them: '[' skips on zero and advances otherwise, while ']'
+  // advances on zero and skips otherwise. The wildcard rule is written last:
+  // rules are tried in source order, so `[*, 0, *, *]` (data is zero) is
+  // checked first and the catch-all carries "anything else".
   // -------------------------------------------------------------------------
 
   ? '[': on a zero cell, push a nesting level and skip forward past the
