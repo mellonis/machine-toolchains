@@ -405,7 +405,7 @@ language would reject:
 
 What this means per service today: `.pmc` and `.pma` offer lint-derived
 quickfixes. `.tma` offers them too, from the arch-agnostic assembly rules
-it shares with `.pma` (`docs/core.md`) — `redundant-jump` and
+it shares with `.pma` (`docs/core.md`) — `redundant-jump-to-next` and
 `leftover-debugger` are the two that carry fixes on that path. No `.tmc`
 rule and no TM-1 `.tma` rule addition emits a fix of its own, so `.tmc`
 code actions are the two fatal-derived quickfixes above and nothing else.

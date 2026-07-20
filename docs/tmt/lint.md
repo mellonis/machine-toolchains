@@ -20,7 +20,7 @@ the detection is not duplicated, only the reporting.
 
 `tmt lint` has no `--fix`: nothing it reports is applied for you. No
 `.tmc` rule and no TM-1 `.tma` addition carries a fix at all. Two rules
-that *do* reach the `.tma` path carry one — `redundant-jump` and
+that *do* reach the `.tma` path carry one — `redundant-jump-to-next` and
 `leftover-debugger`, both arch-agnostic and shared with the PM-1 toolchain,
 where `pmt lint --fix` applies them. On `.tma` those fixes surface through
 the editor's code actions (`docs/lsp.md (code actions)`) rather than on the
