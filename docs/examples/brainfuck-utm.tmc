@@ -10,8 +10,10 @@
 ? one runs a few percent longer, and the difference is a code-generation
 ? artifact rather than anything about the algorithm: a bare `goto` rule emits
 ? a dispatch-vector entry pointing at a one-instruction jump stub, where the
-? assembly's `.targets` names the destination body directly, so every
-? dispatch here costs one extra jump. Part of that is paid back because
+? assembly's `.targets` names the destination body directly, so each such
+? dispatch costs one extra jump. A rule carrying a write or a move does not
+? pay it — its entry points straight at the work. Part of the cost is paid
+? back anyway because
 ? codegen fuses a rule's write and move into a single `wrmv`, which the
 ? hand-written file spells as two instructions.
 ?
