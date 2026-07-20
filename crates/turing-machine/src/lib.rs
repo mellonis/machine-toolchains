@@ -9,6 +9,7 @@ pub mod asm;
 pub mod cli;
 pub mod codegen;
 pub mod compiler;
+mod config;
 pub mod cst;
 pub mod expand;
 pub mod ir;
