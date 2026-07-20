@@ -30,7 +30,7 @@ cargo test -p mtc-post-machine --test golden_programs regen -- --ignored
 
 `pmt` exit codes from `run`: 0 = program stopped (`stp`), 2 = halted (`hlt`), 3 = trapped. Full flag reference: `docs/cli.md`.
 
-Editor plugin builds live only under `editors/` (never repo root): `cd editors/vscode && npm run package` (vsix); `cd editors/jetbrains && JAVA_HOME=<a JetBrains IDE's bundled JBR> ./gradlew buildPlugin` (zip) — each README has specifics.
+Editor plugin builds live only under `editors/` (never repo root): `cd editors/vscode-pm && npm run package` (vsix); `cd editors/jetbrains-pm && JAVA_HOME=<a JetBrains IDE's bundled JBR> ./gradlew buildPlugin` (zip) — each README has specifics.
 
 ## Documentation authority
 

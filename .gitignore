@@ -3,11 +3,21 @@
 .DS_Store
 
 # editor-shell build outputs (plan 3)
-editors/vscode/node_modules/
-editors/vscode/out/
-editors/vscode/syntaxes/
-editors/vscode/*.vsix
-editors/jetbrains/.gradle/
-editors/jetbrains/build/
-editors/jetbrains/.kotlin/
-editors/jetbrains/.intellijPlatform/
+editors/vscode-pm/node_modules/
+editors/vscode-pm/out/
+editors/vscode-pm/syntaxes/
+editors/vscode-pm/*.vsix
+editors/jetbrains-pm/.gradle/
+editors/jetbrains-pm/build/
+editors/jetbrains-pm/.kotlin/
+editors/jetbrains-pm/.intellijPlatform/
+
+# TM editor-shell build outputs (same shape as the PM-1 pair above)
+editors/vscode-tm/node_modules/
+editors/vscode-tm/out/
+editors/vscode-tm/syntaxes/
+editors/vscode-tm/*.vsix
+editors/jetbrains-tm/.gradle/
+editors/jetbrains-tm/build/
+editors/jetbrains-tm/.kotlin/
+editors/jetbrains-tm/.intellijPlatform/

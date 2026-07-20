@@ -40,7 +40,7 @@ activation). Set `pmt.path` to the absolute path — e.g.
 
 ## Build and sideload the extension
 
-From `editors/vscode`:
+From `editors/vscode-pm`:
 
 ```sh
 npm install
