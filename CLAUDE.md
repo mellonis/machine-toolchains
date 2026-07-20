@@ -30,7 +30,7 @@ cargo test -p mtc-post-machine --test golden_programs regen -- --ignored
 
 `pmt` exit codes from `run`: 0 = program stopped (`stp`), 2 = halted (`hlt`), 3 = trapped. Full flag reference: `docs/cli.md`.
 
-Editor plugin builds live only under `editors/` (never repo root): `cd editors/vscode-pm && npm run package` (vsix); `cd editors/jetbrains-pm && JAVA_HOME=<a JetBrains IDE's bundled JBR> ./gradlew buildPlugin` (zip) — each README has specifics.
+Editor plugin builds live only under `editors/` (never repo root). Two independent pairs, PM-1 (`-pm`) and TM-1 (`-tm`), sharing the grammars in `editors/grammars/`: `cd editors/vscode-{pm,tm} && npm run package` (vsix); `cd editors/jetbrains-{pm,tm} && JAVA_HOME=<a JetBrains IDE's bundled JBR> ./gradlew buildPlugin` (zip) — each README has specifics. The PM pair is 0.1.2 with a `MIN_TESTED_PMT` floor; the TM pair is 0.1.0 with `MIN_TESTED_TMT`.
 
 ## Documentation authority
 

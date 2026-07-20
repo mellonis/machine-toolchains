@@ -205,7 +205,9 @@ fn tma_grammar_directives_are_real_directives() {
         let start = bare.find('.').expect("a directive pattern names a word");
         let rest = &bare[start + 1..];
         if let Some(stripped) = rest.strip_prefix('(') {
-            let close = stripped.find(')').expect("a grouped directive pattern closes");
+            let close = stripped
+                .find(')')
+                .expect("a grouped directive pattern closes");
             for word in stripped[..close].split('|') {
                 in_grammar.insert(format!(".{word}"));
             }
@@ -238,14 +240,14 @@ fn tma_grammar_directives_are_real_directives() {
             ".section" => ".section code\n.func probe\nstp\n".to_string(),
             _ => format!(".func probe\n{directive}\nstp\n"),
         };
-        if let Err(e) = mtc_turing_machine::asm::assemble(&source, false) {
-            if let mtc_core::asm::AsmErrorKind::UnknownMnemonic(word) = &e.kind {
-                assert_ne!(
-                    word, directive,
-                    "the tma grammar paints `{directive}`, but the assembler \
-                     rejects it as an unknown mnemonic"
-                );
-            }
+        if let Err(e) = mtc_turing_machine::asm::assemble(&source, false)
+            && let mtc_core::asm::AsmErrorKind::UnknownMnemonic(word) = &e.kind
+        {
+            assert_ne!(
+                word, directive,
+                "the tma grammar paints `{directive}`, but the assembler \
+                 rejects it as an unknown mnemonic"
+            );
         }
     }
 
