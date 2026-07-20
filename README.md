@@ -76,25 +76,28 @@ marks, representing 3 = 2 + 1. `compile`/`link` (`-o`) both accept `-v` to
 render their stage reports; `tape build`/`run --tape-block` build and
 consume `.pmt` snapshots; `dis` shows the linked `.pmx` with real function
 names resolved from the `.pmx.map` sidecar that `link` wrote alongside it.
-Full flag reference: `docs/cli.md`.
+Full flag reference: `docs/pmt/cli.md`.
 
 ## Documentation
 
-- `docs/language.md` — the `.pmc` source language: structure, statements,
+- `docs/pmt/language.md` — the `.pmc` source language: structure, statements,
   visibility/namespaces/imports, doc lines and attention lines,
   optimization, the IR artifact, and the grammar-version history.
-- `docs/isa.md` — the PM-1 processor: registers, buses, the opcode table,
-  timing, execution, and the debug API.
+- `docs/pmt/isa.md` — the PM-1 processor: registers, the opcode table,
+  timing, and execution.
+- `docs/core.md` — the arch-agnostic core: the sans-I/O VM and its buses,
+  tape devices, loading, the trap taxonomy, `DebugSession`, and the
+  assembler, lint, and linker frameworks.
 - `docs/formats.md` — the binary/text container formats: `.pmo`, `.pmx`,
   `.pmt`, `.pma`, the `.pmx.map` sidecar, and IR JSON.
-- `docs/cli.md` — every `pmt` subcommand and flag.
-- `docs/lint.md` — hygiene findings over `.pmc` and `.pma` sources via
+- `docs/pmt/cli.md` — every `pmt` subcommand and flag.
+- `docs/pmt/lint.md` — hygiene findings over `.pmc` and `.pma` sources via
   `pmt lint`, with `--fix`.
-- `docs/fmt.md` — the canonical `.pmc`/`.pma` layout via `pmt fmt`, with
+- `docs/pmt/fmt.md` — the canonical `.pmc`/`.pma` layout via `pmt fmt`, with
   `--check` and stdin.
 - `docs/lsp.md` — the `pmt lsp` language server: capabilities, editor
   wiring, and configuration.
-- `docs/stdlib.md` — the standard library's routine roster and linking
+- `docs/pmt/stdlib.md` — the standard library's routine roster and linking
   semantics.
 - `docs/history.md` — where this design comes from.
 

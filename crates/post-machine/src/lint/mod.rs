@@ -1,5 +1,5 @@
-//! `.pmc` lint layer (docs/lint.md): hygiene findings over the compiler's
-//! analysis. Library-only — the CLI renders (docs/cli.md). Strict channel
+//! `.pmc` lint layer (docs/pmt/lint.md): hygiene findings over the compiler's
+//! analysis. Library-only — the CLI renders (docs/pmt/cli.md). Strict channel
 //! split: lint reports lint findings ONLY; the compile warnings stay on
 //! the compile channel and are never re-reported here.
 

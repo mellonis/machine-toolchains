@@ -2,7 +2,7 @@
 //! findings with optional machine-applicable fixes. Arch-agnostic by
 //! contract — no architecture may leak in. Producers live in the arch
 //! crates (the `.pmc` compiler and lint layer today); renderers live in
-//! their CLIs (docs/cli.md (thin-renderer rule)).
+//! their CLIs (docs/core.md (thin-renderer rule)).
 
 /// 1-based line and column; columns count characters, not bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

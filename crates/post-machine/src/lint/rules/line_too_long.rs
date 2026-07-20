@@ -1,4 +1,4 @@
-//! `line-too-long` (docs/lint.md): a line longer than 80 characters
+//! `line-too-long` (docs/pmt/lint.md): a line longer than 80 characters
 //! (char count). Report-only — rewrapping is the fmt phase's job.
 
 use mtc_core::diagnostics::{Diagnostic, Span};

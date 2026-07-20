@@ -1,4 +1,4 @@
-//! Fix application (docs/lint.md, docs/cli.md): one batch pass against
+//! Fix application (docs/pmt/lint.md, docs/pmt/cli.md): one batch pass against
 //! original-source coordinates — no re-analysis between edits. A `Fix`'s
 //! edits apply atomically; a fix overlapping an already-kept fix is
 //! skipped whole and counted. The CLI re-lints the fixed source and

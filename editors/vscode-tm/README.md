@@ -154,7 +154,7 @@ builds and which depends entirely on the program under test — so it is left
 out of the generic pipeline above rather than guessed at. Add a `tmt run`
 task with the `--tape-block` your program expects. `tmt link`'s
 `--call-mech`, `--entry`, and `--nostdlib` flags and the full `tmt run`
-surface are documented in `docs/cli.md` in this repository.
+surface are documented in `docs/tmt/cli.md` in this repository.
 
 The tasks use `"type": "process"` rather than `"shell"` — `args` go to `tmt`
 verbatim, as the extension's own tasks do, so glyph arguments reach `tmt`

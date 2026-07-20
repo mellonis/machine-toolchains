@@ -24,7 +24,7 @@ use crate::diagnostics::Span;
 
 /// A spanned, coded assembly diagnostic. The `span` points at the exact
 /// offending text (docs/formats.md (assembly text)); the CLI renders it
-/// as `FILE:LINE:COL: error: MESSAGE [CODE]` (docs/cli.md (error codes)).
+/// as `FILE:LINE:COL: error: MESSAGE [CODE]` (docs/core.md (error codes)).
 #[derive(Debug, PartialEq, Eq)]
 pub struct AsmError {
     pub span: Span,
@@ -88,7 +88,7 @@ pub enum AsmErrorKind {
 }
 
 impl AsmErrorKind {
-    /// Stable kebab-case code identifying the kind (docs/cli.md (error
+    /// Stable kebab-case code identifying the kind (docs/core.md (error
     /// codes)). Permanent user-visible identifiers: the CLI brackets them
     /// into every fatal rendering and editor integrations match on them.
     pub fn code(&self) -> &'static str {

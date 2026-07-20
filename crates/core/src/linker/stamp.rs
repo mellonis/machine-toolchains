@@ -68,7 +68,7 @@ struct StampBody {
 }
 
 /// Report counters accumulated while building the mono stamp set — folded
-/// into the link report's engine counters (docs/cli.md (the link report)).
+/// into the link report's engine counters (docs/core.md (the link report)).
 #[derive(Debug, Default, Clone, Copy)]
 struct StampStats {
     /// (routine, composite) pairs that resolved to an already-built stamp.
@@ -971,7 +971,7 @@ fn encode_vec_into(blob: &mut Vec<u8>, vals: &[u8]) {
 /// preimage. Returns the new table bytes, the dispatch-entry sources in the
 /// new row order, the count of synthesized trap rows, and the count of EXTRA
 /// rows one-way collapse expansion produced (the growth beyond one row per
-/// surviving original — docs/cli.md (the link report)).
+/// surviving original — docs/core.md (the link report)).
 fn rewrite_match_table(
     table: &[u8],
     t_off: u32,

@@ -1,4 +1,4 @@
-//! `.pmc` pretty-printer (`docs/fmt.md`). Thin renderer, same discipline
+//! `.pmc` pretty-printer (`docs/pmt/fmt.md`). Thin renderer, same discipline
 //! as [`crate::compile`] and
 //! [`crate::lint`]: [`format`] returns a `Result` and never prints — the
 //! future `cli/fmt.rs` is the only place that renders errors or touches
@@ -357,7 +357,7 @@ fn print_function(out: &mut String, f: &FunctionCst, indent: usize, blank_before
     out.push('\n');
 }
 
-/// A [`FunctionCst::doc_run`] (docs/language.md (doc lines); design doc
+/// A [`FunctionCst::doc_run`] (docs/pmt/language.md (doc lines); design doc
 /// `2026-07-12-pmc-doc-lines-attributes-design.md`, "fmt"): each item at
 /// the bound declaration's own `indent`. A `?`/`!` line prints as the
 /// sigil alone when its stored `text` is empty (a paragraph break for
@@ -443,7 +443,7 @@ fn max_inline_label_prefix_width(body: &[BodyItem]) -> usize {
 }
 
 /// A statement's label prefix as printed: each label `N:` — `N` is the
-/// number as WRITTEN (leading zeros preserved, docs/fmt.md: fmt never
+/// number as WRITTEN (leading zeros preserved, docs/pmt/fmt.md: fmt never
 /// touches a token), not re-derived from the parsed value — joined by
 /// one space (spec "Intra-statement token spacing" → Label row), e.g.
 /// `1:` or the stacked `1: 2:`. Empty for an unlabeled statement.
@@ -886,7 +886,7 @@ fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
 /// `std :: goToEnd` normalize for free (see `tests` submodule,
 /// "Task 8b"). A number's WRITTEN spelling is the one thing NOT
 /// canonicalized here — `succ_label_written`/`marked_written`/
-/// `blank_written`/`label_written` are emitted verbatim (docs/fmt.md:
+/// `blank_written`/`label_written` are emitted verbatim (docs/pmt/fmt.md:
 /// fmt never touches a token).
 pub(crate) fn render_item(item: &Item) -> String {
     match item {
@@ -953,7 +953,7 @@ fn render_builtin_successor(succ: Successor, written: Option<&str>) -> String {
 }
 
 /// `written` is emitted verbatim for `Successor::Label` instead of
-/// re-deriving text from the parsed `u32` (docs/fmt.md: fmt never
+/// re-deriving text from the parsed `u32` (docs/pmt/fmt.md: fmt never
 /// touches a token).
 fn render_successor(succ: Successor, written: Option<&str>) -> String {
     match succ {
@@ -1976,7 +1976,7 @@ mod tests {
         );
     }
 
-    // -- doc/attention runs (`docs/fmt.md`, doc and attention runs) ------
+    // -- doc/attention runs (`docs/pmt/fmt.md`, doc and attention runs) ------
     //
     // Printing rules under test: a run's own lines print immediately
     // above the bound declaration, at the declaration's OWN indent

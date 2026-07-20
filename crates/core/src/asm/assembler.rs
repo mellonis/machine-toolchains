@@ -1,6 +1,6 @@
 //! Two-pass assembly with short/far relaxation (docs/formats.md (assembly
-//! text); docs/isa.md for the opcode/relaxation table this assembles
-//! against).
+//! text); docs/core.md (the assembler framework) for the opcode and
+//! relaxation tables this assembles against).
 
 use std::collections::{BTreeSet, HashMap};
 

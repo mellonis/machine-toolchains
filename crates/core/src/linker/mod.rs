@@ -1,5 +1,5 @@
 //! `MO` objects → `MX` executables: symbol resolution, reachability,
-//! layout, and relaxation (docs/stdlib.md (linking)).
+//! layout, and relaxation (docs/core.md (linking)).
 
 pub(crate) mod binding_label;
 pub(crate) mod compose;
@@ -168,7 +168,7 @@ impl std::fmt::Display for CallMech {
 }
 
 /// Linker knobs; `relax` (default `true`) enables the far→short call
-/// relaxation fixpoint (docs/isa.md; docs/cli.md for `--no-relax`).
+/// relaxation fixpoint (docs/core.md (relaxation); `--no-relax` opts out).
 #[derive(Debug, Clone)]
 pub struct LinkOptions {
     pub relax: bool,
@@ -262,7 +262,8 @@ impl MapFile {
 }
 
 /// Structured account of what the linker did — the CLI renders it under
-/// `-v` (docs/cli.md); libraries never print (library-first principle).
+/// `-v` (docs/core.md (the link report)); libraries never print
+/// (library-first principle).
 /// The counters are image-level aggregates (their meanings are tabulated in
 /// docs/formats.md (the composition engine)); a per-routine breakdown is
 /// deferred until a consumer needs it.
@@ -306,7 +307,7 @@ pub struct LinkOutput {
     pub report: LinkReport,
 }
 
-/// `MO` objects → `MX` executable (docs/stdlib.md (linking)): resolve
+/// `MO` objects → `MX` executable (docs/core.md (linking)): resolve
 /// symbols and reachability, then lay out, relax, and emit code for the
 /// reached functions.
 pub fn link(

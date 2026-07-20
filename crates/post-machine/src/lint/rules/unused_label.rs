@@ -1,4 +1,4 @@
-//! `unused-label` (docs/lint.md): a label nothing in its function
+//! `unused-label` (docs/pmt/lint.md): a label nothing in its function
 //! references — no goto, no check arm, no command successor. Function-
 //! scoped, the same scope as label resolution. The delete-fix is gated:
 //! an unused label may be evidence of a jump the author forgot to write.

@@ -9,7 +9,7 @@
 //!
 //! # The lossless contract
 //!
-//! Where the AST (`docs/language.md` (program structure); `Program` in
+//! Where the AST (`docs/pmt/language.md` (program structure); `Program` in
 //! [`crate::parser`]) flattens for the compiler's convenience, the CST
 //! keeps the source shape a pretty-printer needs to reprint faithfully:
 //!
@@ -38,7 +38,7 @@
 //!   `items.iter().map(|ci| ci.item.clone())` to the AST's flat
 //!   `Vec<Item>` and drops the trivia.
 //! - **`label_break`** records whether the author put a newline after a
-//!   statement's final label `:` (`docs/language.md`'s own-line-label
+//!   statement's final label `:` (`docs/pmt/language.md`'s own-line-label
 //!   shape; the design doc's Formatting rules section "Own-line labels")
 //!   — the printer needs this to preserve the author's choice; it never
 //!   infers or overrides it.
@@ -118,7 +118,7 @@ pub enum TopKind {
     Function(FunctionCst),
 }
 
-/// A same-line trailing comment plus its SOURCE column (`docs/fmt.md`,
+/// A same-line trailing comment plus its SOURCE column (`docs/pmt/fmt.md`,
 /// comments). The column is needed to detect whether the author aligned
 /// a RUN of trailing `//`s in source — it plays no role in the AST:
 /// `lower_cst` ignores this whole type, same as it ignores [`Comment`]
@@ -131,7 +131,7 @@ pub struct TrailingComment {
     pub col: u32,
 }
 
-/// One path within a `use` list, as written (`docs/language.md`
+/// One path within a `use` list, as written (`docs/pmt/language.md`
 /// (imports)) — mirrors [`crate::parser::Import`] minus its
 /// lower-copy-computed `ns` path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +222,7 @@ pub struct FunctionCst {
     pub exported: bool,
     /// Whether the literal `export` keyword was WRITTEN in source — unlike
     /// `exported`, this does NOT fold in top-level `main`'s auto-export
-    /// (`docs/language.md`: `main` is always the entry regardless of
+    /// (`docs/pmt/language.md`: `main` is always the entry regardless of
     /// spelling). The printer reads this, never `exported`, to decide
     /// whether to emit the token: `export main() { … }` keeps `export`,
     /// bare `main() { … }` stays bare, both compile identically.
@@ -245,7 +245,7 @@ pub struct FunctionCst {
     /// A comment on the SAME physical line as the closing `}` — e.g.
     /// `} // t`. `None` when absent.
     pub close_trailing: Option<Comment>,
-    /// The `?`/`!` run bound to this declaration (docs/language.md (doc
+    /// The `?`/`!` run bound to this declaration (docs/pmt/language.md (doc
     /// lines)), in source order; empty when the function is
     /// undocumented. Unlike every other trivia field in this module,
     /// this IS an attachment pass — `parse_cst` walks past blank lines,
@@ -266,7 +266,7 @@ pub struct DocRunItem {
     pub kind: DocRunKind,
 }
 
-/// A doc/attention run's own line shapes (docs/language.md (doc lines)):
+/// A doc/attention run's own line shapes (docs/pmt/language.md (doc lines)):
 /// a `?` doc line, a `!` attention line, or an ordinary comment
 /// interleaved within/after the run (module doc's "Comment placement"
 /// applies here too — position is still the attachment for a comment
@@ -298,7 +298,7 @@ pub enum DocRunKind {
     Comment(Comment),
 }
 
-/// An attention line's leading `[ident]` attribute (docs/language.md
+/// An attention line's leading `[ident]` attribute (docs/pmt/language.md
 /// (doc lines)): v1 accepts exactly `"deprecated"`. `span` covers the
 /// identifier alone, not the surrounding brackets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,7 +337,7 @@ pub struct CommaItem {
     pub item: Item,
     pub leading: Vec<Comment>,
     /// Whether the author put a newline before this item, inside its
-    /// comma group (`docs/fmt.md`, comma groups) — the first entry's is
+    /// comma group (`docs/pmt/fmt.md`, comma groups) — the first entry's is
     /// always `false`. Set
     /// from token line numbers (item K's first token on a later line than
     /// item K-1's last token), not from comment positions.
@@ -358,7 +358,7 @@ pub struct StatementCst {
     /// (matches [`crate::parser::Statement::span`]).
     pub span: Span,
     /// Whether the author put a newline after the statement's final
-    /// label `:` (`docs/language.md`'s own-line-label shape; the design
+    /// label `:` (`docs/pmt/language.md`'s own-line-label shape; the design
     /// doc's Formatting rules → "Own-line labels"). The printer preserves
     /// this choice and never infers or overrides it.
     pub label_break: bool,

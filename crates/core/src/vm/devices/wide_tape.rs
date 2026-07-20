@@ -1,4 +1,4 @@
-//! Unbounded wide-alphabet tape with paged sparse storage (docs/isa.md (the
+//! Unbounded wide-alphabet tape with paged sparse storage (docs/core.md (the
 //! tape and device bus)). `InfiniteTape` is physically two-symbol (a packed
 //! bit array); this device generalizes it to per-cell symbol indices in
 //! `0..width`, for architectures whose tapes declare alphabets wider than

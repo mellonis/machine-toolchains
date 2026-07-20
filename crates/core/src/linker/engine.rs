@@ -70,7 +70,7 @@ pub(super) enum DirSource {
     Raw { func: usize, table_offset: u32 },
 }
 
-/// Composition-engine counters surfaced in the link report (docs/cli.md (the
+/// Composition-engine counters surfaced in the link report (docs/core.md (the
 /// link report)). Frames lowering fills `dedup_savings` (descriptor
 /// interning); mono/hybrid stamping fills the rest. The directory size and
 /// compose-matrix byte count are layout's to report (it emits the region), so

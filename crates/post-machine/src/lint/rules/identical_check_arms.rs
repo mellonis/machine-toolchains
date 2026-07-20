@@ -1,4 +1,4 @@
-//! `identical-check-arms` (docs/lint.md): `check(N, N)` — both arms land
+//! `identical-check-arms` (docs/pmt/lint.md): `check(N, N)` — both arms land
 //! in the same place, so the branch is unconditional; `goto N` was meant
 //! or one arm is a typo. `check(!, !)` is EXEMPT: it is the language's
 //! only pure mid-function return (there is no `return` keyword and `(!)`

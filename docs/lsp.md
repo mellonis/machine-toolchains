@@ -6,7 +6,7 @@ compiler/assembler, optimizer-free analysis, and linter the CLI uses
 for each. Nothing the server reports is a re-implementation: a
 diagnostic, a quickfix, or a formatted document is the same answer
 `pmt compile`/`pmt lint`/`pmt fmt` would give for the same source. See
-`docs/cli.md` (`pmt lsp`) for the subcommand's flags, stdio contract,
+`docs/pmt/cli.md` (`pmt lsp`) for the subcommand's flags, stdio contract,
 and lifecycle exit codes; see **Languages** below for how the two
 languages share the one process.
 
@@ -23,7 +23,7 @@ compiler and republishes the document's complete diagnostic set:
 a fatal compile error when one stage fails (one at a time — the
 compiler is fail-fast, never a cascade of guesses), compile warnings
 (undeclared externals, unused imports, unused functions), and lint
-findings (`docs/lint.md`), merged and sorted by position. Beyond
+findings (`docs/pmt/lint.md`), merged and sorted by position. Beyond
 diagnostics, the server offers:
 
 - **Completions** in four contexts — after `@` (callable names visible
@@ -33,7 +33,7 @@ diagnostics, the server offers:
   enclosing function's labels).
 - **Hover** on a call site, a `use` path segment, or a function's own
   declaration name, rendering that function's `?`/`!` documentation
-  (`docs/language.md (doc lines and attention lines)`) — see **Hover**
+  (`docs/pmt/language.md (doc lines and attention lines)`) — see **Hover**
   below for the exact content shape.
 - **Go-to-definition** for local and nested functions, import
   bindings, qualified internal and external calls, label references,
@@ -107,7 +107,7 @@ declaration name — whichever the cursor sits on, resolved through the
 same walks go-to-definition uses. Content is always plain text
 (`MarkupContent.kind: "plaintext"`) — v1 renders no markdown, matching
 the `?`/`!` grammar's own plain-prose rule
-(`docs/language.md (doc lines and attention lines)`).
+(`docs/pmt/language.md (doc lines and attention lines)`).
 
 A hover body is up to three groups, blank-line separated, in this fixed
 order:
@@ -146,7 +146,7 @@ Two LSP tag surfaces mark a reference to a deprecated function. Both are
 additive fields, omitted from the wire entirely rather than sent as an
 explicit negative:
 
-- **`deprecated-call` diagnostics** (`docs/lint.md`) carry
+- **`deprecated-call` diagnostics** (`docs/pmt/lint.md`) carry
   `DiagnosticTag.Deprecated` (wire `"tags":[2]`), so a client renders
   the finding's range struck through. Every other diagnostic code, on
   either service, is untagged.
@@ -341,7 +341,7 @@ affected.
 ## Configuration
 
 A project has exactly one config file, `pmt.json`, read by both the
-CLI and the server for either language — see `docs/lint.md` for its
+CLI and the server for either language — see `docs/pmt/lint.md` for its
 schema, discovery rule (nearest ancestor wins, never a cascade), and
 union semantics.
 The server adds one more source on top: IDE settings, forwarded over
@@ -350,7 +350,7 @@ startup, live afterward) as `{ "lint": { "allow": [...] } }`, or the
 same object wrapped under a `"pmt"` key for clients that forward whole
 settings sections. Wherever more than one source applies to a
 document — the discovered `pmt.json` and the IDE setting — the
-effective allow-list is their union, exactly as `docs/lint.md`
+effective allow-list is their union, exactly as `docs/pmt/lint.md`
 describes for the CLI's file-plus-flags case.
 
 The server watches `**/pmt.json` through the client's file-watch

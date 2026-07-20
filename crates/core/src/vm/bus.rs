@@ -1,4 +1,4 @@
-//! Bus protocol between the sans-I/O core and its driver (docs/isa.md).
+//! Bus protocol between the sans-I/O core and its driver (docs/core.md).
 
 use super::trap::{DeviceFault, Trap};
 
@@ -54,7 +54,7 @@ pub enum CoreEvent {
     Step,
     /// An instruction containing `MicroOp::Brk` retired. Drivers without
     /// a debugger treat this exactly like `Step` (brk is a no-op); a
-    /// debug session pauses on it (docs/isa.md (DebugSession)).
+    /// debug session pauses on it (docs/core.md (DebugSession)).
     Break,
     Stopped,
     Halted,

@@ -17,7 +17,7 @@ SUBCOMMANDS:
   compile      .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
   asm          .pma assembly -> .pmo object
   link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
-  lint         lint .pmc/.pma sources (hygiene findings; docs/lint.md)
+  lint         lint .pmc/.pma sources (hygiene findings; docs/pmt/lint.md)
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
@@ -31,7 +31,7 @@ Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 
 `pmt --version` prints three lines: `pmt <VERSION>` (the toolchain crate's
 own version), `pmc language <VERSION>` (the `.pmc` language
-acceptance-contract version — `docs/language.md`), and
+acceptance-contract version — `docs/pmt/language.md`), and
 `pma dialect (pm-1) <VERSION>` (the PM-1 `.pma` dialect version —
 `docs/formats.md (assembly text)`). The three numbers move on independent
 axes: a crate release with no grammar change repeats the same
@@ -65,12 +65,12 @@ FLAGS:
 so `-O0`/`-O1`/`-g`/`--strip-debugger` can still override a piece of a
 preset on the same command line. The default build (no flags) is `-O0`, no
 debug info. Compile warnings (undeclared externals, unused imports, unused
-functions — `docs/language.md (visibility)`) always print to stderr as
+functions — `docs/pmt/language.md (visibility)`) always print to stderr as
 `FILE:LINE:COL: warning: MESSAGE` (the column is new; `-Werror` semantics are
 unchanged by it); `-v` additionally prints the optimizer's per-pass round
 report; `-Werror` turns every warning into a compile failure. `--emit-ir`
 writes `<output base>.ir.json` — see
-`docs/language.md (the IR artifact)` and `docs/formats.md (IR JSON)`.
+`docs/pmt/language.md (the IR artifact)` and `docs/formats.md (IR JSON)`.
 "Repeated stages resolve last-wins" refers to snapshot labels, not the
 flag: a stage label captured in several optimizer rounds (e.g.
 `after:inline`) resolves to the last captured snapshot, while the
@@ -100,7 +100,7 @@ integrations.
 | `duplicate-label` | The same label declared twice in one function. |
 | `undefined-label` | `goto`, `check`, or a successor names a label the function never declares. |
 | `goto-return` | `goto !` — put `(!)` on the preceding command instead. |
-| `group-position` | A comma-group position rule violated (`docs/language.md`, the statement table's last row). |
+| `group-position` | A comma-group position rule violated (`docs/pmt/language.md`, the statement table's last row). |
 | `dangling-label` | A label at the end of a function body binds to nothing. |
 | `internal-error` | The generated assembly failed to assemble — a compiler bug, not a source error; please report it. |
 | `nested-export` | `export` on a nested definition — nested functions are always local. |
@@ -109,7 +109,7 @@ integrations.
 | `keyword-in-body` | `use` or `namespace` inside a function body — imports and namespaces live at file or namespace level. |
 | `single-colon-in-path` | A single `:` in a name path where the `::` separator was meant. |
 | `top-level-statement` | A command or call at top level — statements live inside function bodies. |
-| `dangling-doc-run` | A doc/attention run (`docs/language.md` (doc lines)) not immediately followed by a function declaration at its scope. |
+| `dangling-doc-run` | A doc/attention run (`docs/pmt/language.md` (doc lines)) not immediately followed by a function declaration at its scope. |
 | `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block — interleaved, or the whole run written `!`-then-`?`. |
 | `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
 | `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
@@ -161,7 +161,7 @@ info when the objects carry -g debug data).
 ```
 
 Linking always adds the built-in standard library as an implicit last
-library unless `--nostdlib` is given (`docs/stdlib.md`); explicit `-l NAME`
+library unless `--nostdlib` is given (`docs/pmt/stdlib.md`); explicit `-l NAME`
 resolves `NAME.pmo` against the `-L` directories, in the order given, and
 errors if it isn't found on any of them — there is no on-disk library
 directory to fall back to; the standard library is embedded in the
@@ -202,9 +202,9 @@ compared as spelled (no globs — the shell covers the include side), and
 exclusion wins even over explicitly listed files.
 
 Each file's extension picks its rule table: `.pmc` lints through the
-pmc-specific rules (`docs/lint.md`), `.pma` through core's
+pmc-specific rules (`docs/pmt/lint.md`), `.pma` through core's
 arch-agnostic assembly rule table read against the PM-1 syntax
-(`docs/lint.md`'s `.pma` rule list). `--allow CODE` draws from the
+(`docs/pmt/lint.md`'s `.pma` rule list). `--allow CODE` draws from the
 union of both tables, so one allow-list works across a batch mixing
 both languages. An explicitly listed file with neither extension is a
 per-file error (`PATH: error: unknown source extension (expected .pmc
@@ -220,7 +220,7 @@ or errors anywhere (tool errors are also 1).
 
 For each input file, `pmt lint` also discovers a `pmt.json` project
 file by walking up from that file's directory (nearest ancestor wins,
-never a cascade — `docs/lint.md`) and unions its allow-list with any
+never a cascade — `docs/pmt/lint.md`) and unions its allow-list with any
 `--allow` flags. `--no-config` skips that discovery for every file, so
 the run is governed by `--allow` alone. A `pmt.json` that fails to
 parse or validate is a per-file fatal, exactly like a source file that
@@ -235,7 +235,7 @@ report and exit code reflect what remains. `--fix --force` also
 applies the gated fixes (deletions and rewrites whose diagnosis may
 have another reading). `--force` without `--fix` is an error. A file
 with a fatal error is never written. The rule catalog and per-rule fix
-behavior live in `docs/lint.md`.
+behavior live in `docs/pmt/lint.md`.
 
 ## `pmt fmt`
 
@@ -264,7 +264,7 @@ PATH is a `.pmc` or `.pma` file, or a directory, walked the same way as
 sorted order, symlinks are never followed, dot-entries are skipped, and
 `--exclude PATH` (repeatable, no globs) skips a file or prunes a
 subtree. Each file's extension picks its formatter: `.pmc` through the
-pmc pretty-printer (`docs/fmt.md`), `.pma` through core's canonical-grid
+pmc pretty-printer (`docs/pmt/fmt.md`), `.pma` through core's canonical-grid
 printer (`docs/formats.md (assembly text)`). An explicitly listed file
 with neither extension is a per-file error (`PATH: error: unknown
 source extension (expected .pmc or .pma)`), same shape and same
@@ -293,7 +293,7 @@ place); 1 = under `--check`, at least one input would change, or a
 lex/parse error occurred anywhere in the batch. The `.pmc` canonical
 style itself — indentation, label/command alignment, comma-group
 layout, blank lines, comment handling, and the token-spacing table — is
-`docs/fmt.md`; the `.pma` canonical grid is `docs/formats.md (assembly
+`docs/pmt/fmt.md`; the `.pma` canonical grid is `docs/formats.md (assembly
 text)`.
 
 ## `pmt dis`
@@ -408,7 +408,7 @@ initial tape is empty with the head at 0. `--max-steps` defaults to
 program you trust to terminate); `--max-tacts` has no default (unset =
 unlimited). `--tact-profile` sets device costs as `move,read,write`
 (electronic default `1,1,1`; a slower "mechanical" profile can model a
-physical tape's motion cost — `docs/isa.md (timing model)`).
+physical tape's motion cost — `docs/pmt/isa.md (timing model)`).
 
 **`--trace` format:** streams live, one line per retired instruction, in
 the same address/bytes/mnemonic shape as `dis --listing`, with a

@@ -1,4 +1,4 @@
-//! `leftover-debugger` (docs/lint.md): an instruction whose opcode is
+//! `leftover-debugger` (docs/core.md (assembly lint)): an instruction whose opcode is
 //! the arch's declared debugger-break opcode (`ArchSyntax::break_opcode`)
 //! — a forgotten debugging aid left in shipped source. Silent when the
 //! arch declares no such opcode (`break_opcode == None`), so a core

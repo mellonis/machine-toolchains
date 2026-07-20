@@ -1,4 +1,4 @@
-//! `redundant-jump-to-next` (docs/lint.md): a `Flow::Jump` or
+//! `redundant-jump-to-next` (docs/core.md (assembly lint)): a `Flow::Jump` or
 //! `Flow::Branch` item whose name operand targets the label bound to
 //! the immediately following item in the same function — fall-through
 //! already lands there, so an unconditional jump changes nothing and,

@@ -1,4 +1,4 @@
-//! `confusable-names` (docs/lint.md): two definitions or bindings in the
+//! `confusable-names` (docs/pmt/lint.md): two definitions or bindings in the
 //! SAME scope whose names differ only under a confusability
 //! normalization — lowercase, strip `_`, map `1→l`, `i→l`, `0→o`.
 //! Deterministic; one finding per pair, reported at the later

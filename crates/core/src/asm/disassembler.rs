@@ -2330,7 +2330,8 @@ START:  nop
     }
 
     /// The core crate cannot depend on PM-1: a minimal local `ArchSyntax`
-    /// with exactly the entries the derived golden uses (docs/isa.md opcodes),
+    /// with exactly the entries the derived golden uses (docs/core.md (the
+    /// assembler framework)),
     /// mirroring `fixture::test_syntax()`.
     fn pm1_like_syntax() -> crate::asm::syntax::ArchSyntax {
         use Flow::{Branch, FallThrough as FT, Stop};

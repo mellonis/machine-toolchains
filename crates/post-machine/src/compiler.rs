@@ -3,7 +3,7 @@
 //! Every pipeline stage (lexer → parser → lowering → codegen) reports
 //! fatals through [`CompileError`]; non-fatal findings accumulate as
 //! span-carrying, coded [`Diagnostic`]s — library code never prints
-//! (docs/cli.md).
+//! (docs/pmt/cli.md).
 
 use std::collections::HashMap;
 
@@ -40,11 +40,11 @@ pub enum CompileErrorKind {
         name: String,
         what: &'static str,
     },
-    /// A bare identifier statement that is not a builtin (docs/language.md).
+    /// A bare identifier statement that is not a builtin (docs/pmt/language.md).
     UnknownCommand(String),
     /// `@` applied to a builtin name (`@left()`).
     BuiltinCalled(String),
-    /// Empty `()` on a tape builtin (`left()`), docs/language.md: parens
+    /// Empty `()` on a tape builtin (`left()`), docs/pmt/language.md: parens
     /// on a builtin, if present, must carry a successor. Call parens
     /// (`@f()`) are unaffected.
     EmptyBuiltinParens {
@@ -59,9 +59,9 @@ pub enum CompileErrorKind {
     DuplicateLabel(u32),
     /// `goto`/`check`/successor names a label the function never declares.
     UndefinedLabel(u32),
-    /// `goto !` — docs/language.md: put `(!)` on the preceding command instead.
+    /// `goto !` — docs/pmt/language.md: put `(!)` on the preceding command instead.
     GotoReturn,
-    /// A comma-group position rule violated (docs/language.md, the
+    /// A comma-group position rule violated (docs/pmt/language.md, the
     /// statement table's last row).
     GroupPosition(&'static str),
     /// A label at the end of a function body binds to nothing.
@@ -83,7 +83,7 @@ pub enum CompileErrorKind {
     SingleColonInPath,
     /// A command or call at top level (outside any function body).
     TopLevelStatement(String),
-    /// A doc/attention run (docs/language.md (doc lines)) not
+    /// A doc/attention run (docs/pmt/language.md (doc lines)) not
     /// immediately followed by a function declaration at its scope.
     /// Span = the run's first line.
     DanglingDocRun,
@@ -98,7 +98,7 @@ pub enum CompileErrorKind {
 }
 
 impl CompileErrorKind {
-    /// Stable kebab-case code, one per variant (docs/cli.md (compile
+    /// Stable kebab-case code, one per variant (docs/pmt/cli.md (compile
     /// errors)). Frozen once published — these are permanent
     /// user-visible identifiers: the CLI brackets them into every fatal
     /// rendering, and the language server carries them in the LSP
@@ -258,10 +258,10 @@ pub struct CompileOptions {
     /// `-g`: record label/line debug info in the object, with lines
     /// remapped to `.pmc` sources.
     pub debug_info: bool,
-    /// `--strip-debugger`: drop `brk` at codegen (docs/cli.md). The
+    /// `--strip-debugger`: drop `brk` at codegen (docs/pmt/cli.md). The
     /// optimizer runs BEFORE stripping, so `brk` barriers always hold.
     pub strip_debugger: bool,
-    /// `-O0` (default) or `-O1` (docs/language.md (optimization)).
+    /// `-O0` (default) or `-O1` (docs/pmt/language.md (optimization)).
     pub opt_level: OptLevel,
     /// Pass names to disable (`--fno-<pass>`), e.g. `"cell-state"`.
     pub disabled_passes: Vec<String>,
@@ -271,7 +271,7 @@ pub struct CompileOptions {
 }
 
 /// Structured stage report — `pmt -v` renders it; the library never
-/// prints (docs/cli.md, the same pattern as the linker's `LinkReport`).
+/// prints (docs/pmt/cli.md, the same pattern as the linker's `LinkReport`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileReport {
     pub diagnostics: Vec<Diagnostic>,
@@ -567,7 +567,7 @@ struct Flattened {
     docs: HashMap<String, FnDoc>,
 }
 
-/// Flatten definitions and resolve calls (docs/language.md (visibility)):
+/// Flatten definitions and resolve calls (docs/pmt/language.md (visibility)):
 /// mangle names (`::` for namespaces, `.` for nesting), resolve
 /// each call innermost-outward — the function's own nested maps (defs
 /// only), then per enclosing namespace prefix (longest first) that

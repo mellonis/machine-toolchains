@@ -1,4 +1,4 @@
-//! `pmt fmt` (`docs/cli.md (pmt fmt)`): thin renderer over the fmt
+//! `pmt fmt` (`docs/pmt/cli.md (pmt fmt)`): thin renderer over the fmt
 //! library. The library
 //! [`format`](crate::fmt::format) stays print-free (`crate::fmt`'s own
 //! doc comment) — this module is the ONLY place that prints or touches
@@ -44,7 +44,7 @@ FLAGS:
 ";
 
 /// stdin's language for `pmt fmt -`, defaulted from `--lang`
-/// (docs/cli.md (pmt fmt)). PATH batches never need this: each file's
+/// (docs/pmt/cli.md (pmt fmt)). PATH batches never need this: each file's
 /// extension already says which formatter applies.
 #[derive(Clone, Copy)]
 enum Lang {

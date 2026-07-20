@@ -1,5 +1,5 @@
 //! First real Post-machine programs: hand-assembled PM-1 bytecode,
-//! end-to-end through Executable → Machine → tape, with docs/isa.md
+//! end-to-end through Executable → Machine → tape, with docs/pmt/isa.md
 //! (timing model) tact arithmetic pinned exactly.
 
 use mtc_core::formats::ARCH_PM1;
@@ -79,7 +79,7 @@ fn spec_tact_numbers_hold() {
     );
     assert_eq!(t.marked_cells(), vec![0]);
 
-    // call far = 8 core (docs/isa.md (timing model)): ent 2 + call 8 + ent 2 + ret 3 + stp 1
+    // call far = 8 core (docs/pmt/isa.md (timing model)): ent 2 + call 8 + ent 2 + ret 3 + stp 1
     let code = vec![ENT, CALL, 0x01, 0x00, 0x00, 0x00, STP, ENT, RET];
     let m = Machine::from_executable(&machine_for(code), &reg).unwrap();
     let mut t = InfiniteTape::new();

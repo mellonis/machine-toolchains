@@ -1,5 +1,5 @@
 //! Project configuration: `pmt.json`, the toolchain's first (deliberately
-//! tiny) project file (docs/lint.md (project file)).
+//! tiny) project file (docs/pmt/lint.md (project file)).
 //!
 //! Validation is a manual [`serde_json::Value`] walk rather than
 //! `#[serde(deny_unknown_fields)]`: a derive-based reject gives one
@@ -50,7 +50,7 @@ pub(crate) enum ConfigError {
     UnknownKey { path: PathBuf, key: String },
     /// A `lint.allow` entry names no rule in the catalog
     /// (`lint::validate_allow`'s check, re-homed onto this error type so
-    /// the CLI's per-file config posture, docs/lint.md (project file),
+    /// the CLI's per-file config posture, docs/pmt/lint.md (project file),
     /// has one error type to render for every `pmt.json` problem).
     UnknownAllowCode { path: PathBuf, code: String },
 }

@@ -3,7 +3,7 @@
 //! staging (total CST, then a fatal-or-lint split), reusing the shared
 //! config-resolution and code-actions machinery from `lsp/mod.rs` rather
 //! than duplicating it. Library-only — rendering and stdio belong to the
-//! CLI (docs/cli.md (thin-renderer rule)).
+//! CLI (docs/pmt/cli.md (thin-renderer rule)).
 //!
 //! `.pma` has no separate compile-warning channel the way `.pmc` does:
 //! `mtc_core::asm::lint::lint` alone gives both the fatal gate (a lower or

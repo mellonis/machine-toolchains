@@ -1,4 +1,4 @@
-//! Tape devices behind the device bus (docs/isa.md (the tape and device
+//! Tape devices behind the device bus (docs/core.md (the tape and device
 //! bus)). Index-based; the processor never sees glyphs and never knows
 //! the head position.
 

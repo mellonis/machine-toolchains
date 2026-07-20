@@ -1,4 +1,4 @@
-//! PM-1: the Post-machine instruction set (docs/isa.md), as an arch
+//! PM-1: the Post-machine instruction set (docs/pmt/isa.md), as an arch
 //! module for the mtc-core VM. Pure table — no state.
 
 use mtc_core::vm::{Arch, MicroOp, Operand, OperandKind, Trap};
@@ -10,7 +10,7 @@ pub mod opcodes {
     pub const LFT: u8 = 0x04;
     pub const RGT: u8 = 0x05;
     pub const WR: u8 = 0x06;
-    // Fused write+move (docs/isa.md): wr x; lft / wr x; rgt in one fetch,
+    // Fused write+move (docs/pmt/isa.md): wr x; lft / wr x; rgt in one fetch,
     // final MF identical (cell at head after the move).
     pub const WRL: u8 = 0x07;
     pub const WRR: u8 = 0x0F;
@@ -21,7 +21,7 @@ pub mod opcodes {
     pub const RET: u8 = 0x0C;
     pub const ENT: u8 = 0x0D;
     pub const BRK: u8 = 0x0E;
-    // Short forms: far | 0x10 (docs/isa.md).
+    // Short forms: far | 0x10 (docs/pmt/isa.md).
     pub const JMP_S: u8 = 0x18;
     pub const JM_S: u8 = 0x19;
     pub const JNM_S: u8 = 0x1A;
@@ -30,7 +30,7 @@ pub mod opcodes {
 
 use opcodes::*;
 
-/// PM-1 matches against the mark index (docs/isa.md).
+/// PM-1 matches against the mark index (docs/pmt/isa.md).
 const MARK: u32 = 1;
 
 /// Default rendering glyphs (index 0 = blank, 1 = mark) for tooling with
@@ -82,7 +82,7 @@ impl Arch for Pm1 {
                 }
                 _ => return Err(Trap::BadOperand { at: 0 }),
             },
-            // Fused write+move: ≡ `wr x; lft` / `wr x; rgt` (docs/isa.md).
+            // Fused write+move: ≡ `wr x; lft` / `wr x; rgt` (docs/pmt/isa.md).
             // The final latch reads the cell AFTER the move, so MF matches
             // the unfused pair exactly.
             WRL => match operand {

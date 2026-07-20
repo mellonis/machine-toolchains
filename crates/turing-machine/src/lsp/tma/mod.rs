@@ -5,7 +5,7 @@
 //! assembly text has no doc-line grammar), reusing this crate's own
 //! config-resolution and code-action machinery from `lsp/mod.rs` rather than
 //! duplicating it. Library-only — rendering and stdio belong to the CLI
-//! (docs/cli.md (thin-renderer rule)).
+//! (docs/core.md (thin-renderer rule)).
 //!
 //! # Where the diagnostics come from
 //!

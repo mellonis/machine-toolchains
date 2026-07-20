@@ -10,8 +10,8 @@ page for what each version changed.
 `.pmc` is the C-like source language for the Post-machine toolchain. Control
 flow is deliberately flat: labels, `goto`, `check`, and function calls only —
 no loops, no general `if`, no expressions. A `.pmc` file compiles to a `.pmo`
-object (`pmt compile`); see `docs/cli.md` for the compiler's command-line
-flags and `docs/isa.md` for what the generated code actually runs on.
+object (`pmt compile`); see `docs/pmt/cli.md` for the compiler's command-line
+flags and `docs/pmt/isa.md` for what the generated code actually runs on.
 
 ```c
 // Move right until the first blank cell.
@@ -122,7 +122,7 @@ return (in `main`, an implicit stop).
   but the compiler warns unless the name is declared with `use` or called
   fully qualified (see Visibility).
 - Duplicate function definitions in one file are a compile error; across
-  objects, a link-time error (see `docs/stdlib.md`).
+  objects, a link-time error (see `docs/pmt/stdlib.md`).
 
 ## Visibility, nesting, namespaces, imports
 
@@ -170,13 +170,13 @@ return (in `main`, an implicit stop).
   this module.
 - **Warnings** (carried on the compile report, never printed by library
   code — `pmt -v`/`pmt compile -Werror` render or escalate them; see
-  `docs/cli.md`): a bare call to an undeclared external (once per name);
+  `docs/pmt/cli.md`): a bare call to an undeclared external (once per name);
   an unused import; an unused function (unexported and unreached from
   `main` or any export — sound, because local symbols are invisible
   outside the module by construction). `-Werror` turns every warning on
   the report into a compile failure. Hygiene findings beyond these
   warnings — unused labels, shadowed imports, naming style — are the
-  lint layer's job: `pmt lint` (docs/lint.md), a separate channel that
+  lint layer's job: `pmt lint` (docs/pmt/lint.md), a separate channel that
   never runs during compilation.
 
 ### Symbol grammar
@@ -305,7 +305,7 @@ has its lineage).
 `pmt compile` accepts `-O0` (default, no optimization) or `-O1` (the full
 pass pipeline: check-fold, jump-threading, cell-state, branch-fold,
 tail-call, tail-merge, dce, plus the program-level inline pass — see
-`docs/isa.md` for none of these; they are compiler internals with no ISA
+`docs/pmt/isa.md` for none of these; they are compiler internals with no ISA
 surface). Individual passes can be turned off with `--fno-<pass>` (e.g.
 `--fno-inline`), repeatable.
 
@@ -324,7 +324,7 @@ still sees honest state at every breakpoint.
 
 **Interposition:** `-O1`'s inline pass binds intra-module calls at compile
 time, so if you shadow one of a library's *internal* callees (see
-`docs/stdlib.md`), the override only affects call sites that survive
+`docs/pmt/stdlib.md`), the override only affects call sites that survive
 optimization — the linker only guarantees interposition for call sites it
 actually still sees as calls. A library that must stay fully interposable
 should be built with `--fno-inline`.

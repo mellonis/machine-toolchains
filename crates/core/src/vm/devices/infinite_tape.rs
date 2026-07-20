@@ -1,4 +1,4 @@
-//! Unbounded two-symbol tape with paged sparse storage (docs/isa.md (the
+//! Unbounded two-symbol tape with paged sparse storage (docs/core.md (the
 //! tape and device bus)): `TBelt`'s packed bit array, generalized to an
 //! infinite tape.
 

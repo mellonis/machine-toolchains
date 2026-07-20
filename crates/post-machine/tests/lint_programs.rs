@@ -66,7 +66,7 @@ fn allow_filters_a_rule_out() {
     assert!(report.diagnostics.is_empty());
 }
 
-/// Interplay with fmt (docs/fmt.md, docs/lint.md): `leading-zeros` still
+/// Interplay with fmt (docs/pmt/fmt.md, docs/pmt/lint.md): `leading-zeros` still
 /// owns the `007` -> `7` rewrite, and once it has run, the fixed source
 /// must be clean under `pmt fmt` too — no lingering `leading-zeros`
 /// finding, and fmt is a no-op on its own output.

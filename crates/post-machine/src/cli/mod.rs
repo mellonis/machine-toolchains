@@ -37,7 +37,7 @@ SUBCOMMANDS:
   compile      .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
   asm          .pma assembly -> .pmo object
   link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
-  lint         lint .pmc/.pma sources (hygiene findings; docs/lint.md)
+  lint         lint .pmc/.pma sources (hygiene findings; docs/pmt/lint.md)
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
@@ -53,7 +53,7 @@ pub fn execute(args: &[String]) -> Result<CliOutput, String> {
     execute_with(args, &mut std::io::stderr().lock())
 }
 
-/// Writer seam: `--trace` (`docs/cli.md`) streams into `trace_out` live.
+/// Writer seam: `--trace` (`docs/pmt/cli.md`) streams into `trace_out` live.
 /// The bin path passes stderr; tests pass a `Vec<u8>` and assert on it.
 pub fn execute_with(
     args: &[String],

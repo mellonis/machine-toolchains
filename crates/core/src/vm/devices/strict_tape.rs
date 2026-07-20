@@ -1,5 +1,5 @@
 //! Strict-cells decorator: 2006/2007 semantics — writing the value a
-//! cell already holds is an error (docs/isa.md (the tape and device bus)).
+//! cell already holds is an error (docs/core.md (the tape and device bus)).
 
 use super::Tape;
 use crate::vm::trap::DeviceFault;

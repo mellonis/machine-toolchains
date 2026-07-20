@@ -1,6 +1,6 @@
 //! `.tmc` lint layer: hygiene findings over the compiler's analysis, the
 //! front-end mirror of the `.pmc` lint layer in the sibling PM-1 crate.
-//! Library-only — the CLI renders (docs/cli.md (thin-renderer rule)). Strict
+//! Library-only — the CLI renders (docs/core.md (thin-renderer rule)). Strict
 //! channel split: lint reports lint findings ONLY; the compile warnings stay on
 //! the compile channel (`tmt compile`) and are never re-reported here — with
 //! one deliberate exception, the `unused-import`/`unused-routine` re-exposure

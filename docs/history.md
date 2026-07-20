@@ -23,7 +23,7 @@ generation's surface syntax. Erratum: the frozen spec dates `Compiller` to 2012;
 active even at `-O0`: an unconditional jump to the instruction that is
 already physically next is never emitted. PM-1's code generator lays out
 basic blocks in an order chosen specifically so the common case falls
-through instead of jumping (`docs/language.md (optimization)`,
+through instead of jumping (`docs/pmt/language.md (optimization)`,
 `crates/post-machine/src/codegen.rs`) — a size-and-speed win the Delphi
 lineage discovered and this toolchain keeps as a baseline, not an
 opt-in pass.
@@ -31,7 +31,7 @@ opt-in pass.
 **2007 — `Old Test-PostMachine`.** A code generator without a matching
 source language of its own: it emitted machine code and supported calls
 through a return-address stack, but that stack had no equivalent of PM-1's
-mandatory `ent` check (`docs/isa.md`) — nothing verified that a call
+mandatory `ent` check (`docs/pmt/isa.md`) — nothing verified that a call
 target was actually the start of a function before jumping to it. PM-1's
 `ent`-verification-always-on rule (every `call`/`call.s` traps unless the
 target byte is an `ent`) is this toolchain's answer to that gap: call
@@ -44,13 +44,13 @@ this toolchain's own `pmt dis` (with its recursive-descent function
 discovery, `docs/formats.md (assembly text)`) is a direct descendant of.
 `PMProcessor`'s `TPostMachineProcessor`/`TBelt` split — the processor
 talking to the tape only through a narrow interface, never touching it
-directly — is the ancestor of PM-1's bus architecture (`docs/isa.md`),
+directly — is the ancestor of PM-1's bus architecture (`docs/pmt/isa.md`),
 generalized so that EVERY memory, not just the tape, sits behind a bus.
 Its continuation-bit idea for encoding multi-byte opcodes is why PM-1
 reserves opcodes `≥ 0x80` for exactly that future use, unused in v1. Every
 Delphi generation also carried a step-cap guard against runaway
 loops — the direct ancestor of `pmt run`'s `--max-steps` default of
-10,000,000 (`docs/cli.md`).
+10,000,000 (`docs/pmt/cli.md`).
 
 **Generation D.** The lineage's most ambitious instruction design added an
 `AF`/`BF`/`EF` flags trio and an `ja`/`jb`/`je` jump family: edge and
@@ -59,10 +59,10 @@ had reached an edge, boundary, or interior position of a *bounded* tape.
 They were never actually wired up — the routine responsible for updating
 them (`UpdateFLAGS`) was a stub that never ran. This toolchain supersedes
 that whole approach rather than reviving it: PM-1 has no bounded tape by
-default (`InfiniteTape`, `docs/isa.md`), an out-of-alphabet or otherwise
+default (`InfiniteTape`, `docs/pmt/isa.md`), an out-of-alphabet or otherwise
 invalid device access is a `DeviceFault` trap rather than a flag a program
 must remember to check, and — per the device-agnostic principle
-(`docs/isa.md`, the processor never knows the head position or the tape's
+(`docs/pmt/isa.md`, the processor never knows the head position or the tape's
 topology) — any edge behavior a *bounded* tape does need is the device's
 problem to enforce, never an instruction's.
 
@@ -79,7 +79,7 @@ exceptions, not as a distinct machine-level outcome.
 
 PM-1's `hlt` is the first program-initiated abnormal stop anywhere in this
 lineage. It exists because of this project's hardware-realizability
-requirement (`docs/isa.md`): a real machine has a fault-code register and
+requirement (`docs/pmt/isa.md`): a real machine has a fault-code register and
 a HALT line, and `hlt` is a program deliberately asserting that same fault
 path itself, as opposed to a trap the processor raises involuntarily. A
 matching `abortState` sentinel has since shipped in the
@@ -92,7 +92,7 @@ This distinction matters more here than it would elsewhere because a
 `{blank, mark}`, so there is no spare symbol to encode "something went
 wrong" on the tape itself. Termination kind — `stp`, `hlt`, or which trap —
 is the machine's only free output channel beyond the tape. That is exactly
-why the optimizer's equivalence contract (`docs/language.md
+why the optimizer's equivalence contract (`docs/pmt/language.md
 (optimization)`) treats termination kind as an observable on the same
 footing as final tape contents and match-flag-dependent branch decisions:
 it is not incidental metadata, it is one of only two places a program's
@@ -117,7 +117,7 @@ The full design this toolchain was built from is preserved at
 `docs/superpowers/specs/2026-07-04-post-machine-toolchain-design.md`,
 frozen as of this documentation set landing. It is no longer the
 authority code cites or docs are derived from day to day — that role now
-belongs to this page and its siblings (`docs/language.md`, `docs/isa.md`,
-`docs/formats.md`, `docs/cli.md`, `docs/stdlib.md`, and `README.md`) — but
+belongs to this page and its siblings (`docs/pmt/language.md`, `docs/pmt/isa.md`,
+`docs/formats.md`, `docs/pmt/cli.md`, `docs/pmt/stdlib.md`, and `README.md`) — but
 it remains the historical record of the reasoning behind v1's design
 decisions, including the future architecture sketched in its appendix.

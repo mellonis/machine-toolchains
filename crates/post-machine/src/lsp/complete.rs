@@ -1178,7 +1178,7 @@ export main() {
 
     const STALE_CLEAN: &str = "sib() { right; }\nexport main() {\n    @sib();\n}\n";
     // The lexer itself rejects a bare `@` with nothing identifier-like
-    // after it (sigil adjacency, docs/language.md) — so a fixture that's
+    // after it (sigil adjacency, docs/pmt/language.md) — so a fixture that's
     // broken enough to fail PARSING (an unterminated call, missing `)`)
     // but still lexes clean is needed to exercise the tokens-survive/
     // analysis-doesn't split.

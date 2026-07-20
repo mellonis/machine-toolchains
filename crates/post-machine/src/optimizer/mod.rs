@@ -15,7 +15,7 @@
 //! and step counts/intermediate states — EXCEPT at an un-stripped `brk`,
 //! which is an observability barrier: no motion or elimination may cross
 //! it, so a debugger attached at `-O1` still sees honest state there.
-//! (The user-facing summary of this same contract is docs/language.md
+//! (The user-facing summary of this same contract is docs/pmt/language.md
 //! (optimization); this header is the binding version for pass authors —
 //! it is a contract between passes, not with users, so it stays here.)
 //!
@@ -97,7 +97,7 @@ const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[("inline", inline::run)];
 const MAX_ROUNDS: u32 = 10;
 
 /// The canonical `--fno-<pass>` / `--emit-ir=after:<pass>` names
-/// (docs/language.md (optimization)), in pipeline order: the
+/// (docs/pmt/language.md (optimization)), in pipeline order: the
 /// program-level pass first, then the per-function pipeline. This is the
 /// single source of truth other surfaces (shell-completion choices, the
 /// drift guard that checks them) read from instead of retyping the list.

@@ -1,4 +1,4 @@
-//! Loader + facade: Executable → validated Machine → runs (docs/isa.md
+//! Loader + facade: Executable → validated Machine → runs (docs/core.md
 //! (loading)).
 
 use crate::formats::executable::Executable;
@@ -255,7 +255,7 @@ impl<'a> Machine<'a> {
     ) -> RunResult {
         let mut core = self.build_core();
         if preload_mark {
-            // Loading step (docs/isa.md (loading)): latch initial MF from the
+            // Loading step (docs/core.md (loading)): latch initial MF from the
             // mark device, tact-free (loading, not execution). PM-1 matches
             // against the mark index 1.
             core.set_mf(devices[0].read() == 1);
@@ -311,7 +311,7 @@ impl<'a> Machine<'a> {
         Ok(self.drive(devices, opts, false))
     }
 
-    /// A debug session over this machine's image (docs/isa.md
+    /// A debug session over this machine's image (docs/core.md
     /// (DebugSession)). The session owns its core/stack; the device
     /// arrives per call. Legacy single-tape shape: preloads the mark, no
     /// table ROM.

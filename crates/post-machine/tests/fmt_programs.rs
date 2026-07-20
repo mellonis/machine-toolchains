@@ -193,7 +193,7 @@ const SIMPLE: &[&str] = &[
     // Zero-token-changes (module doc "fmt changes no tokens, only
     // layout"): a leading-zero label definition and its `goto` reference
     // both keep their written spelling — fmt is not `leading-zeros`'s
-    // job (docs/fmt.md, docs/lint.md). Right-aligns by the WRITTEN
+    // job (docs/pmt/fmt.md, docs/pmt/lint.md). Right-aligns by the WRITTEN
     // width of "007:" (4 chars), not the canonical value's width.
     "main() {\n    007: right;\n    goto 007;\n}\n",
     // fmt build Task 1 (`docs/superpowers/specs/2026-07-12-pmc-doc-lines-\
@@ -212,7 +212,7 @@ const SIMPLE: &[&str] = &[
     // fmt build Task 1: the same run, but every `?`/`!` line's canonical
     // single space is scrambled (dropped where present, added as a bare
     // trailing space on the empty paragraph-break line) — the lexer's
-    // one-leading-space-stripped rule (`docs/language.md` (doc lines))
+    // one-leading-space-stripped rule (`docs/pmt/language.md` (doc lines))
     // already normalizes this to the SAME stored text as the canonical
     // entry above, so fmt's output is expected to be byte-identical to
     // it (pinned directly in `fmt::tests::scrambled_doc_run_spacing_\
@@ -312,7 +312,7 @@ fn kinds(src: &str) -> Vec<TokenKind> {
         .collect()
 }
 
-/// fmt's own zero-token-changes contract (docs/fmt.md: "fmt changes
+/// fmt's own zero-token-changes contract (docs/pmt/fmt.md: "fmt changes
 /// whitespace and comment placement only — it never touches a token"),
 /// checked over the whole corpus by SPELLING, not just parsed value —
 /// the class of bug this guards is a printer that re-derives a token's
@@ -331,7 +331,7 @@ fn zero_token_changes_over_every_fixture() {
 }
 
 /// A leading-zero label definition and its `goto` reference both keep
-/// `007` verbatim (docs/fmt.md, docs/lint.md), and the label
+/// `007` verbatim (docs/pmt/fmt.md, docs/pmt/lint.md), and the label
 /// right-aligns using the WRITTEN width ("007:", 4 chars) — command
 /// column 8, not the canonical value's width ("7:", 2 chars) — which
 /// would floor the column at 4.

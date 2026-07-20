@@ -105,7 +105,7 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         .collect();
     // A `WideTape` per band, sized to that band's effective-alphabet length —
     // a binary tape is just width 2. `InfiniteTape` is physically two-symbol,
-    // so TM-1's wide alphabets need the general device (docs/isa.md (the tape
+    // so TM-1's wide alphabets need the general device (docs/core.md (the tape
     // and device bus)).
     let mut tapes: Vec<WideTape> = block
         .tapes

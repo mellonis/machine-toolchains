@@ -1,5 +1,5 @@
-//! Visibility end-to-end (docs/language.md (visibility); docs/formats.md
-//! (.pmo); docs/stdlib.md (linking)): locals coexist across objects,
+//! Visibility end-to-end (docs/pmt/language.md (visibility); docs/formats.md
+//! (.pmo); docs/pmt/stdlib.md (linking)): locals coexist across objects,
 //! foreign locals are unreachable, nesting mangles and runs, and the
 //! visibility flip changed no bytes. Also covers the namespace goldens:
 //! `::`-mangled blocks (nestable, reopenable), scoped `use` with paths

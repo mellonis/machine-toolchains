@@ -3,8 +3,8 @@
 All multi-byte integers are little-endian. This page covers the five
 binary/text containers (`.pmo`, `.pmx`, `.pmt`, `.pma`, and the `.tma`
 assembly text), the `.pmx.map` sidecar, and the IR JSON artifact. PM-1's
-opcode semantics are `docs/isa.md`; the `pmt` subcommands that read and
-write these files are `docs/cli.md`. (The `.tma` assembly is a TM-1
+opcode semantics are `docs/pmt/isa.md`; the `pmt` subcommands that read and
+write these files are `docs/pmt/cli.md`. (The `.tma` assembly is a TM-1
 format, read and written by `tmt`; its command-line documentation arrives
 with the TM-1 tooling docs.)
 
@@ -58,7 +58,7 @@ The initial tape contents are **not** embedded in a `.pmx` — they are
 supplied to the VM at run time (`pmt run app.pmx --tape "..*..***" --head 2`,
 or a loaded `.pmt`, or via the API directly). `entry offset` is validated to
 be inside the code section, and the loader additionally checks that byte is
-`ent` before running (`docs/isa.md`). The linker guarantees the
+`ent` before running (`docs/pmt/isa.md`). The linker guarantees the
 **`.pmx entry`** symbol is literally `main`, which is what lets a bare
 executable's disassembly name the entry root `main`.
 
@@ -175,7 +175,7 @@ bound calls:    u32 count, then per bound call: u32 blob, u32 offset,
 Symbol kind 2 (**Local**) was added in object format version 2: a local
 symbol is defined but not exported — bound directly within its own object,
 invisible to cross-object resolution, so it can neither shadow nor be
-shadowed (`docs/language.md (visibility)`, `docs/stdlib.md`). Version-1
+shadowed (`docs/pmt/language.md (visibility)`, `docs/pmt/stdlib.md`). Version-1
 object bytes (no locals) still decode under a later reader.
 
 Object format version 3 was added for generic-routine composition: it
@@ -220,7 +220,7 @@ format.
 Per-function granularity is what gives the linker dead-function
 elimination and leaves link-time inlining open as a future extension. A
 "library" is simply a `.pmo` with many functions — only what `main`
-transitively reaches gets linked in (`docs/stdlib.md`).
+transitively reaches gets linked in (`docs/pmt/stdlib.md`).
 
 ## `.pmt` — tape-block snapshot
 
@@ -271,17 +271,17 @@ default glyphs (PM-1: `" "` for blank, `"*"` for mark — the PM-1 arch
 module's `DEFAULT_GLYPHS` constant). Code-side artifacts — `.pmo`, `.pmx`, and the
 `.pmx.map` sidecar — carry symbol indices only, never glyphs, matching the
 hardware-realizability rule that the processor never sees glyphs
-(`docs/isa.md`).
+(`docs/pmt/isa.md`).
 
 CLI: `pmt tape build " * * *" --head 3 -o in.pmt`, `pmt tape show in.pmt`,
 `pmt run app.pmx --tape-block in.pmt [--save-tape-block out.pmt]`
-(`docs/cli.md`).
+(`docs/pmt/cli.md`).
 
 ## `.pma` — assembly text
 
 The PM-1 `.pma` dialect version is **0.3** (pre-1.0: the version is `0.N`
 and `N` bumps on any grammar change, the same acceptance-contract shape as
-the `.pmc` language version in `docs/language.md`). See "Dialect version
+the `.pmc` language version in `docs/pmt/language.md`). See "Dialect version
 history" below for what each version changed.
 
 ```asm
@@ -307,7 +307,7 @@ more (the name plus its `:`) moves to its own line rather than sharing
 the instruction's line, so a long label never pushes the mnemonic column
 out of alignment; a field of 7 characters or fewer stays inline. `pmt dis`
 output is always valid assembler input — round-tripping through `asm`
-reproduces the original bytes exactly. `pmt fmt` (`docs/cli.md`) is the
+reproduces the original bytes exactly. `pmt fmt` (`docs/pmt/cli.md`) is the
 tool that enforces this grid on hand-written `.pma` source — `pmt compile
 -S` and `pmt dis` already emit it directly, so formatting their output is
 always a no-op.
@@ -342,7 +342,7 @@ into another function's middle that lands on no known root falls back to
 lines and in jump/call operands — accept `::`-separated segments of
 dotted identifiers (`std::api.helper`: the namespace part is everything
 before the LAST `::`, the function-nesting part is everything after;
-`docs/language.md (symbol grammar)`). **Labels are letters, digits, and
+`docs/pmt/language.md (symbol grammar)`). **Labels are letters, digits, and
 underscores only** — Unicode letters are legal (matching identifiers
 elsewhere in the toolchain), but the label grammar does not accept `::`
 or `.`, which is what lets the parser tell a label (`L1:`) apart from a
@@ -359,7 +359,7 @@ namespaced/nested symbol reference without ambiguity.
   them.
 - **0.3** — additive: the fused write+move mnemonics `wrl` and `wrr` join
   the mnemonic set (each takes a one-element symbol vector like `wr`). No
-  existing program changes meaning; the accepted set only grew (`docs/isa.md`).
+  existing program changes meaning; the accepted set only grew (`docs/pmt/isa.md`).
 
 ## `.tma` — assembly text (TM-1)
 
@@ -751,7 +751,7 @@ empty unless the linked objects carried `-g` debug info):
 ```
 
 The `.pmx` itself stays a pure code image — all naming and debug
-correlation lives in this sidecar (see `docs/cli.md` for sidecar discovery
+correlation lives in this sidecar (see `docs/pmt/cli.md` for sidecar discovery
 rules: an explicit `--map` wins over the `FILE.pmx.map` beside the
 executable, and a missing or unparsable sidecar is silently ignored by
 plain `dis`/`run`, but an unparsable *explicit* `--map` is an error).
@@ -835,7 +835,7 @@ behavior the image lacks.
 
 ## IR JSON
 
-`pmt compile --emit-ir` (`docs/language.md (the IR artifact)`) writes a
+`pmt compile --emit-ir` (`docs/pmt/language.md (the IR artifact)`) writes a
 versioned JSON document: `IR_VERSION = 4`.
 
 ```json

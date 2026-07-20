@@ -1,6 +1,6 @@
-//! Assembly lint layer (docs/lint.md). Arch-agnostic: control flow via
+//! Assembly lint layer (docs/core.md (assembly lint)). Arch-agnostic: control flow via
 //! `ArchSyntax::Flow`, the break opcode via `ArchSyntax::break_opcode`.
-//! Library-only — the CLI renders (docs/cli.md, thin-renderer rule).
+//! Library-only — the CLI renders (docs/core.md, thin-renderer rule).
 
 pub(crate) mod rules;
 
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn fatal_gate_catches_errors_lower_alone_cannot_see() {
-        // Channel discipline (docs/lint.md): duplicate/unknown labels are
+        // Channel discipline (docs/core.md (assembly lint)): duplicate/unknown labels are
         // never lint findings — they stay fatals. `lower()` alone does
         // not resolve labels (that is layout's job), so this pins that
         // `lint()`'s gate really is the full `assemble()`, not just

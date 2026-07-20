@@ -1,4 +1,4 @@
-//! `pmt lint` (docs/cli.md, docs/lint.md): thin renderer over the lint
+//! `pmt lint` (docs/pmt/cli.md, docs/pmt/lint.md): thin renderer over the lint
 //! library. Findings go to stdout; exit 0 = clean, 1 = findings or
 //! errors anywhere.
 
@@ -41,7 +41,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
         return Ok(CliOutput::ok(LINT_USAGE.into(), String::new()));
     }
     let allow = args.values("--allow")?;
-    // Up front, over the union (docs/lint.md): a typo'd `--allow` aborts
+    // Up front, over the union (docs/pmt/lint.md): a typo'd `--allow` aborts
     // the whole run before any file is touched. Per-file config merges
     // (`pmt.json`) are validated separately at load time
     // (`config::load`); this only covers the flag's own codes. Without
@@ -78,7 +78,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     let mut stderr = String::new();
     let mut any = false;
     'files: for file in &files {
-        // Per-file project config (docs/lint.md (project file)): the
+        // Per-file project config (docs/pmt/lint.md (project file)): the
         // nearest `pmt.json` ancestor, unless suppressed wholesale by
         // `--no-config`. A bad config is a per-file fatal — unlike a bad
         // `--allow` flag below, which aborts the whole run.
@@ -197,7 +197,7 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
 /// files are counted but not collected — an excluded PATH is not a typo.
 ///
 /// `pub(super)`: `cli/fmt.rs` shares this walk verbatim rather than
-/// duplicating it (docs/cli.md (pmt fmt) — identical batch model). `fmt`
+/// duplicating it (docs/pmt/cli.md (pmt fmt) — identical batch model). `fmt`
 /// routes each collected file by extension (`.pmc` through the pmc
 /// printer, `.pma` through core's canonical-grid printer), so the `.pma`
 /// half of the walk is fully live there, not inert.
@@ -278,7 +278,7 @@ fn fix_and_relint(
 }
 
 /// The per-file fatal line, shared by both language routes:
-/// `{file}:{line}:{col}: error: {kind} [{code}]` (docs/cli.md (error
+/// `{file}:{line}:{col}: error: {kind} [{code}]` (docs/pmt/cli.md (error
 /// codes)). `kind` is `dyn Display` because the two routes bring
 /// different error kinds (pmc's `CompileErrorKind`, asm's
 /// `AsmErrorKind`) that share only the rendering contract.

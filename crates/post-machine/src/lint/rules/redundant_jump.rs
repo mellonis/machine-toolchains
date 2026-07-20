@@ -1,4 +1,4 @@
-//! `redundant-jump-to-next` (docs/lint.md): a `goto N;` statement or a
+//! `redundant-jump-to-next` (docs/pmt/lint.md): a `goto N;` statement or a
 //! `(N)` successor whose target labels the lexically next statement —
 //! fall-through is identical (codegen's layout even elides such jumps).
 

@@ -3,7 +3,7 @@
 //! state, the three-channel diagnostic merge (fatal / compile warnings /
 //! lint findings), and both configuration channels (`pmt.json` project
 //! files and IDE settings). Library-only — rendering and stdio belong to
-//! the CLI (docs/cli.md (thin-renderer rule)).
+//! the CLI (docs/pmt/cli.md (thin-renderer rule)).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

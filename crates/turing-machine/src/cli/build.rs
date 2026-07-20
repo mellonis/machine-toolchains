@@ -344,7 +344,7 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
         );
         // The composition-engine counters follow only when the image carries
         // frames content, so a frameless link keeps the single-line report
-        // (docs/cli.md (the link report)).
+        // (docs/core.md (the link report)).
         if r.composites > 0 || r.instantiations > 0 {
             let _ = writeln!(
                 stderr,

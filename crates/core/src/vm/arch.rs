@@ -144,7 +144,8 @@ pub trait Arch {
     fn is_entry_marker(&self, byte: u8) -> bool;
 }
 
-/// Encode an operand to its wire form (docs/isa.md). The inverse of the
+/// Encode an operand to its wire form (docs/core.md (the architecture
+/// contract)). The inverse of the
 /// core's fetch-time decoding — property-tested against it. A move
 /// vector ([`OperandKind::MoveVec`]) arrives as [`Operand::Symbols`]
 /// and encodes identically to a symbol vector; its payloads are the

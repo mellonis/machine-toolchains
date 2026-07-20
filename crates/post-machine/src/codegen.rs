@@ -3,7 +3,7 @@
 //! intra-function jump relaxation, and the `ent` prologue via `.func` —
 //! codegen never touches bytes.
 //!
-//! Layout invariant (docs/language.md (optimization), active even at
+//! Layout invariant (docs/pmt/language.md (optimization), active even at
 //! `-O0`): an unconditional transfer to the physically next instruction
 //! is never emitted — blocks are laid out in order and fall-through is
 //! selected instead.
@@ -156,7 +156,7 @@ fn emit_function(f: &IrFunction, options: CodegenOptions, e: &mut Emitter) {
                 }
             }
             IrTerm::Return => {
-                // Returning from main stops the machine (docs/language.md).
+                // Returning from main stops the machine (docs/pmt/language.md).
                 let mnemonic = if f.name == "main" { "stp" } else { "ret" };
                 e.push(grid(None, mnemonic, ""), b.term_line);
             }

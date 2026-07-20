@@ -3,7 +3,7 @@
 //! state, the diagnostic merge (fatal / compile warnings / lint findings),
 //! and both configuration channels (`tmt.json` project files and IDE
 //! settings). Library-only — rendering and stdio belong to the CLI
-//! (docs/cli.md (thin-renderer rule)).
+//! (docs/core.md (thin-renderer rule)).
 //!
 //! # Which stages the diagnostics come from
 //!

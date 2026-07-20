@@ -1,7 +1,7 @@
 //! `pmt fmt` property tests
 //! (`docs/superpowers/specs/2026-07-07-pmc-fmt-design.md`, "Contracts").
 //! Complements `tests/fmt_programs.rs`'s hand-picked/corpus checks with a
-//! generator of GRAMMAR-VALID `.pmc` programs (docs/language.md), asserting
+//! generator of GRAMMAR-VALID `.pmc` programs (docs/pmt/language.md), asserting
 //! two properties the printer must hold over every one of them:
 //!
 //! 1. **Idempotence**: `format(format(x)?)? == format(x)?`.
@@ -73,7 +73,7 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// One `check` arm (docs/language.md): a label number or `!`, never
+/// One `check` arm (docs/pmt/language.md): a label number or `!`, never
 /// fall-through.
 fn gen_check_arm(cur: &mut Cursor) -> String {
     if cur.chance(1, 2) {
@@ -84,7 +84,7 @@ fn gen_check_arm(cur: &mut Cursor) -> String {
 }
 
 /// One tape builtin (`left`/`right`/`mark`/`unmark`). `allow_succ` is
-/// false for every non-last comma-group member (docs/language.md: "only
+/// false for every non-last comma-group member (docs/pmt/language.md: "only
 /// the last command in a comma group may take a successor") — those
 /// always render bare (no parens at all; empty `()` is a dedicated
 /// grammar-0.2 syntax error, `EmptyBuiltinParens`).
@@ -116,7 +116,7 @@ fn gen_call(cur: &mut Cursor, allow_succ: bool) -> String {
 }
 
 /// One comma-group item. `is_last` gates `check`/`halt`/a successor-
-/// bearing builtin-or-call (docs/language.md, "the statement table's last
+/// bearing builtin-or-call (docs/pmt/language.md, "the statement table's last
 /// row"); `is_sole` (only true when the group has exactly one member)
 /// additionally allows `goto`, which the grammar forbids in a comma group
 /// entirely, at ANY position, even the last.
@@ -141,7 +141,7 @@ fn gen_item(cur: &mut Cursor, is_last: bool, is_sole: bool) -> String {
 }
 
 /// One `;`-terminated statement: 0-2 stacked labels (each numerically
-/// unique within the function via `next_label`, docs/language.md's
+/// unique within the function via `next_label`, docs/pmt/language.md's
 /// per-function `DuplicateLabel` check) followed by a 1-3 item comma
 /// group.
 fn gen_statement(cur: &mut Cursor, next_label: &mut u32) -> String {

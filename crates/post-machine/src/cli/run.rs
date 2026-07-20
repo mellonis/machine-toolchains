@@ -235,7 +235,7 @@ fn initial_tape(
 
 /// Plain run, or traced run: DebugSession stepping with one listing
 /// line per executed instruction streamed live to the writer, in the
-/// `--trace` format (`docs/cli.md`). The line is written after its
+/// `--trace` format (`docs/pmt/cli.md`). The line is written after its
 /// instruction retires so `MF`/`head` reflect that instruction's effect.
 fn drive(
     machine: &Machine,

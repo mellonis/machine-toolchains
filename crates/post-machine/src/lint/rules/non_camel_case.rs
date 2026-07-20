@@ -1,4 +1,4 @@
-//! `non-camel-case` (docs/lint.md): user-owned definition names —
+//! `non-camel-case` (docs/pmt/lint.md): user-owned definition names —
 //! functions, namespaces, import bindings — must be lowerCamelCase
 //! (`^[a-z][a-zA-Z0-9]*$`, checked by hand: no regex dependency). The
 //! project's de-facto house style; the stdlib is uniformly camelCase.
