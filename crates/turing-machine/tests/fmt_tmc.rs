@@ -31,11 +31,8 @@ fn corpus() -> Vec<(String, String)> {
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out.push((
         "std.tmc".to_string(),
-        std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/stdlib/std.tmc"
-        ))
-        .expect("the embedded stdlib source is readable"),
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/stdlib/std.tmc"))
+            .expect("the embedded stdlib source is readable"),
     ));
     out
 }

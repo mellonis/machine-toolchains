@@ -1,9 +1,11 @@
-//! `tmt fmt` for `.tma`: the library property (idempotence + lossless through
-//! the canonical grid) over the frames/tables/rept surface, and the CLI
-//! (extension dispatch, `--check`, stdin `-` with `--lang`, the `.tmc`
-//! not-yet-implemented route). The `.tma` formatter is core's
-//! `format_asm_with`; these tests are the first to exercise its grid over the
-//! TM-1-only constructs (`.frame`/`.map`/`.exits`, `.rept`, vector operands).
+//! `tmt fmt`: the `.tma` library property (idempotence + lossless through the
+//! canonical grid) over the frames/tables/rept surface, and the CLI for both
+//! languages (extension dispatch, `--check`, stdin `-` with `--lang`, the
+//! per-file fatal in a batch). The `.tma` formatter is core's
+//! `format_asm_with` — these tests are the first to exercise its grid over the
+//! TM-1-only constructs (`.frame`/`.map`/`.exits`, `.rept`, vector operands);
+//! the `.tmc` side is the crate's own printer, whose whole-corpus properties
+//! live in `fmt_tmc.rs` and whose layout fixtures live beside the module.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -199,7 +201,8 @@ fn fmt_reports_a_tmc_parse_fatal_and_keeps_going() {
     assert_eq!(out.code, 1);
     assert!(out.stdout.contains("a.tma"), "stdout: {}", out.stdout);
     assert!(
-        out.stderr.contains(broken.file_name().unwrap().to_str().unwrap()),
+        out.stderr
+            .contains(broken.file_name().unwrap().to_str().unwrap()),
         "stderr: {}",
         out.stderr
     );

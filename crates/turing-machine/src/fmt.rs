@@ -140,7 +140,11 @@ fn print_cst(cst: &Cst) -> String {
     let out = flush(&render_top_items(&cst.items, 0));
     // An empty file still reprints as exactly one newline; a non-empty one
     // already ends in the last item's newline.
-    if out.is_empty() { "\n".to_string() } else { out }
+    if out.is_empty() {
+        "\n".to_string()
+    } else {
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
