@@ -12,7 +12,7 @@
 //!
 //! Codegen does NOT dispatch rows in source order — it re-bands a state into
 //! `[exact] ++ [partial] ++ [catch-all]` and takes the first match in THAT
-//! order (crate::codegen; docs/formats.md (match and dispatch tables)). So an
+//! order (crate::codegen; docs/tmt/isa.md (match and dispatch)). So an
 //! earlier SOURCE rule shadows a later one it covers only when both land in the
 //! same band, where source order equals runtime order — within the partial
 //! band and within the catch-all band. The exact band is excluded: two

@@ -1,5 +1,5 @@
 //! Mono stamping and hybrid classification for the composition engine
-//! (docs/formats.md (frames profile)).
+//! (docs/core.md (the composition engine)).
 //!
 //! MONO lowers each reachable declarative bound-call site to a plain call
 //! into a **stamp**: a specialized copy of the callee's generic body,
@@ -780,7 +780,7 @@ fn build_stamp(
     // finishes with a trap-bearing remap no dispatch consumed — the match
     // table feeds a conditional branch, or nothing reads its result — a hole
     // symbol would match a prepended trap row and be taken as a real match: a
-    // silent misroute. Refuse the stamp (docs/formats.md (frames profile)).
+    // silent misroute. Refuse the stamp (docs/core.md (the composition engine)).
     if remap_has_trap(&pending_remap) {
         return Err(LinkError::MonoHoleyMatchBranch(callee.name.to_string()));
     }

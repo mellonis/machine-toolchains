@@ -1,8 +1,8 @@
 //! The phase-5 milestone: **three-mode equivalence**. Mono, frames, and
 //! hybrid lower the same declarative bound-call programs three different ways —
 //! stamped copies, a runtime compose table, or a per-site mix — yet they MUST
-//! be observably identical on the same programs and tapes (docs/formats.md
-//! (frames profile), the mode semantics summary). This harness mirrors
+//! be observably identical on the same programs and tapes (docs/core.md
+//! (the composition engine), the mode semantics summary). This harness mirrors
 //! `crates/post-machine/tests/opt_equivalence.rs`: `build`/`run`/
 //! `assert_equivalent`, one `.tma` source per program, the full behavioral
 //! tuple compared across modes.
@@ -53,9 +53,10 @@ fn build(src: &str, mech: CallMech) -> (Executable, LinkReport) {
     (out.executable, out.report)
 }
 
-/// A trap's KIND, stripped of its `at` offset (docs/formats.md (frames
-/// profile) — the trap-taxonomy claim: trap kind, not the faulting address,
-/// is the cross-mechanism invariant). Exhaustive on purpose: a new `Trap`
+/// A trap's KIND, stripped of its `at` offset (docs/core.md (the
+/// composition engine) — the trap-taxonomy claim: trap kind, not the
+/// faulting address, is the cross-mechanism invariant). Exhaustive on
+/// purpose: a new `Trap`
 /// variant must be named here rather than silently folded into a catch-all,
 /// which could mask a cross-mode divergence into two distinct kinds reading
 /// as one.
@@ -623,7 +624,7 @@ fn in_range_holes_trap_kinds_are_pinned() {
 fn every_program_relinks_byte_identically_in_every_mode() {
     // Reproducible builds: the closure BFS is deterministic, so linking the
     // same program under the same mechanism twice yields byte-identical bytes
-    // AND an identical sidecar JSON (docs/formats.md (frames profile)).
+    // AND an identical sidecar JSON (docs/core.md (the composition engine)).
     for src in [
         CROSS_ALPHABET,
         NESTED_TWO_LEVEL,

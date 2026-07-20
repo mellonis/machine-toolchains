@@ -81,7 +81,7 @@ pub enum LinkError {
     /// match result through a conditional branch (or leaves it unconsumed),
     /// so a hole symbol would match a prepended trap row and take the branch
     /// as if it had matched: a silent misroute. Carries the callee's name
-    /// (docs/formats.md (frames profile)).
+    /// (docs/core.md (the composition engine)).
     MonoHoleyMatchBranch(String),
 }
 
@@ -265,7 +265,7 @@ impl MapFile {
 /// `-v` (docs/core.md (the link report)); libraries never print
 /// (library-first principle).
 /// The counters are image-level aggregates (their meanings are tabulated in
-/// docs/formats.md (the composition engine)); a per-routine breakdown is
+/// docs/core.md (the composition engine)); a per-routine breakdown is
 /// deferred until a consumer needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkReport {
@@ -335,7 +335,7 @@ pub fn link(
     } else if resolved.order.iter().any(|f| !f.bound.is_empty()) {
         // A reachable declarative bound call needs the machine signature
         // (arity + cardinalities) to compose against; an unsigned entry
-        // has none (docs/formats.md (frames profile)).
+        // has none (docs/core.md (the composition engine)).
         return Err(LinkError::MissingSignature(
             resolved.order[0].name.to_string(),
         ));

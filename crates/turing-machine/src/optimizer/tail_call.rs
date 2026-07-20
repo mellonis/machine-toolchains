@@ -16,7 +16,7 @@
 //!
 //! * **Bindless calls only.** A BOUND call (`binding` non-empty) rides the
 //!   frames stack discipline: the paired `call`/`ret` pushes and restores the
-//!   frame register FR (docs/formats.md (frames profile)). Tail-transferring
+//!   frame register FR (docs/tmt/isa.md (the frames execution profile)). Tail-transferring
 //!   with a bare `jmp` would skip that push, so the callee's `ret` would
 //!   restore the WRONG FR and desync the stack. Bound tail calls are excluded
 //!   in this phase; only a bindless `call` (an empty binding — a plain call the

@@ -56,7 +56,7 @@ pub(crate) fn cell_labels(cell: &PatternCell, tape_glyphs: &[String]) -> Option<
 }
 
 /// A rule's dispatch band, mirroring codegen's row classification (crate::
-/// codegen; docs/formats.md (match and dispatch tables)): all-wildcard is
+/// codegen; docs/tmt/isa.md (match and dispatch)): all-wildcard is
 /// `CatchAll`, wildcard-free is `Exact`, a mix is `Partial`. Source order
 /// equals emitted (runtime) order only WITHIN the `Partial` and `CatchAll`
 /// bands, so order-aware shadow reasoning is sound only there.

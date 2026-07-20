@@ -1,6 +1,6 @@
 //! `retx-exit-bounds`: a `retx #k` whose `k` is at or past the exit count of
 //! the frame active when it runs — the return always traps (exit-out-of-range,
-//! docs/formats.md (framed calls, traps, and multi-exit returns)).
+//! docs/tmt/isa.md (multi-exit returns)).
 //!
 //! # Which frame governs a `retx`
 //!

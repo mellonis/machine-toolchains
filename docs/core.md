@@ -434,9 +434,80 @@ many call sites relaxed and how many stayed far, and — where a
 composition engine ran — the stamps emitted, the composite count and
 compose-matrix size, the stamps and descriptors avoided by interning,
 and the trap rows and expanded rows synthesized. The counters are
-image-level aggregates; their engine-side meanings are tabulated in
-`docs/formats.md (the composition engine)`. Debug names travel out of
-band in the map sidecar, keeping the image itself a pure binary.
+image-level aggregates:
+
+| field | meaning |
+|---|---|
+| `dropped` | defined-but-unreachable functions, dropped from the image |
+| `relaxed_calls` / `far_calls` | call sites narrowed to the short form, or left far |
+| `instantiations` | stamps emitted — one per distinct `(routine, composite)` |
+| `composites` | the directory size `K` — distinct composites in the frames region |
+| `compose_table_bytes` | the compose matrix size, `(K+1) × S × 2` for `S` sites |
+| `dedup_savings` | stamps and descriptors avoided by interning an already-built copy |
+| `synthesized_trap_rows` | unmapped-read trap rows prepended to stamped match tables |
+| `expanded_rows` | extra match rows from one-way collapse expansion |
+
+Debug names travel out of band in the map sidecar, keeping the image
+itself a pure binary.
+
+## The composition engine
+
+An architecture with the frames profile may let a call carry a
+**binding** — a declarative caller↔callee tape and symbol
+correspondence, recorded on the object rather than resolved by the
+assembler (`docs/formats.md (bound calls)` has the operand and the rules
+for completing a binding into a pair of symbol maps). The composition
+engine is the link-time pass that turns those records into concrete
+frames.
+
+It enumerates the finite set of `(routine, composite)` pairs reachable
+from the entry — the same breadth-first walk as reachability, now
+carrying an active composite that each binding call composes onto — in a
+deterministic order, so builds are reproducible. The algebra it composes
+with holds three laws the implementation is property-tested against:
+
+- composition is **associative**;
+- an **identity composite collapses away** (`E ∘ identity = E`), so a
+  binding resolving to a full pass-through lowers to a plain call — the
+  callee simply inherits the caller's frame — and rejoins ordinary call
+  relaxation;
+- **hole sets compose**: the outer holes union the preimages of the
+  inner holes. A one-way pair participates in the read direction only,
+  and is excluded from the bidirectional bijectivity check.
+
+### Call mechanisms
+
+`LinkOptions::call_mech` selects how a lowered site runs. The three
+produce different images from the same objects:
+
+- **mono** compiles for the base profile: it stamps a specialized copy
+  of the callee per distinct composite, folding the projection and
+  symbol maps into that copy's vectors and match tables. A statically
+  known hole keeps the trap taxonomy — an unmapped-read symbol becomes a
+  first-match trap row prepended to every match table, and a write with
+  no physical image becomes a trap stub. Identical stamps dedup behind a
+  digest-suffixed name. Mono emits no frames region.
+- **frames** compiles for the frames profile: one generic copy of each
+  routine, every binding site a framed call, composites resolved through
+  the frames region's directory and compose table at run time. A crossed
+  hole traps through the descriptor's hole sentinel.
+- **hybrid** classifies per site: a completed bijection stamps like
+  mono, anything holey or one-way frames. An image with at least one
+  framed site carries a frames region; an all-stamped one has none.
+
+All three are **observably equivalent** on the same program and inputs —
+same outcome, same final device state, and the **same trap kind** on a
+crossed hole or an unmatched read. The fault offset and the tact cost
+may differ; the kind never does.
+
+Two restrictions bind the **mono lowering path**. A raw hand-authored
+framed call cannot be lowered onto the base profile, which has no
+compose machinery to activate a descriptor with. And a holey binding
+whose synthesized trap rows would be consumed by a conditional branch
+rather than a dispatch jump is refused, since the prepended row could
+misroute the branch. Both errors name the offending routine. `hybrid`
+delegates to the mono path wholesale when every bound site in the image
+is a bijection, and inherits both restrictions in that case.
 
 ## The thin-renderer rule
 

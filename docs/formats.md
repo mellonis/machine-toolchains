@@ -111,26 +111,21 @@ Its three parts, in order:
 | directory | `K × u32 LE` | one descriptor offset per composite (index `i` ⇒ `directory[i-1]`), pointing into the table section |
 | compose | `(K+1) × S × u16 LE` | a matrix: `compose[FR][site]`, rows are active frames `0..=K`, columns are sites |
 
-**How a framed call resolves.** The frame register `FR` is a **composite
-index**: 0 is the identity context (the machine's own tapes, no
-translation), and `1..=K` name directory entries. A framed call carries a
-**site index** `S` (see the framed-call operand below), and at run time the
-processor performs exactly one compose lookup and one directory read:
+**How the fields index each other.** The frame register `FR` is a
+**composite index**: 0 is the identity context, and `1..=K` name directory
+entries. A framed call carries a **site index** (the framed-call operand
+below), and the two tables resolve it in one lookup each:
 
 ```
 FR'         = compose[FR][site]        ; the composite active for the duration of the call
 descriptor  = directory[FR' - 1]       ; its frame-descriptor offset in the table section
 ```
 
-then loads that descriptor into the frame cache. On return, `ret`/`retx`
-reload the caller's descriptor the same way (via the directory) when the
-restored `FR` is non-zero. A compose entry of **0 is reserved-invalid** — a
-reachable framed call never yields it (the linker enumerated every
-reachable `(frame, site)` pair at link time), so reading a 0 at run time is
-a malformed-operand trap, not a normal outcome. Every read is a fixed-size
-frame-cache fill priced at call time; nothing is walked per tape access, so
-the per-call cost is **O(1) at any call depth** — the frame stack exists
-only to restore `FR` on return, never to translate.
+A compose entry of **0 is reserved-invalid** — a reachable framed call
+never yields it (the linker enumerated every reachable `(frame, site)`
+pair at link time), so reading a 0 at run time is a malformed-operand
+trap, not a normal outcome. What the processor then does with the
+descriptor, and what it costs, is `docs/tmt/isa.md (framed calls)`.
 
 ## `.pmo` — object file
 
@@ -392,13 +387,14 @@ L_halt: stp
 One instruction (or one table directive) per line, `;` line comments, the
 same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
 8, operands at 16, comments at 32); the parser accepts any whitespace on
-input, and `pmt fmt` / `tmt dis` emit the grid. `tmt dis` output is always
+input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis` output is always
 valid assembler input and round-trips to the original bytes.
 
 ### Sections and the routine signature
 
 A `.tma` file is split into two sections. `.section tables` holds the
-match and dispatch tables; `.section code` holds the functions. The
+match tables, the dispatch tables, and the frame descriptors;
+`.section code` holds the functions. The
 default section is `code`, so a file may omit `.section code`. Only table
 directives are legal in the tables section, and only functions/code in the
 code section.
@@ -413,43 +409,28 @@ per-tape alphabets, which a run validates its tape band against.
 
 ### The mnemonic set
 
-Twenty mnemonics. The match register (**MR**) is written only by `mtc`;
-the vector `rd`/`wr`/`mov`/`wrmv` instructions leave it untouched, so
-`jm`/`jnm` test the most recent `mtc` outcome regardless of intervening
-tape motion.
+The dialect accepts twenty mnemonics. The opcode table — each mnemonic's
+byte, operand shape, and semantics — is `docs/tmt/isa.md (instruction
+set)`. What belongs here is how they are *spelled*:
 
-| opcode | mnemonic | operand | meaning |
-|---|---|---|---|
-| `0x01` | `nop` | — | no-op |
-| `0x02` | `stp` | — | stop — clean termination (`tmt run` exits 0) |
-| `0x03` | `hlt` | — | halt (`tmt run` exits 2) |
-| `0x04` | `rd` | — | latch every tape head into its match slot in one fetch |
-| `0x05` | `mtc` | table | walk a match table against the latched heads, setting MR |
-| `0x06` | `djmp` | table | dispatch: jump through the table indexed by MR |
-| `0x07` | `wr` | symbol vector | write one symbol per tape (`-` keeps a cell) |
-| `0x08` | `jmp` | label | unconditional jump |
-| `0x09` | `jm` | label | jump if the last `mtc` matched a row (MR ≠ 0) |
-| `0x0A` | `jnm` | label | jump if the last `mtc` matched no row (MR = 0) |
-| `0x0B` | `call` | symbol | call a routine; the width is chosen at link time |
-| `0x0C` | `ret` | — | return from a call |
-| `0x0D` | `ent` | — | entry marker — emitted implicitly by `.func`, the runtime call guard |
-| `0x0E` | `brk` | — | debugger break |
-| `0x0F` | `mov` | move vector | move one step per tape (`<` left, `>` right, `.` stay) |
-| `0x11` | `trap` | `#kind` | raise a typed trap: `#0` unmapped-read, `#1` unmapped-write |
-| `0x12` | `wrmv` | write + move vectors | fused write-then-move: write one symbol per tape, then move one step per tape, in one instruction |
-| `0x13` | `call.m` | frame call | framed call — call a routine and activate a frame for it |
-| `0x14` | `retx` | `#k` | multi-exit return — leave the active frame through exit `k` |
-| `0x1B` | `call.s` | label | the **short** form of `call` — see below |
-
-The three frames instructions (`trap`, `call.m`, `retx`) and their
-`#imm` / frame-call operands are detailed under *Framed calls, traps, and
-multi-exit returns* and *Frame descriptors* below.
-
-`call.s` exists in the mnemonic set for disassembly display and link-time
-relaxation only: the assembler always emits far `call` and rejects
-`call.s <target>` in source (the width is linker-selected). The linker's
-relaxation fixpoint narrows a far `call` to `call.s` when the target is in
-short range, exactly as PM-1 does.
+- **Jump and call targets are labels**; `call` additionally accepts a
+  routine symbol. `call.s` exists in the mnemonic table for disassembly
+  display and link-time relaxation only: the assembler always emits far
+  `call` and rejects `call.s <target>` in source, because the width is
+  linker-selected. The linker's relaxation fixpoint narrows a far `call`
+  to `call.s` when the target is in short range, exactly as PM-1 does.
+- **`mtc` and `djmp` take a table label** defined in the tables section.
+- **`wr`, `mov`, and `wrmv` take bracketed vectors** — see *Vector
+  operands* below; `wrmv` takes two, comma-separated.
+- **`trap` and `retx` take an immediate.** `#<n>` is a single unsigned
+  byte, `0`..=`255`, written with a leading `#` (`trap #0`, `retx #1`).
+  It is distinct from a symbol or a label — it carries a raw number.
+- **`call.m <target>, <frame>`** pairs a call target with a `.frame`
+  label from the tables section. The operand's two halves are a rel
+  displacement and, after link, a call-site index (see *The frames
+  region* above).
+- **`ent` is emitted implicitly by `.func`** and is the runtime call
+  guard; it is never written by hand.
 
 ### Vector operands
 
@@ -465,26 +446,15 @@ where the vector appears:
   stays put.
 
 `wrmv [w…], [m…]` takes **two** vectors — a write vector then a move
-vector, comma-separated — and fuses a rule's whole write+move action into
-one instruction. It is exactly `wr [w…]` followed by `mov [m…]`: **all
-writes precede all moves**, so a tape's write lands before its head moves
-off the cell. This is the `-O0` codegen canon for a conditional rule's
-action (the compiler elides it entirely when the action is all-keep +
-all-stay). A hand-written `wr`/`mov` pair remains equally valid;
-`wrmv` is the fused spelling, not a new capability.
+vector, comma-separated — fusing a rule's whole write+move action into
+one instruction. Its execution order is `docs/tmt/isa.md (reading,
+writing and moving)`. A hand-written `wr`/`mov` pair remains equally
+valid; `wrmv` is the fused spelling, not a new capability.
 
 ### Match and dispatch tables
 
 A **match table** is a labeled run of `.row` directives. Each row is one
-vector; a run of rows under one label forms the table `mtc` walks. The
-walk returns the 1-based index of the first row every tape matches — this
-number is the match register (MR) — or 0 if no row matches. Table
-discipline: all rows share one width (1..=16); **exact** rows (no
-wildcard) come first, sorted and pairwise disjoint; **wildcard** rows
-follow in source order; an **all-wildcard** catch-all, if present, is
-last. A table with no catch-all leaves MR = 0 on an unmatched head, and a
-following `djmp` on MR = 0 traps — a machine can get an invalid-symbol
-fault for free by omitting the catch-all.
+vector; a run of rows under one label forms the table `mtc` walks.
 
 A **dispatch table** is a labeled run of `.targets`/`.target` directives:
 `.targets L1, …, Lk` lists the targets indexed by MR (MR = 1 selects
@@ -492,6 +462,12 @@ A **dispatch table** is a labeled run of `.targets`/`.target` directives:
 Consecutive directives under the **same label** accrue into one table, so
 a wide dispatch table can be built one entry at a time — the idiom a
 `.rept` uses to emit a value-indexed table.
+
+Match tables carry a **row discipline** — one width for every row, exact
+rows first and sorted, wildcard rows after, a catch-all last — which the
+assembler checks and reports as a fatal error under the code
+`table-discipline`. The discipline itself, and what it buys, are
+`docs/tmt/isa.md (match and dispatch)`.
 
 ### The compact symbol family (the `0x7F` rule)
 
@@ -519,43 +495,13 @@ targets. A labeled directive inside a `.rept` emits the **same** label
 every iteration; combined with same-label continuation, that is how a
 `.rept` builds one wide match or dispatch table across its expansion.
 
-### Framed calls, traps, and multi-exit returns
-
-A **framed call** runs a routine under a **frame** — a projection that
-narrows the machine's tapes to the callee's, remapping tape indices and,
-per tape, the symbols read and written. Three mnemonics and one operand
-form make up the surface:
-
-- `call.m <target>, <frame>` — call `<target>` and activate `<frame>`
-  (a `.frame` label in the tables section) for the duration of the call.
-  Inside the callee, tape and symbol references are **virtual**: the frame
-  translates them to physical tapes and symbols. The caller's frame is
-  restored when the callee returns. The operand pairs a rel displacement
-  (the call target) with a **site index** — a dense per-image number for
-  this call site. The site index is *not* a descriptor offset: at run time
-  the processor reads `compose[FR][site]` to pick the composite active in
-  the current context, then `directory[…]` for its descriptor (the frames
-  region above). A hand-authored `call.m` names one fixed descriptor, so its
-  compose column is constant across every frame; a declarative binding call
-  (below) may resolve to a different composite per calling context through
-  the same instruction.
-- `retx #k` — return through **exit `k`** of the active frame's exit
-  vector. Unlike `ret`, the pushed return address is discarded; control
-  resumes at the caller-side label recorded as exit `k`. A `k` past the
-  exit vector traps (exit-out-of-range).
-- `trap #kind` — raise a typed trap explicitly: `#0` is unmapped-read,
-  `#1` is unmapped-write. Numeric kinds leave room for named kinds later
-  without a grammar break.
-
-`#<n>` is the **immediate** operand: a single unsigned byte, `0`..=`255`,
-written with a leading `#` (`trap #0`, `retx #1`). It is distinct from a
-symbol or a label — it carries a raw number.
-
 ### Frame descriptors
 
 `.frame`/`.map`/`.exits` author a **frame descriptor**: the table-section
 record a `call.m` activates. A descriptor projects the caller's tapes onto
-a narrower callee and, per tape, remaps symbols in each direction.
+a narrower callee and, per tape, remaps symbols in each direction — what
+the processor does with it while the callee runs is `docs/tmt/isa.md (the
+frames execution profile)`.
 
 ```asm
 .section tables
@@ -633,25 +579,13 @@ callee virtual tape 1 binds physical tape 0 unchanged.
 
 A binding call **assembles** — it is stored as a bound-call record on the
 object, carrying the target and the binding — and is **lowered at link
-time** by the composition engine (below). Alongside the hand-authored
+time** by the composition engine (`docs/core.md (the composition
+engine)`; what the three mechanisms produce for a TM-1 image is
+`docs/tmt/isa.md (call mechanisms)`). Alongside the hand-authored
 `.frame` form, it is the source-level way to run a framed call.
 
-### The frames profile and the composition engine
-
-At link time a **composition engine** turns declarative binding calls into
-concrete frames. It enumerates the finite set of `(routine, composite)`
-pairs reachable from the entry — the same breadth-first walk as
-reachability, now carrying an active composite that binding calls compose
-onto — in a deterministic order, so builds are reproducible. Bindings
-compose **associatively**; an identity composite collapses away
-(`E ∘ identity = E`), so a binding that resolves to a full pass-through
-lowers to a plain `call` (the callee inherits the caller's frame) and joins
-the ordinary `call → call.s` relaxation. Hole sets compose too: the outer
-holes union the preimages of the inner holes. A one-way `=>` pair
-participates only in the read direction and is excluded from the
-bidirectional bijectivity check.
-
-How a binding's symbol maps complete depends on the two tapes' sizes.
+**Completing a binding.** How a binding's symbol maps complete depends on
+the two tapes' sizes.
 **Equal-size** alphabets identity-complete: a source symbol the binding does
 not name maps to itself (the completed bijection). Across
 **differently-sized** alphabets there is no identity completion — the map is
@@ -664,55 +598,12 @@ everything but the blank (blank↔blank is always implicit). A one-way `=>`
 pair, being read-only, establishes no write-back, so on an unequal tape the
 symbol it collapses onto is a write hole unless a two-way pair also names it.
 
-How a lowered site runs depends on the **call mechanism**, chosen at link
-time (`tmt link --call-mech mono | frames | hybrid`, default hybrid):
-
-- **mono** compiles for the **base profile**: it stamps a specialized copy
-  of the callee per distinct composite, folding the projection and symbol
-  maps into the copy's vectors and match tables. A holey read keeps the
-  trap taxonomy statically — an unmapped-read caller symbol becomes a
-  first-match trap row prepended to every match table, and a write with no
-  physical image becomes a `trap` stub outright. Identical stamps dedup.
-  Mono emits **no frames region**.
-- **frames** compiles for the **frames profile**: one generic copy of each
-  routine, every binding site a `call.m`, and the composites resolved
-  through the frames region's directory and compose table at run time. A
-  crossed hole traps through the descriptor's `0xFFFF` sentinel.
-- **hybrid** (the default) classifies **per site**: a completed bijection
-  (equal-size, no holes, no one-way) stamps like mono; anything holey or
-  one-way frames. An image with at least one framed site carries a frames
-  region; an all-stamped hybrid image has none.
-
-All three mechanisms are **observably equivalent** on the same program and
-tapes — same outcome, same final tapes and heads, and the **same trap
-kind** on a crossed hole or an unmatched read (the offset may differ; the
-kind never does). Two restrictions apply to mono only: a raw
-`.frame`/`call.m` cannot be lowered onto the base profile (it needs the
-frames machinery), and a holey binding whose synthesized trap rows would be
-read by a conditional branch rather than a dispatch jump is refused — the
-prepended trap row could misroute. Both name the offending routine and
-point at `--call-mech=frames` or `hybrid`.
-
-**Link report.** `tmt link -v` renders the composition engine's counters
-(the linker itself never prints — the CLI does):
-
-| field | meaning |
-|---|---|
-| `dropped` | defined-but-unreachable functions, dropped from the image |
-| `relaxed_calls` / `far_calls` | symbol sites narrowed to the short call form, or left far |
-| `instantiations` | mono stamps emitted — one per distinct `(routine, composite)` (0 in frames mode) |
-| `composites` | the directory size `K` — distinct composites in the frames region |
-| `compose_table_bytes` | the compose matrix size, `(K+1) × S × 2` |
-| `dedup_savings` | stamps and descriptors avoided by interning an already-built copy |
-| `synthesized_trap_rows` | unmapped-read trap rows prepended to stamped match tables |
-| `expanded_rows` | extra match rows from one-way collapse expansion (mono) |
-
 ### What the `.tmc` compiler emits
 
 The `.tmc` language front end (`tmt compile`) generates this dialect and
 nothing exotic: a conditional state lowers to `rd` / `mtc` / `djmp` over a
-match table whose **exact rows are sorted and pairwise disjoint** with the
-wildcard rows following (the table discipline above), a rule's write+move
+match table satisfying the row discipline (`docs/tmt/isa.md (match and
+dispatch)`), a rule's write+move
 action lowers to a single `wrmv` (elided when it is all-keep + all-stay),
 and a cross-alphabet `call` lowers to the **binding-call operand** —
 never a hand-authored `.frame`. So a compiled object always reaches the

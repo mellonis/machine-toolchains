@@ -518,7 +518,7 @@ pub(crate) fn is_identity(c: &Composite) -> bool {
 
 /// True when the composite is a genuine full pass-through into `callee` and
 /// may be lowered to a plain `call` — the identity collapse described in
-/// docs/formats.md (the composition engine). The callee inherits the active
+/// docs/core.md (the composition engine). The callee inherits the active
 /// frame and reads/writes the domain's symbols directly,
 /// with no translation and no trap ever owed.
 ///
