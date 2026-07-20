@@ -1,5 +1,5 @@
 //! The name roster: everything the completion contexts need to look up by
-//! name, distilled out of one resolved module.
+//! name, distilled out of one resolved module (docs/lsp.md (completions)).
 //!
 //! Distilled rather than borrowed for one reason — it is the service's
 //! sanctioned staleness exception. Positions always come from the CURRENT

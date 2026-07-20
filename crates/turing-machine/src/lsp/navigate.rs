@@ -1,4 +1,4 @@
-//! Go-to-definition and hover.
+//! Go-to-definition and hover (docs/lsp.md (navigation)).
 //!
 //! # Two sides, two sources
 //!

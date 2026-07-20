@@ -1,5 +1,5 @@
-//! Completion candidates: one classified cursor in, one
-//! context-appropriate list out.
+//! Completion candidates (docs/lsp.md (completions)): one classified
+//! cursor in, one context-appropriate list out.
 //!
 //! Positions come from [`super::context::classify`] over the CURRENT token
 //! stream; names and symbols come from the roster, which may be one edit

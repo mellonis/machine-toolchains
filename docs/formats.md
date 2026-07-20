@@ -1,12 +1,28 @@
 # File formats
 
-All multi-byte integers are little-endian. This page covers the five
-binary/text containers (`.pmo`, `.pmx`, `.pmt`, `.pma`, and the `.tma`
-assembly text), the `.pmx.map` sidecar, and the IR JSON artifact. PM-1's
-opcode semantics are `docs/pmt/isa.md`; the `pmt` subcommands that read and
-write these files are `docs/pmt/cli.md`. (The `.tma` assembly is a TM-1
-format, read and written by `tmt`; its command-line documentation arrives
-with the TM-1 tooling docs.)
+All multi-byte integers are little-endian. This page covers the three
+binary container formats — objects, executables and tape blocks — the two
+assembly text dialects, the link-time map sidecar, and the IR JSON
+artifact. It is a **wire-format** page: what the bytes and the text mean,
+never what the machine does with them. Opcode and execution semantics are
+`docs/pmt/isa.md` for PM-1 and `docs/tmt/isa.md` for TM-1; the parts of the
+virtual machine, assembler and linker that neither architecture owns are
+`docs/core.md`.
+
+Both toolchains write the same three containers under their own
+extensions, and each has its own assembly dialect:
+
+| | objects | executables | tape blocks | assembly text |
+|---|---|---|---|---|
+| `pmt` (PM-1) | `.pmo` | `.pmx` (+ `.pmx.map`) | `.pmt` | `.pma` |
+| `tmt` (TM-1) | `.tmo` | `.tmx` (+ `.tmx.map`) | `.tmt` | `.tma` |
+
+The `pmt` subcommands that read and write these files are
+`docs/pmt/cli.md`; the `tmt` ones are `docs/tmt/cli.md`. One section below
+describes each container once, for both toolchains; where their contents
+differ, the difference is called out in that section rather than split into
+a second one. The two assembly dialects, being different languages, get a
+section each.
 
 ## Shared conventions
 
@@ -16,11 +32,15 @@ byte marks header-layout generations and doubles as a text-file guard; a
 `u16 format version` field inside each header covers evolution within an
 epoch. Each container dispatches on its own version field — MO reads
 `1..=3`, MX and MT read `1..=2` today, selecting the layout from that field
-and never from the extension. The containers are shared across present and future machine
+and never from the extension. The containers are shared across the machine
 toolchains built on this codebase: the file *extension* carries the
-toolchain flavor (`.pmo`/`.pmx`/`.pmt` from `pmt`), while the magic plus an
-`arch` byte identify the actual content. Tools never dispatch on file
-extensions — only on the sniffed magic.
+toolchain flavor — `.pmo`/`.pmx`/`.pmt` from `pmt`, `.tmo`/`.tmx`/`.tmt`
+from `tmt` — while the magic plus an `arch` byte identify the actual
+content. A `.pmo` and a `.tmo` are both `MO 0x01`; a `.pmx` and a `.tmx` are
+both `MX 0x01`; a `.pmt` and a `.tmt` are both `MT 0x01`. **Neither
+toolchain ever dispatches on a file extension** — only on the sniffed
+magic, so a container renamed to the wrong extension still reads correctly,
+and one handed to the wrong subcommand is rejected for what it *is*.
 
 **CRC-32** (IEEE 802.3, reflected, polynomial `0xEDB88320`) covers the
 whole file with the 4-byte CRC field itself zeroed. Writers zero the field,
@@ -29,19 +49,38 @@ compute the CRC over the whole buffer, and stamp it in last; every reader
 else — a mismatch is a clean "corrupt file" error, never a trap mid-run.
 
 `sniff(bytes)` identifies a container from its first 3 bytes
-(`ContainerKind::Object` / `Executable` / `TapeBlock`), used by `pmt dis` to
-accept either a `.pmo` or a `.pmx` on the same command line.
+(`ContainerKind::Object` / `Executable` / `TapeBlock`). It is what lets
+`pmt dis` and `tmt dis` accept either an object or an executable on the same
+command line, and what turns a mistaken argument into a diagnosis rather
+than a decode failure — `tmt dis` handed a tape block answers "that is a
+tape block — use `tmt tape show`".
 
-## `.pmx` — executable
+The `arch` byte says which architecture the content is for; what each tool
+does with it differs. A loader refuses an image it cannot execute — `pmt
+run` on a TM-1 executable reports `unknown architecture 0x02`. A
+disassembler does not check it: `dis` is an arch-agnostic framework driven
+by the mnemonic table its own tool supplies, so each toolchain's `dis`
+decodes the other's image against the wrong table and prints something that
+is well-formed but meaningless. Read an image with the `dis` of the
+toolchain that wrote it.
+
+## `.pmx` / `.tmx` — executable
 
 A `.pmx` is an **executable image**: the linker's output, a pure code
 image with the tape supplied separately at run time.
 
 An `.pmx` reader dispatches on the `u16 format version` field: **version 1**
-is the code-only image PM-1 emits, **version 2** is a sectioned image that
-adds a table section plus per-tape alphabet cardinalities and a processor
-profile. The magic and `sniff()` are identical across both versions —
-version selection is the header field alone, never the extension.
+is the code-only image, **version 2** is a sectioned image adding a table
+section plus per-tape alphabet cardinalities and a processor profile. The
+linker picks by **content, not by toolchain**: the sectioned shape is
+emitted when the reached set carries table content or a routine signature,
+and the code-only shape otherwise. In practice that means every `pmt link`
+output is version 1 — PM-1's dialect has neither tables nor signatures —
+and every `tmt link` output is version 2, since a TM-1 program's entry
+carries a `.routine` signature naming its tape count and alphabets.
+
+The magic and `sniff()` are identical across both versions — version
+selection is the header field alone, never the extension.
 
 ### Version 1 (code-only)
 
@@ -130,7 +169,7 @@ pair at link time), so reading a 0 at run time is a malformed-operand
 trap, not a normal outcome. What the processor then does with the
 descriptor, and what it costs, is `docs/tmt/isa.md (framed calls)`.
 
-## `.pmo` — object file
+## `.pmo` / `.tmo` — object file
 
 ```
 magic "MO" 0x01
@@ -180,8 +219,9 @@ Object format version 3 was added for generic-routine composition: it
 appends four record kinds — routine signatures, per-routine table blobs,
 table fixups, and bound calls. An object carrying any of them serializes as
 version 3; a plain PM-1 object, with none present, still serializes
-byte-for-byte as version 2, and that is what the compiler and assembler
-emit. A reader accepts 1..=3 and rejects a pre-version-3 object that sets
+byte-for-byte as version 2. In practice `pmt compile`/`pmt asm` emit
+version 2 and `tmt compile`/`tmt asm` emit version 3, since every TM-1
+object carries at least a routine signature. A reader accepts 1..=3 and rejects a pre-version-3 object that sets
 either version-3 flag bit. The signature and table-blob sections are gated
 by flags bits 1 and 2; the table-fixup and bound-call sections are
 unconditional — a version-3 object always writes both counts, zero when the
@@ -217,17 +257,20 @@ format.
 
 Per-function granularity is what gives the linker dead-function
 elimination and leaves link-time inlining open as a future extension. A
-"library" is simply a `.pmo` with many functions — only what `main`
-transitively reaches gets linked in (`docs/pmt/stdlib.md`).
+"library" is simply an object with many functions — only what the entry
+transitively reaches gets linked in (`docs/pmt/stdlib.md`,
+`docs/tmt/stdlib.md`).
 
-## `.pmt` — tape-block snapshot
+## `.pmt` / `.tmt` — tape-block snapshot
 
 Binary tape-block state — one or more tapes with their heads, usable as
-`pmt run` input and output; golden tests diff final blocks as files.
+`pmt run` / `tmt run` input and output; golden tests diff final blocks as
+files.
 
-An `.pmt` reader dispatches on the `u16 format version` field: **version 1**
-carries a single shared block alphabet (what PM-1 emits), **version 2** lets
-each tape carry its own glyph table. The magic and `sniff()` are identical
+A reader dispatches on the `u16 format version` field: **version 1** carries
+a single shared block alphabet (what `pmt` emits, PM-1 being single-tape and
+single-alphabet), **version 2** lets each tape carry its own glyph table
+(what `tmt` emits, a TM-1 program's tapes commonly differing in alphabet). The magic and `sniff()` are identical
 across both versions — version selection is the header field alone.
 
 ### Version 1 (shared alphabet)
@@ -264,16 +307,24 @@ loads both shapes.
 The alphabet travels WITH the tape data — a `.pmt` renders using its own
 glyphs (index 0 is blank by convention). **Glyphs live ONLY on the tape
 side.** A tape block's alphabet is the authoritative rendering source; with
-no tape block at hand, tooling falls back to the architecture module's
-default glyphs (PM-1: `" "` for blank, `"*"` for mark — the PM-1 arch
-module's `DEFAULT_GLYPHS` constant). Code-side artifacts — `.pmo`, `.pmx`, and the
-`.pmx.map` sidecar — carry symbol indices only, never glyphs, matching the
+no tape block at hand, tooling falls back to whatever default the
+architecture can supply. PM-1 has a fixed pair — `" "` for blank, `"*"` for
+mark — because its alphabet is fixed at two symbols. TM-1 has no fixed
+alphabet and therefore no fixed glyphs: `tmt tape new` reads the per-tape
+cardinalities out of the executable's header and labels each tape's symbols
+with the decimal strings `0`…`card-1`, which the author then edits or
+replaces. Code-side artifacts — objects, executables, and the map
+sidecar — carry symbol indices only, never glyphs, matching the
 hardware-realizability rule that the processor never sees glyphs
 (`docs/pmt/isa.md`).
 
 CLI: `pmt tape build " * * *" --head 3 -o in.pmt`, `pmt tape show in.pmt`,
 `pmt run app.pmx --tape-block in.pmt [--save-tape-block out.pmt]`
-(`docs/pmt/cli.md`).
+(`docs/pmt/cli.md`). The TM-1 side starts from the executable rather than
+from a literal, since the tape count and each tape's cardinality are
+properties of the program: `tmt tape new --from app.tmx -o in.tmt`, then
+`tmt tape set in.tmt --in-place --tape 1 --cells "0110"`, and
+`tmt tape show in.tmt` (`docs/tmt/cli.md`).
 
 ## `.pma` — assembly text
 
@@ -634,12 +685,13 @@ call mechanism stays a link-time decision independent of the source.
   precede all moves). It is the `-O0` codegen canon for a rule's action;
   no earlier program changes meaning.
 
-## `.pmx.map` — link-time sidecar
+## `.pmx.map` / `.tmx.map` — link-time sidecar
 
-Written next to a `.pmx` by `pmt link` as `<output>.pmx.map`: a JSON
-document with the architecture byte and, per linked function, its absolute
-code range, label offsets, and source line map (the label/line data is
-empty unless the linked objects carried `-g` debug info):
+Written next to the executable by the linker — `<output>.pmx.map` from
+`pmt link`, `<output>.tmx.map` from `tmt link` — as a JSON document with
+the architecture byte and, per linked function, its absolute code range,
+label offsets, and source line map (the label/line data is empty unless the
+linked objects carried `-g` debug info):
 
 ```json
 {
@@ -736,6 +788,16 @@ behavior the image lacks.
 
 ## IR JSON
 
+Each compiler can write its intermediate representation as a **versioned,
+documented JSON document** rather than keep it an internal detail. The two
+are different artifacts with independent version counters, because the two
+languages lower to different shapes: `.pmc` is imperative and lowers to a
+per-function control-flow graph of basic blocks; `.tmc` is a set of
+transition rules and lowers to a per-world state graph. Neither reader
+accepts the other's document.
+
+### The `.pmc` CFG IR
+
 `pmt compile --emit-ir` (`docs/pmt/language.md (the IR artifact)`) writes a
 versioned JSON document: `IR_VERSION = 4`.
 
@@ -773,3 +835,79 @@ Per-terminator tags (`kind` field, snake_case): `fall_through` (`to`),
 `tail_call` (`name`) — the last is optimizer-produced only (never emitted
 by lowering) and replaces a trailing `call` + `return` with a direct jump
 to the callee.
+
+### The `.tmc` state-graph IR
+
+`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 2`. The
+form follows the model — a Turing world is a set of states, each a
+priority-ordered list of classical match rows, so the document is a graph of
+states rather than a CFG of basic blocks. `tmt ir graph` renders one of its
+worlds as a diagram (`docs/tmt/cli.md`).
+
+```json
+{
+  "version": 2,
+  "worlds": [
+    {
+      "name": "main",
+      "kind": "machine",
+      "arity": 1,
+      "tapes": [{ "name": "main", "alphabet": "ab", "cardinality": 3 }],
+      "entry": 0,
+      "states": [
+        {
+          "id": 0,
+          "name": "scan",
+          "line": 8,
+          "rules": [
+            {
+              "pattern": [{ "kind": "index", "index": 2 }],
+              "write": [{ "kind": "index", "index": 1 }],
+              "moves": ["right"],
+              "transition": { "kind": "goto", "state": 0 },
+              "line": 9
+            }
+          ],
+          "dispatch": "table"
+        }
+      ],
+      "local": false,
+      "line": 5
+    }
+  ],
+  "entry_world": 0
+}
+```
+
+The document is **index-only**: patterns and write vectors carry symbol
+indices, never glyphs — the processor never sees glyphs, so neither does the
+IR. Each tape's alphabet *name* and cardinality ride along for readability
+and for index-bound validation; the glyph tables stay in the presentation
+layers (the map sidecar, tape blocks).
+
+- `kind` per world is `machine` or `routine`. Graphs do not survive to the
+  IR — they have been spliced into their hosts by then.
+- State ids are dense (`0..states.len()`) in emission order: a world's own
+  states in source order, then its spliced graft instances. The entry state
+  is *named* by `entry`, not moved to position zero, so every rule's `line`
+  keeps pointing at the source it came from.
+- Per-cell tags (`kind` field): a pattern cell is `wildcard` or `index`
+  (carrying `index`); a write cell is `keep` or `index`. Moves are `left`,
+  `right`, `stay`. `write` and `moves` are omitted entirely when the whole
+  vector is the identity — all-keep, all-stay — which is the same condition
+  under which codegen elides the action instruction.
+- Per-transition tags (`kind` field, snake_case): `goto` (`state`),
+  `call_then` (`target`, an optional `binding`, and a `then` resume point
+  that is itself a `goto`/`return`/`stop`/`halt`), `return`, `stop`, `halt`,
+  `tail_call` (`target`), and the two synthesized trap terminals `trap_read`
+  and `trap_write`. A `binding` entry carries the same per-callee-tape data
+  the `.tma` binding-call operand does: `caller_tape`, plus each authored
+  `src`/`dst` pair resolved to caller and callee alphabet indices, with
+  one-way pairs flagged. No blank pin or closure is applied here — the
+  composition engine does that at link time.
+- `dispatch` is a codegen hint, `table` (the canonical form: a match table
+  plus an indexed jump) or `branch` (the two-row form the optimizer's
+  dispatch-selection pass picks). `tail_call`, `branch`, and the `debugger`
+  and `synthesized` row flags are the shapes only the optimizer or the
+  compiler's own splicing produce; a `-O0` document carries none of them but
+  `synthesized`.

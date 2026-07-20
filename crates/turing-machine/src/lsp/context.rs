@@ -1,4 +1,5 @@
-//! Position classification: what is the cursor *in*?
+//! Position classification: what is the cursor *in*? (docs/lsp.md
+//! (completions)).
 //!
 //! # Why the token stream, not the CST
 //!
