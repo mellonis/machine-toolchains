@@ -1,5 +1,4 @@
-//! Position classification: what is the cursor *in*? (docs/lsp.md
-//! (completions)).
+//! Position classification: what is the cursor *in*?
 //!
 //! # Why the token stream, not the CST
 //!
@@ -76,8 +75,14 @@ pub(crate) enum Context {
     Target(CallKind),
     /// A binding argument's parameter-name slot (`(▮` or `, ▮`).
     BindingName { target: Option<String> },
-    /// A binding argument's value slot (`param = ▮`).
-    BindingValue { param: Option<String> },
+    /// A binding argument's value slot (`param = ▮`). Both halves are
+    /// carried because the legal values depend on which half of `target`'s
+    /// signature `param` names — a tape parameter takes a tape, a state
+    /// parameter takes a continuation.
+    BindingValue {
+        target: Option<String>,
+        param: Option<String>,
+    },
     /// The source side of a `with map { ▮ -> … }` pair — the HOST tape's
     /// alphabet, so `host_tape` names a tape of the ENCLOSING world.
     MapSrc { host_tape: Option<String> },
@@ -493,7 +498,10 @@ fn classify_context(
         return Some(match prev.map(|t| &t.kind) {
             Some(TokenKind::Eq) => {
                 let (param, _) = argument_parts(sig, current_argument(sig, site.open, idx));
-                Context::BindingValue { param }
+                Context::BindingValue {
+                    target: Some(site.target),
+                    param,
+                }
             }
             Some(TokenKind::LParen) | Some(TokenKind::Comma) => Context::BindingName {
                 target: Some(site.target),

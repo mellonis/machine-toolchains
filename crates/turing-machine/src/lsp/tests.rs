@@ -506,13 +506,91 @@ machine {
     assert!(names.contains(&"t".to_string()), "{names:?}");
     assert!(names.contains(&"done".to_string()), "{names:?}");
 
-    let values = labels(&complete_typing(
+    // Each value slot then offers the vocabulary ITS parameter takes: `t`
+    // is a tape parameter, `done` a state parameter.
+    let tape_value = labels(&complete_typing(
         &format!("{head}t = "),
         "ctl, done = fin",
         tail,
     ));
-    assert!(values.contains(&"ctl".to_string()), "{values:?}");
-    assert!(values.contains(&"fin".to_string()), "{values:?}");
+    assert!(tape_value.contains(&"ctl".to_string()), "{tape_value:?}");
+    assert!(!tape_value.contains(&"fin".to_string()), "{tape_value:?}");
+
+    let state_value = labels(&complete_typing(
+        &format!("{head}t = ctl, done = "),
+        "fin",
+        tail,
+    ));
+    assert!(state_value.contains(&"fin".to_string()), "{state_value:?}");
+    assert!(!state_value.contains(&"ctl".to_string()), "{state_value:?}");
+}
+
+/// A machine with three tapes, three transition targets, and a routine
+/// whose signature has ONE tape parameter and ONE state parameter — the
+/// fixture that makes a binding value's two vocabularies tell apart.
+const SIGNATURE_WORLD: &str = "\
+alphabet green { '_', 'g' }
+
+routine work(tape gg: green, state back) {
+  entry state s { [*] -> back; }
+}
+
+graph gr(tape t: green, state done) { entry state s { [*] -> done; } }
+
+machine {
+  tape a: green;
+  tape b: green;
+  tape c: green;
+
+  graft gr(t = a, done = fin) as sk;
+
+  entry state main { [*, *, *] -> stop; }
+  state done { [*, *, *] -> stop; }
+  state fin { [*, *, *] -> stop; }
+
+  bind work(";
+
+const SIGNATURE_WORLD_TAIL: &str = ") as w1;\n}\n";
+
+#[test]
+fn a_tape_parameters_value_offers_tapes_and_nothing_a_continuation_takes() {
+    let got = labels(&complete_typing(
+        &format!("{SIGNATURE_WORLD}gg = "),
+        "a, back = done",
+        SIGNATURE_WORLD_TAIL,
+    ));
+    assert_eq!(got, vec!["a", "b", "c"], "{got:?}");
+}
+
+#[test]
+fn a_state_parameters_value_offers_continuations_and_no_tapes() {
+    let got = labels(&complete_typing(
+        &format!("{SIGNATURE_WORLD}gg = a, back = "),
+        "done",
+        SIGNATURE_WORLD_TAIL,
+    ));
+    for target in ["main", "done", "fin", "sk", "halt", "return", "stop"] {
+        assert!(got.contains(&target.to_string()), "{got:?}");
+    }
+    for tape in ["a", "b", "c"] {
+        assert!(!got.contains(&tape.to_string()), "{got:?}");
+    }
+}
+
+#[test]
+fn an_unresolvable_binding_parameter_falls_back_to_the_union() {
+    // Degrading to MORE candidates is a nuisance; degrading to none is a
+    // dead list. A callee that does not exist — the ordinary state of a
+    // half-typed name — must therefore keep offering both vocabularies.
+    let settled = format!("{SIGNATURE_WORLD}gg = a, back = done{SIGNATURE_WORLD_TAIL}");
+    let (mut service, uri) = opened(&settled);
+    let head = SIGNATURE_WORLD.replace("bind work(", "bind mystery(zz = ");
+    service.did_update(&uri, &head);
+    let pos = pos_at_byte(&head, head.len());
+    let got = labels(&service.completion(&uri, pos));
+    for name in ["a", "b", "c", "done", "fin", "sk", "halt", "return", "stop"] {
+        assert!(got.contains(&name.to_string()), "{got:?}");
+    }
 }
 
 #[test]
@@ -786,6 +864,39 @@ fn an_unresolved_goto_offers_a_state_stub_of_the_right_arity() {
     // Inserted on the world's closing-brace line, at column 1.
     let close_line = src.lines().count() as u32;
     assert_eq!(actions[0].edits[0].span.start.line, close_line);
+}
+
+#[test]
+fn a_state_stub_in_a_nested_world_lands_at_the_depth_fmt_expects() {
+    // The stub's indent is read off the enclosing block's closing brace, so
+    // a world one namespace deep gets one level more than a top-level
+    // `machine`. Formatting the fixed text is the assertion: an indent a
+    // level short would leave `tmt fmt --check` failing on a file the
+    // quickfix itself produced.
+    let src = "\
+alphabet bits { '_', '1' }
+
+namespace lib {
+  routine work(tape t: bits) {
+    entry state s { [*] -> goto nowhere; }
+  }
+}
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let at = span_of(src, "nowhere");
+    let actions = service.code_actions(&uri, at);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0].edits[0].replacement,
+        "    state nowhere { [*] -> stop; }\n"
+    );
+    let fixed = apply(src, &actions[0].edits[0]);
+    assert_eq!(crate::fmt::format(&fixed).expect("formats"), fixed);
 }
 
 #[test]

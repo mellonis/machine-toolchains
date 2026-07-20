@@ -1,4 +1,4 @@
-//! Quickfixes derived from a fatal (docs/lsp.md (code actions)).
+//! Quickfixes derived from a fatal.
 //!
 //! The lint layer's own findings already carry `Fix`es, and those convert
 //! mechanically. The two fixes here are different in kind: they are built
@@ -58,8 +58,13 @@ struct BodyExtent {
 fn state_stub(cst: &Cst, program: Option<&Program>, name: &str, at: Span) -> Option<Action> {
     let extent = enclosing_body(cst, program, at)?;
     let cells = vec!["*"; extent.arity.max(1)].join(", ");
-    // Insert on its own line just before the closing brace, at the
-    // canonical one-level indent the formatter uses for world items.
+    // Insert on its own line just before the closing brace, one level in
+    // from it. The block's own depth is read off that brace rather than
+    // assumed: a world nested in a namespace sits deeper than a top-level
+    // `machine`, and a stub indented for the wrong depth would leave the
+    // file the fix just produced failing `tmt fmt --check`. The brace's
+    // span end is exclusive, so its column IS the one-level-in width.
+    let indent = " ".repeat((extent.close.col as usize).max(2));
     let insert = Pos {
         line: extent.close.line,
         col: 1,
@@ -72,7 +77,7 @@ fn state_stub(cst: &Cst, program: Option<&Program>, name: &str, at: Span) -> Opt
                 start: insert,
                 end: insert,
             },
-            replacement: format!("  state {name} {{ [{cells}] -> stop; }}\n"),
+            replacement: format!("{indent}state {name} {{ [{cells}] -> stop; }}\n"),
         }],
     })
 }

@@ -1,5 +1,5 @@
 //! The name roster: everything the completion contexts need to look up by
-//! name, distilled out of one resolved module (docs/lsp.md (completions)).
+//! name, distilled out of one resolved module.
 //!
 //! Distilled rather than borrowed for one reason — it is the service's
 //! sanctioned staleness exception. Positions always come from the CURRENT
@@ -44,6 +44,17 @@ impl GlyphEntry {
     }
 }
 
+/// Which half of a world's signature a parameter name belongs to. The two
+/// halves take DISJOINT values — a tape parameter binds a tape of the
+/// caller, a state parameter binds a continuation — so knowing which one a
+/// binding argument names is what turns its value slot from a flat list
+/// into a legal one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParamKind {
+    Tape,
+    State,
+}
+
 /// One world's addressable names, keyed in [`Roster::worlds`] by the
 /// world's mangled name (`main` for the machine, `ns::name` otherwise).
 #[derive(Debug, Clone)]
@@ -77,6 +88,19 @@ impl WorldRoster {
     /// from, or `None` when the world has no such position.
     pub(crate) fn alphabet_at(&self, index: usize) -> Option<&str> {
         self.tapes.get(index).map(|(_, a)| a.as_str())
+    }
+
+    /// Which half of this world's signature `param` names, or `None` when
+    /// the signature has no such parameter at all (a stale roster, or a
+    /// name still being typed).
+    pub(crate) fn param_kind(&self, param: &str) -> Option<ParamKind> {
+        if self.tapes.iter().any(|(name, _)| name == param) {
+            Some(ParamKind::Tape)
+        } else if self.state_params.iter().any(|name| name == param) {
+            Some(ParamKind::State)
+        } else {
+            None
+        }
     }
 
     /// The mangled alphabet of the tape parameter named `param`, for

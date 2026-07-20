@@ -1,5 +1,5 @@
-//! Completion candidates (docs/lsp.md (completions)): one classified
-//! cursor in, one context-appropriate list out.
+//! Completion candidates: one classified cursor in, one
+//! context-appropriate list out.
 //!
 //! Positions come from [`super::context::classify`] over the CURRENT token
 //! stream; names and symbols come from the roster, which may be one edit
@@ -14,7 +14,7 @@ use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
 
 use super::context::{CallKind, Context, Cursor, VectorKind, classify};
-use super::roster::Roster;
+use super::roster::{ParamKind, Roster};
 use super::{DocState, significant};
 use crate::compiler::WorldKind;
 
@@ -92,7 +92,9 @@ fn candidates(cursor: &Cursor, roster: Option<&Roster>) -> Vec<Candidate> {
             (Some(roster), Some(target)) => binding_names(roster, cursor, target, span),
             _ => Vec::new(),
         },
-        Context::BindingValue { param } => binding_value(cursor, roster, param.as_deref(), span),
+        Context::BindingValue { target, param } => {
+            binding_value(cursor, roster, target.as_deref(), param.as_deref(), span)
+        }
         Context::MapSrc { host_tape } => match (roster, host_tape) {
             (Some(roster), Some(tape)) => {
                 let alphabet = cursor
@@ -255,13 +257,20 @@ fn binding_names(roster: &Roster, cursor: &Cursor, target: &str, span: Span) -> 
     out
 }
 
-/// A binding argument's value: a tape of the enclosing world when the
-/// parameter is a tape parameter, a transition target when it is a state
-/// parameter, and the continuation terminators either way while the
-/// parameter is still unknown.
+/// A binding argument's value, filtered by which half of the CALLEE's
+/// signature the parameter names: a tape parameter takes a tape of the
+/// enclosing world, a state parameter takes one of that world's transition
+/// targets or a continuation terminator. The two vocabularies are disjoint,
+/// so offering both is offering a wrong answer half the time.
+///
+/// When the parameter cannot be classified — an unresolvable callee, a
+/// parameter name not in its signature, a roster one edit stale — the union
+/// is offered instead. An editor degrading to MORE candidates is a
+/// nuisance; degrading to none is a dead completion list.
 fn binding_value(
     cursor: &Cursor,
     roster: Option<&Roster>,
+    target: Option<&str>,
     param: Option<&str>,
     span: Span,
 ) -> Vec<Candidate> {
@@ -271,26 +280,31 @@ fn binding_value(
     let Some(world) = cursor.world.as_deref().and_then(|w| roster.worlds.get(w)) else {
         return Vec::new();
     };
-    let mut out: Vec<Candidate> = world
-        .tapes
-        .iter()
-        .map(|(name, alphabet)| Candidate {
+    let kind = target.zip(param).and_then(|(target, param)| {
+        roster
+            .resolve_world(target, &cursor.namespaces)
+            .and_then(|callee| callee.param_kind(param))
+    });
+    let mut out: Vec<Candidate> = Vec::new();
+    if kind != Some(ParamKind::State) {
+        out.extend(world.tapes.iter().map(|(name, alphabet)| Candidate {
             label: name.clone(),
             kind: CandidateKind::Value,
             replace_span: span,
             insert_text: name.clone(),
             detail: Some(format!("tape: {alphabet}")),
             deprecated: false,
-        })
-        .collect();
-    out.extend(named(
-        world.transition_targets(),
-        CandidateKind::Function,
-        "state",
-        span,
-    ));
-    out.extend(keywords(&["halt", "return", "stop"], span));
-    let _ = param;
+        }));
+    }
+    if kind != Some(ParamKind::Tape) {
+        out.extend(named(
+            world.transition_targets(),
+            CandidateKind::Function,
+            "state",
+            span,
+        ));
+        out.extend(keywords(&["halt", "return", "stop"], span));
+    }
     out
 }
 
@@ -300,6 +314,11 @@ fn binding_value(
 fn importable(roster: &Roster, span: Span) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     for name in roster.alphabet_names() {
+        // Not the tautology it looks like: `alphabet_names` appends the
+        // bare spellings existing `use` statements bound, and those are
+        // exactly the names the alphabet table does NOT key. The guard
+        // therefore drops them — which is what a `use` path wants, since
+        // it names full paths and re-importing an alias is not one.
         if roster.has_alphabet(&name) {
             out.push(one(name, CandidateKind::Module, "alphabet", span));
         }

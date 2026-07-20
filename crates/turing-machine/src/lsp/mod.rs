@@ -1,5 +1,5 @@
 //! The `.tmc` language service: implements `mtc_core::lsp::LanguageService`
-//! over the real TM-1 front end (docs/lsp.md). Owns per-document staged
+//! over the real TM-1 front end. Owns per-document staged
 //! state, the diagnostic merge (fatal / compile warnings / lint findings),
 //! and both configuration channels (`tmt.json` project files and IDE
 //! settings). Library-only — rendering and stdio belong to the CLI
@@ -256,7 +256,11 @@ fn parse_ide_codes(key: &str, value: &serde_json::Value) -> Result<Vec<String>, 
         Err(LintError::UnknownAllowCode(code)) => {
             Err(format!("unknown lint rule `{code}` in lint.{key}"))
         }
-        Err(other) => unreachable!("validate_allow only returns UnknownAllowCode: {other}"),
+        // `validate_allow` only ever produces `UnknownAllowCode` today, but
+        // this runs on the editor's request thread: a total arm keeps a
+        // future variant an invalid-config message rather than a panic that
+        // takes the whole language server down.
+        Err(other) => Err(other.to_string()),
     }
 }
 
