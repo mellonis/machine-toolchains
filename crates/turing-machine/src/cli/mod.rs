@@ -12,6 +12,7 @@
 
 mod build;
 mod inspect;
+mod lint;
 mod run;
 
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -46,6 +47,7 @@ SUBCOMMANDS:
   run      execute a .tmx on a multi-tape .tmt block
   tape     new/set/show .tmt tape-block snapshots
   ir       render --emit-ir JSON (ir graph -> Mermaid)
+  lint     hygiene findings over .tmc sources (.tma arrives later)
 
 Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 ";
@@ -79,6 +81,7 @@ pub fn execute_with(
         Some("tape") => inspect::tape(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
+        Some("lint") => lint::lint(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
 }
