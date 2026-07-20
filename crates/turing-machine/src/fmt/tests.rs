@@ -224,6 +224,30 @@ machine {
     );
 }
 
+#[test]
+fn a_fold_expression_keeps_redundant_source_parens() {
+    // The formatter is whitespace-only: it reprints a substitution from its
+    // source tokens, so parens the author wrote survive even where precedence
+    // makes them redundant (`v*2` would bind tighter than `+1` without them).
+    // Whitespace still collapses; only the tokens are load-bearing.
+    check(
+        "\
+machine {
+entry state s {
+[0..9 as v] -> write [{ ( v * 2 ) + 1 }] goto s;
+}
+}
+",
+        "\
+machine {
+  entry state s {
+    [0..9 as v] -> write [{(v*2)+1}] goto s;
+  }
+}
+",
+    );
+}
+
 // -- single-line states -----------------------------------------------------
 
 #[test]

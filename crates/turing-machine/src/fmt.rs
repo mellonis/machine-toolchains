@@ -114,17 +114,19 @@
 //! source columns: a run either aligns or it does not, which is both simpler
 //! and one less way for a second pass to disagree with the first.
 
+use mtc_core::diagnostics::Span;
+
 use crate::compiler::CompileError;
 use crate::cst::{
     AlphabetCst, BindCst, Cst, DocRunItem, DocRunKind, GraftCst, MachineCst, NamespaceCst,
     ReuseCarrier, ReuseCst, RuleItem, RuleKind, StateCst, TapeCst, TopItem, TopKind, UseCst,
     UsePath, WorldItem, WorldKind,
 };
-use crate::lexer::{Comment, LexMode, lex_with};
+use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
 use crate::parser::{
-    AlphabetElem, BindingArg, BindingValue, Continuation, FoldExprKind, FoldExprNode, FoldOp,
-    MapArrow, MoveDir, MoveVec, Pattern, PatternCell, PatternCellKind, Rule, SigParamKind,
-    Signature, SymLit, SymMap, TermKind, Transition, WriteCellKind, WriteVec, parse_cst,
+    AlphabetElem, BindingArg, BindingValue, Continuation, MapArrow, MoveDir, MoveVec, Pattern,
+    PatternCell, PatternCellKind, Rule, SigParamKind, Signature, SymLit, SymMap, TermKind,
+    Transition, WriteCellKind, WriteVec, parse_cst,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -140,11 +142,11 @@ const LINE_WIDTH: usize = 80;
 pub fn format(source: &str) -> Result<String, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let cst = parse_cst(&tokens)?;
-    Ok(print_cst(&cst))
+    Ok(print_cst(&cst, &tokens))
 }
 
-fn print_cst(cst: &Cst) -> String {
-    let out = flush(&render_top_items(&cst.items, 0));
+fn print_cst(cst: &Cst, tokens: &[Token]) -> String {
+    let out = flush(&render_top_items(&cst.items, 0, tokens));
     // An empty file still reprints as exactly one newline; a non-empty one
     // already ends in the last item's newline.
     if out.is_empty() {
@@ -386,62 +388,54 @@ fn pattern_cell_text(cell: &PatternCell) -> String {
     out
 }
 
-fn write_vec_text(vec: &WriteVec) -> String {
+fn write_vec_text(vec: &WriteVec, tokens: &[Token]) -> String {
     let cells: Vec<String> = vec
         .cells
         .iter()
         .map(|cell| match &cell.kind {
             WriteCellKind::Keep => "-".to_string(),
             WriteCellKind::Lit(sym) => sym_text(sym),
-            WriteCellKind::Subst { expr } => format!("{{{}}}", fold_expr_text(expr)),
+            WriteCellKind::Subst { expr } => format!("{{{}}}", subst_body_text(&expr.span, tokens)),
         })
         .collect();
     format!("write [{}]", cells.join(", "))
 }
 
-/// Print a write-cell fold expression tight — no spaces, minimal parentheses
-/// (docs/tmt/language.md (substitution)). Precedence levels: atoms bind
-/// tightest, then `*`/`%`, then `+`/`-`. A child is wrapped only when its own
-/// precedence is looser than the parent's, plus the right operand of a
-/// same-precedence node (the operators are left-associative, so `a-(b-c)`
-/// must keep its parens).
-fn fold_expr_text(expr: &FoldExprNode) -> String {
-    fn prec(kind: &FoldExprKind) -> u8 {
-        match kind {
-            FoldExprKind::Var(_) | FoldExprKind::Int(_) => 3,
-            FoldExprKind::Bin {
-                op: FoldOp::Mul | FoldOp::Rem,
-                ..
-            } => 2,
-            FoldExprKind::Bin {
-                op: FoldOp::Add | FoldOp::Sub,
-                ..
-            } => 1,
-        }
+/// Reprint a substitution `{…}` from its SOURCE TOKENS, tight (no interior
+/// whitespace), rather than re-deriving from the parsed tree. This keeps the
+/// formatter whitespace-only (docs/tmt/fmt.md (whitespace-only)): the source's
+/// own parenthesization survives (`{(v*2)+1}` is not rewritten to `{v*2+1}`),
+/// and a number reprints from its written spelling. `span` is the expression's
+/// span (braces excluded); the significant tokens lying within it are exactly
+/// the expression, comments having been split off before the grammar walk, so
+/// concatenating their spellings yields the tight form.
+fn subst_body_text(span: &Span, tokens: &[Token]) -> String {
+    tokens
+        .iter()
+        .filter(|t| {
+            !matches!(t.kind, TokenKind::Comment(_))
+                && t.span().start >= span.start
+                && t.span().end <= span.end
+        })
+        .map(|t| fold_token_text(&t.kind))
+        .collect()
+}
+
+/// The source spelling of one write-cell fold-expression token. Only the fold
+/// grammar's tokens (`+ - * %`, parens, names, integers) fall within a
+/// substitution's span, so nothing else is reachable here.
+fn fold_token_text(kind: &TokenKind) -> &str {
+    match kind {
+        TokenKind::Ident(s) => s,
+        TokenKind::Number(_, spelling) => spelling,
+        TokenKind::Plus => "+",
+        TokenKind::Dash => "-",
+        TokenKind::Star => "*",
+        TokenKind::Percent => "%",
+        TokenKind::LParen => "(",
+        TokenKind::RParen => ")",
+        _ => "",
     }
-    fn go(node: &FoldExprNode, parent_prec: u8, is_right: bool) -> String {
-        match &node.kind {
-            FoldExprKind::Var(name) => name.clone(),
-            FoldExprKind::Int(n) => n.to_string(),
-            FoldExprKind::Bin { op, lhs, rhs } => {
-                let p = prec(&node.kind);
-                let sym = match op {
-                    FoldOp::Add => "+",
-                    FoldOp::Sub => "-",
-                    FoldOp::Mul => "*",
-                    FoldOp::Rem => "%",
-                };
-                let body = format!("{}{sym}{}", go(lhs, p, false), go(rhs, p, true));
-                if p < parent_prec || (p == parent_prec && is_right) {
-                    format!("({body})")
-                } else {
-                    body
-                }
-            }
-        }
-    }
-    // The whole expression sits under no parent — level 0 wraps nothing.
-    go(expr, 0, false)
 }
 
 fn move_vec_text(vec: &MoveVec) -> String {
@@ -554,7 +548,7 @@ struct Grid {
     mov: usize,
 }
 
-fn grid_for(rules: &[&Rule]) -> Grid {
+fn grid_for(rules: &[&Rule], tokens: &[Token]) -> Grid {
     let width = |s: &str| s.chars().count();
     Grid {
         pattern: rules
@@ -569,7 +563,7 @@ fn grid_for(rules: &[&Rule]) -> Grid {
         },
         write: rules
             .iter()
-            .filter_map(|r| r.write.as_ref().map(|w| width(&write_vec_text(w))))
+            .filter_map(|r| r.write.as_ref().map(|w| width(&write_vec_text(w, tokens))))
             .max()
             .unwrap_or(0),
         mov: rules
@@ -582,7 +576,7 @@ fn grid_for(rules: &[&Rule]) -> Grid {
 
 /// One rule as a grid row: `indent`, the padded pattern, the arrow, the
 /// action columns, the transition, `;`.
-fn render_rule(rule: &Rule, grid: &Grid, indent: usize) -> String {
+fn render_rule(rule: &Rule, grid: &Grid, indent: usize, tokens: &[Token]) -> String {
     let mut line = " ".repeat(indent);
     let pattern = pattern_text(&rule.pattern);
     let pattern_width = pattern.chars().count();
@@ -594,7 +588,10 @@ fn render_rule(rule: &Rule, grid: &Grid, indent: usize) -> String {
         (rule.debugger, "debugger".to_string(), grid.debugger),
         (
             rule.write.is_some(),
-            rule.write.as_ref().map(write_vec_text).unwrap_or_default(),
+            rule.write
+                .as_ref()
+                .map(|w| write_vec_text(w, tokens))
+                .unwrap_or_default(),
             grid.write,
         ),
         (
@@ -670,21 +667,21 @@ fn transition_text(transition: &Transition, col: usize) -> String {
 // Top-level items.
 // ---------------------------------------------------------------------------
 
-fn render_top_items(items: &[TopItem], indent: usize) -> Vec<Rendered> {
+fn render_top_items(items: &[TopItem], indent: usize, tokens: &[Token]) -> Vec<Rendered> {
     items
         .iter()
-        .map(|item| render_top_item(item, indent))
+        .map(|item| render_top_item(item, indent, tokens))
         .collect()
 }
 
-fn render_top_item(item: &TopItem, indent: usize) -> Rendered {
+fn render_top_item(item: &TopItem, indent: usize, tokens: &[Token]) -> Rendered {
     match &item.kind {
         TopKind::Comment(c) => Rendered::new(item.blank_before, comment_line(c, indent)),
         TopKind::Import(u) => render_use(u, item.blank_before, indent),
         TopKind::Alphabet(a) => render_alphabet(a, item.blank_before, indent),
-        TopKind::Namespace(ns) => render_namespace(ns, item.blank_before, indent),
-        TopKind::Reuse(r) => render_reuse(r, item.blank_before, indent),
-        TopKind::Machine(m) => render_machine(m, item.blank_before, indent),
+        TopKind::Namespace(ns) => render_namespace(ns, item.blank_before, indent, tokens),
+        TopKind::Reuse(r) => render_reuse(r, item.blank_before, indent, tokens),
+        TopKind::Machine(m) => render_machine(m, item.blank_before, indent, tokens),
     }
 }
 
@@ -738,20 +735,29 @@ fn render_alphabet(a: &AlphabetCst, blank_before: bool, indent: usize) -> Render
         .with_trailing(a.close_trailing.as_ref())
 }
 
-fn render_namespace(ns: &NamespaceCst, blank_before: bool, indent: usize) -> Rendered {
+fn render_namespace(
+    ns: &NamespaceCst,
+    blank_before: bool,
+    indent: usize,
+    tokens: &[Token],
+) -> Rendered {
     let pad = " ".repeat(indent);
     let mut code = doc_run_text(&ns.doc_run, indent, blank_before);
     code.push_str(&format!("{pad}namespace {} {{", ns.name));
     code.push_str(&open_trailing_text(&ns.open_trailing));
     code.push('\n');
-    code.push_str(&flush(&render_top_items(&ns.items, indent + INDENT_UNIT)));
+    code.push_str(&flush(&render_top_items(
+        &ns.items,
+        indent + INDENT_UNIT,
+        tokens,
+    )));
     code.push_str(&pad);
     code.push('}');
     Rendered::new(leads_with_blank(blank_before, &ns.doc_run), code)
         .with_trailing(ns.close_trailing.as_ref())
 }
 
-fn render_reuse(r: &ReuseCst, blank_before: bool, indent: usize) -> Rendered {
+fn render_reuse(r: &ReuseCst, blank_before: bool, indent: usize, tokens: &[Token]) -> Rendered {
     let pad = " ".repeat(indent);
     let mut code = doc_run_text(&r.doc_run, indent, blank_before);
     let carrier = match r.carrier {
@@ -767,20 +773,28 @@ fn render_reuse(r: &ReuseCst, blank_before: bool, indent: usize) -> Rendered {
     code.push_str(&paren_list(indent, &head, &signature_params(&r.sig), " {"));
     code.push_str(&open_trailing_text(&r.open_trailing));
     code.push('\n');
-    code.push_str(&flush(&render_world_items(&r.items, indent + INDENT_UNIT)));
+    code.push_str(&flush(&render_world_items(
+        &r.items,
+        indent + INDENT_UNIT,
+        tokens,
+    )));
     code.push_str(&pad);
     code.push('}');
     Rendered::new(leads_with_blank(blank_before, &r.doc_run), code)
         .with_trailing(r.close_trailing.as_ref())
 }
 
-fn render_machine(m: &MachineCst, blank_before: bool, indent: usize) -> Rendered {
+fn render_machine(m: &MachineCst, blank_before: bool, indent: usize, tokens: &[Token]) -> Rendered {
     let pad = " ".repeat(indent);
     let mut code = doc_run_text(&m.doc_run, indent, blank_before);
     code.push_str(&format!("{pad}machine {{"));
     code.push_str(&open_trailing_text(&m.open_trailing));
     code.push('\n');
-    code.push_str(&flush(&render_world_items(&m.items, indent + INDENT_UNIT)));
+    code.push_str(&flush(&render_world_items(
+        &m.items,
+        indent + INDENT_UNIT,
+        tokens,
+    )));
     code.push_str(&pad);
     code.push('}');
     Rendered::new(leads_with_blank(blank_before, &m.doc_run), code)
@@ -794,8 +808,8 @@ fn render_machine(m: &MachineCst, blank_before: bool, indent: usize) -> Rendered
 /// A world body (a `machine`, `routine`, or `graph` block). Runs of adjacent
 /// single-line states are found first, so the run's shared header width and
 /// shared rule grid are known before any of its members is rendered.
-fn render_world_items(items: &[WorldItem], indent: usize) -> Vec<Rendered> {
-    let inline = inline_state_runs(items, indent);
+fn render_world_items(items: &[WorldItem], indent: usize, tokens: &[Token]) -> Vec<Rendered> {
+    let inline = inline_state_runs(items, indent, tokens);
     let tape_names = tape_name_widths(items);
     items
         .iter()
@@ -806,8 +820,8 @@ fn render_world_items(items: &[WorldItem], indent: usize) -> Vec<Rendered> {
             WorldKind::Graft(g) => render_graft(g, item.blank_before, indent),
             WorldKind::Bind(b) => render_bind(b, item.blank_before, indent),
             WorldKind::State(s) => match &inline[i] {
-                Some(shape) => render_inline_state(s, shape, item.blank_before, indent),
-                None => render_block_state(s, item.blank_before, indent),
+                Some(shape) => render_inline_state(s, shape, item.blank_before, indent, tokens),
+                None => render_block_state(s, item.blank_before, indent, tokens),
             },
         })
         .collect()
@@ -841,7 +855,11 @@ fn state_header_text(state: &StateCst) -> String {
 /// form). A run is maximal over adjacent inline-capable, undocumented states
 /// with no blank line between them; if any member would cross the line limit,
 /// the whole run falls back to block form.
-fn inline_state_runs(items: &[WorldItem], indent: usize) -> Vec<Option<InlineShape>> {
+fn inline_state_runs(
+    items: &[WorldItem],
+    indent: usize,
+    tokens: &[Token],
+) -> Vec<Option<InlineShape>> {
     let mut out: Vec<Option<InlineShape>> = items.iter().map(|_| None).collect();
     fn member(item: &WorldItem) -> Option<&StateCst> {
         match &item.kind {
@@ -876,17 +894,20 @@ fn inline_state_runs(items: &[WorldItem], indent: usize) -> Vec<Option<InlineSha
                 RuleKind::Comment(_) => None,
             })
             .collect();
-        let grid = grid_for(&rules);
-        let fits = states
-            .iter()
-            .all(|s| inline_state_line(s, header, &grid, indent).chars().count() <= LINE_WIDTH);
+        let grid = grid_for(&rules, tokens);
+        let fits = states.iter().all(|s| {
+            inline_state_line(s, header, &grid, indent, tokens)
+                .chars()
+                .count()
+                <= LINE_WIDTH
+        });
         if fits {
             // The run's SHARED grid is what every member prints with — that
             // is what makes a block of one-line states read as one table.
             for offset in 0..states.len() {
                 out[start + offset] = Some(InlineShape {
                     header,
-                    grid: grid_for(&rules),
+                    grid: grid_for(&rules, tokens),
                 });
             }
         }
@@ -895,7 +916,13 @@ fn inline_state_runs(items: &[WorldItem], indent: usize) -> Vec<Option<InlineSha
     out
 }
 
-fn inline_state_line(state: &StateCst, header_width: usize, grid: &Grid, indent: usize) -> String {
+fn inline_state_line(
+    state: &StateCst,
+    header_width: usize,
+    grid: &Grid,
+    indent: usize,
+    tokens: &[Token],
+) -> String {
     let header = state_header_text(state);
     let mut line = format!(
         "{}{header}{} {{",
@@ -905,7 +932,7 @@ fn inline_state_line(state: &StateCst, header_width: usize, grid: &Grid, indent:
     for item in &state.rules {
         if let RuleKind::Rule(r) = &item.kind {
             line.push(' ');
-            line.push_str(&render_rule(&r.rule, grid, 0));
+            line.push_str(&render_rule(&r.rule, grid, 0, tokens));
         }
     }
     line.push_str(" }");
@@ -917,12 +944,18 @@ fn render_inline_state(
     shape: &InlineShape,
     blank_before: bool,
     indent: usize,
+    tokens: &[Token],
 ) -> Rendered {
-    let code = inline_state_line(state, shape.header, &shape.grid, indent);
+    let code = inline_state_line(state, shape.header, &shape.grid, indent, tokens);
     Rendered::new(blank_before, code).with_trailing(state.close_trailing.as_ref())
 }
 
-fn render_block_state(state: &StateCst, blank_before: bool, indent: usize) -> Rendered {
+fn render_block_state(
+    state: &StateCst,
+    blank_before: bool,
+    indent: usize,
+    tokens: &[Token],
+) -> Rendered {
     let pad = " ".repeat(indent);
     let mut code = doc_run_text(&state.doc_run, indent, blank_before);
     code.push_str(&format!("{pad}{} {{", state_header_text(state)));
@@ -936,11 +969,11 @@ fn render_block_state(state: &StateCst, blank_before: bool, indent: usize) -> Re
             RuleKind::Comment(_) => None,
         })
         .collect();
-    let grid = grid_for(&rules);
+    let grid = grid_for(&rules, tokens);
     let body: Vec<Rendered> = state
         .rules
         .iter()
-        .map(|item| render_rule_item(item, &grid, indent + INDENT_UNIT))
+        .map(|item| render_rule_item(item, &grid, indent + INDENT_UNIT, tokens))
         .collect();
     code.push_str(&flush(&body));
     code.push_str(&pad);
@@ -949,11 +982,14 @@ fn render_block_state(state: &StateCst, blank_before: bool, indent: usize) -> Re
         .with_trailing(state.close_trailing.as_ref())
 }
 
-fn render_rule_item(item: &RuleItem, grid: &Grid, indent: usize) -> Rendered {
+fn render_rule_item(item: &RuleItem, grid: &Grid, indent: usize, tokens: &[Token]) -> Rendered {
     match &item.kind {
         RuleKind::Comment(c) => Rendered::new(item.blank_before, comment_line(c, indent)),
-        RuleKind::Rule(r) => Rendered::new(item.blank_before, render_rule(&r.rule, grid, indent))
-            .with_trailing(r.trailing.as_ref()),
+        RuleKind::Rule(r) => Rendered::new(
+            item.blank_before,
+            render_rule(&r.rule, grid, indent, tokens),
+        )
+        .with_trailing(r.trailing.as_ref()),
     }
 }
 

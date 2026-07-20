@@ -901,3 +901,19 @@ fn fold_expr_bare_var_stays_passthrough_for_glyphs() {
     let src = one_rule("['a'..'c' as c] -> write [{c}] move [>] goto s;");
     assert!(parse_src(&src).is_ok());
 }
+
+#[test]
+fn fold_expr_parenthesized_lone_glyph_binding_stays_passthrough() {
+    // Parens around a lone glyph binding collapse to a top-level `Var`, so
+    // `{(c)}` is passthrough — not char arithmetic — and parses on a glyph
+    // binding just as bare `{c}` does.
+    let src = one_rule("['a'..'c' as c] -> write [{(c)}] move [>] goto s;");
+    assert!(parse_src(&src).is_ok());
+    let p = parse_src(&src).unwrap();
+    let cell = &machine(&p).states[0].rules[0].write.as_ref().unwrap().cells[0];
+    assert!(matches!(
+        &cell.kind,
+        WriteCellKind::Subst { expr }
+            if matches!(&expr.kind, FoldExprKind::Var(name) if name == "c")
+    ));
+}
