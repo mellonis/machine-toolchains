@@ -54,11 +54,6 @@ machine {
             },
         )
         .unwrap();
-        assert!(
-            report
-                .diagnostics
-                .iter()
-                .all(|d| d.code != "unused-import")
-        );
+        assert!(report.diagnostics.iter().all(|d| d.code != "unused-import"));
     }
 }

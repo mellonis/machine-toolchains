@@ -42,10 +42,7 @@ fn written_literals(callee: &ResolvedWorld) -> HashSet<(usize, String)> {
 fn check_binding(callee: &ResolvedWorld, args: &[BindingArg], out: &mut Vec<Diagnostic>) {
     let written = written_literals(callee);
     for arg in args {
-        let BindingValue::Named {
-            map: Some(map), ..
-        } = &arg.value
-        else {
+        let BindingValue::Named { map: Some(map), .. } = &arg.value else {
             continue;
         };
         // The callee tape position the map applies to.

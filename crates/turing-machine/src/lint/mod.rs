@@ -106,15 +106,25 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-graft-instance", rules::unused_graft_instance::check),
     ("deprecated-call", rules::deprecated_call::check),
     ("dead-rule", rules::dead_rule::check),
-    ("redundant-identity-pairs", rules::redundant_identity_pairs::check),
-    ("binding-product-threshold", rules::binding_product_threshold::check),
-    ("writes-through-collapse", rules::writes_through_collapse::check),
+    (
+        "redundant-identity-pairs",
+        rules::redundant_identity_pairs::check,
+    ),
+    (
+        "binding-product-threshold",
+        rules::binding_product_threshold::check,
+    ),
+    (
+        "writes-through-collapse",
+        rules::writes_through_collapse::check,
+    ),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the
 /// code (the totality lints, deliberately noisy). In the known-code namespace
 /// (so a shared allow-list may still name one) but never run unless enabled.
-pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[("state-may-trap", rules::state_may_trap::check)];
+pub(crate) const OPT_IN_RULES: &[(&str, Rule)] =
+    &[("state-may-trap", rules::state_may_trap::check)];
 
 /// True when `code` names any rule in this crate's `.tmc` tables OR core's
 /// arch-agnostic asm rule table (`mtc_core::asm::lint::RULES`) — the shared

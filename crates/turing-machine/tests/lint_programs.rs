@@ -49,7 +49,11 @@ fn a_dirty_tmc_file_reports_and_exits_one() {
     let f = write(&dir, "m.tmc", DIRTY);
     let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
     assert_eq!(out.code, 1);
-    assert!(out.stdout.contains("lint: leftover 'debugger' marker"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("lint: leftover 'debugger' marker"),
+        "{}",
+        out.stdout
+    );
 }
 
 #[test]
@@ -122,14 +126,22 @@ fn a_parse_fatal_is_a_per_file_error_and_the_batch_continues() {
     .unwrap();
     assert_eq!(out.code, 1);
     assert!(out.stderr.contains("error:"), "stderr: {}", out.stderr);
-    assert!(out.stdout.contains("leftover 'debugger'"), "stdout: {}", out.stdout);
+    assert!(
+        out.stdout.contains("leftover 'debugger'"),
+        "stdout: {}",
+        out.stdout
+    );
 }
 
 #[test]
 fn tmt_json_allow_unions_with_the_flag() {
     let dir = scratch("config");
     let f = write(&dir, "m.tmc", DIRTY);
-    write(&dir, "tmt.json", r#"{"lint":{"allow":["leftover-debugger"]}}"#);
+    write(
+        &dir,
+        "tmt.json",
+        r#"{"lint":{"allow":["leftover-debugger"]}}"#,
+    );
     // No --allow flag: the config alone suppresses.
     let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
     assert_eq!(out.code, 0, "stdout: {} stderr: {}", out.stdout, out.stderr);
@@ -146,7 +158,11 @@ fn a_bad_tmt_json_is_a_per_file_error() {
     write(&dir, "tmt.json", r#"{"lint":{"allow":["no-such-rule"]}}"#);
     let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
     assert_eq!(out.code, 1);
-    assert!(out.stderr.contains("no-such-rule"), "stderr: {}", out.stderr);
+    assert!(
+        out.stderr.contains("no-such-rule"),
+        "stderr: {}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -164,9 +180,19 @@ machine {
     let f = write(&dir, "m.tmc", partial);
 
     let quiet = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
-    assert_eq!(quiet.code, 0, "stdout: {} stderr: {}", quiet.stdout, quiet.stderr);
+    assert_eq!(
+        quiet.code, 0,
+        "stdout: {} stderr: {}",
+        quiet.stdout, quiet.stderr
+    );
 
-    let warned = execute(&args(&["lint", f.to_str().unwrap(), "--warn", "state-may-trap"])).unwrap();
+    let warned = execute(&args(&[
+        "lint",
+        f.to_str().unwrap(),
+        "--warn",
+        "state-may-trap",
+    ]))
+    .unwrap();
     assert_eq!(warned.code, 1);
     assert!(warned.stdout.contains("may trap"), "{}", warned.stdout);
 }
