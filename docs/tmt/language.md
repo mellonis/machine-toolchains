@@ -438,11 +438,13 @@ A bind is a call target, not a state — `goto h` is a compile error.
 - `bind` when several call sites share one argument list and repeating it
   would be noise.
 
-The stdlib ships both forms of each operation — a behaviour `graph` with
+Most stdlib operations ship both forms — a behaviour `graph` with
 explicit exits and a one-line `routine` facade that grafts it with `done
-= return` — so a consumer picks per use site (`docs/tmt/stdlib.md`). How
-the three lower onto the machine, and what `tmt link --call-mech`
-chooses between, is `docs/tmt/isa.md (call mechanisms)`.
+= return` — so where both exist a consumer picks per use site
+(`docs/tmt/stdlib.md`); a few ship only the routine facade, composed over
+another routine rather than backed by a graph of their own. How the three
+lower onto the machine, and what `tmt link --call-mech` chooses between,
+is `docs/tmt/isa.md (call mechanisms)`.
 
 ## Symbol maps
 

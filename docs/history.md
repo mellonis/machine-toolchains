@@ -212,10 +212,10 @@ programs' modern home.
 
 ## The design record
 
-The full design this toolchain was built from is preserved at
-`docs/superpowers/specs/2026-07-04-post-machine-toolchain-design.md`,
-frozen as of this documentation set landing. It is no longer the
-authority code cites or docs are derived from day to day — that role now
+The full v1 design this toolchain was built from was written up as a
+spec, kept as a frozen record in the repository's internal design
+documents. It is no longer the authority code cites or docs are derived
+from day to day — that role now
 belongs to this page and its siblings (`docs/pmt/language.md`, `docs/pmt/isa.md`,
 `docs/formats.md`, `docs/pmt/cli.md`, `docs/pmt/stdlib.md`, and `README.md`) — but
 it remains the historical record of the reasoning behind v1's design
