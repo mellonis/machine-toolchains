@@ -351,6 +351,72 @@ alphabet wideEnoughToWrap {
 
 // -- blank lines, comments, doc runs ----------------------------------------
 
+// The next three fixtures pin a KNOWN LIMITATION named in the module doc's
+// "Trivia-preserving, with one exception" bullet, not a desired shape: the
+// CST has no comment slot on an alphabet element, a signature parameter, or
+// a binding argument, so a comment written inside one of those lists cannot
+// stay in place. It survives — reprinted as an own-line comment right after
+// the enclosing item — but a reader can misattribute it to whatever follows.
+// If the CST ever grows slots for these, these fixtures should change to
+// keep the comment in place, not merely stay passing.
+
+#[test]
+fn a_comment_inside_an_alphabet_body_relocates_after_it() {
+    check(
+        "\
+alphabet ab {
+  '_', // blank
+  'a'
+}
+",
+        "\
+alphabet ab { '_', 'a' }
+// blank
+",
+    );
+}
+
+#[test]
+fn a_comment_inside_a_grafts_binding_list_relocates_after_it() {
+    check(
+        "\
+machine {
+entry graft findSomething(
+  t = work, // note
+  found = celebrateLoudly
+) as seek;
+}
+",
+        "\
+machine {
+  entry graft findSomething(t = work, found = celebrateLoudly) as seek;
+  // note
+}
+",
+    );
+}
+
+#[test]
+fn a_comment_inside_a_signature_relocates_after_it() {
+    check(
+        "\
+export graph walk(
+  tape t: ab, // note
+  state done
+) {
+state s { [*] -> done; }
+}
+",
+        "\
+export graph walk(tape t: ab, state done) {
+  // note
+
+  state s { [*] -> done; }
+}
+",
+    );
+}
+
 #[test]
 fn blank_runs_collapse_to_one_and_are_never_forced() {
     check(

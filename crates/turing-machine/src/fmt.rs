@@ -5,8 +5,8 @@
 //!
 //! # The contract
 //!
-//! The printer walks the lossless CST ([`crate::parser::parse_cst`]) rather
-//! than the flattened AST, which buys the four properties the fmt battery
+//! The printer walks the CST ([`crate::parser::parse_cst`]) rather than the
+//! flattened AST, which buys the four properties the fmt battery
 //! (`tests/fmt_tmc.rs`) proves on every fixture in the repository:
 //!
 //! - **Canonical** — the output depends on the token stream and on the few
@@ -20,11 +20,18 @@
 //!   reprints with only the two escapes the lexer accepts, and the bare-name
 //!   `goto` sugar stays bare (`Transition::Goto::explicit` is read, never
 //!   normalized either way).
-//! - **Trivia-preserving** — every comment is reprinted: own-line comments at
-//!   their block's indent, same-line trailing comments riding their line,
-//!   brace-line comments riding the `{`/`}` they were written on. Doc (`?`)
-//!   and attention (`!`) runs — `[deprecated]` included — stay directly above
-//!   the declaration they document, in source order.
+//! - **Trivia-preserving, with one exception** — every comment reprints
+//!   somewhere: own-line comments at their block's indent, same-line trailing
+//!   comments riding their line, brace-line comments riding the `{`/`}` they
+//!   were written on. Doc (`?`) and attention (`!`) runs — `[deprecated]`
+//!   included — stay directly above the declaration they document, in source
+//!   order. The exception: a comment written INSIDE a `call`/`graft` binding
+//!   list, a `routine`/`graph` signature parameter list, or an `alphabet`
+//!   body has nowhere in the tree to stay attached to its own entry, so it
+//!   reprints as an own-line comment after the enclosing item instead of in
+//!   place. Nothing is lost and the output is still idempotent, but the
+//!   comment reads as attached to whatever follows rather than to the entry
+//!   it was written next to.
 //!
 //! # Indentation
 //!
