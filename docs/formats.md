@@ -34,6 +34,9 @@ accept either a `.pmo` or a `.pmx` on the same command line.
 
 ## `.pmx` — executable
 
+A `.pmx` is an **executable image**: the linker's output, a pure code
+image with the tape supplied separately at run time.
+
 An `.pmx` reader dispatches on the `u16 format version` field: **version 1**
 is the code-only image PM-1 emits, **version 2** is a sectioned image that
 adds a table section plus per-tape alphabet cardinalities and a processor
