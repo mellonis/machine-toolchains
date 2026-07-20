@@ -43,9 +43,12 @@ axes: a crate release with no grammar change repeats the same
 language-version and dialect-version lines, and each grammar version only
 bumps when its own grammar changes.
 
-Every usage block on this page is the subcommand's real `--help` output,
-quoted verbatim and checked against the binary by a test — this page is a
-reference, not a paraphrase.
+Every usage block on this page is quoted verbatim from the binary and
+checked against it by a test — this page is a reference, not a paraphrase.
+For most subcommands that block is the real `--help` output; `tape` and
+`ir` are the exception, since their children take no `--help` of their
+own, so those two blocks are the bare-invocation group usage instead (each
+of those sections repeats this).
 
 ## `tmt compile`
 
@@ -94,10 +97,13 @@ every warning into a compile failure.
 `-O0` runs no optimizer at all, and its output is byte-identical to plain
 codegen — no optimizer artifact leaks into an unoptimized build. `-O1` runs
 the full pass pipeline to a fixpoint. The pass list is owned by the
-optimizer, and both `--fno-<pass>` and `--emit-ir=after:<pass>` read that
-same list rather than a retyped copy, so a stage name and a disable flag can
-never name a pass that does not exist. Ask the binary for the current set by
-naming an unknown stage:
+optimizer, and `--emit-ir=after:<pass>` reads that list to validate its
+stage argument, so an unrecognized stage name is always rejected up front.
+`--fno-<pass>` reads the same list too, but only to render the flag family
+in the generated completion script (`tmt completions`) — the compiler
+itself does not check the suffix, so `--fno-<pass>` accepts any suffix and
+silently disables nothing when it names no real pass. Ask the binary for
+the current set of `after:` stages by naming an unknown one:
 
 ```
 $ tmt compile prog.tmc --emit-ir=after:bogus
@@ -110,7 +116,10 @@ after:dce | after:dead-rows | after:dispatch-select)
 
 `--fno-<pass>` disables one optimizer pass and is repeatable — `--fno-inline
 --fno-dce` disables both. It is a flag *family*: one full flag per pass name,
-not a `name=value` pair.
+not a `name=value` pair. Nothing checks the suffix against the pass
+registry at compile time, though — `--fno-bogus` is accepted and silently
+ignored rather than rejected; only the generated completion script renders
+the family from the real pass list.
 
 `outline` is the one pass that defaults **off**, so it has flags with both
 senses and both are real. `--foutline` turns it on; `--fno-outline` — which
@@ -129,10 +138,18 @@ both accepted, but `--emit-ir STAGE` as two tokens is not — the stage would
 be left behind and rejected as a stray positional. `STAGE` is one of the
 pipeline bookends `lowered` / `final` (the default), or `after:<pass>` for
 any registered pass. An unknown stage is rejected up front, with an error
-naming every stage that does resolve, rather than late as a missing
-snapshot. A stage label captured in several optimizer rounds resolves to the
-last snapshot captured under it. The flag itself may appear only once per
-command line; repeating it is an unknown-flag error.
+naming every stage that does resolve. A *registered* stage is not
+automatically safe, though: a snapshot is only captured for a pass that
+actually changed something, so a stage naming a pass that fired nothing on
+this particular input still fails — just later, as a missing snapshot.
+`tmt compile <program> -O1 --emit-ir=after:inline` on a program with
+nothing to inline is exactly that case: it exits 1 with
+``no IR snapshot labeled `after:inline` was captured`` and writes no
+`.ir.json` sidecar (the object output itself is written normally), while
+the same flag naming a stage whose pass did fire succeeds. A stage label
+captured in several optimizer rounds resolves to the last snapshot
+captured under it. The flag itself may appear only once per command line;
+repeating it is an unknown-flag error.
 
 ### Compile errors
 
@@ -476,8 +493,7 @@ the flag applies to the entire run rather than to one input.
 ```
 $ tmt lint prog.tmc
 $ tmt lint prog.tmc --warn state-may-trap
-prog.tmc:11:9: lint: state `orphan` may trap — its rules do not cover every
-input and there is no catch-all
+prog.tmc:4:15: lint: state `s` may trap — its rules do not cover every input and there is no catch-all
 ```
 
 ### Project configuration

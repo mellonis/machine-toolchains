@@ -106,8 +106,10 @@ pub enum OptLevel {
 #[derive(Debug, Clone, Default)]
 pub struct OptOptions {
     pub level: OptLevel,
-    /// Pass names to skip (`--fno-<pass>`). Checked against [`pass_names`]; an
-    /// unknown name is a CLI error, never silent.
+    /// Pass names to skip (`--fno-<pass>`). NOT checked against
+    /// [`pass_names`] — the CLI strips the prefix and keeps whatever follows,
+    /// so a name matching no pass disables nothing and is not reported. Only
+    /// the generated completion script derives its choices from [`pass_names`].
     pub disabled: HashSet<String>,
     /// Capture an IR snapshot after each pass that changed something
     /// (`--emit-ir`), labelled `after:<pass>`. `compile()` adds the pipeline
