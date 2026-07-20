@@ -144,6 +144,21 @@ past 80 characters, that one line falls back to a single space instead
 (and may then be reported by `line-too-long`); the rest of the run stays
 aligned.
 
+Because the aligned-or-ragged verdict is read off the author's source
+columns, `pmt fmt`'s output is **not** a pure function of the token
+stream: two files with identical tokens, differing only in where the
+`//` sat, format differently — one keeps an aligned column, the other
+gets one space per comment. What the author's columns decide is only
+whether to align; the column itself is always recomputed, so an
+author-aligned run typically lands somewhere other than where it was
+written.
+
+**The `.tmc` formatter does not work this way.** `tmt fmt` aligns any
+run of two or more unconditionally and never reads source columns at all
+(`docs/tmt/fmt.md`). Someone formatting both languages should expect a
+ragged run of trailing comments to survive `pmt fmt` untouched and to
+come out aligned under `tmt fmt`.
+
 ## Doc and attention runs
 
 A `?`/`!` run (`docs/pmt/language.md`, doc lines and attention lines) prints

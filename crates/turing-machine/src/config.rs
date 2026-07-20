@@ -1,8 +1,7 @@
 //! Project configuration: `tmt.json`, the TM toolchain's project file — the
-//! twin of PM-1's `pmt.json` (docs/lint.md (project file), once it lands;
-//! substance in prose here until then). Same tiny schema (`lint.allow` and
-//! nothing else), same nearest-ancestor discovery, same UNION-with-the-flag
-//! merge (never a cascade).
+//! twin of PM-1's `pmt.json` (docs/tmt/lint.md (project file)). Same tiny
+//! schema (`lint.allow` and nothing else), same nearest-ancestor discovery,
+//! same UNION-with-the-flag merge (never a cascade).
 //!
 //! Validation is a manual [`serde_json::Value`] walk rather than
 //! `#[serde(deny_unknown_fields)]`: a typo in a hand-authored config deserves
