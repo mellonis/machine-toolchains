@@ -35,13 +35,10 @@
 //! symbols resolved to caller/callee alphabet indices. No blank pin or closure
 //! is applied here — the composition engine does that at link.
 //!
-//! `compile()` (Task 7) wires the lowering + `validate_world` into the
-//! pipeline and codegen consumes the output; the JSON round-trip
-//! (`to_json`/`from_json`) and `to_mermaid` render surfaces are wired to the
-//! `tmt ir` / `--emit-ir` CLI (`cli::inspect` / `cli::build`). A few analysis
-//! helpers stay exercised only by the in-module tests until the phase-7 lint /
-//! LSP layers consume them, hence the module-wide allow.
-#![allow(dead_code)]
+//! `compile()` wires the lowering + `validate_world` into the pipeline and
+//! codegen consumes the output; the JSON round-trip (`to_json`/`from_json`)
+//! and `to_mermaid` render surfaces are wired to the `tmt ir` / `--emit-ir`
+//! CLI (`cli::inspect` / `cli::build`).
 
 use std::collections::{HashMap, HashSet};
 

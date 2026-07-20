@@ -25,10 +25,8 @@
 //! (`crates/core/src/linker/{compose,engine}.rs`); the compiler-side checks are
 //! earlier and carry source spans.
 //!
-//! `compile()` (Task 7) wires `expand` into the pipeline (IR lowering
-//! consumes its output). A few internal helpers and struct fields remain
-//! exercised only by the in-module tests for now, hence the module-wide allow.
-#![allow(dead_code)]
+//! `compile()` wires `expand` into the pipeline (IR lowering consumes its
+//! output).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -190,10 +188,6 @@ impl SymMap {
         }
     }
 
-    fn is_identity(&self) -> bool {
-        self.holes.is_empty() && self.pairs.iter().all(|(s, d)| s == d)
-    }
-
     /// A deterministic byte serialization for the dedup key.
     fn write_key(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(self.pairs.len() as u32).to_le_bytes());
@@ -206,32 +200,6 @@ impl SymMap {
             out.extend_from_slice(&h.to_le_bytes());
         }
     }
-}
-
-/// Compose two maps: `second ∘ first` (apply `first`, then `second`), holes
-/// propagating (the linker's `compose_map` verbatim).
-fn compose_map(first: &SymMap, second: &SymMap) -> SymMap {
-    let mut out = SymMap::identity();
-    let candidates: BTreeSet<u16> = first
-        .pairs
-        .keys()
-        .chain(first.holes.iter())
-        .chain(second.pairs.keys())
-        .chain(second.holes.iter())
-        .copied()
-        .collect();
-    for s in candidates {
-        match first.apply(s).and_then(|m| second.apply(m)) {
-            None => {
-                out.holes.insert(s);
-            }
-            Some(d) if d != s => {
-                out.pairs.insert(s, d);
-            }
-            Some(_) => {}
-        }
-    }
-    out
 }
 
 /// One bound graph tape's absolute placement onto a host tape, plus its
@@ -304,28 +272,6 @@ impl Composite {
         }
         out
     }
-}
-
-/// Compose an outer graft frame (a graph running under a host) with a nested
-/// graft's binding (a deeper graph running under the outer graph): the nested
-/// binding's caller tapes index the OUTER graph's tapes, resolved through
-/// `outer` to host tapes. Mirrors the linker's `compose_composites`.
-fn compose(outer: &Composite, inner: &Composite) -> Composite {
-    let tapes = inner
-        .tapes
-        .iter()
-        .map(|it| {
-            let ot = &outer.tapes[it.phys];
-            TapeMap {
-                phys: ot.phys,
-                host_card: ot.host_card,
-                graph_card: it.graph_card,
-                rmap: compose_map(&ot.rmap, &it.rmap),
-                wmap: compose_map(&it.wmap, &ot.wmap),
-            }
-        })
-        .collect();
-    Composite { tapes }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,10 +443,8 @@ fn splice_state(
 /// The product-count above which a rule's expansion warns.
 const PRODUCT_THRESHOLD: usize = 256;
 
-/// One tape's resolution context: its glyph vector (index → glyph) and the
-/// inverse lookup (glyph → index).
+/// One tape's resolution context: the inverse lookup (glyph → index).
 struct TapeInfo {
-    glyphs: Vec<String>,
     index: HashMap<String, u16>,
 }
 
@@ -511,14 +455,7 @@ impl TapeInfo {
             .enumerate()
             .map(|(i, g)| (g.clone(), i as u16))
             .collect();
-        Self {
-            glyphs: glyphs.to_vec(),
-            index,
-        }
-    }
-
-    fn card(&self) -> usize {
-        self.glyphs.len()
+        Self { index }
     }
 
     fn idx(&self, glyph: &str) -> Option<u16> {
@@ -1616,33 +1553,6 @@ mod map_tests {
         assert_eq!(t.read_image(1), None);
         assert_eq!(t.holes(), vec![1, 2, 3]);
     }
-
-    #[test]
-    fn compose_threads_reads_and_writes() {
-        // outer: host 4 → graph-A 1 (and back). inner (graph-B under A): A 1 → B 3.
-        let outer = Composite {
-            tapes: vec![TapeMap {
-                phys: 2,
-                host_card: 6,
-                graph_card: 6,
-                rmap: m(&[(4, 1)]),
-                wmap: m(&[(1, 4)]),
-            }],
-        };
-        let inner = Composite {
-            tapes: vec![TapeMap {
-                phys: 0,
-                host_card: 6,
-                graph_card: 6,
-                rmap: m(&[(1, 3)]),
-                wmap: m(&[(3, 1)]),
-            }],
-        };
-        let c = compose(&outer, &inner);
-        assert_eq!(c.tapes[0].phys, 2);
-        assert_eq!(c.tapes[0].rmap.apply(4), Some(3)); // host 4 → A 1 → B 3
-        assert_eq!(c.tapes[0].wmap.apply(3), Some(4)); // B 3 → A 1 → host 4
-    }
 }
 
 #[cfg(test)]
@@ -1926,24 +1836,6 @@ mod oracle_tests {
                 proptest::collection::vec(any::<bool>(), gc),
             )
         })
-    }
-
-    /// A graph rule: per tape a wildcard or a concrete graph symbol; a write
-    /// keep or a concrete graph symbol; a move. Symbols stay in each tape's
-    /// graph alphabet. The transition encodes the source rule index.
-    fn rule_spec(
-        gcards: Vec<usize>,
-    ) -> impl Strategy<Value = (Vec<Option<u16>>, Vec<Option<u16>>, Vec<u8>)> {
-        let pat: Vec<_> = gcards
-            .iter()
-            .map(|&gc| proptest::option::of(0u16..gc as u16))
-            .collect();
-        let wr: Vec<_> = gcards
-            .iter()
-            .map(|&gc| proptest::option::of(0u16..gc as u16))
-            .collect();
-        let mv: Vec<_> = gcards.iter().map(|_| 0u8..3).collect();
-        (pat, wr, mv)
     }
 
     fn mv_of(n: u8) -> MoveDir {

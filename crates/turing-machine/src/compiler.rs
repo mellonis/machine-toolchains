@@ -1,20 +1,17 @@
 //! `.tmc` compiler driver and shared diagnostics — the front-end mirror of
 //! the `.pmc` compiler in the sibling PM-1 crate.
 //!
-//! This module grows across the phase-6a tasks (parser → resolution → IR →
-//! codegen → compile orchestration). Today it hosts the shared fatal type
-//! every pipeline stage reports through, plus the resolution / flatten /
-//! world-check stage (`analyze`) that produces the [`Resolved`] module Task 5
-//! (graft + range expansion) and Task 6 (IR lowering) consume. Library code
-//! never prints: fatals flow as span-carrying, coded values and the CLI is
-//! the sole renderer.
+//! It hosts the shared fatal type every pipeline stage reports through, the
+//! resolution / flatten / world-check stage ([`analyze`]) that produces the
+//! [`Resolved`] module graft + range expansion and IR lowering consume, the
+//! full `compile()` orchestration (`analyze` → expand → lower → codegen), and
+//! [`analyze_staged`] — the partial-results seam the language service drives
+//! off. Library code never prints: fatals flow as span-carrying, coded values
+//! and the CLI is the sole renderer.
 //!
-//! `compile()` (Task 7) now drives `analyze` → expand → lower → codegen, so
-//! most of the resolution machinery is live. A few analysis-context fields
-//! (e.g. `WorldCtx.resolved`) are retained for the lint / LSP layers that land
-//! in phase 7 and stay exercised only by the in-module tests until then, hence
-//! the module-wide allow.
-#![allow(dead_code)]
+//! A few analysis-surface items ([`Analysis`]'s `tokens`/`program`, the whole
+//! staged seam) are read only by the language-tooling layers rather than by
+//! `compile()`; each carries its own `dead_code` allow with the reason.
 
 use std::collections::{HashMap, HashSet};
 
@@ -850,11 +847,18 @@ pub(crate) enum ResolvedCallTarget {
     Bind { name: String },
 }
 
-/// The front half of the pipeline: everything Task 5/6 (and a future lint /
-/// LSP) needs. Mirrors the `.pmc` compiler's `AnalysisOutput` shape.
+/// The front half of the pipeline: everything expand / IR lowering (and the
+/// language-tooling layers) need. Mirrors the `.pmc` compiler's
+/// `AnalysisOutput` shape.
 #[derive(Debug)]
 pub(crate) struct Analysis {
+    /// Read by the `.tmc` lint's token-level rules (line width, leftover
+    /// debugger); `compile()` itself never touches it.
+    #[allow(dead_code)]
     pub tokens: Vec<Token>,
+    /// Read by the `.tmc` lint's AST-level rules; `compile()` itself works off
+    /// `resolved` instead.
+    #[allow(dead_code)]
     pub program: Program,
     pub resolved: Resolved,
     pub diagnostics: Vec<Diagnostic>,
@@ -894,7 +898,6 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
     let resolved = resolve_module(program, &scopes, alphabets)?;
     let mut ctx = WorldCtx {
         scopes: &scopes,
-        resolved: &resolved,
         imports_used: vec![false; program.imports.len()],
         warned_undeclared: HashSet::new(),
         diagnostics: Vec::new(),
@@ -918,7 +921,11 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
 /// bundle: the flat `program` must survive a *resolve*-stage fatal (an editor
 /// still highlights a program whose semantics don't check out), which a
 /// bundle present only on full success could not express.
+///
+/// Consumed by the phase-7 `.tmc` language service (live diagnostics + the
+/// completion / hover / go-to-definition surfaces), not by `compile()`.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct TmcStagedAnalysis {
     /// WithComments token stream — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
@@ -948,6 +955,9 @@ pub(crate) struct TmcStagedAnalysis {
 /// post-parse source of a fatal, and its non-fatal diagnostics ride alongside
 /// a clean resolve. Additive: [`analyze`] and [`compile`] are unchanged, so a
 /// partial fatal a document recovers from never leaks into the batch pipeline.
+///
+/// Consumed by the phase-7 `.tmc` language service, not by `compile()`.
+#[allow(dead_code)]
 pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
     let tokens = match lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
@@ -1777,7 +1787,6 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
 /// The mutable context threaded through the world-boundary checks.
 struct WorldCtx<'a> {
     scopes: &'a Scopes,
-    resolved: &'a Resolved,
     imports_used: Vec<bool>,
     warned_undeclared: HashSet<String>,
     diagnostics: Vec<Diagnostic>,
@@ -3311,7 +3320,10 @@ machine {
             let compile_code = compile(src, CompileOptions::default())
                 .err()
                 .map(|e| e.kind.code());
-            assert!(staged_code.is_some(), "{stage}: staged should carry a fatal");
+            assert!(
+                staged_code.is_some(),
+                "{stage}: staged should carry a fatal"
+            );
             assert_eq!(staged_code, analyze_code, "{stage}: staged vs analyze");
             assert_eq!(staged_code, compile_code, "{stage}: staged vs compile");
         }
@@ -3361,10 +3373,53 @@ machine {
     /// tokenizes into something the parser and resolver actually walk (arbitrary
     /// `String`s mostly die at the lexer).
     const TMC_FRAGMENTS: &[&str] = &[
-        "alphabet", "machine", "routine", "graph", "namespace", "use", "export", "tape", "state",
-        "entry", "graft", "bind", "call", "then", "goto", "move", "write", "return", "stop",
-        "halt", "as", "debugger", "{", "}", "[", "]", "(", ")", ";", ",", ":", "->", "=>", "..",
-        "*", "::", "'_'", "'a'", "'0'", "0", "1", "t", "s", "b", "// c\n", "? doc\n", "! attn\n",
+        "alphabet",
+        "machine",
+        "routine",
+        "graph",
+        "namespace",
+        "use",
+        "export",
+        "tape",
+        "state",
+        "entry",
+        "graft",
+        "bind",
+        "call",
+        "then",
+        "goto",
+        "move",
+        "write",
+        "return",
+        "stop",
+        "halt",
+        "as",
+        "debugger",
+        "{",
+        "}",
+        "[",
+        "]",
+        "(",
+        ")",
+        ";",
+        ",",
+        ":",
+        "->",
+        "=>",
+        "..",
+        "*",
+        "::",
+        "'_'",
+        "'a'",
+        "'0'",
+        "0",
+        "1",
+        "t",
+        "s",
+        "b",
+        "// c\n",
+        "? doc\n",
+        "! attn\n",
     ];
 
     proptest! {
