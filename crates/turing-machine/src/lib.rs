@@ -12,6 +12,7 @@ pub mod compiler;
 mod config;
 pub mod cst;
 pub mod expand;
+pub mod fmt;
 pub mod ir;
 pub mod lexer;
 pub mod lint;
