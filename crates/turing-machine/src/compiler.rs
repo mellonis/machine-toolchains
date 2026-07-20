@@ -848,34 +848,30 @@ pub(crate) enum ResolvedCallTarget {
 }
 
 /// The front half of the pipeline: everything expand / IR lowering (and the
-/// language-tooling layers) need. Mirrors the `.pmc` compiler's
-/// `AnalysisOutput` shape.
+/// batch lint layer) need. Mirrors the `.pmc` compiler's `AnalysisOutput`
+/// shape.
+///
+/// The token stream and the flat program stay local to [`analyze`]: nothing
+/// downstream reads them off this bundle. The language service needs both, but
+/// takes them from [`TmcStagedAnalysis`], which retains every stage's outcome
+/// independently — a partial-results shape this success-only bundle cannot
+/// express.
 #[derive(Debug)]
 pub(crate) struct Analysis {
-    /// Read by the `.tmc` lint's token-level rules (line width, leftover
-    /// debugger); `compile()` itself never touches it.
-    #[allow(dead_code)]
-    pub tokens: Vec<Token>,
-    /// Read by the `.tmc` lint's AST-level rules; `compile()` itself works off
-    /// `resolved` instead.
-    #[allow(dead_code)]
-    pub program: Program,
     pub resolved: Resolved,
     pub diagnostics: Vec<Diagnostic>,
 }
 
 /// lex → parse → duplicate-binding check → resolve alphabets → flatten +
-/// world checks. The `.tmc` analog of the `.pmc` compiler's `analyze`; Task 7
-/// composes it with codegen. Fatals stop at the first offending span; non-
-/// fatal findings (undeclared external, unused import) accumulate as
+/// world checks. The `.tmc` analog of the `.pmc` compiler's `analyze`;
+/// `compile` composes it with codegen. Fatals stop at the first offending
+/// span; non-fatal findings (undeclared external, unused import) accumulate as
 /// diagnostics.
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
     let tokens = lex(source)?;
     let program = parse(&tokens)?;
     let (resolved, diagnostics) = resolve_program(&program)?;
     Ok(Analysis {
-        tokens,
-        program,
         resolved,
         diagnostics,
     })
@@ -925,7 +921,6 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
 /// Consumed by the phase-7 `.tmc` language service (live diagnostics + the
 /// completion / hover / go-to-definition surfaces), not by `compile()`.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct TmcStagedAnalysis {
     /// WithComments token stream — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
@@ -957,7 +952,6 @@ pub(crate) struct TmcStagedAnalysis {
 /// partial fatal a document recovers from never leaks into the batch pipeline.
 ///
 /// Consumed by the phase-7 `.tmc` language service, not by `compile()`.
-#[allow(dead_code)]
 pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
     let tokens = match lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
@@ -3260,8 +3254,14 @@ machine {
         // A leading comment proves `staged.tokens` is a genuine WithComments
         // stream (not merely coincidentally equal to the comment-free stream
         // because the fixture had nothing to filter). On a clean source the
-        // staged path's success fields reproduce `analyze()`'s output exactly,
-        // and `compile()` still succeeds — the seam is purely additive.
+        // staged path's success fields reproduce the batch path's output
+        // exactly, and `compile()` still succeeds — the seam is purely
+        // additive.
+        //
+        // The lex/parse halves compare against `lex`/`parse` directly, since
+        // those are exactly the two calls `analyze` makes before resolving;
+        // `analyze` itself keeps neither result, so the resolved module and
+        // the diagnostics are what it has left to agree on.
         let src = format!("// leading comment\n{A1}");
         let staged = analyze_staged(&src);
         assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
@@ -3287,10 +3287,11 @@ machine {
             .filter(|t| !matches!(t.kind, crate::lexer::TokenKind::Comment(_)))
             .map(|t| t.kind.clone())
             .collect();
-        let expected: Vec<_> = a.tokens.iter().map(|t| t.kind.clone()).collect();
+        let batch_tokens = lex(&src).unwrap();
+        let expected: Vec<_> = batch_tokens.iter().map(|t| t.kind.clone()).collect();
         assert_eq!(significant, expected);
 
-        assert_eq!(program, &a.program);
+        assert_eq!(program, &parse(&batch_tokens).unwrap());
         assert_eq!(resolved, &a.resolved);
         assert_eq!(staged.diagnostics, a.diagnostics);
 
