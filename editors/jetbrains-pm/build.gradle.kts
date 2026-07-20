@@ -30,8 +30,9 @@ dependencies {
 }
 
 // Single-sourcing: the shared grammars ride into their bundle dirs at
-// build — no second copy is ever committed. See
-// docs/superpowers/plans/2026-07-10-lsp-plan3-editor-shells.md.
+// build — no second copy is ever committed. The `editors/grammars/`
+// directory is the one home for both plugins' grammars, and the Rust
+// drift guards in the post-machine crate check exactly those files.
 tasks.processResources {
     from("../grammars") {
         include("pmc.tmLanguage.json")
