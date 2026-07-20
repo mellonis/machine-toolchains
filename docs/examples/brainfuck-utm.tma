@@ -25,7 +25,11 @@
 ; Each conditional TM state compiles to:   rd; mtc <table>; djmp <targets>
 ; Unconditional TM states (single ifOtherSymbol rule) need no match at all —
 ; they compile to straight-line code.  TapeCommand's "write-then-move" is
-; naturally wr-then-mov here, since TM-1 separates the two instructions.
+; written out below as a separate wr and mov, so both halves of the
+; semantics stay visible.  TM-1 also has the fused wrmv, which expresses
+; that same pair as one instruction: folding every wr/mov pair here into a
+; wrmv computes the same tapes in fewer instructions and fewer steps.  The
+; unfused form is kept on purpose — it is the clearer shape to read.
 ; =============================================================================
 
 .section tables
