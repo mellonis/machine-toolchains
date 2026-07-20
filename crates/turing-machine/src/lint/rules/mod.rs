@@ -3,6 +3,7 @@
 //! check(&LintContext, &mut Vec<Diagnostic>)`. The rule table lives in the
 //! parent module.
 
+pub(crate) mod dead_rule;
 pub(crate) mod deprecated_call;
 pub(crate) mod leftover_debugger;
 pub(crate) mod unused_binding;

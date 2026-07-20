@@ -29,6 +29,7 @@
 //! batch CLI reports the fatal and moves on, so it is not a `tmt lint` defect.
 //! Not fixed here.
 
+pub(crate) mod patterns;
 pub mod rules;
 
 use mtc_core::diagnostics::Diagnostic;
@@ -104,6 +105,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-binding", rules::unused_binding::check),
     ("unused-graft-instance", rules::unused_graft_instance::check),
     ("deprecated-call", rules::deprecated_call::check),
+    ("dead-rule", rules::dead_rule::check),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the
@@ -155,6 +157,11 @@ pub(crate) fn run_rules(ctx: &LintContext, allow: &[String], warn: &[String]) ->
     }
     diagnostics.sort_by_key(|d| d.span.start); // stable; Pos is Ord
     diagnostics
+}
+
+/// The glyph labels of a resolved alphabet by mangled name, in position order.
+pub(crate) fn alphabet_glyphs<'a>(resolved: &'a Resolved, mangled: &str) -> Option<&'a [String]> {
+    resolved.alphabets.get(mangled).map(|a| a.glyphs.as_slice())
 }
 
 pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError> {
