@@ -1,0 +1,245 @@
+? A universal Turing machine that interprets brainfuck, written in .tmc.
+?
+? This is the same machine as docs/examples/brainfuck-utm.tma, expressed in
+? the high-level language instead of TM-1 assembly. The two are proven
+? equivalent by execution: one set of golden tape snapshots, two independent
+? implementations.
+?
+? Equivalent means SAME FINAL TAPES AND SAME OUTCOME — not the same number of
+? steps. Do not treat the two files as interchangeable for timing work. This
+? one runs a few percent longer, and the difference is a code-generation
+? artifact rather than anything about the algorithm: a bare `goto` rule emits
+? a dispatch-vector entry pointing at a one-instruction jump stub, where the
+? assembly's `.targets` names the destination body directly, so each such
+? dispatch costs one extra jump. A rule carrying a write or a move does not
+? pay it — its entry points straight at the work. Part of the cost is paid
+? back anyway because
+? codegen fuses a rule's write and move into a single `wrmv`, which the
+? hand-written file spells as two instructions.
+?
+? Read it as a companion piece. The assembly file teaches the ISA — match
+? tables, dispatch vectors, `.rept` macros. This file teaches what the
+? language gives you above them: a state is a state, a range is a range, and
+? the 127-way arithmetic tables the assembly has to spell out become two
+? rules the compiler expands.
+
+// ---------------------------------------------------------------------------
+// The four tapes and their alphabets
+//
+// A .tmc `alphabet` is a named symbol list; index 0 is the blank, and a tape
+// declaration binds one alphabet to one tape. The four bands below are the
+// same ones the assembly declares in its `.routine` signature — there the
+// cardinalities are written out by hand as `alpha=(9,127,127,2)`, here they
+// follow from the alphabet declarations and the compiler emits the signature.
+// ---------------------------------------------------------------------------
+
+? The brainfuck instruction set as tape symbols, plus the 'H' sentinel the
+? interpreter stops on. Index 0 is the blank ' ': it deliberately has NO
+? dispatch rule, so a blank under the instruction pointer is an invalid
+? opcode (see `fetch`).
+alphabet ops { ' ', '+', '-', '<', '>', '.', '[', ']', 'H' }
+
+? Cell values for the data and output tapes: 127 symbols whose index IS the
+? value. Index 127 is reserved as the match wildcard in the compact symbol
+? family, so the ring is 0..126 rather than a full byte — see
+? docs/formats.md (the .tma dialect).
+alphabet bytes { 0..126 }
+
+? The bracket-nesting counter: a unary stack, one '*' per level.
+alphabet levels { ' ', '*' }
+
+machine {
+  tape prog: ops;      // brainfuck source + 'H'; the head IS the instruction pointer
+  tape data: bytes;    // brainfuck cells; the head IS the data pointer
+  tape out:  bytes;    // cells emitted by '.'
+  tape cnt:  levels;   // unary stack of bracket-nesting levels
+
+  // -------------------------------------------------------------------------
+  // fetch — dispatch on the instruction under the program head
+  //
+  // Every rule's pattern is a vector with one cell per tape, in declaration
+  // order [prog, data, out, cnt]; `*` matches any symbol on that tape. This is
+  // the language's version of the assembly's `rd; mtc Tfetch; djmp Dfetch`
+  // triple: the compiler derives the match table from the patterns and the
+  // dispatch vector from the targets.
+  //
+  // There is deliberately no catch-all rule. A program symbol with no rule —
+  // the blank ' ', which is every cell past the sentinel — matches nothing and
+  // the machine traps. The UTM gets an "invalid opcode" fault for free, exactly
+  // as the hand-written table does by omitting its catch-all row.
+  // -------------------------------------------------------------------------
+  entry state fetch {
+    ['+', *, *, *] -> goto plus;
+    ['-', *, *, *] -> goto minus;
+    ['<', *, *, *] -> goto left;
+    ['>', *, *, *] -> goto right;
+    ['.', *, *, *] -> goto dot;
+    ['[', *, *, *] -> goto lbr;
+    [']', *, *, *] -> goto rbr;
+    ['H', *, *, *] -> stop;
+  }
+
+  // -------------------------------------------------------------------------
+  // '+' and '-' — arithmetic on a 0..126 ring
+  //
+  // A Turing machine pays for arithmetic with one rule per value, and no
+  // language can change that: the assembly spells the 127 rules out with a
+  // `.rept` macro over the table section. What .tmc changes is the SOURCE.
+  // `0..125 as v` binds the matched symbol to `v`, and `{v+1}` in the write
+  // vector is folded per expanded rule, so one line stands for 126 of them.
+  //
+  // Range folding is `{v±k}` — plain addition, no modulus. The wrap that the
+  // assembly writes as `{(v+1)%127}` is therefore split off as its own
+  // boundary rule: the range covers the interval where the arithmetic does not
+  // wrap, and the single wrapping value is named explicitly. This is the same
+  // shape the byte-increment example uses for its overflow case.
+  // -------------------------------------------------------------------------
+
+  ? Increment the cell under the data head, wrapping 126 -> 0, then advance
+  ? the instruction pointer.
+  state plus {
+    [*, 0..125 as v, *, *] -> write [-, {v+1}, -, -] move [>, ., ., .] goto fetch;
+    [*, 126,         *, *] -> write [-, 0,     -, -] move [>, ., ., .] goto fetch;
+  }
+
+  ? Decrement the cell under the data head, wrapping 0 -> 126, then advance
+  ? the instruction pointer.
+  state minus {
+    [*, 1..126 as v, *, *] -> write [-, {v-1}, -, -] move [>, ., ., .] goto fetch;
+    [*, 0,           *, *] -> write [-, 126,   -, -] move [>, ., ., .] goto fetch;
+  }
+
+  // -------------------------------------------------------------------------
+  // '<' and '>' — unconditional, so the pattern is all wildcards
+  //
+  // A state whose only rule matches everything needs no match table at all;
+  // the compiler emits straight-line code for it, the same way the assembly
+  // omits the `rd; mtc; djmp` triple for its unconditional labels.
+  // -------------------------------------------------------------------------
+
+  ? Step the data head right; advance the instruction pointer.
+  state right { [*, *, *, *] -> move [>, >, ., .] goto fetch; }
+
+  ? Step the data head left; advance the instruction pointer.
+  state left  { [*, *, *, *] -> move [>, <, ., .] goto fetch; }
+
+  // -------------------------------------------------------------------------
+  // '.' — emit the current cell
+  //
+  // The binding read on one tape is written to ANOTHER: `0..126 as v` matches
+  // on `data` and `{v}` lands in the `out` slot of the write vector. That is
+  // how a multi-tape copy is spelled in .tmc, and it collapses the assembly's
+  // third 127-entry table into a single rule. The output head steps right so
+  // the next '.' writes the next cell.
+  // -------------------------------------------------------------------------
+
+  ? Copy the cell under the data head onto the output tape, then advance both
+  ? the instruction pointer and the output head.
+  state dot {
+    [*, 0..126 as v, *, *] -> write [-, -, {v}, -] move [>, ., >, .] goto fetch;
+  }
+
+  // -------------------------------------------------------------------------
+  // '[' and ']' — the zero test
+  //
+  // Both bracket handlers test the data cell for zero, and both branches
+  // swap between them: '[' skips on zero and advances otherwise, while ']'
+  // advances on zero and skips otherwise. The wildcard rule is written last:
+  // rules are tried in source order, so `[*, 0, *, *]` (data is zero) is
+  // checked first and the catch-all carries "anything else".
+  // -------------------------------------------------------------------------
+
+  ? '[': on a zero cell, push a nesting level and skip forward past the
+  ? matching ']'; otherwise fall into the loop body.
+  state lbr {
+    [*, 0, *, *] -> goto skipFwdPush;              // zero: skip the loop body
+    [*, *, *, *] -> move [>, ., ., .] goto fetch;  // non-zero: enter the body
+  }
+
+  ? ']': on a zero cell, leave the loop; otherwise push a level and skip
+  ? backward to the matching '['.
+  state rbr {
+    [*, 0, *, *] -> move [>, ., ., .] goto fetch;  // zero: leave the loop
+    [*, *, *, *] -> goto skipBackPush;             // non-zero: jump back
+  }
+
+  // -------------------------------------------------------------------------
+  // The bracket scanners and the counter stack
+  //
+  // Skipping over a bracket body means counting nesting levels, and the `cnt`
+  // tape is that counter: one '*' per open level, the head resting on the top
+  // of the stack.
+  //
+  // Pushing is a MOVE followed by a WRITE — step onto the fresh cell, then
+  // mark it. A .tmc rule always writes before it moves (the classic Turing
+  // machine command shape), so a push cannot be one rule; it is a state that
+  // moves and a state that marks. Popping is the other order — blank the top
+  // cell, then step back — and that IS one rule.
+  //
+  // The pop check reads the new top of the stack and is a state of its own,
+  // because in .tmc the read that drives a dispatch happens on entry to the
+  // state, not as a separate instruction inside it.
+  // -------------------------------------------------------------------------
+
+  ? Push a nesting level for the forward scan: step the instruction pointer
+  ? right and the counter head onto a fresh cell.
+  state skipFwdPush { [*, *, *, *] -> move [>, ., ., >] goto skipFwdMark; }
+
+  ? Mark the freshly pushed counter cell, then resume scanning.
+  state skipFwdMark { [*, *, *, *] -> write [-, -, -, '*'] goto skipFwd; }
+
+  ? Scan right for the matching ']', tracking nesting on the counter tape.
+  state skipFwd {
+    ['[', *, *, *] -> goto skipFwdPush;               // deeper: push a level
+    [']', *, *, *] -> goto skipFwdPop;                // shallower: pop one
+    [*,   *, *, *] -> move [>, ., ., .] goto skipFwd; // anything else: keep going
+  }
+
+  ? Pop a level: blank the top counter cell, then step the instruction pointer
+  ? right and the counter head back down.
+  state skipFwdPop {
+    [*, *, *, *] -> write [-, -, -, ' '] move [>, ., ., <] goto skipFwdCheck;
+  }
+
+  ? Did that pop empty the stack? An empty stack means the matching ']' was
+  ? the one just consumed, so execution resumes; otherwise keep scanning.
+  state skipFwdCheck {
+    [*, *, *, ' '] -> goto fetch;
+    [*, *, *, '*'] -> goto skipFwd;
+  }
+
+  // The backward scanner is the mirror image: the instruction pointer runs
+  // left, '[' and ']' swap roles, and an emptied stack lands one cell to the
+  // left of the matching '[' — hence the extra step right in `skipBackDone`.
+
+  ? Push a nesting level for the backward scan: step the instruction pointer
+  ? left and the counter head onto a fresh cell.
+  state skipBackPush { [*, *, *, *] -> move [<, ., ., >] goto skipBackMark; }
+
+  ? Mark the freshly pushed counter cell, then resume scanning.
+  state skipBackMark { [*, *, *, *] -> write [-, -, -, '*'] goto skipBack; }
+
+  ? Scan left for the matching '[', tracking nesting on the counter tape.
+  state skipBack {
+    [']', *, *, *] -> goto skipBackPush;
+    ['[', *, *, *] -> goto skipBackPop;
+    [*,   *, *, *] -> move [<, ., ., .] goto skipBack;
+  }
+
+  ? Pop a level: blank the top counter cell, then step the instruction pointer
+  ? left and the counter head back down.
+  state skipBackPop {
+    [*, *, *, *] -> write [-, -, -, ' '] move [<, ., ., <] goto skipBackCheck;
+  }
+
+  ? Did that pop empty the stack? An empty stack means the matching '[' was
+  ? just passed; otherwise keep scanning left.
+  state skipBackCheck {
+    [*, *, *, ' '] -> goto skipBackDone;
+    [*, *, *, '*'] -> goto skipBack;
+  }
+
+  ? The backward scan stopped one cell left of the matching '['; step back
+  ? onto it so `fetch` re-reads the bracket and re-tests the loop condition.
+  state skipBackDone { [*, *, *, *] -> move [>, ., ., .] goto fetch; }
+}
