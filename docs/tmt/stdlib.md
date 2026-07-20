@@ -75,7 +75,8 @@ std::binaryNumbersBare::symbols    '_'=0  '0'=1  '1'=2
 A call that *binds* a tape (`call std::…::plusOne(num = num)`) needs the
 callee's tape signature, which the compiler only has for a routine defined in
 the same compilation unit; binding into a library routine reports
-`external-binding-unsupported`. A `graft` of one of the exported graphs is
+`external-binding-unsupported` — the compiler names this a limit it has not
+lifted yet, not a property of the language. A `graft` of one of the exported graphs is
 subject to the same rule for a different reason — a graft splices the graph's
 source, so it needs that source in the unit and reports `undefined-graph`
 otherwise. Both forms work when the library's source is compiled into the
@@ -99,7 +100,7 @@ Every routine takes `(tape num: symbols)` over the 5-symbol alphabet.
 | `goToNumber()` | head on the number, any cell up to and including its `'$'` | tape unchanged | that `'$'` |
 | `goToNumbersStart()` | head on the number, any cell from its `'^'` rightward | tape unchanged | that `'^'` |
 | `goToNextNumber()` | head on the current number's `'$'`, or the blank gap after it | tape unchanged | the next number's `'$'` |
-| `goToPreviousNumber()` | head on the current number's `'$'`, or the blank gap after it | tape unchanged | the previous number's `'$'` |
+| `goToPreviousNumber()` | head on the current number's `'$'` | tape unchanged | the previous number's `'$'` |
 | `deleteNumber()` | head on the number, any cell | every cell of `'^'`…`'$'` becomes blank | the cell where the `'$'` was |
 | `normalizeNumber()` | head on the number | leading `'0'`s stripped; the `'^'` relocates rightward. Zero keeps its form `'^$'` | the `'$'` |
 | `plusOne()` | head on the number | adds one; on overflow the number grows one cell left (`'^111$'` → `'^1000$'`) | the `'$'` |
@@ -110,6 +111,12 @@ Every routine takes `(tape num: symbols)` over the 5-symbol alphabet.
 `deleteNumber`, `normalizeNumber` and `plusOne` treat a head on a blank as a
 no-op and leave the tape untouched. `invertNumber` and `minusOne` do not:
 they walk left looking for a `'^'`, so they must start on a number.
+
+The two navigators are not symmetric about the gap between numbers.
+`goToNextNumber` accepts a head on the blank after a number and reaches the
+next one. `goToPreviousNumber` does not: from that blank it steps left, reads
+the `'$'` it just left, and stops there — landing on the number it started
+after rather than the one before. Enter it from the `'$'` itself.
 
 `minusOneFast` and `minusOne` compute the same function. `minusOneFast` is
 the direct borrow subtractor; `minusOne` is the deliberately heavy one,
@@ -170,7 +177,7 @@ name as incidental — the pattern is the graft, not its label.
 Not every operation fits the shape. `std::binaryNumbers::invertNumber` and
 `std::binaryNumbers::minusOne` are plain routines with no graph behind them,
 because their bodies are compositions of `call`s — and a `call` inside a
-graph body cannot be spliced, since the call's binding arguments name the
+graph body cannot yet be spliced, since the call's binding arguments name the
 graph's own signature tapes and its `then` continuation is a graph-space
 state. That check fires **at the graft site**, not at the graph's
 definition: a graph whose body carries a call compiles without complaint as
