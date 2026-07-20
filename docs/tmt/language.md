@@ -289,10 +289,9 @@ A written symbol must exist in that tape's alphabet.
 | `stop` | normal termination |
 | `halt` | abnormal termination |
 
-`stop` and `halt` are the machine's two terminations; `tmt run` exits 0
-on `stop` and 2 on `halt` (`docs/tmt/isa.md (execution)`). A `call`'s
-continuation `CONT` may be a state name or any of `return`, `stop`,
-`halt`, under the same rules.
+`stop` and `halt` are the machine's two terminations
+(`docs/tmt/isa.md (execution)`). A `call`'s continuation `CONT` may be a
+state name or any of `return`, `stop`, `halt`, under the same rules.
 
 A leading `debugger` in the action emits a breakpoint the debugger
 surfaces; `tmt compile --strip-debugger` drops them
@@ -345,9 +344,8 @@ lint finding rather than an error (`docs/tmt/lint.md`).
 
 A state need not be total. When no rule matches, no catch-all is
 synthesized: the dispatch finds nothing and the machine takes the
-`NoTransition` trap (`docs/tmt/isa.md (execution)`), which `tmt run`
-reports as exit 3. Falling off a state is therefore a diagnosable
-runtime event, not undefined behaviour.
+`NoTransition` trap (`docs/tmt/isa.md (execution)`). Falling off a state
+is therefore a diagnosable runtime event, not undefined behaviour.
 
 ## Reuse: `call`, `graft`, and `bind`
 
@@ -496,10 +494,23 @@ with map { 'a' -> 'b' }
 // error: identity completion collides on `b` — 'a' and 'b' would both read as 'b'
 ```
 
-Omitting the map entirely means identity across the board, which requires
-the two alphabets to be **glyph-for-glyph equal** — not merely the same
-size. Two three-symbol alphabets with different glyphs still need an
-explicit map.
+For a **graft** both the blank pin and this injectivity requirement are
+enforced immediately, at the site's splice during compilation. A
+**call**'s or a **bind**'s binding carries the same two checks, but only
+the linker enforces them, once it resolves the binding — `tmt compile`
+accepts a source that violates either one, and `tmt link` is where the
+violation surfaces.
+
+Omitting the map on a **graft** means identity across the board, which
+requires the two alphabets to be **glyph-for-glyph equal** — not merely
+the same size; the compiler rejects an omitted map between two
+three-symbol alphabets that use different glyphs.
+
+A **call** or a **bind** with an omitted map skips this check: the
+binding maps by **index** instead of by glyph. Two same-size,
+differently-glyphed alphabets then bind silently — the caller's symbol at
+index *k* reads to the callee as whatever glyph sits at index *k* there,
+and a write back lands on the caller's glyph at that same index.
 
 ### Unequal alphabets: closed maps and holes
 
@@ -511,9 +522,7 @@ becomes a **hole**. The blank stays pinned as always.
 A hole is not a silent identity and not a compile error. It is a
 diagnosable runtime event: reading a held-out symbol through the map
 takes the `UnmappedRead` trap, and writing one that has no host image
-takes `UnmappedWrite` (`docs/tmt/isa.md (explicit traps)`). Under a
-graft the compiler synthesizes the trap rows at splice time; under a
-frames call the projection raises them.
+takes `UnmappedWrite` (`docs/tmt/isa.md (explicit traps)`).
 
 ```
 // wide {'_','^','$','0','1'} → bare {'_','0','1'}
