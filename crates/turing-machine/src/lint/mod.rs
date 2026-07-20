@@ -31,6 +31,7 @@
 
 pub(crate) mod patterns;
 pub mod rules;
+pub mod tma;
 
 use mtc_core::diagnostics::Diagnostic;
 
@@ -126,13 +127,15 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
 pub(crate) const OPT_IN_RULES: &[(&str, Rule)] =
     &[("state-may-trap", rules::state_may_trap::check)];
 
-/// True when `code` names any rule in this crate's `.tmc` tables OR core's
-/// arch-agnostic asm rule table (`mtc_core::asm::lint::RULES`) — the shared
-/// allow namespace. One `tmt.json` serves both languages, so a `.tma`-only
-/// code must not error when validated for a `.tmc` file, and vice versa.
+/// True when `code` names any rule in this crate's `.tmc` tables, its `.tma`
+/// additions ([`tma::TMA_RULES`]), OR core's arch-agnostic asm rule table
+/// (`mtc_core::asm::lint::RULES`) — the shared allow namespace. One `tmt.json`
+/// serves both languages, so a `.tma`-only code must not error when validated
+/// for a `.tmc` file, and vice versa.
 pub(crate) fn known_code(code: &str) -> bool {
     RULES.iter().any(|(c, _)| *c == code)
         || OPT_IN_RULES.iter().any(|(c, _)| *c == code)
+        || tma::TMA_RULES.iter().any(|(c, _)| *c == code)
         || mtc_core::asm::lint::RULES.iter().any(|(c, _)| *c == code)
 }
 
@@ -234,6 +237,22 @@ machine {
         assert!(validate_allow(&[]).is_ok());
         let err = validate_allow(&["no-such-rule".to_string()]).unwrap_err();
         assert!(matches!(err, LintError::UnknownAllowCode(ref c) if c == "no-such-rule"));
+    }
+
+    #[test]
+    fn validate_allow_also_accepts_tma_addition_codes() {
+        // The three `.tma` additions share the one namespace: a `tmt.json`
+        // naming one must not error when validated for a `.tmc` file, just as
+        // an asm-only or `.tmc`-only code must not error the other path.
+        for code in [
+            "shadowed-wildcard-rows",
+            "retx-exit-bounds",
+            "rept-var-unused",
+        ] {
+            assert!(!RULES.iter().any(|(c, _)| *c == code), "{code} is a .tma addition, not a .tmc rule");
+            assert!(tma::TMA_RULES.iter().any(|(c, _)| *c == code));
+            assert!(validate_allow(&[code.to_string()]).is_ok());
+        }
     }
 
     #[test]
