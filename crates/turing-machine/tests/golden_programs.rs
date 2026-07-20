@@ -21,6 +21,7 @@ use mtc_core::vm::{ArchRegistry, Machine, Outcome, RunLimits, RunOptions, Tape, 
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::asm::{assemble, link};
 use mtc_turing_machine::compiler::{CompileOptions, compile};
+use mtc_turing_machine::optimizer::OptLevel;
 
 fn example_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma")
@@ -196,20 +197,33 @@ fn utm() -> Executable {
         .executable
 }
 
-/// Compile + link the `.tmc` port of the UTM, asserting it compiles
+/// Compile + link the `.tmc` port of the UTM at `opt`, asserting it compiles
 /// warning-free. Yields an executable interchangeable with `utm()`'s: same
 /// four-tape band, same alphabets, same observable behaviour.
-fn utm_from_tmc() -> Executable {
+fn utm_from_tmc(opt: OptLevel) -> Executable {
     let source = fs::read_to_string(tmc_example_path()).expect("the .tmc port is present");
-    let out = compile(&source, CompileOptions::default()).expect("the .tmc port compiles");
+    let out = compile(
+        &source,
+        CompileOptions {
+            opt_level: opt,
+            ..Default::default()
+        },
+    )
+    .expect("the .tmc port compiles");
     assert!(
         out.report.diagnostics.is_empty(),
-        "the .tmc port must compile warning-free, got {:?}",
+        "the .tmc port must compile warning-free at {opt:?}, got {:?}",
         out.report.diagnostics
     );
     link(&[out.object], &[], LinkOptions::default())
         .expect("the .tmc port links")
         .executable
+}
+
+/// Both optimization levels — the port's equivalence must not depend on the
+/// optimizer being on or off.
+fn opt_levels() -> [OptLevel; 2] {
+    [OptLevel::O0, OptLevel::O1]
 }
 
 /// Run the UTM over a fresh four-tape band: the program encoded onto the prog
@@ -318,33 +332,35 @@ fn goldens_match_the_derived_snapshots_and_files() {
 /// the SAME committed `.tmt` bytes through the compiled executable.
 #[test]
 fn the_tmc_port_matches_the_same_goldens() {
-    let exe = utm_from_tmc();
-    for (program, golden, expected_out) in cases() {
-        let derived = derive(program);
-        assert_eq!(
-            derived[2].cells.first().copied(),
-            Some(expected_out),
-            "{program} should output {expected_out}"
-        );
+    for opt in opt_levels() {
+        let exe = utm_from_tmc(opt);
+        for (program, golden, expected_out) in cases() {
+            let derived = derive(program);
+            assert_eq!(
+                derived[2].cells.first().copied(),
+                Some(expected_out),
+                "{program} should output {expected_out}"
+            );
 
-        let (outcome, actual) = run_utm(&exe, program);
-        assert_eq!(
-            outcome,
-            Outcome::Stopped,
-            "{program} halts via the 'H' sentinel (stp) on the .tmc port too"
-        );
-        assert_eq!(
-            actual, derived,
-            "{program}: the .tmc port's tapes must match the reference derivation"
-        );
+            let (outcome, actual) = run_utm(&exe, program);
+            assert_eq!(
+                outcome,
+                Outcome::Stopped,
+                "{program} halts via the 'H' sentinel (stp) on the .tmc port at {opt:?}"
+            );
+            assert_eq!(
+                actual, derived,
+                "{program} at {opt:?}: the .tmc port's tapes must match the reference derivation"
+            );
 
-        // The very bytes the hand-written UTM is pinned to.
-        let bytes = fs::read(golden_dir().join(golden)).expect("golden .tmt present");
-        assert_eq!(
-            bytes,
-            block(&derived).to_bytes(),
-            "{golden} drifted under the .tmc port"
-        );
+            // The very bytes the hand-written UTM is pinned to.
+            let bytes = fs::read(golden_dir().join(golden)).expect("golden .tmt present");
+            assert_eq!(
+                bytes,
+                block(&derived).to_bytes(),
+                "{golden} drifted under the .tmc port"
+            );
+        }
     }
 }
 
@@ -353,12 +369,20 @@ fn the_tmc_port_matches_the_same_goldens() {
 #[test]
 fn the_tmc_port_and_the_assembly_agree_tape_for_tape() {
     let asm_exe = utm();
-    let tmc_exe = utm_from_tmc();
-    for (program, _, _) in cases() {
-        let (asm_outcome, asm_snaps) = run_utm(&asm_exe, program);
-        let (tmc_outcome, tmc_snaps) = run_utm(&tmc_exe, program);
-        assert_eq!(asm_outcome, tmc_outcome, "{program}: outcomes differ");
-        assert_eq!(asm_snaps, tmc_snaps, "{program}: final tapes differ");
+    for opt in opt_levels() {
+        let tmc_exe = utm_from_tmc(opt);
+        for (program, _, _) in cases() {
+            let (asm_outcome, asm_snaps) = run_utm(&asm_exe, program);
+            let (tmc_outcome, tmc_snaps) = run_utm(&tmc_exe, program);
+            assert_eq!(
+                asm_outcome, tmc_outcome,
+                "{program} at {opt:?}: outcomes differ"
+            );
+            assert_eq!(
+                asm_snaps, tmc_snaps,
+                "{program} at {opt:?}: final tapes differ"
+            );
+        }
     }
 }
 
@@ -367,7 +391,7 @@ fn the_tmc_port_and_the_assembly_agree_tape_for_tape() {
 /// machine traps exactly as the hand-written dispatch table does.
 #[test]
 fn the_tmc_port_traps_on_a_program_symbol_with_no_rule() {
-    let exe = utm_from_tmc();
+    let exe = utm_from_tmc(OptLevel::O1);
     let mut registry = ArchRegistry::new();
     registry.register(Box::new(Tm1::new(exe.tape_count)));
     let machine = Machine::from_executable(&exe, &registry).expect("loads");
