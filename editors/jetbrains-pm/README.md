@@ -67,7 +67,7 @@ excludes this plugin's IntelliJ Platform baseline (2024.3).
 
 ## Build and sideload the plugin
 
-From `editors/jetbrains`, with `JAVA_HOME` pointed at any JDK 17+ — a
+From `editors/jetbrains-pm`, with `JAVA_HOME` pointed at any JDK 17+ — a
 JetBrains IDE's own bundled JBR works, e.g. on macOS:
 
 ```sh
@@ -131,7 +131,7 @@ exit code on completion.
 The dropdown deliberately does not offer `link` — building a runnable
 `.pmx` needs a `pmt compile` step followed by a `pmt link` step, and this
 run-configuration type doesn't model a multi-step pipeline (same scope
-line VS Code's task provider draws: see `editors/vscode/README.md`'s "full
+line VS Code's task provider draws: see `editors/vscode-pm/README.md`'s "full
 build-and-run pipeline" section for the equivalent gap there). Produce a
 `.pmo`/`.pmx` with `pmt compile`/`pmt link` from a terminal (or a
 `compile`-subcommand run configuration for the compile half), then point a

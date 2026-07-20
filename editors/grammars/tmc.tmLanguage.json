@@ -1,0 +1,118 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "TMC",
+  "comment": "TM-1 .tmc source (docs/language.md). Every reserved keyword lives in a repository rule whose key starts with `keyword`; the drift guard in crates/turing-machine/tests/editor_grammar.rs parses those alternations and asserts SET EQUALITY with mtc_turing_machine::lexer::RESERVED, so adding a keyword to the language, dropping one from the grammar, or inventing one here all fail the test. The `declaration` rule repeats a few of those words in a capture so the name after them colors as an entity; that copy is cosmetic and deliberately outside the guard's set. Identifiers use the pragmatic ASCII class [A-Za-z_][A-Za-z0-9_]* even though the lexer additionally accepts Unicode letters — best-effort highlighting, not a full identifier class.",
+  "scopeName": "source.tmc",
+  "patterns": [
+    { "include": "#attentionLine" },
+    { "include": "#docLine" },
+    { "include": "#comments" },
+    { "include": "#declaration" },
+    { "include": "#keywordsStorage" },
+    { "include": "#keywordsModifier" },
+    { "include": "#keywordsImport" },
+    { "include": "#keywordsControl" },
+    { "include": "#keywordsOperation" },
+    { "include": "#keywordsDebugger" },
+    { "include": "#glyph" },
+    { "include": "#interpolation" },
+    { "include": "#operators" },
+    { "include": "#wildcard" },
+    { "include": "#number" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.tmc", "match": "//.*$" },
+        { "name": "comment.block.tmc", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "docLine": {
+      "name": "comment.line.documentation.tmc",
+      "match": "^[ \\t]*\\?.*$"
+    },
+    "attentionLine": {
+      "begin": "^[ \\t]*(!)",
+      "beginCaptures": { "1": { "name": "punctuation.definition.comment.tmc" } },
+      "end": "$",
+      "name": "comment.line.attention.tmc",
+      "patterns": [
+        {
+          "name": "storage.modifier.deprecated.tmc",
+          "match": "\\[\\s*deprecated\\s*\\]"
+        }
+      ]
+    },
+    "keywordsStorage": {
+      "name": "storage.type.tmc",
+      "match": "\\b(alphabet|machine|tape|state|routine|graph|namespace)\\b"
+    },
+    "keywordsModifier": {
+      "name": "storage.modifier.tmc",
+      "match": "\\b(export|entry)\\b"
+    },
+    "keywordsImport": {
+      "name": "keyword.control.import.tmc",
+      "match": "\\b(use|as)\\b"
+    },
+    "keywordsControl": {
+      "name": "keyword.control.tmc",
+      "match": "\\b(goto|call|then|return|stop|halt|graft|bind)\\b"
+    },
+    "keywordsOperation": {
+      "name": "support.function.builtin.tmc",
+      "match": "\\b(write|move|map|with)\\b"
+    },
+    "keywordsDebugger": {
+      "name": "keyword.other.debugger.tmc",
+      "match": "\\b(debugger)\\b"
+    },
+    "declaration": {
+      "comment": "Colors the name introduced by a declaring keyword. The keyword itself is re-scoped here because a TextMate rule consumes what it matches; the authoritative keyword lists are the `keywords*` rules above.",
+      "match": "\\b(alphabet|routine|graph|namespace|state)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.tmc" },
+        "2": { "name": "entity.name.type.tmc" }
+      }
+    },
+    "glyph": {
+      "name": "string.quoted.single.tmc",
+      "match": "'(?:\\\\.|[^'\\\\])*'"
+    },
+    "interpolation": {
+      "name": "meta.embedded.expression.tmc",
+      "begin": "\\{(?=[^}\\n]*\\})",
+      "end": "\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.embedded.begin.tmc" } },
+      "endCaptures": { "0": { "name": "punctuation.section.embedded.end.tmc" } },
+      "patterns": [
+        { "include": "#number" },
+        { "name": "keyword.operator.arithmetic.tmc", "match": "[-+*/]" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.rule.tmc", "match": "->" },
+        { "name": "keyword.operator.map.tmc", "match": "=>" },
+        { "name": "keyword.operator.range.tmc", "match": "\\.\\." },
+        { "name": "keyword.operator.assignment.tmc", "match": "=" }
+      ]
+    },
+    "wildcard": {
+      "patterns": [
+        { "name": "constant.language.wildcard.tmc", "match": "(?<![A-Za-z0-9_])\\*(?![A-Za-z0-9_])" },
+        { "name": "keyword.operator.move.tmc", "match": "(?<![A-Za-z0-9_])[<>](?![A-Za-z0-9_])" }
+      ]
+    },
+    "number": { "name": "constant.numeric.tmc", "match": "\\b\\d+\\b" },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.namespace.tmc", "match": "::" },
+        { "name": "punctuation.terminator.tmc", "match": ";" },
+        { "name": "punctuation.separator.comma.tmc", "match": "," },
+        { "name": "punctuation.section.brackets.tmc", "match": "[\\[\\]]" }
+      ]
+    }
+  }
+}

@@ -1,0 +1,45 @@
+<idea-plugin>
+    <id>ru.mellonis.tmc</id>
+    <name>TMC (Turing machine toolchain)</name>
+    <vendor>mellonis</vendor>
+    <description>Language support for .tmc and .tma via tmt lsp (LSP4IJ): diagnostics,
+        completions, navigation, formatting, semantic tokens; tmt run configurations.</description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.redhat.devtools.lsp4ij</depends>
+    <depends>org.jetbrains.plugins.textmate</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType name="TMC" implementationClass="ru.mellonis.tmc.TmcFileType"
+                  fieldName="INSTANCE" extensions="tmc"/>
+        <fileType name="TMA" implementationClass="ru.mellonis.tmc.TmaFileType"
+                  fieldName="INSTANCE" extensions="tma"/>
+        <textmate.bundleProvider implementation="ru.mellonis.tmc.TmcTextMateBundleProvider"/>
+        <!--
+          A plugin-registered fileType otherwise pre-empts TextMate's own
+          file-name-pattern-based coloring for the same extension (LSP4IJ's
+          Developer Guide, "File type mapping" vs "File name pattern
+          mapping": "using File type will override and disable the syntax
+          coloration with TextMate"). Wiring TextMate's own highlighter onto
+          our fileType by name keeps the fileType (needed below for
+          fileTypeMapping) while restoring the coloring.
+        -->
+        <editorHighlighterProvider filetype="TMC"
+                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+        <editorHighlighterProvider filetype="TMA"
+                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+        <notificationGroup id="ru.mellonis.tmc" displayType="BALLOON"/>
+        <postStartupActivity implementation="ru.mellonis.tmc.TmtVersionCheck"/>
+        <applicationService serviceImplementation="ru.mellonis.tmc.TmtSettings"/>
+        <applicationConfigurable groupId="tools" id="ru.mellonis.tmc.settings"
+                                  displayName="tmt" instance="ru.mellonis.tmc.TmtSettingsConfigurable"/>
+        <configurationType implementation="ru.mellonis.tmc.TmtRunConfigurationType"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+        <server id="tmtLsp" name="tmt lsp"
+                factoryClass="ru.mellonis.tmc.TmtLanguageServerFactory"/>
+        <fileTypeMapping fileType="TMC" serverId="tmtLsp" languageId="tmc"/>
+        <fileTypeMapping fileType="TMA" serverId="tmtLsp" languageId="tma"/>
+    </extensions>
+</idea-plugin>

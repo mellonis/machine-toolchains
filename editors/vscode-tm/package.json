@@ -1,0 +1,77 @@
+{
+  "name": "tmc",
+  "displayName": "TMC (Turing machine toolchain)",
+  "description": "Language support for .tmc via tmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
+  "version": "0.1.0",
+  "publisher": "mellonis",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mellonis/machine-toolchains"
+  },
+  "engines": { "vscode": "^1.91.0" },
+  "categories": ["Programming Languages"],
+  "main": "./out/extension.js",
+  "activationEvents": ["onLanguage:tmc", "onLanguage:tma", "onTaskType:tmt"],
+  "contributes": {
+    "languages": [{
+      "id": "tmc", "extensions": [".tmc"], "aliases": ["TMC"],
+      "configuration": "./language-configuration.json"
+    }, {
+      "id": "tma", "extensions": [".tma"], "aliases": ["TMA"],
+      "configuration": "./language-configuration-tma.json"
+    }],
+    "grammars": [{
+      "language": "tmc", "scopeName": "source.tmc",
+      "path": "./syntaxes/tmc.tmLanguage.json"
+    }, {
+      "language": "tma", "scopeName": "source.tma",
+      "path": "./syntaxes/tma.tmLanguage.json"
+    }],
+    "configuration": {
+      "title": "tmt",
+      "properties": {
+        "tmt.path": {
+          "type": "string", "default": "tmt",
+          "description": "Path to the tmt binary."
+        },
+        "tmt.lint.allow": {
+          "type": "array", "items": { "type": "string" }, "default": [],
+          "description": "Lint codes to allow (merged by union with tmt.json)."
+        },
+        "tmt.lint.warn": {
+          "type": "array", "items": { "type": "string" }, "default": [],
+          "description": "Opt-in lint codes to enable (e.g. state-may-trap). IDE-only; tmt.json has no warn key."
+        }
+      }
+    },
+    "problemMatchers": [{
+      "name": "tmt",
+      "owner": "tmt",
+      "fileLocation": ["autoDetect", "${workspaceFolder}"],
+      "severity": "warning",
+      "pattern": {
+        "regexp": "^(?:tmt: )?(.+?):(\\d+):(\\d+): (error|warning|lint): (.+?)(?: \\[([a-z-]+)\\])?$",
+        "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5, "code": 6
+      }
+    }],
+    "taskDefinitions": [{
+      "type": "tmt",
+      "required": ["command"],
+      "properties": {
+        "command": { "type": "string", "enum": ["compile", "asm", "lint", "fmt-check"] },
+        "file": { "type": "string" }
+      }
+    }]
+  },
+  "scripts": {
+    "copy-grammar": "node scripts/copy-grammar.js",
+    "compile": "npm run copy-grammar && tsc -p .",
+    "package": "npm run compile && vsce package"
+  },
+  "dependencies": { "vscode-languageclient": "^10.1.0" },
+  "devDependencies": {
+    "@types/node": "^20.0.0", "@types/vscode": "^1.91.0",
+    "@vscode/vsce": "^3.9.2", "typescript": "^5.9.0"
+  }
+}

@@ -11,7 +11,11 @@
 //! more plainly than a premature abstraction.
 
 mod build;
+mod completions;
+mod fmt;
 mod inspect;
+mod lint;
+mod lsp;
 mod run;
 
 use mtc_core::formats::tapeblock::TapeSnapshot;
@@ -39,13 +43,17 @@ tmt — Turing-machine toolchain (TM-1)
 USAGE: tmt <SUBCOMMAND> [ARGS]
 
 SUBCOMMANDS:
-  compile  .tmc source -> .tmo object (-S for .tma, --emit-ir for world IR JSON)
-  asm      .tma assembly -> .tmo object
-  link     .tmo objects -> .tmx executable (+ .tmx.map sidecar)
-  dis      disassemble a .tmo or .tmx (--listing for the address view)
-  run      execute a .tmx on a multi-tape .tmt block
-  tape     new/set/show .tmt tape-block snapshots
-  ir       render --emit-ir JSON (ir graph -> Mermaid)
+  compile      .tmc source -> .tmo object (-S for .tma, --emit-ir for world IR JSON)
+  asm          .tma assembly -> .tmo object
+  link         .tmo objects -> .tmx executable (+ .tmx.map sidecar)
+  dis          disassemble a .tmo or .tmx (--listing for the address view)
+  run          execute a .tmx on a multi-tape .tmt block
+  tape         new/set/show .tmt tape-block snapshots
+  ir           render --emit-ir JSON (ir graph -> Mermaid)
+  lint         hygiene findings over .tmc and .tma sources
+  fmt          canonical formatting for .tmc and .tma sources
+  lsp          run the LSP server for .tmc and .tma on stdio
+  completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 ";
@@ -79,6 +87,10 @@ pub fn execute_with(
         Some("tape") => inspect::tape(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
+        Some("lint") => lint::lint(&args[1..]),
+        Some("fmt") => fmt::fmt(&args[1..]),
+        Some("lsp") => lsp::lsp(&args[1..]),
+        Some("completions") => completions::completions(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
 }
