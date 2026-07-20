@@ -36,6 +36,17 @@
 //! `[*] -> call <routine>() then goto <junction>`. The now-orphaned non-root
 //! copies are left for `dce` to delete.
 //!
+//! # The multi-exit variant, deferred
+//!
+//! A multi-exit variant — one body shared across a graft group regardless of
+//! exit count, via exit-vector frames and the multi-exit return instruction —
+//! is deliberately deferred: emitting those artifacts would produce a
+//! frames-profile-locked object that the mono call mechanism refuses,
+//! contradicting the mode-independence a compiled object otherwise keeps. The
+//! clean resolutions — a mode-aware compile flag, or moving outlining to the
+//! linker — remain an open design decision. Until then, single-junction
+//! call/ret outlining is the whole pass.
+//!
 //! # Canonical form and the near-miss
 //!
 //! Two subgraphs fold only when their canonical serializations are equal — a
