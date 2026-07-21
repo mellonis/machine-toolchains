@@ -59,9 +59,9 @@ The `arch` byte says which architecture the content is for, and every
 subcommand that reads it refuses content it cannot handle rather than
 guess: a loader refuses an image it cannot execute — `pmt run` on a
 TM-1 executable reports `unknown architecture 0x02` — and `dis` refuses
-it the same way, for both objects and executables, before decoding a
-single byte: `dis` is an arch-agnostic framework driven by the mnemonic
-table its own tool supplies, so decoding the other toolchain's content
+it the same way, for both objects and executables, before disassembling
+a single instruction: `dis` is an arch-agnostic framework driven by the
+mnemonic table its own tool supplies, so reading the other toolchain's content
 against that table would print something well-formed but meaningless.
 Read an image or object with the `dis` of the toolchain that wrote it.
 
