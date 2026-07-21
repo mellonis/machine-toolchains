@@ -467,6 +467,61 @@ fn a_program_symbol_with_no_dispatch_row_traps() {
     );
 }
 
+/// The `+`/`-` handlers are single MODULAR fold rules — the ring wrap rides
+/// in the `%`, so one rule covers all 127 values with no separate boundary
+/// rule — and the compiled `-S` artifact folds the stamped 127-way arithmetic
+/// tables back into `.rept` families so the generated assembly stays compact.
+///
+/// The source assertions match FULL write vectors, which only ever appear in a
+/// rule body: the teaching prose quotes bare `{...}` folds inline, so a
+/// substring like `{(v+1)%127}` alone would hit a comment and never go red.
+#[test]
+fn the_tmc_port_uses_modular_folds_and_compiles_compact() {
+    let source = fs::read_to_string(tmc_example_path()).expect("the .tmc port is present");
+
+    // The two arithmetic handlers are single modular-fold rules: increment
+    // wraps in `(v+1)%127`, decrement in `(v+126)%127` (the non-negative
+    // remainder, so a wrapping decrement adds 126 rather than subtracting one).
+    assert!(
+        source.contains("write [-, {(v+1)%127}, -, -]"),
+        "'+' must be a single modular increment fold"
+    );
+    assert!(
+        source.contains("write [-, {(v+126)%127}, -, -]"),
+        "'-' must be a single modular decrement fold"
+    );
+    // ...and NOT the retired non-wrapping range + hand-named boundary rule.
+    assert!(
+        !source.contains("write [-, {v+1}, -, -]"),
+        "the non-wrapping '+' range rule must be gone"
+    );
+    assert!(
+        !source.contains("write [-, {v-1}, -, -]"),
+        "the non-wrapping '-' range rule must be gone"
+    );
+
+    // The `-S` artifact folds the stamped arithmetic families back into `.rept`
+    // loops, so the generated assembly stays compact: the hand-written `.tma`
+    // is ~212 lines, unfolded codegen ~1659. Bounds, not exact counts — the
+    // source fragments above already guard against a workaround revert.
+    let out = compile(&source, CompileOptions::default()).expect("the .tmc port compiles");
+    let rept_headers = out
+        .tma
+        .lines()
+        .filter(|l| l.trim_start().starts_with(".rept"))
+        .count();
+    let total_lines = out.tma.lines().count();
+    assert!(
+        rept_headers >= 3,
+        "expected >= 3 .rept families in -S, got {rept_headers}:\n{}",
+        out.tma
+    );
+    assert!(
+        total_lines < 400,
+        "expected < 400 lines in -S, got {total_lines}"
+    );
+}
+
 /// Regenerates the golden `.tmt` files FROM THE DERIVED SNAPSHOTS (never from
 /// run output — derivation-first). Mirrors pmt's regen convention.
 /// cargo test -p mtc-turing-machine --test golden_programs regen -- --ignored
