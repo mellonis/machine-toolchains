@@ -83,8 +83,12 @@ pub enum LinkError {
     /// dispatch jump routes those rows to the trap stub. This callee reads a
     /// match result through a conditional branch (or leaves it unconsumed),
     /// so a hole symbol would match a prepended trap row and take the branch
-    /// as if it had matched: a silent misroute. Carries the callee's name
-    /// (docs/core.md (the composition engine)).
+    /// as if it had matched: a silent misroute. `hybrid` hits the identical
+    /// refusal whenever the holeyness sits one hop past whatever bound site
+    /// its classifier inspected — a nested bound call under an outer
+    /// bijection seed, say (docs/core.md (call mechanisms)) — so the advice
+    /// recommends `frames` outright. Carries the callee's name (docs/core.md
+    /// (the composition engine)).
     MonoHoleyMatchBranch(String),
 }
 
@@ -136,7 +140,7 @@ impl std::fmt::Display for LinkError {
                 "a holey binding needs `{symbol}`'s match tables consumed by \
                  dispatch jumps, but `{symbol}` reads a match result through a \
                  conditional branch; the synthesized unmapped-read trap rows \
-                 would misroute — build with --call-mech=frames or hybrid"
+                 would misroute — build with --call-mech=frames"
             ),
         }
     }
