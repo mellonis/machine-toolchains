@@ -468,3 +468,43 @@ machine {
         );
     }
 }
+
+#[test]
+fn zero_row_state_at_the_widest_alphabet_traps_not_ices() {
+    // A zero-row state on a tape at the WIDEST legal alphabet (127 symbols,
+    // indices 0..126). The never-match sentinel a narrower tape uses is the
+    // one-past-last index — here 127 = 0x7F — which a 7-bit match row cannot
+    // hold, so the canonical `rd; mtc; djmp` lowering would emit a `.row`
+    // the assembler rejects, ICE-ing on legal source. Codegen must instead
+    // fall back to a bare `trap`: entering the state raises an unmapped-read
+    // trap directly, a Trapped outcome in the same class as the no-match a
+    // populated table gives. Every tape here is exactly 127-wide (128+ is a
+    // rejected alphabet), so no satisfiable-yet-unmatchable single-cell row
+    // exists at all — the fall-back is the only sound lowering.
+    let src = "\
+alphabet ring { 0..126 }
+machine {
+  tape t: ring;
+  entry state s { ['a'] -> move [>] goto s; }
+}
+";
+    // The glyph `'a'` is absent from the numeric alphabet, so the only rule
+    // empty-expands and `s` goes zero-row (a warning, never an error).
+    let codes = diag_codes(src);
+    assert!(
+        codes.iter().any(|c| c == "empty-expansion"),
+        "expected empty-expansion, got {codes:?}"
+    );
+    // Trap on entry, unmapped-read kind, tape untouched (no `rd`/write/move
+    // runs). Width 127 fits the alphabet; the seeded index is irrelevant to
+    // the outcome. Sound at BOTH opt levels — the optimizer sees the same
+    // empty-rule IR it already handles at narrower cards.
+    for level in [OptLevel::O0, OptLevel::O1] {
+        let (outcome, snaps) = run_capped_at(src, &[(snap(0, &[1], 0), 127)], 1_000, level);
+        assert!(
+            matches!(outcome, Outcome::Trapped(Trap::UnmappedRead { .. })),
+            "127-wide zero-row state must trap UnmappedRead at {level:?}, got {outcome:?}"
+        );
+        assert_eq!(snaps, vec![snap(0, &[1], 0)], "tape unchanged at {level:?}");
+    }
+}

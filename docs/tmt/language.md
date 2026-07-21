@@ -592,7 +592,7 @@ When *every* alternative drops — an all-off-alphabet range, or a single
 glyph the tape's alphabet lacks — the rule expands to no rows at all. That
 is the `empty-expansion` compile warning, not an error: the rule
 contributes nothing and vanishes, and a state left with zero rows is
-still valid — it traps on entry exactly as a no-match does.
+still valid — it traps on entry.
 
 Expansion is a product, and a large one is a lint finding
 (`docs/tmt/lint.md`) rather than an error.
