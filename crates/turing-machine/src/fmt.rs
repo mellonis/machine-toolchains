@@ -627,7 +627,16 @@ fn render_rule(rule: &Rule, grid: &Grid, indent: usize, tokens: &[Token]) -> Str
     }
 
     let col = line.chars().count();
-    line.push_str(&transition_text(&rule.transition, col));
+    let transition = transition_text(&rule.transition, col);
+    if transition.is_empty() {
+        // Omitted transition: no token to print. Trim the trailing space the
+        // action segments left so the `;` abuts the last action.
+        while line.ends_with(' ') {
+            line.pop();
+        }
+    } else {
+        line.push_str(&transition);
+    }
     line.push(';');
     line
 }
@@ -660,6 +669,9 @@ fn transition_text(transition: &Transition, col: usize) -> String {
         Transition::Return { .. } => "return".to_string(),
         Transition::Stop { .. } => "stop".to_string(),
         Transition::Halt { .. } => "halt".to_string(),
+        // An omitted transition prints nothing — the `;` abuts the last action
+        // (the caller trims the trailing action space).
+        Transition::Stay { .. } => String::new(),
     }
 }
 

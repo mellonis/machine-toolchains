@@ -99,6 +99,37 @@ machine {
 }
 
 #[test]
+fn fmt_preserves_omitted_transition() {
+    // An omitted transition (stay in the current state) is printed with no
+    // `goto` inserted: the `;` abuts the last action just as an explicit
+    // transition would. Idempotent via `stable`.
+    let out = stable(
+        "\
+machine {
+tape t: ab;
+entry state scan {
+['a'] -> write ['b'] move [>];
+['_'] -> stop;
+}
+}
+",
+    );
+    assert_eq!(
+        out,
+        "\
+machine {
+  tape t: ab;
+  entry state scan {
+    ['a'] -> write ['b'] move [>];
+    ['_'] -> stop;
+  }
+}
+"
+    );
+    assert!(!out.contains("goto"), "fmt inserted a transition:\n{out}");
+}
+
+#[test]
 fn a_comment_or_blank_line_inside_a_state_does_not_split_the_grid() {
     check(
         "\

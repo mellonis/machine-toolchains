@@ -311,6 +311,58 @@ fn multi_step_rule_body_is_rejected() {
 }
 
 #[test]
+fn omitted_transition_parses_as_stay_when_an_action_is_present() {
+    // A rule carrying at least one of write / move / debugger may omit the
+    // transition — the omission parses to `Transition::Stay`, later resolved
+    // to a self-`goto` (stay in the current state).
+    let p = parse_src("machine { entry state s { ['a'] -> write ['b'] move [>]; } }")
+        .expect("omitted transition with an action parses");
+    let r = &machine(&p).states[0].rules[0];
+    assert!(matches!(r.transition, Transition::Stay { .. }));
+    // move-only and debugger-only are enough on their own.
+    let p = parse_src("machine { entry state s { [*] -> move [>]; } }")
+        .expect("move-only omission parses");
+    assert!(matches!(
+        machine(&p).states[0].rules[0].transition,
+        Transition::Stay { .. }
+    ));
+    let p = parse_src("machine { entry state s { [*] -> debugger; } }")
+        .expect("debugger-only omission parses");
+    assert!(matches!(
+        machine(&p).states[0].rules[0].transition,
+        Transition::Stay { .. }
+    ));
+}
+
+#[test]
+fn empty_rule_body_still_errors() {
+    // `['a'] -> ;` — arrow then nothing. With no write / move / debugger the
+    // transition is NOT optional, so this stays the "expected a transition"
+    // error family.
+    assert_eq!(
+        err_code("machine { entry state s { ['a'] -> ; } }"),
+        "unexpected-token"
+    );
+    let msg = parse_src("machine { entry state s { ['a'] -> ; } }")
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("transition"), "message: {msg}");
+}
+
+#[test]
+fn call_without_then_still_errors() {
+    // `then` stays mandatory on a `call`, action present or not.
+    let msg = parse_src("machine { entry state s { [*] -> call f(); } }")
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("then"), "message: {msg}");
+    let msg = parse_src("machine { entry state s { [*] -> move [>] call f(); } }")
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("then"), "message: {msg}");
+}
+
+#[test]
 fn wildcard_binding_is_rejected() {
     assert_eq!(
         err_code("machine { entry state s { [* as v] -> stop; } }"),

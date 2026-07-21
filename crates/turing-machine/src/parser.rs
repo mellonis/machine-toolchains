@@ -427,6 +427,14 @@ pub enum Transition {
     Halt {
         span: Span,
     },
+    /// The transition was omitted — stay in the current state. Legal only when
+    /// the rule carries at least one of `write` / `move` / `debugger`; it
+    /// resolves to a self-`goto` at expansion time (the rule loops to its own
+    /// state, or, in a grafted graph, to its own spliced instance)
+    /// (docs/tmt/language.md (rules)).
+    Stay {
+        span: Span,
+    },
 }
 
 /// A `call … then` continuation: a state, or a terminator.
@@ -1687,7 +1695,18 @@ impl Parser<'_> {
         } else {
             None
         };
-        let transition = self.transition()?;
+        // The transition may be omitted (`stay in the current state`) only
+        // when the rule already carries an action — write, move, or a leading
+        // `debugger`. With no action, `-> ;` stays the "expected a transition"
+        // error (docs/tmt/language.md (rules)).
+        let has_action = debugger || write.is_some() || mov.is_some();
+        let transition = if has_action && matches!(self.peek().kind, TokenKind::Semi) {
+            Transition::Stay {
+                span: self.peek().span(),
+            }
+        } else {
+            self.transition()?
+        };
         let semi = self.expect(&TokenKind::Semi, "`;` to end the rule")?;
         self.prev_end_line = semi.line;
         // Char arithmetic is deliberately absent: a `{c±k}` on a glyph-bound

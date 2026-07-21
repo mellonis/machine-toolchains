@@ -1200,6 +1200,12 @@ fn expand_own_states(
         let mut lower = |t: &Transition| -> Transition2 {
             match t {
                 Transition::Goto { name, .. } => Transition2::Goto(name.clone()),
+                // An omitted transition stays in the current state: a self-goto
+                // to THIS state's name. In a graph body this is the source-state
+                // name, which the graft splice renames to the spliced instance
+                // (docs/tmt/language.md (rules)) — so an instance loops to
+                // itself, identical to an explicit `goto <self>`.
+                Transition::Stay { .. } => Transition2::Goto(s.name.clone()),
                 Transition::Return { .. } => Transition2::Return,
                 Transition::Stop { .. } => Transition2::Stop,
                 Transition::Halt { .. } => Transition2::Halt,
@@ -1669,6 +1675,7 @@ mod range_tests {
             Transition::Stop { .. } => Transition2::Stop,
             Transition::Halt { .. } => Transition2::Halt,
             Transition::Call { .. } => panic!("no call in these fixtures"),
+            Transition::Stay { .. } => panic!("no omitted transition in these fixtures"),
         }
     }
 

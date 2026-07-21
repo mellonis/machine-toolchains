@@ -2045,6 +2045,9 @@ impl WorldCtx<'_> {
                         }
                     }
                     Transition::Stop { .. } | Transition::Halt { .. } => {}
+                    // An omitted transition is a self-goto — the current state
+                    // is always a valid target, so there is nothing to check.
+                    Transition::Stay { .. } => {}
                     Transition::Call { then, .. } => {
                         self.check_continuation(then, &states, &binds, &ns, is_routine)?;
                     }

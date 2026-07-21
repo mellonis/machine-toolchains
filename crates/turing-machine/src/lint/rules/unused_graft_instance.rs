@@ -58,6 +58,9 @@ fn referenced_names(world: &ResolvedWorld) -> HashSet<&str> {
                     }
                 }
                 Transition::Return { .. } | Transition::Stop { .. } | Transition::Halt { .. } => {}
+                // An omitted transition self-loops to the current (own) state,
+                // never to a graft instance — it references no instance name.
+                Transition::Stay { .. } => {}
             }
         }
     }
