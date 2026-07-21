@@ -82,7 +82,7 @@ const TMC_DEBUGGER: &str = "\
 alphabet bits { '_', '1' }
 machine {
   tape t: bits;
-  entry state s { [*] -> debugger stop; }
+  entry state s { [*] -> debugger move [>] stop; }
 }
 ";
 

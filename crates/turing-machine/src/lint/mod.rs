@@ -36,6 +36,8 @@ pub mod tma;
 use mtc_core::diagnostics::Diagnostic;
 
 use crate::compiler::{self, CompileError, Resolved};
+use crate::lexer::Token;
+use crate::parser::Program;
 
 #[derive(Debug, Clone, Default)]
 pub struct LintOptions {
@@ -91,6 +93,15 @@ pub(crate) struct LintContext<'a> {
     /// analyze's own non-fatal diagnostics. The `unused-import` rule re-exposes
     /// its entries under allow control (the compile channel keeps them too).
     pub diagnostics: &'a [Diagnostic],
+    /// The parsed AST — source-level detail the resolved module elides (a
+    /// signature parameter's own span, read by `unused-exit`).
+    pub program: &'a Program,
+    /// The COMMENT-FREE token stream. Both entry paths (the batch `lint()` and
+    /// the editor service) supply a comment-free slice, so a token-index walk
+    /// finds the same neighbours in either — the `unused-alphabet` and
+    /// `unused-graft-name` fixes recover spans (a declaration's `}`, a graft's
+    /// `as` keyword) that no earlier artifact keeps.
+    pub tokens: &'a [Token],
 }
 
 /// A lint rule: reads the analysis context, pushes any findings.
@@ -105,6 +116,10 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-graph", rules::unused_graph::check),
     ("unused-binding", rules::unused_binding::check),
     ("unused-graft-instance", rules::unused_graft_instance::check),
+    ("unused-graft-name", rules::unused_graft_name::check),
+    ("unused-alphabet", rules::unused_alphabet::check),
+    ("unused-tape", rules::unused_tape::check),
+    ("unused-exit", rules::unused_exit::check),
     ("deprecated-call", rules::deprecated_call::check),
     ("dead-rule", rules::dead_rule::check),
     (
@@ -124,8 +139,10 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
 /// The opt-in rule table: off by default, run only when `--warn` names the
 /// code (the totality lints, deliberately noisy). In the known-code namespace
 /// (so a shared allow-list may still name one) but never run unless enabled.
-pub(crate) const OPT_IN_RULES: &[(&str, Rule)] =
-    &[("state-may-trap", rules::state_may_trap::check)];
+pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[
+    ("state-may-trap", rules::state_may_trap::check),
+    ("index-identity-map", rules::index_identity_map::check),
+];
 
 /// True when `code` names any rule in this crate's `.tmc` tables, its `.tma`
 /// additions ([`tma::TMA_RULES`]), OR core's arch-agnostic asm rule table
@@ -187,6 +204,8 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     let ctx = LintContext {
         resolved: &analysis.resolved,
         diagnostics: &analysis.diagnostics,
+        program: &analysis.program,
+        tokens: &analysis.tokens,
     };
     let diagnostics = run_rules(&ctx, &options.allow, &options.warn);
     Ok(LintReport { diagnostics })
@@ -202,7 +221,7 @@ mod tests {
 alphabet bit { '_', '1' }
 machine {
   tape t: bit;
-  entry state s { [*] -> stop; }
+  entry state s { [*] -> move [>] stop; }
 }
 ";
         let report = lint(src, LintOptions::default()).unwrap();
@@ -241,13 +260,14 @@ machine {
 
     #[test]
     fn validate_allow_also_accepts_tma_addition_codes() {
-        // The three `.tma` additions share the one namespace: a `tmt.json`
+        // The four `.tma` additions share the one namespace: a `tmt.json`
         // naming one must not error when validated for a `.tmc` file, just as
         // an asm-only or `.tmc`-only code must not error the other path.
         for code in [
             "shadowed-wildcard-rows",
             "retx-exit-bounds",
             "rept-var-unused",
+            "duplicate-map-source",
         ] {
             assert!(
                 !RULES.iter().any(|(c, _)| *c == code),

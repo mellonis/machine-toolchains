@@ -31,14 +31,13 @@ fn collect_arg_targets<'a>(args: &'a [BindingArg], names: &mut HashSet<&'a str>)
     }
 }
 
-/// Every name the world might jump to: `goto` targets, `call … then` state
+/// Every name the world's BODY jumps to: `goto` targets, `call … then` state
 /// continuations, and every bare binding-argument target (over-approx — see
-/// the module note). Plus the world's own entry, for good measure.
-fn referenced_names(world: &ResolvedWorld) -> HashSet<&str> {
+/// the module note). The world's own entry is deliberately NOT counted — a
+/// declaration is not a use of itself. Shared with the `unused-graft-name`
+/// and `unused-exit` rules so all three judge a body reference identically.
+pub(crate) fn body_referenced_names(world: &ResolvedWorld) -> HashSet<&str> {
     let mut names: HashSet<&str> = HashSet::new();
-    if let Some(entry) = &world.entry {
-        names.insert(entry.as_str());
-    }
     for graft in &world.grafts {
         collect_arg_targets(&graft.args, &mut names);
     }
@@ -58,8 +57,21 @@ fn referenced_names(world: &ResolvedWorld) -> HashSet<&str> {
                     }
                 }
                 Transition::Return { .. } | Transition::Stop { .. } | Transition::Halt { .. } => {}
+                // An omitted transition self-loops to the current (own) state,
+                // never to a graft instance — it references no instance name.
+                Transition::Stay { .. } => {}
             }
         }
+    }
+    names
+}
+
+/// Body references plus the world's own entry, for good measure. `unused-graft-
+/// instance` treats a non-entry graft named by the entry as reachable.
+fn referenced_names(world: &ResolvedWorld) -> HashSet<&str> {
+    let mut names = body_referenced_names(world);
+    if let Some(entry) = &world.entry {
+        names.insert(entry.as_str());
     }
     names
 }

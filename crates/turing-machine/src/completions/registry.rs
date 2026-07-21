@@ -236,6 +236,10 @@ fn compile_spec() -> CommandSpec {
             FlagSpec::boolean("--debug", "preset: -g -O0"),
             FlagSpec::boolean("--release", "preset: -O1 --strip-debugger"),
             FlagSpec::boolean("-S", "emit the generated .tma instead of an object"),
+            FlagSpec::boolean(
+                "--stamped-asm",
+                "emit raw stamped .tma (skip .rept re-detection)",
+            ),
             FlagSpec::optional_equals(
                 "--emit-ir",
                 "write the world IR JSON next to the output",

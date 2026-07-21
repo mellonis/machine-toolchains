@@ -338,13 +338,44 @@ pub enum WriteCellKind {
     Keep,
     /// A literal glyph or number.
     Lit(SymLit),
-    /// A substitution `{name}` (delta 0), `{name+k}`, or `{name-k}`. The
-    /// binding-kind legality (arithmetic is numeric-only) is checked at parse
-    /// time; the fold itself happens during range expansion.
-    Subst {
-        name: String,
-        name_span: Span,
-        delta: i64,
+    /// A substitution `{expr}`, where `expr` is the assembler's arithmetic
+    /// grammar (`+ - * %`, parens, i64) over the rule's pattern bindings
+    /// (docs/tmt/language.md (substitution)). A bare name is passthrough; any
+    /// other shape is a fold. The binding-kind legality (arithmetic is
+    /// numeric-only) is checked at parse time; the fold itself happens during
+    /// range expansion.
+    Subst { expr: FoldExprNode },
+}
+
+/// A binary operator in a write-cell fold expression. `*`/`%` bind tighter
+/// than `+`/`-`; all are left-associative
+/// (docs/tmt/language.md (substitution)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldOp {
+    Add,
+    Sub,
+    Mul,
+    Rem,
+}
+
+/// One node of a write-cell fold expression tree, with its source span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldExprNode {
+    pub kind: FoldExprKind,
+    pub span: Span,
+}
+
+/// The shape of a [`FoldExprNode`]: a pattern-binding reference, an integer
+/// literal, or a binary application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FoldExprKind {
+    /// An in-scope pattern binding name.
+    Var(String),
+    Int(i64),
+    Bin {
+        op: FoldOp,
+        lhs: Box<FoldExprNode>,
+        rhs: Box<FoldExprNode>,
     },
 }
 
@@ -394,6 +425,14 @@ pub enum Transition {
         span: Span,
     },
     Halt {
+        span: Span,
+    },
+    /// The transition was omitted — stay in the current state. Legal only when
+    /// the rule carries at least one of `write` / `move` / `debugger`; it
+    /// resolves to a self-`goto` at expansion time (the rule loops to its own
+    /// state, or, in a grafted graph, to its own spliced instance)
+    /// (docs/tmt/language.md (rules)).
+    Stay {
         span: Span,
     },
 }
@@ -786,6 +825,7 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Plus => "`+`".into(),
         TokenKind::Eq => "`=`".into(),
         TokenKind::Star => "`*`".into(),
+        TokenKind::Percent => "`%`".into(),
         TokenKind::Lt => "`<`".into(),
         TokenKind::Gt => "`>`".into(),
         TokenKind::LBracket => "`[`".into(),
@@ -1655,7 +1695,18 @@ impl Parser<'_> {
         } else {
             None
         };
-        let transition = self.transition()?;
+        // The transition may be omitted (`stay in the current state`) only
+        // when the rule already carries an action — write, move, or a leading
+        // `debugger`. With no action, `-> ;` stays the "expected a transition"
+        // error (docs/tmt/language.md (rules)).
+        let has_action = debugger || write.is_some() || mov.is_some();
+        let transition = if has_action && matches!(self.peek().kind, TokenKind::Semi) {
+            Transition::Stay {
+                span: self.peek().span(),
+            }
+        } else {
+            self.transition()?
+        };
         let semi = self.expect(&TokenKind::Semi, "`;` to end the rule")?;
         self.prev_end_line = semi.line;
         // Char arithmetic is deliberately absent: a `{c±k}` on a glyph-bound
@@ -1694,21 +1745,30 @@ impl Parser<'_> {
             }
         }
         for cell in &w.cells {
-            if let WriteCellKind::Subst {
-                name,
-                name_span,
-                delta,
-            } = &cell.kind
-                && *delta != 0
-                && glyph_bound.contains(&name.as_str())
+            if let WriteCellKind::Subst { expr } = &cell.kind
+                // A bare name keeps passthrough semantics — legal for a glyph
+                // binding. Any other shape is a fold, which is numeric-only.
+                && !matches!(expr.kind, FoldExprKind::Var(_))
+                && let Some(span) = Self::glyph_var_span(expr, &glyph_bound)
             {
                 return Err(CompileError {
-                    span: *name_span,
+                    span,
                     kind: CompileErrorKind::CharArithmetic,
                 });
             }
         }
         Ok(())
+    }
+
+    /// The span of the first (leftmost) fold-expression reference to a
+    /// glyph-bound name, or `None` if the expression references none.
+    fn glyph_var_span(expr: &FoldExprNode, glyph_bound: &[&str]) -> Option<Span> {
+        match &expr.kind {
+            FoldExprKind::Var(name) => glyph_bound.contains(&name.as_str()).then_some(expr.span),
+            FoldExprKind::Int(_) => None,
+            FoldExprKind::Bin { lhs, rhs, .. } => Self::glyph_var_span(lhs, glyph_bound)
+                .or_else(|| Self::glyph_var_span(rhs, glyph_bound)),
+        }
     }
 
     fn pattern(&mut self) -> Result<Pattern, CompileError> {
@@ -1852,25 +1912,10 @@ impl Parser<'_> {
             }
             TokenKind::LBrace => {
                 self.bump();
-                let (name, name_span) = self.name("a substitution binding name")?;
-                let delta = match self.peek().kind {
-                    TokenKind::Plus => {
-                        self.bump();
-                        self.subst_delta(1)?
-                    }
-                    TokenKind::Dash => {
-                        self.bump();
-                        self.subst_delta(-1)?
-                    }
-                    _ => 0,
-                };
+                let expr = self.fold_expr()?;
                 let rb = self.expect(&TokenKind::RBrace, "`}` to close the substitution")?;
                 Ok(WriteCell {
-                    kind: WriteCellKind::Subst {
-                        name,
-                        name_span,
-                        delta,
-                    },
+                    kind: WriteCellKind::Subst { expr },
                     span: join(t.span(), rb.span()),
                 })
             }
@@ -1881,15 +1926,93 @@ impl Parser<'_> {
         }
     }
 
-    /// The magnitude after a substitution's `+`/`-`, signed by `sign`.
-    fn subst_delta(&mut self, sign: i64) -> Result<i64, CompileError> {
+    /// Parse a write-cell fold expression, the assembler's arithmetic grammar
+    /// (docs/tmt/language.md (substitution)):
+    ///
+    /// ```text
+    /// expr := mul (('+' | '-') mul)*
+    /// mul  := atom (('*' | '%') atom)*
+    /// atom := var | integer | '(' expr ')'
+    /// ```
+    ///
+    /// `+`/`-` are left-associative; `*`/`%` bind tighter.
+    fn fold_expr(&mut self) -> Result<FoldExprNode, CompileError> {
+        let mut lhs = self.fold_mul()?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Plus => FoldOp::Add,
+                TokenKind::Dash => FoldOp::Sub,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.fold_mul()?;
+            let span = join(lhs.span, rhs.span);
+            lhs = FoldExprNode {
+                kind: FoldExprKind::Bin {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn fold_mul(&mut self) -> Result<FoldExprNode, CompileError> {
+        let mut lhs = self.fold_atom()?;
+        loop {
+            let op = match self.peek().kind {
+                TokenKind::Star => FoldOp::Mul,
+                TokenKind::Percent => FoldOp::Rem,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.fold_atom()?;
+            let span = join(lhs.span, rhs.span);
+            lhs = FoldExprNode {
+                kind: FoldExprKind::Bin {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn fold_atom(&mut self) -> Result<FoldExprNode, CompileError> {
         let t = self.peek().clone();
-        let TokenKind::Number(n, _) = &t.kind else {
-            return Err(Self::expected(&t, "a number after the substitution sign"));
-        };
-        let n = *n;
-        self.bump();
-        Ok(sign * n as i64)
+        match &t.kind {
+            TokenKind::LParen => {
+                self.bump();
+                let inner = self.fold_expr()?;
+                let rp = self.expect(&TokenKind::RParen, "`)` to close the sub-expression")?;
+                Ok(FoldExprNode {
+                    kind: inner.kind,
+                    span: join(t.span(), rp.span()),
+                })
+            }
+            TokenKind::Number(n, _) => {
+                self.bump();
+                Ok(FoldExprNode {
+                    kind: FoldExprKind::Int(*n as i64),
+                    span: t.span(),
+                })
+            }
+            TokenKind::Ident(_) => {
+                let (name, span) = self.name("a substitution binding name")?;
+                Ok(FoldExprNode {
+                    kind: FoldExprKind::Var(name),
+                    span,
+                })
+            }
+            _ => Err(Self::expected(
+                &t,
+                "a fold expression element (binding name, number, or `(`)",
+            )),
+        }
     }
 
     fn move_vec(&mut self) -> Result<MoveVec, CompileError> {

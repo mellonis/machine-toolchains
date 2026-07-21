@@ -233,7 +233,7 @@ Every rule is three parts in fixed order, terminated by `;`:
   may be omitted; a rule with neither reads and transitions without
   disturbing the tapes.
 - The **transition** says which state runs next, or that the machine
-  stops.
+  stops. It may be omitted — see "Transitions".
 
 Pattern, write, and move vectors must each have exactly as many cells as
 the world has tapes. A width mismatch is a compile error naming the
@@ -270,8 +270,9 @@ A rule whose every cell is `*` is the state's **catch-all**.
 
 ### Write and move vectors
 
-A write cell is a literal symbol, a substitution `{name}` / `{name±k}`,
-or `-` meaning **keep** the cell's current symbol. A move cell is `<`
+A write cell is a literal symbol, a substitution `{…}` (a passthrough or
+a fold expression — see "Range expansion and substitution"), or `-`
+meaning **keep** the cell's current symbol. A move cell is `<`
 (left), `>` (right), or `.` (stay). Omitting the whole `write` vector
 keeps every cell; omitting the whole `move` vector leaves every head
 where it is.
@@ -288,10 +289,20 @@ A written symbol must exist in that tape's alphabet.
 | `return` | leave this routine, back to its caller — routines only |
 | `stop` | normal termination |
 | `halt` | abnormal termination |
+| *(omitted)* | stay in the current state — a self-loop; legal only when the rule carries an action |
 
 `stop` and `halt` are the machine's two terminations
 (`docs/tmt/isa.md (execution)`). A `call`'s continuation `CONT` may be a
 state name or any of `return`, `stop`, `halt`, under the same rules.
+
+The transition may be **omitted** entirely, which means *stay in the
+current state*: the head re-runs this same state's rules on the next step.
+Omission is legal only when the rule carries at least one of `write`,
+`move`, or a leading `debugger` — a rule that would do nothing at all
+(`['a'] -> ;`) is a parse error, not a silent spin. A `call … then` never
+omits its continuation; the `then` is mandatory. Inside a grafted graph an
+omitted transition self-loops to that rule's own spliced instance, not to
+the graph's source state.
 
 A leading `debugger` in the action emits a breakpoint the debugger
 surfaces; `tmt compile --strip-debugger` drops them
@@ -322,6 +333,16 @@ entry state s {
   ['a'] -> halt;    // fires on 'a' — exact band beats catch-all
 }
 ```
+
+The one arrangement that genuinely dies is a **second all-wildcard rule**:
+once one catch-all matches every input, a later catch-all can never fire.
+The compiler warns (`unreachable-rule`) and drops it. That narrowness is
+the point — *only* a second catch-all qualifies. An exact or partial rule
+written after a catch-all is not dead; it sorts into an earlier band and
+stays reachable, which is exactly what the example above relies on. The
+broader "an earlier rule already covers this one" reasoning is lint's
+richer `dead-rule` analysis (`docs/tmt/lint.md`), run at lint time over
+the same bands.
 
 Rows in the exact band may never overlap: two wildcard-free rules that
 match the same input are an **exact-row conflict**, rejected at compile
@@ -514,6 +535,19 @@ differently-glyphed alphabets then bind silently — the caller's symbol at
 index *k* reads to the callee as whatever glyph sits at index *k* there,
 and a write back lands on the caller's glyph at that same index.
 
+The split is deliberate, and it follows the level each construct lives at.
+A `graft` is a **source-level splice**, performed at compile time where
+glyphs are the author's mental model — so its identity means *glyph*
+identity, and mismatched glyphs are the `identity-glyph-mismatch` error
+above. A `call` (and a `bind`) is a **machine-level boundary** resolved at
+link time, and the machine stores only indices — it never sees a glyph —
+so identity there can only mean *index* identity. Binding two same-size,
+differently-glyphed alphabets by index is therefore intended semantics,
+not a gap. When that index re-labelling is a surprise rather than the
+intent — the same glyphs listed in a different order, say — the opt-in
+`index-identity-map` lint (`tmt lint --warn index-identity-map`;
+`docs/tmt/lint.md`) is the audit tool that flags it.
+
 ### Unequal alphabets: closed maps and holes
 
 When the cardinalities differ, there is no identity to complete — index
@@ -554,6 +588,12 @@ several such cells the expansion is cartesian, with the leftmost tape
 varying slowest. A range value with no glyph on that tape simply drops
 that alternative rather than failing.
 
+When *every* alternative drops — an all-off-alphabet range, or a single
+glyph the tape's alphabet lacks — the rule expands to no rows at all. That
+is the `empty-expansion` compile warning, not an error: the rule
+contributes nothing and vanishes, and a state left with zero rows is
+still valid — it traps on entry.
+
 Expansion is a product, and a large one is a lint finding
 (`docs/tmt/lint.md`) rather than an error.
 
@@ -568,27 +608,65 @@ entry state copy {
 }
 ```
 
-A substitution may carry an integer offset, `{v+k}` or `{v-k}`. 0.1 folds
-the offset per expanded row, against the numeric value the cell bound in
-*that* row — the substitution is table-expansion sugar, resolved at
-compile time, not a runtime computation. The fold is bounds-checked: a
-row whose result names no symbol in that tape's alphabet is a compile
-error at the substitution's own span.
+A substitution's body is an arithmetic **fold expression** over the row's
+bindings:
+
+```text
+expr := mul (('+' | '-') mul)*
+mul  := atom (('*' | '%') atom)*
+atom := var | integer | '(' expr ')'
+```
+
+`+` and `-` are left-associative; `*` and `%` bind tighter. Several
+distinct bound names may appear in one expression (`{a+b}`). The fold is
+evaluated per expanded row over `i64`, against the numeric values the
+cells bound in *that* row — the substitution is table-expansion sugar
+resolved at compile time, a constant baked into the emitted row, never a
+runtime computation.
+
+Whether a substitution is arithmetic is decided by its **tree shape**, not
+by whether it carries punctuation. A body that is a single bare name is
+the **passthrough**: it writes the bound symbol as read, and applies to a
+glyph binding as readily as to a numeric one. `{c}` is the passthrough,
+and so is `{(c)}` — redundant parentheses around a lone name do not make
+it arithmetic. A body that **applies an operator** is a fold, and a fold
+is numeric-only: an operator on a glyph binding is the `char-arithmetic`
+error (`{c+1}` where `c` bound a glyph), because a glyph carries no
+numeric value to fold.
+
+Because `%` binds tighter than `+`, a modular increment needs explicit
+parentheses. `{(v+1)%127}` folds as `(v+1) mod 127`; `{v+1%127}` would
+fold as `v + (1 mod 127)`. Those parentheses are load-bearing — they are
+what lets the top of the alphabet wrap back to the blank:
 
 ```
 alphabet bytes { 0..126 }
 
 entry state inc {
-  [1..125 as v] -> write [{v+1}] stop;   // 125 rows, each folded
-  [126]         -> halt;
-  [0]           -> write [1] stop;
+  [0..126 as v] -> write [{(v+1)%127}] stop;   // 127 rows; 126 wraps to the blank
 }
 ```
 
-Offsets fold numeric bindings. A binding that took a glyph carries no
-numeric value, and 0.1 rejects arithmetic on one (`{c+1}`) at parse time.
-`{c}` — the bare pass-through — applies to a glyph binding as it does to
-a numeric one.
+`%` is truncating remainder, and the fold rejects any result a tape cannot
+carry, each reported at the substitution's own span:
+
+| Code | When the fold fails |
+|---|---|
+| `zero-modulus` | the modulus is zero (`% 0`) |
+| `negative-remainder` | the remainder is below zero — reachable only through subtraction |
+| `fold-overflow` | an intermediate result leaves the `i64` range |
+| `fold-out-of-alphabet` | the folded value names no symbol on that tape |
+
+The messages, verbatim — a positive-integer-literal modulus adds the
+wrapping-idiom hint to `negative-remainder`, any other modulus gets the
+bare form:
+
+```
+error: zero modulus in fold (`% 0`) [zero-modulus]
+error: negative remainder in fold; for a wrapping decrement write {(v+2)%3} [negative-remainder]
+error: fold arithmetic overflows i64 [fold-overflow]
+error: `150` is not a symbol in this tape's alphabet [fold-out-of-alphabet]
+```
 
 ## Namespaces, visibility, and imports
 

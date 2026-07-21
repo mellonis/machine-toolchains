@@ -530,14 +530,27 @@ impl LanguageService for TmcLanguageService {
             fatal = Some(e);
         }
 
-        // 3. Lint over the resolved module when there is one.
-        let lint = staged.resolved.as_ref().map(|resolved| {
-            let ctx = LintContext {
-                resolved,
-                diagnostics: &staged.diagnostics,
-            };
-            run_rules(&ctx, &effective_allow, &effective_warn)
-        });
+        // 3. Lint over the resolved module when there is one. The rules also
+        //    read the AST and a COMMENT-FREE token stream; the editor lexes
+        //    with comment trivia, so filter to `significant` to match the
+        //    batch path's comment-free stream (identical findings either way).
+        let lint = match (
+            staged.resolved.as_ref(),
+            staged.program.as_ref(),
+            staged.tokens.as_deref(),
+        ) {
+            (Some(resolved), Some(program), Some(raw_tokens)) => {
+                let tokens = significant(raw_tokens);
+                let ctx = LintContext {
+                    resolved,
+                    diagnostics: &staged.diagnostics,
+                    program,
+                    tokens: &tokens,
+                };
+                Some(run_rules(&ctx, &effective_allow, &effective_warn))
+            }
+            _ => None,
+        };
 
         // 4. Store the doc state; a failed re-analysis keeps the previous
         //    last-good roster (the names-only staleness exception).

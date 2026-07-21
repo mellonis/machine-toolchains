@@ -85,28 +85,27 @@ machine {
   // A Turing machine pays for arithmetic with one rule per value, and no
   // language can change that: the assembly spells the 127 rules out with a
   // `.rept` macro over the table section. What .tmc changes is the SOURCE.
-  // `0..125 as v` binds the matched symbol to `v`, and `{v+1}` in the write
-  // vector is folded per expanded rule, so one line stands for 126 of them.
+  // `0..126 as v` binds the matched symbol to `v` across the whole ring, and
+  // the write vector holds a fold over it, evaluated once per expanded rule —
+  // so one line stands for all 127.
   //
-  // Range folding is `{v±k}` — plain addition, no modulus. The wrap that the
-  // assembly writes as `{(v+1)%127}` is therefore split off as its own
-  // boundary rule: the range covers the interval where the arithmetic does not
-  // wrap, and the single wrapping value is named explicitly. This is the same
-  // shape the byte-increment example uses for its overflow case.
+  // A fold may carry a modulus, and the ring wrap rides in it: `{(v+1)%127}`
+  // increments and wraps 126 -> 0, `{(v+126)%127}` decrements and wraps
+  // 0 -> 126, each in a single rule with no separate boundary case. The
+  // remainder is the non-negative one, so the wrapping decrement adds 126
+  // rather than subtracting one and risking a negative intermediate.
   // -------------------------------------------------------------------------
 
   ? Increment the cell under the data head, wrapping 126 -> 0, then advance
   ? the instruction pointer.
   state plus {
-    [*, 0..125 as v, *, *] -> write [-, {v+1}, -, -] move [>, ., ., .] goto fetch;
-    [*, 126,         *, *] -> write [-, 0,     -, -] move [>, ., ., .] goto fetch;
+    [*, 0..126 as v, *, *] -> write [-, {(v+1)%127}, -, -] move [>, ., ., .] goto fetch;
   }
 
   ? Decrement the cell under the data head, wrapping 0 -> 126, then advance
   ? the instruction pointer.
   state minus {
-    [*, 1..126 as v, *, *] -> write [-, {v-1}, -, -] move [>, ., ., .] goto fetch;
-    [*, 0,           *, *] -> write [-, 126,   -, -] move [>, ., ., .] goto fetch;
+    [*, 0..126 as v, *, *] -> write [-, {(v+126)%127}, -, -] move [>, ., ., .] goto fetch;
   }
 
   // -------------------------------------------------------------------------

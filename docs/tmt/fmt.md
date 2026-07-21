@@ -48,9 +48,12 @@ a property the printer's own output preserves.
 
 **Whitespace-only.** No token is added, dropped, or rewritten. A number
 reprints from its written spelling, a glyph reprints with only the two
-escapes the lexer accepts, and bare-name `goto` sugar stays bare.
-Renaming, reordering imports, and normalizing spellings are lint's
-business or the author's, never fmt's.
+escapes the lexer accepts, a substitution reprints from its own tokens —
+redundant parentheses like `{(v)}` and number spellings like `{v+007}`
+survive — bare-name `goto` sugar stays bare, and an omitted transition
+stays omitted rather than gaining a `goto`. Renaming, reordering imports,
+and normalizing spellings are lint's business or the author's, never
+fmt's.
 
 **Trivia-preserving, with one exception.** Every comment reprints
 somewhere — see [Comments](#comments) below for the placement rules and

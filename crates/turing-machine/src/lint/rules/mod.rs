@@ -5,12 +5,17 @@
 pub(crate) mod binding_product_threshold;
 pub(crate) mod dead_rule;
 pub(crate) mod deprecated_call;
+pub(crate) mod index_identity_map;
 pub(crate) mod leftover_debugger;
 pub(crate) mod redundant_identity_pairs;
 pub(crate) mod state_may_trap;
+pub(crate) mod unused_alphabet;
 pub(crate) mod unused_binding;
+pub(crate) mod unused_exit;
 pub(crate) mod unused_graft_instance;
+pub(crate) mod unused_graft_name;
 pub(crate) mod unused_graph;
 pub(crate) mod unused_import;
 pub(crate) mod unused_routine;
+pub(crate) mod unused_tape;
 pub(crate) mod writes_through_collapse;

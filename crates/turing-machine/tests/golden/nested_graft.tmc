@@ -8,7 +8,7 @@ graph findX(tape t: marks, state found, state missing) {
   entry state walk {
     ['x'] -> found;
     ['_'] -> missing;
-    [*]   -> move [>] goto walk;
+    [*]   -> move [>];
   }
 }
 

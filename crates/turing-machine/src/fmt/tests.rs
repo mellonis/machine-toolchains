@@ -99,6 +99,37 @@ machine {
 }
 
 #[test]
+fn fmt_preserves_omitted_transition() {
+    // An omitted transition (stay in the current state) is printed with no
+    // `goto` inserted: the `;` abuts the last action just as an explicit
+    // transition would. Idempotent via `stable`.
+    let out = stable(
+        "\
+machine {
+tape t: ab;
+entry state scan {
+['a'] -> write ['b'] move [>];
+['_'] -> stop;
+}
+}
+",
+    );
+    assert_eq!(
+        out,
+        "\
+machine {
+  tape t: ab;
+  entry state scan {
+    ['a'] -> write ['b'] move [>];
+    ['_'] -> stop;
+  }
+}
+"
+    );
+    assert!(!out.contains("goto"), "fmt inserted a transition:\n{out}");
+}
+
+#[test]
 fn a_comment_or_blank_line_inside_a_state_does_not_split_the_grid() {
     check(
         "\
@@ -169,6 +200,81 @@ machine {
     [007]  -> next;
     ['\\''] -> goto s;
     ['\\\\'] -> write [{v-2}] stop;
+  }
+}
+",
+    );
+}
+
+// -- write-cell fold expressions --------------------------------------------
+
+#[test]
+fn a_fold_expression_prints_tight_keeping_source_parens() {
+    // Sprinkled spaces collapse; the formatter is whitespace-only, so it
+    // reprints the author's parens verbatim. Here those parens are also
+    // load-bearing — `(v+1)` under `%` is an `Add` beneath a tighter `Rem` —
+    // but their survival is source-driven, not a precedence calculation (the
+    // sibling test keeps redundant parens too).
+    check(
+        "\
+machine {
+entry state s {
+[0..9 as v] -> write [{ ( v + 1 ) % 6 }] goto s;
+}
+}
+",
+        "\
+machine {
+  entry state s {
+    [0..9 as v] -> write [{(v+1)%6}] goto s;
+  }
+}
+",
+    );
+}
+
+#[test]
+fn a_fold_expression_drops_parens_precedence_makes_redundant() {
+    // `v*2` binds tighter than `+1`, so no parens are printed; left-
+    // associative `-` keeps its natural left-to-right reading unparenthesized.
+    check(
+        "\
+machine {
+entry state s {
+[0..9 as v] -> write [{ v * 2 + 1 }] goto s;
+[0..9 as w] -> write [{ w - 3 - 1 }] goto s;
+}
+}
+",
+        "\
+machine {
+  entry state s {
+    [0..9 as v] -> write [{v*2+1}] goto s;
+    [0..9 as w] -> write [{w-3-1}] goto s;
+  }
+}
+",
+    );
+}
+
+#[test]
+fn a_fold_expression_keeps_redundant_source_parens() {
+    // The formatter is whitespace-only: it reprints a substitution from its
+    // source tokens, so parens the author wrote survive even where precedence
+    // makes them redundant (`v*2` would bind tighter than `+1` without them).
+    // Whitespace still collapses; only the tokens are load-bearing.
+    check(
+        "\
+machine {
+entry state s {
+[0..9 as v] -> write [{ ( v * 2 ) + 1 }] goto s;
+}
+}
+",
+        "\
+machine {
+  entry state s {
+    [0..9 as v] -> write [{(v*2)+1}] goto s;
   }
 }
 ",

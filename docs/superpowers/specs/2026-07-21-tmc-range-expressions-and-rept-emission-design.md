@@ -115,7 +115,7 @@ A compression stage in codegen operating on the **emitted structured lines befor
 One principle, two shapes: **a rule that can never fire warns and contributes no rows.** Both are compile warnings (the `expansion-threshold` precedent — surfaced through `CompileReport`, not lint findings).
 
 - **`empty-expansion`** (#44): a rule whose expansion drops to zero rows — every range alternative falls outside the tape's alphabet, or a single concrete symbol is absent. Spanned at the rule. The rule contributes nothing; compilation proceeds.
-- **`unreachable-rule`** (#48): a rule following a same-state catch-all (all-wildcard pattern). Spanned at the rule. Dropped from emission, so codegen never produces a table violating the all-wildcard-row-last discipline.
+- **`unreachable-rule`** (#48): a second all-wildcard rule in the same state (a catch-all after an earlier catch-all). Spanned at the rule. Dropped from emission, so codegen never produces a table violating the all-wildcard-row-last discipline. (narrowed during implementation: band dispatch keeps exact/partial rules after a catch-all reachable)
 
 Codegen becomes **sound for zero-row rules**: no dispatch-target label, no `.row`, no dangling table reference. A state left with zero rows is valid and traps at runtime on entry — consistent with existing no-match semantics (and with the opt-in `state-may-trap` lint's story). The implementation sweeps the neighbouring paths for the same shape: anywhere expansion can produce zero rows and codegen assumes at least one.
 

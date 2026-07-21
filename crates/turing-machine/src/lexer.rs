@@ -82,8 +82,12 @@ pub enum TokenKind {
     Plus,
     /// `=` when it does not begin a `=>` (binding `name = target`).
     Eq,
-    /// `*` — the wildcard pattern element.
+    /// `*` — the wildcard pattern element, and the multiplication operator in
+    /// a write-cell fold expression (`{a*2}`).
     Star,
+    /// `%` — the remainder operator in a write-cell fold expression
+    /// (`{(v+1)%6}`). Never begins a multi-character operator.
+    Percent,
     /// `<` — a move-vector glyph (left), never a comparison.
     Lt,
     /// `>` — a move-vector glyph (right), never a comparison.
@@ -479,6 +483,7 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
             ',' => Some(TokenKind::Comma),
             ';' => Some(TokenKind::Semi),
             '*' => Some(TokenKind::Star),
+            '%' => Some(TokenKind::Percent),
             '<' => Some(TokenKind::Lt),
             '>' => Some(TokenKind::Gt),
             '[' => Some(TokenKind::LBracket),
@@ -790,6 +795,30 @@ mod tests {
         );
         // A lone `+` is always a single Plus token.
         assert_eq!(kinds("+"), vec![Plus, Eof]);
+    }
+
+    #[test]
+    fn fold_expr_operators_lex() {
+        use TokenKind::*;
+        // `%` is a single Percent token; `*` stays Star (its wildcard and
+        // multiplication spellings share one token). A full fold expression
+        // lexes to atoms and operators.
+        assert_eq!(kinds("%"), vec![Percent, Eof]);
+        assert_eq!(
+            kinds("{(v+1)%6}"),
+            vec![
+                LBrace,
+                LParen,
+                Ident("v".into()),
+                Plus,
+                Number(1, "1".into()),
+                RParen,
+                Percent,
+                Number(6, "6".into()),
+                RBrace,
+                Eof,
+            ]
+        );
     }
 
     #[test]

@@ -263,7 +263,7 @@ fn lint_findings_ride_the_lint_channel_and_sort_with_the_warnings() {
 alphabet bits { '_', '1' }
 machine {
   tape t: bits;
-  entry state s { [*] -> debugger stop; }
+  entry state s { [*] -> debugger move [>] stop; }
 }
 ";
     let (mut service, uri) = opened(src);
@@ -292,7 +292,7 @@ fn a_project_file_suppresses_a_rule_and_the_ide_channel_unions_with_it() {
 alphabet bits { '_', '1' }
 machine {
   tape t: bits;
-  entry state s { [*] -> debugger stop; }
+  entry state s { [*] -> debugger move [>] stop; }
 }
 ";
     let doc = dir.join("m.tmc");

@@ -25,7 +25,8 @@ use crate::lexer::{LexMode, Token, lex, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Machine,
-    Program, QualName, SigParamKind, State, SymLit, Transition, lower_cst, parse, parse_cst,
+    PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit, Transition, lower_cst,
+    parse, parse_cst,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -203,9 +204,21 @@ pub enum CompileErrorKind {
     /// glyph-for-glyph equal — an omitted map means identity, which requires
     /// matching alphabets.
     IdentityGlyphMismatch,
-    /// A `{v±k}` write substitution folds to a value with no glyph in the
-    /// tape's alphabet (out-of-alphabet arithmetic). `name` is the message.
+    /// A write substitution folds to a value with no glyph in the tape's
+    /// alphabet (an out-of-alphabet fold result). `name` is the message.
     FoldOutOfAlphabet(String),
+    /// A `%` in a write-cell fold has a zero modulus (division by zero). The
+    /// `%` semantics mirror the assembler's `.rept` substitution exactly
+    /// (docs/tmt/language.md (substitution)).
+    FoldZeroModulus,
+    /// A `%` in a write-cell fold produces a negative remainder — reachable
+    /// only when the left operand went negative through subtraction, which
+    /// the assembler rejects rather than wrapping. When the modulus is a
+    /// positive integer literal, `hint_modulus` carries it so the diagnostic
+    /// can teach the `{(v+N-1)%N}` wrapping-decrement idiom.
+    FoldNegativeRemainder { hint_modulus: Option<i64> },
+    /// A write-cell fold overflows `i64` during evaluation.
+    FoldOverflow,
     /// Two rules in one state match the same concrete tuple with neither
     /// carrying a wildcard — an exact-row disjointness violation. The two
     /// rendered patterns name both offenders.
@@ -296,6 +309,9 @@ impl CompileErrorKind {
             CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
             CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
             CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
+            CompileErrorKind::FoldZeroModulus => "zero-modulus",
+            CompileErrorKind::FoldNegativeRemainder { .. } => "negative-remainder",
+            CompileErrorKind::FoldOverflow => "fold-overflow",
             CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
             CompileErrorKind::RowWidth { .. } => "row-width",
             CompileErrorKind::ExternalBindingUnsupported(_) => "external-binding-unsupported",
@@ -549,6 +565,21 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::FoldOutOfAlphabet(m) => {
                 write!(f, "{m}")
+            }
+            CompileErrorKind::FoldZeroModulus => {
+                write!(f, "zero modulus in fold (`% 0`)")
+            }
+            CompileErrorKind::FoldNegativeRemainder { hint_modulus } => match hint_modulus {
+                Some(n) => write!(
+                    f,
+                    "negative remainder in fold; for a wrapping decrement write {{(v+{})%{}}}",
+                    n - 1,
+                    n
+                ),
+                None => write!(f, "negative remainder in fold"),
+            },
+            CompileErrorKind::FoldOverflow => {
+                write!(f, "fold arithmetic overflows i64")
             }
             CompileErrorKind::ExactRowConflict { first, second } => {
                 write!(
@@ -860,6 +891,14 @@ pub(crate) enum ResolvedCallTarget {
 pub(crate) struct Analysis {
     pub resolved: Resolved,
     pub diagnostics: Vec<Diagnostic>,
+    /// The parsed AST, retained so the lint layer can reach source-level
+    /// detail the resolved module elides (e.g. a signature parameter's own
+    /// span). Comment-free — `analyze` lexes without comment trivia.
+    pub program: Program,
+    /// The lexed token stream (comment-free — the `analyze` path never emits
+    /// comment trivia). Retained so lint rules can recover a span no earlier
+    /// artifact keeps — the `as` keyword of a graft's `as NAME` clause.
+    pub tokens: Vec<Token>,
 }
 
 /// lex → parse → duplicate-binding check → resolve alphabets → flatten +
@@ -874,6 +913,8 @@ pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
     Ok(Analysis {
         resolved,
         diagnostics,
+        program,
+        tokens,
     })
 }
 
@@ -906,6 +947,69 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
     } = ctx;
     unused_import_warnings(program, &imports_used, &mut diagnostics);
     Ok((resolved, diagnostics))
+}
+
+/// True when every match cell of a rule's pattern is a wildcard (`[*, …]`) —
+/// an all-wildcard catch-all that matches every input.
+fn is_all_wildcard_rule(rule: &Rule) -> bool {
+    !rule.pattern.cells.is_empty()
+        && rule
+            .pattern
+            .cells
+            .iter()
+            .all(|c| matches!(c.kind, PatternCellKind::Wildcard))
+}
+
+/// Drop a state's second (and later) all-wildcard catch-all rule
+/// (docs/tmt/language.md (rules)). Codegen re-bands a state into
+/// `[exact] ++ [partial] ++ [catch-all]` and takes the first match in THAT
+/// order, so an exact or partial rule written after a catch-all still sorts
+/// ahead of it and stays reachable — only a SECOND all-wildcard rule is
+/// genuinely dead, since the first catch-all already matches everything. Such a
+/// rule warns (`unreachable-rule`) and is removed, so the assembler's
+/// all-wildcard-row-must-be-last discipline can never be violated at codegen.
+/// Detection is on the flattened (resolved, pre-expansion) rules, so both
+/// hand-written states and the bodies of grafted graphs are covered. A world's
+/// `calls` list holds one entry per `call` transition in source order; it is
+/// filtered in tandem so it stays aligned with the surviving rules that
+/// expansion later walks.
+fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnostic>) {
+    for world in &mut resolved.worlds {
+        let old_calls = std::mem::take(&mut world.calls);
+        let mut kept_calls: Vec<ResolvedCall> = Vec::new();
+        let mut call_ix = 0usize; // running index into `old_calls` (source order)
+        for state in &mut world.states {
+            let mut seen_catch_all = false;
+            let old_rules = std::mem::take(&mut state.rules);
+            let mut new_rules: Vec<Rule> = Vec::with_capacity(old_rules.len());
+            for rule in old_rules {
+                let is_call = matches!(rule.transition, Transition::Call { .. });
+                let is_catch_all = is_all_wildcard_rule(&rule);
+                if is_catch_all && seen_catch_all {
+                    diagnostics.push(Diagnostic {
+                        code: "unreachable-rule",
+                        span: rule.span,
+                        message: "this rule can never fire — an earlier all-wildcard rule in \
+                                  this state already matches every input"
+                            .to_string(),
+                        fix: None,
+                    });
+                    if is_call {
+                        call_ix += 1; // consume the dropped rule's call slot
+                    }
+                    continue;
+                }
+                seen_catch_all |= is_catch_all;
+                if is_call {
+                    kept_calls.push(old_calls[call_ix].clone());
+                    call_ix += 1;
+                }
+                new_rules.push(rule);
+            }
+            state.rules = new_rules;
+        }
+        world.calls = kept_calls;
+    }
 }
 
 /// The language-service pipeline entry (the `.pmc` compiler's `analyze_staged`
@@ -1658,6 +1762,10 @@ pub struct CompileOptions {
     /// `--foutline`: enable the default-OFF `outline` optimizer pass. Inert
     /// unless `-O1` is also set (the optimizer runs only at `-O1`).
     pub outline: bool,
+    /// `--stamped-asm`: skip the `.rept` re-detection pass and emit the raw
+    /// stamped assembly codegen produced (docs/tmt/cli.md (compile)). Implied
+    /// when `-g` is set — the debug line map cannot survive the rewrite.
+    pub stamped_asm: bool,
 }
 
 /// Structured stage report — `tmt -v` renders it; the library never prints
@@ -1692,7 +1800,14 @@ pub struct CompileOutput {
 /// [`validate_world`] (the T6 invariant check, run here where `.pmc` runs
 /// `validate_function`), and the generated `.tma` failing to assemble.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
-    let analysis = analyze(source)?;
+    let mut analysis = analyze(source)?;
+    // Drop rules a second catch-all shadows before expansion (docs/tmt/
+    // language.md (rules)) so codegen never emits two all-wildcard match rows.
+    // Done here, on the compile path only — the language service and the batch
+    // lint keep the full source rules (the `dead-rule` lint reports them
+    // instead).
+    let mut unreachable_diags = Vec::new();
+    drop_unreachable_rules(&mut analysis.resolved, &mut unreachable_diags);
     let expanded = crate::expand::expand(&analysis.resolved)?;
     let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved)?;
 
@@ -1725,22 +1840,42 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
             strip_debugger: options.strip_debugger,
         },
     );
-    let mut object =
-        crate::asm::assemble(&tma.text, options.debug_info).map_err(|e| CompileError {
+    let assemble = |text: &str| {
+        crate::asm::assemble(text, options.debug_info).map_err(|e| CompileError {
             span: Span::point(0, 0),
             kind: CompileErrorKind::Internal(format!("generated .tma failed to assemble: {e}")),
-        })?;
+        })
+    };
+    // Fold arithmetic families in the codegen text back into `.rept` loops for
+    // the `-S` artifact (docs/tmt/cli.md (compile)), reusing the object the
+    // emitter assembled for its self-check so no third assemble happens. Skip
+    // it under `--stamped-asm`, and under `-g` — the codegen debug map is keyed
+    // by stamped physical lines, so the rewrite cannot preserve it; those paths
+    // assemble the stamped text exactly as before.
+    let (tma_text, mut object) = if options.stamped_asm || options.debug_info {
+        let object = assemble(&tma.text)?;
+        (tma.text, object)
+    } else {
+        let (text, _report, reused) =
+            crate::rept_emit::compress_asm_with_object(&tma.text, &crate::asm::tm1_syntax());
+        let object = match reused {
+            Some(o) => o,
+            None => assemble(&text)?,
+        };
+        (text, object)
+    };
     if options.debug_info {
         remap_debug_lines(&mut object, &tma.line_map);
     }
 
     let mut diagnostics = analysis.diagnostics;
+    diagnostics.extend(unreachable_diags);
     diagnostics.extend(expanded.diagnostics);
     diagnostics.extend(ir_warnings);
 
     Ok(CompileOutput {
         object,
-        tma: tma.text,
+        tma: tma_text,
         ir,
         ir_snapshots,
         report: CompileReport { diagnostics, opt },
@@ -2015,6 +2150,9 @@ impl WorldCtx<'_> {
                         }
                     }
                     Transition::Stop { .. } | Transition::Halt { .. } => {}
+                    // An omitted transition is a self-goto — the current state
+                    // is always a valid target, so there is nothing to check.
+                    Transition::Stay { .. } => {}
                     Transition::Call { then, .. } => {
                         self.check_continuation(then, &states, &binds, &ns, is_routine)?;
                     }
@@ -2437,6 +2575,9 @@ mod tests {
             CompileErrorKind::MapNotInjective { symbol: "x".into() },
             CompileErrorKind::IdentityGlyphMismatch,
             CompileErrorKind::FoldOutOfAlphabet("x".into()),
+            CompileErrorKind::FoldZeroModulus,
+            CompileErrorKind::FoldNegativeRemainder { hint_modulus: None },
+            CompileErrorKind::FoldOverflow,
             CompileErrorKind::ExactRowConflict {
                 first: "x".into(),
                 second: "y".into(),
@@ -2451,7 +2592,7 @@ mod tests {
         ];
         // Update this count when a variant joins — the reminder to wire
         // `code()` and this list together.
-        assert_eq!(all.len(), 53);
+        assert_eq!(all.len(), 56);
         let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
         codes.sort_unstable();
         let mut deduped = codes.clone();
