@@ -384,6 +384,69 @@ machine {
 }
 
 #[test]
+fn exact_rule_after_a_catch_all_stays_reachable_and_wins() {
+    // The narrow semantics of `unreachable-rule`: an EXACT rule written AFTER a
+    // same-state catch-all is NOT unreachable. Band dispatch sorts the exact
+    // ahead of the all-wildcard row, so it stays reachable — no warning — and
+    // its write wins over the catch-all's for the symbol it matches.
+    let src = "\
+alphabet ab { '_', 'a', 'b' }
+machine {
+  tape t: ab;
+  entry state s {
+    [*]   -> write ['a'] stop;
+    ['b'] -> write ['_'] stop;
+  }
+}
+";
+    let codes = diag_codes(src);
+    assert!(
+        !codes.iter().any(|c| c == "unreachable-rule"),
+        "an exact rule after a catch-all must NOT warn unreachable-rule, got {codes:?}"
+    );
+    // Seed 'b' (index 2): the exact `['b']` sorts ahead of the catch-all and
+    // fires, writing '_' (index 0). Had the catch-all won, the cell would read
+    // 'a' (index 1) instead — so the derived '_' proves the exact rule wins.
+    let (outcome, snaps) = run_capped(src, &[(snap(0, &[2], 0), 3)], 1_000);
+    assert_eq!(outcome, Outcome::Stopped);
+    assert_eq!(snaps, vec![snap(0, &[0], 0)]);
+}
+
+#[test]
+fn grafted_graph_body_with_two_catch_alls_warns_and_compiles() {
+    // The graft path of `unreachable-rule`: a graph body carrying two
+    // all-wildcard catch-alls. The second `[*]` can never fire; it WARNS and is
+    // dropped before codegen, so splicing the graph into the machine compiles
+    // clean at -O0 — no assembler "all-wildcard must be last" internal error.
+    let src = "\
+alphabet marks { '_', 'x', 'y' }
+
+graph twice(tape t: marks, state done) {
+  entry state s {
+    [*] -> move [>] goto s;
+    [*] -> done;
+  }
+}
+
+machine {
+  tape work: marks;
+  entry graft twice(t = work, done = win) as g;
+  state win { [*] -> stop; }
+}
+";
+    let codes = diag_codes(src);
+    assert!(
+        codes.iter().any(|c| c == "unreachable-rule"),
+        "expected unreachable-rule from the grafted body, got {codes:?}"
+    );
+    // `run_capped` compiles at -O0 (the "compiles clean" gate) then runs. The
+    // surviving rule moves right forever, so the capped run traps StepLimit —
+    // the second catch-all's `-> done` was correctly dropped.
+    let (outcome, _) = run_capped(src, &[(snap(0, &[1, 1, 0], 0), 3)], 8);
+    assert_eq!(outcome, Outcome::Trapped(Trap::StepLimit));
+}
+
+#[test]
 fn zero_row_state_is_sound_at_both_opt_levels() {
     // A zero-row state is a NEW IR shape (rules: []) the optimizer had never
     // seen before this task; the optimizer runs on it at -O1 before codegen.
