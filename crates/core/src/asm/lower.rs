@@ -4,9 +4,10 @@
 //! every diagnostic. Replaces the old line-oriented parser.
 
 use super::cst::{
-    AsmCst, AsmItem, AsmItemKind, FrameDirectiveCst, FrameHeaderCst, FrameMapCst, FramePairCst,
-    FuncCst, InstrCst, LabelCst, LineCst, OperandToken, ReptCst, RoutineDirectiveCst, SectionCst,
-    TableDirectiveCst, TableDirectiveKind, parse_asm_cst_with, parse_binding,
+    AsmCst, AsmItem, AsmItemKind, BYTE_WORD, FRAME_DIRECTIVE_WORDS, FUNC_WORD, FrameDirectiveCst,
+    FrameHeaderCst, FrameMapCst, FramePairCst, FuncCst, InstrCst, LabelCst, LineCst, OperandToken,
+    ROUTINE_WORD, ROW_WORD, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst,
+    TableDirectiveKind, parse_asm_cst_with, parse_binding,
 };
 use super::subst::substitute;
 use super::syntax::{ArchSyntax, Flow, SyntaxEntry};
@@ -1118,7 +1119,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
     // gets a precise complaint instead of UnknownMnemonic, in either
     // section. Only for dialects whose tables cap could shape one at all.
     if let Some(instr) = &line.instr
-        && matches!(instr.word.as_str(), ".frame" | ".map" | ".exits")
+        && FRAME_DIRECTIVE_WORDS.contains(&instr.word.as_str())
         && syntax.caps.tables
     {
         return Err(err(
@@ -1133,7 +1134,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
     // than the generic section one.
     if ctx.section == Section::Tables {
         if let Some(instr) = &line.instr
-            && instr.word == ".row"
+            && instr.word == ROW_WORD
         {
             return Err(err(
                 instr.word_span,
@@ -1164,7 +1165,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
     // ".func" is the instruction word with no labels before it;
     // `L1: .func …` is a plain unknown mnemonic. This fires before the
     // open-function check, matching the legacy `.func`-branch precedence.
-    if instr.word == ".func" && line.labels.is_empty() {
+    if instr.word == FUNC_WORD && line.labels.is_empty() {
         return lower_malformed_func(instr, ctx);
     }
 
@@ -1173,7 +1174,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
     // instead of UnknownMnemonic. Only for dialects whose caps could
     // shape one at all: with tables off the word is as unknown as any
     // other, exactly as before the directive existed.
-    if instr.word == ".routine" && line.labels.is_empty() && syntax.caps.tables {
+    if instr.word == ROUTINE_WORD && line.labels.is_empty() && syntax.caps.tables {
         return Err(err(
             instr.word_span,
             AsmErrorKind::Syntax("`.routine` takes `<name>, tapes=<int>, alpha=(<int>, …)`"),
@@ -1192,7 +1193,7 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
     let override_span = ctx.span_override;
     labels.extend(line.labels.iter().map(|l| spanned_in(l, override_span)));
 
-    let item = if instr.word == ".byte" {
+    let item = if instr.word == BYTE_WORD {
         SourceItem::RawByte {
             span: line.span,
             labels,

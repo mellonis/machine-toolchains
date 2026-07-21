@@ -7,6 +7,71 @@ use super::lexer::{AsmToken, AsmTokenKind, lex_line};
 use super::syntax::AsmCaps;
 use crate::diagnostics::Span;
 
+// ---------------------------------------------------------------------
+// Directive words — the single spelling of every directive the
+// assembler framework recognizes (docs/formats.md (assembly text)).
+// The recognizers consult these consts — the `.rept` block opener and
+// `shape_line`'s branches here, the `.func`/`.byte`/malformed-directive
+// paths in lower.rs — never a re-spelled literal, so the public
+// inventory below is assembled from the same words recognition reads.
+//
+// Residual risk, stated honestly: recognition is structurally scattered
+// (a block opener, several shaping branches, lowering paths), so a
+// future directive COULD bypass this block with an inline literal and
+// stay invisible to [`recognized_directives`]. The convention is
+// load-bearing; the `recognized_directives_match_the_real_recognizer`
+// test pins every listed word's caps tier to the real assembler, and
+// the editor-grammar drift guards set-compare the inventory against
+// each dialect's grammar.
+
+pub(crate) const FUNC_WORD: &str = ".func";
+pub(crate) const BYTE_WORD: &str = ".byte";
+pub(crate) const SECTION_WORD: &str = ".section";
+pub(crate) const ROUTINE_WORD: &str = ".routine";
+pub(crate) const REPT_WORD: &str = ".rept";
+pub(crate) const ENDR_WORD: &str = ".endr";
+pub(crate) const ROW_WORD: &str = ".row";
+pub(crate) const TARGETS_WORD: &str = ".targets";
+pub(crate) const TARGET_WORD: &str = ".target";
+pub(crate) const FRAME_WORD: &str = ".frame";
+pub(crate) const MAP_WORD: &str = ".map";
+pub(crate) const EXITS_WORD: &str = ".exits";
+
+/// The frame-descriptor directive family, shaped under
+/// [`AsmCaps::tables`] and reported precisely by lower when malformed.
+pub(crate) const FRAME_DIRECTIVE_WORDS: [&str; 3] = [FRAME_WORD, MAP_WORD, EXITS_WORD];
+
+/// Every directive word the assembler framework recognizes under
+/// `caps`, sorted (docs/formats.md (assembly text)). `.func` and
+/// `.byte` are the caps-independent classic surface; the
+/// section/table/signature/frame family rides [`AsmCaps::tables`];
+/// `.rept`/`.endr` ride [`AsmCaps::rept`]; the vectors cap adds operand
+/// tokens, never directives.
+///
+/// This is the drift-guard authority: the editor-grammar suites
+/// set-compare the directive words each dialect's grammar paints
+/// against this list under that dialect's caps, so a directive added
+/// to the assembler with no grammar entry fails a test — and a
+/// directive invented in a grammar fails the same test the other way.
+pub fn recognized_directives(caps: AsmCaps) -> Vec<&'static str> {
+    let mut words = vec![FUNC_WORD, BYTE_WORD];
+    if caps.tables {
+        words.extend([
+            SECTION_WORD,
+            ROUTINE_WORD,
+            ROW_WORD,
+            TARGETS_WORD,
+            TARGET_WORD,
+        ]);
+        words.extend(FRAME_DIRECTIVE_WORDS);
+    }
+    if caps.rept {
+        words.extend([REPT_WORD, ENDR_WORD]);
+    }
+    words.sort_unstable();
+    words
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsmCst {
     pub items: Vec<AsmItem>,
@@ -404,7 +469,7 @@ fn rept_header(rec: &LineRecord<'_>) -> Option<ReptHeader> {
     let [first, rest @ ..] = body else {
         return None;
     };
-    if word_text(first) != Some(".rept") {
+    if word_text(first) != Some(REPT_WORD) {
         return None;
     }
     let operands = operand_region(rec.line, rest, rec.line_no, first.col + first.len);
@@ -432,7 +497,7 @@ fn rept_header(rec: &LineRecord<'_>) -> Option<ReptHeader> {
 /// unterminated, again mirroring `.func`.
 fn is_endr(tokens: &[AsmToken]) -> bool {
     let (body, _) = split_trailing(tokens);
-    matches!(body, [only] if word_text(only) == Some(".endr"))
+    matches!(body, [only] if word_text(only) == Some(ENDR_WORD))
 }
 
 /// The `.endr` record's word span (excluding its trailing comment) and
@@ -503,7 +568,7 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     // `.func` special case: structurally exact directives only.
     // Anything else starting `.func` stays a Line so lower.rs can
     // replicate the legacy errors verbatim.
-    if word_text(&body[0]) == Some(".func") {
+    if word_text(&body[0]) == Some(FUNC_WORD) {
         let exact = match body {
             [_, name] => word_text(name).map(|n| (n, name, false)),
             [_, name, kw] if word_text(kw) == Some("local") => {
@@ -526,7 +591,7 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     // `.func` — structurally exact (`.section` + one Word name) only,
     // else it stays a Line.
     if caps.tables
-        && word_text(&body[0]) == Some(".section")
+        && word_text(&body[0]) == Some(SECTION_WORD)
         && let [_, name] = body
         && let Some(name) = word_text(name)
     {
@@ -545,7 +610,7 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     // so with rept off the parens stay Junk and the line shapes Raw
     // before this branch is ever reached.
     if caps.tables
-        && word_text(&body[0]) == Some(".routine")
+        && word_text(&body[0]) == Some(ROUTINE_WORD)
         && let Some(directive) = routine_directive(body, line_no, span, &trailing)
     {
         return AsmItemKind::RoutineDirective(directive);
@@ -621,7 +686,7 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     // only — anything else degrades to a Line for lower to report
     // precisely (mirror `.func`/`.routine`).
     if caps.tables
-        && matches!(word, ".frame" | ".map" | ".exits")
+        && FRAME_DIRECTIVE_WORDS.contains(&word)
         && let Some(directive) = frame_directive(
             word,
             &labels,
@@ -778,7 +843,7 @@ fn frame_directive(
     after_word_col: u32,
 ) -> Option<FrameDirectiveCst> {
     match word {
-        ".frame" => {
+        FRAME_WORD => {
             let [label] = labels else {
                 return None;
             };
@@ -791,13 +856,13 @@ fn frame_directive(
                 trailing: trailing.clone(),
             }))
         }
-        ".map" => {
+        MAP_WORD => {
             if !labels.is_empty() {
                 return None;
             }
             parse_frame_map(region, line_no, span, trailing).map(FrameDirectiveCst::Map)
         }
-        ".exits" => {
+        EXITS_WORD => {
             if !labels.is_empty() {
                 return None;
             }
@@ -1023,9 +1088,9 @@ fn parse_binding_entry(seg: &[AsmToken]) -> Option<(u32, Vec<FramePairCst>)> {
 /// for any other word.
 fn table_directive_kind(word: &str) -> Option<TableDirectiveKind> {
     match word {
-        ".row" => Some(TableDirectiveKind::Row),
-        ".targets" => Some(TableDirectiveKind::Targets),
-        ".target" => Some(TableDirectiveKind::Target),
+        ROW_WORD => Some(TableDirectiveKind::Row),
+        TARGETS_WORD => Some(TableDirectiveKind::Targets),
+        TARGET_WORD => Some(TableDirectiveKind::Target),
         _ => None,
     }
 }
@@ -1818,5 +1883,123 @@ F0: .frame tapes=(3, 0)
                 .count();
             prop_assert_eq!(cst.items.len(), nonblank);
         }
+    }
+
+    // -- The directive inventory matches the real recognizer -----------
+
+    /// The fixture syntax with `caps` swapped in — the assembler probes
+    /// below need every caps tier on one dialect.
+    fn syntax_with(caps: AsmCaps) -> crate::asm::ArchSyntax {
+        let mut syntax = crate::asm::syntax::fixture::test_syntax();
+        syntax.caps = caps;
+        syntax
+    }
+
+    /// A probe source whose directive line must reach a real handler
+    /// when the word is recognized. Well-formed where a clean assembly
+    /// proves recognition; deliberately malformed where the directive's
+    /// own precise complaint (never "unknown mnemonic") proves it —
+    /// which also keeps the probe valid on tiers missing the OTHER caps
+    /// the well-formed spelling would need to lex (`.routine`'s parens
+    /// ride the rept cap, `.row`'s brackets the vectors cap).
+    fn recognized_probe(word: &str) -> String {
+        match word {
+            FUNC_WORD => ".func probe\nstop\n".to_string(),
+            BYTE_WORD => ".func probe\n.byte 7\nstop\n".to_string(),
+            SECTION_WORD => ".section code\n.func probe\nstop\n".to_string(),
+            // `.rept`/`.endr` are only directives as a matched pair —
+            // the block recognizer consumes both or neither.
+            REPT_WORD | ENDR_WORD => ".func probe\n.rept v, 0, 0\nnop\n.endr\nstop\n".to_string(),
+            // Bare in code: answered by the malformed-`.routine` /
+            // malformed-frame-directive complaints.
+            ROUTINE_WORD | FRAME_WORD | MAP_WORD | EXITS_WORD => {
+                format!(".func probe\n{word}\nstop\n")
+            }
+            // Bare in the tables section: answered by the `.row` vector
+            // complaint / the table-space label complaints.
+            ROW_WORD | TARGETS_WORD | TARGET_WORD => {
+                format!(".section tables\nT: {word}\n.section code\n.func probe\nstop\n")
+            }
+            _ => panic!("no probe for `{word}`"),
+        }
+    }
+
+    /// Pins [`recognized_directives`] to the recognizer's actual
+    /// behavior on every caps tier: each listed word must reach a real
+    /// directive handler (its probe never answers "unknown mnemonic"
+    /// naming it), and each word the tier does NOT list must fall
+    /// through to mnemonic lookup and fail there. A word added to the
+    /// inventory without a recognizer — or under the wrong cap — fails
+    /// here; so does a recognizer whose cap gate moves.
+    #[test]
+    fn recognized_directives_match_the_real_recognizer() {
+        use crate::asm::{AsmErrorKind, assemble};
+        let all_on = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        let everything = recognized_directives(all_on);
+        assert_eq!(everything.len(), 12, "the audited directive surface");
+        let tiers = [
+            AsmCaps::default(),
+            AsmCaps {
+                tables: true,
+                ..AsmCaps::default()
+            },
+            AsmCaps {
+                rept: true,
+                ..AsmCaps::default()
+            },
+            all_on,
+        ];
+        for caps in tiers {
+            let inventory = recognized_directives(caps);
+            for word in &everything {
+                if inventory.contains(word) {
+                    if let Err(e) =
+                        assemble(&syntax_with(caps), 0x7F, &recognized_probe(word), false)
+                        && let AsmErrorKind::UnknownMnemonic(w) = &e.kind
+                    {
+                        assert_ne!(
+                            w, word,
+                            "inventory lists `{word}` under {caps:?}, but the \
+                             recognizer rejects it as an unknown mnemonic"
+                        );
+                    }
+                } else {
+                    let source = format!(".func probe\n{word}\nstop\n");
+                    let err = assemble(&syntax_with(caps), 0x7F, &source, false)
+                        .expect_err("an unrecognized directive cannot assemble");
+                    assert_eq!(
+                        err.kind,
+                        AsmErrorKind::UnknownMnemonic((*word).to_string()),
+                        "inventory omits `{word}` under {caps:?}, so it must fall \
+                         through to mnemonic lookup"
+                    );
+                }
+            }
+            // A word in no tier's inventory is unknown under every caps
+            // combination — dotted words carry no blanket special-casing.
+            let err = assemble(
+                &syntax_with(caps),
+                0x7F,
+                ".func probe\n.bogus\nstop\n",
+                false,
+            )
+            .expect_err("an invented directive cannot assemble");
+            assert_eq!(
+                err.kind,
+                AsmErrorKind::UnknownMnemonic(".bogus".to_string())
+            );
+        }
+        // The vectors cap adds operand tokens, never directives.
+        assert_eq!(
+            recognized_directives(AsmCaps {
+                vectors: true,
+                ..AsmCaps::default()
+            }),
+            recognized_directives(AsmCaps::default())
+        );
     }
 }

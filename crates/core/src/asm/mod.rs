@@ -15,6 +15,7 @@ pub(crate) mod syntax;
 
 pub use assembler::assemble;
 pub(crate) use assembler::assemble_lowered;
+pub use cst::recognized_directives;
 pub use disassembler::{
     disassemble_executable, disassemble_object, grid_line, listing_executable, listing_line,
 };
