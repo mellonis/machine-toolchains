@@ -10,6 +10,10 @@ use serde_json::json;
 
 use mtc_core::lsp::CandidateKind;
 
+// The service now drives `lint_tma_cst` (single-parse); the CLI-parity
+// tests below still compare against the source-taking `lint_tma` wrapper.
+use crate::lint::tma::lint_tma;
+
 use super::*;
 
 /// A fresh scratch directory, unique per call. This crate has no shared

@@ -66,7 +66,7 @@ use mtc_core::lsp::{
 use mtc_core::vm::OperandKind;
 
 use crate::asm::tm1_syntax;
-use crate::lint::tma::lint_tma;
+use crate::lint::tma::lint_tma_cst;
 
 use super::{ConfigResolver, actions_from_findings, parse_ide_codes};
 
@@ -495,11 +495,13 @@ impl LanguageService for TmaLanguageService {
         }
         .resolve(uri);
 
-        // 2. Total CST, always. One `lint_tma` call gives the fatal gate AND
-        //    the lint findings — the same entry `tmt lint` uses, so both
-        //    surfaces report the same set.
+        // 2. Total CST, always — parsed once here and shared with both the
+        //    lint route and the descriptor channel below. One `lint_tma_cst`
+        //    call over that CST gives the fatal gate AND the lint findings
+        //    without re-parsing it — the same findings `tmt lint` reports, so
+        //    both surfaces agree.
         let cst = parse_asm_cst_with(text, tm1_syntax().caps);
-        let (fatal, lint_findings) = match lint_tma(text, &effective_allow) {
+        let (fatal, lint_findings) = match lint_tma_cst(text, &cst, &effective_allow) {
             Ok(findings) => (None, Some(findings)),
             Err(e) => (Some(e), None),
         };

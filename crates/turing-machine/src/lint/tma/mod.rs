@@ -8,15 +8,14 @@
 //!
 //! # The merge seam
 //!
-//! Core's `mtc_core::asm::lint::lint` stays CLOSED — it runs only its own
-//! five rules and exposes no extension hook. [`lint_tma`] calls it (with
-//! `tm1_syntax()`, exactly as the `.pma` route does) for those five plus the
-//! fatal gate, then runs the TM additions ([`TMA_RULES`]) over the same asm
-//! CST and merges both diagnostic streams into one source-ordered report.
-//! Because core's `lint` never hands its own CST back (and cannot be made
-//! to — core is a closed dependency here), the additions re-parse with
-//! `parse_asm_cst_with` under the identical `tm1_syntax()` caps; identical
-//! caps yield an identical parse, so "the same CST" holds in substance.
+//! Core's assembly lint layer stays CLOSED — it runs only its own five
+//! rules and exposes no extension hook. [`lint_tma`] parses the asm CST
+//! once (under `tm1_syntax()` caps, exactly as the `.pma` route does),
+//! hands it to core's `lint_cst` for those five rules plus the fatal gate,
+//! then runs the TM additions ([`TMA_RULES`]) over that SAME CST and merges
+//! both diagnostic streams into one source-ordered report. The CST is
+//! threaded through rather than re-parsed on each side, so one parse (and
+//! one lowering, inside `lint_cst`) serves the whole route.
 //!
 //! # unused-label runs unmodified on the `.tma` path
 //!
@@ -92,10 +91,25 @@ pub(crate) const TMA_RULES: &[(&str, TmaRule)] = &[
 /// `.pma` route. Does NOT validate `allow` codes — the driver owns that over
 /// the shared cross-language namespace, same as core's `lint`.
 pub fn lint_tma(source: &str, allow: &[String]) -> Result<Vec<Diagnostic>, AsmError> {
+    let cst = parse_asm_cst_with(source, tm1_syntax().caps);
+    lint_tma_cst(source, &cst, allow)
+}
+
+/// [`lint_tma`] over an already-parsed CST. The `.tma` language service
+/// parses the CST once for its document state (and its descriptor
+/// channel) and passes it here, so the whole `did_update` path parses and
+/// lowers the source exactly once — core's `lint_cst` reuses the same CST
+/// for the five arch-agnostic rules + fatal gate, and the TM additions
+/// read it directly. The CST MUST have been parsed under `tm1_syntax()`
+/// caps. Byte-identical to [`lint_tma`] on the same source.
+pub fn lint_tma_cst(
+    source: &str,
+    cst: &AsmCst,
+    allow: &[String],
+) -> Result<Vec<Diagnostic>, AsmError> {
     let syntax = tm1_syntax();
-    let mut diagnostics = mtc_core::asm::lint::lint(&syntax, source, allow)?;
-    let cst = parse_asm_cst_with(source, syntax.caps);
-    let ctx = TmaLintContext { source, cst: &cst };
+    let mut diagnostics = mtc_core::asm::lint::lint_cst(&syntax, source, cst, allow)?;
+    let ctx = TmaLintContext { source, cst };
     for (code, rule) in TMA_RULES {
         if allow.iter().any(|a| a == code) {
             continue;
@@ -226,5 +240,18 @@ gone:   hlt
             err.kind,
             mtc_core::asm::AsmErrorKind::UnknownMnemonic(_)
         ));
+    }
+
+    #[test]
+    fn lint_tma_cst_matches_lint_tma_on_the_same_source() {
+        // The CST-consuming entry produces byte-identical findings to
+        // `lint_tma`, reusing the one parse the caller supplies. This cannot
+        // compile unless `lint_tma_cst` exists, so it doubles as the
+        // single-parse proof for the `.tma` route.
+        let cst = parse_asm_cst_with(CLEAN, tm1_syntax().caps);
+        assert_eq!(
+            lint_tma_cst(CLEAN, &cst, &[]).unwrap(),
+            lint_tma(CLEAN, &[]).unwrap(),
+        );
     }
 }

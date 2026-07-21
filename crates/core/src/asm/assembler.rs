@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::lower::{
-    FrameTapeMap, SourceFunction, SourceItem, SourceOperand, SourceRow, SourceTable,
+    FrameTapeMap, LoweredSource, SourceFunction, SourceItem, SourceOperand, SourceRow, SourceTable,
     SourceTapeBinding, SpannedName, VecElem, lower_source,
 };
 use super::syntax::{ArchSyntax, Flow};
@@ -136,6 +136,25 @@ pub fn assemble(
         syntax,
         source,
     )?;
+    assemble_lowered(syntax, arch_id, &lowered, with_debug)
+}
+
+/// The resolve-only half of [`assemble`]: everything after lowering
+/// (symbol table, per-function layout/encoding/relaxation, table blobs,
+/// signatures, bound calls). Callers that already hold a [`LoweredSource`]
+/// — the assembly lint entry uses it as its fatal gate — reuse the one
+/// parse+lower instead of re-running both (docs/core.md (the assembler
+/// framework)). Byte-identical to [`assemble`] on the same source.
+///
+/// Borrows `lowered` (rather than consuming it) so a caller can go on to
+/// read the lowered functions/tables afterward — the lint context does;
+/// only `signatures` is cloned into the object as a result.
+pub(crate) fn assemble_lowered(
+    syntax: &ArchSyntax,
+    arch_id: u8,
+    lowered: &LoweredSource,
+    with_debug: bool,
+) -> Result<ObjectFile, AsmError> {
     let functions = &lowered.functions;
 
     let mut symbols: Vec<Symbol> = functions
@@ -208,7 +227,9 @@ pub fn assemble(
     // (MO)): lowering guarantees they parallel the functions — and so
     // the blobs — when present; absent, the object keeps its v2 shape
     // byte-for-byte.
-    object.signatures = lowered.signatures;
+    // Cloned (not moved) so the entry can borrow `lowered`; for a file
+    // with no `.routine` this is a `None` discriminant copy (no heap).
+    object.signatures = lowered.signatures.clone();
     // Declarative binding calls force the v3 object shape (docs/formats.md
     // (bound calls)); an object with none keeps its v2 shape byte-for-byte.
     object.bound_calls = bound_calls;
@@ -1466,6 +1487,53 @@ mod tests {
 
     fn asm_fake(src: &str) -> Result<crate::formats::object::ObjectFile, AsmError> {
         assemble(&fake_syntax(), 0x7E, src, false)
+    }
+
+    #[test]
+    fn assemble_lowered_matches_assemble_on_the_same_source() {
+        // The resolve-only entry produces a byte-identical object to the
+        // full `assemble`: it does the same post-lower work over the one
+        // lowering the caller already holds (docs/core.md (the assembler
+        // framework)). Covers a plain source, one with debug info, a
+        // `.routine`-signed source (exercising the signatures clone), and a
+        // tables source. This cannot compile unless `assemble_lowered`
+        // exists, so it doubles as the single-lower proof.
+        let check = |syntax: &ArchSyntax, arch: u8, src: &str, dbg: bool| {
+            let lowered = lower_source(
+                &crate::asm::cst::parse_asm_cst_with(src, syntax.caps),
+                syntax,
+                src,
+            )
+            .unwrap();
+            assert_eq!(
+                assemble_lowered(syntax, arch, &lowered, dbg).unwrap(),
+                assemble(syntax, arch, src, dbg).unwrap(),
+            );
+        };
+        check(
+            &test_syntax(),
+            0x7E,
+            ".func f\nL:      nop\n        jmp L\n        stop\n",
+            false,
+        );
+        check(
+            &test_syntax(),
+            0x7E,
+            ".func f\nL:      nop\n        stop\n",
+            true,
+        );
+        check(
+            &fake_syntax(),
+            0x7E,
+            ".routine main, tapes=2, alpha=(3, 5)\n.func main\n    vwrite 1, 2\n    stp\n",
+            false,
+        );
+        check(
+            &fake_syntax(),
+            0x7E,
+            ".section tables\nT0: .row [1, 2]\n    .row [1, *]\n.section code\n.func main\n    tmatch T0\n    stp\n",
+            false,
+        );
     }
 
     #[test]
