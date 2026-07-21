@@ -100,6 +100,20 @@
 - [ ] Failing test; implement (case-insensitive compare at the match site — do not lowercase stored registrations if that changes any public surface; compare-time folding suffices); full gates
 - [ ] Commit: `fix(core): LSP extension routing is case-insensitive`
 
+### Task 6: JetBrains README JDK claim (#21 cherry-pick)
+
+**Files:**
+- Modify: `editors/jetbrains-pm/README.md` and `editors/jetbrains-tm/README.md` (verify both carry the claim), possibly `editors/jetbrains-{pm,tm}/build.gradle.kts`
+
+**Requirements:**
+1. Both JetBrains plugin READMEs claim (or may claim — verify) the build works with "any JDK 17+"; nothing pins a Gradle `jvmToolchain`, and only a JetBrains-bundled JBR was ever exercised. Published READMEs shipping with release artifacts must state only verified facts.
+2. Preferred fix: pin `jvmToolchain` in both `build.gradle.kts` files AND verify the build actually succeeds under it (`JAVA_HOME=<a JetBrains IDE's bundled JBR> ./gradlew buildPlugin` per each README — probe for an installed JBR under `/Applications/*.app/Contents/jbr`). If you cannot run the build in this environment, do NOT pin blind — take the fallback: soften the README claim to exactly what is verified (the JBR the maintainer builds with), text-only.
+3. Whichever path taken, the two plugins stay textually consistent with each other, and no other README claims are touched.
+
+**Steps:**
+- [ ] Verify the claim's presence in both READMEs; probe for a JBR; pin+build or soften
+- [ ] Commit: `docs(editors): jetbrains build-JDK claim states what is verified` (or `fix(editors): pin gradle jvmToolchain …` if pinning)
+
 ---
 
 ## Final gates (whole branch)
@@ -107,4 +121,4 @@
 - `cargo test --workspace` / clippy `-D warnings` / `fmt --check`
 - `git status --short crates/post-machine/tests/golden/` empty
 - Version-space constants untouched (grep the five)
-- Issues closed on merge: #41, #42, #50, #36; #51 gets a prong-1-shipped comment and STAYS OPEN carrying prong 2.
+- Issues closed on merge: #41, #42, #50, #36; #51 gets a prong-1-shipped comment and STAYS OPEN carrying prong 2; #21 gets a cherry-pick comment (README claim shipped; the hardening batch remains) and STAYS OPEN.
