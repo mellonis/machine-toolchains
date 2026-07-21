@@ -88,31 +88,49 @@ pub enum AsmErrorKind {
     BadFrame(String),
 }
 
-impl AsmErrorKind {
-    /// Stable kebab-case code identifying the kind (docs/core.md (error
-    /// codes)). Permanent user-visible identifiers: the CLI brackets them
-    /// into every fatal rendering and editor integrations match on them.
-    pub fn code(&self) -> &'static str {
-        match self {
-            AsmErrorKind::Syntax(_) => "syntax",
-            AsmErrorKind::UnknownMnemonic(_) => "unknown-mnemonic",
-            AsmErrorKind::OutsideFunction => "outside-function",
-            AsmErrorKind::DuplicateFunction(_) => "duplicate-function",
-            AsmErrorKind::DuplicateLabel(_) => "duplicate-label",
-            AsmErrorKind::UnknownLabel(_) => "unknown-label",
-            AsmErrorKind::BadOperand(_) => "bad-operand",
-            AsmErrorKind::ShortOffsetOutOfRange { .. } => "short-offset-out-of-range",
-            AsmErrorKind::EncodeError(_) => "encode-error",
-            AsmErrorKind::RawLine => "raw-line",
-            AsmErrorKind::BadRept => "bad-rept",
-            AsmErrorKind::BadSubstitution(_) => "bad-substitution",
-            AsmErrorKind::BadVector(_) => "bad-vector",
-            AsmErrorKind::BadTable(_) => "bad-table",
-            AsmErrorKind::TableDiscipline(_) => "table-discipline",
-            AsmErrorKind::UnknownTableLabel(_) => "unknown-table-label",
-            AsmErrorKind::BadSignature(_) => "bad-signature",
-            AsmErrorKind::BadFrame(_) => "bad-frame",
+/// Binds each [`AsmErrorKind`] variant to its stable code exactly once,
+/// expanding to BOTH the exhaustive `code()` match and the `CODES`
+/// registry table, so the two cannot diverge: a new variant fails to
+/// compile until it gets a row here, and the row lands in the table the
+/// completeness and docs drift guards read (docs/core.md (error codes)).
+macro_rules! code_registry {
+    ($($variant:pat => $code:literal,)+) => {
+        /// Every code an [`AsmErrorKind`] can render, in declaration
+        /// order — the registry the drift guards set-compare against
+        /// the published inventory (docs/core.md (error codes)).
+        pub const CODES: &[&str] = &[$($code),+];
+
+        /// Stable kebab-case code identifying the kind (docs/core.md (error
+        /// codes)). Permanent user-visible identifiers: the CLI brackets them
+        /// into every fatal rendering and editor integrations match on them.
+        pub fn code(&self) -> &'static str {
+            match self {
+                $($variant => $code,)+
+            }
         }
+    };
+}
+
+impl AsmErrorKind {
+    code_registry! {
+        AsmErrorKind::Syntax(_) => "syntax",
+        AsmErrorKind::UnknownMnemonic(_) => "unknown-mnemonic",
+        AsmErrorKind::OutsideFunction => "outside-function",
+        AsmErrorKind::DuplicateFunction(_) => "duplicate-function",
+        AsmErrorKind::DuplicateLabel(_) => "duplicate-label",
+        AsmErrorKind::UnknownLabel(_) => "unknown-label",
+        AsmErrorKind::BadOperand(_) => "bad-operand",
+        AsmErrorKind::ShortOffsetOutOfRange { .. } => "short-offset-out-of-range",
+        AsmErrorKind::EncodeError(_) => "encode-error",
+        AsmErrorKind::RawLine => "raw-line",
+        AsmErrorKind::BadRept => "bad-rept",
+        AsmErrorKind::BadSubstitution(_) => "bad-substitution",
+        AsmErrorKind::BadVector(_) => "bad-vector",
+        AsmErrorKind::BadTable(_) => "bad-table",
+        AsmErrorKind::TableDiscipline(_) => "table-discipline",
+        AsmErrorKind::UnknownTableLabel(_) => "unknown-table-label",
+        AsmErrorKind::BadSignature(_) => "bad-signature",
+        AsmErrorKind::BadFrame(_) => "bad-frame",
     }
 }
 
@@ -201,9 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_has_a_distinct_code() {
-        // One representative per variant; `code()`'s match is exhaustive,
-        // so this also pins that every variant is accounted for.
+    fn every_kind_has_a_registry_row_and_codes_are_unique_kebab_case() {
+        // One representative per variant, in declaration order. The
+        // `code_registry!` expansion already ties every variant to a
+        // `CODES` row structurally (one list feeds both the match and
+        // the table); this witness list additionally proves the rows
+        // come out in declaration order and stay pairwise distinct.
         let kinds = [
             AsmErrorKind::Syntax("x"),
             AsmErrorKind::UnknownMnemonic("x".into()),
@@ -224,8 +245,25 @@ mod tests {
             AsmErrorKind::BadSignature("x".into()),
             AsmErrorKind::BadFrame("x".into()),
         ];
-        assert_eq!(kinds.len(), 18);
-        let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
-        assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
+        let witnessed: Vec<&str> = kinds.iter().map(|k| k.code()).collect();
+        assert_eq!(
+            witnessed,
+            AsmErrorKind::CODES,
+            "the witness list and the CODES registry disagree"
+        );
+        let unique: std::collections::HashSet<&str> = witnessed.iter().copied().collect();
+        assert_eq!(unique.len(), kinds.len(), "duplicate code: {witnessed:?}");
+        for code in AsmErrorKind::CODES {
+            assert!(
+                !code.is_empty()
+                    && !code.starts_with('-')
+                    && !code.ends_with('-')
+                    && !code.contains("--")
+                    && code
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "code `{code}` is not kebab-case"
+            );
+        }
     }
 }
