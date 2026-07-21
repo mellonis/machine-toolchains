@@ -25,7 +25,8 @@ where a fix exists it surfaces through the editor's code actions
 (`docs/lsp.md (code actions)`) rather than on the command line. Two of
 them, `redundant-jump-to-next` and `leftover-debugger`, are arch-agnostic
 rules shared with the PM-1 toolchain, where `pmt lint --fix` also applies
-them from the command line.
+them from the command line — `redundant-jump-to-next` directly, and
+`leftover-debugger`'s deletion gated behind `--fix --force`.
 
 ## Rule tiers and `--allow`
 
