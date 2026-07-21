@@ -9,6 +9,15 @@ plugins {
 group = "ru.mellonis"
 version = "0.1.0"
 
+kotlin {
+    // Pinned, not just "any JDK 17+": the IntelliJ Platform Gradle Plugin
+    // compiles against this toolchain regardless of JAVA_HOME's own JDK —
+    // foojay-resolver-convention (settings.gradle.kts) auto-provisions 17
+    // if JAVA_HOME doesn't already provide it. Verified building under a
+    // JetBrains-bundled JBR newer than 17 (JBR 25) with this pin in place.
+    jvmToolchain(17)
+}
+
 repositories {
     mavenCentral()
     intellijPlatform {
