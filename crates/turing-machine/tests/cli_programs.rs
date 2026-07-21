@@ -5,6 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mtc_core::formats::ARCH_PM1;
+use mtc_core::formats::executable::Executable;
+use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use mtc_turing_machine::cli::{execute, execute_with};
 use mtc_turing_machine::ir::IrProgram;
@@ -122,6 +125,29 @@ fn no_args_prints_usage() {
 #[test]
 fn unknown_subcommand_errors() {
     assert!(execute(&args(&["bogus"])).is_err());
+}
+
+#[test]
+fn dis_refuses_a_foreign_architecture_executable() {
+    // A .tmx stamped with PM-1's arch byte: `run` already refuses this
+    // (`unknown architecture 0x01`); `dis` must refuse it the same way
+    // instead of decoding the code section against TM-1's opcode table.
+    let dir = scratch("dis_foreign_exe");
+    let exe = Executable::code_only(ARCH_PM1, 0, vec![0x0D, 0x02]);
+    let path = dir.join("foreign.tmx");
+    fs::write(&path, exe.to_bytes()).unwrap();
+    let err = execute(&args(&["dis", path.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("unknown architecture 0x01"), "{err}");
+}
+
+#[test]
+fn dis_refuses_a_foreign_architecture_object() {
+    let dir = scratch("dis_foreign_obj");
+    let obj = ObjectFile::v2(ARCH_PM1, Vec::new(), Vec::new(), Vec::new(), None);
+    let path = dir.join("foreign.tmo");
+    fs::write(&path, obj.to_bytes()).unwrap();
+    let err = execute(&args(&["dis", path.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("unknown architecture 0x01"), "{err}");
 }
 
 /// The embedded standard library auto-links: a program that transparently

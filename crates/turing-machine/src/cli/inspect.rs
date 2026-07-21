@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
-use mtc_core::formats::{ContainerKind, sniff};
+use mtc_core::formats::{ARCH_TM1, ContainerKind, sniff};
 use mtc_core::linker::MapFile;
+use mtc_core::vm::LoadError;
 
 use crate::ir::IrProgram;
 
@@ -46,6 +47,9 @@ pub(super) fn dis(raw: &[String]) -> Result<CliOutput, String> {
                 return Err("--listing applies to executables only".into());
             }
             let obj = ObjectFile::from_bytes(&bytes).map_err(|e| e.to_string())?;
+            if obj.arch != ARCH_TM1 {
+                return Err(LoadError::UnknownArch(obj.arch).to_string());
+            }
             Ok(CliOutput::ok(
                 crate::asm::disassemble_object(&obj),
                 String::new(),
@@ -53,6 +57,9 @@ pub(super) fn dis(raw: &[String]) -> Result<CliOutput, String> {
         }
         Some(ContainerKind::Executable) => {
             let exe = Executable::from_bytes(&bytes).map_err(|e| e.to_string())?;
+            if exe.arch != ARCH_TM1 {
+                return Err(LoadError::UnknownArch(exe.arch).to_string());
+            }
             let map = load_map(path, map_path)?;
             let text = if listing {
                 crate::asm::listing_executable(&exe, map.as_ref())
