@@ -114,6 +114,26 @@
 - [ ] Verify the claim's presence in both READMEs; probe for a JBR; pin+build or soften
 - [ ] Commit: `docs(editors): jetbrains build-JDK claim states what is verified` (or `fix(editors): pin gradle jvmToolchain …` if pinning)
 
+### Task 7: Table-aware `unused-label` (#34) — the batch's largest task
+
+**Files:**
+- Modify: `crates/core/src/asm/lint/` (the `unused-label` rule and/or `AsmLintContext` — read the module first; the context must learn which labels are referenced through TABLE constructs: lowered `.targets` entries, `.exits`, and any other table operand that names a label)
+- Modify: `crates/turing-machine/src/lint/tma/mod.rs` (DELETE the force-suppression of core's `unused-label` on the `.tma` path + update the rule-inventory note that records it)
+- Modify: `docs/tmt/lint.md` (the passage documenting the suppression/limitation — rewrite to the new truth, verified against the binary)
+- Test: core's asm-lint tests (fake dialects — core carries zero TM knowledge; add a tables-ON fake-dialect case), turing-side `.tma` lint tests, and the flagship acceptance test
+
+**Requirements:**
+1. **The gap:** core's `unused-label` cannot see labels reached through lowered table sections, so on any dispatch-table program it fires on nearly every label — 400 false findings on `docs/examples/brainfuck-utm.tma` — which is why the `.tma` path force-suppresses it, leaving TM-1 assembly with NO unused-label coverage. Reproduce the 400 first (remove the suppression, run, count).
+2. **The fix, core-side:** the lint context gains the label references that table constructs carry, so a label targeted only by a `.targets`/`.exits`/table operand counts as used. Read how the context is built (per the codebase: `parse_asm_cst` + `lower`) and feed the reference set from whichever layer actually knows it — verify, don't guess.
+3. **Span quality:** `.rept`-expanded labels currently collapse to span `1:1` (no real source position). A finding on such a label must carry a USABLE span — the enclosing `.rept` header's span is the agreed target. If the expansion layer genuinely cannot recover it, report the obstacle rather than shipping `1:1`.
+4. **PM-1 neutrality, PROVEN:** PM-1 never enables `AsmCaps.tables`, so the change must be demonstrably inert there — PM lint suites byte-identical behavior, PM goldens untouched, plus a core-level fake-dialect test with tables OFF pinning that the reference set stays empty.
+5. **Acceptance:** with the suppression gone, `tmt lint docs/examples/brainfuck-utm.tma` reports ZERO false `unused-label` findings (if any finding remains, prove it is a genuinely unreferenced label before accepting it); the `.tma` fixtures' expected findings updated only where the new truth demands; `docs/tmt/lint.md` no longer documents the limitation.
+
+**Steps:**
+- [ ] Reproduce the 400; write the failing core fake-dialect test (tables-on: table-referenced label is used; tables-off: behavior unchanged)
+- [ ] Implement core-side; delete the turing-side suppression; flagship acceptance + span check
+- [ ] Full gates; commit per crate: `fix(core): unused-label sees labels reached through table sections` then `feat(turing-machine): unused-label live on the .tma path`
+
 ---
 
 ## Final gates (whole branch)
@@ -121,4 +141,4 @@
 - `cargo test --workspace` / clippy `-D warnings` / `fmt --check`
 - `git status --short crates/post-machine/tests/golden/` empty
 - Version-space constants untouched (grep the five)
-- Issues closed on merge: #41, #42, #50, #36; #51 gets a prong-1-shipped comment and STAYS OPEN carrying prong 2; #21 gets a cherry-pick comment (README claim shipped; the hardening batch remains) and STAYS OPEN.
+- Issues closed on merge: #41, #42, #50, #36, #34; #51 gets a prong-1-shipped comment and STAYS OPEN carrying prong 2; #21 gets a cherry-pick comment (README claim shipped; the hardening batch remains) and STAYS OPEN.
