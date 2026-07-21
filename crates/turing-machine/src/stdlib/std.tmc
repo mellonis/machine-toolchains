@@ -14,20 +14,32 @@
 //     A number is a bare run of '0'/'1' cells with blanks on both sides and
 //     no markers. One number per region; the graphs are much smaller.
 //
-// Each namespace exports its representation alphabet as `symbols`, so a
-// caller can declare a compatible tape (tape num: std::binaryNumbers::symbols)
-// or write a map against it.
+// Each namespace exports its representation alphabet as `symbols` — the
+// normative statement of the representation. An exported alphabet is a
+// source-level declaration and contributes no linkable symbol, so a caller in
+// another compilation unit cannot name it as `std::binaryNumbers::symbols`. To
+// run these routines over your own tape, declare a local alphabet listing the
+// SAME glyphs in the SAME order and type the tape with it — a transparent call
+// binds by index, so the order is the part that must match.
 //
 // Anatomy — the facade pattern. Each operation's behavior is defined ONCE as
 // an `export graph` with explicit exit continuations: the `done` state
 // parameter is where control leaves the graph. A one-line `export routine`
 // facade grafts that graph with `done = return`, giving the operation a
-// call-able form. A consumer then chooses per use site — `call` the facade
-// (one shared body, a dynamic return) or `graft` the graph (a private copy
-// with static continuations). Both forms are exported because the library
-// ships as source. Where an operation is inherently a composition of calls
-// (`minusOne`, and the cross-representation `invertNumber`) it is a plain
-// routine, because a graph cannot contain a call.
+// call-able form. The two forms are complementary, not a per-use-site choice,
+// and which one a consumer can use is decided by where the library's source
+// is. Against the compiled, LINKED object — the normal way to consume the
+// library — the only path is a transparent `call` with an empty argument list:
+// it binds the caller's tape by index and returns dynamically. Binding a tape
+// into a library routine (`call …(num = num)`) needs that routine's tape
+// signature, and grafting one of the graphs needs the graph's source; neither
+// crosses a link boundary, so both are rejected there
+// (`external-binding-unsupported`, `undefined-graph`). Both work only when the
+// library's source is compiled into the consumer's own unit — which is why
+// both forms are exported: the library ships as source. Where an operation is
+// inherently a composition of calls (`minusOne`, and the cross-representation
+// `invertNumber`) it is a plain routine, because a graph cannot contain a
+// call.
 //
 // Convention: the tape parameter is `num`; a behavior graph is named
 // `<op>Graph` and its facade `<op>`. The `?` lines on each entity are its
@@ -53,7 +65,7 @@ namespace std {
     ? the number (any cell up to and including its '$'); on exit it rests on
     ? that '$'. The tape is unchanged.
     export routine goToNumber(tape num: symbols) {
-      entry graft goToNumberGraph(num = num, done = return) as body;
+      entry graft goToNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToNumbersStart: walk left until the first '^',
@@ -69,7 +81,7 @@ namespace std {
     ? the number (any cell from its '^' rightward); on exit it rests on that
     ? '^'. The tape is unchanged.
     export routine goToNumbersStart(tape num: symbols) {
-      entry graft goToNumbersStartGraph(num = num, done = return) as body;
+      entry graft goToNumbersStartGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToNextNumber: step one cell right, then walk right
@@ -84,7 +96,7 @@ namespace std {
     ? current number's '$' (or the blank gap after it); it steps right and
     ? then walks to the next number's '$', where it stops. Unchanged tape.
     export routine goToNextNumber(tape num: symbols) {
-      entry graft goToNextNumberGraph(num = num, done = return) as body;
+      entry graft goToNextNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToPreviousNumber: step one cell left, then walk
@@ -98,11 +110,13 @@ namespace std {
     }
 
     ? Move to the previous number's end marker. On entry the head is on the
-    ? current number's '$' (or the blank gap after it); it steps left and
-    ? then walks back to the previous number's '$', where it stops. The tape
-    ? is unchanged.
+    ? current number's '$' — enter from the '$' itself. Unlike goToNextNumber
+    ? this does NOT accept the blank gap after a number: from that gap it steps
+    ? left onto the '$' it just left and stops there, on the number it started
+    ? after rather than the one before. From the '$' it steps left and walks
+    ? back to the previous number's '$', where it stops. The tape is unchanged.
     export routine goToPreviousNumber(tape num: symbols) {
-      entry graft goToPreviousNumberGraph(num = num, done = return) as body;
+      entry graft goToPreviousNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for deleteNumber. On a number cell it goes to the '^'
@@ -125,7 +139,7 @@ namespace std {
     ? on the erased '$' cell. A head that is not on a number leaves the tape
     ? untouched.
     export routine deleteNumber(tape num: symbols) {
-      entry graft deleteNumberGraph(num = num, done = return) as body;
+      entry graft deleteNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for normalizeNumber. On a number cell it goes to the
@@ -156,7 +170,7 @@ namespace std {
     ? value zero keeps its representation '^$'. A head not on a number leaves
     ? the tape untouched.
     export routine normalizeNumber(tape num: symbols) {
-      entry graft normalizeNumberGraph(num = num, done = return) as body;
+      entry graft normalizeNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for plusOne. Walk right to '$', step left onto the least
@@ -193,7 +207,7 @@ namespace std {
     ? '^' relocates), so '^111$' becomes '^1000$'. A head not on a number
     ? leaves the tape untouched.
     export routine plusOne(tape num: symbols) {
-      entry graft plusOneGraph(num = num, done = return) as body;
+      entry graft plusOneGraph(num = num, done = return);
     }
 
     ? Behavior graph for minusOneFast: the direct-borrow subtractor. Walk
@@ -223,7 +237,7 @@ namespace std {
     ? zero. Zero stays zero ('^$' − 1 → '^$'). A head not on a number leaves
     ? the tape untouched.
     export routine minusOneFast(tape num: symbols) {
-      entry graft minusOneFastGraph(num = num, done = return) as body;
+      entry graft minusOneFastGraph(num = num, done = return);
     }
 
     ? Flip every bit of a number, implemented ACROSS representations: it
@@ -287,7 +301,7 @@ namespace std {
     ? number grows one cell to the left ('111' → '1000') and that settling cell
     ? is the new leading '1'.
     export routine plusOne(tape num: symbols) {
-      entry graft plusOneGraph(num = num, done = return) as body;
+      entry graft plusOneGraph(num = num, done = return);
     }
 
     ? Behavior graph for minusOne. Walk right to the trailing blank, step
@@ -314,7 +328,7 @@ namespace std {
     ? → '0111'); the result is NOT normalized. An empty region (underflow) halts
     ? unchanged with the head one cell left, on a blank.
     export routine minusOne(tape num: symbols) {
-      entry graft minusOneGraph(num = num, done = return) as body;
+      entry graft minusOneGraph(num = num, done = return);
     }
 
     ? Behavior graph for invertNumber: sweep right flipping each bit, halt at
@@ -330,7 +344,7 @@ namespace std {
     ? Flip every bit of a number. On entry the head is on the leftmost digit;
     ? on exit it rests on the trailing blank.
     export routine invertNumber(tape num: symbols) {
-      entry graft invertNumberGraph(num = num, done = return) as body;
+      entry graft invertNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for normalizeNumber: erase leading '0's moving right
@@ -349,7 +363,7 @@ namespace std {
     ? '0' when the number was all zeros). The value zero keeps its
     ? representation.
     export routine normalizeNumber(tape num: symbols) {
-      entry graft normalizeNumberGraph(num = num, done = return) as body;
+      entry graft normalizeNumberGraph(num = num, done = return);
     }
   }
 }

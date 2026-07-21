@@ -167,12 +167,13 @@ continuations chosen per site, while calling the facade shares one body and
 returns **dynamically** to whoever called it
 (`docs/tmt/language.md (choosing between them)`).
 
-An `entry graft` may carry an `as NAME` suffix, and the library source writes
-one throughout. That name is **optional**: only a *non-entry* graft must be
-named, because an unnamed non-entry instance would be unreachable
-(`docs/tmt/language.md (graft)`). None of the library's names are referenced,
-and dropping them all leaves the compiled object byte-identical. Read the
-name as incidental — the pattern is the graft, not its label.
+An `entry graft` may carry an optional `as NAME` suffix; a *non-entry* graft
+must be named, because nothing could otherwise `goto` its spliced instance and
+it would be unreachable (`docs/tmt/language.md (graft)`). The library names
+its non-entry grafts — the ones its own `goto`s enter — and leaves its entry
+grafts unnamed, an entry graft's name being only a label nothing references.
+Such a name is inert: dropping an unused one leaves the compiled object
+byte-identical, because it is source-level and contributes nothing linkable.
 
 Not every operation fits the shape. `std::binaryNumbers::invertNumber` and
 `std::binaryNumbers::minusOne` are plain routines with no graph behind them,
