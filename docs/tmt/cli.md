@@ -76,6 +76,16 @@ Consumes one `.tmc` source; produces a `.tmo` object (or, with `-S`, the
 generated `.tma` assembly text). Without `-o` the output takes the input's
 name with the extension replaced.
 
+Codegen stamps range-expanded families out one block (or match-table row)
+per value; before writing the `-S` text the compiler folds each such family
+back into the `.rept` loop a human would have written (`docs/formats.md`).
+The rewrite is verified by assembling both the stamped and the folded text
+and comparing the object bytes, so it can only change how the assembly reads,
+never what it assembles; on any mismatch it keeps the stamped text.
+`--stamped-asm` skips the fold and emits the raw stamped assembly. `-g`
+implies it — the debug line map is keyed to the stamped physical lines and
+cannot survive the rewrite — so a `-g` build always carries the stamped text.
+
 `--debug` and `--release` are presets applied *before* the individual flags,
 so `-O0` / `-O1` / `-g` / `--strip-debugger` can still override one piece of
 a preset on the same command line. The default build (no flags) is `-O0`
