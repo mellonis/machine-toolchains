@@ -18,26 +18,20 @@
 //! `parse_asm_cst_with` under the identical `tm1_syntax()` caps; identical
 //! caps yield an identical parse, so "the same CST" holds in substance.
 //!
-//! # unused-label is suppressed on the `.tma` path
+//! # unused-label runs unmodified on the `.tma` path
 //!
-//! `unused-label` is core's existing arch-agnostic rule, not reimplemented
-//! here — but it is **structurally unreliable on `.tma`** and is therefore
-//! suppressed on this path (by injecting its code into the allow list handed
-//! to core). Core's rule counts only in-function jump/call name operands as
-//! references; it cannot see a code label reached through a `.targets` /
-//! `.target` dispatch entry or listed in a `.exits` frame descriptor, because
-//! those references live in the lowered table section, which core's
-//! `AsmLintContext` does not expose. On any dispatch-table program every
-//! djmp/exit target would be flagged as unused (the flagship brainfuck UTM
-//! trips ~400 such false findings, all reachable code). A CST-level filter
-//! cannot rescue it: core lowers and expands `.rept` before flagging, so a
-//! finding names the expanded label (`Linc0`..`Linc126`) while the CST
-//! carries only the verbatim template (`Linc{v}`) — matching them would mean
-//! reimplementing core's substitution evaluator. The code stays in the shared
-//! allow namespace (core's `RULES`), so allow-validation is unaffected; a
-//! maintainer wanting the check back once core can surface the lowered
-//! table/exit references drops the injection. The four additions below are
-//! the defects core genuinely cannot detect.
+//! `unused-label` is core's arch-agnostic rule, run here exactly as the
+//! four other core rules are — nothing on this path suppresses it. It once
+//! had to be: core counted only in-function jump/call operands as
+//! references, so a code label reached only through a `.targets` / `.target`
+//! dispatch entry or a `.exits` frame descriptor — references that live in
+//! the lowered table section, not in any operand — looked unused, and a
+//! dispatch-table program tripped a false finding on nearly every label (the
+//! flagship brainfuck UTM: 400 of them, all reachable code). Core now feeds
+//! its lint rules the lowered tables, so the rule counts a dispatch or exit
+//! target as a reference and flags only genuinely dead labels — no `.tma`
+//! special-casing remains. The four additions below are the defects core
+//! genuinely cannot detect.
 //!
 //! # The allow namespace
 //!
@@ -99,15 +93,7 @@ pub(crate) const TMA_RULES: &[(&str, TmaRule)] = &[
 /// the shared cross-language namespace, same as core's `lint`.
 pub fn lint_tma(source: &str, allow: &[String]) -> Result<Vec<Diagnostic>, AsmError> {
     let syntax = tm1_syntax();
-    // Suppress core's `unused-label` on this path — it cannot see `.targets`/
-    // `.target`/`.exits` label references and so false-flags every dispatch
-    // and exit target (module doc, "unused-label is suppressed on the .tma
-    // path"). The code remains a valid shared-namespace allow code.
-    let mut core_allow = allow.to_vec();
-    if !core_allow.iter().any(|a| a == "unused-label") {
-        core_allow.push("unused-label".to_string());
-    }
-    let mut diagnostics = mtc_core::asm::lint::lint(&syntax, source, &core_allow)?;
+    let mut diagnostics = mtc_core::asm::lint::lint(&syntax, source, allow)?;
     let cst = parse_asm_cst_with(source, syntax.caps);
     let ctx = TmaLintContext { source, cst: &cst };
     for (code, rule) in TMA_RULES {
@@ -143,10 +129,10 @@ miss:   hlt
 
     #[test]
     fn a_clean_tma_yields_no_findings() {
-        // CLEAN has a dispatch table (djmp → hit/miss); with `unused-label`
-        // suppressed on this path and no TM addition tripping, the report is
-        // empty — which also proves the suppression (hit/miss would otherwise
-        // be flagged).
+        // CLEAN dispatches djmp → hit/miss; those labels are reached only
+        // through `D0`'s `.targets`, so unused-label (now live on this path)
+        // counts them as used, and with no TM addition tripping the report is
+        // empty.
         let report = lint_tma(CLEAN, &[]).unwrap();
         assert!(report.is_empty(), "{report:?}");
     }
@@ -154,8 +140,7 @@ miss:   hlt
     #[test]
     fn a_core_rule_fires_through_the_merged_entry() {
         // Dead code after `stp` is core's `unreachable-code` rule — proves the
-        // core call is wired into the merged report. (`unused-label` can no
-        // longer serve as the witness — it is suppressed on the `.tma` path.)
+        // core call is wired into the merged report.
         let src = "\
 .routine main, tapes=2, alpha=(2, 2)
 .section code
@@ -171,12 +156,13 @@ miss:   hlt
     }
 
     #[test]
-    fn unused_label_is_suppressed_on_the_tma_path() {
-        // Every code label here is reached only through a `.targets` dispatch
-        // entry or a `.exits` frame descriptor — references core's rule
-        // cannot see. It must NOT flag any of them (module doc, the core-gap
-        // decision).
-        let src = "\
+    fn unused_label_counts_dispatch_and_exit_targets_as_references() {
+        // The positive control for the un-suppression: hit/miss are reached
+        // only through `D0`'s `.targets`, done/other only through `F0`'s
+        // `.exits` — references that live in the table section, named by no
+        // operand. The rule is LIVE on this path now (not suppressed), and it
+        // must count every one as used, flagging none.
+        let referenced = "\
 .routine main, tapes=2, alpha=(2, 2)
 .routine helper, tapes=2, alpha=(2, 2)
 .section tables
@@ -198,11 +184,39 @@ miss:   hlt
         wr      [1, -]
         retx    #1
 ";
-        let report = lint_tma(src, &[]).unwrap();
+        let report = lint_tma(referenced, &[]).unwrap();
         assert!(
             report.iter().all(|d| d.code != "unused-label"),
-            "unused-label must be suppressed on .tma: {report:?}"
+            "table-referenced labels must not be flagged: {report:?}"
         );
+
+        // The discriminating half: `gone` is reached by no operand and by no
+        // table, so the (now live) rule must still flag it — proving it is
+        // doing real work, not merely inert. seen/other stay unflagged as
+        // dispatch targets.
+        let dead = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section tables
+T0: .row [1, 1]
+    .row [*, *]
+D0: .targets seen, other
+.section code
+.func main
+        rd
+        mtc     T0
+        djmp    D0
+seen:   stp
+other:  hlt
+gone:   hlt
+";
+        let report = lint_tma(dead, &[]).unwrap();
+        let unused: Vec<&str> = report
+            .iter()
+            .filter(|d| d.code == "unused-label")
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(unused.len(), 1, "exactly one dead label: {report:?}");
+        assert!(unused[0].contains("`gone`"), "{}", unused[0]);
     }
 
     #[test]

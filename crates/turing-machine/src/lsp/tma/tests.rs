@@ -317,11 +317,12 @@ fn the_service_publishes_exactly_what_the_cli_lint_entry_reports() {
 }
 
 #[test]
-fn unused_label_stays_suppressed_on_the_server_exactly_as_on_the_cli() {
+fn unused_label_counts_table_targets_on_the_server_exactly_as_on_the_cli() {
     // Every code label in FULL is reached only through a `.targets` dispatch
-    // entry or a `.exits` descriptor — references core's own rule cannot see,
-    // which is why the `.tma` path suppresses it. The editor must agree with
-    // the command line rather than flagging all four as unused.
+    // entry or a `.exits` descriptor. Core's `unused-label` now reads those
+    // table references and counts the labels as used (it runs live on this
+    // path, no longer suppressed), so none are flagged — and the editor agrees
+    // with the command line rather than diverging.
     let mut service = TmaLanguageService::new();
     let diags = service.did_update(URI, FULL);
     assert!(

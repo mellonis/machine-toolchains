@@ -13,11 +13,10 @@
 //! lower or assemble failure) and the lint findings — `.tma` has no separate
 //! compile-warning channel the way `.tmc` does. Routing every diagnostic
 //! through that one entry is deliberate: it is the same function `tmt lint`
-//! calls, so the editor and the command line agree on every finding, the
-//! suppression of core's `unused-label` on this path included (that rule
-//! cannot see label references living in lowered table sections, so on a
-//! dispatch-table program it would false-flag every reachable dispatch and
-//! exit target; the reasoning lives at the suppression site).
+//! calls, so the editor and the command line agree on every finding —
+//! core's `unused-label` among them, which reads dispatch and exit targets
+//! as references (it now sees the lowered tables) and so runs on `.tma`
+//! unmodified rather than being suppressed the way it once was.
 //!
 //! On top of that the service adds one channel of its own: the frame-descriptor
 //! field checks in `descriptors.rs`. Those are not new findings — every one of
