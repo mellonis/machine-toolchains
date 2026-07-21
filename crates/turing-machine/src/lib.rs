@@ -20,6 +20,7 @@ pub mod lint;
 mod lsp;
 pub mod optimizer;
 pub mod parser;
+pub mod rept_emit;
 pub mod stdlib;
 
 pub use asm::{TM1_TMA_DIALECT_VERSION, tm1_syntax};
