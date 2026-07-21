@@ -18,13 +18,14 @@ below (`unused-import`, `unused-routine`, `binding-product-threshold`)
 run and its allow-list cover it too. The compile channel keeps its copy;
 the detection is not duplicated, only the reporting.
 
-`tmt lint` has no `--fix`: nothing it reports is applied for you. No
-`.tmc` rule and no TM-1 `.tma` addition carries a fix at all. Two rules
-that *do* reach the `.tma` path carry one — `redundant-jump-to-next` and
-`leftover-debugger`, both arch-agnostic and shared with the PM-1 toolchain,
-where `pmt lint --fix` applies them. On `.tma` those fixes surface through
-the editor's code actions (`docs/lsp.md (code actions)`) rather than on the
-command line.
+`tmt lint` has no `--fix`: nothing it reports is applied for you on the
+command line (`--fix` is an unknown flag). Several rules do attach a fix —
+the per-rule entries below say which ones and what each one does — and
+where a fix exists it surfaces through the editor's code actions
+(`docs/lsp.md (code actions)`) rather than on the command line. Two of
+them, `redundant-jump-to-next` and `leftover-debugger`, are arch-agnostic
+rules shared with the PM-1 toolchain, where `pmt lint --fix` also applies
+them from the command line.
 
 ## Rule tiers and `--allow`
 
