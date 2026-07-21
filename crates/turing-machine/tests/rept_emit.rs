@@ -294,6 +294,46 @@ fn table_rows_compress() {
     assert_eq!(object_bytes(TABLE_ROWS), object_bytes(&out));
 }
 
+/// A near-miss: five blocks that share a template (so the run is CONSIDERED)
+/// but whose write operand — `0, 5, 2, 9, 1` — is neither affine nor modular.
+/// No progression fits, so the run stays stamped and still assembles to the
+/// identical object. This is the "template matches, progression fails" case,
+/// distinct from `non_integer_variance_stays_stamped` (template mismatch).
+const NEAR_MISS: &str = "\
+.routine main, tapes=1, alpha=(20)
+.func main
+        jmp     L0
+L0:
+        wr      [0]
+        jmp     done
+L1:
+        wr      [5]
+        jmp     done
+L2:
+        wr      [2]
+        jmp     done
+L3:
+        wr      [9]
+        jmp     done
+L4:
+        wr      [1]
+        jmp     done
+done:
+        stp
+";
+
+#[test]
+fn near_miss_progression_stays_stamped() {
+    let (out, report) = compress_asm(NEAR_MISS, &tm1_syntax());
+    assert!(!report.fell_back);
+    assert_eq!(
+        report.runs_compressed, 0,
+        "an unsupported progression must not fold:\n{out}"
+    );
+    assert_eq!(out, NEAR_MISS, "text must be unchanged");
+    assert_eq!(object_bytes(NEAR_MISS), object_bytes(&out));
+}
+
 // ---------------------------------------------------------------------------
 // Property test: no matter how a stamped family is shaped — affine, modular,
 // constant, a near-miss that must stay stamped, or a mix — `compress_asm`'s
@@ -347,15 +387,19 @@ fn family_strategy() -> impl Strategy<Value = Family> {
 }
 
 /// Render a list of families into an assemblable `.tma` program: each family
-/// is a run of labeled blocks (`fF mI: / wr [value] / jmp done`) with unique
-/// labels, wrapped in a minimal `main` that falls through to a `done: stp`.
+/// is a run of labeled blocks with a per-family letter prefix and a SINGLE
+/// trailing decimal member index (`La0`, `La1`, … / `Lb0`, …), wrapped in a
+/// minimal `main` that falls through to `done: stp`. The trailing-only decimal
+/// is what makes the label a foldable hole — an interior digit would make
+/// `tokenize_holes` bail and quietly turn the whole property vacuous.
 fn program(families: &[Family]) -> String {
     let mut s =
         format!(".routine main, tapes=1, alpha=({ALPHA})\n.func main\n        jmp     done\n");
     for (f_idx, fam) in families.iter().enumerate() {
+        let letter = char::from(b'a' + f_idx as u8);
         for (m_idx, value) in fam.values().iter().enumerate() {
             s.push_str(&format!(
-                "fF{f_idx}mI{m_idx}:\n        wr      [{value}]\n        jmp     done\n"
+                "L{letter}{m_idx}:\n        wr      [{value}]\n        jmp     done\n"
             ));
         }
     }
@@ -363,24 +407,42 @@ fn program(families: &[Family]) -> String {
     s
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(400))]
+/// The core property: for any batch of stamped families — affine, modular,
+/// constant, near-miss, or a mix — `compress_asm`'s output assembles to the
+/// SAME object bytes as the stamped input. Driven by a deterministic
+/// `TestRunner` so the fold-fire count is reproducible, and it asserts that a
+/// substantial fraction of the cases actually FOLD a run: if a generator
+/// regression stopped folds from firing, the pass would silently test only
+/// split/join identity, so that failure mode is made loud here.
+#[test]
+fn compressed_output_always_assembles_identically() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
 
-    #[test]
-    fn compressed_output_always_assembles_identically(
-        families in prop::collection::vec(family_strategy(), 1..4)
-    ) {
+    const CASES: usize = 400;
+    let mut runner = TestRunner::deterministic();
+    let strategy = prop::collection::vec(family_strategy(), 1..4);
+    let mut folded = 0usize;
+    for _ in 0..CASES {
+        let families = strategy.new_tree(&mut runner).unwrap().current();
         let src = program(&families);
         let stamped = object_bytes(&src);
         let (out, report) = compress_asm(&src, &tm1_syntax());
-        let compressed = object_bytes(&out);
-        prop_assert_eq!(
-            &stamped,
-            &compressed,
-            "object bytes diverged (fell_back={}, runs={})\n---\n{}",
+        assert_eq!(
+            stamped,
+            object_bytes(&out),
+            "object bytes diverged (fell_back={}, runs={})\n---\n{out}",
             report.fell_back,
             report.runs_compressed,
-            out
         );
+        if report.runs_compressed > 0 {
+            folded += 1;
+        }
     }
+    // Non-vacuity guard: the generator MUST produce foldable families often.
+    assert!(
+        folded >= CASES / 4,
+        "property near-vacuous: only {folded}/{CASES} cases folded a run"
+    );
+    eprintln!("fold-fire: {folded}/{CASES} generated programs folded >= 1 run");
 }

@@ -259,27 +259,31 @@ fn infer(values: &[i64]) -> Option<Progression> {
     if first < 0 {
         return None;
     }
+    // All arithmetic is checked: values come straight from the source and can
+    // sit near `i64::MAX`, so an overflow here would be a detection-time panic
+    // BEFORE the self-check could catch it. Overflow → no progression fits →
+    // the run stays stamped, matching the conservative framing.
     // Affine: strictly `first + i`, no wrap.
     if values
         .iter()
         .enumerate()
-        .all(|(i, &v)| v == first + i as i64)
+        .all(|(i, &v)| first.checked_add(i as i64) == Some(v))
     {
         return Some(Progression::Affine(first));
     }
     // Modular: `(first + i) % n` with `n = max + 1` and at least one wrap. The
     // step is `+1`, so `first + i` is always non-negative and the emitted `%`
     // never yields a negative remainder.
-    let n = values.iter().max().copied()? + 1;
+    let n = values.iter().max().copied()?.checked_add(1)?;
     if n >= 1
         && values
             .iter()
             .enumerate()
-            .all(|(i, &v)| v == (first + i as i64) % n)
+            .all(|(i, &v)| first.checked_add(i as i64).is_some_and(|raw| raw % n == v))
         && values
             .iter()
             .enumerate()
-            .any(|(i, _)| first + i as i64 >= n)
+            .any(|(i, _)| first.checked_add(i as i64).is_some_and(|raw| raw >= n))
     {
         return Some(Progression::Modular { first, n });
     }
