@@ -457,7 +457,8 @@ PATH is a .tmc or .tma file, or a directory; directories are walked
 recursively for *.tmc and *.tma (sorted order, symlinks not followed,
 dot-entries skipped). .tmc sources lint through the .tmc rule table;
 .tma sources through the five arch-agnostic asm rules plus the TM-1
-additions (shadowed rows, retx exit bounds, unused rept vars).
+additions (shadowed rows, retx exit bounds, unused rept vars,
+duplicate map source).
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
