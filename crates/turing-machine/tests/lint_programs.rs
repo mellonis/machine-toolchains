@@ -39,7 +39,7 @@ const CLEAN: &str = "\
 alphabet bit { '_', '1' }
 machine {
   tape t: bit;
-  entry state s { [*] -> stop; }
+  entry state s { [*] -> move [>] stop; }
 }
 ";
 

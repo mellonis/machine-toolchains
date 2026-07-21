@@ -105,6 +105,10 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-graph", rules::unused_graph::check),
     ("unused-binding", rules::unused_binding::check),
     ("unused-graft-instance", rules::unused_graft_instance::check),
+    ("unused-graft-name", rules::unused_graft_name::check),
+    ("unused-alphabet", rules::unused_alphabet::check),
+    ("unused-tape", rules::unused_tape::check),
+    ("unused-exit", rules::unused_exit::check),
     ("deprecated-call", rules::deprecated_call::check),
     ("dead-rule", rules::dead_rule::check),
     (
@@ -202,7 +206,7 @@ mod tests {
 alphabet bit { '_', '1' }
 machine {
   tape t: bit;
-  entry state s { [*] -> stop; }
+  entry state s { [*] -> move [>] stop; }
 }
 ";
         let report = lint(src, LintOptions::default()).unwrap();
