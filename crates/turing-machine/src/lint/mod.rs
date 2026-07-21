@@ -260,7 +260,7 @@ machine {
 
     #[test]
     fn validate_allow_also_accepts_tma_addition_codes() {
-        // The three `.tma` additions share the one namespace: a `tmt.json`
+        // The four `.tma` additions share the one namespace: a `tmt.json`
         // naming one must not error when validated for a `.tmc` file, just as
         // an asm-only or `.tmc`-only code must not error the other path.
         for code in [

@@ -1,18 +1,27 @@
-//! `duplicate-map-source`: a `.map` directive whose `rmap=(…)` clause lists the
-//! same source symbol twice (`rmap=(1->2, 1->3)`). The assembler accepts this
-//! silently, and the LAST mapping wins — the emitted object is byte-identical
-//! to the one the winning pair alone produces (observed assembler behavior; the
-//! quickfix test pins it). The earlier pair is therefore dead.
+//! `duplicate-map-source`: a `.map` directive whose `rmap=(…)` or `wmap=(…)`
+//! clause lists the same source symbol twice (`rmap=(1->2, 1->3)`). The
+//! assembler accepts this silently, and the LAST mapping wins — the emitted
+//! object is byte-identical to the one the winning pair alone produces
+//! (observed assembler behavior for both clauses; the quickfix test pins it).
+//! The earlier pair is therefore dead.
+//!
+//! # Clause-generic
+//!
+//! The defect is clause-generic: it is the same last-wins shadowing whether
+//! the source symbol repeats in the read map (`rmap`, physical → virtual,
+//! docs/formats.md (frame descriptors)) or the write map (`wmap`, virtual →
+//! physical). Each clause is checked independently — the two are separate
+//! symbol namespaces, so a symbol appearing once in `rmap` and once in `wmap`
+//! is not a repeat and does not fire; a `.map` that duplicates in BOTH yields
+//! one finding per clause.
 //!
 //! # What it sees, and the fix
 //!
-//! Scoped to the `rmap` clause (physical → virtual, docs/formats.md (frame
-//! descriptors)); `wmap` is out of scope — its last-wins behavior is not
-//! asserted here. The finding spans the LATER (winning) pair, and its fix
-//! removes the EARLIER (shadowed) pair together with its trailing comma, so the
-//! remaining list still parses. `FramePairCst` keeps no per-pair span, so the
-//! spans are reconstructed from the source text within the clause's `(..)`
-//! group span (the clause is a single line; pairs split on top-level commas).
+//! The finding spans the LATER (winning) pair, and its fix removes the EARLIER
+//! (shadowed) pair together with its trailing comma, so the remaining list
+//! still parses. `FramePairCst` keeps no per-pair span, so the spans are
+//! reconstructed from the source text within the clause's `(..)` group span
+//! (the clause is a single line; pairs split on top-level commas).
 //!
 //! Top-level `.map` directives only: a `.map` inside a `.rept` body is not
 //! scanned (a completeness-only limit — never a wrong finding). The lint runs
@@ -20,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use mtc_core::asm::cst::{AsmItemKind, FrameDirectiveCst, FrameMapCst};
+use mtc_core::asm::cst::{AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst};
 use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 
 use crate::lint::tma::TmaLintContext;
@@ -33,9 +42,23 @@ pub(crate) fn check(ctx: &TmaLintContext, out: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Flag each `rmap` pair whose source symbol an earlier pair already mapped.
+/// Flag repeated source symbols in each of the `.map`'s clauses. `rmap` and
+/// `wmap` are independent symbol namespaces, so each is scanned on its own.
 fn check_map(source: &str, m: &FrameMapCst, out: &mut Vec<Diagnostic>) {
-    let (Some(pairs), Some(group)) = (&m.rmap, m.rmap_span) else {
+    check_clause(source, m.rmap.as_deref(), m.rmap_span, out);
+    check_clause(source, m.wmap.as_deref(), m.wmap_span, out);
+}
+
+/// Flag each pair in one clause whose source symbol an earlier pair in the
+/// same clause already mapped. `pairs`/`group` are `Some` iff the clause is
+/// present.
+fn check_clause(
+    source: &str,
+    pairs: Option<&[FramePairCst]>,
+    group: Option<Span>,
+    out: &mut Vec<Diagnostic>,
+) {
+    let (Some(pairs), Some(group)) = (pairs, group) else {
         return;
     };
     let spans = pair_spans(source, group);
@@ -131,17 +154,18 @@ mod tests {
     use crate::asm::assemble;
     use crate::lint::tma::lint_tma;
 
-    /// A frame descriptor whose `.map 0` rmap clause is `RMAP`, wired into a
-    /// `call.m` so the file assembles. Alphabets are 4-wide so symbols 0..3 are
-    /// all valid map values.
-    fn program(rmap: &str) -> String {
+    /// A frame descriptor whose `.map 0` clause tail is `map_tail` (e.g.
+    /// `rmap=(1->2, 1->3)` or `rmap=(…), wmap=(…)`), wired into a `call.m` so
+    /// the file assembles. Alphabets are 4-wide so symbols 0..3 are all valid
+    /// map values.
+    fn program(map_tail: &str) -> String {
         format!(
             "\
 .routine main, tapes=4, alpha=(2, 2, 4, 2)
 .routine helper, tapes=2, alpha=(4, 4)
 .section tables
 Fh: .frame  tapes=(2, 0)
-    .map    0, rmap=({rmap})
+    .map    0, {map_tail}
     .exits  done, alt
 .section code
 .func main
@@ -185,8 +209,8 @@ alt:    hlt
     }
 
     #[test]
-    fn a_repeated_source_symbol_fires() {
-        let src = program("1->2, 1->3");
+    fn a_repeated_rmap_source_symbol_fires() {
+        let src = program("rmap=(1->2, 1->3)");
         let f = diagnostics(&src);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(
@@ -202,14 +226,55 @@ alt:    hlt
     }
 
     #[test]
+    fn a_repeated_wmap_source_symbol_fires() {
+        // `wmap` is `w` where `rmap` had `r`, so the column layout is identical.
+        let src = program("wmap=(1->2, 1->3)");
+        let f = diagnostics(&src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].message,
+            "source symbol 1 mapped twice; the last mapping wins"
+        );
+        assert_eq!((f[0].span.start.line, f[0].span.start.col), (5, 28));
+        assert_eq!(f[0].fix.as_ref().unwrap().edits[0].span.start.col, 22);
+    }
+
+    #[test]
     fn distinct_source_symbols_are_silent() {
-        assert!(diagnostics(&program("1->2, 2->3")).is_empty());
+        assert!(diagnostics(&program("rmap=(1->2, 2->3)")).is_empty());
+        assert!(diagnostics(&program("wmap=(1->2, 2->3)")).is_empty());
+    }
+
+    #[test]
+    fn rmap_and_wmap_are_separate_namespaces() {
+        // Source 1 appears once in each clause — not a repeat in either, so no
+        // cross-clause finding.
+        assert!(diagnostics(&program("rmap=(1->2), wmap=(1->3)")).is_empty());
+    }
+
+    #[test]
+    fn a_duplicate_in_both_clauses_yields_one_finding_per_clause() {
+        // `rmap` repeats source 1, `wmap` repeats source 2 — two findings, one
+        // per clause, source-ordered (the `rmap` clause is earlier).
+        let f = diagnostics(&program("rmap=(1->2, 1->3), wmap=(2->1, 2->0)"));
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert_eq!(
+            f[0].message,
+            "source symbol 1 mapped twice; the last mapping wins"
+        );
+        assert_eq!(
+            f[1].message,
+            "source symbol 2 mapped twice; the last mapping wins"
+        );
+        // The two findings span distinct clauses (rmap's later pair precedes
+        // wmap's later pair on the line).
+        assert!(f[0].span.start.col < f[1].span.start.col, "{f:?}");
     }
 
     #[test]
     fn allow_suppresses_the_finding() {
         let report = lint_tma(
-            &program("1->2, 1->3"),
+            &program("rmap=(1->2, 1->3)"),
             &["duplicate-map-source".to_string()],
         )
         .unwrap();
@@ -217,10 +282,19 @@ alt:    hlt
     }
 
     #[test]
-    fn the_fix_removes_the_shadowed_clause() {
-        // apply -> re-lint clean -> byte-identical to hand-removing the clause,
-        // and both assemble to the same object as the original (last wins).
-        let original = program("1->2, 1->3");
+    fn the_fix_removes_the_shadowed_rmap_clause() {
+        assert_fix_no_op("rmap=(1->2, 1->3)", "rmap=(1->3)");
+    }
+
+    #[test]
+    fn the_fix_removes_the_shadowed_wmap_clause() {
+        assert_fix_no_op("wmap=(1->2, 1->3)", "wmap=(1->3)");
+    }
+
+    /// apply -> re-lint clean -> byte-identical to hand-removing the clause,
+    /// and both assemble to the same object as the original (last wins).
+    fn assert_fix_no_op(dup_tail: &str, winner_tail: &str) {
+        let original = program(dup_tail);
         let d = diagnostics(&original)
             .into_iter()
             .next()
@@ -228,8 +302,8 @@ alt:    hlt
         let fix = d.fix.expect("a fix");
         let fixed = apply(&original, &fix.edits[0]);
 
-        // The fix produces exactly what hand-removing `1->2, ` gives.
-        let hand_removed = program("1->3");
+        // The fix produces exactly what hand-removing the earlier pair gives.
+        let hand_removed = program(winner_tail);
         assert_eq!(fixed, hand_removed, "fixed:\n{fixed}");
 
         // Re-lint: the duplicate is gone.
