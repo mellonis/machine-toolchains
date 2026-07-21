@@ -1,11 +1,28 @@
-# Project manifest + `pmt build` — design
+# Project manifest + `pmt build` / `tmt build` — design
 
 Date: 2026-07-12
 Status: approved 2026-07-12 (brainstorm walked section-by-section; audit
 pass against the codebase folded in)
 Tracker: [machine-toolchains#16](https://github.com/mellonis/machine-toolchains/issues/16)
 (manifest), [machine-toolchains#11](https://github.com/mellonis/machine-toolchains/issues/11)
-(`pmt build`)
+(`pmt build` / `tmt build`)
+
+**Amended 2026-07-21:** extended to cover the shipped TM-1 toolchain
+(`tmt build` as a first-class twin; parallel manifest schema in
+`tmt.json`). This spec was written when only PM-1 (`pmt`) existed; the
+TM-1 arc ([machine-toolchains#8](https://github.com/mellonis/machine-toolchains/issues/8))
+has since shipped `tmt` in full. Execution of this design had not started
+(only plan 1 of 3 was ever written), so the amendment is folded in place
+rather than layered on top. The original PM-1 prose stands unchanged where
+it is still accurate; the TM-1 material lands as marked subsections under
+the manifest and build sections, plus deferral/parallel notes in the LSP,
+editors, docs, testing, and follow-up sections. Everything TM-1 here was
+verified against the built `tmt` binary and the crate source, not assumed
+from the PM-1 shape — the divergences (a required `.tmt` run band, the
+`--call-mech` lowering axis, an entry that fixes tape arity, an
+already-shipped `LinkOptions.entry`) are called out where they bite. One
+genuine design fork surfaced: where `call-mech` lives in the manifest —
+written below as an explicit open question.
 
 ## Context
 
@@ -46,7 +63,7 @@ design cycle exactly as the manifest issue demanded.
 | Faithfulness contract | overlay resolution ≡ `linker::resolve` on the declared set, pinned by an equivalence test. Linked symbol names ARE the qualified names (flatten mangles `::`/`.` onto `Function::name`), so no name mapping is needed |
 | Undeclared-external refinement | the "undeclared external" **compile warning** (flatten's, fires on bare calls only — qualified calls are self-declaring and never warn) is refined wherever a full link set is declared: `pmt build` post-filters in **both modes** (its argv or the manifest is always a complete declared set); the LSP does the same via the overlay. `pmt compile` / single-file lint stay per-file honest — same input scope, same diagnostics |
 | Shell completion | the completions registry gains the `build` entry (the shell-completion design doc's parked sketch, now activated); target names complete **dynamically** — the rendered zsh function shells out to `pmt build --list-targets` at completion time, the `_git` pattern |
-| Version space | `pmt.json`'s schema becomes a named versioned contract like `PMC_LANG_VERSION`: the lint-only shape is retroactively **0.1**; this design makes it **0.2**. It gets a row in the release-notes version block |
+| Version space | `pmt.json`'s schema becomes a named versioned contract like `PMC_LANG_VERSION`: the lint-only shape is retroactively **0.1**; this design makes it **0.2**. It gets a row in the release-notes version block *(amended 2026-07-21: `tmt.json` gets a parallel, independently-versioned row — see Documentation and versioning)* |
 
 ## The manifest: `pmt.json` grows a `project` section
 
@@ -148,6 +165,116 @@ load of a file with a broken `project` section still errors (and vice
 versa): a typo never silently does nothing, and the two walks can
 never disagree about whether a given `pmt.json` is well-formed.
 
+## TM-1: `tmt.json` grows the same `project` section (amended 2026-07-21)
+
+TM-1 (`tmt`) shipped in full after this spec was written, so the manifest
+half applies to it symmetrically. Everything above holds for `tmt.json`
+with one substitution and a short list of TM-1 divergences. **Each CLI
+reads only its own file — `pmt build` reads `pmt.json`, `tmt build` reads
+`tmt.json` — and there is no cross-toolchain manifest.** A repo holding
+both a PM-1 and a TM-1 program carries both files (side by side, or in
+separate subtrees); the two never merge and neither tool reads the other's.
+`tmt.json` already exists exactly as `pmt.json` did
+(`crates/turing-machine/src/config.rs`: `lint.allow`, nearest-ancestor
+discovery, union-with-the-flag merge, strict unknown-key errors), so it
+grows the identical `project` section under the same per-section discovery
+rule. `project.rs` lives one crate over
+(`crates/turing-machine/src/project.rs`), per-crate, exactly as each crate
+already carries its own `config.rs` — core stays arch-agnostic and holds no
+manifest knowledge. One loader validates the whole `tmt.json`; consumers
+read only their section.
+
+```json
+{
+  "project": {
+    "call-mech": "hybrid",
+    "sources": ["src/shared.tmc"],
+    "targets": {
+      "utm": {
+        "sources": ["src/utm.tmc", "src/tables.tma"],
+        "output": "out/utm.tmx",
+        "run": { "tape": "tapes/bf-hello.tmt", "max-steps": 2000000 }
+      }
+    }
+  }
+}
+```
+
+Where TM-1 diverges from the PM-1 schema above:
+
+- **Source kinds** — a target's sources may be `.tmc`, `.tma`, or `.tmo`.
+  `.tma` is a first-class build input: `tmt asm` already assembles a `.tma`
+  to a `.tmo` (the `.s`/`.pma` analogy holds exactly), so a hand-written
+  assembly source is legal in a `sources` list and in the argv-mode
+  positional list, dispatched by extension like everything else. **Settled,
+  not a fork.**
+- **`entry`** — same per-target key, same default `main`, same
+  "must be exported" rule. It threads the **already-existing**
+  `LinkOptions.entry` (`crates/core/src/linker/mod.rs`) — the core change
+  the PM-1 half of this spec proposed is already in the tree, landed with
+  the TM-1 arc's `tmt link --entry`, so `tmt build` needs no core work (and
+  `pmt build` can now thread the same field without one either). Note a
+  semantic the PM-1 design never faced: a TM-1 entry is not only the
+  reachability-BFS root — it also fixes the machine's **tape arity** and,
+  in sectioned/frames output, must carry a **routine signature** (the
+  linker errors `entry function X has no routine signature to fill it`). A
+  non-`main` TM-1 entry is therefore not a free pick; the manifest names
+  it, the linker enforces the rest.
+- **`output`** — default `<target-name>.tmx` next to the manifest.
+- **`profiles`** — the same two names and the same four keys (`opt`,
+  `debug-info`, `strip-debugger`, `werror`), same CLI-preset base values.
+  TM-1's extra optimizer switches — `--foutline` (enable the default-off
+  `outline` pass) and the `--fno-<pass>` family — stay **per-invocation
+  flags only**, never manifest keys, exactly as `--fno-<pass>` is flag-only
+  on the PM-1 side.
+- **`call-mech`** — a NEW axis with no PM-1 analogue (`tmt link
+  --call-mech mono | frames | hybrid`, default `hybrid`): the bound-call
+  lowering strategy. It needs a manifest home; see the open question below.
+- **`run`** — the block **mirrors `tmt run`, which differs sharply from
+  `pmt run`**. `tmt run` always drives a whole multi-tape band loaded from a
+  `.tmt` snapshot: its only tape flag is `--tape PATH.tmt` (**mandatory** —
+  the tool errors `run needs --tape TAPES.tmt` without it; there is no
+  inline-glyph form, no `--head`, no `--strict-cells`, no `--tact-profile`,
+  no `--save-tape-block`). So a TM-1 `run` block is just `tape` (a `.tmt`
+  path, **required** for the block to be runnable), `max-steps`,
+  `no-step-limit` (bool), `max-tacts`. Consequence for `--run` below: a
+  TM-1 target with no `run` block — or one lacking `tape` — cannot be
+  `--run`, because `tmt run` has no empty-tape default to fall back on
+  (PM-1 does); `tmt build --run` on such a target is a pointed error, not a
+  default-tape run.
+- **`stdlib`** — same project-level bool, default `true`; `false` is the
+  manifest form of `tmt link --nostdlib`. TM-1's embedded stdlib twins
+  (`std::binaryNumbers` / `std::binaryNumbersBare`) link lazily by
+  reachability just like PM-1's.
+
+### Open question — where `call-mech` lives (amended 2026-07-21)
+
+`--call-mech mono | frames | hybrid` (default `hybrid`) is a link-time
+lowering with no committed manifest home yet — the one genuine design fork
+this amendment cannot settle neutrally. Three defensible placements:
+
+- **(a) a target/project-level key like `entry`/`output`** (shareable at
+  project level, overridable per target), defaulting to `hybrid`, with the
+  `--call-mech` flag overriding per invocation (flags win, as the profile
+  keys do). Treats call-mech as a structural-but-tunable property of the
+  produced image — you can experiment with a lowering without editing the
+  manifest. **(Recommended.)**
+- **(b) a profile key** (`debug` uses `frames`, `release` uses `mono`,
+  say). Plausible — a user may genuinely want different lowering per
+  profile, so this is not a taxonomy edge case. Costs orthogonality:
+  call-mech is independent of opt level, so folding it into the
+  debug/release axis couples two unrelated choices.
+- **(c) flag-only, no manifest home** — simplest, but the chosen lowering
+  is then never a committed artifact, which cuts against the point of the
+  manifest.
+
+Recommending **(a)**; the maintainer should confirm or redirect. The
+choice also decides `--call-mech`'s manifest-mode behavior: under (a) and
+(c) it is *accepted* as an override (unlike `-o`/`-L`/`-l`/`--nostdlib`
+/`--entry`, which are rejected for contradicting a structural declaration);
+under (b) it would be rejected in manifest mode like the other structural
+declarations, since the profile already fixes it.
+
 ## `pmt build`: one subcommand, two modes
 
 **Mode dispatch** is by positional shape, never by flags: if any
@@ -241,7 +368,105 @@ so scripts and editor tasks see the machine outcome.
 - `pmt` becomes twelve subcommands — README/CLAUDE.md counts update at
   implementation.
 
+## TM-1: `tmt build` (amended 2026-07-21)
+
+`tmt build` is the exact twin of `pmt build` — same two-mode driver, same
+positional-shape dispatch (any positional ending `.tmc`/`.tma`/`.tmo` ⇒
+argv mode and the manifest is not read; otherwise positionals are target
+names ⇒ manifest mode; mixing the two is an error; target names are
+dot-free by schema so the dispatch is unambiguous). It becomes `tmt`'s
+twelfth subcommand.
+
+### argv mode (the cc driver)
+
+```
+tmt build main.tmc lib.tma extra.tmo [-o app.tmx] [FLAGS]
+```
+
+Each `.tmc` compiles, each `.tma` assembles, each `.tmo` loads (CRC + magic
+sniff, never by extension), all to in-memory objects; then one link with
+the implicit stdlib (unless `--nostdlib`). Default output: first input's
+stem + `.tmx`, plus the `.tmx.map` sidecar. `--keep-objects` writes each
+intermediate `.tmo` next to its source.
+
+Flag union of `tmt compile` and `tmt link`, verified against the real
+`--help`:
+
+- compile side: `--debug`/`--release`, `-O0`/`-O1`, `-g`,
+  `--strip-debugger`, `--fno-<pass>`, `--foutline`, `-Werror`
+- link side: `--no-relax`, `--nostdlib`, `-L DIR`, `-l NAME`,
+  `--call-mech mono|frames|hybrid`, `--entry NAME`
+- `-v`
+
+Deliberately **excluded** — per-file inspection / asm-emit artifacts that
+stay `tmt compile`'s job, mirroring PM-1's exclusion of `-S`/`--emit-ir`:
+`-S`, `--emit-ir`, and TM-1's `--stamped-asm`.
+
+### manifest mode (the #16 consumer)
+
+Identical shape to PM-1's manifest mode (`tmt build` builds every target
+alphabetically; `tmt build <target>`; `tmt build --release <target>`;
+`tmt build --run [TARGET]`; `tmt build --list-targets`), with these TM-1
+specifics:
+
+- Flags rejected in manifest mode: `-o`, `-L`, `-l`, `--nostdlib`,
+  `--entry` — each contradicts a structural manifest declaration.
+  `--call-mech` is *accepted* as an override under the recommended (a)
+  placement above (rejected under (b)); the compile-side profile flags
+  (`-g`, `-O0`/`-O1`, `--strip-debugger`, `--foutline`, `--fno-<pass>`,
+  `-Werror`) override profile keys per invocation exactly as on the PM-1
+  side, flags win.
+- `--run` requires a run block **with a `tape`** (see the run-block
+  divergence above): `tmt run` has no empty-tape default, so `--run` on a
+  target with no run block or no `tape` is a pointed error, not a
+  default-tape run. On a successful build the process then adopts `tmt
+  run`'s exit codes (0 stopped / 2 hlt / 3 trap), identical to PM-1.
+- Warning refinement applies identically: `.tmc` flatten emits the same
+  bare `undeclared-external` warning (`compiler.rs::warn_undeclared`), and
+  `tmt build` drops those the declared set resolves, in both modes;
+  `-Werror` counts the post-filter set. The stdlib exports only
+  `std::`-qualified names, so bare calls never match it — same caveat as
+  PM-1.
+
+### Plumbing
+
+- A new `crates/turing-machine/src/cli/driver.rs`; the existing
+  `cli/build.rs` (compile/asm/link) stays and the driver calls its
+  internals. A `BuildReport` (per-input `CompileReport`s + `LinkReport` +
+  optional `RunResult`), rendered only in `cli/` under `-v`.
+- **No core change** — `LinkOptions.entry` already exists in
+  `crates/core/src/linker/mod.rs` (it landed with the TM-1 arc's `tmt link
+  --entry`), unlike the PM-1 half, which still proposes adding it. `pmt
+  link` does not yet expose an `--entry` flag even though the core field is
+  there; that is orthogonal pmt-reality, noted for the maintainer, not
+  fixed here.
+- Completions: the TM registry
+  (`crates/turing-machine/src/completions/registry.rs`) gains a
+  `build_spec()` in its own idiom — positional `File(FileHint { extensions:
+  ["tmc","tma","tmo"], dirs: false })` combined with dynamic target names;
+  the flag table above expressed as `FlagSpec`s (`--call-mech` as
+  `Value(Choices(["mono","frames","hybrid"]))`, the `--fno-` family as
+  `suffix_family(pass_names())`, `--foutline` as its own boolean,
+  `--entry` as `Value(Text)`). A new positional kind renders the
+  `_git`-pattern zsh helper that shells `tmt build --list-targets` at
+  completion time. The existing drift guard
+  (`crates/turing-machine/tests/completions_registry.rs`) auto-probes the
+  new entry's flags against the real parser.
+- `tmt` becomes twelve subcommands.
+
 ## LSP: manifest awareness + the cross-file overlay
+
+**Amended 2026-07-21 — scope of this section.** The overlay design below
+is PM-1-specific (`.pmc`/`.pma` sources, flatten's open namespaces). The
+symmetric TM-1 concern — a manifest-aware `tmt lsp` overlay across `.tmc`
+/`.tma` — is real but **deferred to when plan 2 (the LSP overlay plan) is
+written**, and is not re-derived here: TM-1's cross-file model differs
+(bindings/grafts and per-world state-graph IR rather than flatten's
+namespace join), so its overlay is a separate design pass rather than a
+mechanical restatement of the PM-1 one. The manifest awareness itself
+(`tmt.json` project views invalidated on watch, load/validation errors
+through the existing diagnostics channel) mirrors PM-1 directly and needs
+no new design. The PM-1 overlay design stands as written.
 
 ### Manifest awareness
 
@@ -326,21 +551,50 @@ is acceptable.
   through the server; the README gains a documented run-configuration
   recipe around `pmt build`.
 - Both plugins bump `MIN_TESTED_PMT` when this releases.
+- **TM-1 (amended 2026-07-21)**: the shipped TM plugin pair
+  (`editors/vscode-tm` + `editors/jetbrains-tm`, currently 0.1.0 with a
+  `MIN_TESTED_TMT` floor) gets the symmetric treatment against `tmt build
+  --list-targets` — a `tmt build <t>` task per target plus `tmt build
+  --run <t>` where a run block exists, refreshed on `tmt.json` watch
+  events; a `$tmt` problem matcher; a JetBrains run-configuration recipe.
+  All four plugins (both `-pm` and both `-tm`) bump their respective
+  `MIN_TESTED_*` floors when this releases.
 
 ## Documentation and versioning
 
-- New `docs/project.md`: the manifest reference — schema, per-section
-  discovery, path rules, profiles, run blocks, examples. Ref-free
-  prose per the published-docs policy.
-- `docs/cli.md` gains `build`; `docs/lsp.md` gains the cross-file
-  section; `docs/lint.md`'s project-file section points at
-  `project.md` (lint.allow stays documented in lint.md).
-- README quickstart gains the manifest example; subcommand count
-  becomes twelve.
-- Version block: new **pmt.json schema** space — 0.1 (retroactive,
-  the lint-only shape) → **0.2**. Crates bump to 0.3.0 at the release
-  cut; `.pmc` language, PM-1 dialect, IR, and container formats
-  unchanged.
+**Amended 2026-07-21 — `docs/` has since split into per-toolchain
+domains** (`docs/pmt/` and `docs/tmt/`, each with language/isa/cli/lint
+/fmt/stdlib), with shared root pages (`core.md`, `formats.md`,
+`history.md`, `lsp.md`). The doc bullets below are corrected to the split
+layout and duplicated per toolchain.
+
+- New manifest-reference pages: `docs/pmt/project.md` and
+  `docs/tmt/project.md` — schema, per-section discovery, path rules,
+  profiles, run blocks, examples. Ref-free prose per the published-docs
+  policy. (The schema is parallel; each page documents its toolchain's own
+  source kinds, run block, and — for TM-1 — `call-mech`, so per-toolchain
+  pages match the existing cli/lint/fmt split rather than one shared page.)
+- `docs/pmt/cli.md` and `docs/tmt/cli.md` each gain `build`; the shared
+  root `docs/lsp.md` gains the cross-file section (PM-1 now; TM-1 when
+  plan 2 lands); each `docs/{pmt,tmt}/lint.md`'s project-file section
+  points at that toolchain's `project.md` (`lint.allow` stays documented
+  in lint.md).
+- README quickstart gains the manifest example; each tool's subcommand
+  count becomes twelve.
+- Version block: the project-manifest schema is a versioned contract per
+  toolchain, following house precedent that PM-1 and TM-1 contracts
+  version independently (`.pma`/`.tma` dialects, `PMC_`/`TMC_LANG_VERSION`).
+  Two rows, coincidentally both moving the same way: **`pmt.json` schema**
+  0.1 (retroactive, the lint-only shape) → **0.2**, and **`tmt.json`
+  schema** 0.1 → **0.2**. They are byte-identical at 0.1 and diverge here
+  (`call-mech`, the differently-shaped run block) — exactly the
+  "independent but happen to match" pattern. Crates bump at the release
+  cut; `.pmc`/`.tmc` languages, the PM-1/TM-1 dialects, IR, and container
+  formats unchanged. Note the TM-1 arc's own first release is separately
+  pending (deferred by maintainer ruling until the range-expression work,
+  [#31](https://github.com/mellonis/machine-toolchains/issues/31), lands),
+  so `tmt.json`'s 0.2 bump rides that release and need not share a cut with
+  `pmt.json`'s.
 
 ## Testing
 
@@ -367,15 +621,25 @@ is acceptable.
 - Completions: registry drift guard auto-covers `build`; the
   `zsh -n`/`compinit` test covers the rendered script including the
   dynamic target function.
-
-## Out of scope (the follow-up ledger)
+- **TM-1 (amended 2026-07-21)**: the same matrices run one crate over for
+  `tmt` — `project.rs` validation (incl. `call-mech` value validation and
+  the run-block `tape`-required rule), argv-mode `.tmc`/`.tma`/`.tmo`
+  dispatch and default `.tmx` naming, manifest-mode multi-target build and
+  contradicting-flag rejection, and the TM-specific `--run` behavior (a
+  target with no run block or no `tape` errors rather than running an empty
+  tape; exit codes 0/2/3 otherwise), plus the completions drift guard over
+  the TM registry's `build_spec()`. The LSP overlay↔linker equivalence
+  fixture is PM-1-only this round; its TM-1 counterpart rides plan 2.
 
 - **Rename / find-references** — unblocked by the manifest, still
   needs the references index; v2.
-- **Bare `pmt lint` / `pmt fmt` over the declared source set** — a
-  natural follow-up once the manifest exists; noticed during this
-  design, deliberately not scoped in. Filed as
-  [machine-toolchains#28](https://github.com/mellonis/machine-toolchains/issues/28).
+- **Bare `pmt lint` / `pmt fmt` (and `tmt lint` / `tmt fmt`) over the
+  declared source set** — a natural follow-up once the manifest exists;
+  noticed during this design, deliberately not scoped in. Filed as
+  [machine-toolchains#28](https://github.com/mellonis/machine-toolchains/issues/28),
+  whose framing is PM-1-worded but applies symmetrically to `tmt` (its
+  `.tmc`/`.tma` source set, its `--no-config` interaction) — amended
+  2026-07-21 to cover both toolchains.
 - **Glob sources, per-target profiles, an `out-dir` key, more profile
   names** — schema supersets, each addable without breaking 0.2.
 - **JSONC comments in `pmt.json`** — stays deferred from the LSP
@@ -385,5 +649,15 @@ is acceptable.
 - **Symlink-aware duplicate detection** — lexical normalization only,
   documented.
 - **JetBrains task/run-configuration plugin code** — recipe-only this
-  round. Plugin-side per-target integration filed as
-  [machine-toolchains#29](https://github.com/mellonis/machine-toolchains/issues/29).
+  round, for both `jetbrains-pm` and `jetbrains-tm`. Plugin-side per-target
+  integration filed as
+  [machine-toolchains#29](https://github.com/mellonis/machine-toolchains/issues/29)
+  (PM-1-worded; applies symmetrically to the `-tm` plugin — amended
+  2026-07-21).
+- **`--keep-objects` stem collisions (amended 2026-07-21, flag not fix)** —
+  the argv-mode claim that writing intermediates next to their source makes
+  stem collisions impossible is shaky for *both* toolchains: `foo.tmc` and
+  `foo.tma` (or `foo.pmc`/`foo.pma`) in one directory both want `foo.tmo`
+  (`foo.pmo`). Pre-existing in the PM-1 text, out of this amendment's
+  scope to redesign; noted so `--keep-objects`'s collision handling is
+  settled when the driver is actually built.
