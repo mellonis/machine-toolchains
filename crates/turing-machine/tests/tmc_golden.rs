@@ -110,7 +110,7 @@ fn block(snaps: &[TapeSnapshot], widths: &[u32]) -> TapeBlockFile {
 /// Assert a committed golden is byte-identical to a derived block.
 fn assert_golden(name: &str, derived: &TapeBlockFile) {
     let bytes = fs::read(golden_dir().join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
-    assert_eq!(bytes, derived.to_bytes(), "{name} drifted");
+    assert_eq!(bytes, derived.to_bytes().unwrap(), "{name} drifted");
 }
 
 // ── the six Appendix A examples ─────────────────────────────────────────────
@@ -331,7 +331,7 @@ fn nested_graft_two_levels_runs() {
 #[ignore = "writes the golden files; run explicitly"]
 fn regen_goldens() {
     let write = |name: &str, b: &TapeBlockFile| {
-        fs::write(golden_dir().join(name), b.to_bytes()).unwrap();
+        fs::write(golden_dir().join(name), b.to_bytes().unwrap()).unwrap();
     };
     write(
         "a1_replace_b.expected.tmt",

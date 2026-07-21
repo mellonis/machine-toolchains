@@ -165,7 +165,8 @@ fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
             })
             .collect(),
     };
-    fs::write(&out, block.to_bytes()).map_err(|e| format!("cannot write {out}: {e}"))?;
+    let bytes = block.to_bytes().map_err(|e| format!("{from}: {e}"))?;
+    fs::write(&out, bytes).map_err(|e| format!("cannot write {out}: {e}"))?;
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 
@@ -261,7 +262,8 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
         tape.head = head;
     }
 
-    fs::write(&dest, block.to_bytes()).map_err(|e| format!("cannot write {dest}: {e}"))?;
+    let bytes = block.to_bytes().map_err(|e| e.to_string())?;
+    fs::write(&dest, bytes).map_err(|e| format!("cannot write {dest}: {e}"))?;
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 

@@ -487,6 +487,37 @@ fn tape_new_sizes_per_tape_alphabets_from_cardinalities() {
     );
 }
 
+/// A routine declaring an alphabet wider than the MT tape-block's
+/// byte-sized glyph-count field (300 > 255) assembles and links cleanly
+/// (the executable header stores cardinalities as `u32`); `tape new`
+/// minting the per-band alphabet is where the width has to fit a wire
+/// `u8`, so it must surface a normal CLI error naming both numbers —
+/// never panic.
+#[test]
+fn tape_new_rejects_an_oversize_alphabet_without_panicking() {
+    let dir = scratch("tape_new_oversize_alphabet");
+    let src = "\
+.routine main, tapes=1, alpha=(300)
+.section code
+.func main
+        stp
+";
+    let exe = asm_and_link(&dir, "oversize", src);
+    let tape = dir.join("oversize.tmt");
+    let err = execute(&args(&[
+        "tape",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "-o",
+        tape.to_str().unwrap(),
+    ]))
+    .expect_err("an oversize alphabet must be a typed CLI error, not a panic");
+    assert!(err.contains("300"), "{err}");
+    assert!(err.contains("255"), "{err}");
+    assert!(!tape.exists(), "no partial .tmt should be written on error");
+}
+
 /// Assemble `one_tape_program("stp")` into `stem.tmo`, returning the obj
 /// path — the shared prologue for the `link` flag tests below.
 fn asm_one_tape(dir: &Path, stem: &str) -> PathBuf {
@@ -637,7 +668,7 @@ fn compile_link_run_a4_overflow_halts_with_exit_2() {
             alphabet: None,
         }],
     };
-    fs::write(&tape, block.to_bytes()).unwrap();
+    fs::write(&tape, block.to_bytes().unwrap()).unwrap();
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),

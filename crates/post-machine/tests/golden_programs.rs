@@ -115,7 +115,11 @@ fn goldens_match_the_derived_snapshots_and_files() {
         }
         // the committed .pmt is byte-for-byte the derived block
         let bytes = fs::read(golden_dir().join(golden)).expect("golden .pmt present");
-        assert_eq!(bytes, block(expected).to_bytes(), "{golden} drifted");
+        assert_eq!(
+            bytes,
+            block(expected).to_bytes().unwrap(),
+            "{golden} drifted"
+        );
     }
 }
 
@@ -131,6 +135,10 @@ fn goldens_match_the_derived_snapshots_and_files() {
 #[ignore = "writes the golden files; run explicitly"]
 fn regen_goldens() {
     for (_, golden, _, _, expected) in cases() {
-        fs::write(golden_dir().join(golden), block(expected).to_bytes()).unwrap();
+        fs::write(
+            golden_dir().join(golden),
+            block(expected).to_bytes().unwrap(),
+        )
+        .unwrap();
     }
 }
