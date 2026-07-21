@@ -247,11 +247,14 @@ Where TM-1 diverges from the PM-1 schema above:
   (`std::binaryNumbers` / `std::binaryNumbersBare`) link lazily by
   reachability just like PM-1's.
 
-### Open question — where `call-mech` lives (amended 2026-07-21)
+### Resolved — where `call-mech` lives (amended 2026-07-21; ruled same day)
 
-`--call-mech mono | frames | hybrid` (default `hybrid`) is a link-time
-lowering with no committed manifest home yet — the one genuine design fork
-this amendment cannot settle neutrally. Three defensible placements:
+**Maintainer ruling: (a)** — a target-level key with a project-level
+default, the `--call-mech` flag overriding per invocation. The deciding
+argument: call-mech is a property of the artifact (mono stamps specialized
+copies, frames keeps runtime composition), and the manifest exists
+precisely to make link inputs a committed, reproducible artifact instead
+of shell history. The alternatives considered:
 
 - **(a) a target/project-level key like `entry`/`output`** (shareable at
   project level, overridable per target), defaulting to `hybrid`, with the
@@ -268,12 +271,11 @@ this amendment cannot settle neutrally. Three defensible placements:
   is then never a committed artifact, which cuts against the point of the
   manifest.
 
-Recommending **(a)**; the maintainer should confirm or redirect. The
-choice also decides `--call-mech`'s manifest-mode behavior: under (a) and
-(c) it is *accepted* as an override (unlike `-o`/`-L`/`-l`/`--nostdlib`
-/`--entry`, which are rejected for contradicting a structural declaration);
-under (b) it would be rejected in manifest mode like the other structural
-declarations, since the profile already fixes it.
+Consequence of the ruling: in manifest mode `--call-mech` is *accepted*
+as an override (unlike `-o`/`-L`/`-l`/`--nostdlib`/`--entry`, which are
+rejected for contradicting a structural declaration) — the manifest
+records the committed lowering, the flag exists for experiments against
+it.
 
 ## `pmt build`: one subcommand, two modes
 
