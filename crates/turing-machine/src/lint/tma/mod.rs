@@ -36,27 +36,27 @@
 //! reimplementing core's substitution evaluator. The code stays in the shared
 //! allow namespace (core's `RULES`), so allow-validation is unaffected; a
 //! maintainer wanting the check back once core can surface the lowered
-//! table/exit references drops the injection. The three additions below are
+//! table/exit references drops the injection. The four additions below are
 //! the defects core genuinely cannot detect.
 //!
 //! # The allow namespace
 //!
-//! The three TM codes join the crate's shared allow namespace via
+//! The four TM codes join the crate's shared allow namespace via
 //! [`super::known_code`] (one more union arm over [`TMA_RULES`]), so a single
 //! `tmt.json` `lint.allow` serves both languages: a `.tma`-only code does not
 //! error when validated for a `.tmc` file, and vice versa. There is no
-//! `--warn` opt-in tier on the `.tma` side — all three additions are
+//! `--warn` opt-in tier on the `.tma` side — all four additions are
 //! default-on.
 //!
-//! # A known gap this layer should close
+//! # The duplicate-`.map` finding
 //!
 //! A `.map` clause that repeats a source symbol (`rmap=(1->2, 1->3)`) is
 //! silently accepted by the assembler, last write winning — the emitted
-//! object is identical to the one `1->3` alone produces. That is worth a
-//! finding, and it belongs here rather than in the language server: a rule
-//! added to this layer reaches both `tmt lint` and the editor through the
-//! one `lint_tma` call, whereas a server-only check would raise a
-//! diagnostic in the editor that the command line never reports.
+//! object is identical to the one `1->3` alone produces. `duplicate-map-source`
+//! flags it (with a fix that removes the shadowed pair), and it lives here
+//! rather than in the language server so that the one `lint_tma` call reaches
+//! both `tmt lint` and the editor; a server-only check would raise a
+//! diagnostic in the editor the command line never reports.
 
 pub(crate) mod rules;
 
@@ -88,6 +88,7 @@ pub(crate) const TMA_RULES: &[(&str, TmaRule)] = &[
     ),
     ("retx-exit-bounds", rules::retx_exit_bounds::check),
     ("rept-var-unused", rules::rept_var_unused::check),
+    ("duplicate-map-source", rules::duplicate_map_source::check),
 ];
 
 /// Lint one `.tma` source: core's five rules (with the fatal gate — a full

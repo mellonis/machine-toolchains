@@ -5,6 +5,7 @@
 pub(crate) mod binding_product_threshold;
 pub(crate) mod dead_rule;
 pub(crate) mod deprecated_call;
+pub(crate) mod index_identity_map;
 pub(crate) mod leftover_debugger;
 pub(crate) mod redundant_identity_pairs;
 pub(crate) mod state_may_trap;

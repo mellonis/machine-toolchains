@@ -139,8 +139,10 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
 /// The opt-in rule table: off by default, run only when `--warn` names the
 /// code (the totality lints, deliberately noisy). In the known-code namespace
 /// (so a shared allow-list may still name one) but never run unless enabled.
-pub(crate) const OPT_IN_RULES: &[(&str, Rule)] =
-    &[("state-may-trap", rules::state_may_trap::check)];
+pub(crate) const OPT_IN_RULES: &[(&str, Rule)] = &[
+    ("state-may-trap", rules::state_may_trap::check),
+    ("index-identity-map", rules::index_identity_map::check),
+];
 
 /// True when `code` names any rule in this crate's `.tmc` tables, its `.tma`
 /// additions ([`tma::TMA_RULES`]), OR core's arch-agnostic asm rule table
@@ -265,6 +267,7 @@ machine {
             "shadowed-wildcard-rows",
             "retx-exit-bounds",
             "rept-var-unused",
+            "duplicate-map-source",
         ] {
             assert!(
                 !RULES.iter().any(|(c, _)| *c == code),
