@@ -5,7 +5,7 @@
 pub(crate) mod rules;
 
 use super::cst::{AsmCst, parse_asm_cst_with};
-use super::lower::{SourceFunction, lower};
+use super::lower::{SourceFunction, SourceTable, lower_source};
 use super::{ArchSyntax, AsmError, assemble};
 use crate::diagnostics::Diagnostic;
 
@@ -14,6 +14,13 @@ pub struct AsmLintContext<'a> {
     pub source: &'a str,
     pub cst: &'a AsmCst,
     pub functions: &'a [SourceFunction],
+    /// The file-scoped tables lowered from `.section tables` (empty for
+    /// every cap-off dialect — PM-1 never shapes a table). Rules read
+    /// these for the label references TM-1 keeps outside the code
+    /// section: `unused-label` counts a code label as used when a
+    /// dispatch `.targets`/`.target` entry or a frame `.exits` descriptor
+    /// names it (docs/core.md (assembly lint)).
+    pub tables: &'a [SourceTable],
     pub syntax: &'a ArchSyntax,
 }
 
@@ -45,13 +52,18 @@ pub fn lint(
     // Parse under the dialect's caps, matching `assemble` (identical to
     // the default parse for every cap-off dialect).
     let cst = parse_asm_cst_with(source, syntax.caps);
-    let functions = lower(&cst, syntax, source)?;
+    // `lower_source` (not the functions-only `lower`) so the rules can
+    // reach the tables — the code-label references TM-1 keeps in the
+    // lowered table section. Cap-off dialects lower no tables, so this is
+    // an empty slice there.
+    let lowered = lower_source(&cst, syntax, source)?;
     assemble(syntax, 0, source, false)?;
 
     let ctx = AsmLintContext {
         source,
         cst: &cst,
-        functions: &functions,
+        functions: &lowered.functions,
+        tables: &lowered.tables,
         syntax,
     };
     let mut diagnostics = Vec::new();

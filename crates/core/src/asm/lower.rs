@@ -246,10 +246,27 @@ fn spanned(label: &LabelCst) -> SpannedName {
     }
 }
 
-/// The functions-only view of [`lower_source`], for consumers that never
-/// see tables (the lint layer; every existing cap-off dialect). All
+/// [`spanned`], but with the span replaced by `override_span` when set —
+/// the enclosing `.rept` header, so an expanded label carries a usable
+/// source anchor instead of the line-1 span of its one-line re-parse.
+/// Reduces to `spanned` (byte-for-byte) when the override is `None`,
+/// which is always the case outside a `.rept` expansion.
+fn spanned_in(label: &LabelCst, override_span: Option<Span>) -> SpannedName {
+    SpannedName {
+        name: label.name.clone(),
+        span: override_span.unwrap_or(label.span),
+    }
+}
+
+/// The functions-only view of [`lower_source`], dropping the tables. All
 /// validation still runs — only the successfully lowered tables are
-/// dropped from the result.
+/// discarded. A convenience for the asm-lint rule unit tests whose
+/// fixtures exercise no table section (they build the context with an
+/// empty `tables` slice); production lint calls [`lower_source`] so a
+/// rule can read the table-carried label references. Test-only: no
+/// non-test caller remains, so it is gated to keep the release build
+/// free of dead code.
+#[cfg(test)]
 pub(crate) fn lower(
     cst: &AsmCst,
     syntax: &ArchSyntax,
@@ -278,6 +295,16 @@ struct LowerCtx {
     pending_sigs: Vec<(SpannedName, RoutineSig)>,
     /// Per-function signature slots, parallel to `functions`.
     func_sigs: Vec<Option<RoutineSig>>,
+    /// While expanding a `.rept` block, the header's span. Each body line
+    /// is recovered, substituted, and re-parsed as a standalone one-line
+    /// source, so its labels come back carrying line-1 spans of that
+    /// throwaway parse — useless to point a diagnostic at. Stamping the
+    /// block header's span onto those labels gives a finding on an
+    /// expanded label (e.g. `unused-label` on a never-referenced
+    /// `Linc{v}`) a usable anchor. `None` outside a `.rept` expansion, so
+    /// every non-rept label keeps its own span and cap-off dialects (no
+    /// `.rept`) are unaffected.
+    span_override: Option<Span>,
 }
 
 pub(crate) fn lower_source(
@@ -293,6 +320,7 @@ pub(crate) fn lower_source(
         run_open: false,
         pending_sigs: Vec::new(),
         func_sigs: Vec::new(),
+        span_override: None,
     };
 
     for item in &cst.items {
@@ -971,6 +999,23 @@ fn lower_rept(
     if rept.lo > rept.hi {
         return Err(err(rept.span, AsmErrorKind::BadRept));
     }
+    // Anchor every label an expanded body line produces at the block
+    // header — its re-parsed line-1 span is a throwaway-parse artifact,
+    // not a place a diagnostic can point (module doc on `span_override`).
+    // Saved and restored (rather than cleared) so a hypothetical nested
+    // expansion would restore the outer header, never leak `None`.
+    let saved_override = ctx.span_override.replace(rept.span);
+    let result = lower_rept_body(rept, syntax, source, ctx);
+    ctx.span_override = saved_override;
+    result
+}
+
+fn lower_rept_body(
+    rept: &ReptCst,
+    syntax: &ArchSyntax,
+    source: &str,
+    ctx: &mut LowerCtx,
+) -> Result<(), AsmError> {
     for value in rept.lo..=rept.hi {
         for body_item in &rept.body {
             // Comment body items carry no line number and lower to
@@ -1108,7 +1153,9 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
             // A label-only line always carries at least one label.
             return Err(err(line.labels[0].span, AsmErrorKind::OutsideFunction));
         }
-        ctx.pending.extend(line.labels.iter().map(spanned));
+        let override_span = ctx.span_override;
+        ctx.pending
+            .extend(line.labels.iter().map(|l| spanned_in(l, override_span)));
         return Ok(());
     };
 
@@ -1142,7 +1189,8 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
     // Labels bound to this instruction: those pending from prior
     // label-only lines, then this line's own.
     let mut labels: Vec<SpannedName> = std::mem::take(&mut ctx.pending);
-    labels.extend(line.labels.iter().map(spanned));
+    let override_span = ctx.span_override;
+    labels.extend(line.labels.iter().map(|l| spanned_in(l, override_span)));
 
     let item = if instr.word == ".byte" {
         SourceItem::RawByte {
