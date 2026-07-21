@@ -28,12 +28,12 @@ command line.
 
 ## Rule tiers and `--allow`
 
-Most rules are **default-on**. One is **opt-in**: `state-may-trap` is
-off unless `--warn state-may-trap` names it, because a deliberately
-partial state is idiomatic in this language and a totality lint run by
-default would be noise on ordinary programs. Opt-in is explicit
-enablement, never allow-removal — there is no way to reach the rule by
-un-suppressing it.
+Most rules are **default-on**. Two are **opt-in**, run only when `--warn`
+names them: `state-may-trap` (a deliberately partial state is idiomatic
+in this language, so a totality lint by default would be noise on ordinary
+programs) and `index-identity-map` (binding differently-glyphed alphabets
+by index is occasionally the intent). Opt-in is explicit enablement, never
+allow-removal — there is no way to reach either rule by un-suppressing it.
 
 `--allow CODE` suppresses a rule and **allow beats warn**: a code named
 by both flags stays suppressed. Naming a default-on rule with `--warn`
@@ -130,6 +130,76 @@ through rather than flag a live one.
 b.tmc:13:3: lint: graft instance `deadSplice` is never used
 ```
 
+### unused-graft-name
+
+An **entry** graft's `as NAME` that nothing references. An entry graft is
+reachable as the world's entry and its splice runs whether or not it is
+named, so the name matters only when some `goto`, `call … then`, or
+binding argument routes back to the instance; if none does, the name is
+dead surface an entry graft may legally omit. This is the
+reachable-but-unreferenced gap `unused-graft-instance` structurally skips
+(that rule flags only non-entry grafts), so the two partition the grafts
+by entry-ness and never double-report.
+
+```
+b.tmc:7:3: lint: entry graft instance name `seek` is never used
+```
+
+The fix removes exactly the ` as NAME` clause, leaving a valid unnamed
+entry graft.
+
+### unused-alphabet
+
+An `alphabet` declaration no tape draws on — neither a machine `tape`
+declaration nor a routine/graph signature tape parameter names it. Unlike
+`unused-routine`/`unused-graph`, an **exported** alphabet is flagged too:
+a tape may draw only on a locally-defined alphabet, so an alphabet has no
+cross-object references in this language version to protect — an
+exported-but-undrawn-on alphabet is as dead as a private one.
+
+```
+b.tmc:2:10: lint: alphabet `dead` is never used by any tape
+```
+
+The fix deletes the whole declaration, including any leading doc/attention
+run — an orphaned `?`/`!` run is a parse error, so the doc goes with the
+alphabet it documents.
+
+### unused-tape
+
+A machine `tape` no rule ever reads, writes, or moves, and no reuse ever
+binds. A tape is untouched when, across every rule of the machine world,
+its pattern cell is a wildcard (or omitted), its write cell keeps (`-`, or
+omitted), and its move cell stays (`.`, or omitted) — and it is never
+passed as a binding argument to a `call`/`graft`/`bind`, where a spliced
+or called subgraph could touch it out of the machine's own view.
+
+```
+b.tmc:4:3: lint: tape `scratch` is never read, written, or moved
+```
+
+`fix: None` — a tape is a vector position, so deleting one narrows the
+arity of every pattern/write/move vector in the world at once, not a safe
+single-span textual edit. The finding is worth surfacing regardless: an
+untouched tape still costs a cell in every emitted row.
+
+### unused-exit
+
+A `graph` `state` exit parameter its own body never targets — no `goto`,
+no bare-name goto, no `call … then`, and no binding argument hands it on.
+A graph's `state` parameters are its exits (the continuations a graft
+wires up), and a declared-but-unreached one is dead surface every graft
+site is still obliged to bind. It fires regardless of `export`: an exit no
+body rule targets cannot fire for any caller, exported or not.
+
+```
+b.tmc:2:38: lint: graph `g` declares exit `miss`, which its body never targets
+```
+
+`fix: None` — the exit is part of the graph's signature, so removing it is
+an API change at every graft site that must currently bind it, not a safe
+local textual edit.
+
 ### deprecated-call
 
 A `call`, `graft`, or `bind` whose target carries a `! [deprecated]`
@@ -161,6 +231,14 @@ overlap are a conflict the compiler rejects, not a silent shadow.
 ```
 c.tmc:7:5: lint: this rule is unreachable — an earlier rule in `s` already covers it
 ```
+
+`dead-rule` is lint's richer relative of two warnings the compiler raises
+on its own channel (`docs/tmt/language.md`): `unreachable-rule` (a second
+all-wildcard rule — and only that exact shape) and `empty-expansion` (a
+rule whose range/glyph expansion drops to zero rows). Those two live on
+the compile channel because compilation must be total and honest even when
+lint never runs; `dead-rule` is the fuller same-band-cover analysis, done
+only at lint time.
 
 ### redundant-identity-pairs
 
@@ -243,11 +321,38 @@ guessed at. Every path errs toward silence. It is opt-in not because it
 is unreliable but because partial states are a normal way to write this
 language, and on a real program the rule has a great deal to say.
 
+### index-identity-map (opt-in)
+
+A `call` or `bind` with an **omitted** symbol map binding a caller tape to
+a callee tape whose alphabets are not glyph-for-glyph equal. With no `with
+map { … }` the binding maps by index (`docs/tmt/language.md`), so a glyph
+the caller reads as one thing the callee reads as another — occasionally a
+deliberate re-labelling by position, so the rule is **off by default**;
+enable it with `--warn index-identity-map`. It mirrors
+`redundant-identity-pairs` inverted: that rule fires when the two
+alphabets are identical, this one when they differ at some shared index.
+The message names the first differing index and both glyphs, caller side
+first.
+
+```
+$ tmt lint b.tmc --warn index-identity-map
+b.tmc:8:34: lint: call maps by index across differently-glyphed alphabets ('a' vs 'x' at index 1); glyphs change meaning here
+```
+
+Only `call` and `bind` — a graft's omitted map means glyph identity and
+either matches or errors at compile time, so it never reaches this rule.
+Silent when a map is written (the author is explicit), when the two
+alphabets are glyph-for-glyph equal over their shared indices, or when the
+callee's alphabet is not visible in this compilation (an external routine
+resolved at link). `fix: None`: writing the intended map needs the
+author's intent — which glyph should become which — that the tool cannot
+guess.
+
 ## The `.tma` additions
 
 TM-1's assembly dialect carries defects the arch-agnostic rules cannot
 see, because those rules know nothing of sections, match tables, frame
-descriptors, or `.rept` macros (`docs/formats.md`). These three rules
+descriptors, or `.rept` macros (`docs/formats.md`). These four rules
 cover them. All are default-on — there is no `--warn` tier on the `.tma`
 side — and they run alongside core's rules, both streams merged into one
 source-ordered report.
@@ -303,6 +408,27 @@ Substitution only touches `{…}` markers, so a bare mention of the
 variable in a comment or a mnemonic is not a use. The scan is
 conservative in the safe direction: it flags only when no `{…}` anywhere
 in the block mentions the variable as a whole-word identifier.
+
+### duplicate-map-source
+
+A `.map` directive whose `rmap=(…)` or `wmap=(…)` clause lists the same
+source symbol twice (`rmap=(1->2, 1->3)`). The assembler accepts it
+silently and the **last** mapping wins — the emitted object is
+byte-identical to the one the winning pair alone produces — so the earlier
+pair is dead. The defect is **clause-generic**: the same last-wins
+shadowing in the read map (`rmap`, physical → virtual) or the write map
+(`wmap`, virtual → physical). The two are separate namespaces, so a symbol
+appearing once in each is not a repeat, while a `.map` duplicating in both
+yields one finding per clause.
+
+```
+f.tma:5:28: lint: source symbol 1 mapped twice; the last mapping wins
+```
+
+The finding spans the later (winning) pair; the fix removes the earlier
+(shadowed) pair together with its trailing comma, so the remaining list
+still parses. Top-level `.map` directives only — a `.map` inside a `.rept`
+body is not scanned (a completeness limit, never a wrong finding).
 
 ## The arch-agnostic rules on `.tma`
 
