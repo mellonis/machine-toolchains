@@ -1984,6 +1984,53 @@ mod tests {
     }
 
     #[test]
+    fn full_sync_did_change_with_two_content_changes_takes_the_last() {
+        let mut service = FakeService::new();
+        let (outputs, _exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "ok"),
+                // Full sync: one message, two change events. Only the
+                // last element may win. The LAST text is the one with
+                // the diagnostic trigger, so the published set proves
+                // which element was applied: "bad" at cols 1..4 can
+                // come from neither the first element nor the pre-change
+                // text.
+                notification_message(
+                    "textDocument/didChange",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.fake", "version": 2},
+                        "contentChanges": [{"text": "ok still clean"}, {"text": "bad"}],
+                    }),
+                ),
+            ],
+            &mut service,
+        );
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(outputs[2]["method"], "textDocument/publishDiagnostics");
+        assert_eq!(
+            outputs[2]["params"],
+            serde_json::json!({
+                "uri": "file:///a.fake",
+                "version": 2,
+                "diagnostics": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 3},
+                        },
+                        "severity": 1,
+                        "code": "bad-word",
+                        "source": "fake",
+                        "message": "bad word (config rev 0)",
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
     fn did_close_publishes_an_empty_set_with_version_omitted() {
         let mut service = FakeService::new();
         let (outputs, _exit_code) = run_session(
