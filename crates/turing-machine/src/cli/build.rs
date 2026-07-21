@@ -27,6 +27,7 @@ FLAGS:
   --debug            preset: -g -O0
   --release          preset: -O1 --strip-debugger
   -S                 emit the generated .tma instead of an object
+  --stamped-asm      emit raw stamped .tma (skip .rept re-detection)
   --emit-ir[=STAGE]  write the world-graph IR JSON next to the output
                      (STAGE: lowered | final | after:<pass> for a registered
                       pass; default final)
@@ -70,6 +71,7 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     let mut options = CompileOptions {
         debug_info: debug_preset || args.flag("-g"),
         strip_debugger: release_preset || args.flag("--strip-debugger"),
+        stamped_asm: args.flag("--stamped-asm"),
         opt_level: if release_preset {
             OptLevel::O1
         } else {

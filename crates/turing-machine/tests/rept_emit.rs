@@ -9,6 +9,7 @@
 use mtc_turing_machine::asm::assemble;
 use mtc_turing_machine::rept_emit::compress_asm;
 use mtc_turing_machine::tm1_syntax;
+use proptest::prelude::*;
 
 /// Assemble `.tma` text (no debug info) and return its object bytes — the
 /// same byte image the pass's own self-check compares.
@@ -291,4 +292,95 @@ fn table_rows_compress() {
     );
     assert!(out.contains("[{v}]"), "row index expr missing:\n{out}");
     assert_eq!(object_bytes(TABLE_ROWS), object_bytes(&out));
+}
+
+// ---------------------------------------------------------------------------
+// Property test: no matter how a stamped family is shaped — affine, modular,
+// constant, a near-miss that must stay stamped, or a mix — `compress_asm`'s
+// output must assemble to the SAME object bytes as the stamped input. This is
+// the pass's whole contract; it re-verifies the always-on self-check across
+// randomized families rather than trusting detection cleverness.
+// ---------------------------------------------------------------------------
+
+/// Alphabet cardinality of the generated programs. Every emitted symbol index
+/// stays below it so the fixtures always assemble.
+const ALPHA: i64 = 60;
+
+/// One stamped family's write-operand values (each `< ALPHA`).
+#[derive(Debug, Clone)]
+enum Family {
+    /// `first + i`.
+    Affine { first: i64, len: usize },
+    /// `(first + i) % n`.
+    Modular { first: i64, n: i64, len: usize },
+    /// A single repeated value.
+    Constant { value: i64, len: usize },
+    /// Arbitrary values — usually not a supported progression, so it stays
+    /// stamped; the self-check must still hold.
+    NearMiss { values: Vec<i64> },
+}
+
+impl Family {
+    fn values(&self) -> Vec<i64> {
+        match self {
+            Family::Affine { first, len } => (0..*len).map(|i| first + i as i64).collect(),
+            Family::Modular { first, n, len } => {
+                (0..*len).map(|i| (first + i as i64) % n).collect()
+            }
+            Family::Constant { value, len } => vec![*value; *len],
+            Family::NearMiss { values } => values.clone(),
+        }
+    }
+}
+
+fn family_strategy() -> impl Strategy<Value = Family> {
+    prop_oneof![
+        (0i64..20, 1usize..8).prop_map(|(first, len)| Family::Affine { first, len }),
+        (0i64..30, 2i64..30, 1usize..8).prop_map(|(first, n, len)| Family::Modular {
+            first: first % n,
+            n,
+            len,
+        }),
+        (0i64..ALPHA, 1usize..8).prop_map(|(value, len)| Family::Constant { value, len }),
+        prop::collection::vec(0i64..ALPHA, 1..8).prop_map(|values| Family::NearMiss { values }),
+    ]
+}
+
+/// Render a list of families into an assemblable `.tma` program: each family
+/// is a run of labeled blocks (`fF mI: / wr [value] / jmp done`) with unique
+/// labels, wrapped in a minimal `main` that falls through to a `done: stp`.
+fn program(families: &[Family]) -> String {
+    let mut s =
+        format!(".routine main, tapes=1, alpha=({ALPHA})\n.func main\n        jmp     done\n");
+    for (f_idx, fam) in families.iter().enumerate() {
+        for (m_idx, value) in fam.values().iter().enumerate() {
+            s.push_str(&format!(
+                "fF{f_idx}mI{m_idx}:\n        wr      [{value}]\n        jmp     done\n"
+            ));
+        }
+    }
+    s.push_str("done:\n        stp\n");
+    s
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(400))]
+
+    #[test]
+    fn compressed_output_always_assembles_identically(
+        families in prop::collection::vec(family_strategy(), 1..4)
+    ) {
+        let src = program(&families);
+        let stamped = object_bytes(&src);
+        let (out, report) = compress_asm(&src, &tm1_syntax());
+        let compressed = object_bytes(&out);
+        prop_assert_eq!(
+            &stamped,
+            &compressed,
+            "object bytes diverged (fell_back={}, runs={})\n---\n{}",
+            report.fell_back,
+            report.runs_compressed,
+            out
+        );
+    }
 }

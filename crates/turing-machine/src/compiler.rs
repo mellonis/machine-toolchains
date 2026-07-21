@@ -1752,6 +1752,10 @@ pub struct CompileOptions {
     /// `--foutline`: enable the default-OFF `outline` optimizer pass. Inert
     /// unless `-O1` is also set (the optimizer runs only at `-O1`).
     pub outline: bool,
+    /// `--stamped-asm`: skip the `.rept` re-detection pass and emit the raw
+    /// stamped assembly codegen produced (docs/tmt/cli.md (compile)). Implied
+    /// when `-g` is set — the debug line map cannot survive the rewrite.
+    pub stamped_asm: bool,
 }
 
 /// Structured stage report — `tmt -v` renders it; the library never prints
@@ -1826,11 +1830,30 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
             strip_debugger: options.strip_debugger,
         },
     );
-    let mut object =
-        crate::asm::assemble(&tma.text, options.debug_info).map_err(|e| CompileError {
+    let assemble = |text: &str| {
+        crate::asm::assemble(text, options.debug_info).map_err(|e| CompileError {
             span: Span::point(0, 0),
             kind: CompileErrorKind::Internal(format!("generated .tma failed to assemble: {e}")),
-        })?;
+        })
+    };
+    // Fold arithmetic families in the codegen text back into `.rept` loops for
+    // the `-S` artifact (docs/tmt/cli.md (compile)), reusing the object the
+    // emitter assembled for its self-check so no third assemble happens. Skip
+    // it under `--stamped-asm`, and under `-g` — the codegen debug map is keyed
+    // by stamped physical lines, so the rewrite cannot preserve it; those paths
+    // assemble the stamped text exactly as before.
+    let (tma_text, mut object) = if options.stamped_asm || options.debug_info {
+        let object = assemble(&tma.text)?;
+        (tma.text, object)
+    } else {
+        let (text, _report, reused) =
+            crate::rept_emit::compress_asm_with_object(&tma.text, &crate::asm::tm1_syntax());
+        let object = match reused {
+            Some(o) => o,
+            None => assemble(&text)?,
+        };
+        (text, object)
+    };
     if options.debug_info {
         remap_debug_lines(&mut object, &tma.line_map);
     }
@@ -1842,7 +1865,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
 
     Ok(CompileOutput {
         object,
-        tma: tma.text,
+        tma: tma_text,
         ir,
         ir_snapshots,
         report: CompileReport { diagnostics, opt },

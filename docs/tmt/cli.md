@@ -62,6 +62,7 @@ FLAGS:
   --debug            preset: -g -O0
   --release          preset: -O1 --strip-debugger
   -S                 emit the generated .tma instead of an object
+  --stamped-asm      emit raw stamped .tma (skip .rept re-detection)
   --emit-ir[=STAGE]  write the world-graph IR JSON next to the output
                      (STAGE: lowered | final | after:<pass> for a registered
                       pass; default final)
