@@ -392,7 +392,7 @@ documents them in its own vocabulary.
 | Code | Arms on |
 |---|---|
 | `unreachable-code` | an item with no label right after a `Stop` or `Jump` item; a label resets the arm |
-| `unused-label` | a label nothing in its function references through a jump or call operand |
+| `unused-label` | a label nothing references — no in-function jump or call operand, and, on a dialect with table sections, no dispatch (`.targets`/`.target`) or frame-exit (`.exits`) entry |
 | `redundant-jump-to-next` | a `Jump` or `Branch` whose target labels the immediately following item |
 | `line-too-long` | a source line over 80 characters (character count, not bytes) |
 | `leftover-debugger` | an instruction using the arch's declared break opcode; silent when it declares none |

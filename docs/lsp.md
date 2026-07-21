@@ -582,9 +582,9 @@ last-good roster is the part the service can do something about.
 split — over the TM-1 assembler, reusing the `.tmc` service's
 config-resolution and code-action machinery. One `lint` call settles both
 the fatal gate and the findings; it is the same entry `tmt lint` calls, so
-the editor and the command line agree on every finding, including the
-suppression of the arch-agnostic `unused-label` rule on this path
-(`docs/tmt/lint.md`).
+the editor and the command line agree on every finding, the arch-agnostic
+`unused-label` rule among them — it reads dispatch and exit targets as
+references and runs on `.tma` unmodified (`docs/tmt/lint.md`).
 
 | Feature | Needs | Degrades to (when the tier fails) |
 |---|---|---|

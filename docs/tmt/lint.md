@@ -435,12 +435,12 @@ body is not scanned (a completeness limit, never a wrong finding).
 ## The arch-agnostic rules on `.tma`
 
 A `.tma` file also runs core's assembly rules, read against the TM-1
-syntax. They are documented at `docs/core.md`; four of the five apply
-here:
+syntax. They are documented at `docs/core.md`; all five apply here:
 
 | Code | Fires on |
 |---|---|
 | `unreachable-code` | An unlabeled item after an unconditional jump or stop. |
+| `unused-label` | A label nothing references — no operand and no table entry. Dispatch (`.targets`/`.target`) and frame-exit (`.exits`) entries count as references, so a label reached only through a table is not flagged (see below). |
 | `redundant-jump-to-next` | A jump or branch whose target labels the next item. |
 | `line-too-long` | A source line over 80 characters. |
 | `leftover-debugger` (`.tma`) | An instruction using the architecture's declared debugger-break opcode. TM-1 declares one (`brk`), so this rule is live here. |
@@ -452,31 +452,28 @@ g.tma:7:9: lint: unreachable code: no label between here and the preceding uncon
 g.tma:8:81: lint: line is 110 characters long (limit 80)
 ```
 
-### `unused-label` is suppressed on `.tma`
+### `unused-label` and table references
 
-The fifth core rule, `unused-label`, is **not run on the `.tma` path**.
-It is suppressed there, and this is a current limitation rather than a
-statement about what the rule should report.
+The fifth core rule, `unused-label`, runs on `.tma` like the other four.
+It once could not: the rule counted a label as referenced only when an
+in-function jump or call operand named it, and on TM-1 that undercounts
+badly. A code label reached through a `.targets` / `.target` dispatch
+entry, or listed in a `.exits` frame descriptor, is referenced from the
+table section, not by any operand — so on a program that dispatches
+through a table nearly every branch target looked unused. The brainfuck
+interpreter shipped under `docs/examples/` tripped 400 such findings, all
+naming reachable code, which is why the rule was held off the `.tma` path
+entirely.
 
-Core's rule counts a label as referenced when an in-function jump or
-call operand names it. On TM-1 that undercounts badly: a code label
-reached through a `.targets` / `.target` dispatch entry, or listed in a
-`.exits` frame descriptor, is referenced from the lowered table section,
-and core's lint context does not expose those references. On any program
-that dispatches through a table, every djmp and exit target therefore
-looks unused. On the brainfuck interpreter shipped under `docs/examples/`
-the unsuppressed rule produces 400 findings, all of them naming
-reachable code; with the suppression it produces none.
+Core now feeds its lint rules the lowered tables, so `unused-label`
+counts a dispatch or exit target as a reference and flags only genuinely
+dead labels. Match-table rows and frame `.map` clauses name symbols
+rather than code labels and never count. A label a table reaches counts
+as used everywhere in the file — the conservative direction for a
+hygiene rule, since it can only silence a finding, never invent one. On
+the brainfuck example the rule now reports nothing.
 
-Filtering the findings at the CST level does not rescue it either: core
-lowers and expands `.rept` before flagging, so a finding names an
-expanded label (`Linc0`…`Linc126`) while the source carries only the
-template (`Linc{v}`), and matching the two would mean reimplementing the
-substitution evaluator.
-
-`unused-label` remains a valid code in the shared allow namespace, so a
-`tmt.json` or `--allow` naming it is accepted as usual, and it continues
-to work normally on the `.pma` path in the PM-1 toolchain
-(`docs/pmt/lint.md`). What is suppressed is only its use on `.tma`,
-where its reference model does not yet reach the places TM-1 keeps
-references.
+A label stamped out of a `.rept` block (`Linc{v}` → `Linc0`…`Linc126`)
+has no single source line of its own, so if one were genuinely
+unreferenced the finding is anchored at the enclosing `.rept` header and
+carries no delete fix — there is no one line to remove.
