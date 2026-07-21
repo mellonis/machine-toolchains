@@ -72,8 +72,11 @@ pub enum LinkError {
     /// A raw hand-authored framed call (`call.m` / a `.frame` descriptor)
     /// was reached under `--call-mech=mono`: a mono image runs on the base
     /// profile, which has no frames machinery to activate the descriptor.
-    /// Carries the offending function's name (docs/core.md (the composition
-    /// engine)).
+    /// `hybrid` hits the identical refusal whenever no OTHER bound site
+    /// forces the frames path (docs/core.md (call mechanisms)), so the
+    /// advice recommends `frames` outright rather than sending the caller in
+    /// a circle. Carries the offending function's name (docs/core.md (the
+    /// composition engine)).
     MonoRawFrame(String),
     /// Under `--call-mech=mono` a holey binding makes the stamp synthesize
     /// unmapped-read trap rows into the callee's match table — but only a
@@ -126,7 +129,7 @@ impl std::fmt::Display for LinkError {
                 f,
                 "`{symbol}` uses a raw framed call, which the mono call \
                  mechanism cannot lower onto the base profile; build with \
-                 --call-mech=frames or hybrid"
+                 --call-mech=frames"
             ),
             Self::MonoHoleyMatchBranch(symbol) => write!(
                 f,

@@ -1201,6 +1201,79 @@ Fr: .frame  tapes=(0, 1)
 ";
     let e = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).unwrap_err();
     assert_eq!(e, LinkError::MonoRawFrame("main".into()));
+    // The advice recommends the mechanism that actually works. `hybrid`
+    // hits this same refusal whenever no other bound site forces the
+    // frames path (see the hybrid probe below), so it is no longer offered
+    // as an escape.
+    let msg = e.to_string();
+    assert!(
+        msg.contains("--call-mech=frames"),
+        "advises the mechanism that works: {msg}"
+    );
+    assert!(
+        !msg.contains("hybrid"),
+        "must not send the caller in a circle: {msg}"
+    );
+}
+
+/// The same raw `call.m` site, but the only bound call alongside it is a
+/// completed bijection — hybrid's mono-or-frames-or-mixed classifier (see
+/// `docs/core.md`, the composition engine) finds no holey/one-way site to
+/// force the frames path and delegates wholesale to mono, hitting the same
+/// contradiction. This is the common failure shape the reworded advice
+/// targets: telling the caller to retry with `hybrid` sends them in a
+/// circle.
+#[test]
+fn a_raw_call_m_under_hybrid_with_only_bijection_sites_is_the_same_link_error() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.routine leaf, tapes=2, alpha=(4, 4)
+.section tables
+Fr: .frame  tapes=(0, 1)
+    .map    0, rmap=(1->2)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        fcall   leaf, Fr
+        stp
+.func sub
+        ret
+.func leaf
+        ret
+";
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).unwrap_err();
+    assert_eq!(
+        e,
+        LinkError::MonoRawFrame("main".into()),
+        "no holey/one-way site to force frames ⇒ hybrid delegates to mono wholesale"
+    );
+}
+
+/// Same raw `call.m` site once more, under `frames`: no mono stamping is
+/// ever attempted, so the descriptor's compose machinery is present and the
+/// link succeeds. This is the mechanism the advice should point at.
+#[test]
+fn a_raw_call_m_under_frames_links() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.routine leaf, tapes=2, alpha=(4, 4)
+.section tables
+Fr: .frame  tapes=(0, 1)
+    .map    0, rmap=(1->2)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        fcall   leaf, Fr
+        stp
+.func sub
+        ret
+.func leaf
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(out.executable.profile, PROFILE_FRAMES);
 }
 
 /// The hand-derived read-table rewrite: a machine-width match table with
