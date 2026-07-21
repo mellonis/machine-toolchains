@@ -165,11 +165,74 @@ repeating it is an unknown-flag error.
 ### Compile errors
 
 A fatal compile error stops the compile and renders as
-`FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed suffix is a stable
-kebab-case identifier for the error kind — safe to match in scripts and
-editor integrations. The same rendering carries the same codes wherever a
-fatal surfaces: `tmt compile` itself, and the per-file fatal lines of
-`tmt lint` and `tmt fmt`.
+`FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed suffix is one of
+this page's **error codes** — a stable kebab-case identifier for the
+error kind — safe to match in scripts and editor integrations. The same
+rendering carries the same codes wherever a fatal surfaces: `tmt
+compile` itself, and the per-file fatal lines of `tmt lint` and
+`tmt fmt`. Codes are permanent identifiers: they never change meaning.
+Feature-context detail stays with its feature — the fold family's
+verbatim messages live in `docs/tmt/language.md (substitution)`, the
+graft-map family in the graft section of the same page.
+
+| Code | Meaning |
+|---|---|
+| `lex-error` | The source failed to tokenize: an unexpected character, an unterminated block comment, or a malformed glyph literal. |
+| `unexpected-token` | The parser needed one construct and saw another. |
+| `reserved-name` | A reserved keyword used where a name is expected (a state, alphabet, or path-segment name). |
+| `multiple-machines` | More than one `machine { … }` block in one file — a program has exactly one, a library has none. |
+| `tape-not-in-machine` | A `tape` declaration outside a `machine` block — routines and graphs take their tapes from the signature. |
+| `naked-pattern` | A rule pattern written without its enclosing `[ … ]` — bare single-tape patterns are not supported. |
+| `wildcard-binding` | `* as v` — a wildcard cannot bind; write the range explicitly so the expansion cost is visible. |
+| `range-kind-mismatch` | A range whose endpoints are not the same kind (`'a'..3`) — `glyph..glyph` or `number..number` only. |
+| `char-arithmetic` | Arithmetic on a glyph-bound substitution (`{c+1}`) — only numeric bindings fold. |
+| `graft-needs-name` | A non-`entry` `graft` with no `as name` — an unreferenced unnamed instance would be dead. |
+| `state-redirect` | The `state name;` redirect form — a state always has a `{ … }` body. |
+| `dangling-doc-run` | A doc/attention run not immediately followed by a declaration that accepts documentation. |
+| `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block. |
+| `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
+| `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
+| `empty-alphabet` | An alphabet with no elements — a world needs at least one symbol. |
+| `duplicate-glyph` | The same glyph appears twice in one alphabet. |
+| `alphabet-too-large` | An alphabet resolves to more than 127 symbols. |
+| `range-endpoint-not-scalar` | A glyph range endpoint that is not a single Unicode scalar. |
+| `range-descending` | A range whose low endpoint exceeds its high endpoint — ranges are inclusive and ascending. |
+| `duplicate-name` | Two entities (alphabet, routine, graph, or namespace) share one name in one scope. |
+| `duplicate-binding` | Two imports bind one bare name in one scope — qualify the target or disambiguate with `as`. |
+| `too-many-tapes` | A world declares more than 16 tapes. |
+| `unresolved-alphabet` | A tape (or signature tape parameter) names an alphabet no scope resolves. |
+| `duplicate-tape` | Two tapes share one name in one world. |
+| `duplicate-state` | Two states (or a state and a graft instance) share one name in one world. |
+| `duplicate-param` | Two signature parameters share one name. |
+| `entry-count` | A world's `entry` count is not exactly one. |
+| `return-outside-routine` | A `return` transition or continuation outside a routine body. |
+| `goto-into-bind` | `goto` targeting a bind name — a bind is a call target, never a state. |
+| `goto-not-a-state` | `goto` targeting a routine or graph — a reuse target, not a state. |
+| `undefined-state` | `goto`, a continuation, or a state argument names no state (or graft instance) in the world. |
+| `wrong-target-kind` | A `call`/`graft`/`bind` target resolves to the wrong entity kind. |
+| `undefined-graph` | A `graft` target names no graph in scope. |
+| `unknown-arg` | A binding argument names a parameter the signature does not declare. |
+| `duplicate-arg` | Two binding arguments share one parameter name. |
+| `missing-arg` | A signature parameter has no binding argument. |
+| `wrong-arg-kind` | A binding argument is the wrong kind for its parameter. |
+| `unresolved-tape-target` | A tape-parameter argument names a target that is not a tape in the enclosing world. |
+| `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
+| `graft-cycle` | A graph definition graft-depends on itself, directly or through a cycle of definitions. |
+| `graft-call-unsupported` | A grafted graph's body contains a `call` — splicing a calling graph into the host is not supported. |
+| `map-symbol-not-in-alphabet` | A graft binding's symbol map references a glyph that is not in the tape it maps. |
+| `map-blank-pin` | A graft binding maps the blank off itself — blank must read as blank, and a write-back must not un-pin it. |
+| `map-conflict` | A graft binding maps one symbol to two different images in one direction. |
+| `map-not-injective` | A graft binding on equal-size alphabets is not injective — identity completion collides. |
+| `identity-glyph-mismatch` | An omitted symbol map on tapes whose alphabets are not glyph-for-glyph equal — an omitted map means identity. |
+| `fold-out-of-alphabet` | A write substitution folds to a value with no glyph in the tape's alphabet. |
+| `zero-modulus` | A `%` in a write-cell fold has a zero modulus. |
+| `negative-remainder` | A `%` fold produces a negative remainder — reachable only when subtraction takes the left operand negative. |
+| `fold-overflow` | A write-cell fold overflows `i64` during evaluation. |
+| `exact-row-conflict` | Two rules in one state match the same concrete tuple with neither carrying a wildcard. |
+| `row-width` | A rule's pattern, write, or move vector width differs from the world's tape count. |
+| `external-binding-unsupported` | A `call`/`bind` with tape bindings into a routine not defined in this compilation unit — a plain external call stays legal. |
+| `state-param-continuation-unsupported` | A routine body hands control to one of its own `state` parameters — threading it to the call site is not lowered yet. |
+| `internal-error` | The compiler broke its own invariant — generated assembly failed to assemble, or a compiler-built IR world failed validation. A compiler bug, not a source error; please report it. |
 
 ## `tmt asm`
 
@@ -183,8 +246,9 @@ the assembler's full capability set — sections, match and dispatch tables,
 `.rept` macros, vector operands, `.routine` signatures, and frame
 descriptors (`docs/formats.md (assembly text)`, `docs/tmt/isa.md`). A fatal
 assembly error renders in the same `FILE:LINE:COL: error: MESSAGE [CODE]`
-shape as a compile error, with the assembler's own stable codes
-(`docs/core.md (error codes)`).
+shape as a compile error, with the assembler's own stable codes — the
+shared catalog in `docs/core.md (error codes)`; TM-1 enables the full
+capability set, so every row of that catalog can fire from `tmt asm`.
 
 ## `tmt link`
 

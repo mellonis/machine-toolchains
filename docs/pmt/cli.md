@@ -129,20 +129,12 @@ A fatal assembly error stops the assemble and renders the same shape as a
 compile error: `FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed code
 is a stable kebab-case identifier — permanent, safe to match in scripts
 and editor integrations, same contract as `pmt compile` (compile errors)
-above.
-
-| Code | Meaning |
-|---|---|
-| `syntax` | The line doesn't parse as an instruction, directive, or label — malformed function header, junk after a modifier, a dangling label at the end of a function, and similar structural defects. |
-| `unknown-mnemonic` | The instruction word isn't in the PM-1 mnemonic table. |
-| `outside-function` | Code or a label appears before any `.func` line. |
-| `duplicate-function` | The same function name is declared twice. |
-| `duplicate-label` | The same label is declared twice in one function. |
-| `unknown-label` | A branch or jump names a label the function never declares. |
-| `bad-operand` | An operand doesn't fit its instruction's shape — wrong count, wrong kind (a number where a name is required), or a malformed `@name`. |
-| `short-offset-out-of-range` | A `.s`-suffixed short form's target is too far away to encode; use the far form or let the linker relax it. |
-| `encode-error` | The operand encodes to a value the container format can't represent. |
-| `raw-line` | The line isn't assembly-shaped at all — a disassembly listing row or similar text that doesn't belong in `.pma` input. |
+above. The catalog is the assembler framework's shared namespace,
+tabulated once in `docs/core.md (error codes)`; the PM-1 dialect enables
+none of the assembler's capability extensions, so only the rows marked
+reachable in every dialect can fire from `pmt asm` — a capability-gated
+directive such as `.rept` is not recognized and surfaces through the
+base codes instead.
 
 ## `pmt link`
 

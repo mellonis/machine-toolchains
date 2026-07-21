@@ -378,9 +378,39 @@ edges, and the assembly lint rules below arm on them.
 Assembly diagnostics are spanned and coded: a span pointing at the exact
 offending text, and a stable kebab-case code identifying the kind. The
 codes are permanent user-visible identifiers — a CLI brackets them into
-every fatal rendering and editor integrations match on them — and each
-CLI page documents the rendering (`FILE:LINE:COL: error: MESSAGE
-[CODE]`) and the catalog its dialect can produce.
+every fatal rendering (`FILE:LINE:COL: error: MESSAGE [CODE]`) and
+editor integrations match on them. The catalog below is the assembler
+framework's full namespace, shared by every dialect; the capability
+column names the assembler capability that must be enabled for the code
+to be reachable (`—` = reachable in every dialect), and each CLI page
+states which capabilities its dialect enables. The `.routine` signature
+and `.frame`/`.map`/`.exits` frame-descriptor directive families ride
+the tables capability.
+
+| Code | Capability | Trigger |
+|---|---|---|
+| `syntax` | — | the line does not parse as an instruction, directive, or label — a malformed function header, junk after a modifier, a malformed directive |
+| `unknown-mnemonic` | — | the instruction word is not in the dialect's mnemonic table |
+| `outside-function` | — | code or a label appears before any `.func` line |
+| `duplicate-function` | — | the same function name is declared twice |
+| `duplicate-label` | — | the same label is declared twice in one function |
+| `unknown-label` | — | a branch or jump names a label the function never declares |
+| `bad-operand` | — | an operand does not fit its instruction's shape — wrong count, wrong kind, or a malformed `@name` |
+| `short-offset-out-of-range` | — | a short-form target is too far away to encode; use the far form or let the linker relax it |
+| `encode-error` | — | an operand encodes to a value the container format cannot represent |
+| `raw-line` | — | the line is not assembly-shaped at all — a disassembly listing row or similar text |
+| `bad-rept` | rept | a `.rept v, lo, hi` whose bounds describe an empty range (`lo > hi`) |
+| `bad-substitution` | rept | a `{expr}` marker in a `.rept` body failed to evaluate — bad grammar, an unknown variable, an unbalanced brace |
+| `bad-vector` | vectors | a `[..]` vector operand that does not parse, or carries an element illegal in its context |
+| `bad-table` | tables | a section/table structural violation — a table directive outside `.section tables`, a function inside it, an unreferenced or multiply-referenced table |
+| `table-discipline` | tables | a match-table discipline violation — exact rows first, sorted and pairwise disjoint; wildcard rows after; an all-wildcard catch-all only last; all rows one width |
+| `unknown-table-label` | tables | a table-space label that does not resolve — an operand naming no table, or dispatch targets outside the one owning function |
+| `bad-signature` | tables | a `.routine` signature problem — a duplicate directive, no `.func` of its name, tapes outside 1..=16, an alpha list length mismatch, or a function left unsigned in a file that signs any |
+| `bad-frame` | tables | a `.frame`/`.map`/`.exits` violation — a duplicate `.map k`, an index at or past the frame arity, an orphan directive with no open `.frame`, a map pair that unpins blank |
+
+The linker and the VM do not participate in this namespace: a link
+error renders as a prose message with no bracketed code, and a trap is
+a structured outcome, not an error line (the trap table above).
 
 ### Assembly lint
 
