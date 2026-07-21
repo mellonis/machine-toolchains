@@ -209,10 +209,12 @@ machine {
 // -- write-cell fold expressions --------------------------------------------
 
 #[test]
-fn a_fold_expression_prints_tight_with_minimal_parens() {
-    // Sprinkled spaces collapse; parens survive only where precedence needs
-    // them. `(v+1)` must stay parenthesized under `%` (an `Add` under a
-    // tighter `Rem`).
+fn a_fold_expression_prints_tight_keeping_source_parens() {
+    // Sprinkled spaces collapse; the formatter is whitespace-only, so it
+    // reprints the author's parens verbatim. Here those parens are also
+    // load-bearing — `(v+1)` under `%` is an `Add` beneath a tighter `Rem` —
+    // but their survival is source-driven, not a precedence calculation (the
+    // sibling test keeps redundant parens too).
     check(
         "\
 machine {
