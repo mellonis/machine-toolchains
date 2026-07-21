@@ -112,7 +112,7 @@ namespace std {
     ? Move to the previous number's end marker. On entry the head is on the
     ? current number's '$' — enter from the '$' itself. Unlike goToNextNumber
     ? this does NOT accept the blank gap after a number: from that gap it steps
-    ? left onto the '$' it just left and stops there, on the number it started
+    ? left onto the adjacent '$' and stops there, on the number it started
     ? after rather than the one before. From the '$' it steps left and walks
     ? back to the previous number's '$', where it stops. The tape is unchanged.
     export routine goToPreviousNumber(tape num: symbols) {
