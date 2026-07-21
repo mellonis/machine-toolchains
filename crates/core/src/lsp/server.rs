@@ -306,6 +306,18 @@ fn handle_request(
     params: serde_json::Value,
 ) {
     match method {
+        // After `shutdown` the only message still honored is the `exit`
+        // notification; every further request — a repeat `shutdown`
+        // included — errors InvalidRequest, per the LSP lifecycle
+        // (docs/lsp.md (runtime model)).
+        _ if state.shutdown => {
+            respond_err(
+                writer,
+                Some(id),
+                error_codes::INVALID_REQUEST,
+                "server is shut down",
+            );
+        }
         "initialize" => handle_initialize(state, writer, services, identity, id, params),
         _ if !state.initialized => {
             respond_err(
@@ -1733,6 +1745,48 @@ mod tests {
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[1]["id"], serde_json::json!(2));
         assert_eq!(outputs[1]["result"], serde_json::Value::Null);
+        assert_eq!(exit_code, 0);
+    }
+
+    #[test]
+    fn requests_after_shutdown_error_invalid_request() {
+        let mut service = FakeService::new();
+        let (outputs, exit_code) = run_session(
+            &[
+                initialize_message(1),
+                did_open_message("file:///a.fake", 1, "ok"),
+                serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": null}),
+                // A feature request and a repeat shutdown: both must
+                // error InvalidRequest instead of being served.
+                request_message(
+                    3,
+                    "textDocument/hover",
+                    serde_json::json!({
+                        "textDocument": {"uri": "file:///a.fake"},
+                        "position": {"line": 0, "character": 0},
+                    }),
+                ),
+                serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "shutdown", "params": null}),
+                // `exit` is still honored, and the lifecycle exit code
+                // stays the clean shutdown→exit zero.
+                serde_json::json!({"jsonrpc": "2.0", "method": "exit"}),
+            ],
+            &mut service,
+        );
+
+        // initialize result, didOpen publish, shutdown result, then the
+        // two errors.
+        assert_eq!(outputs.len(), 5);
+        assert_eq!(outputs[2]["id"], serde_json::json!(2));
+        assert_eq!(outputs[2]["result"], serde_json::Value::Null);
+        for (output, id) in [(&outputs[3], 3), (&outputs[4], 4)] {
+            assert_eq!(output["id"], serde_json::json!(id));
+            assert_eq!(
+                output["error"]["code"],
+                serde_json::json!(error_codes::INVALID_REQUEST)
+            );
+            assert_eq!(output["error"]["message"], "server is shut down");
+        }
         assert_eq!(exit_code, 0);
     }
 
