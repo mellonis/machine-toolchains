@@ -240,8 +240,24 @@ pub(crate) fn spans_overlap(a: Span, b: Span) -> bool {
     a.start < b.end && b.start < a.end
 }
 
-/// True when `pos` sits inside `span`, or exactly at its end — the
-/// cursor-touches-token rule every position lookup in this module shares.
+/// Half-open span containment: true when `pos` sits ON a character of the
+/// token. Core `Span.end` is exclusive — one past the last character — and
+/// that half-open reading is the one span convention every position lookup
+/// in this crate starts from. The `.tma` navigation path uses bare
+/// containment: a definition answers only with the cursor on the reference
+/// itself.
+pub(crate) fn span_contains(span: Span, pos: Pos) -> bool {
+    span.start <= pos && pos < span.end
+}
+
+/// [`span_contains`] widened by exactly the end position — the
+/// cursor-touches-token rule for edit-shaped lookups: a cursor that just
+/// typed a token's last character sits exactly at `span.end`, and completion
+/// must still claim the token being finished. This is a deliberate policy on
+/// top of the half-open convention, not an end-inclusive reading of the
+/// span — the same split the PM-1 services hold (`.pmc`'s prefix anchor,
+/// `.pma`'s whole-token touch). Every `.tmc` position lookup in this module
+/// and the `.tma` completion path share it.
 pub(crate) fn span_touches(span: Span, pos: Pos) -> bool {
     span.start <= pos && pos <= span.end
 }

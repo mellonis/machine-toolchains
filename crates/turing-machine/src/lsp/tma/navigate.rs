@@ -31,23 +31,24 @@
 //!
 //! An operand carrying an unexpanded `.rept` marker (`L{v}`) names a template,
 //! not an identifier, and resolves to nothing.
+//!
+//! Every lookup here claims an operand by bare half-open containment
+//! ([`crate::lsp::span_contains`]) — the cursor must sit ON the reference,
+//! one position narrower than completion's own end-touch rule (`complete.rs`
+//! documents the split).
 
 use mtc_core::asm::cst::{AsmItemKind, FrameDirectiveCst};
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::DefTarget;
 
 use crate::asm::tm1_syntax;
+use crate::lsp::span_contains;
 
 use super::{
     FlatItem, OperandRole, TmaDocState, doc_frames, doc_functions, doc_routines, doc_tables,
     enclosing_function_range, flat_items, is_templated, item_at_line, name_span, operand_name,
     operand_role,
 };
-
-/// Half-open span containment, 1-based.
-fn span_contains(span: Span, pos: Pos) -> bool {
-    pos >= span.start && pos < span.end
-}
 
 pub(super) fn definition(state: &TmaDocState, uri: &str, pos: Pos) -> Option<DefTarget> {
     let item = item_at_line(&state.flat, pos.line)?;
