@@ -55,14 +55,15 @@ command line, and what turns a mistaken argument into a diagnosis rather
 than a decode failure — `tmt dis` handed a tape block answers "that is a
 tape block — use `tmt tape show`".
 
-The `arch` byte says which architecture the content is for; what each tool
-does with it differs. A loader refuses an image it cannot execute — `pmt
-run` on a TM-1 executable reports `unknown architecture 0x02`. A
-disassembler does not check it: `dis` is an arch-agnostic framework driven
-by the mnemonic table its own tool supplies, so each toolchain's `dis`
-decodes the other's image against the wrong table and prints something that
-is well-formed but meaningless. Read an image with the `dis` of the
-toolchain that wrote it.
+The `arch` byte says which architecture the content is for, and every
+subcommand that reads it refuses content it cannot handle rather than
+guess: a loader refuses an image it cannot execute — `pmt run` on a
+TM-1 executable reports `unknown architecture 0x02` — and `dis` refuses
+it the same way, for both objects and executables, before disassembling
+a single instruction: `dis` is an arch-agnostic framework driven by the
+mnemonic table its own tool supplies, so reading the other toolchain's content
+against that table would print something well-formed but meaningless.
+Read an image or object with the `dis` of the toolchain that wrote it.
 
 ## `.pmx` / `.tmx` — executable
 

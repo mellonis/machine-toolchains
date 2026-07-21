@@ -27,43 +27,43 @@
     "sectionDirective": {
       "match": "(\\.section)\\b\\s*([A-Za-z_][A-Za-z0-9_]*)?",
       "captures": {
-        "1": { "name": "keyword.control.directive.tma" },
+        "1": { "name": "keyword.control.tma" },
         "2": { "name": "entity.name.section.tma" }
       }
     },
     "funcDirective": {
       "match": "(\\.func)\\b\\s+([A-Za-z_][A-Za-z0-9_.:]*)(?:\\s+(local)\\b)?",
       "captures": {
-        "1": { "name": "keyword.control.directive.tma" },
+        "1": { "name": "keyword.control.tma" },
         "2": { "name": "entity.name.function.tma" },
-        "3": { "name": "storage.modifier.tma" }
+        "3": { "name": "keyword.control.tma" }
       }
     },
     "routineDirective": {
       "match": "(\\.routine)\\b\\s*([A-Za-z_][A-Za-z0-9_.:]*)?",
       "captures": {
-        "1": { "name": "keyword.control.directive.tma" },
+        "1": { "name": "keyword.control.tma" },
         "2": { "name": "entity.name.function.tma" }
       }
     },
     "repeatDirective": {
-      "name": "keyword.control.directive.tma",
+      "name": "keyword.control.tma",
       "match": "\\.(rept|endr)\\b"
     },
     "tableDirective": {
-      "name": "keyword.control.directive.tma",
+      "name": "keyword.control.tma",
       "match": "\\.(row|targets|target)\\b"
     },
     "frameDirective": {
-      "name": "keyword.control.directive.tma",
+      "name": "keyword.control.tma",
       "match": "\\.(frame|map|exits)\\b"
     },
     "byteDirective": {
-      "name": "keyword.control.directive.tma",
+      "name": "keyword.control.tma",
       "match": "\\.byte\\b"
     },
     "mnemonics": {
-      "name": "keyword.other.mnemonic.tma",
+      "name": "keyword.control.tma",
       "match": "\\b(call\\.m|call\\.s|wrmv|djmp|retx|trap|call|jmp|jnm|brk|ent|hlt|mov|mtc|nop|ret|stp|rd|jm|wr)\\b"
     },
     "label": {

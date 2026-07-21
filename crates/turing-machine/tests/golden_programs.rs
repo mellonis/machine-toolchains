@@ -331,7 +331,11 @@ fn goldens_match_the_derived_snapshots_and_files() {
 
         // The committed .tmt is byte-for-byte the derived block.
         let bytes = fs::read(golden_dir().join(golden)).expect("golden .tmt present");
-        assert_eq!(bytes, block(&derived).to_bytes(), "{golden} drifted");
+        assert_eq!(
+            bytes,
+            block(&derived).to_bytes().unwrap(),
+            "{golden} drifted"
+        );
     }
 }
 
@@ -368,7 +372,7 @@ fn the_tmc_port_matches_the_same_goldens() {
             let bytes = fs::read(golden_dir().join(golden)).expect("golden .tmt present");
             assert_eq!(
                 bytes,
-                block(&derived).to_bytes(),
+                block(&derived).to_bytes().unwrap(),
                 "{golden} drifted under the .tmc port"
             );
         }
@@ -530,6 +534,10 @@ fn the_tmc_port_uses_modular_folds_and_compiles_compact() {
 fn regen_goldens() {
     for (program, golden, _) in cases() {
         let derived = derive(program);
-        fs::write(golden_dir().join(golden), block(&derived).to_bytes()).unwrap();
+        fs::write(
+            golden_dir().join(golden),
+            block(&derived).to_bytes().unwrap(),
+        )
+        .unwrap();
     }
 }

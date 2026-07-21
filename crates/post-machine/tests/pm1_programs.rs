@@ -248,7 +248,7 @@ fn pmt_in_run_pmt_out() {
             alphabet: None,
         }],
     };
-    let bytes = input.to_bytes();
+    let bytes = input.to_bytes().unwrap();
     let parsed = TapeBlockFile::from_bytes(&bytes).unwrap();
     let mut tape = InfiniteTape::from_snapshot(&parsed.tapes[0]).unwrap();
 
@@ -264,7 +264,7 @@ fn pmt_in_run_pmt_out() {
         alphabet: parsed.alphabet.clone(),
         tapes: vec![tape.to_snapshot()],
     };
-    let out_bytes = output.to_bytes();
+    let out_bytes = output.to_bytes().unwrap();
     let reparsed = TapeBlockFile::from_bytes(&out_bytes).unwrap();
     assert_eq!(reparsed.tapes[0].head, 3);
     assert_eq!(reparsed.tapes[0].cells, vec![1, 1, 1, 0, 1]); // data intact

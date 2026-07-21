@@ -38,7 +38,7 @@ impl TapeBlockFile {
         self.tapes.iter().all(|t| t.alphabet.is_none())
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, FormatError> {
         if self.is_v1_shape() {
             self.to_bytes_v1()
         } else {
@@ -46,14 +46,14 @@ impl TapeBlockFile {
         }
     }
 
-    fn to_bytes_v1(&self) -> Vec<u8> {
+    fn to_bytes_v1(&self) -> Result<Vec<u8>, FormatError> {
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC_TAPEBLOCK);
         put_u16(&mut out, MT_FORMAT_VERSION_V1);
         out.push(0); // flags
         put_u32(&mut out, 0); // crc placeholder
 
-        out.push(u8::try_from(self.alphabet.len()).expect("alphabet fits u8"));
+        out.push(glyph_count(&self.alphabet)?);
         for glyph in &self.alphabet {
             put_u16(
                 &mut out,
@@ -74,10 +74,10 @@ impl TapeBlockFile {
         }
 
         stamp_crc(&mut out, CRC_OFFSET);
-        out
+        Ok(out)
     }
 
-    fn to_bytes_v2(&self) -> Vec<u8> {
+    fn to_bytes_v2(&self) -> Result<Vec<u8>, FormatError> {
         let mut out = Vec::new();
         out.extend_from_slice(&MAGIC_TAPEBLOCK);
         put_u16(&mut out, MT_FORMAT_VERSION_V2);
@@ -85,7 +85,7 @@ impl TapeBlockFile {
         put_u32(&mut out, 0); // crc placeholder
 
         // Block-level fallback/shared alphabet.
-        write_glyphs(&mut out, &self.alphabet);
+        write_glyphs(&mut out, &self.alphabet)?;
 
         out.push(u8::try_from(self.tapes.len()).expect("tape count fits u8"));
         for tape in &self.tapes {
@@ -99,12 +99,12 @@ impl TapeBlockFile {
             // Per-tape glyph table: count 0 means "inherit the block alphabet".
             match &tape.alphabet {
                 None => out.push(0),
-                Some(own) => write_glyphs(&mut out, own),
+                Some(own) => write_glyphs(&mut out, own)?,
             }
         }
 
         stamp_crc(&mut out, CRC_OFFSET);
-        out
+        Ok(out)
     }
 
     /// v2 body (per-tape glyph tables). `r` is positioned right after the
@@ -215,14 +215,25 @@ impl TapeBlockFile {
     }
 }
 
+/// Encodes an alphabet's symbol count as the wire `u8`, or
+/// `FormatError::AlphabetTooWide` when the alphabet has more symbols than
+/// that byte-sized field can hold (docs/formats.md (tape-block snapshot)).
+fn glyph_count(glyphs: &[String]) -> Result<u8, FormatError> {
+    u8::try_from(glyphs.len()).map_err(|_| FormatError::AlphabetTooWide {
+        symbols: glyphs.len(),
+        max: usize::from(u8::MAX),
+    })
+}
+
 /// Writes a glyph table: a `u8` count, then each glyph as `u16` byte-length +
 /// its UTF-8 bytes. Shared by the v2 block alphabet and per-tape own tables.
-fn write_glyphs(out: &mut Vec<u8>, glyphs: &[String]) {
-    out.push(u8::try_from(glyphs.len()).expect("alphabet fits u8"));
+fn write_glyphs(out: &mut Vec<u8>, glyphs: &[String]) -> Result<(), FormatError> {
+    out.push(glyph_count(glyphs)?);
     for glyph in glyphs {
         put_u16(out, u16::try_from(glyph.len()).expect("glyph fits u16"));
         out.extend_from_slice(glyph.as_bytes());
     }
+    Ok(())
 }
 
 /// Reads `count` glyphs (each `u16` byte-length + UTF-8 bytes) into a vector,
@@ -257,7 +268,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let bytes = sample().to_bytes();
+        let bytes = sample().to_bytes().unwrap();
         assert_eq!(&bytes[0..3], b"MT\x01");
         assert_eq!(TapeBlockFile::from_bytes(&bytes).unwrap(), sample());
     }
@@ -267,7 +278,7 @@ mod tests {
     #[test]
     fn shared_alphabet_is_byte_identical_v1() {
         let block = sample(); // all tapes alphabet: None after this task's refactor
-        let bytes = block.to_bytes();
+        let bytes = block.to_bytes().unwrap();
         assert_eq!(&bytes[0..3], b"MT\x01");
         assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 1);
         assert_eq!(TapeBlockFile::from_bytes(&bytes).unwrap(), block);
@@ -292,7 +303,7 @@ mod tests {
                 },
             ],
         };
-        let back = TapeBlockFile::from_bytes(&block.to_bytes()).unwrap();
+        let back = TapeBlockFile::from_bytes(&block.to_bytes().unwrap()).unwrap();
         assert_eq!(back, block);
     }
 
@@ -300,7 +311,7 @@ mod tests {
     fn cell_outside_alphabet_rejected() {
         let mut block = sample();
         block.tapes[0].cells[0] = 9;
-        let bytes = block.to_bytes();
+        let bytes = block.to_bytes().unwrap();
         assert!(matches!(
             TapeBlockFile::from_bytes(&bytes),
             Err(FormatError::Malformed("cell index outside alphabet"))
@@ -313,7 +324,7 @@ mod tests {
             alphabet: vec![],
             tapes: sample().tapes,
         };
-        let bytes = block.to_bytes();
+        let bytes = block.to_bytes().unwrap();
         assert!(matches!(
             TapeBlockFile::from_bytes(&bytes),
             Err(FormatError::Malformed("empty alphabet"))
@@ -322,7 +333,7 @@ mod tests {
 
     #[test]
     fn corruption_rejected() {
-        let mut bytes = sample().to_bytes();
+        let mut bytes = sample().to_bytes().unwrap();
         bytes[12] ^= 0xFF;
         assert!(matches!(
             TapeBlockFile::from_bytes(&bytes),
@@ -336,7 +347,7 @@ mod tests {
             alphabet: vec![" ".into(), "*".into()],
             tapes: vec![],
         };
-        let bytes = block.to_bytes();
+        let bytes = block.to_bytes().unwrap();
         assert!(matches!(
             TapeBlockFile::from_bytes(&bytes),
             Err(FormatError::Malformed("no tapes"))
@@ -345,7 +356,7 @@ mod tests {
 
     #[test]
     fn non_utf8_glyph_rejected() {
-        let mut bytes = sample().to_bytes();
+        let mut bytes = sample().to_bytes().unwrap();
         // header is 10 bytes (magic 3 + version 2 + flags 1 + crc 4); then
         // u8 alphabet count @10, u16 glyph len @11..13, glyph bytes @13.
         bytes[13] = 0xFF; // invalidate the single-byte " " glyph
@@ -382,7 +393,7 @@ mod tests {
     /// per-tape (origin8 + cells_len4 + cells + head8 + own-glyph-table).
     #[test]
     fn v2_layout_is_exact() {
-        let bytes = sample_v2().to_bytes();
+        let bytes = sample_v2().to_bytes().unwrap();
         assert_eq!(&bytes[0..3], b"MT\x01"); // magic
         assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2); // version
         assert_eq!(bytes[5], 0); // flags
@@ -415,7 +426,7 @@ mod tests {
     #[test]
     fn v2_round_trips_per_tape_alphabets() {
         let block = sample_v2();
-        let bytes = block.to_bytes();
+        let bytes = block.to_bytes().unwrap();
         assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 2);
         assert_eq!(TapeBlockFile::from_bytes(&bytes).unwrap(), block);
     }
@@ -424,7 +435,7 @@ mod tests {
     fn v2_cell_outside_own_alphabet_rejected() {
         let mut block = sample_v2();
         block.tapes[0].cells[0] = 9; // own alphabet has 3 symbols
-        let bytes = block.to_bytes();
+        let bytes = block.to_bytes().unwrap();
         assert!(matches!(
             TapeBlockFile::from_bytes(&bytes),
             Err(FormatError::Malformed("cell index outside alphabet"))
@@ -442,12 +453,58 @@ mod tests {
                 alphabet: Some(vec!["_".into(), "😀".into()]),
             }],
         };
-        assert_eq!(TapeBlockFile::from_bytes(&block.to_bytes()).unwrap(), block);
+        assert_eq!(
+            TapeBlockFile::from_bytes(&block.to_bytes().unwrap()).unwrap(),
+            block
+        );
     }
 
     #[test]
     fn v1_shared_alphabet_file_still_loads() {
         let v1 = sample(); // all None
-        assert_eq!(TapeBlockFile::from_bytes(&v1.to_bytes()).unwrap(), v1);
+        assert_eq!(
+            TapeBlockFile::from_bytes(&v1.to_bytes().unwrap()).unwrap(),
+            v1
+        );
+    }
+
+    /// A block-level (v1-shaped) alphabet past the wire glyph-count byte's
+    /// range is a typed error, not a panic — the u8 header field caps the
+    /// table at 255 glyphs (docs/formats.md (tape-block snapshot)).
+    #[test]
+    fn oversize_block_alphabet_is_typed_error_not_panic() {
+        let block = TapeBlockFile {
+            alphabet: (0..300).map(|i| i.to_string()).collect(),
+            tapes: sample().tapes,
+        };
+        assert_eq!(
+            block.to_bytes(),
+            Err(FormatError::AlphabetTooWide {
+                symbols: 300,
+                max: 255,
+            })
+        );
+    }
+
+    /// Same invariant on the v2 per-tape path: a tape's own glyph table
+    /// past 255 symbols is a typed error, not a panic.
+    #[test]
+    fn oversize_per_tape_alphabet_is_typed_error_not_panic() {
+        let block = TapeBlockFile {
+            alphabet: vec!["_".into()],
+            tapes: vec![TapeSnapshot {
+                origin: 0,
+                cells: Vec::new(),
+                head: 0,
+                alphabet: Some((0..300).map(|i| i.to_string()).collect()),
+            }],
+        };
+        assert_eq!(
+            block.to_bytes(),
+            Err(FormatError::AlphabetTooWide {
+                symbols: 300,
+                max: 255,
+            })
+        );
     }
 }

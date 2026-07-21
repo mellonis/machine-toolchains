@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use mtc_core::diagnostics::{Diagnostic, Edit, Pos};
 use mtc_turing_machine::cli::execute;
 use mtc_turing_machine::compiler::{CompileOptions, compile};
+use mtc_turing_machine::lint::tma::lint_tma;
 use mtc_turing_machine::lint::{LintOptions, lint};
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -373,4 +374,26 @@ machine {
         findings(&fixed)
     );
     compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
+}
+
+// -- flagship acceptance: unused-label on `.tma` ------------------------
+
+#[test]
+fn the_flagship_brainfuck_utm_lints_free_of_false_unused_labels() {
+    // The UTM dispatches every branch through the table section and stamps
+    // its arithmetic labels (Linc/Ldec/Ldot) out of `.rept` blocks — the
+    // shape that once tripped 400 false unused-label findings and forced the
+    // rule off on `.tma`. With core reading the lowered tables, linting the
+    // shipped example reports no unused-label finding at all: none is a false
+    // positive, and none names genuinely dead code.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/examples/brainfuck-utm.tma");
+    let src = fs::read_to_string(&path).expect("read the flagship .tma");
+    let report = lint_tma(&src, &[]).expect("the flagship assembles");
+    let unused: Vec<&Diagnostic> = report.iter().filter(|d| d.code == "unused-label").collect();
+    assert!(
+        unused.is_empty(),
+        "{} false unused-label finding(s): {unused:#?}",
+        unused.len()
+    );
 }

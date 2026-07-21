@@ -1201,6 +1201,79 @@ Fr: .frame  tapes=(0, 1)
 ";
     let e = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).unwrap_err();
     assert_eq!(e, LinkError::MonoRawFrame("main".into()));
+    // The advice recommends the mechanism that actually works. `hybrid`
+    // hits this same refusal whenever no other bound site forces the
+    // frames path (see the hybrid probe below), so it is no longer offered
+    // as an escape.
+    let msg = e.to_string();
+    assert!(
+        msg.contains("--call-mech=frames"),
+        "advises the mechanism that works: {msg}"
+    );
+    assert!(
+        !msg.contains("hybrid"),
+        "must not send the caller in a circle: {msg}"
+    );
+}
+
+/// The same raw `call.m` site, but the only bound call alongside it is a
+/// completed bijection — hybrid's mono-or-frames-or-mixed classifier (see
+/// `docs/core.md`, the composition engine) finds no holey/one-way site to
+/// force the frames path and delegates wholesale to mono, hitting the same
+/// contradiction. This is the common failure shape the reworded advice
+/// targets: telling the caller to retry with `hybrid` sends them in a
+/// circle.
+#[test]
+fn a_raw_call_m_under_hybrid_with_only_bijection_sites_is_the_same_link_error() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.routine leaf, tapes=2, alpha=(4, 4)
+.section tables
+Fr: .frame  tapes=(0, 1)
+    .map    0, rmap=(1->2)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        fcall   leaf, Fr
+        stp
+.func sub
+        ret
+.func leaf
+        ret
+";
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).unwrap_err();
+    assert_eq!(
+        e,
+        LinkError::MonoRawFrame("main".into()),
+        "no holey/one-way site to force frames ⇒ hybrid delegates to mono wholesale"
+    );
+}
+
+/// Same raw `call.m` site once more, under `frames`: no mono stamping is
+/// ever attempted, so the descriptor's compose machinery is present and the
+/// link succeeds. This is the mechanism the advice should point at.
+#[test]
+fn a_raw_call_m_under_frames_links() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.routine leaf, tapes=2, alpha=(4, 4)
+.section tables
+Fr: .frame  tapes=(0, 1)
+    .map    0, rmap=(1->2)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        fcall   leaf, Fr
+        stp
+.func sub
+        ret
+.func leaf
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(out.executable.profile, PROFILE_FRAMES);
 }
 
 /// The hand-derived read-table rewrite: a machine-width match table with
@@ -1352,6 +1425,19 @@ L:      ret
     // into T0; `jm` reads the match result, so no dispatch consumes it.
     let e = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).unwrap_err();
     assert_eq!(e, LinkError::MonoHoleyMatchBranch("sub".into()));
+    // The advice recommends the mechanism that works unconditionally: a
+    // nested holey bound call under an outer bijection seed (see the hybrid
+    // probe below) hits this same refusal under hybrid too, so hybrid is no
+    // longer offered as an escape.
+    let msg = e.to_string();
+    assert!(
+        msg.contains("--call-mech=frames"),
+        "advises the mechanism that works: {msg}"
+    );
+    assert!(
+        !msg.contains("hybrid"),
+        "must not send the caller in a circle: {msg}"
+    );
 }
 
 /// The same misroute, mid-body: a trap-bearing match table feeds a branch,
@@ -1386,6 +1472,112 @@ B:      ret
 ";
     let e = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).unwrap_err();
     assert_eq!(e, LinkError::MonoHoleyMatchBranch("sub".into()));
+}
+
+/// The FIRST world: when the holey, branch-fed site is itself the top-level
+/// bound call (no bijection anywhere), hybrid's classifier sees it is not a
+/// completed bijection and routes it to frames directly — it never attempts
+/// a mono stamp for `sub` at all, so this specific shape never raises
+/// `MonoHoleyMatchBranch` under hybrid. Same source as
+/// `a_holey_mono_binding_with_a_branch_fed_match_table_is_a_link_error`, one
+/// mechanism over.
+#[test]
+fn a_top_level_holey_branch_fed_site_is_frames_lowered_under_hybrid() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine sub, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+    .row [1]
+.section code
+.func main
+        call    sub [0{1=>1, 2=>1}]
+        stp
+.func sub
+        rd
+        tmatch  T0
+        jm      L
+        ret
+L:      ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).expect("links");
+    assert_eq!(
+        out.executable.profile, PROFILE_FRAMES,
+        "the holey top-level site is not a bijection ⇒ frames, no mono attempt"
+    );
+}
+
+/// The SECOND world: the holeyness sits one hop DEEPER than the classifier
+/// looks. `main` reaches `swap` through a completed bijection (equal
+/// cardinalities, no one-way pair) — hybrid's classifier inspects only
+/// `main`'s own bound sites, finds this one mono-eligible, and (with no
+/// other top-level site to force frames) delegates the whole link to mono
+/// via the `!any_frames` fast path. `swap` itself then makes a NESTED bound
+/// call into `narrow` with a narrowing, branch-fed binding — invisible to
+/// the top-level classifier, but reached all the same by the mono stamp
+/// closure, which raises the identical refusal. This is the shape the
+/// reworded advice targets (mirrors the `MonoRawFrame` probe): hybrid is not
+/// an escape whenever the offending site's mono-stamped ancestry starts at
+/// a bijection.
+#[test]
+fn a_nested_holey_bound_call_under_a_bijection_seed_is_the_same_link_error_under_hybrid() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine swap, tapes=1, alpha=(4)
+.routine narrow, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+    .row [1]
+.section code
+.func main
+        call    swap [0{1->2, 2->1}]
+        stp
+.func swap
+        call    narrow [0{1=>1, 2=>1}]
+        ret
+.func narrow
+        rd
+        tmatch  T0
+        jm      L
+        ret
+L:      ret
+";
+    let e = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).unwrap_err();
+    assert_eq!(
+        e,
+        LinkError::MonoHoleyMatchBranch("narrow".into()),
+        "the outer bijection commits the closure to mono before the nested holeyness is ever seen"
+    );
+}
+
+/// Same nested shape once more, under `frames`: no mono stamping is ever
+/// attempted, so the descriptor path's hole handling applies uniformly and
+/// the link succeeds. This is the mechanism the advice should point at.
+#[test]
+fn a_nested_holey_bound_call_under_a_bijection_seed_links_under_frames() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine swap, tapes=1, alpha=(4)
+.routine narrow, tapes=1, alpha=(3)
+.section tables
+T0: .row [0]
+    .row [1]
+.section code
+.func main
+        call    swap [0{1->2, 2->1}]
+        stp
+.func swap
+        call    narrow [0{1=>1, 2=>1}]
+        ret
+.func narrow
+        rd
+        tmatch  T0
+        jm      L
+        ret
+L:      ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], frames_opts()).expect("links");
+    assert_eq!(out.executable.profile, PROFILE_FRAMES);
 }
 
 /// Hybrid: one image with BOTH a mono-stamped bijection site and a

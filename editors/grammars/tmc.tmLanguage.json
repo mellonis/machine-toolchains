@@ -45,15 +45,15 @@
       ]
     },
     "keywordsStorage": {
-      "name": "storage.type.tmc",
+      "name": "keyword.control.tmc",
       "match": "\\b(alphabet|machine|tape|state|routine|graph|namespace)\\b"
     },
     "keywordsModifier": {
-      "name": "storage.modifier.tmc",
+      "name": "keyword.control.tmc",
       "match": "\\b(export|entry)\\b"
     },
     "keywordsImport": {
-      "name": "keyword.control.import.tmc",
+      "name": "keyword.control.tmc",
       "match": "\\b(use|as)\\b"
     },
     "keywordsControl": {
@@ -61,18 +61,18 @@
       "match": "\\b(goto|call|then|return|stop|halt|graft|bind)\\b"
     },
     "keywordsOperation": {
-      "name": "support.function.builtin.tmc",
+      "name": "keyword.control.tmc",
       "match": "\\b(write|move|map|with)\\b"
     },
     "keywordsDebugger": {
-      "name": "keyword.other.debugger.tmc",
+      "name": "keyword.control.tmc",
       "match": "\\b(debugger)\\b"
     },
     "declaration": {
       "comment": "Colors the name introduced by a declaring keyword. The keyword itself is re-scoped here because a TextMate rule consumes what it matches; the authoritative keyword lists are the `keywords*` rules above.",
       "match": "\\b(alphabet|routine|graph|namespace|state)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
-        "1": { "name": "storage.type.tmc" },
+        "1": { "name": "keyword.control.tmc" },
         "2": { "name": "entity.name.type.tmc" }
       }
     },

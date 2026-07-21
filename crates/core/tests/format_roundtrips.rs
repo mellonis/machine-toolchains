@@ -114,7 +114,7 @@ proptest! {
             alphabet: vec![" ".into(), "*".into()],
             tapes: vec![TapeSnapshot { origin, cells, head, alphabet: None }],
         };
-        let back = TapeBlockFile::from_bytes(&block.to_bytes()).unwrap();
+        let back = TapeBlockFile::from_bytes(&block.to_bytes().unwrap()).unwrap();
         prop_assert_eq!(back, block);
     }
 
@@ -144,7 +144,7 @@ proptest! {
             }
         }).collect();
         let block = TapeBlockFile { alphabet: vec!["_".into()], tapes };
-        prop_assert_eq!(TapeBlockFile::from_bytes(&block.to_bytes()).unwrap(), block);
+        prop_assert_eq!(TapeBlockFile::from_bytes(&block.to_bytes().unwrap()).unwrap(), block);
     }
 
     /// from_bytes never panics on arbitrary bytes (must return Err, not panic).

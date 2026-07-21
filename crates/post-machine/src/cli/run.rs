@@ -151,8 +151,8 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
             alphabet: alphabet.clone(),
             tapes: vec![snapshot],
         };
-        fs::write(&out_path, block.to_bytes())
-            .map_err(|e| format!("cannot write {out_path}: {e}"))?;
+        let bytes = block.to_bytes().map_err(|e| e.to_string())?;
+        fs::write(&out_path, bytes).map_err(|e| format!("cannot write {out_path}: {e}"))?;
     }
 
     let code = match outcome {

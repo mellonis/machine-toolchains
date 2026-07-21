@@ -1,23 +1,58 @@
-//! `unused-label` (docs/core.md (assembly lint)): a label nothing in its function
-//! references via a jump/call name operand. Function-scoped, the same
+//! `unused-label` (docs/core.md (assembly lint)): a label nothing
+//! references. A reference is an in-function jump/call name operand, OR
+//! — on a dialect with table sections — a dispatch `.targets`/`.target`
+//! entry or a frame `.exits` descriptor that names the label; those
+//! table references live outside the code section, so a rule that
+//! looked only at in-function operands false-flagged every dispatch and
+//! exit target. Function-scoped for the in-function operands, the same
 //! scope as label resolution — `SourceOperand::SymbolName` (`@name`)
 //! targets a function symbol, never a local label, so it never counts
-//! as a reference.
+//! as a reference. The table references are file-scoped: a name a table
+//! reaches counts as used in every function. That can only silence a
+//! finding, never mint one, so it is the safe direction for a hygiene
+//! lint (the rare cost is missing a dead label that shares its name
+//! with a table-reached one elsewhere).
 
 use std::collections::HashSet;
 
 use crate::asm::cst::{AsmCst, AsmItemKind, LineCst};
 use crate::asm::lint::AsmLintContext;
-use crate::asm::lower::{SourceFunction, SourceItem, SourceOperand, SpannedName};
+use crate::asm::lower::{SourceFunction, SourceItem, SourceOperand, SourceTable, SpannedName};
 use crate::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 
 pub(crate) fn check(ctx: &AsmLintContext, out: &mut Vec<Diagnostic>) {
+    let table_refs = table_referenced_labels(ctx.tables);
     for function in ctx.functions {
-        check_function(function, ctx.cst, out);
+        check_function(function, &table_refs, ctx.cst, out);
     }
 }
 
-fn check_function(function: &SourceFunction, cst: &AsmCst, out: &mut Vec<Diagnostic>) {
+/// Code-label names referenced from lowered table sections: dispatch
+/// `.targets`/`.target` entries and frame `.exits` descriptors. A match
+/// table's rows carry symbol payloads and a frame's `.map` clauses carry
+/// symbol maps — neither names a code label, so both are skipped.
+fn table_referenced_labels(tables: &[SourceTable]) -> HashSet<&str> {
+    let mut refs: HashSet<&str> = HashSet::new();
+    for table in tables {
+        match table {
+            SourceTable::Dispatch { targets, .. } => {
+                refs.extend(targets.iter().map(|t| t.name.as_str()));
+            }
+            SourceTable::Frame { exits, .. } => {
+                refs.extend(exits.iter().map(|e| e.name.as_str()));
+            }
+            SourceTable::Match { .. } => {}
+        }
+    }
+    refs
+}
+
+fn check_function(
+    function: &SourceFunction,
+    table_refs: &HashSet<&str>,
+    cst: &AsmCst,
+    out: &mut Vec<Diagnostic>,
+) {
     let mut referenced: HashSet<&str> = HashSet::new();
     for item in &function.items {
         if let SourceItem::Instr {
@@ -34,7 +69,8 @@ fn check_function(function: &SourceFunction, cst: &AsmCst, out: &mut Vec<Diagnos
             SourceItem::Instr { labels, .. } | SourceItem::RawByte { labels, .. } => labels,
         };
         for label in labels {
-            if referenced.contains(label.name.as_str()) {
+            if referenced.contains(label.name.as_str()) || table_refs.contains(label.name.as_str())
+            {
                 continue;
             }
             out.push(Diagnostic {
@@ -44,32 +80,43 @@ fn check_function(function: &SourceFunction, cst: &AsmCst, out: &mut Vec<Diagnos
                     "label `{}` is never referenced (function `{}`)",
                     label.name, function.name
                 ),
-                fix: Some(Fix {
-                    description: "remove the unused label".to_string(),
-                    applicability: Applicability::MachineApplicable,
-                    edits: vec![Edit {
-                        span: edit_span(cst, label),
-                        replacement: String::new(),
-                    }],
-                }),
+                // A label that occupies a real source line gets a delete
+                // fix; one whose span is a `.rept` header (its physical
+                // position is a template the block stamps out repeatedly,
+                // not a deletable line) is reported without a fix.
+                fix: delete_fix(cst, label),
             });
         }
     }
 }
 
+/// A machine-applicable fix that deletes the label, or `None` when the
+/// label maps to no single source line to edit (a `.rept`-expanded
+/// label, whose span is the block header — [`find_label_line`] finds no
+/// matching `Line`).
+fn delete_fix(cst: &AsmCst, label: &SpannedName) -> Option<Fix> {
+    let line = find_label_line(cst, label)?;
+    Some(Fix {
+        description: "remove the unused label".to_string(),
+        applicability: Applicability::MachineApplicable,
+        edits: vec![Edit {
+            span: edit_span(line, label),
+            replacement: String::new(),
+        }],
+    })
+}
+
 /// The label's own span extended through the `:` and any spaces up to
 /// the next token on the same line, so deleting it leaves the line
-/// grid-clean rather than a hole of leftover spaces.
-fn edit_span(cst: &AsmCst, label: &SpannedName) -> Span {
+/// grid-clean rather than a hole of leftover spaces. `line` is the CST
+/// line already found to carry this label.
+fn edit_span(line: &LineCst, label: &SpannedName) -> Span {
     let through_colon = Span::new(
         label.span.start.line,
         label.span.start.col,
         label.span.start.line,
         label.span.end.col + 1,
     );
-    let Some(line) = find_label_line(cst, label) else {
-        return through_colon;
-    };
     let index = line
         .labels
         .iter()
@@ -106,23 +153,43 @@ fn find_label_line<'a>(cst: &'a AsmCst, label: &SpannedName) -> Option<&'a LineC
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asm::cst::parse_asm_cst;
-    use crate::asm::lower::lower;
+    use crate::asm::cst::parse_asm_cst_with;
+    use crate::asm::lower::lower_source;
+    use crate::asm::syntax::AsmCaps;
     use crate::asm::syntax::fixture::test_syntax;
 
-    fn findings(src: &str) -> Vec<Diagnostic> {
-        let syntax = test_syntax();
-        let cst = parse_asm_cst(src);
-        let functions = lower(&cst, &syntax, src).unwrap();
+    /// Lower under the given dialect and run only this rule, threading the
+    /// lowered tables into the context (empty for a cap-off dialect).
+    fn findings_with(src: &str, syntax: &crate::asm::ArchSyntax) -> Vec<Diagnostic> {
+        let cst = parse_asm_cst_with(src, syntax.caps);
+        let lowered = lower_source(&cst, syntax, src).unwrap();
         let ctx = AsmLintContext {
             source: src,
             cst: &cst,
-            functions: &functions,
-            syntax: &syntax,
+            functions: &lowered.functions,
+            tables: &lowered.tables,
+            syntax,
         };
         let mut out = Vec::new();
         check(&ctx, &mut out);
         out
+    }
+
+    fn findings(src: &str) -> Vec<Diagnostic> {
+        findings_with(src, &test_syntax())
+    }
+
+    /// `test_syntax()` with the tables and rept caps on, so `.section`
+    /// markers, dispatch directives, and `.rept` blocks shape and lower —
+    /// the surface that carries the table references this rule now reads.
+    fn caps_syntax() -> crate::asm::ArchSyntax {
+        let mut syntax = test_syntax();
+        syntax.caps = AsmCaps {
+            tables: true,
+            rept: true,
+            ..Default::default()
+        };
+        syntax
     }
 
     #[test]
@@ -187,5 +254,75 @@ mod tests {
         assert_eq!(fix.edits.len(), 1);
         assert_eq!(fix.edits[0].span, Span::new(2, 1, 2, 8));
         assert_eq!(fix.edits[0].replacement, "");
+    }
+
+    #[test]
+    fn a_dispatch_target_counts_as_a_reference_while_a_dead_label_still_fires() {
+        // `seen` is reached only through a `.targets` dispatch entry — a
+        // reference that lives in the lowered table section, named by no
+        // in-function operand — so it must NOT be flagged. `dead` is
+        // reached by nothing, so it must. This is the positive control:
+        // it fails if the rule ignores the table feed (both flagged) and
+        // if the rule stopped flagging entirely (neither).
+        let src = "\
+.section tables
+D0: .targets seen
+.section code
+.func f
+seen:   nop
+        stop
+dead:   nop
+        stop
+";
+        let d = findings_with(src, &caps_syntax());
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, "unused-label");
+        assert!(d[0].message.contains("`dead`"), "{}", d[0].message);
+    }
+
+    #[test]
+    fn a_frame_exit_counts_as_a_reference() {
+        // A `.exits` descriptor names a code label in the owning function;
+        // that reference lives in the frame descriptor, not in any
+        // operand, so the label must not be flagged.
+        let src = "\
+.section tables
+F0: .frame tapes=(0)
+    .exits done
+.section code
+.func f
+done:   stop
+";
+        let d = findings_with(src, &caps_syntax());
+        assert!(d.iter().all(|f| f.code != "unused-label"), "{d:?}");
+    }
+
+    #[test]
+    fn tables_off_leaves_the_reference_set_empty_so_behavior_is_unchanged() {
+        // With the tables cap off — every PM-1-style dialect — no table
+        // shapes, the table-reference set is empty, and a dead label fires
+        // exactly as it did before the table feed existed. This pins the
+        // change inert wherever `AsmCaps.tables` is off.
+        let d = findings(".func f\nUNUSED: nop\n        stop\n");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].code, "unused-label");
+        assert!(d[0].fix.is_some(), "a real source line still gets a fix");
+    }
+
+    #[test]
+    fn a_dead_rept_expanded_label_reports_at_the_header_span_without_a_fix() {
+        // `L{v}:` stamps out L0..L2, none referenced. An expanded label's
+        // only physical position is the template line, so the finding is
+        // anchored at the `.rept` header (line 2) — a usable span, not the
+        // re-parsed line-1 artifact — and carries no delete fix, because
+        // there is no single source line to edit.
+        let src = ".func f\n.rept v, 0, 2\nL{v}: nop\n.endr\n        stop\n";
+        let d = findings_with(src, &caps_syntax());
+        assert_eq!(d.len(), 3, "{d:?}");
+        for f in &d {
+            assert_eq!(f.code, "unused-label");
+            assert_eq!(f.span.start.line, 2, "anchored at the `.rept` header");
+            assert!(f.fix.is_none(), "no fix for a templated label: {f:?}");
+        }
     }
 }

@@ -27,10 +27,20 @@ pub mod tapeblock;
 #[derive(Debug, PartialEq, Eq)]
 pub enum FormatError {
     BadMagic,
-    BadCrc { stored: u32, computed: u32 },
+    BadCrc {
+        stored: u32,
+        computed: u32,
+    },
     UnsupportedVersion(u16),
     Truncated,
     Malformed(&'static str),
+    /// A tape-block alphabet (the shared block table or a per-tape
+    /// override) has more symbols than the wire glyph-count field —
+    /// a `u8` — can hold (docs/formats.md (tape-block snapshot)).
+    AlphabetTooWide {
+        symbols: usize,
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for FormatError {
@@ -46,6 +56,12 @@ impl std::fmt::Display for FormatError {
             Self::UnsupportedVersion(v) => write!(f, "unsupported format version {v}"),
             Self::Truncated => write!(f, "truncated file"),
             Self::Malformed(what) => write!(f, "malformed file: {what}"),
+            Self::AlphabetTooWide { symbols, max } => {
+                write!(
+                    f,
+                    "alphabet has {symbols} symbols: the MT container holds at most {max}"
+                )
+            }
         }
     }
 }

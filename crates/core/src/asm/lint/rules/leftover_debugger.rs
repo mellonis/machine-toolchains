@@ -72,6 +72,7 @@ mod tests {
             source: src,
             cst: &cst,
             functions: &functions,
+            tables: &[],
             syntax,
         };
         let mut out = Vec::new();

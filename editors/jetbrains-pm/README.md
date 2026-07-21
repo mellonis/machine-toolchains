@@ -67,8 +67,9 @@ excludes this plugin's IntelliJ Platform baseline (2024.3).
 
 ## Build and sideload the plugin
 
-From `editors/jetbrains-pm`, with `JAVA_HOME` pointed at any JDK 17+ — a
-JetBrains IDE's own bundled JBR works, e.g. on macOS:
+From `editors/jetbrains-pm`, with `JAVA_HOME` pointed at a JDK capable of
+running Gradle itself — a JetBrains IDE's own bundled JBR works, e.g. on
+macOS:
 
 ```sh
 export JAVA_HOME="$HOME/Applications/<SomeIDE>.app/Contents/jbr/Contents/Home"
@@ -76,9 +77,15 @@ export JAVA_HOME="$HOME/Applications/<SomeIDE>.app/Contents/jbr/Contents/Home"
 ```
 
 (Substitute the `.app` for whichever JetBrains IDE Toolbox installed —
-for example `RustRover.app`. Any JDK 17 or newer on `PATH`/`JAVA_HOME`
-works equally well; the bundled JBR is just a JDK most JetBrains-IDE
-users already have on disk without a separate install.)
+for example `RustRover.app`; the bundled JBR is just a JDK most
+JetBrains-IDE users already have on disk without a separate install.)
+The compilation itself always targets a pinned JDK 17 toolchain
+(`kotlin { jvmToolchain(17) }` in `build.gradle.kts`), regardless of
+which JDK `JAVA_HOME` points at — Gradle auto-provisions JDK 17 via the
+`foojay-resolver-convention` plugin (`settings.gradle.kts`) if the
+`JAVA_HOME` JDK doesn't already supply one. This has been verified
+building under a JetBrains-bundled JBR newer than 17 (JBR 25); other
+JDKs as `JAVA_HOME` are untested.
 
 `buildPlugin` produces `build/distributions/pmc-0.1.2.zip`. Install it:
 

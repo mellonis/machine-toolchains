@@ -21,23 +21,23 @@
     },
     "keywords": {
       "patterns": [
-        { "name": "keyword.control.import.pmc", "match": "\\buse\\b" },
+        { "name": "keyword.control.pmc", "match": "\\buse\\b" },
         {
           "match": "\\b(namespace)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.other.namespace.pmc" },
+            "1": { "name": "keyword.control.pmc" },
             "2": { "name": "entity.name.namespace.pmc" }
           }
         },
-        { "name": "storage.modifier.pmc", "match": "\\bexport\\b" },
-        { "name": "keyword.other.as.pmc", "match": "\\bas\\b" }
+        { "name": "keyword.control.pmc", "match": "\\bexport\\b" },
+        { "name": "keyword.control.pmc", "match": "\\bas\\b" }
       ]
     },
     "commands": {
       "patterns": [
         { "name": "keyword.control.pmc", "match": "\\b(goto|check|halt)\\b" },
-        { "name": "support.function.builtin.pmc", "match": "\\b(left|right|mark|unmark)\\b" },
-        { "name": "keyword.other.debugger.pmc", "match": "\\bdebugger\\b" }
+        { "name": "keyword.control.pmc", "match": "\\b(left|right|mark|unmark)\\b" },
+        { "name": "keyword.control.pmc", "match": "\\bdebugger\\b" }
       ]
     },
     "call": {
