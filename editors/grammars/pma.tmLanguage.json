@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "PMA",
-  "comment": "PM-1 .pma assembly (docs/formats.md). Mnemonics mirror pm1_syntax() in crates/post-machine/src/asm/mod.rs; the drift guard in crates/post-machine/tests/editor_grammar.rs asserts coverage generated from that table. Mnemonic alternation is ordered longest-first so a `.s` short form (e.g. `jm.s`) is never shadowed by its bare prefix (`jm`) under Oniguruma's first-match alternation. `local` after `.func` is scoped storage.modifier. Labels use the pragmatic ASCII class `[A-Za-z_][A-Za-z0-9_]*` for highlighting even though the parser additionally accepts Unicode letters (docs/formats.md) — best-effort, not a full identifier class.",
+  "comment": "PM-1 .pma assembly (docs/formats.md). Mnemonics mirror pm1_syntax() in crates/post-machine/src/asm/mod.rs; the drift guard in crates/post-machine/tests/editor_grammar.rs asserts coverage generated from that table. Mnemonic alternation is ordered longest-first so a `.s` short form (e.g. `jm.s`) is never shadowed by its bare prefix (`jm`) under Oniguruma's first-match alternation. `local` after `.func` is scoped keyword.control, same as every other keyword-tier word in this grammar. Labels use the pragmatic ASCII class `[A-Za-z_][A-Za-z0-9_]*` for highlighting even though the parser additionally accepts Unicode letters (docs/formats.md) — best-effort, not a full identifier class.",
   "scopeName": "source.pma",
   "patterns": [
     { "include": "#comments" },
@@ -21,17 +21,17 @@
     "funcDirective": {
       "match": "(\\.func)\\b\\s+([A-Za-z_][A-Za-z0-9_.:]*)(?:\\s+(local)\\b)?",
       "captures": {
-        "1": { "name": "keyword.control.directive.pma" },
+        "1": { "name": "keyword.control.pma" },
         "2": { "name": "entity.name.function.pma" },
-        "3": { "name": "storage.modifier.pma" }
+        "3": { "name": "keyword.control.pma" }
       }
     },
     "byteDirective": {
-      "name": "keyword.control.directive.pma",
+      "name": "keyword.control.pma",
       "match": "\\.byte\\b"
     },
     "mnemonics": {
-      "name": "keyword.other.mnemonic.pma",
+      "name": "keyword.control.pma",
       "match": "\\b(call\\.s|jmp\\.s|jnm\\.s|call|jm\\.s|nop|stp|hlt|lft|rgt|jmp|jnm|ret|ent|brk|wrl|wrr|wr|jm)\\b"
     },
     "label": {
