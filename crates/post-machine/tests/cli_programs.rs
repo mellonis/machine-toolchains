@@ -1,6 +1,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+use mtc_core::formats::ARCH_TM1;
+use mtc_core::formats::executable::Executable;
+use mtc_core::formats::object::ObjectFile;
 use mtc_post_machine::cli::execute;
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::optimizer::OptLevel;
@@ -346,6 +349,29 @@ fn trace_streams_lines_with_post_state_into_the_writer() {
         lines[3]
     );
     assert!(out.stderr.is_empty(), "trace must stream, not buffer");
+}
+
+#[test]
+fn dis_refuses_a_foreign_architecture_executable() {
+    // A .pmx stamped with TM-1's arch byte: `run` already refuses this
+    // (`unknown architecture 0x02`); `dis` must refuse it the same way
+    // instead of decoding the code section against PM-1's opcode table.
+    let dir = scratch("dis_foreign_exe");
+    let exe = Executable::code_only(ARCH_TM1, 0, vec![0x0D, 0x02]);
+    let path = dir.join("foreign.pmx");
+    fs::write(&path, exe.to_bytes()).unwrap();
+    let err = execute(&args(&["dis", path.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("unknown architecture 0x02"), "{err}");
+}
+
+#[test]
+fn dis_refuses_a_foreign_architecture_object() {
+    let dir = scratch("dis_foreign_obj");
+    let obj = ObjectFile::v2(ARCH_TM1, Vec::new(), Vec::new(), Vec::new(), None);
+    let path = dir.join("foreign.pmo");
+    fs::write(&path, obj.to_bytes()).unwrap();
+    let err = execute(&args(&["dis", path.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("unknown architecture 0x02"), "{err}");
 }
 
 #[test]
