@@ -4,10 +4,55 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mtc_core::diagnostics::{Diagnostic, Edit, Pos};
 use mtc_turing_machine::cli::execute;
+use mtc_turing_machine::compiler::{CompileOptions, compile};
+use mtc_turing_machine::lint::{LintOptions, lint};
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Lint a source through the library, returning the findings.
+fn findings(src: &str) -> Vec<Diagnostic> {
+    lint(src, LintOptions::default()).unwrap().diagnostics
+}
+
+/// Apply a fix's edits to `src` (char-position spans → byte offsets, applied
+/// descending so earlier offsets stay valid). The lint fixes here are each a
+/// single deletion, but this handles several disjoint edits regardless.
+fn apply_fix(src: &str, edits: &[Edit]) -> String {
+    fn byte_offset(src: &str, pos: Pos) -> usize {
+        let (mut line, mut col) = (1u32, 1u32);
+        for (i, c) in src.char_indices() {
+            if line == pos.line && col == pos.col {
+                return i;
+            }
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        src.len()
+    }
+    let mut ranges: Vec<(usize, usize, String)> = edits
+        .iter()
+        .map(|e| {
+            (
+                byte_offset(src, e.span.start),
+                byte_offset(src, e.span.end),
+                e.replacement.clone(),
+            )
+        })
+        .collect();
+    ranges.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = src.to_string();
+    for (s, e, rep) in ranges {
+        out.replace_range(s..e, &rep);
+    }
+    out
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -254,4 +299,78 @@ fn help_prints_usage() {
     let out = execute(&args(&["lint", "--help"])).unwrap();
     assert_eq!(out.code, 0);
     assert!(out.stdout.contains("USAGE: tmt lint"), "{}", out.stdout);
+}
+
+// -- quickfix application: apply -> re-lint clean -> still compiles -------
+
+#[test]
+fn unused_alphabet_fix_deletes_the_declaration_including_its_doc_run() {
+    // The dead alphabet carries a doc line. The fix must take the doc run with
+    // it — an orphaned `?` run is a parse error, so "still compiles" is the
+    // real proof the run was included.
+    let src = "\
+alphabet bit { '_', '1' }
+? documented, but no tape draws on it
+alphabet dead { '_', 'x' }
+machine {
+  tape t: bit;
+  entry state s { [*] -> move [>] stop; }
+}
+";
+    let d = findings(src)
+        .into_iter()
+        .find(|d| d.code == "unused-alphabet")
+        .expect("a unused-alphabet finding");
+    assert!(d.message.contains("dead"), "{}", d.message);
+    let fix = d.fix.expect("a fix");
+
+    let fixed = apply_fix(src, &fix.edits);
+    assert!(!fixed.contains("alphabet dead"), "decl gone:\n{fixed}");
+    assert!(!fixed.contains("documented, but"), "doc run gone:\n{fixed}");
+
+    // Re-lint: the finding is resolved.
+    assert!(
+        findings(&fixed).iter().all(|d| d.code != "unused-alphabet"),
+        "{:?}",
+        findings(&fixed)
+    );
+    // Still compiles (also proves no dangling doc run).
+    compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
+}
+
+#[test]
+fn unused_graft_name_fix_removes_exactly_the_as_clause() {
+    let src = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  entry graft findX(t = work, found = win, missing = lose) as seek;
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+";
+    let d = findings(src)
+        .into_iter()
+        .find(|d| d.code == "unused-graft-name")
+        .expect("a unused-graft-name finding");
+    let fix = d.fix.expect("a fix");
+
+    let fixed = apply_fix(src, &fix.edits);
+    // Exactly ` as seek` removed — the graft is now a valid unnamed entry graft.
+    assert!(
+        fixed.contains("entry graft findX(t = work, found = win, missing = lose);"),
+        "clause removed cleanly:\n{fixed}"
+    );
+
+    assert!(
+        findings(&fixed)
+            .iter()
+            .all(|d| d.code != "unused-graft-name"),
+        "{:?}",
+        findings(&fixed)
+    );
+    compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
 }

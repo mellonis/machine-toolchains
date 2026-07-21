@@ -8,12 +8,61 @@
 //! has no cross-module consumers to protect — an exported-but-undrawn-on
 //! alphabet is as dead as a private one. New on the lint channel (the
 //! deferred hygiene family), detected source-level over `Resolved`.
+//!
+//! The fix deletes the whole declaration, including any leading doc/attention
+//! run — an orphaned `?`/`!` run is a parse error, so the doc goes with the
+//! alphabet it documents.
 
 use std::collections::HashSet;
 
-use mtc_core::diagnostics::Diagnostic;
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 
+use crate::lexer::{Token, TokenKind};
 use crate::lint::LintContext;
+
+/// The full source span of an alphabet declaration — its leading doc/attention
+/// run (if any), the `export`/`alphabet` header, and the `{ … }` body through
+/// the closing brace — anchored on the NAME identifier's span. Read off the
+/// comment-free token stream: neither the resolved module nor the AST keeps a
+/// declaration's closing brace or the extent of its attached doc run, and the
+/// doc run must go with the alphabet (an orphaned `?`/`!` run is a parse
+/// error). `None` if the token neighbourhood is not the expected shape.
+fn decl_span(tokens: &[Token], name_span: Span) -> Option<Span> {
+    // The NAME identifier token.
+    let name_ix = tokens
+        .iter()
+        .position(|t| t.span().start == name_span.start)?;
+    // Back up over the `alphabet` keyword, then an optional `export`, then any
+    // contiguous doc/attention run bound to this declaration.
+    let is_kw = |t: &Token, kw: &str| matches!(&t.kind, TokenKind::Ident(k) if k == kw);
+    let mut start_ix = name_ix.checked_sub(1)?;
+    if !is_kw(&tokens[start_ix], "alphabet") {
+        return None;
+    }
+    if let Some(prev) = start_ix.checked_sub(1)
+        && is_kw(&tokens[prev], "export")
+    {
+        start_ix = prev;
+    }
+    while let Some(prev) = start_ix.checked_sub(1)
+        && matches!(
+            tokens[prev].kind,
+            TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
+        )
+    {
+        start_ix = prev;
+    }
+    // The body's closing brace — an alphabet body has no nested braces, and a
+    // glyph like `'{'` lexes as a symbol, not a delimiter, so the first RBrace
+    // after the name is the declaration's end.
+    let close = tokens[name_ix..]
+        .iter()
+        .find(|t| matches!(t.kind, TokenKind::RBrace))?;
+    Some(Span {
+        start: tokens[start_ix].span().start,
+        end: close.span().end,
+    })
+}
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     // Every alphabet some world's tape draws on (machine tape declarations
@@ -28,11 +77,19 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
 
     for (name, alphabet) in &ctx.resolved.alphabets {
         if !used.contains(name.as_str()) {
+            let fix = decl_span(ctx.tokens, alphabet.name_span).map(|span| Fix {
+                description: format!("delete the unused alphabet `{name}`"),
+                applicability: Applicability::MaybeIncorrect,
+                edits: vec![Edit {
+                    span,
+                    replacement: String::new(),
+                }],
+            });
             out.push(Diagnostic {
                 code: "unused-alphabet",
                 span: alphabet.name_span,
                 message: format!("alphabet `{name}` is never used by any tape"),
-                fix: None,
+                fix,
             });
         }
     }

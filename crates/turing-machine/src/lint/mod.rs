@@ -36,6 +36,8 @@ pub mod tma;
 use mtc_core::diagnostics::Diagnostic;
 
 use crate::compiler::{self, CompileError, Resolved};
+use crate::lexer::Token;
+use crate::parser::Program;
 
 #[derive(Debug, Clone, Default)]
 pub struct LintOptions {
@@ -91,6 +93,15 @@ pub(crate) struct LintContext<'a> {
     /// analyze's own non-fatal diagnostics. The `unused-import` rule re-exposes
     /// its entries under allow control (the compile channel keeps them too).
     pub diagnostics: &'a [Diagnostic],
+    /// The parsed AST — source-level detail the resolved module elides (a
+    /// signature parameter's own span, read by `unused-exit`).
+    pub program: &'a Program,
+    /// The COMMENT-FREE token stream. Both entry paths (the batch `lint()` and
+    /// the editor service) supply a comment-free slice, so a token-index walk
+    /// finds the same neighbours in either — the `unused-alphabet` and
+    /// `unused-graft-name` fixes recover spans (a declaration's `}`, a graft's
+    /// `as` keyword) that no earlier artifact keeps.
+    pub tokens: &'a [Token],
 }
 
 /// A lint rule: reads the analysis context, pushes any findings.
@@ -191,6 +202,8 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     let ctx = LintContext {
         resolved: &analysis.resolved,
         diagnostics: &analysis.diagnostics,
+        program: &analysis.program,
+        tokens: &analysis.tokens,
     };
     let diagnostics = run_rules(&ctx, &options.allow, &options.warn);
     Ok(LintReport { diagnostics })

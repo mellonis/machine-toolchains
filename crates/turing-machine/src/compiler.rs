@@ -891,6 +891,14 @@ pub(crate) enum ResolvedCallTarget {
 pub(crate) struct Analysis {
     pub resolved: Resolved,
     pub diagnostics: Vec<Diagnostic>,
+    /// The parsed AST, retained so the lint layer can reach source-level
+    /// detail the resolved module elides (e.g. a signature parameter's own
+    /// span). Comment-free — `analyze` lexes without comment trivia.
+    pub program: Program,
+    /// The lexed token stream (comment-free — the `analyze` path never emits
+    /// comment trivia). Retained so lint rules can recover a span no earlier
+    /// artifact keeps — the `as` keyword of a graft's `as NAME` clause.
+    pub tokens: Vec<Token>,
 }
 
 /// lex → parse → duplicate-binding check → resolve alphabets → flatten +
@@ -905,6 +913,8 @@ pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
     Ok(Analysis {
         resolved,
         diagnostics,
+        program,
+        tokens,
     })
 }
 

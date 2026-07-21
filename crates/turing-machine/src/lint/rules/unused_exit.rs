@@ -14,11 +14,29 @@
 //! an API change at every graft site that must currently bind it — not a
 //! safe local textual edit.
 
-use mtc_core::diagnostics::Diagnostic;
+use mtc_core::diagnostics::{Diagnostic, Span};
 
-use crate::compiler::WorldKind;
+use crate::compiler::{WorldKind, full_name};
 use crate::lint::LintContext;
 use crate::lint::rules::unused_graft_instance::body_referenced_names;
+use crate::parser::{Program, SigParamKind};
+
+/// The declaration span of a graph world's `state` exit parameter, read off
+/// the AST (the resolved module keeps state-parameter NAMES but not their
+/// spans). Falls back to `None` if the correlation misses — the caller then
+/// points at the graph name.
+fn exit_param_span(program: &Program, world_name: &str, param: &str) -> Option<Span> {
+    let graph = program
+        .graphs
+        .iter()
+        .find(|g| full_name(&g.ns, &g.name) == world_name)?;
+    graph
+        .sig
+        .params
+        .iter()
+        .find(|p| matches!(p.kind, SigParamKind::State) && p.name == param)
+        .map(|p| p.name_span)
+}
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for world in &ctx.resolved.worlds {
@@ -30,7 +48,8 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             if !referenced.contains(param.as_str()) {
                 out.push(Diagnostic {
                     code: "unused-exit",
-                    span: world.name_span,
+                    span: exit_param_span(ctx.program, &world.name, param)
+                        .unwrap_or(world.name_span),
                     message: format!(
                         "graph `{}` declares exit `{param}`, which its body never targets",
                         world.name
