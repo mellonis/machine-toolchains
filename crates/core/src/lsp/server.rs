@@ -581,10 +581,11 @@ fn handle_notification(
 
 /// Chooses the service a freshly opened document binds to (docs/lsp.md,
 /// multi-service routing): languageId exact match first, then a
-/// URI-suffix match against each service's `extensions()`, finally
-/// service 0 with a stderr note. Never a hard error — a wrong-language
-/// binding still yields *some* diagnostics, which beats silence, and a
-/// lone service always resolves to index 0 regardless.
+/// case-insensitive URI-suffix match against each service's
+/// `extensions()`, finally service 0 with a stderr note. Never a hard
+/// error — a wrong-language binding still yields *some* diagnostics,
+/// which beats silence, and a lone service always resolves to index 0
+/// regardless.
 fn bind_service(services: &[&mut dyn LanguageService], uri: &str, language_id: &str) -> usize {
     if let Some(idx) = services
         .iter()
@@ -592,10 +593,17 @@ fn bind_service(services: &[&mut dyn LanguageService], uri: &str, language_id: &
     {
         return idx;
     }
-    if let Some(idx) = services
-        .iter()
-        .position(|service| service.extensions().iter().any(|ext| uri.ends_with(ext)))
-    {
+    // Extensions are ASCII in every registration, so ASCII lowercasing
+    // (not full Unicode case-folding) is the correct compare here — it
+    // lets `X.TMA`/`X.PMA` etc. bind the same as their lowercase form
+    // without touching the registrations themselves.
+    let uri_lower = uri.to_ascii_lowercase();
+    if let Some(idx) = services.iter().position(|service| {
+        service
+            .extensions()
+            .iter()
+            .any(|ext| uri_lower.ends_with(ext.to_ascii_lowercase().as_str()))
+    }) {
         return idx;
     }
     // eprintln! is this loop's one sanctioned side channel (docs/lsp.md,
@@ -2837,6 +2845,27 @@ mod tests {
         // Service 0 (FakeService, source "fake") reacted to "bad";
         // FakeService2 only ever reports under source "fake2".
         assert_eq!(outputs[1]["params"]["diagnostics"][0]["source"], "fake");
+    }
+
+    /// (2c) The URI-extension match is case-insensitive: an uppercase
+    /// extension still binds to the service that registered its
+    /// lowercase form.
+    #[test]
+    fn uppercase_uri_extension_falls_back_to_the_extension_binding() {
+        let mut s1 = FakeService::new();
+        let mut s2 = FakeService2::new();
+        let (outputs, _exit) = run_session_multi(
+            &[
+                initialize_message(1),
+                // "plaintext" matches no service's languageId; ".F2"
+                // matches FakeService2's ".f2" only case-insensitively.
+                did_open_message_lang("file:///FOO.F2", "plaintext", 1, "boo"),
+            ],
+            &mut [&mut s1, &mut s2],
+        );
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[1]["params"]["diagnostics"][0]["source"], "fake2");
     }
 
     /// (3) completion/definition/formatting all follow the binding.

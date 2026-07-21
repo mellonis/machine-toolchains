@@ -58,7 +58,8 @@ republishes the other's diagnostics.
 
 The routing tries, in order: the client's own `languageId` (an exact match
 against a service's declared id — `pmc`, `pma`, `tmc`, `tma`), then the
-URI's file extension when the languageId matches no service, and finally
+URI's file extension when the languageId matches no service — matched
+case-insensitively, so `Foo.TMA` binds the same as `foo.tma` — and finally
 the **first registered service** as a last-resort default — a document
 neither identifier recognizes still gets *some* answer instead of silence.
 `pmt lsp` registers `.pmc` first and `tmt lsp` registers `.tmc` first, so
