@@ -416,13 +416,30 @@ fn splice_state(
     host_arity: usize,
     host_name: &str,
     remap_tr: &impl Fn(&Transition2) -> Transition2,
+    warn: &mut Vec<Diagnostic>,
 ) -> ExpandedState {
     let mut rules = Vec::new();
     if state_reads(&gstate.rules) {
         rules.extend(trap_read_rows(comp, host_arity, gstate.name_span));
     }
     for r in &gstate.rules {
-        rules.extend(map_rule(r, comp, host_arity, remap_tr));
+        let mapped = map_rule(r, comp, host_arity, remap_tr);
+        if mapped.is_empty() {
+            // Every read cell had a host preimage EXCEPT this rule's — the
+            // graft binds a symbol the host tape can never read as, so the
+            // generically-written rule can never fire in this instance. A
+            // warning, not an error, mirroring the range-expansion case
+            // (docs/tmt/language.md (rules)); the graft-site is legal.
+            warn.push(Diagnostic {
+                code: "empty-expansion",
+                span: r.span,
+                message: "this grafted rule expands to no rows here — the binding maps no host \
+                          symbol to a match cell; the rule can never fire in this instance"
+                    .to_string(),
+                fix: None,
+            });
+        }
+        rules.extend(mapped);
     }
     ExpandedState {
         name: host_name.to_string(),
@@ -621,7 +638,20 @@ fn expand_rule(
         combos = next;
     }
 
-    if combos.len() > PRODUCT_THRESHOLD {
+    if combos.is_empty() {
+        // Every match alternative fell outside a tape alphabet, so the rule
+        // expands to no rows and can never fire. A warning, not an error:
+        // dropping absent range members is documented behaviour, and this is
+        // only its degenerate all-dropped case (docs/tmt/language.md (rules)).
+        warn.push(Diagnostic {
+            code: "empty-expansion",
+            span: rule.span,
+            message: "this rule expands to no rows — every match alternative falls outside the \
+                      tape alphabet; the rule can never fire"
+                .to_string(),
+            fix: None,
+        });
+    } else if combos.len() > PRODUCT_THRESHOLD {
         warn.push(Diagnostic {
             code: "expansion-threshold",
             span: rule.span,
@@ -1334,7 +1364,7 @@ fn expand_grafts_into<'a>(
 
         for st in &gx.states {
             let host_name = &name_map[&st.name];
-            out.push(splice_state(st, &comp, host_arity, host_name, &remap));
+            out.push(splice_state(st, &comp, host_arity, host_name, &remap, warn));
         }
         dedup.insert(key, instance.clone());
         if graft.entry {
@@ -2070,7 +2100,8 @@ mod oracle_tests {
                 rules,
             };
             let cond = state_reads(&state.rules);
-            let spliced = splice_state(&state, &comp, arity, "s", &|t| t.clone());
+            let mut warn = Vec::new();
+            let spliced = splice_state(&state, &comp, arity, "s", &|t| t.clone(), &mut warn);
 
             // Enumerate every host tuple and compare.
             let total: usize = host_cards.iter().product();

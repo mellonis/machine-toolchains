@@ -213,7 +213,15 @@ fn build_world_plan(w: &IrWorld, options: CodegenOptions, table_idx: &mut usize)
     let mut blocks = Vec::new();
     for &i in &order {
         let st = &w.states[i];
-        if is_straight_line(st) {
+        if st.rules.is_empty() {
+            // A zero-row state (every rule vanished during expansion) traps
+            // like a runtime no-match; it needs its own table + head block.
+            let n = *table_idx;
+            *table_idx += 1;
+            let (table, head) = zero_row(w, st, n);
+            tables.push(table);
+            blocks.push(head);
+        } else if is_straight_line(st) {
             blocks.push(straight_block(w, st, options));
         } else if st.dispatch == IrDispatch::Branch {
             // The `dispatch_select` pass's two-row form: one match row + `jm` +
@@ -339,6 +347,66 @@ fn conditional(
         .collect();
 
     (table, blocks)
+}
+
+/// A zero-row state's lowering. Every rule vanished during expansion (a range
+/// whose alternatives all fell outside the alphabet, or a graft binding with
+/// no host preimage), so the state can match nothing — entering it must trap
+/// exactly like a runtime no-match. It lowers to `rd; mtc T<n>; djmp D<n>`
+/// over a one-row match table whose single row can never match any tape tuple:
+/// an out-of-alphabet symbol (the narrowest tape's one-past-last index) at that
+/// tape's position, wildcards elsewhere. `mtc` therefore leaves the match
+/// register at 0 and `djmp` traps NoTransition (docs/tmt/isa.md (match and
+/// dispatch) — the deliberate no-match behaviour). The dispatch table carries
+/// one never-reached target (the state's own head) so it is well-formed; MR = 0
+/// traps before the table is ever read.
+fn zero_row(w: &IrWorld, st: &IrState, n: usize) -> (Table, Block) {
+    // The narrowest tape's one-past-last index is a symbol that tape can never
+    // hold; matching it (wildcarding the rest) makes the row unsatisfiable.
+    // Match-row payloads are 7-bit, so this is sound whenever the narrowest
+    // alphabet has at most 126 symbols — the same ceiling exact-match rows
+    // already live under.
+    let (k, card) = w
+        .tapes
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, t.cardinality))
+        .min_by_key(|&(_, c)| c)
+        .expect("a world has at least one tape");
+    // `card` is out of range for tape `k` by construction. Match-row payloads
+    // are 7-bit, so this is a valid sentinel only when the narrowest alphabet
+    // has at most 126 symbols. A wider narrowest tape cannot be exact-matched
+    // by this table format at all (the same ceiling every conditional state
+    // lives under), so a zero-row state on one shares that pre-existing limit
+    // rather than getting special handling here.
+    let mut row = vec![IrCell::Wildcard; w.arity as usize];
+    row[k] = IrCell::Index { index: card };
+
+    let table = Table {
+        label_t: format!("T{n}"),
+        label_d: format!("D{n}"),
+        rows: vec![row],
+        targets: vec![st.name.clone()],
+    };
+    let head = Block {
+        label: st.name.clone(),
+        force_label: true,
+        body: vec![
+            Instr {
+                mnemonic: "rd",
+                operand: String::new(),
+                line: st.line,
+            },
+            Instr {
+                mnemonic: "mtc",
+                operand: format!("T{n}"),
+                line: st.line,
+            },
+        ],
+        term: Term::Djmp(format!("D{n}")),
+        term_line: st.line,
+    };
+    (table, head)
 }
 
 /// A Branch-flagged state's lowering (the `dispatch_select` pass's output). The

@@ -25,7 +25,8 @@ use crate::lexer::{LexMode, Token, lex, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Machine,
-    Program, QualName, SigParamKind, State, SymLit, Transition, lower_cst, parse, parse_cst,
+    PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit, Transition, lower_cst,
+    parse, parse_cst,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -938,6 +939,69 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
     Ok((resolved, diagnostics))
 }
 
+/// True when every match cell of a rule's pattern is a wildcard (`[*, …]`) —
+/// an all-wildcard catch-all that matches every input.
+fn is_all_wildcard_rule(rule: &Rule) -> bool {
+    !rule.pattern.cells.is_empty()
+        && rule
+            .pattern
+            .cells
+            .iter()
+            .all(|c| matches!(c.kind, PatternCellKind::Wildcard))
+}
+
+/// Drop a state's second (and later) all-wildcard catch-all rule
+/// (docs/tmt/language.md (rules)). Codegen re-bands a state into
+/// `[exact] ++ [partial] ++ [catch-all]` and takes the first match in THAT
+/// order, so an exact or partial rule written after a catch-all still sorts
+/// ahead of it and stays reachable — only a SECOND all-wildcard rule is
+/// genuinely dead, since the first catch-all already matches everything. Such a
+/// rule warns (`unreachable-rule`) and is removed, so the assembler's
+/// all-wildcard-row-must-be-last discipline can never be violated at codegen.
+/// Detection is on the flattened (resolved, pre-expansion) rules, so both
+/// hand-written states and the bodies of grafted graphs are covered. A world's
+/// `calls` list holds one entry per `call` transition in source order; it is
+/// filtered in tandem so it stays aligned with the surviving rules that
+/// expansion later walks.
+fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnostic>) {
+    for world in &mut resolved.worlds {
+        let old_calls = std::mem::take(&mut world.calls);
+        let mut kept_calls: Vec<ResolvedCall> = Vec::new();
+        let mut call_ix = 0usize; // running index into `old_calls` (source order)
+        for state in &mut world.states {
+            let mut seen_catch_all = false;
+            let old_rules = std::mem::take(&mut state.rules);
+            let mut new_rules: Vec<Rule> = Vec::with_capacity(old_rules.len());
+            for rule in old_rules {
+                let is_call = matches!(rule.transition, Transition::Call { .. });
+                let is_catch_all = is_all_wildcard_rule(&rule);
+                if is_catch_all && seen_catch_all {
+                    diagnostics.push(Diagnostic {
+                        code: "unreachable-rule",
+                        span: rule.span,
+                        message: "this rule can never fire — an earlier all-wildcard rule in \
+                                  this state already matches every input"
+                            .to_string(),
+                        fix: None,
+                    });
+                    if is_call {
+                        call_ix += 1; // consume the dropped rule's call slot
+                    }
+                    continue;
+                }
+                seen_catch_all |= is_catch_all;
+                if is_call {
+                    kept_calls.push(old_calls[call_ix].clone());
+                    call_ix += 1;
+                }
+                new_rules.push(rule);
+            }
+            state.rules = new_rules;
+        }
+        world.calls = kept_calls;
+    }
+}
+
 /// The language-service pipeline entry (the `.pmc` compiler's `analyze_staged`
 /// twin): every stage's outcome, retained independently, so a document that
 /// fails partway through still serves whatever the earlier stages produced.
@@ -1722,7 +1786,14 @@ pub struct CompileOutput {
 /// [`validate_world`] (the T6 invariant check, run here where `.pmc` runs
 /// `validate_function`), and the generated `.tma` failing to assemble.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
-    let analysis = analyze(source)?;
+    let mut analysis = analyze(source)?;
+    // Drop rules a second catch-all shadows before expansion (docs/tmt/
+    // language.md (rules)) so codegen never emits two all-wildcard match rows.
+    // Done here, on the compile path only — the language service and the batch
+    // lint keep the full source rules (the `dead-rule` lint reports them
+    // instead).
+    let mut unreachable_diags = Vec::new();
+    drop_unreachable_rules(&mut analysis.resolved, &mut unreachable_diags);
     let expanded = crate::expand::expand(&analysis.resolved)?;
     let (mut ir, ir_warnings) = lower(&expanded, &analysis.resolved)?;
 
@@ -1765,6 +1836,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     }
 
     let mut diagnostics = analysis.diagnostics;
+    diagnostics.extend(unreachable_diags);
     diagnostics.extend(expanded.diagnostics);
     diagnostics.extend(ir_warnings);
 
