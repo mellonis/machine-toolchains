@@ -775,8 +775,23 @@ fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
+/// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
+/// uniquely by process id + an atomic counter. The single caller below
+/// drives the real CLI end to end (`asm` / `link` / `tape new` / `tape set
+/// --in-place` / `run`) over a handful of fixed filenames inside this
+/// directory; a literal, non-unique directory name is shared by every
+/// concurrently running `cargo test` invocation that targets the same
+/// `CARGO_TARGET_TMPDIR`, so two such invocations racing on the identical
+/// path can interleave their non-atomic `fs::write`s — one process's `tape
+/// new` truncating a `.tmt` file while another process's `tape set` is
+/// mid-`fs::read` of it, which surfaces as a parse failure and an `unwrap`
+/// panic in the test, not in the library. A unique directory per call
+/// removes the shared path entirely.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("{name}-{}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

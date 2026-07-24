@@ -11,13 +11,20 @@
 //! every bare binding target across the world is treated as a potential
 //! reference. That can only let a genuinely-dead instance slip through, never
 //! flag a live one.
+//!
+//! The fix deletes the whole `graft … ;` statement — leading doc/attention run
+//! included (an orphaned `?`/`!` run is a parse error). A non-entry graft
+//! nothing reaches splices in states nothing reaches, so removing it is a
+//! source-only change (`MaybeIncorrect`); the over-approximation means a firing
+//! is a provably unreachable instance.
 
 use std::collections::HashSet;
 
-use mtc_core::diagnostics::Diagnostic;
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::ResolvedWorld;
 use crate::lint::LintContext;
+use crate::lint::rules::spans::reuse_statement_span;
 use crate::parser::{BindingArg, BindingValue, Continuation, Transition};
 
 /// Extend `names` with every bare binding-argument target in `args` (a bare
@@ -87,11 +94,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 continue;
             };
             if !referenced.contains(name.as_str()) {
+                let fix =
+                    reuse_statement_span(ctx.tokens, graft.target_span, "graft").map(|span| Fix {
+                        description: format!("delete the unused graft instance `{name}`"),
+                        applicability: Applicability::MaybeIncorrect,
+                        edits: vec![Edit {
+                            span,
+                            replacement: String::new(),
+                        }],
+                    });
                 out.push(Diagnostic {
                     code: "unused-graft-instance",
                     span: graft.span,
                     message: format!("graft instance `{name}` is never used"),
-                    fix: None,
+                    fix,
                 });
             }
         }

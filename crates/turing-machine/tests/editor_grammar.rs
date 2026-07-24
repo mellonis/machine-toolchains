@@ -169,58 +169,85 @@ fn tma_grammar_covers_exactly_the_tm1_mnemonics() {
     }
 }
 
-/// Every directive the `.tma` grammar paints must be one the assembler
-/// actually recognizes. The probe assembles a one-line source carrying the
-/// directive and asserts the assembler's complaint — if any — is not
-/// "unknown mnemonic" naming it; an arity or discipline complaint proves the
-/// word reached a real directive handler.
+/// The directive words a grammar rule's match pattern paints, regex
+/// escapes resolved. Directive rules are either `.word\b…` or
+/// `.(a|b|c)\b`-shaped; `\b` is replaced first — stripping every
+/// backslash blindly would fuse the word boundary's `b` onto the
+/// directive name (`.byte\b` → `.byteb`).
+fn directive_words(pattern: &str) -> Vec<String> {
+    let bare = pattern.replace("\\b", " ").replace('\\', "");
+    let start = bare.find('.').expect("a directive pattern names a word");
+    let rest = &bare[start + 1..];
+    if let Some(stripped) = rest.strip_prefix('(') {
+        let close = stripped
+            .find(')')
+            .expect("a grouped directive pattern closes");
+        stripped[..close]
+            .split('|')
+            .map(|word| format!(".{word}"))
+            .collect()
+    } else {
+        let end = rest
+            .find(|c: char| !c.is_ascii_alphanumeric())
+            .unwrap_or(rest.len());
+        vec![format!(".{}", &rest[..end])]
+    }
+}
+
+/// The `.tma` grammar's directive rules must paint EXACTLY the directive
+/// words core's assembler framework recognizes under TM-1's caps —
+/// `mtc_core::asm::recognized_directives` is the generated source of
+/// truth, so a directive added to the assembler with no grammar entry
+/// fails, a grammar rule deleted while the assembler kept the word
+/// fails, and a directive invented in the grammar fails too. Every
+/// directive lives in a repository rule whose key ends with `Directive`;
+/// the guard reads them by that naming convention (the mirror of the
+/// `keyword*` convention in the tmc guard above).
 ///
-/// What it cannot catch: a directive ADDED to the assembler with no grammar
-/// entry. There is no directive table in the core assembler to generate from
-/// — the words are recognized by scattered string matches in the assembly
-/// CST and lowering — so this direction has no source of truth to compare
-/// against, unlike the mnemonics above. The list below is therefore
-/// hand-maintained, and the guard's job is to keep it honest rather than
-/// complete.
+/// A second, behavioral layer probes the real assembler with each word
+/// and asserts its complaint — if any — is not "unknown mnemonic" naming
+/// it; an arity or discipline complaint proves the word reached a real
+/// directive handler. This keeps the inventory honest from the other
+/// side: a word added to the inventory without a real recognizer cannot
+/// be laundered through the grammar by adding it there too.
 #[test]
-fn tma_grammar_directives_are_real_directives() {
+fn tma_grammar_directives_match_the_recognized_inventory() {
     let json = load("tma.tmLanguage.json", "source.tma");
+    let repository = json["repository"]
+        .as_object()
+        .expect("tma grammar has a repository");
     let mut in_grammar: BTreeSet<String> = BTreeSet::new();
-    for rule in [
-        "sectionDirective",
-        "funcDirective",
-        "routineDirective",
-        "repeatDirective",
-        "tableDirective",
-        "frameDirective",
-        "byteDirective",
-    ] {
-        let pattern = json["repository"][rule]["match"]
+    let mut rules_seen = 0;
+    for (key, rule) in repository {
+        if !key.ends_with("Directive") {
+            continue;
+        }
+        rules_seen += 1;
+        let pattern = rule["match"]
             .as_str()
-            .unwrap_or_else(|| panic!("tma grammar has a `{rule}` match pattern"));
-        // `\b` first — stripping every backslash blindly would fuse the word
-        // boundary's `b` onto the directive name (`.byte\b` → `.byteb`).
-        let bare = pattern.replace("\\b", " ").replace('\\', "");
-        // Directive rules are either `.word\b…` or `.(a|b|c)\b`.
-        let start = bare.find('.').expect("a directive pattern names a word");
-        let rest = &bare[start + 1..];
-        if let Some(stripped) = rest.strip_prefix('(') {
-            let close = stripped
-                .find(')')
-                .expect("a grouped directive pattern closes");
-            for word in stripped[..close].split('|') {
-                in_grammar.insert(format!(".{word}"));
-            }
-        } else {
-            let end = rest
-                .find(|c: char| !c.is_ascii_alphanumeric())
-                .unwrap_or(rest.len());
-            in_grammar.insert(format!(".{}", &rest[..end]));
+            .unwrap_or_else(|| panic!("tma grammar has a `{key}` match pattern"));
+        for word in directive_words(pattern) {
+            assert!(
+                in_grammar.insert(word.clone()),
+                "tma grammar lists `{word}` in more than one directive rule"
+            );
         }
     }
     assert!(
-        in_grammar.len() >= 10,
-        "expected the tma grammar to paint the full directive surface, found {in_grammar:?}"
+        rules_seen >= 7,
+        "tma grammar keeps its directives in `*Directive` repository rules \
+         (found {rules_seen}) — the guard reads them by that naming convention"
+    );
+
+    let recognized: BTreeSet<String> =
+        mtc_core::asm::recognized_directives(mtc_turing_machine::tm1_syntax().caps)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    assert_eq!(
+        in_grammar, recognized,
+        "the tma grammar's directive rules and core's recognized-directive \
+         inventory must agree exactly"
     );
 
     for directive in &in_grammar {
@@ -249,18 +276,6 @@ fn tma_grammar_directives_are_real_directives() {
                  rejects it as an unknown mnemonic"
             );
         }
-    }
-
-    // The reverse direction has no generated source; this pins the words the
-    // grammar is known to need so a deletion is loud.
-    for expected in [
-        ".section", ".func", ".routine", ".rept", ".endr", ".row", ".target", ".targets", ".frame",
-        ".map", ".exits", ".byte",
-    ] {
-        assert!(
-            in_grammar.contains(expected),
-            "tma grammar misses the `{expected}` directive"
-        );
     }
 }
 

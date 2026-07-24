@@ -6,6 +6,13 @@
 
 use std::io::{BufRead, Write};
 
+/// Upper bound on an accepted `Content-Length` value (64 MiB). One frame
+/// carries one JSON-RPC payload, and no honest client message comes
+/// anywhere near this; a larger value is a corrupt or adversarial header,
+/// and rejecting it up front keeps the pre-read payload allocation
+/// bounded instead of trusting an arbitrary parsed `usize`.
+pub const MAX_CONTENT_LENGTH: usize = 64 * 1024 * 1024;
+
 /// Transport-layer framing failures.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransportError {
@@ -13,6 +20,9 @@ pub enum TransportError {
     MissingContentLength,
     /// Malformed header line or unparseable length value.
     MalformedHeader(String),
+    /// Content-Length exceeded [`MAX_CONTENT_LENGTH`] (carries the
+    /// declared length).
+    PayloadTooLarge(usize),
     /// Payload bytes were not valid UTF-8.
     InvalidUtf8,
     /// Underlying read/write failure (message text of the io::Error).
@@ -24,6 +34,12 @@ impl std::fmt::Display for TransportError {
         match self {
             Self::MissingContentLength => write!(f, "missing content-length header"),
             Self::MalformedHeader(line) => write!(f, "malformed header line: {line}"),
+            Self::PayloadTooLarge(len) => {
+                write!(
+                    f,
+                    "content-length {len} exceeds the {MAX_CONTENT_LENGTH}-byte cap"
+                )
+            }
             Self::InvalidUtf8 => write!(f, "payload was not valid utf-8"),
             Self::Io(msg) => write!(f, "io error: {msg}"),
         }
@@ -35,7 +51,9 @@ impl std::error::Error for TransportError {}
 /// Reads one framed message. `Ok(None)` = clean EOF before any header byte.
 /// Header lines are `Name: value\r\n`; unknown headers (Content-Type, …) are
 /// tolerated; the header block ends at an empty line; then exactly
-/// Content-Length bytes of UTF-8 payload follow.
+/// Content-Length bytes of UTF-8 payload follow. A declared length above
+/// [`MAX_CONTENT_LENGTH`] is rejected while still parsing headers, before
+/// the payload buffer is allocated.
 pub fn read_message(reader: &mut dyn BufRead) -> Result<Option<String>, TransportError> {
     let mut content_length: Option<usize> = None;
     let mut header_seen = false;
@@ -82,6 +100,9 @@ pub fn read_message(reader: &mut dyn BufRead) -> Result<Option<String>, Transpor
                 .trim()
                 .parse()
                 .map_err(|_| TransportError::MalformedHeader(line.clone()))?;
+            if len > MAX_CONTENT_LENGTH {
+                return Err(TransportError::PayloadTooLarge(len));
+            }
             content_length = Some(len);
         }
     }
@@ -190,6 +211,66 @@ mod tests {
         assert_eq!(
             read_message(&mut reader),
             Err(TransportError::MissingContentLength)
+        );
+    }
+
+    #[test]
+    fn content_length_above_the_cap_is_a_dedicated_error() {
+        let too_large = MAX_CONTENT_LENGTH + 1;
+        let raw = format!("Content-Length: {too_large}\r\n\r\n");
+        let mut reader = BufReader::new(raw.as_bytes());
+        assert_eq!(
+            read_message(&mut reader),
+            Err(TransportError::PayloadTooLarge(too_large))
+        );
+    }
+
+    #[test]
+    fn content_length_exactly_at_the_cap_passes_the_header_check() {
+        // No payload follows, so the read fails downstream with an EOF
+        // io error — the point is that the boundary value is NOT
+        // rejected as PayloadTooLarge.
+        let raw = format!("Content-Length: {MAX_CONTENT_LENGTH}\r\n\r\n");
+        let mut reader = BufReader::new(raw.as_bytes());
+        let err = read_message(&mut reader).unwrap_err();
+        assert!(matches!(err, TransportError::Io(_)));
+    }
+
+    #[test]
+    fn header_line_without_a_colon_is_malformed() {
+        let raw = "Content-Length 5\r\n\r\nhello";
+        let mut reader = BufReader::new(raw.as_bytes());
+        assert_eq!(
+            read_message(&mut reader),
+            Err(TransportError::MalformedHeader(
+                "Content-Length 5".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn non_numeric_content_length_is_malformed() {
+        let raw = "Content-Length: five\r\n\r\n";
+        let mut reader = BufReader::new(raw.as_bytes());
+        assert_eq!(
+            read_message(&mut reader),
+            Err(TransportError::MalformedHeader(
+                "Content-Length: five".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn negative_content_length_is_malformed() {
+        // `usize` has no negative values, so "-1" fails the parse the
+        // same way a word does.
+        let raw = "Content-Length: -1\r\n\r\n";
+        let mut reader = BufReader::new(raw.as_bytes());
+        assert_eq!(
+            read_message(&mut reader),
+            Err(TransportError::MalformedHeader(
+                "Content-Length: -1".to_string()
+            ))
         );
     }
 

@@ -24,7 +24,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, parse_asm_cst};
+use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, parse_asm_cst_with};
 use mtc_core::asm::{AsmError, Flow, SyntaxEntry, format_asm, lint};
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
@@ -165,12 +165,15 @@ impl LanguageService for PmaLanguageService {
         }
         .resolve(uri);
 
-        // 2. Total CST, always. One `lint::lint` call gives the fatal
-        //    gate (lower/assemble failure) AND the lint findings in one
-        //    shot — `.pma` has no separate compile-warning channel.
-        let cst = parse_asm_cst(text);
+        // 2. Total CST, always — parsed once here and shared. One
+        //    `lint::lint_cst` call over that CST gives the fatal gate
+        //    (lower/assemble failure) AND the lint findings in one shot,
+        //    without re-parsing it — `.pma` has no separate compile-warning
+        //    channel. PM-1's caps are the default set, so this is the same
+        //    parse `parse_asm_cst` produced before.
         let syntax = pm1_syntax();
-        let (fatal, lint_findings) = match lint::lint(&syntax, text, &effective_allow) {
+        let cst = parse_asm_cst_with(text, syntax.caps);
+        let (fatal, lint_findings) = match lint::lint_cst(&syntax, text, &cst, &effective_allow) {
             Ok(findings) => (None, Some(findings)),
             Err(e) => (Some(e), None),
         };

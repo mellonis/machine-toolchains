@@ -9,11 +9,12 @@
 //!
 //! # Where the diagnostics come from
 //!
-//! One call to [`crate::lint::tma::lint_tma`] settles both the fatal gate (a
-//! lower or assemble failure) and the lint findings — `.tma` has no separate
-//! compile-warning channel the way `.tmc` does. Routing every diagnostic
-//! through that one entry is deliberate: it is the same function `tmt lint`
-//! calls, so the editor and the command line agree on every finding —
+//! One call to [`crate::lint::tma::lint_tma_cst`] settles both the fatal gate
+//! (a lower or assemble failure) and the lint findings — `.tma` has no
+//! separate compile-warning channel the way `.tmc` does. Routing every
+//! diagnostic through that one entry is deliberate: it is the CST-taking core
+//! of the same `lint_tma` entry `tmt lint` calls, byte-identical on the same
+//! source, so the editor and the command line agree on every finding —
 //! core's `unused-label` among them, which reads dispatch and exit targets
 //! as references (it now sees the lowered tables) and so runs on `.tma`
 //! unmodified rather than being suppressed the way it once was.
@@ -66,7 +67,7 @@ use mtc_core::lsp::{
 use mtc_core::vm::OperandKind;
 
 use crate::asm::tm1_syntax;
-use crate::lint::tma::lint_tma;
+use crate::lint::tma::lint_tma_cst;
 
 use super::{ConfigResolver, actions_from_findings, parse_ide_codes};
 
@@ -95,8 +96,8 @@ impl TmaLanguageService {
 }
 
 /// Per-document staged state. Simpler than `.tmc`'s: no separate
-/// compile-warning channel, so one `lint_tma` call settles either the fatal
-/// (a lower/assemble failure) or the lint findings — never both.
+/// compile-warning channel, so one `lint_tma_cst` call settles either the
+/// fatal (a lower/assemble failure) or the lint findings — never both.
 pub(crate) struct TmaDocState {
     /// The document's current text, verbatim from the framework.
     pub(crate) text: String,
@@ -495,11 +496,13 @@ impl LanguageService for TmaLanguageService {
         }
         .resolve(uri);
 
-        // 2. Total CST, always. One `lint_tma` call gives the fatal gate AND
-        //    the lint findings — the same entry `tmt lint` uses, so both
-        //    surfaces report the same set.
+        // 2. Total CST, always — parsed once here and shared with both the
+        //    lint route and the descriptor channel below. One `lint_tma_cst`
+        //    call over that CST gives the fatal gate AND the lint findings
+        //    without re-parsing it — the same findings `tmt lint` reports, so
+        //    both surfaces agree.
         let cst = parse_asm_cst_with(text, tm1_syntax().caps);
-        let (fatal, lint_findings) = match lint_tma(text, &effective_allow) {
+        let (fatal, lint_findings) = match lint_tma_cst(text, &cst, &effective_allow) {
             Ok(findings) => (None, Some(findings)),
             Err(e) => (Some(e), None),
         };

@@ -252,74 +252,92 @@ pub enum CompileErrorKind {
     Internal(String),
 }
 
-impl CompileErrorKind {
-    /// Stable kebab-case code, one per variant. Frozen once published —
-    /// these are permanent user-visible identifiers: the CLI brackets them
-    /// into every fatal rendering, and the language server carries them in
-    /// the LSP diagnostic `code` field. The message itself stays the kind's
-    /// own `Display`, which is why the `[code]` suffix lives on
-    /// [`CompileError`]'s `Display`, not here.
-    pub fn code(&self) -> &'static str {
-        match self {
-            CompileErrorKind::Lex(_) => "lex-error",
-            CompileErrorKind::Expected { .. } => "unexpected-token",
-            CompileErrorKind::ReservedName { .. } => "reserved-name",
-            CompileErrorKind::MultipleMachines => "multiple-machines",
-            CompileErrorKind::TapeNotInMachine => "tape-not-in-machine",
-            CompileErrorKind::NakedPattern => "naked-pattern",
-            CompileErrorKind::WildcardBinding => "wildcard-binding",
-            CompileErrorKind::RangeKindMismatch => "range-kind-mismatch",
-            CompileErrorKind::CharArithmetic => "char-arithmetic",
-            CompileErrorKind::GraftNeedsName => "graft-needs-name",
-            CompileErrorKind::StateRedirect => "state-redirect",
-            CompileErrorKind::DanglingDocRun => "dangling-doc-run",
-            CompileErrorKind::DocLineOrder => "doc-line-order",
-            CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
-            CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
-            CompileErrorKind::EmptyAlphabet => "empty-alphabet",
-            CompileErrorKind::DuplicateGlyph(_) => "duplicate-glyph",
-            CompileErrorKind::AlphabetTooLarge(_) => "alphabet-too-large",
-            CompileErrorKind::RangeEndpointNotScalar => "range-endpoint-not-scalar",
-            CompileErrorKind::RangeDescending => "range-descending",
-            CompileErrorKind::DuplicateName { .. } => "duplicate-name",
-            CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
-            CompileErrorKind::TooManyTapes(_) => "too-many-tapes",
-            CompileErrorKind::UnresolvedAlphabet(_) => "unresolved-alphabet",
-            CompileErrorKind::DuplicateTape(_) => "duplicate-tape",
-            CompileErrorKind::DuplicateState(_) => "duplicate-state",
-            CompileErrorKind::DuplicateParam(_) => "duplicate-param",
-            CompileErrorKind::EntryCount(_) => "entry-count",
-            CompileErrorKind::ReturnOutsideRoutine => "return-outside-routine",
-            CompileErrorKind::GotoIntoBind(_) => "goto-into-bind",
-            CompileErrorKind::GotoNotAState(_) => "goto-not-a-state",
-            CompileErrorKind::UndefinedState(_) => "undefined-state",
-            CompileErrorKind::WrongTargetKind { .. } => "wrong-target-kind",
-            CompileErrorKind::UndefinedGraph(_) => "undefined-graph",
-            CompileErrorKind::UnknownArg(_) => "unknown-arg",
-            CompileErrorKind::DuplicateArg(_) => "duplicate-arg",
-            CompileErrorKind::MissingArg(_) => "missing-arg",
-            CompileErrorKind::WrongArgKind { .. } => "wrong-arg-kind",
-            CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
-            CompileErrorKind::BindCallArgs(_) => "bind-call-args",
-            CompileErrorKind::GraftCycle(_) => "graft-cycle",
-            CompileErrorKind::GraftCallUnsupported(_) => "graft-call-unsupported",
-            CompileErrorKind::MapSymbolNotInAlphabet(_) => "map-symbol-not-in-alphabet",
-            CompileErrorKind::MapBlankPin => "map-blank-pin",
-            CompileErrorKind::MapConflict { .. } => "map-conflict",
-            CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
-            CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
-            CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
-            CompileErrorKind::FoldZeroModulus => "zero-modulus",
-            CompileErrorKind::FoldNegativeRemainder { .. } => "negative-remainder",
-            CompileErrorKind::FoldOverflow => "fold-overflow",
-            CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
-            CompileErrorKind::RowWidth { .. } => "row-width",
-            CompileErrorKind::ExternalBindingUnsupported(_) => "external-binding-unsupported",
-            CompileErrorKind::StateParamContinuationUnsupported(_) => {
-                "state-param-continuation-unsupported"
+/// Binds each [`CompileErrorKind`] variant to its stable code exactly
+/// once, expanding to BOTH the exhaustive `code()` match and the `CODES`
+/// registry table, so the two cannot diverge: a new variant fails to
+/// compile until it gets a row here, and the row lands in the table the
+/// completeness and docs drift guards read (docs/tmt/cli.md (compile
+/// errors)).
+macro_rules! code_registry {
+    ($($variant:pat => $code:literal,)+) => {
+        /// Every code a [`CompileErrorKind`] can render, in declaration
+        /// order — the registry the drift guards set-compare against
+        /// the published inventory (docs/tmt/cli.md (compile errors)).
+        pub const CODES: &[&str] = &[$($code),+];
+
+        /// Stable kebab-case code, one per variant (docs/tmt/cli.md (compile
+        /// errors)). Frozen once published — these are permanent
+        /// user-visible identifiers: the CLI brackets them into every fatal
+        /// rendering, and the language server carries them in the LSP
+        /// diagnostic `code` field. The message itself stays the kind's
+        /// own `Display`, which is why the `[code]` suffix lives on
+        /// [`CompileError`]'s `Display`, not here.
+        pub fn code(&self) -> &'static str {
+            match self {
+                $($variant => $code,)+
             }
-            CompileErrorKind::Internal(_) => "internal-error",
         }
+    };
+}
+
+impl CompileErrorKind {
+    code_registry! {
+        CompileErrorKind::Lex(_) => "lex-error",
+        CompileErrorKind::Expected { .. } => "unexpected-token",
+        CompileErrorKind::ReservedName { .. } => "reserved-name",
+        CompileErrorKind::MultipleMachines => "multiple-machines",
+        CompileErrorKind::TapeNotInMachine => "tape-not-in-machine",
+        CompileErrorKind::NakedPattern => "naked-pattern",
+        CompileErrorKind::WildcardBinding => "wildcard-binding",
+        CompileErrorKind::RangeKindMismatch => "range-kind-mismatch",
+        CompileErrorKind::CharArithmetic => "char-arithmetic",
+        CompileErrorKind::GraftNeedsName => "graft-needs-name",
+        CompileErrorKind::StateRedirect => "state-redirect",
+        CompileErrorKind::DanglingDocRun => "dangling-doc-run",
+        CompileErrorKind::DocLineOrder => "doc-line-order",
+        CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
+        CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
+        CompileErrorKind::EmptyAlphabet => "empty-alphabet",
+        CompileErrorKind::DuplicateGlyph(_) => "duplicate-glyph",
+        CompileErrorKind::AlphabetTooLarge(_) => "alphabet-too-large",
+        CompileErrorKind::RangeEndpointNotScalar => "range-endpoint-not-scalar",
+        CompileErrorKind::RangeDescending => "range-descending",
+        CompileErrorKind::DuplicateName { .. } => "duplicate-name",
+        CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
+        CompileErrorKind::TooManyTapes(_) => "too-many-tapes",
+        CompileErrorKind::UnresolvedAlphabet(_) => "unresolved-alphabet",
+        CompileErrorKind::DuplicateTape(_) => "duplicate-tape",
+        CompileErrorKind::DuplicateState(_) => "duplicate-state",
+        CompileErrorKind::DuplicateParam(_) => "duplicate-param",
+        CompileErrorKind::EntryCount(_) => "entry-count",
+        CompileErrorKind::ReturnOutsideRoutine => "return-outside-routine",
+        CompileErrorKind::GotoIntoBind(_) => "goto-into-bind",
+        CompileErrorKind::GotoNotAState(_) => "goto-not-a-state",
+        CompileErrorKind::UndefinedState(_) => "undefined-state",
+        CompileErrorKind::WrongTargetKind { .. } => "wrong-target-kind",
+        CompileErrorKind::UndefinedGraph(_) => "undefined-graph",
+        CompileErrorKind::UnknownArg(_) => "unknown-arg",
+        CompileErrorKind::DuplicateArg(_) => "duplicate-arg",
+        CompileErrorKind::MissingArg(_) => "missing-arg",
+        CompileErrorKind::WrongArgKind { .. } => "wrong-arg-kind",
+        CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
+        CompileErrorKind::BindCallArgs(_) => "bind-call-args",
+        CompileErrorKind::GraftCycle(_) => "graft-cycle",
+        CompileErrorKind::GraftCallUnsupported(_) => "graft-call-unsupported",
+        CompileErrorKind::MapSymbolNotInAlphabet(_) => "map-symbol-not-in-alphabet",
+        CompileErrorKind::MapBlankPin => "map-blank-pin",
+        CompileErrorKind::MapConflict { .. } => "map-conflict",
+        CompileErrorKind::MapNotInjective { .. } => "map-not-injective",
+        CompileErrorKind::IdentityGlyphMismatch => "identity-glyph-mismatch",
+        CompileErrorKind::FoldOutOfAlphabet(_) => "fold-out-of-alphabet",
+        CompileErrorKind::FoldZeroModulus => "zero-modulus",
+        CompileErrorKind::FoldNegativeRemainder { .. } => "negative-remainder",
+        CompileErrorKind::FoldOverflow => "fold-overflow",
+        CompileErrorKind::ExactRowConflict { .. } => "exact-row-conflict",
+        CompileErrorKind::RowWidth { .. } => "row-width",
+        CompileErrorKind::ExternalBindingUnsupported(_) => "external-binding-unsupported",
+        CompileErrorKind::StateParamContinuationUnsupported(_) => "state-param-continuation-unsupported",
+        CompileErrorKind::Internal(_) => "internal-error",
     }
 }
 
@@ -2506,9 +2524,11 @@ mod tests {
 
     /// Every `CompileErrorKind` code is a stable kebab identifier, and no two
     /// variants share one — the CLI and the language server key on these.
-    /// One representative of each variant is listed here; the list length is
-    /// asserted so a newly added variant forces a test update (the count
-    /// doubles as a "did you wire `code()`?" reminder).
+    /// One representative of each variant is listed here, in declaration
+    /// order. The `code_registry!` expansion already ties every variant to
+    /// a `CODES` row structurally (one list feeds both the match and the
+    /// table); this witness list additionally proves the rows come out in
+    /// declaration order and stay pairwise distinct.
     #[test]
     fn error_codes_are_pairwise_distinct_and_complete() {
         let all = [
@@ -2590,19 +2610,27 @@ mod tests {
             CompileErrorKind::StateParamContinuationUnsupported("x".into()),
             CompileErrorKind::Internal("x".into()),
         ];
-        // Update this count when a variant joins — the reminder to wire
-        // `code()` and this list together.
-        assert_eq!(all.len(), 56);
-        let mut codes: Vec<&str> = all.iter().map(|k| k.code()).collect();
+        let witnessed: Vec<&str> = all.iter().map(|k| k.code()).collect();
+        assert_eq!(
+            witnessed,
+            CompileErrorKind::CODES,
+            "the witness list and the CODES registry disagree"
+        );
+        let mut codes = witnessed.clone();
         codes.sort_unstable();
         let mut deduped = codes.clone();
         deduped.dedup();
         assert_eq!(codes, deduped, "duplicate CompileErrorKind code: {codes:?}");
-        // Every code is non-empty kebab-case (ascii lowercase + hyphens).
-        for c in &codes {
-            assert!(!c.is_empty());
+        // Every code is non-empty kebab-case (ascii lowercase + digits +
+        // interior hyphens).
+        for c in CompileErrorKind::CODES {
             assert!(
-                c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-'),
+                !c.is_empty()
+                    && !c.starts_with('-')
+                    && !c.ends_with('-')
+                    && !c.contains("--")
+                    && c.chars()
+                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'),
                 "code `{c}` is not kebab-case"
             );
         }

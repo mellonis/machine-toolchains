@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use mtc_core::diagnostics::{Diagnostic, Edit, Pos};
 use mtc_turing_machine::cli::execute;
@@ -56,8 +57,21 @@ fn apply_fix(src: &str, edits: &[Edit]) -> String {
     out
 }
 
+/// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
+/// uniquely by process id + an atomic counter (mirrors `config::tests::
+/// unique_tmp_dir` in this crate). `tmt.json` discovery walks upward from a
+/// linted file's own directory toward the filesystem root, so two
+/// concurrently running `cargo test` invocations sharing the same
+/// `CARGO_TARGET_TMPDIR` must never resolve `scratch` to the same directory
+/// — otherwise one process's `tmt.json` fixture can be discovered (or
+/// clobbered mid-write) by another process's lint run walking the same
+/// path. A bare per-test-name subdirectory is not unique across processes,
+/// only across call sites within one process.
 fn scratch(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("lint-{name}"));
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lint-{name}-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -370,6 +384,134 @@ machine {
         findings(&fixed)
             .iter()
             .all(|d| d.code != "unused-graft-name"),
+        "{:?}",
+        findings(&fixed)
+    );
+    compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
+}
+
+/// The shared shape for the source-removing deletion fixes: the finding for
+/// `code` carries a fix; applying it removes `must_vanish`, clears that code on
+/// re-lint, and the result still compiles.
+fn assert_deletion_fix(src: &str, code: &str, must_vanish: &[&str]) {
+    let d = findings(src)
+        .into_iter()
+        .find(|d| d.code == code)
+        .unwrap_or_else(|| panic!("a {code} finding"));
+    let fix = d.fix.unwrap_or_else(|| panic!("a {code} fix"));
+    let fixed = apply_fix(src, &fix.edits);
+    for needle in must_vanish {
+        assert!(
+            !fixed.contains(needle),
+            "`{needle}` should be gone:\n{fixed}"
+        );
+    }
+    assert!(
+        findings(&fixed).iter().all(|d| d.code != code),
+        "{:?}",
+        findings(&fixed)
+    );
+    compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
+}
+
+#[test]
+fn unused_graph_fix_deletes_the_whole_declaration_including_its_doc_run() {
+    // The dead graph carries a doc line; the fix must take the run with it (an
+    // orphaned `?` run is a parse error, so "still compiles" proves inclusion).
+    let src = "\
+alphabet marks { '_', 'x' }
+? a helper graph nothing ever grafts
+graph dead(tape t: marks, state hit, state miss) {
+  entry state w { ['x'] -> hit; [*] -> miss; }
+}
+machine {
+  tape work: marks;
+  entry state go { [*] -> stop; }
+}
+";
+    assert_deletion_fix(src, "unused-graph", &["graph dead", "a helper graph"]);
+}
+
+#[test]
+fn unused_routine_fix_deletes_the_whole_declaration_including_its_doc_run() {
+    let src = "\
+alphabet ab { '_', 'a' }
+? an unused helper routine
+routine helper(tape t: ab) { entry state s { [*] -> return; } }
+machine {
+  tape t: ab;
+  entry state go { [*] -> stop; }
+}
+";
+    assert_deletion_fix(src, "unused-routine", &["routine helper", "unused helper"]);
+}
+
+#[test]
+fn unused_binding_fix_deletes_the_whole_bind_statement() {
+    // Removing the uncalled bind leaves `helper` uncalled — that surfaces as
+    // its own unused-routine finding, never an error, and the file compiles.
+    let src = "\
+alphabet ab { '_', 'a' }
+routine helper(tape t: ab) { entry state s { [*] -> return; } }
+machine {
+  tape t: ab;
+  bind helper(t = t) as h;
+  entry state go { [*] -> stop; }
+}
+";
+    assert_deletion_fix(src, "unused-binding", &["bind helper"]);
+}
+
+#[test]
+fn unused_graft_instance_fix_deletes_the_whole_graft_statement() {
+    // The dead splice's exits target `win`/`lose`; removing the graft orphans
+    // those states (legal, unreachable) and leaves `findX` ungrafted (its own
+    // unused-graph finding) — the file still compiles.
+    let src = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  graft findX(t = work, found = win, missing = lose) as seek;
+  entry state go { [*] -> stop; }
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+";
+    assert_deletion_fix(src, "unused-graft-instance", &["graft findX", "as seek"]);
+}
+
+#[test]
+fn leftover_debugger_fix_removes_just_the_marker() {
+    // The marked rule keeps a move + goto, so removing `debugger` leaves a
+    // valid rule; a `brk` is a no-op in a plain run, so behaviour is preserved.
+    let src = "\
+alphabet bit { '_', '1' }
+machine {
+  tape t: bit;
+  entry state s {
+    ['1'] -> debugger move [>] goto s;
+    ['_'] -> stop;
+  }
+}
+";
+    let d = findings(src)
+        .into_iter()
+        .find(|d| d.code == "leftover-debugger")
+        .expect("a leftover-debugger finding");
+    let fix = d.fix.expect("a fix");
+    let fixed = apply_fix(src, &fix.edits);
+    assert!(!fixed.contains("debugger"), "marker gone:\n{fixed}");
+    assert!(
+        fixed.contains("['1'] -> move [>] goto s;"),
+        "only the marker removed:\n{fixed}"
+    );
+    assert!(
+        findings(&fixed)
+            .iter()
+            .all(|d| d.code != "leftover-debugger"),
         "{:?}",
         findings(&fixed)
     );

@@ -44,12 +44,13 @@ use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
 
 use crate::compiler::{ScopeSummary, full_name};
-use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
+use crate::cst::{BodyKind, TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::parser::{FnDoc, RESERVED};
 use crate::stdlib::roster;
 
 use super::DocState;
+use super::walk::{enclosing_function_chain, function_labels, span_contains};
 
 /// The completion candidates for `pos` in `state`'s current document.
 pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
@@ -328,16 +329,13 @@ fn is_final_slot(sig: &[Token], scan_from: usize) -> bool {
     true
 }
 
-/// Half-open span containment, 1-based (mirrors `navigate.rs`'s own
-/// helper of the same name — CST extent hit-testing, not the prefix
-/// rule's touches-the-end variant above).
-fn span_contains(span: Span, pos: Pos) -> bool {
-    pos >= span.start && pos < span.end
-}
-
 /// The enclosing namespace path at `pos` — walks only `Namespace`
 /// blocks (a function's own extent never changes it; only `namespace {
 /// }` blocks add a `::` segment), recursively, innermost match wins.
+/// Unlike `walk::enclosing_function_chain`, this walks a DIFFERENT node
+/// kind (namespace blocks, never function extents) toward a different
+/// result shape (a path of names, not a chain of CST nodes) — its own
+/// walk, not a duplicate of the shared one.
 fn enclosing_ns_path(items: &[TopItem], pos: Pos) -> Vec<String> {
     for item in items {
         if let TopKind::Namespace(ns) = &item.kind
@@ -349,47 +347,6 @@ fn enclosing_ns_path(items: &[TopItem], pos: Pos) -> Vec<String> {
         }
     }
     Vec::new()
-}
-
-/// The enclosing function CHAIN at `pos`, outermost first: the
-/// top-level function containing `pos`, then its `BodyKind::Nested`
-/// descendant containing `pos`, as deep as `pos` still lands inside one.
-/// Mirrors the shape of `navigate.rs`'s `innermost_function` +
-/// `deepest_nested`, but accumulates the whole chain instead of
-/// returning only the innermost — context 3's assembly needs every
-/// enclosing level, innermost-outward.
-fn enclosing_function_chain(items: &[TopItem], pos: Pos) -> Vec<&FunctionCst> {
-    for item in items {
-        match &item.kind {
-            TopKind::Namespace(ns) => {
-                let chain = enclosing_function_chain(&ns.items, pos);
-                if !chain.is_empty() {
-                    return chain;
-                }
-            }
-            TopKind::Function(f) => {
-                if span_contains(f.span, pos) {
-                    let mut chain = vec![f];
-                    push_deepest_nested(f, pos, &mut chain);
-                    return chain;
-                }
-            }
-            TopKind::Comment(_) | TopKind::Import(_) => {}
-        }
-    }
-    Vec::new()
-}
-
-fn push_deepest_nested<'a>(f: &'a FunctionCst, pos: Pos, chain: &mut Vec<&'a FunctionCst>) {
-    for item in &f.body {
-        if let BodyKind::Nested(nested) = &item.kind
-            && span_contains(nested.span, pos)
-        {
-            chain.push(nested);
-            push_deepest_nested(nested, pos, chain);
-            return;
-        }
-    }
 }
 
 /// Context 1/2's shared member lookup for an exact namespace `path`:
@@ -573,8 +530,9 @@ fn command_candidates(final_slot: Option<bool>, replace_span: Span) -> Vec<Candi
 
 /// Context 4's `after goto` sub-case: the innermost enclosing function's
 /// OWN labels (labels are function-scoped, same as `navigate.rs`'s
-/// `label_span`), as Value candidates whose label is the decimal value.
-/// No CST → no labels (not a hardcoded fallback list).
+/// `label_span`), via `walk::function_labels`' shared scan, as Value
+/// candidates whose label is the decimal value. No CST → no labels (not
+/// a hardcoded fallback list).
 fn label_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candidate> {
     let Some(cst) = &state.cst else {
         return Vec::new();
@@ -585,17 +543,13 @@ fn label_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candi
     };
     let mut seen: HashSet<u32> = HashSet::new();
     let mut out = Vec::new();
-    for item in &f.body {
-        if let BodyKind::Statement(stmt) = &item.kind {
-            for label in &stmt.labels {
-                if seen.insert(label.value) {
-                    out.push(mk_candidate(
-                        &label.value.to_string(),
-                        CandidateKind::Value,
-                        replace_span,
-                    ));
-                }
-            }
+    for label in function_labels(f) {
+        if seen.insert(label.value) {
+            out.push(mk_candidate(
+                &label.value.to_string(),
+                CandidateKind::Value,
+                replace_span,
+            ));
         }
     }
     out
@@ -662,6 +616,27 @@ mod tests {
 
     fn labels(candidates: &[Candidate]) -> BTreeSet<String> {
         candidates.iter().map(|c| c.label.clone()).collect()
+    }
+
+    #[test]
+    fn span_contains_excludes_a_position_exactly_at_the_end() {
+        // Half-open contract (this module's `span_contains` doc comment
+        // — the CST-extent variant, distinct from `prefix_anchor`'s
+        // deliberately wider `<=` touches-the-end rule tested below):
+        // `end` is one past the last contained position.
+        let span = Span::new(1, 1, 1, 5);
+        assert!(
+            span_contains(span, Pos { line: 1, col: 1 }),
+            "start is inclusive"
+        );
+        assert!(
+            span_contains(span, Pos { line: 1, col: 4 }),
+            "last contained column"
+        );
+        assert!(
+            !span_contains(span, Pos { line: 1, col: 5 }),
+            "end is exclusive"
+        );
     }
 
     // --- Call position (context 3) ---
@@ -1143,6 +1118,27 @@ export main() {
         service.did_update(URI, HELP_FIXTURE);
 
         let pos = pos_after(HELP_FIXTURE, "@help()", 3); // between "he" and "lp"
+        let candidates = service.completion(URI, pos);
+
+        assert!(!candidates.is_empty());
+        let expected = span_of(HELP_FIXTURE, "help");
+        for c in &candidates {
+            assert_eq!(c.replace_span, expected);
+        }
+    }
+
+    #[test]
+    fn prefix_replacement_covers_the_whole_token_when_cursor_sits_at_its_end() {
+        // `prefix_anchor`'s span check is `pos <= span.end`, one wider
+        // than `span_contains`'s half-open `<` (this module's doc
+        // comment, "The prefix/replace rule") — a cursor sitting exactly
+        // at the end of a just-typed identifier must still anchor to
+        // that identifier, not fall through to a zero-width span one
+        // column later.
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, HELP_FIXTURE);
+
+        let pos = pos_after(HELP_FIXTURE, "@help()", 5); // right after "help"'s "p"
         let candidates = service.completion(URI, pos);
 
         assert!(!candidates.is_empty());

@@ -97,40 +97,59 @@ pub enum CompileErrorKind {
     DuplicateAttribute,
 }
 
-impl CompileErrorKind {
-    /// Stable kebab-case code, one per variant (docs/pmt/cli.md (compile
-    /// errors)). Frozen once published — these are permanent
-    /// user-visible identifiers: the CLI brackets them into every fatal
-    /// rendering, and the language server carries them in the LSP
-    /// diagnostic `code` field (the message stays the kind's own
-    /// `Display`, which is why the suffix lives on [`CompileError`]'s
-    /// `Display`, not here).
-    pub fn code(&self) -> &'static str {
-        match self {
-            CompileErrorKind::Lex(_) => "lex-error",
-            CompileErrorKind::Expected { .. } => "unexpected-token",
-            CompileErrorKind::ReservedName { .. } => "reserved-name",
-            CompileErrorKind::UnknownCommand(_) => "unknown-command",
-            CompileErrorKind::BuiltinCalled(_) => "builtin-called",
-            CompileErrorKind::EmptyBuiltinParens { .. } => "empty-builtin-parens",
-            CompileErrorKind::DuplicateName { .. } => "duplicate-name",
-            CompileErrorKind::DuplicateLabel(_) => "duplicate-label",
-            CompileErrorKind::UndefinedLabel(_) => "undefined-label",
-            CompileErrorKind::GotoReturn => "goto-return",
-            CompileErrorKind::GroupPosition(_) => "group-position",
-            CompileErrorKind::DanglingLabel(_) => "dangling-label",
-            CompileErrorKind::Internal(_) => "internal-error",
-            CompileErrorKind::NestedExport => "nested-export",
-            CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
-            CompileErrorKind::KeywordNeedsName(_) => "keyword-needs-name",
-            CompileErrorKind::KeywordInBody(_) => "keyword-in-body",
-            CompileErrorKind::SingleColonInPath => "single-colon-in-path",
-            CompileErrorKind::TopLevelStatement(_) => "top-level-statement",
-            CompileErrorKind::DanglingDocRun => "dangling-doc-run",
-            CompileErrorKind::DocLineOrder => "doc-line-order",
-            CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
-            CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
+/// Binds each [`CompileErrorKind`] variant to its stable code exactly
+/// once, expanding to BOTH the exhaustive `code()` match and the `CODES`
+/// registry table, so the two cannot diverge: a new variant fails to
+/// compile until it gets a row here, and the row lands in the table the
+/// completeness and docs drift guards read (docs/pmt/cli.md (compile
+/// errors)).
+macro_rules! code_registry {
+    ($($variant:pat => $code:literal,)+) => {
+        /// Every code a [`CompileErrorKind`] can render, in declaration
+        /// order — the registry the drift guards set-compare against
+        /// the published inventory (docs/pmt/cli.md (compile errors)).
+        pub const CODES: &[&str] = &[$($code),+];
+
+        /// Stable kebab-case code, one per variant (docs/pmt/cli.md (compile
+        /// errors)). Frozen once published — these are permanent
+        /// user-visible identifiers: the CLI brackets them into every fatal
+        /// rendering, and the language server carries them in the LSP
+        /// diagnostic `code` field (the message stays the kind's own
+        /// `Display`, which is why the suffix lives on [`CompileError`]'s
+        /// `Display`, not here).
+        pub fn code(&self) -> &'static str {
+            match self {
+                $($variant => $code,)+
+            }
         }
+    };
+}
+
+impl CompileErrorKind {
+    code_registry! {
+        CompileErrorKind::Lex(_) => "lex-error",
+        CompileErrorKind::Expected { .. } => "unexpected-token",
+        CompileErrorKind::ReservedName { .. } => "reserved-name",
+        CompileErrorKind::UnknownCommand(_) => "unknown-command",
+        CompileErrorKind::BuiltinCalled(_) => "builtin-called",
+        CompileErrorKind::EmptyBuiltinParens { .. } => "empty-builtin-parens",
+        CompileErrorKind::DuplicateName { .. } => "duplicate-name",
+        CompileErrorKind::DuplicateLabel(_) => "duplicate-label",
+        CompileErrorKind::UndefinedLabel(_) => "undefined-label",
+        CompileErrorKind::GotoReturn => "goto-return",
+        CompileErrorKind::GroupPosition(_) => "group-position",
+        CompileErrorKind::DanglingLabel(_) => "dangling-label",
+        CompileErrorKind::Internal(_) => "internal-error",
+        CompileErrorKind::NestedExport => "nested-export",
+        CompileErrorKind::DuplicateBinding(_) => "duplicate-binding",
+        CompileErrorKind::KeywordNeedsName(_) => "keyword-needs-name",
+        CompileErrorKind::KeywordInBody(_) => "keyword-in-body",
+        CompileErrorKind::SingleColonInPath => "single-colon-in-path",
+        CompileErrorKind::TopLevelStatement(_) => "top-level-statement",
+        CompileErrorKind::DanglingDocRun => "dangling-doc-run",
+        CompileErrorKind::DocLineOrder => "doc-line-order",
+        CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
+        CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
     }
 }
 
@@ -331,6 +350,22 @@ pub(crate) struct AnalysisOutput {
     pub docs: HashMap<String, FnDoc>,
 }
 
+/// `ir::lower` the flattened AST and merge its diagnostics with flatten's
+/// visibility warnings — the shared tail of `analyze()` and
+/// `analyze_staged()`. Ordering contract: `ir::lower`'s diagnostics come
+/// FIRST, then flatten's `vis` warnings, appended in `vis`'s own order.
+/// Both callers rely on this exact order (docs/lsp.md (staged analysis)
+/// documents it on `Analysis.warnings`); stated once here so it can't
+/// drift between the two call sites.
+fn lower_and_merge(
+    program: &Program,
+    vis: Vec<Diagnostic>,
+) -> Result<(IrProgram, Vec<Diagnostic>), CompileError> {
+    let (ir, mut diagnostics) = crate::ir::lower(program)?;
+    diagnostics.extend(vis);
+    Ok((ir, diagnostics))
+}
+
 /// lex → parse → duplicate-binding check → flatten → lower. Stops before
 /// the optimizer; `compile()` composes this with the back half.
 pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
@@ -344,8 +379,7 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         resolutions: _,
         docs,
     } = flatten(parsed);
-    let (ir, mut diagnostics) = crate::ir::lower(&program)?;
-    diagnostics.extend(vis);
+    let (ir, diagnostics) = lower_and_merge(&program, vis)?;
     Ok(AnalysisOutput {
         tokens,
         ast: program,
@@ -440,22 +474,19 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         resolutions,
         docs,
     } = flatten(program);
-    match crate::ir::lower(&program) {
-        Ok((_ir, mut warnings)) => {
-            warnings.extend(vis);
-            StagedAnalysis {
-                tokens: Some(tokens),
-                cst: Some(cst),
-                analysis: Some(Analysis {
-                    ast: program,
-                    scopes,
-                    warnings,
-                    resolutions,
-                    docs,
-                }),
-                fatal: None,
-            }
-        }
+    match lower_and_merge(&program, vis) {
+        Ok((_ir, warnings)) => StagedAnalysis {
+            tokens: Some(tokens),
+            cst: Some(cst),
+            analysis: Some(Analysis {
+                ast: program,
+                scopes,
+                warnings,
+                resolutions,
+                docs,
+            }),
+            fatal: None,
+        },
         Err(fatal) => StagedAnalysis {
             tokens: Some(tokens),
             cst: Some(cst),
@@ -935,9 +966,12 @@ mod tests {
 
     #[test]
     fn error_codes_are_pairwise_distinct() {
-        // One representative kind per variant (all 23); `code()`'s match
-        // is exhaustive over the enum, so this also pins that every
-        // variant is accounted for.
+        // One representative kind per variant (all 23), in declaration
+        // order. The `code_registry!` expansion already ties every
+        // variant to a `CODES` row structurally (one list feeds both
+        // the match and the table); this witness list additionally
+        // proves the rows come out in declaration order and stay
+        // pairwise distinct kebab-case.
         let kinds = [
             CompileErrorKind::Lex("x".into()),
             CompileErrorKind::Expected {
@@ -972,9 +1006,26 @@ mod tests {
             CompileErrorKind::UnknownAttribute("x".into()),
             CompileErrorKind::DuplicateAttribute,
         ];
-        assert_eq!(kinds.len(), 23);
-        let codes: std::collections::HashSet<&str> = kinds.iter().map(|k| k.code()).collect();
-        assert_eq!(codes.len(), kinds.len(), "codes: {codes:?}");
+        let witnessed: Vec<&str> = kinds.iter().map(|k| k.code()).collect();
+        assert_eq!(
+            witnessed,
+            CompileErrorKind::CODES,
+            "the witness list and the CODES registry disagree"
+        );
+        let unique: std::collections::HashSet<&str> = witnessed.iter().copied().collect();
+        assert_eq!(unique.len(), kinds.len(), "duplicate code: {witnessed:?}");
+        for code in CompileErrorKind::CODES {
+            assert!(
+                !code.is_empty()
+                    && !code.starts_with('-')
+                    && !code.ends_with('-')
+                    && !code.contains("--")
+                    && code
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "code `{code}` is not kebab-case"
+            );
+        }
     }
 
     #[test]
@@ -1340,6 +1391,24 @@ mod tests {
             .filter(|d| d.code == "undeclared-external")
             .count();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn undeclared_external_warning_span_is_the_first_occurrence() {
+        // `warned_undeclared.insert` (above) short-circuits every
+        // occurrence after the first, so the ONE warning that survives
+        // the repeated-name dedup carries the FIRST call site's span,
+        // never the second's — the detail the dedup-count tests above
+        // don't pin.
+        let out = compile("main() { @go(); right; @go(); }", CompileOptions::default()).unwrap();
+        let warnings: Vec<_> = out
+            .report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "undeclared-external")
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:#?}");
+        assert_eq!(warnings[0].span, Span::new(1, 11, 1, 13), "the first `go`");
     }
 
     #[test]

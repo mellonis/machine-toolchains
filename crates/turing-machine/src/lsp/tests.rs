@@ -315,6 +315,32 @@ machine {
 }
 
 #[test]
+fn config_cache_stays_bounded_across_many_distinct_project_roots() {
+    // More distinct `tmt.json` roots than the eviction bound, so an
+    // unbounded cache would visibly outgrow it (docs/lsp.md
+    // (configuration)).
+    let src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    for i in 0..(CONFIG_CACHE_LIMIT + 8) {
+        let dir = unique_tmp_dir(&format!("cache-bound-{i}"));
+        fs::write(dir.join("tmt.json"), "{}").unwrap();
+        let uri = file_uri(&dir.join("prog.tmc"));
+        service.did_update(&uri, src);
+    }
+    assert!(
+        service.config_cache.len() <= CONFIG_CACHE_LIMIT,
+        "cache grew past its bound: {} entries",
+        service.config_cache.len()
+    );
+}
+
+#[test]
 fn an_unknown_ide_rule_code_becomes_an_invalid_config_warning() {
     let (mut service, uri) = opened(TWO_TAPE);
     service.did_change_config(json!({"tmt": {"lint": {"allow": ["no-such-rule"]}}}));
@@ -970,9 +996,9 @@ machine {
 
 #[test]
 fn a_lint_finding_that_carries_a_fix_becomes_an_action() {
-    // No `.tmc` lint rule ships a `Fix` yet, so this exercises the
-    // conversion itself rather than any one rule: the day a rule gains a
-    // fix, it reaches the client through exactly this path.
+    // A synthetic finding exercises the fix->action conversion in isolation,
+    // independent of which real rules ship a `Fix`: every rule that carries
+    // one reaches the client through exactly this path.
     let finding = Diagnostic {
         code: "dead-rule",
         span: Span::new(4, 3, 4, 9),

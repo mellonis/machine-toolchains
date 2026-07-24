@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 /// A document with its current version and text content.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
     pub version: i32,
     pub text: String,
@@ -104,6 +105,30 @@ mod tests {
             uris,
             vec!["file:///a.fake", "file:///b.fake", "file:///c.fake"]
         );
+    }
+
+    #[test]
+    fn test_reopen_overwrites_the_previous_document() {
+        let mut store = DocStore::new();
+        store.open("file:///a.fake", 3, "old text".to_string());
+        // A client re-sending didOpen for an already-open URI starts the
+        // document over: version and text are both replaced wholesale.
+        store.open("file:///a.fake", 1, "new text".to_string());
+
+        assert_eq!(
+            store.get("file:///a.fake"),
+            Some(&Document {
+                version: 1,
+                text: "new text".to_string(),
+            })
+        );
+        // Still one entry, not two.
+        assert_eq!(store.uris(), vec!["file:///a.fake"]);
+    }
+
+    #[test]
+    fn test_uris_on_an_empty_store_is_empty() {
+        assert_eq!(DocStore::new().uris(), Vec::<String>::new());
     }
 
     #[test]

@@ -150,6 +150,8 @@ pub fn range_to_span(text: &str, range: Range) -> Span {
 /// Absolute tokens → the wire's relative-packed data array
 /// (deltaLine, deltaStartChar, length, tokenType, tokenModifiers)×N,
 /// sorted by span start; columns and lengths in UTF-16 code units.
+/// A token whose span violates the single-line contract (see
+/// [`SemToken`]) is skipped rather than encoded.
 pub fn pack_semantic_tokens(text: &str, tokens: &[SemToken]) -> Vec<u32> {
     let mut sorted: Vec<&SemToken> = tokens.iter().collect();
     sorted.sort_by_key(|token| token.span.start);
@@ -159,12 +161,18 @@ pub fn pack_semantic_tokens(text: &str, tokens: &[SemToken]) -> Vec<u32> {
     let mut prev_start = 0u32;
 
     for token in sorted {
-        debug_assert_eq!(
-            token.span.start.line, token.span.end.line,
-            "semantic token span must be single-line"
-        );
-
         let range = span_to_range(text, token.span);
+
+        // Contract (see `SemToken`): a token's span is single-line and
+        // forward. A violating span has no wire encoding — the packed
+        // format carries a single length, not an end position — and its
+        // length subtraction below would wrap in release builds,
+        // corrupting every later delta in the stream. Skip it instead:
+        // one missing token degrades to the client's static coloring.
+        if range.start.line != range.end.line || range.end.character < range.start.character {
+            continue;
+        }
+
         let line = range.start.line;
         let start = range.start.character;
         let length = range.end.character - range.start.character;
@@ -266,6 +274,42 @@ mod tests {
         // it maps to UTF-16 offset 2, not 3.
         assert_eq!(pos_to_lsp(text, pos(1, 3)), position(0, 2));
         assert_eq!(pos_from_lsp(text, position(0, 2)), pos(1, 3));
+    }
+
+    #[test]
+    fn empty_text_maps_everything_to_the_zero_position() {
+        // The empty document splits to one empty line; every input, in
+        // range or not, lands on its only valid caret position.
+        assert_eq!(pos_to_lsp("", pos(1, 1)), position(0, 0));
+        assert_eq!(pos_to_lsp("", pos(1, 99)), position(0, 0));
+        assert_eq!(pos_to_lsp("", pos(99, 99)), position(0, 0));
+        assert_eq!(pos_from_lsp("", position(0, 0)), pos(1, 1));
+        assert_eq!(pos_from_lsp("", position(0, 99)), pos(1, 1));
+        assert_eq!(pos_from_lsp("", position(99, 0)), pos(1, 1));
+    }
+
+    #[test]
+    fn trailing_newline_yields_an_addressable_empty_last_line() {
+        // "ab\n" splits to ["ab", ""]: the empty last line is a real
+        // line whose only caret position is its start.
+        let text = "ab\n";
+        assert_eq!(pos_to_lsp(text, pos(2, 1)), position(1, 0));
+        assert_eq!(pos_from_lsp(text, position(1, 0)), pos(2, 1));
+        // Past-the-end input clamps to that empty line's end — which
+        // is also its start.
+        assert_eq!(pos_to_lsp(text, pos(2, 99)), position(1, 0));
+        assert_eq!(pos_to_lsp(text, pos(99, 1)), position(1, 0));
+        assert_eq!(pos_from_lsp(text, position(1, 99)), pos(2, 1));
+        assert_eq!(pos_from_lsp(text, position(99, 0)), pos(2, 1));
+    }
+
+    #[test]
+    fn line_zero_clamps_to_the_document_start() {
+        // 0 is below the valid 1-based line range: the defensive clamp
+        // answers the document start and disregards the column.
+        assert_eq!(pos_to_lsp("abc\ndef", pos(0, 1)), position(0, 0));
+        assert_eq!(pos_to_lsp("abc\ndef", pos(0, 99)), position(0, 0));
+        assert_eq!(pos_to_lsp("", pos(0, 0)), position(0, 0));
     }
 
     #[test]
@@ -371,5 +415,36 @@ mod tests {
     #[test]
     fn empty_input_packs_to_an_empty_vec() {
         assert_eq!(pack_semantic_tokens("anything", &[]), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn contract_violating_multi_line_token_is_skipped() {
+        let text = "foo bar\nbaz";
+        let valid_1 = sem_token(Span::new(1, 1, 1, 4), 1, 2);
+        // Spans two lines: no wire encoding exists for it, and its
+        // length subtraction would wrap in release builds.
+        let violating = sem_token(Span::new(1, 5, 2, 2), 7, 8);
+        let valid_2 = sem_token(Span::new(2, 1, 2, 4), 5, 6);
+
+        // The violator is dropped and must not perturb the delta
+        // tracking of its neighbors: the output is identical to
+        // packing the two valid tokens alone.
+        let packed = pack_semantic_tokens(text, &[valid_1, violating, valid_2]);
+        assert_eq!(packed, pack_semantic_tokens(text, &[valid_1, valid_2]));
+        assert_eq!(packed, vec![0, 0, 3, 1, 2, 1, 0, 3, 5, 6]);
+    }
+
+    #[test]
+    fn contract_violating_reversed_span_is_skipped() {
+        let text = "foo bar";
+        let valid = sem_token(Span::new(1, 1, 1, 4), 1, 2);
+        // Same line but end before start: the other shape whose length
+        // subtraction would wrap.
+        let reversed = sem_token(Span::new(1, 7, 1, 5), 3, 4);
+
+        assert_eq!(
+            pack_semantic_tokens(text, &[valid, reversed]),
+            vec![0, 0, 3, 1, 2]
+        );
     }
 }

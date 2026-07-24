@@ -25,6 +25,16 @@
 //! No match — an unknown mnemonic, an immediate or vector operand, a
 //! `Func`/`Raw`/`Comment` line, a blank position — yields an empty list.
 //!
+//! # Position policy
+//!
+//! Word and operand spans are half-open — `Span.end` is one past the last
+//! character — the same spans `navigate.rs` reads. A completion context
+//! claims a token by [`crate::lsp::span_touches`]: containment PLUS the
+//! position exactly at the token's end, because a cursor that just typed the
+//! last character sits exactly there and must still complete the token it is
+//! finishing. Navigation keeps bare containment — the deliberate policy
+//! split both PM-1 services also hold.
+//!
 //! # Operand hints
 //!
 //! A mnemonic candidate's `detail` is derived from its entry's operand kind and
@@ -40,6 +50,7 @@ use mtc_core::lsp::{Candidate, CandidateKind};
 use mtc_core::vm::OperandKind;
 
 use crate::asm::tm1_syntax;
+use crate::lsp::span_touches;
 
 use super::{
     FlatItem, OperandRole, TmaDocState, doc_callable_names, doc_frames, doc_tables,
@@ -72,13 +83,13 @@ pub(super) fn completion(state: &TmaDocState, pos: Pos) -> Vec<Candidate> {
             let Some(instr) = &line.instr else {
                 return word_position_candidates(zero_span(pos));
             };
-            if pos.col <= instr.word_span.end.col {
-                let replace = if pos.col >= instr.word_span.start.col {
-                    instr.word_span
-                } else {
-                    zero_span(pos)
-                };
-                return word_position_candidates(replace);
+            if span_touches(instr.word_span, pos) {
+                return word_position_candidates(instr.word_span);
+            }
+            if pos < instr.word_span.start {
+                // Before the word even starts — on a label or in the leading
+                // indent: still instruction-word position, inserting fresh.
+                return word_position_candidates(zero_span(pos));
             }
             operand_candidates(state, instr, pos)
         }
@@ -87,7 +98,7 @@ pub(super) fn completion(state: &TmaDocState, pos: Pos) -> Vec<Candidate> {
             let replace = d
                 .operands
                 .iter()
-                .find(|o| touches(o.span, pos))
+                .find(|o| span_touches(o.span, pos))
                 .map_or_else(|| zero_span(pos), |o| o.span);
             match d.kind {
                 mtc_core::asm::cst::TableDirectiveKind::Row => Vec::new(),
@@ -98,7 +109,7 @@ pub(super) fn completion(state: &TmaDocState, pos: Pos) -> Vec<Candidate> {
             let replace = e
                 .targets
                 .iter()
-                .find(|o| touches(o.span, pos))
+                .find(|o| span_touches(o.span, pos))
                 .map_or_else(|| zero_span(pos), |o| o.span);
             code_label_candidates(&state.flat, replace)
         }
@@ -122,17 +133,14 @@ fn operand_candidates(
         .operands
         .iter()
         .enumerate()
-        .find(|(_, o)| touches(o.span, pos));
+        .find(|(_, o)| span_touches(o.span, pos));
     let (index, current) = match touched {
         Some((i, o)) => (i, Some(o)),
-        // Not on a written operand: the slot after the last one that ends
-        // before the cursor.
+        // Not on a written operand: the slot after the operands lying
+        // entirely before the cursor (half-open, `end` is already one past
+        // the token; the `end == pos` case was claimed as touched above).
         None => (
-            instr
-                .operands
-                .iter()
-                .filter(|o| o.span.end.col <= pos.col)
-                .count(),
+            instr.operands.iter().filter(|o| o.span.end <= pos).count(),
             None,
         ),
     };
@@ -149,12 +157,6 @@ fn operand_candidates(
         Some(OperandRole::Frame) => frame_candidates(state, replace),
         None => Vec::new(),
     }
-}
-
-/// Whole-token touch: the cursor inside the span or exactly at either end, so
-/// `replace_span` covers the token an in-progress edit is sitting against.
-fn touches(span: Span, pos: Pos) -> bool {
-    pos.line == span.start.line && pos.col >= span.start.col && pos.col <= span.end.col
 }
 
 fn zero_span(pos: Pos) -> Span {

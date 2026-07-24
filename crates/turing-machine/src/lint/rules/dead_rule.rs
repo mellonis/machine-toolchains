@@ -20,7 +20,15 @@
 //! rejects outright, not a silent shadow, so this rule leaves that case to the
 //! compiler. A covering rule always has at least as many wildcards as the rule
 //! it covers, so it is never in a LATER band; requiring the same band is the
-//! sound subset. Report-only.
+//! sound subset.
+//!
+//! No fix ships. A remove-the-covered-row deletion would be a pure text edit,
+//! but its safety rests on the cover analysis (band classification + per-cell
+//! superset + range resolution) being false-positive-free over ALL inputs, not
+//! merely the tested shapes. Report-only, a false positive is noise; as an
+//! autofix it would be a silent miscompile, so the fix is withheld — the
+//! unused-* deletions that DO ship one rest on trivial membership checks with
+//! no such surface. The finding still guides a hand edit.
 
 use std::collections::HashSet;
 

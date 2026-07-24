@@ -109,8 +109,9 @@ pub struct SymbolNode {
 }
 
 /// One absolute semantic token. `span` MUST be single-line (contract;
-/// the packer debug_asserts it). `token_type` indexes the legend's types;
-/// `modifiers` is a bitset over the legend's modifiers.
+/// the packer skips violating tokens rather than encoding them).
+/// `token_type` indexes the legend's types; `modifiers` is a bitset over
+/// the legend's modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemToken {
     pub span: Span,

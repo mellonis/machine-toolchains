@@ -9,7 +9,15 @@
 //! alphabet (same glyphs, same order): then every glyph sits at the same index
 //! on both sides, so a bidirectional `x -> x` is exactly what completion gives.
 //! Any subtler equal-size-but-reordered case is left unflagged — the rule
-//! under-reports rather than risk a false positive. Report-only.
+//! under-reports rather than risk a false positive.
+//!
+//! No fix ships. Unlike the assembly-side `duplicate-map-source` — whose
+//! shadowed pair is dead and whose removal is a proven object no-op — removing
+//! a redundant identity pair is NOT a byte-level no-op: the emitted binding
+//! representation differs (an explicit identity map versus the completed one),
+//! and the two diverge further under `-O1`. Behaviour is preserved by the
+//! identity-completion argument, but that is a semantic claim, not a mechanical
+//! all-inputs proof, so the removal is withheld from autofix. Report-only.
 
 use std::collections::HashMap;
 

@@ -10,6 +10,10 @@ use serde_json::json;
 
 use mtc_core::lsp::CandidateKind;
 
+// The service now drives `lint_tma_cst` (single-parse); the CLI-parity
+// tests below still compare against the source-taking `lint_tma` wrapper.
+use crate::lint::tma::lint_tma;
+
 use super::*;
 
 /// A fresh scratch directory, unique per call. This crate has no shared
@@ -229,6 +233,28 @@ fn a_project_file_suppresses_a_rule_and_the_ide_channel_unions_with_it() {
     // project file's own suppression standing.
     service.did_change_config(json!({"lint": {"allow": ["line-too-long"]}}));
     assert!(service.did_update(&uri, DEAD_CODE).is_empty());
+}
+
+#[test]
+fn config_cache_stays_bounded_across_many_distinct_project_roots() {
+    // More distinct `tmt.json` roots than the eviction bound, so an
+    // unbounded cache would visibly outgrow it (docs/lsp.md
+    // (configuration)). Mirrors the `.tmc` service's own bound test —
+    // `TmaLanguageService` keeps a separate `config_cache` field, so the
+    // eviction shared through `ConfigResolver::project_allow` needs
+    // proving on this side too.
+    let mut service = TmaLanguageService::new();
+    for i in 0..(super::super::CONFIG_CACHE_LIMIT + 8) {
+        let dir = unique_tmp_dir(&format!("cache-bound-{i}"));
+        fs::write(dir.join("tmt.json"), "{}").unwrap();
+        let uri = file_uri(&dir.join("prog.tma"));
+        service.did_update(&uri, DEAD_CODE);
+    }
+    assert!(
+        service.config_cache.len() <= super::super::CONFIG_CACHE_LIMIT,
+        "cache grew past its bound: {} entries",
+        service.config_cache.len()
+    );
 }
 
 #[test]
@@ -799,6 +825,160 @@ fn a_row_operand_offers_nothing() {
     // A `.row` carries a symbol vector, not a name.
     let mut service = opened(FULL);
     assert!(service.completion(URI, Pos { line: 4, col: 12 }).is_empty());
+}
+
+// ---- the span boundary: half-open spans, end-touch completions ----
+//
+// Operand and word spans are half-open — `Span.end` is one past the last
+// character. Navigation reads bare containment (the cursor must sit ON the
+// reference), while completion deliberately widens each token by exactly its
+// end position, because a cursor that just typed the last character sits
+// there — the same policy pair the PM-1 services hold. These tests pin every
+// boundary so a future edit cannot move one silently.
+
+#[test]
+fn completion_claims_an_operand_with_the_cursor_exactly_at_its_end() {
+    // `helper` spans (15,17)-(15,23) half-open: col 23 is one past the final
+    // `r`, exactly where the cursor sits after typing it.
+    let mut service = opened(FULL);
+
+    let callees = service.completion(URI, Pos { line: 15, col: 23 });
+    assert_eq!(labels(&callees), vec!["helper", "main"]);
+    assert!(
+        callees
+            .iter()
+            .all(|c| c.replace_span == Span::new(15, 17, 15, 23)),
+        "{callees:?}"
+    );
+
+    // The same rule on the other two operand consumers: a dispatch entry
+    // (`hit` in `.targets`) and an exit target (`done` in `.exits`).
+    let dispatch = service.completion(URI, Pos { line: 6, col: 17 });
+    assert!(labels(&dispatch).contains(&"miss".to_string()));
+    assert!(
+        dispatch
+            .iter()
+            .all(|c| c.replace_span == Span::new(6, 14, 6, 17)),
+        "{dispatch:?}"
+    );
+
+    let exits = service.completion(URI, Pos { line: 9, col: 16 });
+    assert!(labels(&exits).contains(&"other".to_string()));
+    assert!(
+        exits
+            .iter()
+            .all(|c| c.replace_span == Span::new(9, 12, 9, 16)),
+        "{exits:?}"
+    );
+}
+
+#[test]
+fn every_position_across_an_operand_boundary_resolves_to_exactly_one_slot() {
+    // `call.m  helper, F0`: `helper` ends (half-open) at col 23 — the comma —
+    // and `F0` starts at col 25. Walking the cursor across the gap, each
+    // position lands in exactly one context, so adjacent operands never
+    // double-claim a position.
+    let mut service = opened(FULL);
+
+    let at_end = service.completion(URI, Pos { line: 15, col: 23 });
+    assert_eq!(
+        labels(&at_end),
+        vec!["helper", "main"],
+        "still the callable"
+    );
+
+    let between = service.completion(URI, Pos { line: 15, col: 24 });
+    assert_eq!(labels(&between), vec!["F0"], "the NEXT slot: frames");
+    assert!(
+        between
+            .iter()
+            .all(|c| c.replace_span == Span::new(15, 24, 15, 24)),
+        "inserts fresh at the cursor, replaces nothing: {between:?}"
+    );
+
+    // Exactly at `F0`'s own start: the operand itself, whole-token replace.
+    let at_start = service.completion(URI, Pos { line: 15, col: 25 });
+    assert_eq!(labels(&at_start), vec!["F0"]);
+    assert!(
+        at_start
+            .iter()
+            .all(|c| c.replace_span == Span::new(15, 25, 15, 27)),
+        "{at_start:?}"
+    );
+}
+
+#[test]
+fn the_instruction_words_own_end_is_still_word_position() {
+    // `mtc` spans (13,9)-(13,12): col 12 is one past the `c` — still the
+    // word, so the mnemonic list answers there, replacing the whole word.
+    // One further right the operand contexts take over.
+    let mut service = opened(FULL);
+
+    let at_word_end = service.completion(URI, Pos { line: 13, col: 12 });
+    assert!(labels(&at_word_end).contains(&"mtc".to_string()));
+    assert!(
+        at_word_end
+            .iter()
+            .all(|c| c.kind == CandidateKind::Keyword && c.replace_span == Span::new(13, 9, 13, 12)),
+        "{at_word_end:?}"
+    );
+
+    let past_word = service.completion(URI, Pos { line: 13, col: 13 });
+    assert_eq!(
+        labels(&past_word),
+        vec!["T0", "D0"],
+        "one past the word: the table operand slot"
+    );
+}
+
+#[test]
+fn an_operand_at_line_end_completes_at_the_final_column() {
+    // `F0` is the last token on its line: col 27 is one past the `0` AND one
+    // past the line's own end — the position a cursor holds right after
+    // typing the operand at EOL.
+    let mut service = opened(FULL);
+    let frames = service.completion(URI, Pos { line: 15, col: 27 });
+    assert_eq!(labels(&frames), vec!["F0"]);
+    assert!(
+        frames
+            .iter()
+            .all(|c| c.replace_span == Span::new(15, 25, 15, 27)),
+        "{frames:?}"
+    );
+}
+
+#[test]
+fn navigation_requires_the_cursor_on_the_reference_itself() {
+    // Bare half-open containment: the first character resolves, the last
+    // character resolves, one past the last does not — the cursor is then
+    // between the operand and whatever follows, on no reference at all.
+    let mut service = opened(FULL);
+
+    let at_start = service
+        .definition(URI, Pos { line: 15, col: 17 })
+        .expect("on the `h` of `helper`");
+    assert_eq!(at_start.span, helper_func_name());
+    let at_last = service
+        .definition(URI, Pos { line: 15, col: 22 })
+        .expect("on the final `r` of `helper`");
+    assert_eq!(at_last.span, helper_func_name());
+    assert_eq!(
+        service.definition(URI, Pos { line: 15, col: 23 }),
+        None,
+        "one past `helper` — the comma"
+    );
+
+    // The same rule on the table-section consumers.
+    assert_eq!(
+        service.definition(URI, Pos { line: 6, col: 17 }),
+        None,
+        "one past the `hit` dispatch entry"
+    );
+    assert_eq!(
+        service.definition(URI, Pos { line: 9, col: 16 }),
+        None,
+        "one past the `done` exit target"
+    );
 }
 
 // ---- semantic tokens ----

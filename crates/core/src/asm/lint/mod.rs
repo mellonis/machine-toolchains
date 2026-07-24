@@ -6,7 +6,7 @@ pub(crate) mod rules;
 
 use super::cst::{AsmCst, parse_asm_cst_with};
 use super::lower::{SourceFunction, SourceTable, lower_source};
-use super::{ArchSyntax, AsmError, assemble};
+use super::{ArchSyntax, AsmError, assemble_lowered};
 use crate::diagnostics::Diagnostic;
 
 /// Everything a rule may read. Rules never mutate the program.
@@ -50,18 +50,37 @@ pub fn lint(
     allow: &[String],
 ) -> Result<Vec<Diagnostic>, AsmError> {
     // Parse under the dialect's caps, matching `assemble` (identical to
-    // the default parse for every cap-off dialect).
+    // the default parse for every cap-off dialect), then run the shared
+    // body — a single parse+lower for both the gate and the rule context.
     let cst = parse_asm_cst_with(source, syntax.caps);
+    lint_cst(syntax, source, &cst, allow)
+}
+
+/// [`lint`] over an already-parsed CST. A caller that has parsed the
+/// source once — the `.pma`/`.tma` language services parse the CST for
+/// their document state — passes it here to lint without a re-parse
+/// (docs/core.md (assembly lint)). The CST MUST have been parsed under
+/// `syntax.caps` (`parse_asm_cst_with(source, syntax.caps)`); a mismatch
+/// would lower a differently-shaped CST. Byte-identical findings and
+/// fatals to [`lint`] on the same source.
+pub fn lint_cst(
+    syntax: &ArchSyntax,
+    source: &str,
+    cst: &AsmCst,
+    allow: &[String],
+) -> Result<Vec<Diagnostic>, AsmError> {
     // `lower_source` (not the functions-only `lower`) so the rules can
     // reach the tables — the code-label references TM-1 keeps in the
     // lowered table section. Cap-off dialects lower no tables, so this is
-    // an empty slice there.
-    let lowered = lower_source(&cst, syntax, source)?;
-    assemble(syntax, 0, source, false)?;
+    // an empty slice there. The lowering feeds BOTH the fatal gate and
+    // the rule context: `assemble_lowered` reuses this one lower rather
+    // than re-parsing + re-lowering the source as a full `assemble` would.
+    let lowered = lower_source(cst, syntax, source)?;
+    assemble_lowered(syntax, 0, &lowered, false)?;
 
     let ctx = AsmLintContext {
         source,
-        cst: &cst,
+        cst,
         functions: &lowered.functions,
         tables: &lowered.tables,
         syntax,
@@ -196,6 +215,32 @@ mod tests {
         let syntax = debugger_syntax();
         let report = lint(&syntax, ".func f\n        dbg\n        stop\n", &[]).unwrap();
         assert!(report.iter().any(|d| d.code == "leftover-debugger"));
+    }
+
+    #[test]
+    fn lint_cst_matches_lint_on_the_same_source() {
+        // The CST-consuming entry produces byte-identical findings AND
+        // fatals to `lint` — it runs the same rules over the same fatal
+        // gate, reusing the one parse the caller supplies (docs/core.md
+        // (assembly lint)). This cannot compile unless `lint_cst` exists,
+        // so it doubles as the single-parse proof.
+        let syntax = test_syntax();
+
+        // Findings path: an unused label plus dead code.
+        let src = ".func f\nUNUSED: nop\n        stop\n        nop\n";
+        let cst = parse_asm_cst_with(src, syntax.caps);
+        assert_eq!(
+            lint_cst(&syntax, src, &cst, &[]).unwrap(),
+            lint(&syntax, src, &[]).unwrap(),
+        );
+
+        // Fatal-gate path: an unknown mnemonic refuses the file identically.
+        let bad = ".func f\n        bogus\n";
+        let cst = parse_asm_cst_with(bad, syntax.caps);
+        assert_eq!(
+            lint_cst(&syntax, bad, &cst, &[]).unwrap_err(),
+            lint(&syntax, bad, &[]).unwrap_err(),
+        );
     }
 
     #[test]
