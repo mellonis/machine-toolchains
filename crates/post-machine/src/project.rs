@@ -4,8 +4,6 @@
 //! WHOLE file (both sections) regardless of consumer, so the lint walk
 //! and the project walk can never disagree about well-formedness.
 
-#![allow(dead_code)] // remove in Task 2, once the loader consumes these types.
-
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
@@ -71,6 +69,10 @@ pub(crate) struct RunSpec {
 /// `--release` = `-O1 --strip-debugger`); `resolve` layers the
 /// manifest's per-key overrides on the preset base. Flags override the
 /// result at the driver (flags win — cli/driver.rs).
+// Consumed by the manifest-driven build driver, which resolves a
+// target's profile before invoking the compiler; no non-test caller
+// exists until that driver lands.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ResolvedProfile {
     pub opt_level: OptLevel,
@@ -80,6 +82,8 @@ pub(crate) struct ResolvedProfile {
 }
 
 impl Profiles {
+    // See the `ResolvedProfile` note above: same build-driver consumer.
+    #[allow(dead_code)]
     pub(crate) fn resolve(&self, release: bool) -> ResolvedProfile {
         let (base, over) = if release {
             (
@@ -120,6 +124,10 @@ impl Manifest {
             .collect()
     }
 
+    // Consumed by the build driver, which resolves a target's effective
+    // library list (dirs to search, names to link) before invoking the
+    // linker; no non-test caller exists until that driver lands.
+    #[allow(dead_code)]
     pub(crate) fn effective_libraries(&self, target: &Target) -> Libraries {
         Libraries {
             dirs: self
@@ -475,14 +483,188 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
     Ok(manifest)
 }
 
+/// A whole validated `pmt.json`: the lint allow-list plus the optional
+/// project manifest. THE one loader — both consumers (lint config, the
+/// project model) validate everything so a typo in either section
+/// surfaces no matter who reads the file first.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PmtFile {
+    pub allow: Vec<String>,
+    pub manifest: Option<Manifest>,
+}
+
+pub(crate) fn load_file(path: &Path) -> Result<PmtFile, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        message: format!("invalid JSON: {e}"),
+    })?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| parse_err(path, "top-level value must be a JSON object"))?;
+
+    let mut file = PmtFile {
+        allow: Vec::new(),
+        manifest: None,
+    };
+    for (key, val) in root {
+        match key.as_str() {
+            "lint" => file.allow = parse_lint(path, val)?,
+            "project" => file.manifest = Some(validate_manifest(path, val)?),
+            other => return Err(unknown_key(path, other)),
+        }
+    }
+    Ok(file)
+}
+
+/// The lint section walk, moved verbatim from `config::load` (which now
+/// delegates here): `lint.allow` only, entries validated against the
+/// rule catalog.
+fn parse_lint(path: &Path, value: &Value) -> Result<Vec<String>, ConfigError> {
+    let lint_obj = as_obj(path, value, "lint")?;
+    let mut allow: Vec<String> = Vec::new();
+    for (lkey, lval) in lint_obj {
+        if lkey != "allow" {
+            return Err(unknown_key(path, lkey));
+        }
+        allow = as_str_array(path, lval, "lint.allow")?;
+    }
+    match crate::lint::validate_allow(&allow) {
+        Ok(()) => {}
+        Err(crate::lint::LintError::UnknownAllowCode(code)) => {
+            return Err(ConfigError::UnknownAllowCode {
+                path: path.to_path_buf(),
+                code,
+            });
+        }
+        Err(other) => unreachable!("validate_allow only ever returns UnknownAllowCode: {other}"),
+    }
+    Ok(allow)
+}
+
+/// Nearest ancestor `pmt.json` that HAS a `project` section — the
+/// per-section discovery rule (docs/pmt/project.md (discovery)): a
+/// lint-only file on the walk is transparent to THIS walk (while
+/// `config::discover` still stops at it for lint). A malformed
+/// candidate is an error, not a skip: we cannot know whether it had a
+/// project section.
+// The project-side discovery entry point; the build driver (and later
+// the LSP) is its first non-test caller.
+#[allow(dead_code)]
+pub(crate) fn discover_manifest(start: &Path) -> Result<Option<(PathBuf, Manifest)>, ConfigError> {
+    let start = if start.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        start
+    };
+    let Ok(abs) = std::path::absolute(start) else {
+        return Ok(None);
+    };
+    let mut dir = Some(abs.as_path());
+    while let Some(d) = dir {
+        let candidate = d.join("pmt.json");
+        if candidate.is_file() {
+            let file = load_file(&candidate)?;
+            if let Some(manifest) = file.manifest {
+                return Ok(Some((candidate, manifest)));
+            }
+        }
+        dir = d.parent();
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn v(path_json: serde_json::Value) -> Result<Manifest, crate::config::ConfigError> {
         validate_manifest(Path::new("/x/pmt.json"), &path_json)
+    }
+
+    /// A fresh scratch directory under `std::env::temp_dir()`, unique per
+    /// call (process id + an atomic counter — this crate has no tempfile
+    /// dependency, matching the zero-new-deps constraint). Mirrors
+    /// `config::tests::unique_tmp_dir`, local to this file per this
+    /// crate's no-shared-test-support convention.
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pmt-project-test-{label}-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn discover_manifest_skips_lint_only_files_but_lint_walk_stops_at_them() {
+        let root = unique_tmp_dir("per-section");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            root.join("pmt.json"),
+            r#"{ "project": { "targets": { "app": { "sources": ["m.pmc"] } } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sub.join("pmt.json"),
+            r#"{ "lint": { "allow": ["unused-label"] } }"#,
+        )
+        .unwrap();
+
+        // Project walk: the nested lint-only file is transparent.
+        let (found, manifest) = discover_manifest(&sub).unwrap().expect("project above");
+        assert_eq!(found, root.join("pmt.json"));
+        assert!(manifest.targets.contains_key("app"));
+
+        // Lint walk: unchanged — nearest file wins, even lint-only.
+        assert_eq!(crate::config::discover(&sub), Some(sub.join("pmt.json")));
+    }
+
+    #[test]
+    fn one_loader_a_broken_project_section_fails_the_lint_load_too() {
+        let dir = unique_tmp_dir("one-loader");
+        let path = dir.join("pmt.json");
+        std::fs::write(
+            &path,
+            r#"{ "lint": { "allow": [] }, "project": { "targets": {} } }"#,
+        )
+        .unwrap();
+        assert!(
+            crate::config::load(&path).is_err(),
+            "empty targets must fail even for lint"
+        );
+        assert!(load_file(&path).is_err());
+    }
+
+    #[test]
+    fn load_file_reads_both_sections() {
+        let dir = unique_tmp_dir("both");
+        let path = dir.join("pmt.json");
+        std::fs::write(
+            &path,
+            r#"{ "lint": { "allow": ["unused-label"] },
+                "project": { "targets": { "app": { "sources": ["m.pmc"] } } } }"#,
+        )
+        .unwrap();
+        let file = load_file(&path).unwrap();
+        assert_eq!(file.allow, vec!["unused-label".to_string()]);
+        assert!(file.manifest.is_some());
+    }
+
+    #[test]
+    fn discover_manifest_errors_on_a_malformed_candidate() {
+        let dir = unique_tmp_dir("malformed-walk");
+        std::fs::write(dir.join("pmt.json"), "{").unwrap();
+        assert!(discover_manifest(&dir).is_err());
     }
 
     #[test]

@@ -1,20 +1,16 @@
 //! Project configuration: `pmt.json`, the toolchain's first (deliberately
 //! tiny) project file (docs/pmt/lint.md (project file)).
 //!
-//! Validation is a manual [`serde_json::Value`] walk rather than
-//! `#[serde(deny_unknown_fields)]`: a derive-based reject gives one
-//! generic "unknown field" error for the whole document, while a typo in
-//! a hand-authored config file deserves a precise "unknown key `X` at
-//! `lint`" pointing at exactly the offending key. The schema itself is
-//! intentionally tiny — today, `lint.allow` and nothing else — so the
-//! manual walk stays a handful of match arms, not a maintenance burden.
+//! [`load`] delegates to [`crate::project::load_file`], the one loader
+//! for the whole file (docs/pmt/project.md (one loader)): a manual
+//! [`serde_json::Value`] walk rather than `#[serde(deny_unknown_fields)]`,
+//! since a derive-based reject gives one generic "unknown field" error
+//! for the whole document, while a typo in a hand-authored config file
+//! deserves a precise "unknown key `X` at `lint`" pointing at exactly the
+//! offending key. This module keeps the lint-only view (`ProjectConfig`),
+//! `ConfigError`, and the nearest-ancestor `discover` walk.
 
-use std::fs;
 use std::path::{Path, PathBuf};
-
-use serde_json::Value;
-
-use crate::lint::{self, LintError};
 
 /// The parsed, validated contents of a `pmt.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,9 +53,6 @@ pub(crate) enum ConfigError {
     /// path, colliding target outputs, bad target name, `tape` and
     /// `tape-block` together, an unknown profile name, ... The message
     /// is complete on its own.
-    // Constructed by `project::validate_manifest`; that function has no
-    // caller of its own until the loader (manifest plan 1, Task 2).
-    #[allow(dead_code)]
     Invalid { path: PathBuf, message: String },
 }
 
@@ -160,65 +153,14 @@ fn discover_from(start: &Path) -> Option<PathBuf> {
 /// valid (an empty allow-list) — a `pmt.json` need not set anything to
 /// be worth discovering, e.g. one that exists purely to mark a subtree
 /// root.
+///
+/// Delegates to [`crate::project::load_file`], the one loader for the
+/// whole file (docs/pmt/project.md (one loader)): it validates BOTH the
+/// `lint` and `project` sections regardless of which one this caller
+/// actually wants, so a typo in either section is caught no matter which
+/// consumer reads the file first.
 pub(crate) fn load(path: &Path) -> Result<ProjectConfig, ConfigError> {
-    let text = fs::read_to_string(path).map_err(|e| ConfigError::Io {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
-    let value: Value = serde_json::from_str(&text).map_err(|e| ConfigError::Parse {
-        path: path.to_path_buf(),
-        message: format!("invalid JSON: {e}"),
-    })?;
-    let root = value.as_object().ok_or_else(|| ConfigError::Parse {
-        path: path.to_path_buf(),
-        message: "top-level value must be a JSON object".to_string(),
-    })?;
-
-    let mut allow: Vec<String> = Vec::new();
-    for (key, val) in root {
-        if key != "lint" {
-            return Err(ConfigError::UnknownKey {
-                path: path.to_path_buf(),
-                key: key.clone(),
-            });
-        }
-        let lint_obj = val.as_object().ok_or_else(|| ConfigError::Parse {
-            path: path.to_path_buf(),
-            message: "`lint` must be a JSON object".to_string(),
-        })?;
-        for (lkey, lval) in lint_obj {
-            if lkey != "allow" {
-                return Err(ConfigError::UnknownKey {
-                    path: path.to_path_buf(),
-                    key: lkey.clone(),
-                });
-            }
-            let arr = lval.as_array().ok_or_else(|| ConfigError::Parse {
-                path: path.to_path_buf(),
-                message: "`lint.allow` must be an array of strings".to_string(),
-            })?;
-            for item in arr {
-                let s = item.as_str().ok_or_else(|| ConfigError::Parse {
-                    path: path.to_path_buf(),
-                    message: "`lint.allow` must be an array of strings".to_string(),
-                })?;
-                allow.push(s.to_string());
-            }
-        }
-    }
-
-    match lint::validate_allow(&allow) {
-        Ok(()) => {}
-        Err(LintError::UnknownAllowCode(code)) => {
-            return Err(ConfigError::UnknownAllowCode {
-                path: path.to_path_buf(),
-                code,
-            });
-        }
-        Err(other) => unreachable!("validate_allow only ever returns UnknownAllowCode: {other}"),
-    }
-
-    Ok(ProjectConfig { allow })
+    crate::project::load_file(path).map(|file| ProjectConfig { allow: file.allow })
 }
 
 #[cfg(test)]
@@ -226,6 +168,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use std::fs;
 
     /// A fresh scratch directory under `std::env::temp_dir()`, unique per
     /// call (process id + an atomic counter — this crate has no tempfile
