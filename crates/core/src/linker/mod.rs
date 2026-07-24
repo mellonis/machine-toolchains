@@ -131,9 +131,8 @@ impl std::fmt::Display for LinkError {
             ),
             Self::MonoRawFrame(symbol) => write!(
                 f,
-                "`{symbol}` uses a raw framed call, which the mono call \
-                 mechanism cannot lower onto the base profile; build with \
-                 --call-mech=frames"
+                "`{symbol}` uses a raw framed call, which cannot be lowered \
+                 onto the base profile; build with --call-mech=frames"
             ),
             Self::MonoHoleyMatchBranch(symbol) => write!(
                 f,
