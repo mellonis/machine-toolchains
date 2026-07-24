@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use mtc_core::diagnostics::{Diagnostic, Edit, Pos};
 use mtc_turing_machine::cli::execute;
@@ -56,8 +57,21 @@ fn apply_fix(src: &str, edits: &[Edit]) -> String {
     out
 }
 
+/// A fresh, per-call fixture directory under `CARGO_TARGET_TMPDIR`, named
+/// uniquely by process id + an atomic counter (mirrors `config::tests::
+/// unique_tmp_dir` in this crate). `tmt.json` discovery walks upward from a
+/// linted file's own directory toward the filesystem root, so two
+/// concurrently running `cargo test` invocations sharing the same
+/// `CARGO_TARGET_TMPDIR` must never resolve `scratch` to the same directory
+/// — otherwise one process's `tmt.json` fixture can be discovered (or
+/// clobbered mid-write) by another process's lint run walking the same
+/// path. A bare per-test-name subdirectory is not unique across processes,
+/// only across call sites within one process.
 fn scratch(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("lint-{name}"));
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lint-{name}-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
