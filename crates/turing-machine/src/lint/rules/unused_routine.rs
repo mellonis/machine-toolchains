@@ -9,13 +9,20 @@
 //! never called. That is a deliberate over-approximation of use: it can only
 //! MISS an unused routine, never invent one (the unused bind fires
 //! `unused-binding` in its own right), which keeps the rule false-positive-free.
+//!
+//! The fix deletes the whole declaration — leading doc/attention run included
+//! (an orphaned `?`/`!` run is a parse error). A local routine nothing calls
+//! contributes no reachable states, so removing it is a source-only change
+//! (`MaybeIncorrect`); the reference scan over-approximates, so a firing is a
+//! provably uncalled routine.
 
 use std::collections::HashSet;
 
-use mtc_core::diagnostics::Diagnostic;
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::{ResolvedCallTarget, WorldKind};
 use crate::lint::LintContext;
+use crate::lint::rules::spans::braced_world_decl_span;
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     let mut referenced: HashSet<&str> = HashSet::new();
@@ -35,11 +42,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             && world.local
             && !referenced.contains(world.name.as_str())
         {
+            let fix =
+                braced_world_decl_span(ctx.tokens, world.name_span, "routine").map(|span| Fix {
+                    description: format!("delete the unused routine `{}`", world.name),
+                    applicability: Applicability::MaybeIncorrect,
+                    edits: vec![Edit {
+                        span,
+                        replacement: String::new(),
+                    }],
+                });
             out.push(Diagnostic {
                 code: "unused-routine",
                 span: world.name_span,
                 message: format!("routine `{}` is never called", world.name),
-                fix: None,
+                fix,
             });
         }
     }

@@ -2,13 +2,20 @@
 //! world ever targets. New on the lint channel (the deferred hygiene family).
 //! A bind is world-local — only a `call N(…)` inside its own world can reach
 //! it — so the reference scan is scoped to the declaring world's calls.
+//!
+//! The fix deletes the whole `bind … ;` statement — leading doc/attention run
+//! included (an orphaned `?`/`!` run is a parse error). An uncalled bind names
+//! no call target, so removing it is a source-only change (`MaybeIncorrect`);
+//! the target routine, if now unreferenced, becomes its own `unused-routine`
+//! finding rather than an error.
 
 use std::collections::HashSet;
 
-use mtc_core::diagnostics::Diagnostic;
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::ResolvedCallTarget;
 use crate::lint::LintContext;
+use crate::lint::rules::spans::reuse_statement_span;
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     for world in &ctx.resolved.worlds {
@@ -22,11 +29,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
             .collect();
         for bind in &world.binds {
             if !called.contains(bind.name.as_str()) {
+                let fix =
+                    reuse_statement_span(ctx.tokens, bind.target_span, "bind").map(|span| Fix {
+                        description: format!("delete the unused bind `{}`", bind.name),
+                        applicability: Applicability::MaybeIncorrect,
+                        edits: vec![Edit {
+                            span,
+                            replacement: String::new(),
+                        }],
+                    });
                 out.push(Diagnostic {
                     code: "unused-binding",
                     span: bind.span,
                     message: format!("bind `{}` is never called", bind.name),
-                    fix: None,
+                    fix,
                 });
             }
         }

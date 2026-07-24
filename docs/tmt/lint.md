@@ -86,12 +86,21 @@ and an un-stripped `brk` is an optimizer observability barrier that no
 pass may move code across — so shipping one does not merely leave a
 debugging aid in the binary, it pessimizes `-O1` output around it.
 
+The fix removes just the `debugger` keyword. Because a `brk` is a no-op in
+a plain run, that is behaviour-preserving. It is offered only when the rule
+keeps another action or an explicit transition: a rule whose sole action is
+`debugger` (`… -> debugger;`) would become `… -> ;`, a parse error, and gets
+no fix.
+
 ### unused-import
 
 A `use` binding nothing references. Re-exposed from the compile channel
 so the shared allow-list covers it: an import that resolves to nothing
 used is dead weight in the module's namespace and a common leftover
 after a refactor.
+
+`fix: None` — the finding is re-exposed verbatim from the compile channel,
+which offers no fix, so there is no lint-only rewrite to attach here.
 
 ### unused-routine
 
@@ -102,6 +111,10 @@ itself never called — a deliberate over-approximation, so the rule can
 miss a dead routine but never invent one (the dead bind is
 `unused-binding`'s finding in its own right).
 
+The fix deletes the whole declaration, its leading doc/attention run
+included — an uncalled routine contributes no reachable states, so removal
+is a source-only change.
+
 ### unused-graph
 
 A non-exported `graph` no `graft` names anywhere in the module.
@@ -109,12 +122,19 @@ Exported graphs are library API and are never flagged. A graph that
 nothing grafts contributes no states to any world — it is source that
 compiles to nothing.
 
+The fix deletes the whole declaration, its leading doc/attention run
+included.
+
 ### unused-binding
 
 A `bind … as N` whose name no `call` in the same world targets. A bind
 is world-local, so only a `call N(…)` inside its own world could reach
 it; if none does, the binding's whole point — giving a routine a
 call-able name under a symbol map — has no consumer.
+
+The fix deletes the whole `bind … ;` statement (doc run included). If that
+leaves the target routine uncalled, it surfaces as its own `unused-routine`
+finding, never an error.
 
 ### unused-graft-instance
 
@@ -131,6 +151,11 @@ through rather than flag a live one.
 ```
 b.tmc:13:3: lint: graft instance `deadSplice` is never used
 ```
+
+The fix deletes the whole `graft … ;` statement (doc run included). The
+instance's spliced states go with it — they were unreachable — and any
+state its exits named that nothing else reaches is left as a legal orphan,
+not an error.
 
 ### unused-graft-name
 
@@ -215,6 +240,9 @@ b.tmc:15:14: lint: call to deprecated `oldHelper`: use newHelper instead
 Only locally-defined targets are checked — an imported target's doc map
 is not this module's, so its deprecation cannot be seen from here.
 
+`fix: None` — "stop using this" has no single mechanical rewrite; the
+replacement is the author's call.
+
 ### dead-rule
 
 Within one state, a rule an earlier rule in the **same dispatch band**
@@ -242,6 +270,13 @@ the compile channel because compilation must be total and honest even when
 lint never runs; `dead-rule` is the fuller same-band-cover analysis, done
 only at lint time.
 
+`fix: None` — a remove-the-covered-row deletion would be pure text, but its
+safety rests on the cover analysis (band classification, per-cell superset,
+range resolution) being free of false positives over every input, not just
+the tested shapes. As a report a false positive is noise; as an autofix it
+would be a silent miscompile, so the fix is withheld. The finding still
+guides a hand edit.
+
 ### redundant-identity-pairs
 
 A `with map { x -> x }` bidirectional pair that identity completion
@@ -259,6 +294,14 @@ would be advice to break a working program.
 ```
 e.tmc:9:41: lint: identity pair `0 -> 0` is redundant — an identity mapping already supplies it
 ```
+
+`fix: None` — unlike the `.tma` `duplicate-map-source`, whose shadowed pair
+is dead and whose removal is a proven object no-op, removing a redundant
+identity pair is not a byte-level no-op: the emitted binding differs (an
+explicit identity map versus the completed one), and the two diverge further
+under `-O1`. Behaviour is preserved by identity completion, but that is a
+semantic argument, not a mechanical proof, so the removal is withheld from
+autofix.
 
 ### binding-product-threshold
 
@@ -278,6 +321,9 @@ always agree.
 ```
 d.tmc:7:5: lint: rule expands to 343 match rows (over 256) — the binding product is large
 ```
+
+`fix: None` — the report flags a size to be aware of, not a defect with one
+correct edit; shrinking the product is a design choice.
 
 ### writes-through-collapse
 
@@ -303,6 +349,9 @@ The rule fires only on a literal write the local callee provably makes
 at the bound tape's position; a computed write, or an external callee
 whose body is unseen, is skipped.
 
+`fix: None` — the right repair (drop the `=>`, rewrite the map, or move the
+write) depends on what the author meant, which the tool cannot guess.
+
 ### state-may-trap (opt-in)
 
 A state whose rules leave some input unmatched and that has no
@@ -322,6 +371,9 @@ whose product is too large to enumerate cheaply, is skipped rather than
 guessed at. Every path errs toward silence. It is opt-in not because it
 is unreliable but because partial states are a normal way to write this
 language, and on a real program the rule has a great deal to say.
+
+`fix: None` — closing the gap means choosing the intended behaviour for the
+uncovered inputs (a catch-all, more rules), which the tool cannot supply.
 
 ### index-identity-map (opt-in)
 

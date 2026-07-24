@@ -8,6 +8,7 @@ pub(crate) mod deprecated_call;
 pub(crate) mod index_identity_map;
 pub(crate) mod leftover_debugger;
 pub(crate) mod redundant_identity_pairs;
+pub(crate) mod spans;
 pub(crate) mod state_may_trap;
 pub(crate) mod unused_alphabet;
 pub(crate) mod unused_binding;

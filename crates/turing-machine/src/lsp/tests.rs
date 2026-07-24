@@ -996,9 +996,9 @@ machine {
 
 #[test]
 fn a_lint_finding_that_carries_a_fix_becomes_an_action() {
-    // No `.tmc` lint rule ships a `Fix` yet, so this exercises the
-    // conversion itself rather than any one rule: the day a rule gains a
-    // fix, it reaches the client through exactly this path.
+    // A synthetic finding exercises the fix->action conversion in isolation,
+    // independent of which real rules ship a `Fix`: every rule that carries
+    // one reaches the client through exactly this path.
     let finding = Diagnostic {
         code: "dead-rule",
         span: Span::new(4, 3, 4, 9),

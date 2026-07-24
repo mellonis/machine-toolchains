@@ -3,13 +3,20 @@
 //! here (the deferred hygiene family landing on the lint channel). Detected
 //! source-level over `Resolved`; exported graphs are library API and are never
 //! flagged.
+//!
+//! The fix deletes the whole declaration — its leading doc/attention run
+//! included, since an orphaned `?`/`!` run is a parse error. A local graph
+//! nothing grafts compiles to nothing already, so removing it is a source-only
+//! change (`MaybeIncorrect`); the reference scan over-approximates, so a firing
+//! is a provably ungrafted graph.
 
 use std::collections::HashSet;
 
-use mtc_core::diagnostics::Diagnostic;
+use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix};
 
 use crate::compiler::WorldKind;
 use crate::lint::LintContext;
+use crate::lint::rules::spans::braced_world_decl_span;
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
     let mut grafted: HashSet<&str> = HashSet::new();
@@ -21,11 +28,20 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
 
     for world in &ctx.resolved.worlds {
         if world.kind == WorldKind::Graph && world.local && !grafted.contains(world.name.as_str()) {
+            let fix =
+                braced_world_decl_span(ctx.tokens, world.name_span, "graph").map(|span| Fix {
+                    description: format!("delete the unused graph `{}`", world.name),
+                    applicability: Applicability::MaybeIncorrect,
+                    edits: vec![Edit {
+                        span,
+                        replacement: String::new(),
+                    }],
+                });
             out.push(Diagnostic {
                 code: "unused-graph",
                 span: world.name_span,
                 message: format!("graph `{}` is never grafted", world.name),
-                fix: None,
+                fix,
             });
         }
     }
