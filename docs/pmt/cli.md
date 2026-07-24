@@ -17,6 +17,7 @@ SUBCOMMANDS:
   compile      .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
   asm          .pma assembly -> .pmo object
   link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
+  build        compile+link driver: .pmc/.pma/.pmo inputs or manifest targets
   lint         lint .pmc/.pma sources (hygiene findings; docs/pmt/lint.md)
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
