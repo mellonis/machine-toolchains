@@ -11,18 +11,10 @@ use mtc_core::lsp::DefTarget;
 
 use crate::compiler::{Analysis, Resolution};
 use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
-use crate::parser::{CheckArm, Item, Successor};
 use crate::stdlib::{materialized_std_uri, roster};
 
 use super::DocState;
-
-/// Half-open span containment, 1-based. `Pos`'s derived `Ord` compares
-/// `line` then `col` (its field order) — exactly a lexicographic
-/// position comparison — so this is correct for a multi-line span with
-/// no special-casing.
-fn span_contains(span: Span, pos: Pos) -> bool {
-    pos >= span.start && pos < span.end
-}
+use super::walk::{enclosing_function_chain, function_labels, label_refs, span_contains};
 
 /// Step 1's shared scan — the ONE place a position is hit-tested
 /// against the resolution table: the entry whose call-site span
@@ -58,7 +50,7 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
 
     let cst = state.cst.as_ref()?;
 
-    if let Some(function) = innermost_function(&cst.items, pos)
+    if let Some(function) = enclosing_function_chain(&cst.items, pos).pop()
         && let Some((value, origin)) = label_reference_at(function, pos)
     {
         return label_span(function, value).map(|span| DefTarget {
@@ -132,100 +124,23 @@ fn std_target(full_path: &str, origin: Span) -> Option<DefTarget> {
     })
 }
 
-/// The innermost `FunctionCst` whose extent span contains `pos` — walks
-/// namespace blocks, then descends into `BodyKind::Nested` functions as
-/// deep as `pos` still lands inside. Labels are function-scoped, so only
-/// the deepest enclosing function's own labels are ever relevant.
-fn innermost_function(items: &[TopItem], pos: Pos) -> Option<&FunctionCst> {
-    for item in items {
-        match &item.kind {
-            TopKind::Namespace(ns) => {
-                if let Some(f) = innermost_function(&ns.items, pos) {
-                    return Some(f);
-                }
-            }
-            TopKind::Function(f) => {
-                if span_contains(f.span, pos) {
-                    return Some(deepest_nested(f, pos));
-                }
-            }
-            TopKind::Comment(_) | TopKind::Import(_) => {}
-        }
-    }
-    None
-}
-
-/// Descends into `f`'s own `BodyKind::Nested` children as long as `pos`
-/// stays inside one of them; returns the deepest match (`f` itself if
-/// none of its nested children contain `pos`).
-fn deepest_nested(f: &FunctionCst, pos: Pos) -> &FunctionCst {
-    for item in &f.body {
-        if let BodyKind::Nested(nested) = &item.kind
-            && span_contains(nested.span, pos)
-        {
-            return deepest_nested(nested, pos);
-        }
-    }
-    f
-}
-
 /// The label value referenced at `pos`, plus the reference's own span
-/// (the origin), if `pos` sits on one of `function`'s own Task 2
-/// reference spans: `Item::Goto.label_span`, `Item::Check`'s
-/// `marked_span`/`blank_span` when that arm is a `CheckArm::Label`, or a
-/// `Successor::Label`'s `succ_label_span` on a builtin or a call. Only
-/// `function`'s OWN statements are examined — its nested children are a
-/// separate label scope, reached only by `innermost_function` descending
-/// into them for a `pos` that lands there.
+/// (the origin), if `pos` sits on one of `function`'s own reference
+/// spans — `walk::label_refs`' shared enumeration over each comma-group
+/// item, first hit wins. Only `function`'s OWN statements are examined —
+/// its nested children are a separate label scope, reached only by
+/// `walk::enclosing_function_chain` descending into them for a `pos`
+/// that lands there.
 fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<(u32, Span)> {
     for item in &function.body {
         let BodyKind::Statement(stmt) = &item.kind else {
             continue;
         };
         for comma in &stmt.items {
-            match &comma.item {
-                Item::Goto {
-                    label, label_span, ..
-                } => {
-                    if span_contains(*label_span, pos) {
-                        return Some((*label, *label_span));
-                    }
+            for (value, span) in label_refs(&comma.item).into_iter().flatten() {
+                if span_contains(span, pos) {
+                    return Some((value, span));
                 }
-                Item::Check {
-                    marked,
-                    blank,
-                    marked_span,
-                    blank_span,
-                    ..
-                } => {
-                    if let CheckArm::Label(value) = marked
-                        && span_contains(*marked_span, pos)
-                    {
-                        return Some((*value, *marked_span));
-                    }
-                    if let CheckArm::Label(value) = blank
-                        && span_contains(*blank_span, pos)
-                    {
-                        return Some((*value, *blank_span));
-                    }
-                }
-                Item::Builtin {
-                    succ,
-                    succ_label_span: Some(span),
-                    ..
-                }
-                | Item::Call {
-                    succ,
-                    succ_label_span: Some(span),
-                    ..
-                } => {
-                    if let Successor::Label(value) = succ
-                        && span_contains(*span, pos)
-                    {
-                        return Some((*value, *span));
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -234,19 +149,11 @@ fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<(u32, Span)> {
 
 /// `value`'s label declaration span within `function`'s OWN statements
 /// (labels are function-scoped — never searched in nested children or
-/// enclosing scopes).
+/// enclosing scopes), via `walk::function_labels`' shared scan.
 fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
-    for item in &function.body {
-        let BodyKind::Statement(stmt) = &item.kind else {
-            continue;
-        };
-        for label in &stmt.labels {
-            if label.value == value {
-                return Some(label.span);
-            }
-        }
-    }
-    None
+    function_labels(function)
+        .find(|label| label.value == value)
+        .map(|label| label.span)
 }
 
 /// Step 3: `pos` inside a `use …` path's span → its joined full path

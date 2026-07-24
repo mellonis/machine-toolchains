@@ -26,8 +26,9 @@ use mtc_core::lsp::SemToken;
 
 use crate::compiler::Resolution;
 use crate::cst::{BodyKind, FunctionCst, StatementCst, TopItem, TopKind, UsePath};
-use crate::parser::{CheckArm, Item, Successor};
+use crate::parser::Item;
 
+use super::walk::label_refs;
 use super::{
     DocState, MODIFIER_DECLARATION, MODIFIER_DEFAULT_LIBRARY, TOKEN_TYPE_FUNCTION,
     TOKEN_TYPE_NAMESPACE, TOKEN_TYPE_NUMBER,
@@ -136,57 +137,21 @@ fn walk_statement(
     }
 }
 
-/// The Task 2 label-reference spans (`Goto.label_span`, a `Check` arm's
-/// own span only when that arm is `CheckArm::Label`, a builtin/call's
-/// `succ_label_span`) as bare, no-modifier `number` tokens, plus a
-/// call's resolved name segments. `Unresolved` calls emit nothing for
-/// their name — the quiet visual cue complementing `undeclared-external`.
+/// Every reference span `item` carries — `walk::label_refs`' shared
+/// enumeration (`Goto.label_span`, a `Check` arm's own span only when
+/// that arm is `CheckArm::Label`, a builtin/call's `succ_label_span`) —
+/// as bare, no-modifier `number` tokens, plus a call's resolved name
+/// segments. `Unresolved` calls emit nothing for their name — the quiet
+/// visual cue complementing `undeclared-external`.
 fn walk_item(item: &Item, resolutions: &BTreeMap<Span, &Resolution>, out: &mut Vec<SemToken>) {
-    match item {
-        Item::Builtin {
-            succ,
-            succ_label_span,
-            ..
-        } => emit_successor_reference(succ, succ_label_span, out),
-        Item::Debugger { .. } => {}
-        Item::Call {
-            name,
-            name_span,
-            succ,
-            succ_label_span,
-            ..
-        } => {
-            emit_successor_reference(succ, succ_label_span, out);
-            emit_call_name(name, *name_span, resolutions, out);
-        }
-        Item::Check {
-            marked,
-            blank,
-            marked_span,
-            blank_span,
-            ..
-        } => {
-            if let CheckArm::Label(_) = marked {
-                out.push(number_reference(*marked_span));
-            }
-            if let CheckArm::Label(_) = blank {
-                out.push(number_reference(*blank_span));
-            }
-        }
-        Item::Halt { .. } => {}
-        Item::Goto { label_span, .. } => out.push(number_reference(*label_span)),
+    for (_, span) in label_refs(item).into_iter().flatten() {
+        out.push(number_reference(span));
     }
-}
-
-/// A builtin's or call's labeled-successor reference (`right(2)` and
-/// the like) — only when the successor is actually `Successor::Label`.
-fn emit_successor_reference(
-    succ: &Successor,
-    succ_label_span: &Option<Span>,
-    out: &mut Vec<SemToken>,
-) {
-    if let (Successor::Label(_), Some(span)) = (succ, succ_label_span) {
-        out.push(number_reference(*span));
+    if let Item::Call {
+        name, name_span, ..
+    } = item
+    {
+        emit_call_name(name, *name_span, resolutions, out);
     }
 }
 

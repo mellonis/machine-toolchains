@@ -26,6 +26,7 @@ mod complete;
 mod navigate;
 mod pma;
 mod tokens;
+mod walk;
 
 pub(crate) use pma::PmaLanguageService;
 
