@@ -315,6 +315,32 @@ machine {
 }
 
 #[test]
+fn config_cache_stays_bounded_across_many_distinct_project_roots() {
+    // More distinct `tmt.json` roots than the eviction bound, so an
+    // unbounded cache would visibly outgrow it (docs/lsp.md
+    // (configuration)).
+    let src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    for i in 0..(CONFIG_CACHE_LIMIT + 8) {
+        let dir = unique_tmp_dir(&format!("cache-bound-{i}"));
+        fs::write(dir.join("tmt.json"), "{}").unwrap();
+        let uri = file_uri(&dir.join("prog.tmc"));
+        service.did_update(&uri, src);
+    }
+    assert!(
+        service.config_cache.len() <= CONFIG_CACHE_LIMIT,
+        "cache grew past its bound: {} entries",
+        service.config_cache.len()
+    );
+}
+
+#[test]
 fn an_unknown_ide_rule_code_becomes_an_invalid_config_warning() {
     let (mut service, uri) = opened(TWO_TAPE);
     service.did_change_config(json!({"tmt": {"lint": {"allow": ["no-such-rule"]}}}));

@@ -98,6 +98,18 @@ struct ConfigResolver<'a> {
     config_cache: &'a mut HashMap<PathBuf, (SystemTime, Result<Vec<String>, String>)>,
 }
 
+/// Bounds `config_cache`'s growth (docs/lsp.md (configuration)). Each key
+/// is a discovered `tmt.json` winner path, so a single open workspace keys
+/// in at most a handful of entries — but a server process is long-running
+/// and nearest-ancestor discovery re-runs per document, so a session that
+/// visits many project roots (a monorepo, or several workspace folders over
+/// one LSP process's lifetime) would otherwise grow the map forever. A
+/// cache miss just re-parses `tmt.json` from disk — the same cost already
+/// paid on a first visit or an mtime-stale hit — so evicting an arbitrary
+/// entry once at capacity is safe: it can only turn a hit into a miss,
+/// never produce a wrong allow-list.
+const CONFIG_CACHE_LIMIT: usize = 32;
+
 impl ConfigResolver<'_> {
     /// The project-file channel: the parsed outcome of the discovered
     /// `tmt.json`, through the mtime cache — reused only while the file's
@@ -119,6 +131,12 @@ impl ConfigResolver<'_> {
         if let Some(mtime) = mtime {
             // No stat (a file racing in and out of existence) → no cache
             // entry: there is no mtime to key staleness on.
+            if !self.config_cache.contains_key(winner)
+                && self.config_cache.len() >= CONFIG_CACHE_LIMIT
+                && let Some(evict) = self.config_cache.keys().next().cloned()
+            {
+                self.config_cache.remove(&evict);
+            }
             self.config_cache
                 .insert(winner.to_path_buf(), (mtime, outcome.clone()));
         }

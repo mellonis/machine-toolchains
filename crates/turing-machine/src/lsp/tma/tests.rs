@@ -236,6 +236,28 @@ fn a_project_file_suppresses_a_rule_and_the_ide_channel_unions_with_it() {
 }
 
 #[test]
+fn config_cache_stays_bounded_across_many_distinct_project_roots() {
+    // More distinct `tmt.json` roots than the eviction bound, so an
+    // unbounded cache would visibly outgrow it (docs/lsp.md
+    // (configuration)). Mirrors the `.tmc` service's own bound test —
+    // `TmaLanguageService` keeps a separate `config_cache` field, so the
+    // eviction shared through `ConfigResolver::project_allow` needs
+    // proving on this side too.
+    let mut service = TmaLanguageService::new();
+    for i in 0..(super::super::CONFIG_CACHE_LIMIT + 8) {
+        let dir = unique_tmp_dir(&format!("cache-bound-{i}"));
+        fs::write(dir.join("tmt.json"), "{}").unwrap();
+        let uri = file_uri(&dir.join("prog.tma"));
+        service.did_update(&uri, DEAD_CODE);
+    }
+    assert!(
+        service.config_cache.len() <= super::super::CONFIG_CACHE_LIMIT,
+        "cache grew past its bound: {} entries",
+        service.config_cache.len()
+    );
+}
+
+#[test]
 fn the_ide_channel_alone_suppresses_a_rule() {
     let mut service = TmaLanguageService::new();
     service.did_change_config(json!({"lint": {"allow": ["unreachable-code"]}}));
