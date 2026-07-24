@@ -71,7 +71,7 @@ The full audit is `docs/superpowers/plans/2026-07-25-manifest-plan1-revalidation
 - Test: unit tests inside `project.rs`
 
 **Interfaces:**
-- Consumes: `crate::config::ConfigError`, `crate::optimizer::OptLevel`, `crate::lint::validate_allow`.
+- Consumes: `crate::config::ConfigError`, `crate::optimizer::OptLevel`. (`crate::lint::validate_allow` is NOT consumed here — the lint walk moves into `project.rs` in Task 2, which is where `parse_lint` calls it.)
 - Produces (all `pub(crate)`):
   - `struct Manifest { stdlib: bool, sources: Vec<String>, libraries: Libraries, profiles: Profiles, targets: BTreeMap<String, Target> }`
   - `struct Libraries { dirs: Vec<String>, link: Vec<String> }` (Default)
