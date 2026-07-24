@@ -53,6 +53,14 @@ pub(crate) enum ConfigError {
     /// the CLI's per-file config posture, docs/pmt/lint.md (project file),
     /// has one error type to render for every `pmt.json` problem).
     UnknownAllowCode { path: PathBuf, code: String },
+    /// A semantically invalid `project` section: duplicate effective
+    /// path, colliding target outputs, bad target name, `tape` and
+    /// `tape-block` together, an unknown profile name, ... The message
+    /// is complete on its own.
+    // Constructed by `project::validate_manifest`; that function has no
+    // caller of its own until the loader (manifest plan 1, Task 2).
+    #[allow(dead_code)]
+    Invalid { path: PathBuf, message: String },
 }
 
 impl ConfigError {
@@ -62,7 +70,8 @@ impl ConfigError {
             ConfigError::Io { path, .. }
             | ConfigError::Parse { path, .. }
             | ConfigError::UnknownKey { path, .. }
-            | ConfigError::UnknownAllowCode { path, .. } => path,
+            | ConfigError::UnknownAllowCode { path, .. }
+            | ConfigError::Invalid { path, .. } => path,
         }
     }
 
@@ -86,6 +95,7 @@ impl ConfigError {
             ConfigError::UnknownAllowCode { code, .. } => {
                 format!("unknown lint rule `{code}` in lint.allow")
             }
+            ConfigError::Invalid { message, .. } => message.clone(),
         }
     }
 }
