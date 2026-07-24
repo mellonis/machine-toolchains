@@ -864,6 +864,7 @@ git add -A && git commit -m "feat(post-machine): one pmt.json loader — full-fi
 - Create: `crates/post-machine/src/cli/driver.rs`
 - Modify: `crates/post-machine/src/cli/mod.rs` (add `mod driver;`, dispatch `Some("build")`, add the `build` line to `USAGE`)
 - Modify: `crates/post-machine/src/cli/build.rs` (make `out_path`, `render_warnings`, `render_opt_report`, `read_object`, `find_library`, `sidecar_path`, `take_disabled_passes` `pub(super)`)
+- Modify: `docs/pmt/cli.md` — one line only, adding `build` to the root `SUBCOMMANDS:` list. **Forced, not optional:** `tests/cli_docs.rs` quotes the ROOT usage block verbatim too, not just the per-subcommand ones, so adding the `build` line to `USAGE` in `cli/mod.rs` turns that guard red in this task. The full `## pmt build` section still belongs to Task 6, which registers `build_spec()` and trips the guard's other assertion.
 - Test: create `crates/post-machine/tests/build_driver.rs`
 
 **Interfaces:**
@@ -2571,6 +2572,7 @@ git add -A && git commit -m "feat(turing-machine): one tmt.json loader — full-
 - Create: `crates/turing-machine/src/cli/driver.rs`
 - Modify: `crates/turing-machine/src/cli/mod.rs` (add `mod driver;`, dispatch `Some("build")`, add the `build` line to `USAGE`)
 - Modify: `crates/turing-machine/src/cli/build.rs` (make `out_path`, `render_warnings`, `render_opt_report`, `read_object`, `find_library`, `sidecar_path`, `take_disabled_passes`, `parse_call_mech` `pub(super)`)
+- Modify: `docs/tmt/cli.md` — one line only, adding `build` to the root `SUBCOMMANDS:` list. **Forced, not optional**, exactly as its PM twin was in Task 3: `crates/turing-machine/tests/cli_docs.rs` quotes the ROOT usage block verbatim, so adding the `build` line to `USAGE` turns that guard red here. The full `## tmt build` section belongs to Task 14.
 - Test: create `crates/turing-machine/tests/build_driver.rs`
 
 **Interfaces:**
