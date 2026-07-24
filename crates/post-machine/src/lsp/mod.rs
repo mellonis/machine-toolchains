@@ -62,6 +62,18 @@ struct ConfigResolver<'a> {
     config_cache: &'a mut HashMap<PathBuf, (SystemTime, Result<Vec<String>, String>)>,
 }
 
+/// Bounds `config_cache`'s growth (docs/lsp.md (configuration)). Each key
+/// is a discovered `pmt.json` winner path, so a single open workspace
+/// keys in at most a handful of entries — but a server process is
+/// long-running and nearest-ancestor discovery re-runs per document, so a
+/// session that visits many project roots (a monorepo, or several
+/// workspace folders over one LSP process's lifetime) would otherwise
+/// grow the map forever. A cache miss just re-parses `pmt.json` from
+/// disk — the same cost already paid on a first visit or an mtime-stale
+/// hit — so evicting an arbitrary entry once at capacity is safe: it can
+/// only turn a hit into a miss, never produce a wrong allow-list.
+const CONFIG_CACHE_LIMIT: usize = 32;
+
 impl ConfigResolver<'_> {
     /// The project-file channel for one analysis: the parsed outcome of
     /// the discovered `pmt.json`, through the mtime cache — reused only
@@ -83,6 +95,12 @@ impl ConfigResolver<'_> {
         if let Some(mtime) = mtime {
             // No stat (file racing in and out of existence) → no cache
             // entry: there is no mtime to key staleness on.
+            if !self.config_cache.contains_key(winner)
+                && self.config_cache.len() >= CONFIG_CACHE_LIMIT
+                && let Some(evict) = self.config_cache.keys().next().cloned()
+            {
+                self.config_cache.remove(&evict);
+            }
             self.config_cache
                 .insert(winner.to_path_buf(), (mtime, outcome.clone()));
         }
@@ -1025,6 +1043,25 @@ export main() {
     }
 
     #[test]
+    fn code_actions_empty_when_the_request_span_only_abuts_the_finding() {
+        // `spans_overlap`'s comparisons are strict (`<`, not `<=`), so a
+        // request span that merely TOUCHES a finding's boundary — no
+        // shared position, just adjacency — must still miss. The
+        // finding's span is (2,1)-(2,3) (`UNUSED_LABEL_FIXTURE`'s "5:").
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+        service.did_update(uri, UNUSED_LABEL_FIXTURE);
+
+        // Abuts on the left: request ends exactly where the finding starts.
+        let actions = service.code_actions(uri, Span::new(1, 1, 2, 1));
+        assert!(actions.is_empty(), "left-abut: {actions:?}");
+
+        // Abuts on the right: request starts exactly where the finding ends.
+        let actions = service.code_actions(uri, Span::new(2, 3, 2, 5));
+        assert!(actions.is_empty(), "right-abut: {actions:?}");
+    }
+
+    #[test]
     fn code_actions_edits_round_trip_makes_the_finding_disappear() {
         use mtc_core::diagnostics::{Edit, Fix};
 
@@ -1110,6 +1147,25 @@ export main() {
             .as_ref()
             .expect("last-good scopes survive the failed re-analysis");
         assert_eq!(scopes.defs[&Vec::<String>::new()]["main"], "main");
+    }
+
+    #[test]
+    fn config_cache_stays_bounded_across_many_distinct_project_roots() {
+        let mut service = PmcLanguageService::new();
+        // More distinct `pmt.json` roots than the eviction bound, so an
+        // unbounded cache would visibly outgrow it (docs/lsp.md
+        // (configuration)).
+        for i in 0..(CONFIG_CACHE_LIMIT + 8) {
+            let dir = unique_tmp_dir(&format!("cache-bound-{i}"));
+            fs::write(dir.join("pmt.json"), "{}").unwrap();
+            let uri = file_uri(&dir.join("prog.pmc"));
+            service.did_update(&uri, "main() {\nright;\n}\n");
+        }
+        assert!(
+            service.config_cache.len() <= CONFIG_CACHE_LIMIT,
+            "cache grew past its bound: {} entries",
+            service.config_cache.len()
+        );
     }
 
     #[test]
@@ -1291,6 +1347,24 @@ export main() {
         let first = service.did_update(&uri, TWO_FINDINGS_FIXTURE);
         let second = service.did_update(&uri, TWO_FINDINGS_FIXTURE);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn did_update_transitions_from_lint_clean_to_a_finding_on_re_edit() {
+        // The other direction from `rewritten_broken_config_…`'s
+        // config-driven restore: a document that lints clean, re-edited
+        // to introduce a finding, must report it on the very next
+        // `did_update` — `DocState.lint` is recomputed every call, never
+        // left stale from the clean pass.
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+
+        let clean = service.did_update(uri, "main() {\nright;\n}\n");
+        assert!(clean.is_empty(), "sanity: no findings yet, {clean:?}");
+
+        let after_edit = service.did_update(uri, UNUSED_LABEL_FIXTURE);
+        assert_eq!(after_edit.len(), 1, "{after_edit:?}");
+        assert_eq!(after_edit[0].code, Some("unused-label"));
     }
 
     #[test]

@@ -74,6 +74,26 @@ mod tests {
 
     const URI: &str = "untitled:Nav-1";
 
+    #[test]
+    fn span_contains_excludes_a_position_exactly_at_the_end() {
+        // Half-open contract (this module's `span_contains` doc comment,
+        // mirroring `.pmc`'s own navigate.rs): `end` is one past the
+        // last contained position.
+        let span = Span::new(1, 1, 1, 5);
+        assert!(
+            span_contains(span, Pos { line: 1, col: 1 }),
+            "start is inclusive"
+        );
+        assert!(
+            span_contains(span, Pos { line: 1, col: 4 }),
+            "last contained column"
+        );
+        assert!(
+            !span_contains(span, Pos { line: 1, col: 5 }),
+            "end is exclusive"
+        );
+    }
+
     /// One function `f` exercising all three operand-reference shapes —
     /// a bare label (`jm L1`), a bare function symbol (`call helper`),
     /// and an `@`-prefixed function symbol (`jmp @helper`) — plus the

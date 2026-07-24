@@ -350,6 +350,22 @@ pub(crate) struct AnalysisOutput {
     pub docs: HashMap<String, FnDoc>,
 }
 
+/// `ir::lower` the flattened AST and merge its diagnostics with flatten's
+/// visibility warnings — the shared tail of `analyze()` and
+/// `analyze_staged()`. Ordering contract: `ir::lower`'s diagnostics come
+/// FIRST, then flatten's `vis` warnings, appended in `vis`'s own order.
+/// Both callers rely on this exact order (docs/lsp.md (staged analysis)
+/// documents it on `Analysis.warnings`); stated once here so it can't
+/// drift between the two call sites.
+fn lower_and_merge(
+    program: &Program,
+    vis: Vec<Diagnostic>,
+) -> Result<(IrProgram, Vec<Diagnostic>), CompileError> {
+    let (ir, mut diagnostics) = crate::ir::lower(program)?;
+    diagnostics.extend(vis);
+    Ok((ir, diagnostics))
+}
+
 /// lex → parse → duplicate-binding check → flatten → lower. Stops before
 /// the optimizer; `compile()` composes this with the back half.
 pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
@@ -363,8 +379,7 @@ pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
         resolutions: _,
         docs,
     } = flatten(parsed);
-    let (ir, mut diagnostics) = crate::ir::lower(&program)?;
-    diagnostics.extend(vis);
+    let (ir, diagnostics) = lower_and_merge(&program, vis)?;
     Ok(AnalysisOutput {
         tokens,
         ast: program,
@@ -459,22 +474,19 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         resolutions,
         docs,
     } = flatten(program);
-    match crate::ir::lower(&program) {
-        Ok((_ir, mut warnings)) => {
-            warnings.extend(vis);
-            StagedAnalysis {
-                tokens: Some(tokens),
-                cst: Some(cst),
-                analysis: Some(Analysis {
-                    ast: program,
-                    scopes,
-                    warnings,
-                    resolutions,
-                    docs,
-                }),
-                fatal: None,
-            }
-        }
+    match lower_and_merge(&program, vis) {
+        Ok((_ir, warnings)) => StagedAnalysis {
+            tokens: Some(tokens),
+            cst: Some(cst),
+            analysis: Some(Analysis {
+                ast: program,
+                scopes,
+                warnings,
+                resolutions,
+                docs,
+            }),
+            fatal: None,
+        },
         Err(fatal) => StagedAnalysis {
             tokens: Some(tokens),
             cst: Some(cst),
@@ -1379,6 +1391,24 @@ mod tests {
             .filter(|d| d.code == "undeclared-external")
             .count();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn undeclared_external_warning_span_is_the_first_occurrence() {
+        // `warned_undeclared.insert` (above) short-circuits every
+        // occurrence after the first, so the ONE warning that survives
+        // the repeated-name dedup carries the FIRST call site's span,
+        // never the second's — the detail the dedup-count tests above
+        // don't pin.
+        let out = compile("main() { @go(); right; @go(); }", CompileOptions::default()).unwrap();
+        let warnings: Vec<_> = out
+            .report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "undeclared-external")
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:#?}");
+        assert_eq!(warnings[0].span, Span::new(1, 11, 1, 13), "the first `go`");
     }
 
     #[test]

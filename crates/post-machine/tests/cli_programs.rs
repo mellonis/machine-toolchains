@@ -155,6 +155,55 @@ fn compile_errors_render_one_position_prefix() {
 }
 
 #[test]
+fn compile_fatal_is_byte_identical_to_the_shared_render_fatal_format() {
+    // Derivation-first (this crate's golden-testing convention): the
+    // expected line is built from the SAME `CompileError` the library
+    // call raises, not a hand-typed string, so this pins the exact
+    // `render_fatal` shape (`docs/pmt/cli.md (error codes)`) rather than
+    // one particular error's wording.
+    let dir = scratch("compile_fatal_exact");
+    let src = dir.join("bad.pmc");
+    let source = "main() { 1: flip; }";
+    fs::write(&src, source).unwrap();
+
+    let err = compile(source, CompileOptions::default()).unwrap_err();
+    let expected = format!(
+        "{}:{}:{}: error: {} [{}]",
+        src.display(),
+        err.span.start.line,
+        err.span.start.col,
+        err.kind,
+        err.kind.code()
+    );
+
+    let cli_err = execute(&args(&["compile", src.to_str().unwrap()])).unwrap_err();
+    assert_eq!(cli_err, expected);
+}
+
+#[test]
+fn asm_fatal_is_byte_identical_to_the_shared_render_fatal_format() {
+    // Same derivation-first proof as the `compile` fatal above, for
+    // `asm`'s own call site — untested before this pin.
+    let dir = scratch("asm_fatal_exact");
+    let src = dir.join("bad.pma");
+    let source = "<goToEnd>\n";
+    fs::write(&src, source).unwrap();
+
+    let err = mtc_post_machine::asm::assemble(source, false).unwrap_err();
+    let expected = format!(
+        "{}:{}:{}: error: {} [{}]",
+        src.display(),
+        err.span.start.line,
+        err.span.start.col,
+        err.kind,
+        err.kind.code()
+    );
+
+    let cli_err = execute(&args(&["asm", src.to_str().unwrap()])).unwrap_err();
+    assert_eq!(cli_err, expected);
+}
+
+#[test]
 fn bare_emit_ir_before_the_positional_does_not_eat_it() {
     let dir = scratch("emit_ir_bare");
     let src = dir.join("hello.pmc");

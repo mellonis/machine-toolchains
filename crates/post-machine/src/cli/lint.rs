@@ -286,6 +286,10 @@ fn fix_and_relint(
 /// `pub(super)`: `cli/fmt.rs` reuses this verbatim for its own per-file
 /// and stdin fatals rather than duplicating the rendering — its
 /// `.pmc`/`.pma` routes bring the same two error-kind shapes lint's do.
+/// `cli/build.rs`'s `compile`/`asm` subcommands reuse it too, writing
+/// into a throwaway buffer and trimming the trailing newline since their
+/// single-input fatal surfaces as a whole-tool `Result::Err(String)`
+/// rather than a per-file line appended to a batch's stderr.
 pub(super) fn render_fatal(
     stderr: &mut String,
     file: &Path,

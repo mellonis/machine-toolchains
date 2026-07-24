@@ -459,6 +459,27 @@ mod tests {
     }
 
     #[test]
+    fn span_contains_excludes_a_position_exactly_at_the_end() {
+        // Half-open contract (this module's `span_contains` doc comment):
+        // `end` is one past the last contained position, so a cursor
+        // sitting exactly there belongs to whatever comes NEXT, not this
+        // span — the off-by-one this test pins.
+        let span = Span::new(1, 1, 1, 5);
+        assert!(
+            span_contains(span, Pos { line: 1, col: 1 }),
+            "start is inclusive"
+        );
+        assert!(
+            span_contains(span, Pos { line: 1, col: 4 }),
+            "last contained column"
+        );
+        assert!(
+            !span_contains(span, Pos { line: 1, col: 5 }),
+            "end is exclusive"
+        );
+    }
+
+    #[test]
     fn local_call_resolves_to_the_top_level_definitions_name_span() {
         let mut service = PmcLanguageService::new();
         service.did_update(URI, NAV_FIXTURE);
@@ -628,6 +649,29 @@ mod tests {
         assert_eq!(
             target.origin,
             Some(span_after(NAV_FIXTURE, "check(1, !);", 6, 1))
+        );
+    }
+
+    #[test]
+    fn check_arm_reference_resolves_when_the_blank_arm_is_the_label() {
+        // `check(1, !)` above only exercises the `marked` arm's own
+        // `CheckArm::Label` branch; this pins the `blank` arm's sibling
+        // branch (docs/pmt/language.md (check(A1, A2))) by swapping which
+        // side carries the label — `!` marked, `3` blank.
+        const FIXTURE: &str = "main() {\n    3: right;\n    check(!, 3);\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, FIXTURE);
+
+        let label = span_at(FIXTURE, "3: right;", 2);
+        let pos = pos_after(FIXTURE, "check(!, 3);", 9);
+        let target = service
+            .definition(URI, pos)
+            .expect("check's blank arm references label 3 in main");
+        assert_eq!(target.uri, URI);
+        assert_eq!(target.span, label);
+        assert_eq!(
+            target.origin,
+            Some(span_after(FIXTURE, "check(!, 3);", 9, 1))
         );
     }
 

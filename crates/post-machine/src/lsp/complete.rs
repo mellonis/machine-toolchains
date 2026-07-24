@@ -664,6 +664,27 @@ mod tests {
         candidates.iter().map(|c| c.label.clone()).collect()
     }
 
+    #[test]
+    fn span_contains_excludes_a_position_exactly_at_the_end() {
+        // Half-open contract (this module's `span_contains` doc comment
+        // — the CST-extent variant, distinct from `prefix_anchor`'s
+        // deliberately wider `<=` touches-the-end rule tested below):
+        // `end` is one past the last contained position.
+        let span = Span::new(1, 1, 1, 5);
+        assert!(
+            span_contains(span, Pos { line: 1, col: 1 }),
+            "start is inclusive"
+        );
+        assert!(
+            span_contains(span, Pos { line: 1, col: 4 }),
+            "last contained column"
+        );
+        assert!(
+            !span_contains(span, Pos { line: 1, col: 5 }),
+            "end is exclusive"
+        );
+    }
+
     // --- Call position (context 3) ---
 
     const CALL_TOP_FIXTURE: &str = "use ext;\nsib() { left; }\nexport main() {\n    @sib();\n}\n";
@@ -1143,6 +1164,27 @@ export main() {
         service.did_update(URI, HELP_FIXTURE);
 
         let pos = pos_after(HELP_FIXTURE, "@help()", 3); // between "he" and "lp"
+        let candidates = service.completion(URI, pos);
+
+        assert!(!candidates.is_empty());
+        let expected = span_of(HELP_FIXTURE, "help");
+        for c in &candidates {
+            assert_eq!(c.replace_span, expected);
+        }
+    }
+
+    #[test]
+    fn prefix_replacement_covers_the_whole_token_when_cursor_sits_at_its_end() {
+        // `prefix_anchor`'s span check is `pos <= span.end`, one wider
+        // than `span_contains`'s half-open `<` (this module's doc
+        // comment, "The prefix/replace rule") — a cursor sitting exactly
+        // at the end of a just-typed identifier must still anchor to
+        // that identifier, not fall through to a zero-width span one
+        // column later.
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, HELP_FIXTURE);
+
+        let pos = pos_after(HELP_FIXTURE, "@help()", 5); // right after "help"'s "p"
         let candidates = service.completion(URI, pos);
 
         assert!(!candidates.is_empty());

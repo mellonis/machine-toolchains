@@ -453,6 +453,45 @@ mod tests {
         );
     }
 
+    /// `Resolution::ImportBinding` with a NON-`std` full path — the rich
+    /// fixture above only exercises the std-aliased import (`@ge()`,
+    /// `defaultLibrary` set) and a `Resolution::Local` call (`@local()`,
+    /// no modifiers); this pins the third combination `emit_call_name`'s
+    /// `default_library` guard distinguishes: a user's own `use` import,
+    /// which must render as a plain function token with NO
+    /// `defaultLibrary` modifier, same as a local resolution but through
+    /// the other match arm.
+    #[test]
+    fn non_std_import_binding_call_carries_no_default_library_modifier() {
+        const FIXTURE: &str = "use ext;\nmain() {\n    @ext();\n}\n";
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update(URI, FIXTURE);
+        assert!(diags.is_empty(), "sanity: clean fixture, {diags:?}");
+
+        let tokens = service
+            .semantic_tokens(URI)
+            .expect("analysis-tier answer on a clean parse");
+
+        assert_eq!(
+            tokens,
+            vec![
+                // `use ext;` — the single path segment, function (the
+                // last/only segment), no defaultLibrary (path[0] != "std").
+                tok(Span::new(1, 5, 1, 8), TOKEN_TYPE_FUNCTION, 0),
+                // `main() {` — the entry function declaration.
+                tok(
+                    Span::new(2, 1, 2, 5),
+                    TOKEN_TYPE_FUNCTION,
+                    MODIFIER_DECLARATION
+                ),
+                // `@ext();` — import-bound to a NON-std name: plain
+                // function, no modifiers (the branch `@ge()` above
+                // doesn't reach, since `ge`'s full path IS std-prefixed).
+                tok(Span::new(3, 6, 3, 9), TOKEN_TYPE_FUNCTION, 0),
+            ]
+        );
+    }
+
     #[test]
     fn label_definition_token_excludes_the_trailing_colon() {
         // `5: right;` — the label span covers "5:" (cols 1..3); the

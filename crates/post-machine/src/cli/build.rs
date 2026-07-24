@@ -11,6 +11,7 @@ use crate::compiler::{CompileOptions, CompileReport, compile as compile_source};
 use crate::optimizer::OptLevel;
 use crate::stdlib;
 
+use super::lint::render_fatal;
 use super::{Args, CliOutput};
 
 const COMPILE_USAGE: &str = "\
@@ -103,14 +104,9 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     let source =
         fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let out = compile_source(&source, options).map_err(|e| {
-        format!(
-            "{}:{}:{}: error: {} [{}]",
-            input.display(),
-            e.span.start.line,
-            e.span.start.col,
-            e.kind,
-            e.kind.code()
-        )
+        let mut stderr = String::new();
+        render_fatal(&mut stderr, input, e.span, &e.kind, e.kind.code());
+        stderr.trim_end().to_string()
     })?;
 
     let mut stderr = String::new();
@@ -206,14 +202,9 @@ pub(super) fn asm(raw: &[String]) -> Result<CliOutput, String> {
     let source =
         fs::read_to_string(input).map_err(|e| format!("cannot read {}: {e}", input.display()))?;
     let object = crate::asm::assemble(&source, with_debug).map_err(|e| {
-        format!(
-            "{}:{}:{}: error: {} [{}]",
-            input.display(),
-            e.span.start.line,
-            e.span.start.col,
-            e.kind,
-            e.kind.code()
-        )
+        let mut stderr = String::new();
+        render_fatal(&mut stderr, input, e.span, &e.kind, e.kind.code());
+        stderr.trim_end().to_string()
     })?;
     let target = out_path(input, explicit_out, "pmo");
     fs::write(&target, object.to_bytes())
