@@ -43,7 +43,7 @@ pub(crate) enum ConfigError {
     /// Constructed by `project::validate_manifest`'s semantic pass,
     /// reached through the one-loader `tmt.json` walk (`load`,
     /// docs/tmt/project.md (one loader)); the manifest-driven `tmt build`
-    /// driver is the other future consumer, not yet wired.
+    /// driver is the other consumer.
     Invalid { path: PathBuf, message: String },
 }
 

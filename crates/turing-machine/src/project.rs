@@ -17,10 +17,7 @@ use crate::optimizer::OptLevel;
 /// The manifest-driven `tmt build` driver constructs and reads every
 /// field on this type (docs/tmt/project.md (schema)); the one-loader
 /// `tmt.json` walk (`load_file` -> `validate_manifest`) constructs one
-/// too, but `stdlib`/`profiles`/`call_mech` aren't read anywhere yet
-/// outside tests, so clippy's plain-lib-target pass still needs this
-/// suppression until the build driver lands.
-#[allow(dead_code)]
+/// too.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Manifest {
     pub stdlib: bool,
@@ -35,8 +32,7 @@ pub(crate) struct Manifest {
 }
 
 /// Consumed by the manifest-driven `tmt build` driver's library search
-/// (`-L`/`-l` resolution), not yet wired.
-#[allow(dead_code)]
+/// (`-L`/`-l` resolution).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Libraries {
     pub dirs: Vec<String>,
@@ -44,15 +40,13 @@ pub(crate) struct Libraries {
 }
 
 /// Consumed by `Profiles::resolve`, itself consumed by the manifest
-/// driver's `--debug`/`--release` preset selection, not yet wired.
-#[allow(dead_code)]
+/// driver's `--debug`/`--release` preset selection.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Profiles {
     pub debug: ProfileOverrides,
     pub release: ProfileOverrides,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ProfileOverrides {
     pub opt: Option<OptLevel>,
@@ -62,8 +56,7 @@ pub(crate) struct ProfileOverrides {
 }
 
 /// Consumed by the manifest-driven `tmt build` driver's per-target build
-/// loop, not yet wired.
-#[allow(dead_code)]
+/// loop.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Target {
     pub sources: Vec<String>,
@@ -80,9 +73,7 @@ pub(crate) struct Target {
 /// (docs/tmt/cli.md (run)). `tape` is therefore required for the block
 /// to be runnable at all.
 ///
-/// Consumed by `tmt build --run`'s manifest-mode settings split, not yet
-/// wired.
-#[allow(dead_code)]
+/// Consumed by `tmt build --run`'s manifest-mode settings split.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RunSpec {
     pub tape: Option<String>,
@@ -97,8 +88,7 @@ pub(crate) struct RunSpec {
 /// manifest's per-key overrides on the preset base. Flags override the
 /// result at the driver (flags win — cli/driver.rs).
 ///
-/// Consumed by the manifest-driven `tmt build` driver, not yet wired.
-#[allow(dead_code)]
+/// Consumed by the manifest-driven `tmt build` driver.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ResolvedProfile {
     pub opt_level: OptLevel,
@@ -109,8 +99,7 @@ pub(crate) struct ResolvedProfile {
 
 impl Profiles {
     /// Consumed by the manifest-driven `tmt build` driver's profile
-    /// selection, not yet wired.
-    #[allow(dead_code)]
+    /// selection.
     pub(crate) fn resolve(&self, release: bool) -> ResolvedProfile {
         let (base, over) = if release {
             (
@@ -145,7 +134,7 @@ impl Profiles {
 impl Manifest {
     /// Also used by `validate_manifest`'s own semantic pass (duplicate
     /// effective-source detection); the manifest-driven `tmt build`
-    /// driver will be the other consumer once wired.
+    /// driver is the other consumer.
     pub(crate) fn effective_sources(&self, target: &Target) -> Vec<String> {
         self.sources
             .iter()
@@ -155,8 +144,7 @@ impl Manifest {
     }
 
     /// Consumed by the manifest-driven `tmt build` driver's library
-    /// search resolution, not yet wired.
-    #[allow(dead_code)]
+    /// search resolution.
     pub(crate) fn effective_libraries(&self, target: &Target) -> Libraries {
         Libraries {
             dirs: self
@@ -178,7 +166,7 @@ impl Manifest {
 
     /// Also used by `validate_manifest`'s own semantic pass (cross-target
     /// output-collision detection); the manifest-driven `tmt build`
-    /// driver will be the other consumer once wired.
+    /// driver is the other consumer.
     pub(crate) fn output_of(&self, name: &str, target: &Target) -> String {
         target
             .output
@@ -218,8 +206,7 @@ impl Manifest {
     /// win, as the profile keys do (docs/tmt/project.md (call-mech)).
     ///
     /// Consumed by the manifest-driven `tmt build` driver's link-step
-    /// lowering selection, not yet wired.
-    #[allow(dead_code)]
+    /// lowering selection.
     pub(crate) fn effective_call_mech(&self, target: &Target) -> Option<CallMech> {
         target.call_mech.or(self.call_mech)
     }
@@ -231,8 +218,9 @@ impl Manifest {
 /// directory are allowed — docs/tmt/project.md (path rules)). Lexical
 /// only: symlink aliases are not detected, documented not solved.
 ///
-/// Used by `validate_manifest`'s semantic pass; the manifest driver's
-/// manifest-dir path resolution will reuse it once wired.
+/// Used by `validate_manifest`'s semantic pass, and by the manifest
+/// driver and bare `tmt lint`/`tmt fmt` to resolve declared paths
+/// against the manifest's directory.
 pub(crate) fn normalize_rel(path_str: &str) -> Result<PathBuf, String> {
     let p = Path::new(path_str);
     let absolute_err = || {
@@ -444,8 +432,8 @@ fn parse_target(path: &Path, name: &str, value: &Value) -> Result<Target, Config
 /// cross-target output collision, path normalization/absolute rejection.
 ///
 /// Consumed by the one-loader `tmt.json` walk (`load_file`,
-/// docs/tmt/project.md (one loader)); the manifest-driven `tmt build`
-/// driver is the other future consumer, not yet wired.
+/// docs/tmt/project.md (one loader)) and by the manifest-driven
+/// `tmt build` driver.
 pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, ConfigError> {
     let obj = as_obj(path, value, "project")?;
     let mut manifest = Manifest {
@@ -551,11 +539,9 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TmtFile {
     pub allow: Vec<String>,
-    /// Read by `discover_manifest` and this module's own tests; the
-    /// manifest-driven `tmt build` driver and `tmt lint`/`tmt fmt`'s
-    /// per-section source-set discovery are the future production
-    /// consumers, not yet wired.
-    #[allow(dead_code)]
+    /// Read by `discover_manifest`, the manifest-driven `tmt build`
+    /// driver, and bare `tmt lint`/`tmt fmt`'s per-section source-set
+    /// discovery.
     pub manifest: Option<Manifest>,
 }
 
@@ -621,7 +607,6 @@ fn parse_lint(path: &Path, value: &Value) -> Result<Vec<String>, ConfigError> {
 /// Not yet called outside this module's own tests — the manifest-driven
 /// `tmt build` driver and `tmt lint`/`tmt fmt`'s per-section source-set
 /// discovery are the future production consumers.
-#[allow(dead_code)]
 pub(crate) fn discover_manifest(start: &Path) -> Result<Option<(PathBuf, Manifest)>, ConfigError> {
     let start = if start.as_os_str().is_empty() {
         Path::new(".")
