@@ -45,6 +45,8 @@ pub fn render(registry: &Registry) -> String {
     );
     out.push_str("# regenerate with `tmt completions zsh`.\n\n");
 
+    render_build_targets_helper(&mut out);
+
     render_root(&mut out, root, &leaves, &group_names);
     out.push('\n');
 
@@ -73,6 +75,23 @@ pub fn render(registry: &Registry) -> String {
 
 fn function_name(path: &[String]) -> String {
     format!("_tmt_{}", path.join("_"))
+}
+
+/// `tmt build`'s target names come from the nearest manifest, not a
+/// fixed word list, so they can't be baked into the registry the way
+/// `--emit-ir`'s stages are. Instead this helper shells out to
+/// `tmt build --list-targets` at completion time — the same pattern
+/// `_git` uses for branch/tag names — and offers whatever comes back
+/// (docs/tmt/cli.md (tmt build)). Emitted unconditionally: it is one
+/// small function, and only runs when the `targets` alternative in
+/// `build`'s positional is actually attempted.
+fn render_build_targets_helper(out: &mut String) {
+    out.push_str("__tmt_build_targets() {\n");
+    out.push_str("  local -a __targets\n");
+    out.push_str("  __targets=(${(f)\"$(tmt build --list-targets 2>/dev/null)\"})\n");
+    out.push_str("  __targets=(${__targets%%$'\\t'*})\n");
+    out.push_str("  (( ${#__targets} )) && compadd -a __targets\n");
+    out.push_str("}\n\n");
 }
 
 fn render_root(out: &mut String, root: &CommandSpec, leaves: &[&CommandSpec], groups: &[&str]) {
@@ -322,6 +341,7 @@ fn positional_lines(positional: &Positional) -> Vec<String> {
 fn positional_message(hint: &PositionalHint) -> &'static str {
     match hint {
         PositionalHint::File(_) => "file",
+        PositionalHint::FilesOrTargets(_) => "file or target",
         PositionalHint::Choices(_) => "value",
         PositionalHint::Text => "pattern",
     }
@@ -330,6 +350,12 @@ fn positional_message(hint: &PositionalHint) -> &'static str {
 fn positional_action(hint: &PositionalHint) -> String {
     match hint {
         PositionalHint::File(file_hint) => file_action(file_hint),
+        PositionalHint::FilesOrTargets(file_hint) => {
+            let escaped_glob = glob_action(&file_hint.extensions).replace('"', "\\\"");
+            format!(
+                "_alternative \"files:file:{escaped_glob}\" \"targets:target:__tmt_build_targets\""
+            )
+        }
         PositionalHint::Choices(choices) => {
             // A plain `(...)` word list (unlike `_describe`) has no slot
             // for per-word descriptions, so only the literal values go
@@ -369,6 +395,7 @@ mod tests {
             "compile",
             "asm",
             "link",
+            "build",
             "dis",
             "run",
             "tape",
@@ -477,6 +504,23 @@ mod tests {
             script.matches(expected).count(),
             4,
             "expected lint's AND fmt's positional + --exclude to all render it: {script}"
+        );
+    }
+
+    #[test]
+    fn build_renders_dynamic_target_alternative_and_helper() {
+        let script = render(&registry());
+        assert!(
+            script.contains("__tmt_build_targets"),
+            "helper function emitted"
+        );
+        assert!(
+            script.contains("targets:target:__tmt_build_targets"),
+            "positional _alternative wires the helper: {script}"
+        );
+        assert!(
+            script.contains("tmt build --list-targets"),
+            "helper shells out to tmt"
         );
     }
 

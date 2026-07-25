@@ -47,6 +47,7 @@ SUBCOMMANDS:
   compile      .tmc source -> .tmo object (-S for .tma, --emit-ir for world IR JSON)
   asm          .tma assembly -> .tmo object
   link         .tmo objects -> .tmx executable (+ .tmx.map sidecar)
+  build        compile+link driver: .tmc/.tma/.tmo inputs or manifest targets
   dis          disassemble a .tmo or .tmx (--listing for the address view)
   run          execute a .tmx on a multi-tape .tmt block
   tape         new/set/show .tmt tape-block snapshots

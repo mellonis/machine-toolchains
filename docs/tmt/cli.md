@@ -22,6 +22,7 @@ SUBCOMMANDS:
   compile      .tmc source -> .tmo object (-S for .tma, --emit-ir for world IR JSON)
   asm          .tma assembly -> .tmo object
   link         .tmo objects -> .tmx executable (+ .tmx.map sidecar)
+  build        compile+link driver: .tmc/.tma/.tmo inputs or manifest targets
   dis          disassemble a .tmo or .tmx (--listing for the address view)
   run          execute a .tmx on a multi-tape .tmt block
   tape         new/set/show .tmt tape-block snapshots
@@ -329,6 +330,132 @@ Explicit `-l NAME` resolves `NAME.tmo` against the `-L` directories in the
 order given, and errors if it is not found on any of them. There is no
 on-disk library directory to fall back to: the standard library is embedded
 in the toolchain binary itself.
+
+## `tmt build`
+
+```
+USAGE: tmt build [INPUT.tmc|.tma|.tmo ...] [-o OUT.tmx] [FLAGS]   (argv mode)
+       tmt build [TARGET ...] [FLAGS]                             (manifest mode)
+
+Argv mode compiles/assembles/loads every input in memory, links with
+the stdlib, and writes OUT.tmx (+ .tmx.map). Manifest mode discovers
+the nearest tmt.json with a `project` section from the current
+directory and builds its targets (all of them when none is named).
+
+COMPILE FLAGS (argv mode; manifest mode: override the profile):
+  --debug | --release   presets (manifest mode: profile selection)
+  -O0 | -O1             optimization level
+  -g                    record debug info
+  --strip-debugger      drop `brk` at codegen
+  --fno-<pass>          disable one optimizer pass (repeatable)
+  --foutline            enable the default-off `outline` pass
+  -Werror               treat (post-refinement) warnings as errors
+
+LINK FLAGS (argv mode only; the manifest declares these):
+  --nostdlib            do not link the built-in std
+  -L DIR / -l NAME      library search dir / library (repeatable)
+  --entry NAME          link NAME as the program entry (default: main)
+  -o OUT.tmx            output path
+
+COMMON:
+  --no-relax            keep every symbol site in far form
+  --call-mech MECH      bound-call lowering: mono | frames | hybrid
+  --keep-objects        write each intermediate .tmo next to its source
+  --run [TARGET]        manifest mode: build, then run the target's run block
+  --list-targets        manifest mode: print `NAME[\trun]` per target
+  -v                    render the build report
+```
+
+`tmt build` is the compile+link driver, dispatching between two modes by
+looking at the shape of its own positional arguments — the manifest is
+consulted only when it needs to be. Any positional ending `.tmc`, `.tma`,
+or `.tmo` selects **argv mode**: every input is compiled, assembled, or
+loaded from disk as needed, held in memory, linked against the standard
+library (or an explicit `-L`/`-l` set), and written to `OUT.tmx`; no
+`tmt.json` is read at all in this mode. Otherwise every positional is
+read as a **target name**, selecting **manifest mode**: `tmt build`
+discovers the nearest `tmt.json` carrying a `project` section by walking
+up from the current directory, and builds the named targets (or every
+declared target when none is named). Mixing the two positional shapes on
+one command line — a source path alongside a target name — is an error;
+a build is either fully argv-driven or fully manifest-driven.
+
+**Flag table**, split by which mode reads which flag:
+
+- **Compile-side** (`--debug`/`--release`, `-O0`/`-O1`, `-g`,
+  `--strip-debugger`, `--fno-<pass>`, `--foutline`, `-Werror`) apply in
+  argv mode directly; in manifest mode they **override** the
+  corresponding key of the selected profile for this invocation only —
+  the manifest itself is never rewritten. `-S`, `--emit-ir`, and
+  `--stamped-asm` are deliberately absent from `tmt build`: per-file
+  inspection of generated `.tma` or world-graph IR JSON stays `tmt
+  compile`'s job, not the multi-file driver's.
+- **Link-side, argv mode only** (`--nostdlib`, `-L`, `-l`, `--entry`,
+  `-o`): the manifest already declares the equivalent information itself
+  (linked libraries, standard-library opt-out, per-target entry symbol,
+  output path), so manifest mode **rejects** `-o`, `-L`, `-l`,
+  `--nostdlib`, and `--entry` outright rather than silently ignoring
+  them — five flags, one more than the compile-side/link-side split
+  alone would suggest, because a target's entry symbol is as much a
+  manifest-declared fact as its output path or its libraries.
+- **Common to both modes** (`--no-relax`, `--call-mech`,
+  `--keep-objects`, `-v`). `--call-mech` is the one link-side flag
+  manifest mode does *not* reject: it is accepted there as a
+  per-invocation override of the target's declared lowering, resolved
+  flag first, then the target's own `call-mech` key, then the project's
+  default `call-mech` key, then the linker's own default when none of
+  those set it. The manifest records the *committed* lowering for a
+  target; the flag exists to experiment against that commitment for one
+  build without editing `tmt.json`.
+- **Manifest mode only** (`--run`, `--list-targets`): argv mode has no
+  notion of a target or a declared run block for either flag to act on.
+
+**Profile selection (manifest mode):** there is no per-target profile
+name in the manifest schema — selection happens once per invocation, the
+same base for every target that invocation builds. `--release` selects
+the `release` base; omitting both `--release` and `--debug` selects
+`debug`. The individual compile-side flags above then layer on top of
+that base's keys for this invocation only — an individual flag always
+wins over whatever the resolved profile declares (see
+[`tmt.json`](#tmtjson) below and `docs/tmt/project.md` for the profile
+schema itself).
+
+**`--run [TARGET]`:** builds first, then runs the target's declared run
+block, reached only after a successful build; naming more than one
+target (or none, when the manifest declares more than one) alongside
+`--run` is an error, since exactly one target must be selected to run
+afterward. Unlike `pmt run`, `tmt run` has **no empty-tape default** — it
+always drives a whole multi-tape band loaded from a `.tmt` snapshot — so
+a target's run block must declare a `tape`; a target with no run block
+at all, or one whose run block declares no `tape`, cannot be `--run` and
+names the target in a pointed error instead of inventing one. Exit codes
+mirror `tmt run`: `0` the program stopped (`stp`), `2` the program halted
+abnormally (`hlt`), `3` the program trapped; a build failure
+short-circuits before any of these apply.
+
+**`--list-targets`:** manifest mode only; prints one line per declared
+target — `NAME`, a tab, then `run` when that target carries a run block
+(omitted otherwise) — machine-readable, one target per line. This is
+also what the generated zsh completion script's dynamic target
+completion shells out to at completion time, so the candidate list
+always tracks the manifest with zero drift.
+
+**`--keep-objects`:** in both modes, writes each intermediate `.tmo`
+object next to its source file instead of discarding it once linked in
+memory.
+
+**Undeclared-external refinement:** the ordinary "undeclared external"
+compile warning fires per file, on a bare call whose name that file
+never imports. `tmt build` sees the whole declared set for the build —
+every input in argv mode, every target's declared sources in manifest
+mode — so it drops that warning wherever the name turns out to be
+defined somewhere else in the same build. `tmt compile`, working one
+file at a time, has no such visibility and stays per-file honest,
+warning on every bare undeclared call regardless of what a sibling file
+happens to define.
+
+See `docs/tmt/project.md` for the manifest's `project` section itself —
+the schema, target and profile shapes, and the discovery rule.
 
 ## `tmt dis`
 

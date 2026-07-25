@@ -91,6 +91,7 @@ const EXPECTED_TOP_LEVEL: &[&str] = &[
     "compile",
     "asm",
     "link",
+    "build",
     "dis",
     "run",
     "tape",
