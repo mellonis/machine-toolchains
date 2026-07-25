@@ -218,6 +218,12 @@ link-time composition engine selected by `--call-mech`. Both CLIs share
 their exit codes (`0` stopped, `2` halted, `3` trapped). Full flag
 reference: `docs/tmt/cli.md`.
 
+`tmt build` is the same compile-link driver `pmt build` is, over its own
+`tmt.json`. A manifest declaring one target — its sources, its `.tmt`
+tape, and optionally the `call-mech` it commits to — turns the sequence
+above into `tmt build --run <target>`. Manifest reference:
+`docs/tmt/project.md`.
+
 ## Documentation
 
 The two toolchains are documented per domain, over a set of shared pages
@@ -250,7 +256,10 @@ that cover what they hold in common.
   vectors, match/dispatch tables, the frames execution profile, framed
   calls, traps, and the three call mechanisms.
 - `docs/tmt/cli.md` — every `tmt` subcommand and flag, and the `tmt.json`
-  project file.
+  file's `lint` section.
+- `docs/tmt/project.md` — the `tmt.json` project manifest: schema,
+  per-section discovery, targets, profiles, the bound-call lowering, and
+  run settings, and how `tmt build` consumes it.
 - `docs/tmt/lint.md` — hygiene findings over `.tmc` and `.tma` sources via
   `tmt lint`.
 - `docs/tmt/fmt.md` — the canonical `.tmc`/`.tma` layout via `tmt fmt`.

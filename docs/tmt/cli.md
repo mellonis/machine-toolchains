@@ -828,13 +828,22 @@ neither renders a script.
 
 ## `tmt.json`
 
-`tmt.json` is the TM toolchain's project file, and a **strict twin** of
-PM-1's `pmt.json` (`docs/pmt/lint.md`): the same tiny schema, the same
-discovery rule, the same merge semantics. Only the filename differs, which
-means a repository holding both `.pmc` and `.tmc` sources keeps two separate
-project files rather than one shared file with per-language sections.
+`tmt.json` is the TM toolchain's project file, and a close twin of PM-1's
+`pmt.json` (`docs/pmt/lint.md`): the same discovery rule and the same
+merge semantics. A repository holding both `.pmc` and `.tmc` sources keeps
+two separate project files rather than one shared file with per-language
+sections — `tmt` never reads `pmt.json`, and `pmt` never reads `tmt.json`.
 
-The whole schema is one key:
+The file carries up to two independent top-level sections. This section
+documents `lint`, the allow-list; the same file may also carry a
+`project` section — the declared project model `tmt build` reads (sources,
+libraries, profiles, the bound-call lowering, named targets), documented
+in full at `docs/tmt/project.md`. Its presence does not change lint
+discovery in any way, and the two walks are independent: a bare
+`tmt lint` with no PATH arguments uses that section's declared source set
+(`docs/tmt/project.md (the declared source set)`).
+
+The `lint` section is one key:
 
 ```json
 {
@@ -850,7 +859,9 @@ this schema is rejected by name (`unknown key `lnt``), as is an
 `allow` entry naming no rule in the shared namespace. Validation is a manual
 walk rather than a blanket deserialize, so a typo in a hand-authored file
 points at the offending key instead of failing the whole document
-generically.
+generically. One loader validates the **whole file**, both sections, no
+matter which one the calling tool wants: a typo under `project` fails a
+lint-only load of the same file too.
 
 Note what is **not** in the schema: there is no `warn` key. A `tmt.json`
 can suppress a rule but cannot turn an opt-in rule on; that is the `--warn`

@@ -77,6 +77,13 @@ union.
 editor settings, and which surfaces read it — is documented in full at
 `docs/tmt/cli.md`; it is not restated here.
 
+The same `tmt.json` may also carry a `project` section, the declared
+project model documented at `docs/tmt/project.md`. Its presence does not
+change lint discovery: the two sections are found by independent ancestor
+walks, and a `tmt.json` carrying only `lint` is still the nearest config
+for lint purposes. The one connection is that a bare `tmt lint` — no PATH
+arguments at all — lints exactly that section's declared source set.
+
 ## The `.tmc` rules
 
 ### leftover-debugger (`.tmc`)
