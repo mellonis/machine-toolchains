@@ -640,8 +640,8 @@ fn o1_flag_overrides_a_manifest_profile_that_declares_o0() {
 /// `--strip-debugger`'s effect is observable via `pmt dis`: a kept
 /// `debugger;` statement disassembles as `brk`, a stripped one doesn't
 /// (docs/pmt/isa.md). A manifest profile that declares
-/// `strip-debugger: false` — the opposite of the debug preset's own
-/// default — must still lose to an explicit `--strip-debugger` flag.
+/// `strip-debugger: false` — the opposite of what `--strip-debugger`
+/// asks for — must still lose to the explicit flag.
 #[test]
 fn strip_debugger_flag_overrides_a_manifest_profile_that_keeps_it() {
     let dir = scratch("manifest_strip_debugger_flag_wins");
