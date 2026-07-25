@@ -20,6 +20,7 @@ pub mod lint;
 mod lsp;
 pub mod optimizer;
 pub mod parser;
+mod project;
 pub mod rept_emit;
 pub mod stdlib;
 

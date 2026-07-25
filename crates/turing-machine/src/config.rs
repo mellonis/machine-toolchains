@@ -40,6 +40,16 @@ pub(crate) enum ConfigError {
     UnknownKey { path: PathBuf, key: String },
     /// A `lint.allow` entry names no rule in the shared namespace.
     UnknownAllowCode { path: PathBuf, code: String },
+    /// A semantically invalid `project` section: duplicate effective
+    /// path, colliding target outputs, bad target name, an unknown
+    /// profile name, ... The message is complete on its own.
+    ///
+    /// Constructed by `project::validate_manifest`'s semantic pass; the
+    /// one-loader `tmt.json` walk and the manifest-driven `tmt build`
+    /// driver are the real future consumers, neither wired into this
+    /// crate yet — only `project.rs`'s own tests construct it so far.
+    #[allow(dead_code)]
+    Invalid { path: PathBuf, message: String },
 }
 
 impl ConfigError {
@@ -49,7 +59,8 @@ impl ConfigError {
             ConfigError::Io { path, .. }
             | ConfigError::Parse { path, .. }
             | ConfigError::UnknownKey { path, .. }
-            | ConfigError::UnknownAllowCode { path, .. } => path,
+            | ConfigError::UnknownAllowCode { path, .. }
+            | ConfigError::Invalid { path, .. } => path,
         }
     }
 
@@ -64,6 +75,7 @@ impl ConfigError {
             ConfigError::UnknownAllowCode { code, .. } => {
                 format!("unknown lint rule `{code}` in lint.allow")
             }
+            ConfigError::Invalid { message, .. } => message.clone(),
         }
     }
 }
