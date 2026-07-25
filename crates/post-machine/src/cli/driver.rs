@@ -21,6 +21,7 @@ use super::build::{
     find_library, out_path, read_object, render_opt_report, render_warnings, sidecar_path,
     take_disabled_passes,
 };
+use super::lint::render_fatal;
 use super::{Args, CliOutput};
 
 const BUILD_USAGE: &str = "\
@@ -161,14 +162,9 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
                 let source = fs::read_to_string(path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
                 let out = compile_source(&source, options.clone()).map_err(|e| {
-                    format!(
-                        "{}:{}:{}: error: {} [{}]",
-                        path.display(),
-                        e.span.start.line,
-                        e.span.start.col,
-                        e.kind,
-                        e.kind.code()
-                    )
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
                 })?;
                 if flags.keep_objects {
                     let pmo = path.with_extension("pmo");
@@ -182,14 +178,9 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
                 let source = fs::read_to_string(path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
                 let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
-                    format!(
-                        "{}:{}:{}: error: {} [{}]",
-                        path.display(),
-                        e.span.start.line,
-                        e.span.start.col,
-                        e.kind,
-                        e.kind.code()
-                    )
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
                 })?;
                 if flags.keep_objects {
                     let pmo = path.with_extension("pmo");
