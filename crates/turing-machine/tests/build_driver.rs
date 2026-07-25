@@ -667,15 +667,41 @@ fn list_targets_prints_name_and_run_marker() {
     );
 }
 
-/// The PM-1 driver's `release_flag_selects_the_release_profile`, ported.
-/// Builds `notape` (not `app`) so the assertion isn't riding the
-/// bootstrap's already-cleaned-up `app.tmx`.
+/// The PM-1 driver's `release_flag_selects_the_release_profile`, ported —
+/// but rewritten to a byte comparison instead of the ported version's
+/// bare `.is_file()` check. `notape`'s own source (`A2_BINARY_PLUS_ONE`)
+/// was hand-verified (`cmp -s` on a plain `-O0` vs `-O1` build, no
+/// `--release`/`--foutline` involved) to compile byte-IDENTICAL at both
+/// levels — a file-existence assertion on either profile can never fail
+/// no matter what `manifest.profiles.resolve(flags.release_preset)`
+/// does, so it is not reused here. `A5_CALL_ACROSS_ALPHABETS` (defined
+/// below, already proven elsewhere in this file to diverge under
+/// different `call-mech` choices) was separately hand-verified via the
+/// same `cmp -s` check to also diverge between plain `-O0` and `-O1`
+/// with NO `--call-mech`/`--foutline` involved — the O1-only optimizer
+/// pipeline (inline/jump_threading/tail_merge/dce/etc., all default-ON,
+/// `outline` itself excepted) changes the cross-alphabet call site's
+/// codegen on its own. Uses its own scratch manifest (a single `app`
+/// target, not `write_project`'s `notape`) so the divergence is
+/// guaranteed by construction rather than riding a shared fixture that
+/// might stop diverging if `notape`'s source ever changed. Failing
+/// mutation: `manifest.profiles.resolve(flags.release_preset)` collapsing
+/// to `resolve(false)` (i.e. `--release` never reaching profile
+/// selection) — both builds would then use the debug profile and produce
+/// identical bytes.
 #[test]
 fn release_flag_selects_the_release_profile() {
     let dir = scratch("tm_manifest_release");
-    write_project(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/app.tmc"), A5_CALL_ACROSS_ALPHABETS).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": { "targets": { "app": { "sources": ["src/app.tmc"] } } } }"#,
+    )
+    .unwrap();
+
     let out = tmt()
-        .args(["build", "--release", "notape"])
+        .args(["build", "app"])
         .current_dir(&dir)
         .output()
         .unwrap();
@@ -684,7 +710,24 @@ fn release_flag_selects_the_release_profile() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(dir.join("notape.tmx").is_file());
+    let debug = fs::read(dir.join("app.tmx")).unwrap();
+
+    let out = tmt()
+        .args(["build", "--release", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let release = fs::read(dir.join("app.tmx")).unwrap();
+
+    assert_ne!(
+        debug, release,
+        "--release must select the release profile (-O1) and reach build_one_target's CompileOptions"
+    );
 }
 
 /// Two structurally-identical 7-state exit-free chains that only
