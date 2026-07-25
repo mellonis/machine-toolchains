@@ -823,7 +823,7 @@ fn foutline_flag_reaches_manifest_mode_compile_options() {
     );
 }
 
-// ── `--run` (docs/tmt/project.md (run blocks)) ─────────────────────────────
+// ── `--run` (docs/tmt/project.md (run block)) ──────────────────────────────
 //
 // TM's `run_target` diverges sharply from PM's: `tmt run` always drives a
 // whole multi-tape band loaded from a `.tmt` snapshot, with no empty-tape

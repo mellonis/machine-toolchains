@@ -319,7 +319,10 @@ For each input file, `pmt lint` also discovers a `pmt.json` project
 file by walking up from that file's directory (nearest ancestor wins,
 never a cascade — `docs/pmt/lint.md`) and unions its allow-list with any
 `--allow` flags. `--no-config` skips that discovery for every file, so
-the run is governed by `--allow` alone. A `pmt.json` that fails to
+the run is governed by `--allow` alone — but it is rejected outright on a
+*bare* `pmt lint` (no PATH arguments), where the manifest's declared
+source set is the input itself and skipping discovery would leave nothing
+to lint. A `pmt.json` that fails to
 parse or validate is a per-file fatal, exactly like a source file that
 fails to parse: reported on stderr as `PATH/pmt.json: error: MESSAGE`,
 the file it would have configured is skipped, and the batch continues.

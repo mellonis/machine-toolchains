@@ -713,6 +713,11 @@ that file's directory and unions its `lint.allow` with any `--allow` flags.
 `--no-config` skips that discovery for every file, leaving the run governed
 by the flags alone. See [`tmt.json`](#tmtjson) below.
 
+`--no-config` is rejected outright on a *bare* `tmt lint` — one with no PATH
+arguments — because there the manifest's declared source set is the input
+itself, so skipping discovery would leave nothing to lint. Alongside
+explicit paths it behaves exactly as described above.
+
 There is no `--fix` on `tmt lint`: no `.tmc` or `.tma` rule emits a
 machine-applicable fix, so there is nothing for it to apply.
 
@@ -769,9 +774,13 @@ Exit codes follow `tmt lint`'s convention: 0 = success (every input already
 canonical, or rewritten in place); 1 = under `--check` at least one input
 would change, or a lex/parse error occurred anywhere in the batch.
 
-Unlike `tmt lint`, `tmt fmt` does **not** read `tmt.json` — formatting has no
-configurable surface for a project file to set, and there is correspondingly
-no `--no-config` flag on it.
+Unlike `tmt lint`, `tmt fmt` takes no **configuration** from `tmt.json` —
+formatting has no configurable surface for a project file to set, and there
+is correspondingly no `--no-config` flag on it. It does read the file in one
+case, and only to learn *what* to format: a bare `tmt fmt` with no PATH
+arguments formats the nearest manifest's declared source set
+(`docs/tmt/project.md (the declared source set)`). Nothing in the file
+changes *how* any of those files are formatted.
 
 ## `tmt lsp`
 

@@ -221,6 +221,11 @@ pmt fmt PATH... [--exclude PATH]... [--check]
 pmt fmt -       [--check] [--lang pmc|pma]
 ```
 
+Omitting `PATH` entirely formats the nearest project manifest's declared
+source set (`docs/pmt/project.md (the declared source set)`) rather than
+being a usage error — the set is smaller and explicitly declared, but
+each file in it is formatted by exactly the rules above.
+
 By default `pmt fmt` rewrites each file in place, and only when its
 formatted text differs from what's on disk — an already-formatted file
 is never rewritten, so running fmt does not churn file modification
