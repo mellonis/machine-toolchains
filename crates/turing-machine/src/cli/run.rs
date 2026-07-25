@@ -43,6 +43,24 @@ EXIT CODE: 0 stopped | 2 halted (hlt) | 3 trapped | 1 tool error.
 
 const DEFAULT_MAX_STEPS: u64 = 10_000_000;
 
+/// Parsed `tmt run` flags, also the shape `tmt build --run` maps a
+/// manifest `run` block onto (cli/driver.rs) — one execution path for
+/// both callers. Smaller than PM's `RunSettings`: `tmt run` always
+/// drives a whole multi-tape band loaded from a `.tmt` snapshot, so
+/// there is no inline-glyph tape, no `--head`, no `--strict-cells`, and
+/// no `--tact-profile` knob to carry.
+#[derive(Debug, Clone, Default)]
+pub(super) struct RunSettings {
+    /// `--tape PATH.tmt`. `None` reaches `execute_run` only from a bare
+    /// `tmt run` with no flag, which errors there as it does today —
+    /// the driver checks earlier so it can name the target.
+    pub tape: Option<String>,
+    pub no_step_limit: bool,
+    pub max_steps: Option<u64>,
+    pub max_tacts: Option<u64>,
+    pub trace: bool,
+}
+
 pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     if args.flag("--help") {
@@ -67,21 +85,36 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         ),
         None => None,
     };
-    let tape_path = args.value("--tape")?;
+    let tape = args.value("--tape")?;
     let inputs = args.positionals()?;
     let [exe_path] = inputs.as_slice() else {
         return Err(format!("run takes exactly one executable\n\n{RUN_USAGE}"));
     };
     let exe_path = Path::new(exe_path);
 
+    let settings = RunSettings {
+        tape,
+        no_step_limit,
+        max_steps,
+        max_tacts,
+        trace,
+    };
+    execute_run(exe_path, &settings, trace_out)
+}
+
+pub(super) fn execute_run(
+    exe_path: &Path,
+    settings: &RunSettings,
+    trace_out: &mut dyn std::io::Write,
+) -> Result<CliOutput, String> {
     let bytes =
         fs::read(exe_path).map_err(|e| format!("cannot read {}: {e}", exe_path.display()))?;
     let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{}: {e}", exe_path.display()))?;
 
-    let Some(tape_path) = tape_path else {
+    let Some(tape_path) = settings.tape.as_deref() else {
         return Err(format!("run needs --tape TAPES.tmt\n\n{RUN_USAGE}"));
     };
-    let tape_bytes = fs::read(&tape_path).map_err(|e| format!("cannot read {tape_path}: {e}"))?;
+    let tape_bytes = fs::read(tape_path).map_err(|e| format!("cannot read {tape_path}: {e}"))?;
     let block = TapeBlockFile::from_bytes(&tape_bytes).map_err(|e| format!("{tape_path}: {e}"))?;
 
     // The band count must equal the image's tape count. This is a tool
@@ -119,12 +152,12 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         .collect::<Result<_, _>>()?;
 
     let limits = RunLimits {
-        max_steps: if no_step_limit {
+        max_steps: if settings.no_step_limit {
             None
         } else {
-            Some(max_steps.unwrap_or(DEFAULT_MAX_STEPS))
+            Some(settings.max_steps.unwrap_or(DEFAULT_MAX_STEPS))
         },
-        max_tacts,
+        max_tacts: settings.max_tacts,
     };
     let options = RunOptions {
         limits,
@@ -138,7 +171,7 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
     let map = super::inspect::sidecar_map(exe_path); // sidecar discovery, shared with `dis`
 
     let mut devices: Vec<&mut dyn Tape> = tapes.iter_mut().map(|t| t as &mut dyn Tape).collect();
-    let (outcome, stats) = if trace {
+    let (outcome, stats) = if settings.trace {
         drive_traced(
             &machine,
             &exe,

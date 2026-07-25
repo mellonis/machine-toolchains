@@ -822,3 +822,259 @@ fn foutline_flag_reaches_manifest_mode_compile_options() {
         "--foutline must reach build_one_target's CompileOptions and change the linked image"
     );
 }
+
+// ── `--run` (docs/tmt/project.md (run blocks)) ─────────────────────────────
+//
+// TM's `run_target` diverges sharply from PM's: `tmt run` always drives a
+// whole multi-tape band loaded from a `.tmt` snapshot, with no empty-tape
+// default to fall back on. So a target without a declared `run` block, or
+// one whose block declares no `tape`, is a pointed error naming the
+// target — not a default-tape run the way PM's `run_target` behaves.
+
+/// `app`'s declared run block (`tapes/app-in.tmt`, `max-steps: 100000`)
+/// carries a real tape, so `--run` must build then run it and adopt
+/// `tmt run`'s own exit code — asserted as an EQUIVALENCE against a
+/// hand-driven `tmt build app` + `tmt run --tape ... app.tmx` rather than
+/// a hardcoded number, so the assertion survives a fixture swap. Uses its
+/// own scratch project seeded to TRAP (not `write_project`'s `app`, which
+/// always stops with exit 0): `A5_CALL_ACROSS_ALPHABETS` seeded through
+/// the same spawned `tmt tape set` recipe
+/// `cli_programs.rs::compile_link_run_a5_holey_read_traps_with_exit_3`
+/// exercises in-process, so a mutation that hardcoded exit 0 (or
+/// otherwise returned the BUILD's outcome instead of the RUN's) makes
+/// `driven` diverge from `direct`'s genuine exit 3 — a same-exit-0
+/// fixture could not tell "adopted" from "hardcoded 0" apart, which the
+/// sanity assertion on `direct` below documents explicitly.
+#[test]
+fn build_run_adopts_the_machine_exit_code() {
+    let dir = scratch("tm_manifest_run");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/app.tmc"), A5_CALL_ACROSS_ALPHABETS).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": { "targets": {
+            "app": { "sources": ["src/app.tmc"], "run": { "tape": "tapes/app-in.tmt" } }
+        } } }"#,
+    )
+    .unwrap();
+
+    let bootstrap = tmt()
+        .args(["build", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        bootstrap.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bootstrap.stderr)
+    );
+    fs::create_dir_all(dir.join("tapes")).unwrap();
+    let out = tmt()
+        .args(["tape", "new", "--from", "app.tmx", "-o", "tapes/app-in.tmt"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // ctl (tape 0, card 3): index 2 = '1' triggers the call.
+    let out = tmt()
+        .args([
+            "tape",
+            "set",
+            "tapes/app-in.tmt",
+            "--in-place",
+            "--tape",
+            "0",
+            "--cells",
+            "2",
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // data (tape 1, card 5): index 1 = 'a', a holey wide symbol → unmapped-read.
+    let out = tmt()
+        .args([
+            "tape",
+            "set",
+            "tapes/app-in.tmt",
+            "--in-place",
+            "--tape",
+            "1",
+            "--cells",
+            "1",
+        ])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let direct = tmt()
+        .args(["run", "--tape", "tapes/app-in.tmt", "app.tmx"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        direct.status.code(),
+        Some(3),
+        "fixture sanity: the seeded holey read must trap directly, or the\
+         equivalence below would be vacuous"
+    );
+    let driven = tmt()
+        .args(["build", "--run", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        driven.status.code(),
+        direct.status.code(),
+        "build --run must adopt tmt run's TRAPPED outcome code: {}",
+        String::from_utf8_lossy(&driven.stderr)
+    );
+}
+
+/// `notape` declares no `run` block at all — `run_target`'s first guard
+/// (`let Some(spec) = run else { ... }`) must fire and name the target,
+/// since `tmt run` has no empty-tape default to invent one from. Failing
+/// mutation: dropping the `run.is_none()` guard (e.g. falling through to
+/// `RunSpec::default()` the way PM's `run_target` does) — the build
+/// would then attempt `execute_run` with `settings.tape = None`, which
+/// fails with `run.rs`'s OWN "run needs --tape" message instead of one
+/// naming the target `notape`; the `stderr.contains("notape")` assertion
+/// below is what catches that particular substitution, since both
+/// messages contain "tape".
+#[test]
+fn build_run_on_a_target_without_a_tape_is_a_pointed_error() {
+    let dir = scratch("tm_manifest_run_no_tape");
+    write_project(&dir);
+    let out = tmt()
+        .args(["build", "--run", "notape"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tape"), "{stderr}");
+    assert!(stderr.contains("notape"), "{stderr}");
+}
+
+/// Distinct from `notape` above: this target HAS a `run` block, but the
+/// block declares no `tape` key — `parse_run` (project.rs) accepts that
+/// (`tape` simply stays `None`; there is no schema-level requirement),
+/// so `run_target`'s SECOND guard
+/// (`let Some(raw_tape) = spec.tape.clone() else { ... }`) is genuinely
+/// reachable and needs its own coverage. Failing mutation: dropping this
+/// second guard (e.g. falling through to `settings.tape = None` the way
+/// a naive port of PM's `run_target` might) — `execute_run` would then
+/// fail with ITS OWN "run needs --tape TAPES.tmt" message, which still
+/// contains "tape" but never names `notape2`; the
+/// `stderr.contains("notape2")` assertion is what catches that.
+#[test]
+fn build_run_with_a_run_block_but_no_tape_is_a_pointed_error() {
+    let dir = scratch("tm_manifest_run_block_no_tape");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/app.tmc"), TRIVIAL_TMC).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": { "targets": {
+            "notape2": { "sources": ["src/app.tmc"], "run": { "max-steps": 100 } }
+        } } }"#,
+    )
+    .unwrap();
+    let out = tmt()
+        .args(["build", "--run", "notape2"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tape"), "{stderr}");
+    assert!(stderr.contains("notape2"), "{stderr}");
+}
+
+/// `run_target` resolves the declared `tape` against the MANIFEST
+/// directory (`root.join(normalize_rel(raw))`), never the process cwd —
+/// the same discipline `manifest_mode_discovery_walks_up_from_a_
+/// subdirectory` proves for build outputs, applied here to `--run`
+/// specifically. Spawns from `src/`, a subdirectory of the manifest
+/// root; a mutation that resolved the tape against cwd instead (or
+/// dropped the `root.join` entirely) would look for `tapes/app-in.tmt`
+/// relative to `src/` — which doesn't exist there — and fail to read it.
+#[test]
+fn build_run_resolves_the_tape_against_the_manifest_directory() {
+    let dir = scratch("tm_manifest_run_cwd");
+    write_project(&dir);
+    let out = tmt()
+        .args(["build", "--run", "app"])
+        .current_dir(dir.join("src"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "tape must resolve against the manifest dir, not cwd: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `run_target` prefixes the BUILD's stderr chunk onto the RUN's
+/// (`run_out.stderr = format!("{build_stderr}{}", run_out.stderr)`), so
+/// `--run`'s combined output reads as one build+run invocation — half of
+/// `run_target`'s stated contract, untested until now. `-v` makes
+/// `build_one_target` emit a `NAME: link: dropped [...]` summary line
+/// into that chunk (docs/tmt/cli.md (build)); asserting it survives into
+/// `--run`'s stderr catches a mutation that dropped the prefix (e.g.
+/// returning `execute_run`'s output unprefixed).
+#[test]
+fn build_run_prefixes_the_build_stderr_onto_the_run_output() {
+    let dir = scratch("tm_manifest_run_stderr_prefix");
+    write_project(&dir);
+    let out = tmt()
+        .args(["build", "--run", "-v", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("link:"),
+        "the build's -v report must survive into --run's combined stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `manifest_mode`'s pre-existing `flags.run && selected.len() != 1`
+/// guard (not new to this task, but previously untested in this crate —
+/// PM's `build_driver.rs` has the analogous
+/// `run_flag_needs_exactly_one_target`). `write_project` declares three
+/// targets, so a bare `tmt build --run` with no target named selects all
+/// three and must be rejected before any target is built or run. Failing
+/// mutation: dropping the guard, or loosening it to accept the FIRST of
+/// several selected targets instead of erroring — the build would then
+/// succeed (or fail for an unrelated reason) instead of naming the
+/// "exactly one" requirement.
+#[test]
+fn build_run_without_a_named_target_needs_exactly_one() {
+    let dir = scratch("tm_manifest_run_ambiguous");
+    write_project(&dir);
+    let out = tmt()
+        .args(["build", "--run"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("exactly one"));
+}

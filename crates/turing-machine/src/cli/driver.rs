@@ -364,19 +364,43 @@ fn build_one_target(
 
 /// Runs a just-built target under `--run` (docs/tmt/cli.md (run)): the
 /// manifest `run` block split against a `RunSettings`-shaped driver, the
-/// way `build_one_target` splits `CompileOptions`/`LinkOptions`. TM's own
-/// run-settings type and executor don't exist in this crate yet, so this
-/// stub keeps the signature `manifest_mode` already calls (including the
-/// target name its error messages will need) so that landing them later
-/// replaces only this body.
+/// way `build_one_target` splits `CompileOptions`/`LinkOptions`. Unlike
+/// PM's `run_target`, `tmt run` always drives a whole multi-tape band
+/// loaded from a `.tmt` snapshot — there is no empty-tape default to
+/// fall back on — so a target without a declared `run` block, or one
+/// whose block declares no `tape`, cannot be `--run`; both cases name
+/// the target in a pointed error instead of inventing a run.
 fn run_target(
-    _root: &Path,
-    _output: &Path,
-    _name: &str,
-    _run: Option<&crate::project::RunSpec>,
-    _stderr: String,
+    root: &Path,
+    output: &Path,
+    name: &str,
+    run: Option<&crate::project::RunSpec>,
+    build_stderr: String,
 ) -> Result<CliOutput, String> {
-    Err("tmt build --run is not implemented yet".to_string())
+    let Some(spec) = run else {
+        return Err(format!(
+            "target `{name}` declares no `run` block: --run needs one with a `tape`"
+        ));
+    };
+    let Some(raw_tape) = spec.tape.clone() else {
+        return Err(format!(
+            "target `{name}`'s run block declares no `tape`: tmt run needs a .tmt snapshot"
+        ));
+    };
+    let settings = super::run::RunSettings {
+        tape: Some(
+            root.join(crate::project::normalize_rel(&raw_tape)?)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        no_step_limit: spec.no_step_limit,
+        max_steps: spec.max_steps,
+        max_tacts: spec.max_tacts,
+        trace: false,
+    };
+    let mut run_out = super::run::execute_run(output, &settings, &mut std::io::sink())?;
+    run_out.stderr = format!("{build_stderr}{}", run_out.stderr);
+    Ok(run_out)
 }
 
 /// Compile options for argv mode: exactly `tmt compile`'s preset/flag
