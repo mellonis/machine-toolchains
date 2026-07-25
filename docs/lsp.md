@@ -39,8 +39,11 @@ A server is a blocking loop: it reads Content-Length-framed JSON-RPC
 messages off stdin, dispatches each against the bound language service(s),
 and enforces the LSP lifecycle — initialize/initialized/shutdown/exit
 gating, unknown-method handling, and decode-error responses. Document sync
-(`didOpen`/`didChange`/`didClose`) drives the per-document store and
-republishes diagnostics through one shared publish path — the same path
+(`didOpen`/`didChange`/`didClose`) is **full-text**: a server advertises
+sync kind `1`, so each `didChange` carries the whole document and the
+store replaces its copy outright rather than applying ranged edits. Sync
+drives the per-document store and republishes diagnostics through one
+shared publish path — the same path
 the config- and watched-file-triggered republish-all sweeps use. Feature
 requests (completion, definition, hover, code actions, document symbols,
 semantic tokens, formatting) convert the bound service's output to wire
