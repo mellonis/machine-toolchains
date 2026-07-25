@@ -143,6 +143,30 @@ impl Manifest {
             .clone()
             .unwrap_or_else(|| format!("{name}.pmx"))
     }
+
+    /// The union of every target's effective sources, first-seen order,
+    /// deduped after lexical normalization, with `.pmo` entries dropped —
+    /// the file set a bare `pmt lint` / `pmt fmt` operates on
+    /// (docs/pmt/project.md (the declared source set)). Objects carry no
+    /// text, so there is nothing in them to lint or format.
+    pub(crate) fn all_sources(&self) -> Vec<String> {
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for target in self.targets.values() {
+            for raw in self.effective_sources(target) {
+                if raw.ends_with(".pmo") {
+                    continue;
+                }
+                let Ok(normalized) = normalize_rel(&raw) else {
+                    continue; // validate_manifest already rejected these
+                };
+                if seen.insert(normalized) {
+                    out.push(raw);
+                }
+            }
+        }
+        out
+    }
 }
 
 /// Lexical normalization of a manifest-relative path: rejects absolute
@@ -784,5 +808,26 @@ mod tests {
         let libs = m.effective_libraries(t);
         assert_eq!(libs.dirs, vec!["libs".to_string(), "alibs".to_string()]);
         assert_eq!(libs.link, vec!["base".to_string(), "extra".to_string()]);
+    }
+
+    #[test]
+    fn all_sources_dedupes_across_targets_and_drops_objects() {
+        let m = v(json!({
+            "sources": ["shared.pmc"],
+            "targets": {
+                "a": { "sources": ["a.pmc", "vendor.pmo"] },
+                "b": { "sources": ["b.pmc"] }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            m.all_sources(),
+            vec![
+                "shared.pmc".to_string(),
+                "a.pmc".to_string(),
+                "b.pmc".to_string()
+            ],
+            "shared.pmc appears once, the .pmo is dropped"
+        );
     }
 }

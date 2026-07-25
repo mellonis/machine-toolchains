@@ -267,9 +267,12 @@ USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]] 
 
 PATH is a .pmc or .pma file, or a directory; directories are walked
 recursively for *.pmc and *.pma (sorted order, symlinks not followed,
-dot-entries skipped). .pmc sources lint through the pmc rule table;
-.pma sources lint through core's arch-agnostic asm rule table over the
-PM-1 syntax. --allow CODE draws from the union of both tables.
+dot-entries skipped). Omitting PATH uses the nearest manifest's declared
+source set (docs/pmt/project.md (the declared source set)); requires a
+`pmt.json` project and is incompatible with --no-config. .pmc sources
+lint through the pmc rule table; .pma sources lint through core's
+arch-agnostic asm rule table over the PM-1 syntax. --allow CODE draws
+from the union of both tables.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -336,7 +339,9 @@ USAGE: pmt fmt PATH... [--exclude PATH]... [--check]
 
 PATH is a .pmc or .pma file, or a directory; directories are walked
 recursively for *.pmc and *.pma (sorted order, symlinks not followed,
-dot-entries skipped). `-` reads one source from stdin and writes the
+dot-entries skipped). Omitting PATH uses the nearest manifest's declared
+source set (docs/pmt/project.md (the declared source set)); requires a
+`pmt.json` project. `-` reads one source from stdin and writes the
 result to stdout; it cannot be combined with PATH arguments.
 
 FLAGS:
@@ -348,6 +353,8 @@ FLAGS:
   --lang LANG     stdin's language: pmc (default) or pma; applies to
                   stdin (-) only — an error alongside PATH arguments,
                   whose language always comes from the file extension
+  --no-config     with a bare invocation (no PATH), an error — the
+                  manifest IS the input, so it cannot be skipped
 ```
 
 PATH is a `.pmc` or `.pma` file, or a directory, walked the same way as

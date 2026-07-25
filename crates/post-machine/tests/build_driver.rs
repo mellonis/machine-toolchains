@@ -743,3 +743,93 @@ fn strip_debugger_flag_overrides_a_manifest_profile_that_keeps_it() {
         String::from_utf8_lossy(&dis.stdout)
     );
 }
+
+/// A bare `pmt lint` operates on the nearest manifest's declared source
+/// set (docs/pmt/project.md (the declared source set)) — never a
+/// directory scan. `src/stray.pmc` sits right next to the declared
+/// files but is not named by any target's `sources`, so it must not
+/// appear in the lint output even though it parses and would surface if
+/// the batch were ever built from a directory walk instead.
+#[test]
+fn bare_lint_uses_the_manifests_declared_source_set() {
+    let dir = scratch("manifest_bare_lint");
+    write_project(&dir);
+    // A file NOT in the manifest must not be linted, even though it sits
+    // in the same directory — the declared set is the set, never a scan.
+    fs::write(dir.join("src/stray.pmc"), "main() { mark; mark; }").unwrap();
+
+    let out = pmt().arg("lint").current_dir(&dir).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("stray.pmc"),
+        "undeclared file must not be linted: {combined}"
+    );
+}
+
+/// With no ancestor `pmt.json` carrying a `project` section, a bare
+/// `pmt lint` must error naming what it searched for — mirroring bare
+/// `pmt build`'s discovery-failure message exactly.
+#[test]
+fn bare_lint_without_a_manifest_errors_naming_what_was_searched() {
+    let empty = scratch("manifest_bare_lint_absent");
+    let out = pmt().arg("lint").current_dir(&empty).output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("pmt.json"), "{stderr}");
+    assert!(stderr.contains("project"), "{stderr}");
+}
+
+/// `--no-config` cannot combine with a bare invocation — the manifest
+/// IS the input, so skipping discovery would leave nothing to lint.
+#[test]
+fn bare_lint_rejects_no_config() {
+    let dir = scratch("manifest_bare_lint_noconfig");
+    write_project(&dir);
+    let out = pmt()
+        .args(["lint", "--no-config"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--no-config"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A bare `pmt fmt` formats exactly the manifest's declared source set:
+/// the declared `src/app.pmc` is rewritten in place, but the undeclared
+/// `src/stray.pmc` — sitting in the same directory, also unformatted —
+/// is left untouched. This is the write-side twin of
+/// `bare_lint_uses_the_manifests_declared_source_set`.
+#[test]
+fn bare_fmt_formats_exactly_the_declared_set() {
+    let dir = scratch("manifest_bare_fmt");
+    write_project(&dir);
+    let stray = dir.join("src/stray.pmc");
+    let unformatted = "main(){mark;}";
+    fs::write(&stray, unformatted).unwrap();
+    fs::write(dir.join("src/app.pmc"), "main(){@util();}").unwrap();
+
+    let out = pmt().arg("fmt").current_dir(&dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&stray).unwrap(),
+        unformatted,
+        "an undeclared file must be left untouched"
+    );
+    assert_ne!(
+        fs::read_to_string(dir.join("src/app.pmc")).unwrap(),
+        "main(){@util();}",
+        "a declared file is formatted in place"
+    );
+}

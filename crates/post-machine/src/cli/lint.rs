@@ -18,9 +18,12 @@ USAGE: pmt lint PATH... [--exclude PATH]... [--allow CODE]... [--fix [--force]] 
 
 PATH is a .pmc or .pma file, or a directory; directories are walked
 recursively for *.pmc and *.pma (sorted order, symlinks not followed,
-dot-entries skipped). .pmc sources lint through the pmc rule table;
-.pma sources lint through core's arch-agnostic asm rule table over the
-PM-1 syntax. --allow CODE draws from the union of both tables.
+dot-entries skipped). Omitting PATH uses the nearest manifest's declared
+source set (docs/pmt/project.md (the declared source set)); requires a
+`pmt.json` project and is incompatible with --no-config. .pmc sources
+lint through the pmc rule table; .pma sources lint through core's
+arch-agnostic asm rule table over the PM-1 syntax. --allow CODE draws
+from the union of both tables.
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -60,9 +63,35 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     if force && !fix {
         return Err(format!("--force requires --fix\n\n{LINT_USAGE}"));
     }
-    let paths = args.positionals()?;
+    let mut paths = args.positionals()?;
+    // Bare invocation: the nearest manifest's declared source set, the
+    // same discovery `pmt build` uses (docs/pmt/project.md (the declared
+    // source set)). Never a directory scan — undeclared files are not
+    // part of the project.
     if paths.is_empty() {
-        return Err(format!("lint takes at least one PATH\n\n{LINT_USAGE}"));
+        if no_config {
+            return Err(format!(
+                "--no-config cannot combine with a bare invocation: the manifest IS the input\n\n{LINT_USAGE}"
+            ));
+        }
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let Some((manifest_path, manifest)) =
+            crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
+        else {
+            return Err(
+                "no pmt.json with a `project` section found from the current directory upward"
+                    .into(),
+            );
+        };
+        let root = manifest_path.parent().expect("pmt.json has a parent");
+        paths = manifest
+            .all_sources()
+            .iter()
+            .map(|raw| {
+                crate::project::normalize_rel(raw)
+                    .map(|rel| root.join(rel).to_string_lossy().into_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
     }
 
     let mut files: Vec<PathBuf> = Vec::new();
