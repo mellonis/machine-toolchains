@@ -2190,7 +2190,11 @@ try manifest discovery:
     }
 ```
 
-`fmt.rs` uses the same block with `FMT_USAGE` in the `--no-config` message.
+`fmt.rs` uses the same block **minus the `--no-config` guard** — `pmt fmt` has
+no `--no-config` flag and reads no config at all (only `lint` does, for the
+allow-list). Do NOT add one: a flag that exists only to be refused is
+discoverable in `--help` and useful never. Bare `pmt fmt` with an unknown flag
+gets the parser's own "unknown flag" error, which is accurate.
 Both keep their existing behavior for every non-empty positional list, and
 `fmt`'s in-place default is unchanged — the set is smaller and explicitly
 declared, so no extra guard is warranted (the issue asked; this is the
