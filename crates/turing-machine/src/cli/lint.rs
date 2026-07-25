@@ -25,10 +25,12 @@ USAGE: tmt lint PATH... [--exclude PATH]... [--allow CODE]... [--warn CODE]... [
 
 PATH is a .tmc or .tma file, or a directory; directories are walked
 recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). .tmc sources lint through the .tmc rule table;
-.tma sources through the five arch-agnostic asm rules plus the TM-1
-additions (shadowed rows, retx exit bounds, unused rept vars,
-duplicate map source).
+dot-entries skipped). Omitting PATH uses the nearest manifest's declared
+source set (docs/tmt/project.md (the declared source set)); requires a
+`tmt.json` project and is incompatible with --no-config. .tmc sources
+lint through the .tmc rule table; .tma sources through the five
+arch-agnostic asm rules plus the TM-1 additions (shadowed rows, retx
+exit bounds, unused rept vars, duplicate map source).
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -59,9 +61,35 @@ pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
         .map(PathBuf::from)
         .collect();
     let no_config = args.flag("--no-config");
-    let paths = args.positionals()?;
+    let mut paths = args.positionals()?;
+    // Bare invocation: the nearest manifest's declared source set, the
+    // same discovery `tmt build` uses (docs/tmt/project.md (the declared
+    // source set)). Never a directory scan — undeclared files are not
+    // part of the project.
     if paths.is_empty() {
-        return Err(format!("lint takes at least one PATH\n\n{LINT_USAGE}"));
+        if no_config {
+            return Err(format!(
+                "--no-config cannot combine with a bare invocation: the manifest IS the input\n\n{LINT_USAGE}"
+            ));
+        }
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let Some((manifest_path, manifest)) =
+            crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
+        else {
+            return Err(
+                "no tmt.json with a `project` section found from the current directory upward"
+                    .into(),
+            );
+        };
+        let root = manifest_path.parent().expect("tmt.json has a parent");
+        paths = manifest
+            .all_sources()
+            .iter()
+            .map(|raw| {
+                crate::project::normalize_rel(raw)
+                    .map(|rel| root.join(rel).to_string_lossy().into_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
     }
 
     let mut files: Vec<PathBuf> = Vec::new();

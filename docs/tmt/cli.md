@@ -651,10 +651,12 @@ USAGE: tmt lint PATH... [--exclude PATH]... [--allow CODE]... [--warn CODE]... [
 
 PATH is a .tmc or .tma file, or a directory; directories are walked
 recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). .tmc sources lint through the .tmc rule table;
-.tma sources through the five arch-agnostic asm rules plus the TM-1
-additions (shadowed rows, retx exit bounds, unused rept vars,
-duplicate map source).
+dot-entries skipped). Omitting PATH uses the nearest manifest's declared
+source set (docs/tmt/project.md (the declared source set)); requires a
+`tmt.json` project and is incompatible with --no-config. .tmc sources
+lint through the .tmc rule table; .tma sources through the five
+arch-agnostic asm rules plus the TM-1 additions (shadowed rows, retx
+exit bounds, unused rept vars, duplicate map source).
 
 FLAGS:
   --exclude PATH  skip a file or prune a directory subtree (repeatable;
@@ -722,7 +724,9 @@ USAGE: tmt fmt PATH... [--exclude PATH]... [--check]
 
 PATH is a .tmc or .tma file, or a directory; directories are walked
 recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). `-` reads one source from stdin and writes the
+dot-entries skipped). Omitting PATH uses the nearest manifest's declared
+source set (docs/tmt/project.md (the declared source set)); requires a
+`tmt.json` project. `-` reads one source from stdin and writes the
 result to stdout; it cannot be combined with PATH arguments.
 
 .tma sources format through the canonical assembly grid; .tmc sources

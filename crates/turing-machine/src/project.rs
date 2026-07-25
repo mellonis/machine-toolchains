@@ -186,6 +186,32 @@ impl Manifest {
             .unwrap_or_else(|| format!("{name}.tmx"))
     }
 
+    /// The union of every target's effective sources, first-seen order,
+    /// deduped after lexical normalization, with `.tmo` entries dropped —
+    /// the file set a bare `tmt lint` / `tmt fmt` operates on
+    /// (docs/tmt/project.md (the declared source set)). Objects carry no
+    /// text, so there is nothing in them to lint or format. `.tma` stays:
+    /// hand-written assembly is a first-class TM-1 source with both a lint
+    /// layer and a formatter.
+    pub(crate) fn all_sources(&self) -> Vec<String> {
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for target in self.targets.values() {
+            for raw in self.effective_sources(target) {
+                if raw.ends_with(".tmo") {
+                    continue;
+                }
+                let Ok(normalized) = normalize_rel(&raw) else {
+                    continue; // validate_manifest already rejected these
+                };
+                if seen.insert(normalized) {
+                    out.push(raw);
+                }
+            }
+        }
+        out
+    }
+
     /// Effective lowering for one target: its own key, else the
     /// project default, else `None` (the linker's own default). The
     /// `--call-mech` flag overrides the result at the driver — flags
@@ -885,5 +911,43 @@ mod tests {
         let libs = m.effective_libraries(t);
         assert_eq!(libs.dirs, vec!["libs".to_string(), "alibs".to_string()]);
         assert_eq!(libs.link, vec!["base".to_string(), "extra".to_string()]);
+    }
+
+    #[test]
+    fn all_sources_dedupes_across_targets_and_drops_objects() {
+        let m = v(json!({
+            "sources": ["shared.tmc"],
+            "targets": {
+                "a": { "sources": ["a.tmc", "vendor.tmo"] },
+                "b": { "sources": ["b.tmc"] }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            m.all_sources(),
+            vec![
+                "shared.tmc".to_string(),
+                "a.tmc".to_string(),
+                "b.tmc".to_string()
+            ],
+            "shared.tmc appears once, the .tmo is dropped"
+        );
+    }
+
+    /// The one divergence from PM's `all_sources`: `.tma` is a first-class
+    /// hand-written source on the TM side, with both a lint layer and a
+    /// formatter, so it stays in the set. Only `.tmo` — an object, carrying
+    /// no text — is dropped.
+    #[test]
+    fn all_sources_keeps_tma_and_drops_tmo() {
+        let m = v(json!({
+            "targets": { "a": { "sources": ["a.tmc", "tables.tma", "vendor.tmo"] } }
+        }))
+        .unwrap();
+        assert_eq!(
+            m.all_sources(),
+            vec!["a.tmc".to_string(), "tables.tma".to_string()],
+            ".tma is a lintable/formattable source; .tmo is not"
+        );
     }
 }

@@ -1427,3 +1427,138 @@ fn manifest_mode_refines_undeclared_external_resolved_by_shared_sources() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// A bare `tmt lint` operates on the nearest manifest's declared source
+/// set (docs/tmt/project.md (the declared source set)) — never a
+/// directory scan. `src/stray.tmc` sits right next to the declared files
+/// but is not named by any target's `sources`, so it must never be read.
+/// The fixture is deliberately unparseable (rather than valid but
+/// lint-clean code) so a regression that swaps the declared set for a
+/// directory scan is guaranteed to surface: a compile fatal always names
+/// its file on stderr, whereas valid TM-1 code can lint clean and leave
+/// no trace either way — silently defeating the assertion below.
+#[test]
+fn bare_lint_uses_the_manifests_declared_source_set() {
+    let dir = scratch("tm_manifest_bare_lint");
+    write_project(&dir);
+    fs::write(dir.join("src/stray.tmc"), "@@@ not valid tmc syntax @@@").unwrap();
+
+    let out = tmt().arg("lint").current_dir(&dir).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("stray.tmc"),
+        "undeclared file must not be linted: {combined}"
+    );
+}
+
+/// The `.tma` half of the declared set. Unlike PM — where `.pmo` and
+/// `.pma` are the only non-`.pmc` entries and only `.pma` is lintable —
+/// TM-1 has lint and fmt layers for BOTH languages, so a hand-written
+/// `.tma` named in a target's `sources` is part of what a bare
+/// `tmt lint` reads. Proven by a deliberately unparseable `.tma`: if the
+/// declared set dropped `.tma` the way it drops `.tmo`, the file would
+/// never be read and its fatal would never appear.
+#[test]
+fn bare_lint_reads_declared_tma_sources_too() {
+    let dir = scratch("tm_manifest_bare_lint_tma");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.tmc"), TRIVIAL_TMC).unwrap();
+    fs::write(dir.join("src/tables.tma"), "@@@ not valid tma syntax @@@").unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "targets": { "app": { "sources": ["src/prog.tmc", "src/tables.tma"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt().arg("lint").current_dir(&dir).output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("tables.tma"),
+        "a declared .tma source must be linted: {combined}"
+    );
+}
+
+/// With no ancestor `tmt.json` carrying a `project` section, a bare
+/// `tmt lint` must error naming what it searched for — mirroring bare
+/// `tmt build`'s discovery-failure message exactly. The assertion names
+/// the discovery phrasing rather than just "tmt.json" and "project":
+/// `LINT_USAGE` itself contains both words (`--no-config  ignore tmt.json
+/// project files`), so the looser pair is satisfied by ANY lint error
+/// that prints the usage block, and would prove nothing.
+#[test]
+fn bare_lint_without_a_manifest_errors_naming_what_was_searched() {
+    let empty = scratch("tm_manifest_bare_lint_absent");
+    let out = tmt().arg("lint").current_dir(&empty).output().unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tmt.json"), "{stderr}");
+    assert!(stderr.contains("project"), "{stderr}");
+    assert!(
+        stderr.contains("from the current directory upward"),
+        "must be the discovery failure, not the old usage error: {stderr}"
+    );
+}
+
+/// `--no-config` cannot combine with a bare invocation — the manifest
+/// IS the input, so skipping discovery would leave nothing to lint.
+/// Asserts the guard's own wording for the same reason as the test
+/// above: `LINT_USAGE` documents a `--no-config` flag, so a bare
+/// substring check is satisfied by any error that prints the usage.
+#[test]
+fn bare_lint_rejects_no_config() {
+    let dir = scratch("tm_manifest_bare_lint_noconfig");
+    write_project(&dir);
+    let out = tmt()
+        .args(["lint", "--no-config"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot combine with a bare invocation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A bare `tmt fmt` formats exactly the manifest's declared source set:
+/// the declared `src/app.tmc` is rewritten in place, but the undeclared
+/// `src/stray.tmc` — sitting in the same directory, also unformatted —
+/// is left untouched. The write-side twin of
+/// `bare_lint_uses_the_manifests_declared_source_set`.
+#[test]
+fn bare_fmt_formats_exactly_the_declared_set() {
+    let dir = scratch("tm_manifest_bare_fmt");
+    write_project(&dir);
+    let unformatted = "alphabet ab { '_', 'a' }\nmachine{tape t: ab;entry state s{[*]->stop;}}\n";
+    let stray = dir.join("src/stray.tmc");
+    fs::write(&stray, unformatted).unwrap();
+    fs::write(dir.join("src/app.tmc"), unformatted).unwrap();
+
+    let out = tmt().arg("fmt").current_dir(&dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&stray).unwrap(),
+        unformatted,
+        "an undeclared file must be left untouched"
+    );
+    assert_ne!(
+        fs::read_to_string(dir.join("src/app.tmc")).unwrap(),
+        unformatted,
+        "a declared file is formatted in place"
+    );
+}

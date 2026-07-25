@@ -303,10 +303,22 @@ machine {
     assert!(warned.stdout.contains("may trap"), "{}", warned.stdout);
 }
 
+/// A bare `tmt lint` is no longer a usage error: it means "the nearest
+/// manifest's declared source set". Only the `--no-config` combination
+/// stays an error, because that flag would skip the very discovery the
+/// bare form depends on. Asserted through `--no-config` rather than a
+/// plain bare invocation because this test runs in-process, inheriting
+/// the harness's own cwd — the bare form's outcome would then depend on
+/// whether an ancestor `tmt.json` happens to exist. The cwd-sensitive
+/// half is covered by `build_driver.rs`, which spawns the binary with an
+/// explicit `current_dir`.
 #[test]
-fn no_positionals_is_an_error() {
-    let err = execute(&args(&["lint"])).unwrap_err();
-    assert!(err.contains("at least one PATH"), "{err}");
+fn no_positionals_with_no_config_is_an_error() {
+    let err = execute(&args(&["lint", "--no-config"])).unwrap_err();
+    assert!(
+        err.contains("cannot combine with a bare invocation"),
+        "{err}"
+    );
 }
 
 #[test]
