@@ -15,9 +15,11 @@ use crate::config::ConfigError;
 use crate::optimizer::OptLevel;
 
 /// The manifest-driven `tmt build` driver constructs and reads every
-/// field on this type (docs/tmt/project.md (schema)); nothing in this
-/// crate calls the schema/validation walk yet, so clippy's plain-lib-target
-/// pass sees it as unconstructed until that driver lands.
+/// field on this type (docs/tmt/project.md (schema)); the one-loader
+/// `tmt.json` walk (`load_file` -> `validate_manifest`) constructs one
+/// too, but `stdlib`/`profiles`/`call_mech` aren't read anywhere yet
+/// outside tests, so clippy's plain-lib-target pass still needs this
+/// suppression until the build driver lands.
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Manifest {
@@ -141,8 +143,9 @@ impl Profiles {
 }
 
 impl Manifest {
-    /// Consumed by the manifest-driven `tmt build` driver, not yet wired.
-    #[allow(dead_code)]
+    /// Also used by `validate_manifest`'s own semantic pass (duplicate
+    /// effective-source detection); the manifest-driven `tmt build`
+    /// driver will be the other consumer once wired.
     pub(crate) fn effective_sources(&self, target: &Target) -> Vec<String> {
         self.sources
             .iter()
@@ -173,8 +176,9 @@ impl Manifest {
         }
     }
 
-    /// Consumed by the manifest-driven `tmt build` driver, not yet wired.
-    #[allow(dead_code)]
+    /// Also used by `validate_manifest`'s own semantic pass (cross-target
+    /// output-collision detection); the manifest-driven `tmt build`
+    /// driver will be the other consumer once wired.
     pub(crate) fn output_of(&self, name: &str, target: &Target) -> String {
         target
             .output
@@ -201,10 +205,8 @@ impl Manifest {
 /// directory are allowed — docs/tmt/project.md (path rules)). Lexical
 /// only: symlink aliases are not detected, documented not solved.
 ///
-/// Consumed by `validate_manifest`'s semantic pass and the manifest
-/// driver's manifest-dir path resolution, not yet wired outside this
-/// module's own tests.
-#[allow(dead_code)]
+/// Used by `validate_manifest`'s semantic pass; the manifest driver's
+/// manifest-dir path resolution will reuse it once wired.
 pub(crate) fn normalize_rel(path_str: &str) -> Result<PathBuf, String> {
     let p = Path::new(path_str);
     let absolute_err = || {
@@ -236,14 +238,6 @@ pub(crate) fn normalize_rel(path_str: &str) -> Result<PathBuf, String> {
     Ok(parts.iter().collect())
 }
 
-// The following parse helpers are reachable only through
-// `validate_manifest`'s walk, which is itself not yet called outside this
-// module's own tests (the one-loader `tmt.json` walk and the
-// manifest-driven `tmt build` driver are the real future consumers,
-// neither wired into this crate yet) — each carries its own narrow
-// `#[allow(dead_code)]` rather than a blanket module suppression.
-
-#[allow(dead_code)]
 fn invalid(path: &Path, message: String) -> ConfigError {
     ConfigError::Invalid {
         path: path.to_path_buf(),
@@ -251,7 +245,6 @@ fn invalid(path: &Path, message: String) -> ConfigError {
     }
 }
 
-#[allow(dead_code)]
 fn parse_err(path: &Path, message: &str) -> ConfigError {
     ConfigError::Parse {
         path: path.to_path_buf(),
@@ -259,7 +252,6 @@ fn parse_err(path: &Path, message: &str) -> ConfigError {
     }
 }
 
-#[allow(dead_code)]
 fn unknown_key(path: &Path, key: &str) -> ConfigError {
     ConfigError::UnknownKey {
         path: path.to_path_buf(),
@@ -267,7 +259,6 @@ fn unknown_key(path: &Path, key: &str) -> ConfigError {
     }
 }
 
-#[allow(dead_code)]
 fn as_obj<'v>(
     path: &Path,
     value: &'v Value,
@@ -278,7 +269,6 @@ fn as_obj<'v>(
         .ok_or_else(|| parse_err(path, &format!("`{what}` must be a JSON object")))
 }
 
-#[allow(dead_code)]
 fn as_str_array(path: &Path, value: &Value, what: &str) -> Result<Vec<String>, ConfigError> {
     let complain = || parse_err(path, &format!("`{what}` must be an array of strings"));
     let arr = value.as_array().ok_or_else(complain)?;
@@ -287,21 +277,18 @@ fn as_str_array(path: &Path, value: &Value, what: &str) -> Result<Vec<String>, C
         .collect()
 }
 
-#[allow(dead_code)]
 fn as_bool(path: &Path, value: &Value, what: &str) -> Result<bool, ConfigError> {
     value
         .as_bool()
         .ok_or_else(|| parse_err(path, &format!("`{what}` must be a boolean")))
 }
 
-#[allow(dead_code)]
 fn as_u64(path: &Path, value: &Value, what: &str) -> Result<u64, ConfigError> {
     value
         .as_u64()
         .ok_or_else(|| parse_err(path, &format!("`{what}` must be a non-negative integer")))
 }
 
-#[allow(dead_code)]
 fn as_str(path: &Path, value: &Value, what: &str) -> Result<String, ConfigError> {
     value
         .as_str()
@@ -309,7 +296,6 @@ fn as_str(path: &Path, value: &Value, what: &str) -> Result<String, ConfigError>
         .ok_or_else(|| parse_err(path, &format!("`{what}` must be a string")))
 }
 
-#[allow(dead_code)]
 fn valid_target_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -319,7 +305,6 @@ fn valid_target_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-#[allow(dead_code)]
 fn parse_libraries(path: &Path, value: &Value) -> Result<Libraries, ConfigError> {
     let obj = as_obj(path, value, "libraries")?;
     let mut libs = Libraries::default();
@@ -333,7 +318,6 @@ fn parse_libraries(path: &Path, value: &Value) -> Result<Libraries, ConfigError>
     Ok(libs)
 }
 
-#[allow(dead_code)]
 fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverrides, ConfigError> {
     let obj = as_obj(path, value, &format!("profiles.{name}"))?;
     let mut over = ProfileOverrides::default();
@@ -363,7 +347,6 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
 /// `call-mech` accepts exactly the three lowercase names `tmt link
 /// --call-mech` accepts; the CLI's own parser is the reference for the
 /// spelling and the error wording (cli/build.rs::parse_call_mech).
-#[allow(dead_code)]
 fn parse_call_mech_value(path: &Path, value: &Value) -> Result<CallMech, ConfigError> {
     match as_str(path, value, "call-mech")?.as_str() {
         "mono" => Ok(CallMech::Mono),
@@ -376,7 +359,6 @@ fn parse_call_mech_value(path: &Path, value: &Value) -> Result<CallMech, ConfigE
     }
 }
 
-#[allow(dead_code)]
 fn parse_run(path: &Path, value: &Value) -> Result<RunSpec, ConfigError> {
     let obj = as_obj(path, value, "run")?;
     let mut run = RunSpec::default();
@@ -398,7 +380,6 @@ fn parse_run(path: &Path, value: &Value) -> Result<RunSpec, ConfigError> {
     Ok(run)
 }
 
-#[allow(dead_code)]
 fn parse_target(path: &Path, name: &str, value: &Value) -> Result<Target, ConfigError> {
     let obj = as_obj(path, value, &format!("targets.{name}"))?;
     let mut target = Target {
@@ -436,10 +417,9 @@ fn parse_target(path: &Path, name: &str, value: &Value) -> Result<Target, Config
 /// target-name charset, per-target effective-list duplicate rejection,
 /// cross-target output collision, path normalization/absolute rejection.
 ///
-/// Consumed by the one-loader `tmt.json` walk (`load_file`) and the
-/// manifest-driven `tmt build` driver, neither wired into this crate yet
-/// — only this module's own tests call it so far.
-#[allow(dead_code)]
+/// Consumed by the one-loader `tmt.json` walk (`load_file`,
+/// docs/tmt/project.md (one loader)); the manifest-driven `tmt build`
+/// driver is the other future consumer, not yet wired.
 pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, ConfigError> {
     let obj = as_obj(path, value, "project")?;
     let mut manifest = Manifest {
@@ -538,14 +518,195 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
     Ok(manifest)
 }
 
+/// A whole validated `tmt.json`: the lint allow-list plus the optional
+/// project manifest. THE one loader — both consumers (lint config, the
+/// project model) validate everything so a typo in either section
+/// surfaces no matter who reads the file first.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TmtFile {
+    pub allow: Vec<String>,
+    /// Read by `discover_manifest` and this module's own tests; the
+    /// manifest-driven `tmt build` driver and `tmt lint`/`tmt fmt`'s
+    /// per-section source-set discovery are the future production
+    /// consumers, not yet wired.
+    #[allow(dead_code)]
+    pub manifest: Option<Manifest>,
+}
+
+pub(crate) fn load_file(path: &Path) -> Result<TmtFile, ConfigError> {
+    let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Io {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        message: format!("invalid JSON: {e}"),
+    })?;
+    let root = value
+        .as_object()
+        .ok_or_else(|| parse_err(path, "top-level value must be a JSON object"))?;
+
+    let mut file = TmtFile {
+        allow: Vec::new(),
+        manifest: None,
+    };
+    for (key, val) in root {
+        match key.as_str() {
+            "lint" => file.allow = parse_lint(path, val)?,
+            "project" => file.manifest = Some(validate_manifest(path, val)?),
+            other => return Err(unknown_key(path, other)),
+        }
+    }
+    Ok(file)
+}
+
+/// The lint section walk, moved verbatim from `config::load` (which now
+/// delegates here): `lint.allow` only, entries validated against the
+/// rule catalog.
+fn parse_lint(path: &Path, value: &Value) -> Result<Vec<String>, ConfigError> {
+    let lint_obj = as_obj(path, value, "lint")?;
+    let mut allow: Vec<String> = Vec::new();
+    for (lkey, lval) in lint_obj {
+        if lkey != "allow" {
+            return Err(unknown_key(path, lkey));
+        }
+        allow = as_str_array(path, lval, "lint.allow")?;
+    }
+    match crate::lint::validate_allow(&allow) {
+        Ok(()) => {}
+        Err(crate::lint::LintError::UnknownAllowCode(code)) => {
+            return Err(ConfigError::UnknownAllowCode {
+                path: path.to_path_buf(),
+                code,
+            });
+        }
+        Err(other) => unreachable!("validate_allow only ever returns UnknownAllowCode: {other}"),
+    }
+    Ok(allow)
+}
+
+/// Nearest ancestor `tmt.json` that HAS a `project` section — the
+/// per-section discovery rule (docs/tmt/project.md (discovery)): a
+/// lint-only file on the walk is transparent to THIS walk (while
+/// `config::discover` still stops at it for lint). A malformed
+/// candidate is an error, not a skip: we cannot know whether it had a
+/// project section.
+///
+/// Not yet called outside this module's own tests — the manifest-driven
+/// `tmt build` driver and `tmt lint`/`tmt fmt`'s per-section source-set
+/// discovery are the future production consumers.
+#[allow(dead_code)]
+pub(crate) fn discover_manifest(start: &Path) -> Result<Option<(PathBuf, Manifest)>, ConfigError> {
+    let start = if start.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        start
+    };
+    let Ok(abs) = std::path::absolute(start) else {
+        return Ok(None);
+    };
+    let mut dir = Some(abs.as_path());
+    while let Some(d) = dir {
+        let candidate = d.join("tmt.json");
+        if candidate.is_file() {
+            let file = load_file(&candidate)?;
+            if let Some(manifest) = file.manifest {
+                return Ok(Some((candidate, manifest)));
+            }
+        }
+        dir = d.parent();
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn v(path_json: serde_json::Value) -> Result<Manifest, crate::config::ConfigError> {
         validate_manifest(Path::new("/x/tmt.json"), &path_json)
+    }
+
+    /// A fresh scratch directory under `std::env::temp_dir()`, unique per
+    /// call (process id + an atomic counter — this crate has no tempfile
+    /// dependency, matching the zero-new-deps constraint). Mirrors
+    /// `config::tests::unique_tmp_dir`, local to this file per this
+    /// crate's no-shared-test-support convention.
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "tmt-project-test-{label}-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn discover_manifest_skips_lint_only_files_but_lint_walk_stops_at_them() {
+        let root = unique_tmp_dir("per-section");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(
+            root.join("tmt.json"),
+            r#"{ "project": { "targets": { "app": { "sources": ["m.tmc"] } } } }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            sub.join("tmt.json"),
+            r#"{ "lint": { "allow": ["leftover-debugger"] } }"#,
+        )
+        .unwrap();
+
+        // Project walk: the nested lint-only file is transparent.
+        let (found, manifest) = discover_manifest(&sub).unwrap().expect("project above");
+        assert_eq!(found, root.join("tmt.json"));
+        assert!(manifest.targets.contains_key("app"));
+
+        // Lint walk: unchanged — nearest file wins, even lint-only.
+        assert_eq!(crate::config::discover(&sub), Some(sub.join("tmt.json")));
+    }
+
+    #[test]
+    fn one_loader_a_broken_project_section_fails_the_lint_load_too() {
+        let dir = unique_tmp_dir("one-loader");
+        let path = dir.join("tmt.json");
+        std::fs::write(
+            &path,
+            r#"{ "lint": { "allow": [] }, "project": { "targets": {} } }"#,
+        )
+        .unwrap();
+        assert!(
+            crate::config::load(&path).is_err(),
+            "empty targets must fail even for lint"
+        );
+        assert!(load_file(&path).is_err());
+    }
+
+    #[test]
+    fn load_file_reads_both_sections() {
+        let dir = unique_tmp_dir("both");
+        let path = dir.join("tmt.json");
+        std::fs::write(
+            &path,
+            r#"{ "lint": { "allow": ["leftover-debugger"] },
+                "project": { "targets": { "app": { "sources": ["m.tmc"] } } } }"#,
+        )
+        .unwrap();
+        let file = load_file(&path).unwrap();
+        assert_eq!(file.allow, vec!["leftover-debugger".to_string()]);
+        assert!(file.manifest.is_some());
+    }
+
+    #[test]
+    fn discover_manifest_errors_on_a_malformed_candidate() {
+        let dir = unique_tmp_dir("malformed-walk");
+        std::fs::write(dir.join("tmt.json"), "{").unwrap();
+        assert!(discover_manifest(&dir).is_err());
     }
 
     #[test]

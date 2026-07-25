@@ -1,20 +1,16 @@
 //! Project configuration: `tmt.json`, the TM toolchain's project file — the
-//! twin of PM-1's `pmt.json` (docs/tmt/lint.md (project file)). Same tiny
-//! schema (`lint.allow` and nothing else), same nearest-ancestor discovery,
-//! same UNION-with-the-flag merge (never a cascade).
+//! twin of PM-1's `pmt.json` (docs/tmt/lint.md (project file)).
 //!
-//! Validation is a manual [`serde_json::Value`] walk rather than
-//! `#[serde(deny_unknown_fields)]`: a typo in a hand-authored config deserves
-//! a precise "unknown key `X`" pointing at the offending key, not one generic
-//! deserialize error for the whole document. The schema is intentionally tiny,
-//! so the walk stays a handful of match arms.
+//! [`load`] delegates to [`crate::project::load_file`], the one loader for
+//! the whole file (docs/tmt/project.md (one loader)): a manual
+//! [`serde_json::Value`] walk rather than `#[serde(deny_unknown_fields)]`,
+//! since a derive-based reject gives one generic "unknown field" error for
+//! the whole document, while a typo in a hand-authored config file deserves
+//! a precise "unknown key `X` at `lint`" pointing at exactly the offending
+//! key. This module keeps the lint-only view (`ProjectConfig`), `ConfigError`,
+//! and the nearest-ancestor `discover` walk.
 
-use std::fs;
 use std::path::{Path, PathBuf};
-
-use serde_json::Value;
-
-use crate::lint::{self, LintError};
 
 /// The parsed, validated contents of a `tmt.json`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,11 +40,10 @@ pub(crate) enum ConfigError {
     /// path, colliding target outputs, bad target name, an unknown
     /// profile name, ... The message is complete on its own.
     ///
-    /// Constructed by `project::validate_manifest`'s semantic pass; the
-    /// one-loader `tmt.json` walk and the manifest-driven `tmt build`
-    /// driver are the real future consumers, neither wired into this
-    /// crate yet — only `project.rs`'s own tests construct it so far.
-    #[allow(dead_code)]
+    /// Constructed by `project::validate_manifest`'s semantic pass,
+    /// reached through the one-loader `tmt.json` walk (`load`,
+    /// docs/tmt/project.md (one loader)); the manifest-driven `tmt build`
+    /// driver is the other future consumer, not yet wired.
     Invalid { path: PathBuf, message: String },
 }
 
@@ -127,72 +122,22 @@ fn discover_from(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Loads and validates the `tmt.json` at `path`. An empty object `{}` is valid
-/// (an empty allow-list) — a `tmt.json` need not set anything to be worth
-/// discovering (one may exist purely to mark a subtree root).
+/// Loads and validates the `tmt.json` at `path`. An empty object `{}` is
+/// valid (an empty allow-list) — a `tmt.json` need not set anything to be
+/// worth discovering, e.g. one that exists purely to mark a subtree root.
+///
+/// Delegates to [`crate::project::load_file`], the one loader for the
+/// whole file (docs/tmt/project.md (one loader)): it validates BOTH the
+/// `lint` and `project` sections regardless of which one this caller
+/// actually wants, so a typo in either section is caught no matter which
+/// consumer reads the file first.
 pub(crate) fn load(path: &Path) -> Result<ProjectConfig, ConfigError> {
-    let text = fs::read_to_string(path).map_err(|e| ConfigError::Io {
-        path: path.to_path_buf(),
-        message: e.to_string(),
-    })?;
-    let value: Value = serde_json::from_str(&text).map_err(|e| ConfigError::Parse {
-        path: path.to_path_buf(),
-        message: format!("invalid JSON: {e}"),
-    })?;
-    let root = value.as_object().ok_or_else(|| ConfigError::Parse {
-        path: path.to_path_buf(),
-        message: "top-level value must be a JSON object".to_string(),
-    })?;
-
-    let mut allow: Vec<String> = Vec::new();
-    for (key, val) in root {
-        if key != "lint" {
-            return Err(ConfigError::UnknownKey {
-                path: path.to_path_buf(),
-                key: key.clone(),
-            });
-        }
-        let lint_obj = val.as_object().ok_or_else(|| ConfigError::Parse {
-            path: path.to_path_buf(),
-            message: "`lint` must be a JSON object".to_string(),
-        })?;
-        for (lkey, lval) in lint_obj {
-            if lkey != "allow" {
-                return Err(ConfigError::UnknownKey {
-                    path: path.to_path_buf(),
-                    key: lkey.clone(),
-                });
-            }
-            let arr = lval.as_array().ok_or_else(|| ConfigError::Parse {
-                path: path.to_path_buf(),
-                message: "`lint.allow` must be an array of strings".to_string(),
-            })?;
-            for item in arr {
-                let s = item.as_str().ok_or_else(|| ConfigError::Parse {
-                    path: path.to_path_buf(),
-                    message: "`lint.allow` must be an array of strings".to_string(),
-                })?;
-                allow.push(s.to_string());
-            }
-        }
-    }
-
-    match lint::validate_allow(&allow) {
-        Ok(()) => {}
-        Err(LintError::UnknownAllowCode(code)) => {
-            return Err(ConfigError::UnknownAllowCode {
-                path: path.to_path_buf(),
-                code,
-            });
-        }
-        Err(other) => unreachable!("validate_allow only ever returns UnknownAllowCode: {other}"),
-    }
-
-    Ok(ProjectConfig { allow })
+    crate::project::load_file(path).map(|file| ProjectConfig { allow: file.allow })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
@@ -351,6 +296,25 @@ mod tests {
         let dir = unique_tmp_dir("empty");
         let path = dir.join("tmt.json");
         fs::write(&path, "{}").unwrap();
+        let config = load(&path).unwrap();
+        assert!(config.allow.is_empty());
+    }
+
+    /// The gap the delegation closes: `load`'s own former direct walk only
+    /// recognized `lint` at the root, so a `tmt.json` carrying ONLY a
+    /// `project` section failed with `UnknownKey { key: "project" }` — a
+    /// real manifest-only file couldn't be loaded by `tmt lint`/`tmt fmt`
+    /// at all. Delegating to `project::load_file` (which recognizes both
+    /// root keys) fixes it.
+    #[test]
+    fn load_recognizes_a_project_only_file() {
+        let dir = unique_tmp_dir("project-only");
+        let path = dir.join("tmt.json");
+        fs::write(
+            &path,
+            r#"{"project":{"targets":{"app":{"sources":["m.tmc"]}}}}"#,
+        )
+        .unwrap();
         let config = load(&path).unwrap();
         assert!(config.allow.is_empty());
     }
