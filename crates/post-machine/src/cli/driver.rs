@@ -117,8 +117,237 @@ pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
     }
 }
 
-fn manifest_mode(_targets: &[String], _flags: &Flags) -> Result<CliOutput, String> {
-    Err("manifest mode lands in the next task".to_string()) // Task 4 replaces this
+fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, String> {
+    if flags.out.is_some()
+        || !flags.search_dirs.is_empty()
+        || !flags.lib_names.is_empty()
+        || flags.nostdlib
+    {
+        return Err(format!(
+            "-o/-L/-l/--nostdlib contradict the manifest — it declares outputs and libraries\n\n{BUILD_USAGE}"
+        ));
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let Some((manifest_path, manifest)) =
+        crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
+    else {
+        return Err(
+            "no pmt.json with a `project` section found from the current directory upward".into(),
+        );
+    };
+    let root = manifest_path
+        .parent()
+        .expect("pmt.json has a parent")
+        .to_path_buf();
+
+    if flags.list_targets {
+        let mut stdout = String::new();
+        for (name, target) in &manifest.targets {
+            stdout.push_str(name);
+            if target.run.is_some() {
+                stdout.push_str("\trun");
+            }
+            stdout.push('\n');
+        }
+        return Ok(CliOutput::ok(stdout, String::new()));
+    }
+
+    for name in requested {
+        if !manifest.targets.contains_key(name) {
+            return Err(format!(
+                "no target `{name}` in {} (targets: {})",
+                manifest_path.display(),
+                manifest
+                    .targets
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    let selected: Vec<&str> = if requested.is_empty() {
+        manifest.targets.keys().map(String::as_str).collect() // BTreeMap: alphabetical
+    } else {
+        requested.iter().map(String::as_str).collect()
+    };
+
+    if flags.run && selected.len() != 1 {
+        return Err(format!(
+            "--run needs exactly one target (have {}): name it\n\n{BUILD_USAGE}",
+            selected.len()
+        ));
+    }
+
+    let mut stderr = String::new();
+    let mut built: Vec<(String, PathBuf)> = Vec::new();
+    for name in &selected {
+        let target = &manifest.targets[*name];
+        let (output, chunk) = build_one_target(&root, &manifest, name, target, flags)?;
+        stderr.push_str(&chunk);
+        built.push((name.to_string(), output));
+    }
+
+    if flags.run {
+        let (name, output) = &built[0];
+        let target = &manifest.targets[name.as_str()];
+        return run_target(&root, output, target.run.as_ref(), stderr); // Task 5
+    }
+    Ok(CliOutput::ok(String::new(), stderr))
+}
+
+/// Builds one target: compile/assemble/load its effective sources with
+/// the resolved profile (+ flag overrides), refine warnings against the
+/// declared set, link with the declared libraries + entry, write the
+/// output (+ sidecar) relative to the manifest dir. Returns the
+/// absolute output path and the stderr chunk.
+fn build_one_target(
+    root: &Path,
+    manifest: &crate::project::Manifest,
+    name: &str,
+    target: &crate::project::Target,
+    flags: &Flags,
+) -> Result<(PathBuf, String), String> {
+    // In manifest mode --debug/--release are PURE profile selectors
+    // (docs/pmt/cli.md (build)): only the individual flags (-g, -O*,
+    // --strip-debugger, -Werror) override the resolved profile's keys.
+    let profile = manifest.profiles.resolve(flags.release_preset);
+    let mut options = CompileOptions {
+        debug_info: if flags.debug_info {
+            true
+        } else {
+            profile.debug_info
+        },
+        strip_debugger: if flags.strip_debugger {
+            true
+        } else {
+            profile.strip_debugger
+        },
+        opt_level: profile.opt_level,
+        disabled_passes: flags.disabled_passes.clone(),
+        capture_ir: false,
+    };
+    if flags.o0 {
+        options.opt_level = OptLevel::O0;
+    }
+    if flags.o1 {
+        options.opt_level = OptLevel::O1;
+    }
+    let werror = profile.werror || flags.werror;
+
+    let resolve = |raw: &str| -> Result<PathBuf, String> {
+        Ok(root.join(crate::project::normalize_rel(raw)?))
+    };
+
+    let mut objects: Vec<ObjectFile> = Vec::new();
+    let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
+    for raw in manifest.effective_sources(target) {
+        let path = resolve(&raw)?;
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("pmc") => {
+                let source = fs::read_to_string(&path)
+                    .map_err(|e| format!("target `{name}`: cannot read {}: {e}", path.display()))?;
+                let out = compile_source(&source, options.clone()).map_err(|e| {
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
+                })?;
+                if flags.keep_objects {
+                    let pmo = path.with_extension("pmo");
+                    fs::write(&pmo, out.object.to_bytes())
+                        .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
+                }
+                reports.push((path.clone(), out.report));
+                objects.push(out.object);
+            }
+            Some("pma") => {
+                let source = fs::read_to_string(&path)
+                    .map_err(|e| format!("target `{name}`: cannot read {}: {e}", path.display()))?;
+                let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
+                })?;
+                objects.push(object);
+            }
+            _ => objects.push(read_object(&path)?),
+        }
+    }
+
+    let libs = manifest.effective_libraries(target);
+    let dirs: Vec<String> = libs
+        .dirs
+        .iter()
+        .map(|d| resolve(d).map(|p| p.to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    let mut libraries = Vec::new();
+    for lib in &libs.link {
+        libraries.push(find_library(lib, &dirs)?);
+    }
+    if manifest.stdlib {
+        libraries.push(stdlib::object().clone());
+    }
+
+    refine_reports(&mut reports, &defined_names(&objects, &libraries));
+    let mut stderr = String::new();
+    let mut warning_count = 0usize;
+    for (path, report) in &reports {
+        warning_count += report.diagnostics.len();
+        render_warnings(&mut stderr, path, report);
+        if flags.verbose {
+            render_opt_report(&mut stderr, report);
+        }
+    }
+    if werror && warning_count > 0 {
+        return Err(format!(
+            "{stderr}-Werror: {warning_count} warning(s) treated as errors"
+        ));
+    }
+
+    // `entry` threads the manifest's per-target key into the linker's
+    // BFS root; `call_mech` has no PM-1 analogue, so it stays default.
+    let linked = crate::asm::link(
+        &objects,
+        &libraries,
+        LinkOptions {
+            relax: !flags.no_relax,
+            entry: target.entry.clone(),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("target `{name}`: {e}"))?;
+
+    let output = resolve(&manifest.output_of(name, target))?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    fs::write(&output, linked.executable.to_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+    let map_path = sidecar_path(&output);
+    fs::write(&map_path, linked.map.to_json())
+        .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
+
+    if flags.verbose {
+        let r = &linked.report;
+        let _ = writeln!(
+            stderr,
+            "{name}: link: dropped [{}]; {} site(s) relaxed short, {} far",
+            r.dropped.join(", "),
+            r.relaxed_calls,
+            r.far_calls
+        );
+    }
+    Ok((output, stderr))
+}
+
+fn run_target(
+    _root: &Path,
+    _output: &Path,
+    _run: Option<&crate::project::RunSpec>,
+    _stderr: String,
+) -> Result<CliOutput, String> {
+    Err("--run lands in the next task".to_string()) // Task 5 replaces this
 }
 
 /// Compile options for argv mode: exactly `pmt compile`'s preset/flag

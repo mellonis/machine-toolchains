@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use mtc_post_machine::cli::execute;
 
@@ -126,4 +127,153 @@ fn argv_mode_rejects_s_and_emit_ir() {
         let err = execute(&args(&["build", flag, main.to_str().unwrap()])).unwrap_err();
         assert!(err.contains("unknown flag"), "{flag}: {err}");
     }
+}
+
+fn pmt() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_pmt"))
+}
+
+fn write_project(dir: &Path) {
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/shared.pmc"), "export util() { mark; }").unwrap();
+    fs::write(dir.join("src/app.pmc"), "main() { @util(); }").unwrap();
+    fs::write(
+        dir.join("src/bench.pmc"),
+        "export start() { @util(); halt; }",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "sources": ["src/shared.pmc"],
+            "targets": {
+                "app":   { "sources": ["src/app.pmc"] },
+                "bench": { "sources": ["src/bench.pmc"], "entry": "start",
+                           "run": { "tape": " *" } }
+            }
+        } }"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn manifest_mode_bare_build_builds_all_targets_alphabetically() {
+    let dir = scratch("manifest_all");
+    write_project(&dir);
+    let out = pmt().arg("build").current_dir(&dir).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.join("app.pmx").is_file(),
+        "default output <name>.pmx next to manifest"
+    );
+    assert!(dir.join("app.pmx.map").is_file());
+    assert!(dir.join("bench.pmx").is_file());
+}
+
+#[test]
+fn manifest_mode_named_target_builds_only_it() {
+    let dir = scratch("manifest_named");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(dir.join("app.pmx").is_file());
+    assert!(!dir.join("bench.pmx").exists());
+}
+
+#[test]
+fn manifest_mode_discovery_walks_up_from_a_subdirectory() {
+    let dir = scratch("manifest_walkup");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "app"])
+        .current_dir(dir.join("src"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.join("app.pmx").is_file(),
+        "outputs resolve against the MANIFEST dir, not cwd"
+    );
+}
+
+#[test]
+fn manifest_mode_rejects_declared_model_flags() {
+    let dir = scratch("manifest_reject_flags");
+    write_project(&dir);
+    for flagset in [
+        vec!["-o", "x.pmx"],
+        vec!["-L", "libs"],
+        vec!["-l", "x"],
+        vec!["--nostdlib"],
+    ] {
+        let mut cmd = pmt();
+        cmd.arg("build").args(&flagset).arg("app").current_dir(&dir);
+        let out = cmd.output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{flagset:?} must be rejected in manifest mode"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("manifest"), "{flagset:?}: {stderr}");
+    }
+}
+
+#[test]
+fn manifest_mode_unknown_target_and_missing_manifest_error() {
+    let dir = scratch("manifest_unknown");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "nosuch"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nosuch"));
+
+    let empty = scratch("manifest_absent");
+    let out = pmt().arg("build").current_dir(&empty).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("project"));
+}
+
+#[test]
+fn list_targets_prints_name_and_run_marker() {
+    let dir = scratch("manifest_list");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "--list-targets"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "app\nbench\trun\n");
+}
+
+#[test]
+fn release_flag_selects_the_release_profile() {
+    let dir = scratch("manifest_release");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "--release", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("app.pmx").is_file());
 }

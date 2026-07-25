@@ -69,10 +69,6 @@ pub(crate) struct RunSpec {
 /// `--release` = `-O1 --strip-debugger`); `resolve` layers the
 /// manifest's per-key overrides on the preset base. Flags override the
 /// result at the driver (flags win — cli/driver.rs).
-// Consumed by the manifest-driven build driver, which resolves a
-// target's profile before invoking the compiler; no non-test caller
-// exists until that driver lands.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ResolvedProfile {
     pub opt_level: OptLevel,
@@ -82,8 +78,6 @@ pub(crate) struct ResolvedProfile {
 }
 
 impl Profiles {
-    // See the `ResolvedProfile` note above: same build-driver consumer.
-    #[allow(dead_code)]
     pub(crate) fn resolve(&self, release: bool) -> ResolvedProfile {
         let (base, over) = if release {
             (
@@ -124,10 +118,6 @@ impl Manifest {
             .collect()
     }
 
-    // Consumed by the build driver, which resolves a target's effective
-    // library list (dirs to search, names to link) before invoking the
-    // linker; no non-test caller exists until that driver lands.
-    #[allow(dead_code)]
     pub(crate) fn effective_libraries(&self, target: &Target) -> Libraries {
         Libraries {
             dirs: self
@@ -551,9 +541,6 @@ fn parse_lint(path: &Path, value: &Value) -> Result<Vec<String>, ConfigError> {
 /// `config::discover` still stops at it for lint). A malformed
 /// candidate is an error, not a skip: we cannot know whether it had a
 /// project section.
-// The project-side discovery entry point; the build driver (and later
-// the LSP) is its first non-test caller.
-#[allow(dead_code)]
 pub(crate) fn discover_manifest(start: &Path) -> Result<Option<(PathBuf, Manifest)>, ConfigError> {
     let start = if start.as_os_str().is_empty() {
         Path::new(".")
