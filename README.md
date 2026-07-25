@@ -5,7 +5,7 @@ one arch-agnostic core, each with its own source language, optimizing
 compiler, assembler/disassembler, linker, and bus-accurate processor (VM),
 and each driven by its own CLI:
 
-- the **Post machine** — a C-like source language (`.pmc`) compiled and
+- the **Post machine PM-1** — a C-like source language (`.pmc`) compiled and
   linked down to a single-tape, index-based processor, driven by `pmt`;
 - the **multi-tape Turing machine TM-1** — a source language (`.tmc`) with
   worlds, grafts, and link-time composition, compiled through a `.tma`
@@ -38,8 +38,7 @@ the CLI uses. The ready-made editor integrations live under `editors/`; see
 cargo build --release
 ```
 
-Produces two binaries at `target/release/`: `pmt` (the Post machine) and
-`tmt` (the Turing machine).
+Produces two binaries at `target/release/`: `pmt` (PM-1) and `tmt` (TM-1).
 
 ## Quick start
 
@@ -123,6 +122,28 @@ consume `.pmt` snapshots; `dis` shows the linked `.pmx` with real function
 names resolved from the `.pmx.map` sidecar that `link` wrote alongside it.
 Full flag reference: `docs/pmt/cli.md`.
 
+The five commands above are what `pmt build` collapses into one step once
+a project has more than a one-off source file. A `pmt.json` at the
+repository root (alongside the `sum.pmt`/`sum.pmx` the walkthrough above
+wrote there), declaring one target:
+
+```json
+{
+  "project": {
+    "targets": {
+      "sum": {
+        "sources": ["crates/post-machine/tests/golden/sum.pmc"],
+        "run": { "tape-block": "sum.pmt" }
+      }
+    }
+  }
+}
+```
+
+turns `pmt build --run sum` into that same compile-link-run sequence
+against the `sum.pmt` snapshot built above. Manifest reference (schema,
+profiles, targets, run settings): `docs/pmt/project.md`.
+
 ### The Turing machine (`tmt`)
 
 `a1_replace_b.tmc` mirrors that pipeline for a `.tmc` program: a single-tape
@@ -197,6 +218,12 @@ link-time composition engine selected by `--call-mech`. Both CLIs share
 their exit codes (`0` stopped, `2` halted, `3` trapped). Full flag
 reference: `docs/tmt/cli.md`.
 
+`tmt build` is the same compile-link driver `pmt build` is, over its own
+`tmt.json`. A manifest declaring one target — its sources, its `.tmt`
+tape, and optionally the `call-mech` it commits to — turns the sequence
+above into `tmt build --run <target>`. Manifest reference:
+`docs/tmt/project.md`.
+
 ## Documentation
 
 The two toolchains are documented per domain, over a set of shared pages
@@ -210,6 +237,9 @@ that cover what they hold in common.
 - `docs/pmt/isa.md` — the PM-1 processor: registers, the opcode table,
   timing, and execution.
 - `docs/pmt/cli.md` — every `pmt` subcommand and flag.
+- `docs/pmt/project.md` — the `pmt.json` project manifest: schema,
+  per-section discovery, targets, profiles, and run settings, and how
+  `pmt build` consumes it.
 - `docs/pmt/lint.md` — hygiene findings over `.pmc` and `.pma` sources via
   `pmt lint`, with `--fix`.
 - `docs/pmt/fmt.md` — the canonical `.pmc`/`.pma` layout via `pmt fmt`, with
@@ -226,7 +256,10 @@ that cover what they hold in common.
   vectors, match/dispatch tables, the frames execution profile, framed
   calls, traps, and the three call mechanisms.
 - `docs/tmt/cli.md` — every `tmt` subcommand and flag, and the `tmt.json`
-  project file.
+  file's `lint` section.
+- `docs/tmt/project.md` — the `tmt.json` project manifest: schema,
+  per-section discovery, targets, profiles, the bound-call lowering, and
+  run settings, and how `tmt build` consumes it.
 - `docs/tmt/lint.md` — hygiene findings over `.tmc` and `.tma` sources via
   `tmt lint`.
 - `docs/tmt/fmt.md` — the canonical `.tmc`/`.tma` layout via `tmt fmt`.

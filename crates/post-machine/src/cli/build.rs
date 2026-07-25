@@ -32,14 +32,14 @@ FLAGS:
   -v                 render the compile report (passes, rounds)
 ";
 
-fn out_path(input: &Path, explicit: Option<String>, extension: &str) -> PathBuf {
+pub(super) fn out_path(input: &Path, explicit: Option<String>, extension: &str) -> PathBuf {
     match explicit {
         Some(path) => PathBuf::from(path),
         None => input.with_extension(extension),
     }
 }
 
-fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
+pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
     for d in &report.diagnostics {
         let _ = writeln!(
             stderr,
@@ -52,7 +52,7 @@ fn render_warnings(stderr: &mut String, input: &Path, report: &CompileReport) {
     }
 }
 
-fn render_opt_report(stderr: &mut String, report: &CompileReport) {
+pub(super) fn render_opt_report(stderr: &mut String, report: &CompileReport) {
     let _ = writeln!(stderr, "opt: {} round(s)", report.opt.rounds);
     for change in &report.opt.changes {
         let _ = writeln!(
@@ -172,7 +172,7 @@ fn take_emit_ir(args: &mut Args) -> Result<Option<Option<String>>, String> {
     Ok(None)
 }
 
-fn take_disabled_passes(args: &mut Args, disabled: &mut Vec<String>) {
+pub(super) fn take_disabled_passes(args: &mut Args, disabled: &mut Vec<String>) {
     for slot in &mut args.tokens {
         if let Some(tok) = slot.as_deref()
             && let Some(pass) = tok.strip_prefix("--fno-")
@@ -287,18 +287,18 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
 
 /// `app.pmx` → `app.pmx.map` (docs/pmt/cli.md; docs/formats.md: the sidecar
 /// keeps the full executable name).
-fn sidecar_path(target: &Path) -> PathBuf {
+pub(super) fn sidecar_path(target: &Path) -> PathBuf {
     let mut s = target.as_os_str().to_owned();
     s.push(".map");
     PathBuf::from(s)
 }
 
-fn read_object(path: &Path) -> Result<ObjectFile, String> {
+pub(super) fn read_object(path: &Path) -> Result<ObjectFile, String> {
     let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     ObjectFile::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, String> {
+pub(super) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, String> {
     for dir in dirs {
         let candidate = Path::new(dir).join(format!("{name}.pmo"));
         if candidate.exists() {

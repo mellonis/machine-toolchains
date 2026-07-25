@@ -3,6 +3,7 @@
 
 mod build;
 mod completions;
+mod driver;
 mod fmt;
 mod inspect;
 mod lint;
@@ -37,6 +38,7 @@ SUBCOMMANDS:
   compile      .pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)
   asm          .pma assembly -> .pmo object
   link         .pmo objects -> .pmx executable (+ .pmx.map sidecar)
+  build        compile+link driver: .pmc/.pma/.pmo inputs or manifest targets
   lint         lint .pmc/.pma sources (hygiene findings; docs/pmt/lint.md)
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
@@ -73,6 +75,7 @@ pub fn execute_with(
         Some("compile") => build::compile(&args[1..]),
         Some("asm") => build::asm(&args[1..]),
         Some("link") => build::link(&args[1..]),
+        Some("build") => driver::build(&args[1..]),
         Some("lint") => lint::lint(&args[1..]),
         Some("fmt") => fmt::fmt(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),

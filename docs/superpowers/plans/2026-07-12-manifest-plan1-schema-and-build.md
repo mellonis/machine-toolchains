@@ -1,5 +1,11 @@
 # Project Manifest + `pmt build` (Plan 1 of 3) Implementation Plan
 
+> **SUPERSEDED 2026-07-25 — do not execute.** Written before the TM-1 arc
+> and before the spec's 2026-07-21 amendment, this plan is PM-only and its
+> Task 1 (`LinkOptions.entry`) already shipped. The live plan is
+> `2026-07-25-manifest-plan1-schema-and-build.md`; the audit that drove the
+> rewrite is `2026-07-25-manifest-plan1-revalidation.md`. Kept as history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship the `pmt.json` `project` section (schema 0.2) and the

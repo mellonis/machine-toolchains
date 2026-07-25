@@ -21,8 +21,8 @@ Unknown codes are an error, so a typo cannot silently disable linting.
 
 A repository can carry its own allow-list in a `pmt.json` file, so the
 suppressions a team has agreed on travel with the source instead of
-living only in shell aliases or CI flags. The schema is deliberately
-tiny — today it holds nothing but the lint allow-list:
+living only in shell aliases or CI flags. This `lint` section's own
+schema is deliberately tiny — it holds nothing but the allow-list:
 
 ```json
 {
@@ -33,15 +33,16 @@ tiny — today it holds nothing but the lint allow-list:
 ```
 
 An empty object (`{}`) is valid — an empty allow-list. Validation is
-strict: any top-level key other than `lint`, any key under `lint` other
-than `allow`, a non-array `allow`, a non-string entry in `allow`, or an
-`allow` entry naming no rule in either catalog (below) is a hard error
-naming the file and the offending key or code. A typo in a project file
-must not silently do nothing, the same posture `--allow` already takes
-on the command line. One `pmt.json` governs a directory regardless of
-which files under it are `.pmc` and which are `.pma` — its `allow`
-entries draw from the same union `--allow` does, so a single project
-file suppresses a code across both languages at once.
+strict: any top-level key other than `lint` or `project`
+(`docs/pmt/project.md`), any key under `lint` other than `allow`, a
+non-array `allow`, a non-string entry in `allow`, or an `allow` entry
+naming no rule in either catalog (below) is a hard error naming the file
+and the offending key or code. A typo in a project file must not
+silently do nothing, the same posture `--allow` already takes on the
+command line. One `pmt.json` governs a directory regardless of which
+files under it are `.pmc` and which are `.pma` — its `allow` entries
+draw from the same union `--allow` does, so a single project file
+suppresses a code across both languages at once.
 
 `pmt lint` locates the file per input by walking up from that file's
 directory through its ancestors and reading the FIRST `pmt.json` it
@@ -50,6 +51,15 @@ merged in, even when the nearer one exists. Two input files linted in
 the same run may therefore end up governed by two different project
 files, or by none. `--no-config` (`docs/pmt/cli.md`) skips this discovery
 altogether, for CI invocations that want purely flag-driven behavior.
+
+The same `pmt.json` may also carry a `project` section — the project
+manifest, `docs/pmt/project.md` — declaring targets, sources, libraries,
+and per-target run settings. Its presence does not change lint discovery
+above: the `lint` and `project` sections are found by separate,
+independent walks (`docs/pmt/project.md (discovery)`). A bare `pmt lint`
+invocation (no PATH arguments) uses that section's declared source set
+instead of requiring an explicit path (`docs/pmt/project.md (the
+declared source set)`).
 
 Wherever more than one source can name an allow-list for a file — the
 discovered `pmt.json`, `--allow` flags on the command line, and (in an

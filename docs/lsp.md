@@ -39,8 +39,11 @@ A server is a blocking loop: it reads Content-Length-framed JSON-RPC
 messages off stdin, dispatches each against the bound language service(s),
 and enforces the LSP lifecycle — initialize/initialized/shutdown/exit
 gating, unknown-method handling, and decode-error responses. Document sync
-(`didOpen`/`didChange`/`didClose`) drives the per-document store and
-republishes diagnostics through one shared publish path — the same path
+(`didOpen`/`didChange`/`didClose`) is **full-text**: a server advertises
+sync kind `1`, so each `didChange` carries the whole document and the
+store replaces its copy outright rather than applying ranged edits. Sync
+drives the per-document store and republishes diagnostics through one
+shared publish path — the same path
 the config- and watched-file-triggered republish-all sweeps use. Feature
 requests (completion, definition, hover, code actions, document symbols,
 semantic tokens, formatting) convert the bound service's output to wire
@@ -139,8 +142,15 @@ A project has exactly one config file — `pmt.json` for the PM-1 toolchain,
 `tmt.json` for the TM-1 one — read by both the CLI and the server, for
 either of that toolchain's languages. There is no per-language config file
 and no override: the discovery rule is nearest ancestor wins, never a
-cascade. The schemas are documented at `docs/pmt/lint.md` and
-`docs/tmt/cli.md` respectively.
+cascade.
+
+Each file holds up to two independent sections. Only the `lint` section is
+configuration in the sense this page means; its schema is documented at
+`docs/pmt/lint.md` and `docs/tmt/cli.md` respectively. The other section,
+`project`, is the declared project model the build drivers read
+(`docs/pmt/project.md`, `docs/tmt/project.md`); it is found by its own
+ancestor walk — one that passes through a lint-only file rather than
+stopping at it — and configures nothing about how a document is analyzed.
 
 Both services of a server read the same file and the same IDE-settings
 channel. A `lint.allow` entry applies uniformly no matter which language's
@@ -163,10 +173,11 @@ file-plus-flags case. Every other key in the settings object is
 client-owned (binary path, trace switches) and deliberately ignored.
 
 One asymmetry: `tmt lint` has an opt-in rule tier (`--warn`), but
-`tmt.json`'s schema is `lint.allow` and nothing else, so IDE settings are
-the only channel that can turn a default-off `.tmc` rule on for the editor
-— through `{ "lint": { "warn": [...] } }`, read by the `.tmc` service
-only. The `.tma` service has no opt-in tier and reads no `warn` key.
+`tmt.json`'s `lint` section is `lint.allow` and nothing else, so IDE
+settings are the only channel that can turn a default-off `.tmc` rule on
+for the editor — through `{ "lint": { "warn": [...] } }`, read by the
+`.tmc` service only. The `.tma` service has no opt-in tier and reads no
+`warn` key.
 
 A server watches its project file glob through the client's file-watch
 capability and re-publishes every open document's diagnostics after a

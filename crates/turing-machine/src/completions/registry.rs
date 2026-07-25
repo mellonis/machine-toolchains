@@ -176,6 +176,13 @@ pub enum Positional {
 #[derive(Debug, Clone)]
 pub enum PositionalHint {
     File(FileHint),
+    /// Files by extension OR a target name from the nearest manifest —
+    /// `tmt build`'s positional. Rendered dynamically: the zsh script's
+    /// `__tmt_build_targets` helper shells out to
+    /// `tmt build --list-targets` at completion time (the `_git`
+    /// pattern), so target names track the manifest with zero drift
+    /// (docs/tmt/cli.md (tmt build)).
+    FilesOrTargets(FileHint),
     /// A fixed set of literal words with descriptions (the root's
     /// subcommand name, a group's sub-subcommand name, or
     /// `tmt completions <shell>`'s shell name).
@@ -319,6 +326,74 @@ fn link_spec() -> CommandSpec {
                 "render the link report (dropped functions, relaxation)",
             ),
             FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
+            FlagSpec::boolean("--help", "show subcommand help"),
+        ],
+    }
+}
+
+/// `tmt build`'s flag table (docs/tmt/cli.md (tmt build)): the
+/// `pmt build` shape plus TM-1's own three additions — `--foutline`
+/// (the default-off pass's flag-only enable switch, no manifest-schema
+/// equivalent), `--entry` (argv-mode-only, rejected in manifest mode
+/// because the manifest already declares each target's entry), and
+/// `--call-mech` (COMMON to both modes — unlike `--entry`, manifest mode
+/// accepts it as a per-invocation override of the declared lowering).
+fn build_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["build"]),
+        positional: Positional::OneOrMore(PositionalHint::FilesOrTargets(ext(&[
+            "tmc", "tma", "tmo",
+        ]))),
+        flags: vec![
+            FlagSpec::boolean("--debug", "preset/profile: -g -O0").exclusive("profile"),
+            FlagSpec::boolean("--release", "preset/profile: -O1 --strip-debugger")
+                .exclusive("profile"),
+            FlagSpec::boolean("-O0", "optimization level O0").exclusive("opt-level"),
+            FlagSpec::boolean("-O1", "optimization level O1").exclusive("opt-level"),
+            FlagSpec::boolean("-g", "record debug info"),
+            FlagSpec::boolean("--strip-debugger", "drop `brk` at codegen"),
+            FlagSpec::suffix_family(
+                "--fno-",
+                "disable one optimizer pass (repeatable)",
+                pass_names(),
+            ),
+            FlagSpec::boolean("--foutline", "enable the default-off `outline` pass"),
+            FlagSpec::boolean("-Werror", "treat post-refinement warnings as errors"),
+            FlagSpec::boolean("--no-relax", "keep every symbol site in far form"),
+            FlagSpec::boolean("--nostdlib", "argv mode: do not link the built-in std"),
+            FlagSpec::value(
+                "-L",
+                "argv mode: library search directory",
+                ValueHint::Directory,
+            )
+            .repeatable(),
+            FlagSpec::value(
+                "-l",
+                "argv mode: link NAME.tmo from the search path",
+                ValueHint::Text,
+            )
+            .repeatable(),
+            FlagSpec::value(
+                "--entry",
+                "argv mode: link NAME as the program entry",
+                ValueHint::Text,
+            ),
+            FlagSpec::value(
+                "--call-mech",
+                "bound-call lowering (overrides the manifest)",
+                ValueHint::Choices(strings(&["mono", "frames", "hybrid"])),
+            ),
+            FlagSpec::value("-o", "argv mode: output path", ValueHint::File(any_file())),
+            FlagSpec::boolean(
+                "--keep-objects",
+                "write each intermediate .tmo next to its source",
+            ),
+            FlagSpec::boolean("--run", "manifest mode: build then run the target"),
+            FlagSpec::boolean(
+                "--list-targets",
+                "manifest mode: print NAME[\\trun] per target",
+            ),
+            FlagSpec::boolean("-v", "render the build report"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
@@ -535,6 +610,7 @@ fn top_level_help(name: &str) -> &'static str {
         "compile" => ".tmc source -> .tmo object (-S for .tma, --emit-ir for world IR JSON)",
         "asm" => ".tma assembly -> .tmo object",
         "link" => ".tmo objects -> .tmx executable (+ .tmx.map sidecar)",
+        "build" => "compile+link driver: .tmc/.tma/.tmo inputs or manifest targets",
         "dis" => "disassemble a .tmo or .tmx (--listing for the address view)",
         "run" => "execute a .tmx on a multi-tape .tmt block",
         "tape" => "new/set/show .tmt tape-block snapshots",
@@ -588,15 +664,17 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing the real, currently-dispatched `tmt` surface:
-/// ten top-level subcommands (`compile`/`asm`/`link`/`dis`/`run`/`tape`/
-/// `ir`/`lint`/`fmt`/`lsp`, `tape` and `ir` nested) plus `completions`
-/// itself. Absent, permanently: `tape build`, which is PM-1-only
-/// glyph-pattern sugar (`cli/inspect.rs` says why TM-1 has no analogue).
+/// eleven top-level subcommands (`compile`/`asm`/`link`/`build`/`dis`/
+/// `run`/`tape`/`ir`/`lint`/`fmt`/`lsp`, `tape` and `ir` nested) plus
+/// `completions` itself. Absent, permanently: `tape build`, which is
+/// PM-1-only glyph-pattern sugar (`cli/inspect.rs` says why TM-1 has no
+/// analogue).
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
         asm_spec(),
         link_spec(),
+        build_spec(),
         dis_spec(),
         run_spec(),
         tape_new_spec(),
@@ -676,6 +754,7 @@ mod tests {
                 "compile",
                 "asm",
                 "link",
+                "build",
                 "dis",
                 "run",
                 "tape",
@@ -686,6 +765,25 @@ mod tests {
                 "completions"
             ]
         );
+    }
+
+    /// `tmt build`'s positional accepts `.tmc`/`.tma`/`.tmo` files OR a
+    /// dynamically-resolved target name, and its flag table carries the
+    /// TM-1-specific additions over PM-1's shape.
+    #[test]
+    fn build_positional_offers_files_and_dynamic_targets() {
+        let reg = registry();
+        let build = find(&reg, &["build"]);
+        let Positional::OneOrMore(PositionalHint::FilesOrTargets(hint)) = &build.positional else {
+            panic!("build positional should be files-or-targets");
+        };
+        assert_eq!(hint.extensions, vec!["tmc", "tma", "tmo"]);
+        assert!(build.flags.iter().any(|f| f.name == "--list-targets"));
+        assert!(build.flags.iter().any(|f| f.name == "--run"));
+        assert!(build.flags.iter().any(|f| f.name == "--keep-objects"));
+        assert!(build.flags.iter().any(|f| f.name == "--call-mech"));
+        assert!(build.flags.iter().any(|f| f.name == "--foutline"));
+        assert!(build.flags.iter().any(|f| f.name == "--entry"));
     }
 
     #[test]

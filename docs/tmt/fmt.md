@@ -6,6 +6,11 @@ own printer, described on this page; a `.tma` file goes through the
 canonical assembly grid shared with the rest of the toolchain
 (`docs/formats.md`). The command surface — the directory walk,
 `--check`, stdin with `--lang`, exit codes — is `docs/tmt/cli.md`.
+Invoked with no PATH arguments at all, `tmt fmt` formats the nearest
+project manifest's declared source set
+(`docs/tmt/project.md (the declared source set)`) — the set is smaller
+and explicitly declared, but each file in it is formatted by exactly the
+rules below.
 
 Both rewrites are whitespace-only, which is what makes `--check` a safe
 CI gate.

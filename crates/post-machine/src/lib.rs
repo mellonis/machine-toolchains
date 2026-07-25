@@ -15,6 +15,7 @@ pub mod lint;
 mod lsp;
 pub mod optimizer;
 pub mod parser;
+mod project;
 pub mod stdlib;
 
 pub use asm::PM1_PMA_DIALECT_VERSION;

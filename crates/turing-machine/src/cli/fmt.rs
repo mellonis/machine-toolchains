@@ -28,7 +28,9 @@ USAGE: tmt fmt PATH... [--exclude PATH]... [--check]
 
 PATH is a .tmc or .tma file, or a directory; directories are walked
 recursively for *.tmc and *.tma (sorted order, symlinks not followed,
-dot-entries skipped). `-` reads one source from stdin and writes the
+dot-entries skipped). Omitting PATH uses the nearest manifest's declared
+source set (docs/tmt/project.md (the declared source set)); requires a
+`tmt.json` project. `-` reads one source from stdin and writes the
 result to stdout; it cannot be combined with PATH arguments.
 
 .tma sources format through the canonical assembly grid; .tmc sources
@@ -90,7 +92,7 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    let paths = args.positionals()?;
+    let mut paths = args.positionals()?;
 
     if paths.iter().any(|p| p == "-") {
         if paths.len() != 1 {
@@ -103,10 +105,31 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     if lang.is_some() {
         return Err(format!("--lang applies to stdin (-) only\n\n{FMT_USAGE}"));
     }
+    // Bare invocation: the nearest manifest's declared source set, the
+    // same discovery `tmt build` uses (docs/tmt/project.md (the declared
+    // source set)). Never a directory scan — undeclared files are not
+    // part of the project. No `--no-config` guard here, unlike `lint`:
+    // `tmt fmt` reads no config at all, and a flag that exists only to be
+    // refused is discoverable in `--help` and useful never.
     if paths.is_empty() {
-        return Err(format!(
-            "fmt takes at least one PATH (or `-`)\n\n{FMT_USAGE}"
-        ));
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let Some((manifest_path, manifest)) =
+            crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
+        else {
+            return Err(
+                "no tmt.json with a `project` section found from the current directory upward"
+                    .into(),
+            );
+        };
+        let root = manifest_path.parent().expect("tmt.json has a parent");
+        paths = manifest
+            .all_sources()
+            .iter()
+            .map(|raw| {
+                crate::project::normalize_rel(raw)
+                    .map(|rel| root.join(rel).to_string_lossy().into_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
     }
 
     let mut files: Vec<PathBuf> = Vec::new();
