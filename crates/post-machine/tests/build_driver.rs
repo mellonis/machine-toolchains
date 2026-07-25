@@ -471,3 +471,238 @@ fn manifest_mode_keep_objects_writes_pmo_for_pma_sources_too() {
         "--keep-objects must write the .pma source's intermediate .pmo too"
     );
 }
+
+/// `-g`'s effect is observable in the `.pmx.map` sidecar: `MapFunction`
+/// lines are only recorded from `-g` objects (docs/formats.md); a
+/// manifest profile that declares `debug-info: false` — the opposite of
+/// the debug preset's own default — must still lose to an explicit
+/// `-g` flag.
+#[test]
+fn debug_info_flag_overrides_a_manifest_profile_that_disables_it() {
+    let dir = scratch("manifest_debug_info_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.pmc"), "main() { mark; }").unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "debug-info": false } },
+            "targets": { "prog": { "sources": ["src/prog.pmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let map = mtc_core::linker::MapFile::from_json(
+        &fs::read_to_string(dir.join("prog.pmx.map")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        map.functions.iter().all(|f| f.lines.is_empty()),
+        "manifest profile disables debug info: {map:?}"
+    );
+
+    let out = pmt()
+        .args(["build", "-g", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let map = mtc_core::linker::MapFile::from_json(
+        &fs::read_to_string(dir.join("prog.pmx.map")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        map.functions.iter().any(|f| !f.lines.is_empty()),
+        "-g flag must override the manifest profile's debug-info: false: {map:?}"
+    );
+}
+
+/// `-O0`'s effect is observable in the `-v` opt report: `optimize`
+/// returns immediately at `-O0` with `rounds == 0`, while `-O1` always
+/// runs at least one round even when it finds nothing to change
+/// (docs/pmt/language.md (optimization)) — so the rendered
+/// `"opt: N round(s)"` line differs deterministically between the two
+/// levels for any program. A manifest profile that declares `opt: O1`
+/// must still lose to an explicit `-O0` flag.
+#[test]
+fn o0_flag_overrides_a_manifest_profile_that_declares_o1() {
+    let dir = scratch("manifest_o0_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.pmc"), "main() { mark; }").unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "opt": "O1" } },
+            "targets": { "prog": { "sources": ["src/prog.pmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "-v", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 1 round(s)"),
+        "manifest profile declares opt: O1: {stderr}"
+    );
+
+    let out = pmt()
+        .args(["build", "-v", "-O0", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 0 round(s)"),
+        "-O0 flag must override the manifest profile's opt: O1: {stderr}"
+    );
+}
+
+/// The `-O1` counterpart of the test above: a manifest profile that
+/// declares `opt: O0` — matching the debug preset's own default, made
+/// explicit — must still lose to an explicit `-O1` flag. Covered as its
+/// own test because `flags.o0` and `flags.o1` are independent `if`
+/// branches in `build_one_target`; an inverted condition in either one
+/// would only be caught by exercising both directions.
+#[test]
+fn o1_flag_overrides_a_manifest_profile_that_declares_o0() {
+    let dir = scratch("manifest_o1_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.pmc"), "main() { mark; }").unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "opt": "O0" } },
+            "targets": { "prog": { "sources": ["src/prog.pmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "-v", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 0 round(s)"),
+        "manifest profile declares opt: O0: {stderr}"
+    );
+
+    let out = pmt()
+        .args(["build", "-v", "-O1", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 1 round(s)"),
+        "-O1 flag must override the manifest profile's opt: O0: {stderr}"
+    );
+}
+
+/// `--strip-debugger`'s effect is observable via `pmt dis`: a kept
+/// `debugger;` statement disassembles as `brk`, a stripped one doesn't
+/// (docs/pmt/isa.md). A manifest profile that declares
+/// `strip-debugger: false` — the opposite of the debug preset's own
+/// default — must still lose to an explicit `--strip-debugger` flag.
+#[test]
+fn strip_debugger_flag_overrides_a_manifest_profile_that_keeps_it() {
+    let dir = scratch("manifest_strip_debugger_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.pmc"), "main() { mark; debugger; mark; }").unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "strip-debugger": false } },
+            "targets": { "prog": { "sources": ["src/prog.pmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dis = pmt()
+        .args(["dis", dir.join("prog.pmx").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        dis.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dis.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&dis.stdout).contains("brk"),
+        "manifest profile keeps the debugger statement: {}",
+        String::from_utf8_lossy(&dis.stdout)
+    );
+
+    let out = pmt()
+        .args(["build", "--strip-debugger", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dis = pmt()
+        .args(["dis", dir.join("prog.pmx").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        dis.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dis.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&dis.stdout).contains("brk"),
+        "--strip-debugger flag must override the manifest profile's strip-debugger: false: {}",
+        String::from_utf8_lossy(&dis.stdout)
+    );
+}

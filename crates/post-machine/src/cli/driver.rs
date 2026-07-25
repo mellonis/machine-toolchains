@@ -239,6 +239,7 @@ fn build_one_target(
         Ok(root.join(crate::project::normalize_rel(raw)?))
     };
 
+    let read_err_prefix = format!("target `{name}`: ");
     let mut objects: Vec<ObjectFile> = Vec::new();
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
     for raw in manifest.effective_sources(target) {
@@ -247,7 +248,7 @@ fn build_one_target(
             &path,
             &options,
             flags.keep_objects,
-            &format!("target `{name}`: "),
+            &read_err_prefix,
             &mut objects,
             &mut reports,
         )?;
