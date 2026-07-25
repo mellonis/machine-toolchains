@@ -43,8 +43,6 @@ FLAGS:
   --lang LANG     stdin's language: pmc (default) or pma; applies to
                   stdin (-) only — an error alongside PATH arguments,
                   whose language always comes from the file extension
-  --no-config     with a bare invocation (no PATH), an error — the
-                  manifest IS the input, so it cannot be skipped
 ";
 
 /// stdin's language for `pmt fmt -`, defaulted from `--lang`
@@ -87,7 +85,6 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    let no_config = args.flag("--no-config");
     let mut paths = args.positionals()?;
 
     if paths.iter().any(|p| p == "-") {
@@ -106,11 +103,6 @@ pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     // source set)). Never a directory scan — undeclared files are not
     // part of the project.
     if paths.is_empty() {
-        if no_config {
-            return Err(format!(
-                "--no-config cannot combine with a bare invocation: the manifest IS the input\n\n{FMT_USAGE}"
-            ));
-        }
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let Some((manifest_path, manifest)) =
             crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?

@@ -353,8 +353,6 @@ FLAGS:
   --lang LANG     stdin's language: pmc (default) or pma; applies to
                   stdin (-) only — an error alongside PATH arguments,
                   whose language always comes from the file extension
-  --no-config     with a bare invocation (no PATH), an error — the
-                  manifest IS the input, so it cannot be skipped
 ```
 
 PATH is a `.pmc` or `.pma` file, or a directory, walked the same way as
