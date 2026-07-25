@@ -48,6 +48,7 @@ fn quoted_blocks() -> Vec<(Option<&'static str>, Vec<&'static str>)> {
         (Some("compile"), vec!["compile", "--help"]),
         (Some("asm"), vec!["asm", "--help"]),
         (Some("link"), vec!["link", "--help"]),
+        (Some("build"), vec!["build", "--help"]),
         (Some("lint"), vec!["lint", "--help"]),
         (Some("fmt"), vec!["fmt", "--help"]),
         (Some("dis"), vec!["dis", "--help"]),

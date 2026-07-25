@@ -162,6 +162,103 @@ toolchain binary itself. `-v` renders which defined-but-unreachable
 functions were dropped and how many call/jump sites relaxed to their short
 form versus stayed far.
 
+## `pmt build`
+
+```
+USAGE: pmt build [INPUT.pmc|.pma|.pmo ...] [-o OUT.pmx] [FLAGS]   (argv mode)
+       pmt build [TARGET ...] [FLAGS]                             (manifest mode)
+
+Argv mode compiles/assembles/loads every input in memory, links with
+the stdlib, and writes OUT.pmx (+ .pmx.map). Manifest mode discovers
+the nearest pmt.json with a `project` section from the current
+directory and builds its targets (all of them when none is named).
+
+COMPILE FLAGS (argv mode; manifest mode: override the profile):
+  --debug | --release   presets (manifest mode: profile selection)
+  -O0 | -O1             optimization level
+  -g                    record debug info
+  --strip-debugger      drop `brk` at codegen
+  --fno-<pass>          disable one optimizer pass (repeatable)
+  -Werror               treat (post-refinement) warnings as errors
+
+LINK FLAGS (argv mode only; the manifest declares these):
+  --nostdlib            do not link the built-in std
+  -L DIR / -l NAME      library search dir / library (repeatable)
+  -o OUT.pmx            output path
+
+COMMON:
+  --no-relax            keep every symbol site in far form
+  --keep-objects        write each intermediate .pmo next to its source
+  --run [TARGET]        manifest mode: build, then run the target's run block
+  --list-targets        manifest mode: print `NAME[\trun]` per target
+  -v                    render the build report
+```
+
+`pmt build` is the compile+link driver, dispatching between two modes by
+looking at the shape of its own positional arguments — the manifest is
+consulted only when it needs to be. Any positional ending `.pmc`, `.pma`,
+or `.pmo` selects **argv mode**: every input is compiled, assembled, or
+loaded from disk as needed, held in memory, linked against the standard
+library (or an explicit `-L`/`-l` set), and written to `OUT.pmx`; no
+`pmt.json` is read at all in this mode. Otherwise every positional is
+read as a **target name**, selecting **manifest mode**: `pmt build`
+discovers the nearest `pmt.json` carrying a `project` section by walking
+up from the current directory, and builds the named targets (or every
+declared target when none is named). Mixing the two positional shapes on
+one command line — a source path alongside a target name — is an error;
+a build is either fully argv-driven or fully manifest-driven.
+
+**Flag table**, split by which mode reads which flag:
+
+- **Compile-side** (`--debug`/`--release`, `-O0`/`-O1`, `-g`,
+  `--strip-debugger`, `--fno-<pass>`, `-Werror`) apply in argv mode
+  directly; in manifest mode they **override** the corresponding key of
+  the selected profile for this invocation only — the manifest itself is
+  never rewritten. `-S` and `--emit-ir` are deliberately absent from
+  `pmt build`: per-file inspection of generated `.pma` or CFG JSON stays
+  `pmt compile`'s job, not the multi-file driver's.
+- **Link-side, argv mode only** (`--nostdlib`, `-L`, `-l`, `-o`): the
+  manifest already declares the equivalent information itself (linked
+  libraries, standard-library opt-out, per-target output path), so
+  manifest mode **rejects** `-o`, `-L`, `-l`, and `--nostdlib` outright
+  rather than silently ignoring them.
+- **Common to both modes** (`--no-relax`, `--keep-objects`, `--run`,
+  `--list-targets`, `-v`).
+
+**Profile selection (manifest mode):** each target names a profile, or
+falls back to the manifest's default; `--debug`/`--release` and the
+individual compile-side flags above layer on top of the resolved
+profile's keys for that invocation — an individual flag always wins over
+whatever the profile declares, whether that profile was chosen by the
+target or overridden by `--debug`/`--release` on the command line.
+
+**`--run [TARGET]`:** builds first, then runs the target's declared run
+block (the same tape/limits shape `pmt run` reads), reached only after a
+successful build. Exit codes mirror `pmt run`: `0` the program stopped
+(`stp`), `2` the program halted abnormally (`hlt`), `3` the program
+trapped; a build failure short-circuits before any of these apply.
+
+**`--list-targets`:** manifest mode only; prints one line per declared
+target — `NAME`, a tab, then `run` when that target carries a run block
+(omitted otherwise) — machine-readable, one target per line.
+
+**`--keep-objects`:** in both modes, writes each intermediate `.pmo`
+object next to its source file instead of discarding it once linked in
+memory.
+
+**Undeclared-external refinement:** the ordinary "undeclared external"
+compile warning fires per file, on a bare call whose name that file
+never imports. `pmt build` sees the whole declared set for the build —
+every input in argv mode, every target's declared sources in manifest
+mode — so it drops that warning wherever the name turns out to be
+defined somewhere else in the same build. `pmt compile`, working one
+file at a time, has no such visibility and stays per-file honest,
+warning on every bare undeclared call regardless of what a sibling file
+happens to define.
+
+See `docs/pmt/project.md` for the manifest's `project` section itself —
+the schema, target and profile shapes, and the discovery rule.
+
 ## `pmt lint`
 
 ```

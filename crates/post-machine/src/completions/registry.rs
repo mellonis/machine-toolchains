@@ -174,6 +174,12 @@ pub enum Positional {
 #[derive(Debug, Clone)]
 pub enum PositionalHint {
     File(FileHint),
+    /// Files by extension OR a target name from the nearest manifest —
+    /// `pmt build`'s positional. Rendered dynamically: the zsh script's
+    /// `__pmt_build_targets` helper shells out to
+    /// `pmt build --list-targets` at completion time (the `_git`
+    /// pattern), so target names track the manifest with zero drift.
+    FilesOrTargets(FileHint),
     /// A fixed set of literal words with descriptions (the root's
     /// subcommand name, a group's sub-subcommand name, or
     /// `pmt completions <shell>`'s shell name).
@@ -285,6 +291,42 @@ fn link_spec() -> CommandSpec {
                 "render the link report (dropped functions, relaxation)",
             ),
             FlagSpec::value("-o", "output path", ValueHint::File(any_file())),
+            FlagSpec::boolean("--help", "show subcommand help"),
+        ],
+    }
+}
+
+fn build_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["build"]),
+        positional: Positional::OneOrMore(PositionalHint::FilesOrTargets(ext(&[
+            "pmc", "pma", "pmo",
+        ]))),
+        flags: vec![
+            FlagSpec::boolean("--debug", "preset/profile: -g -O0").exclusive("profile"),
+            FlagSpec::boolean("--release", "preset/profile: -O1 --strip-debugger")
+                .exclusive("profile"),
+            FlagSpec::boolean("-O0", "optimization level O0").exclusive("opt-level"),
+            FlagSpec::boolean("-O1", "optimization level O1").exclusive("opt-level"),
+            FlagSpec::boolean("-g", "record debug info"),
+            FlagSpec::boolean("--strip-debugger", "drop `brk` at codegen"),
+            FlagSpec::suffix_family(
+                "--fno-",
+                "disable one optimizer pass (repeatable)",
+                crate::optimizer::pass_names().iter().map(|p| p.to_string()).collect(),
+            ),
+            FlagSpec::boolean("-Werror", "treat post-refinement warnings as errors"),
+            FlagSpec::boolean("--no-relax", "keep every symbol site in far form"),
+            FlagSpec::boolean("--nostdlib", "argv mode: do not link the built-in std"),
+            FlagSpec::value("-L", "argv mode: library search directory", ValueHint::Directory)
+                .repeatable(),
+            FlagSpec::value("-l", "argv mode: link NAME.pmo from the search path", ValueHint::Text)
+                .repeatable(),
+            FlagSpec::value("-o", "argv mode: output path", ValueHint::File(any_file())),
+            FlagSpec::boolean("--keep-objects", "write each intermediate .pmo next to its source"),
+            FlagSpec::boolean("--run", "manifest mode: build then run the target"),
+            FlagSpec::boolean("--list-targets", "manifest mode: print NAME[\\trun] per target"),
+            FlagSpec::boolean("-v", "render the build report"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
@@ -524,6 +566,7 @@ fn top_level_help(name: &str) -> &'static str {
         "compile" => ".pmc source -> .pmo object (-S for .pma, --emit-ir for CFG JSON)",
         "asm" => ".pma assembly -> .pmo object",
         "link" => ".pmo objects -> .pmx executable (+ .pmx.map sidecar)",
+        "build" => "compile+link driver: .pmc/.pma/.pmo inputs or manifest targets",
         "lint" => "lint .pmc/.pma sources (hygiene findings; docs/pmt/lint.md)",
         "fmt" => "format .pmc/.pma sources in place (--check to preview; -)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
@@ -578,15 +621,15 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing master's real, currently-dispatched CLI
-/// surface: 11 top-level subcommands (`compile`/`asm`/`link`/`lint`/
-/// `fmt`/`dis`/`tape`/`run`/`ir`/`lsp`, `tape` and `ir` nested) plus
-/// `completions` itself. `build` (issue-tracked) is deliberately absent
-/// — see the design doc for the entry it'll need.
+/// surface: 12 top-level subcommands (`compile`/`asm`/`link`/`build`/
+/// `lint`/`fmt`/`dis`/`tape`/`run`/`ir`/`lsp`, `tape` and `ir` nested)
+/// plus `completions` itself.
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
         asm_spec(),
         link_spec(),
+        build_spec(),
         lint_spec(),
         fmt_spec(),
         dis_spec(),
@@ -658,6 +701,7 @@ mod tests {
                 "compile",
                 "asm",
                 "link",
+                "build",
                 "lint",
                 "fmt",
                 "dis",
@@ -668,6 +712,23 @@ mod tests {
                 "completions"
             ]
         );
+    }
+
+    #[test]
+    fn build_positional_offers_files_and_dynamic_targets() {
+        let reg = registry();
+        let build = reg
+            .commands
+            .iter()
+            .find(|c| c.path == vec!["build".to_string()])
+            .expect("build should be registered");
+        let Positional::OneOrMore(PositionalHint::FilesOrTargets(hint)) = &build.positional else {
+            panic!("build positional should be files-or-targets");
+        };
+        assert_eq!(hint.extensions, vec!["pmc", "pma", "pmo"]);
+        assert!(build.flags.iter().any(|f| f.name == "--list-targets"));
+        assert!(build.flags.iter().any(|f| f.name == "--run"));
+        assert!(build.flags.iter().any(|f| f.name == "--keep-objects"));
     }
 
     #[test]
