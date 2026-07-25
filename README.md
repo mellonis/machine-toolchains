@@ -123,6 +123,27 @@ consume `.pmt` snapshots; `dis` shows the linked `.pmx` with real function
 names resolved from the `.pmx.map` sidecar that `link` wrote alongside it.
 Full flag reference: `docs/pmt/cli.md`.
 
+The five commands above are what `pmt build` collapses into one step once
+a project has more than a one-off source file. A `pmt.json` next to
+`sum.pmc`, declaring one target:
+
+```json
+{
+  "project": {
+    "targets": {
+      "sum": {
+        "sources": ["crates/post-machine/tests/golden/sum.pmc"],
+        "run": { "tape-block": "sum.pmt" }
+      }
+    }
+  }
+}
+```
+
+turns `pmt build --run sum` into that same compile-link-run sequence
+against the `sum.pmt` snapshot built above. Manifest reference (schema,
+profiles, targets, run settings): `docs/pmt/project.md`.
+
 ### The Turing machine (`tmt`)
 
 `a1_replace_b.tmc` mirrors that pipeline for a `.tmc` program: a single-tape
@@ -210,6 +231,9 @@ that cover what they hold in common.
 - `docs/pmt/isa.md` — the PM-1 processor: registers, the opcode table,
   timing, and execution.
 - `docs/pmt/cli.md` — every `pmt` subcommand and flag.
+- `docs/pmt/project.md` — the `pmt.json` project manifest: schema,
+  per-section discovery, targets, profiles, and run settings, and how
+  `pmt build` consumes it.
 - `docs/pmt/lint.md` — hygiene findings over `.pmc` and `.pma` sources via
   `pmt lint`, with `--fix`.
 - `docs/pmt/fmt.md` — the canonical `.pmc`/`.pma` layout via `pmt fmt`, with

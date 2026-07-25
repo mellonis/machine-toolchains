@@ -21,8 +21,8 @@ Unknown codes are an error, so a typo cannot silently disable linting.
 
 A repository can carry its own allow-list in a `pmt.json` file, so the
 suppressions a team has agreed on travel with the source instead of
-living only in shell aliases or CI flags. The schema is deliberately
-tiny — today it holds nothing but the lint allow-list:
+living only in shell aliases or CI flags. This `lint` section's own
+schema is deliberately tiny — it holds nothing but the allow-list:
 
 ```json
 {
@@ -50,6 +50,15 @@ merged in, even when the nearer one exists. Two input files linted in
 the same run may therefore end up governed by two different project
 files, or by none. `--no-config` (`docs/pmt/cli.md`) skips this discovery
 altogether, for CI invocations that want purely flag-driven behavior.
+
+The same `pmt.json` may also carry a `project` section — the project
+manifest, `docs/pmt/project.md` — declaring targets, sources, libraries,
+and per-target run settings. Its presence does not change lint discovery
+above: the `lint` and `project` sections are found by separate,
+independent walks (`docs/pmt/project.md (discovery)`). A bare `pmt lint`
+invocation (no PATH arguments) uses that section's declared source set
+instead of requiring an explicit path (`docs/pmt/project.md (the
+declared source set)`).
 
 Wherever more than one source can name an allow-list for a file — the
 discovered `pmt.json`, `--allow` flags on the command line, and (in an
