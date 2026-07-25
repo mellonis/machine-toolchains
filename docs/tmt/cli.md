@@ -386,10 +386,15 @@ a build is either fully argv-driven or fully manifest-driven.
   `--strip-debugger`, `--fno-<pass>`, `--foutline`, `-Werror`) apply in
   argv mode directly; in manifest mode they **override** the
   corresponding key of the selected profile for this invocation only —
-  the manifest itself is never rewritten. `-S`, `--emit-ir`, and
-  `--stamped-asm` are deliberately absent from `tmt build`: per-file
-  inspection of generated `.tma` or world-graph IR JSON stays `tmt
-  compile`'s job, not the multi-file driver's.
+  the manifest itself is never rewritten. Two of them have no such key
+  to override: `--fno-<pass>` and `--foutline` are **flag-only axes**.
+  A profile carries `opt`, `debug-info`, `strip-debugger`, and `werror`
+  and nothing else, so pass selection cannot be committed to the
+  manifest at all — those two always come from the command line,
+  layered on top of whichever profile is in force. `-S`, `--emit-ir`,
+  and `--stamped-asm` are deliberately absent from `tmt build`:
+  per-file inspection of generated `.tma` or world-graph IR JSON stays
+  `tmt compile`'s job, not the multi-file driver's.
 - **Link-side, argv mode only** (`--nostdlib`, `-L`, `-l`, `--entry`,
   `-o`): the manifest already declares the equivalent information itself
   (linked libraries, standard-library opt-out, per-target entry symbol,
