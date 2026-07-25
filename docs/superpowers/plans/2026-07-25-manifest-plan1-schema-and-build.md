@@ -1947,6 +1947,14 @@ fn build_spec() -> CommandSpec {
 
 Register `build_spec()` in `registry()` after `link_spec()`; add `"build" => "compile+link driver: .pmc/.pma/.pmo inputs or manifest targets",` to `top_level_help`; update the `registry()` doc comment from 11 to 12 top-level subcommands.
 
+**Also add `"build"` to `EXPECTED_TOP_LEVEL` in
+`crates/post-machine/tests/completions_registry.rs`** (after `"link"`). That
+const is a hand-maintained mirror of the registry's subcommand set, guarded by
+a set-compare — registering a spec without updating it fails
+`top_level_subcommands_match_the_maintained_list_cli_help_and_the_real_parser`.
+The TM twin in `crates/turing-machine/tests/completions_registry.rs` has the
+identical guard; Task 14 must do the same.
+
 `zsh.rs` — extend the two positional matches:
 
 ```rust
@@ -3220,7 +3228,12 @@ fn build_spec() -> CommandSpec {
 Register after `link_spec()`; add the `top_level_help` row; update the
 `registry()` doc comment (its current wording is "ten top-level
 subcommands … plus `completions`" — make the count and the list include
-`build`). `zsh.rs` gets the same two match arms plus:
+`build`). **And add `"build"` to `EXPECTED_TOP_LEVEL` in
+`crates/turing-machine/tests/completions_registry.rs`** — a hand-maintained
+mirror of the registry's subcommand set, guarded by a set-compare that fails
+the moment a spec is registered without it. The PM side hit exactly this in
+Task 6 because the plan had not named the guard. `zsh.rs` gets the same two
+match arms plus:
 
 ```zsh
 __tmt_build_targets() {
