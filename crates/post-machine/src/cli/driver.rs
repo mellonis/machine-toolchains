@@ -268,6 +268,11 @@ fn build_one_target(
                     render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
                     stderr.trim_end().to_string()
                 })?;
+                if flags.keep_objects {
+                    let pmo = path.with_extension("pmo");
+                    fs::write(&pmo, object.to_bytes())
+                        .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
+                }
                 objects.push(object);
             }
             _ => objects.push(read_object(&path)?),

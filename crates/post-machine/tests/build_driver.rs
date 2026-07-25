@@ -277,3 +277,197 @@ fn release_flag_selects_the_release_profile() {
     );
     assert!(dir.join("app.pmx").is_file());
 }
+
+/// The flags-win contract (docs/pmt/cli.md (build)): a manifest profile
+/// key is a default, not a floor — an individual invocation flag must
+/// still override it. The manifest declares `werror: false` (matching
+/// the debug profile's own base, so this isn't exercising a base-vs-
+/// override difference by accident). `dead()` is exported but never
+/// called from `main`, so it is unreachable and the linker drops it
+/// (docs/core.md (linker)) — its genuinely-unresolvable `@missing()`
+/// call never becomes a link error, only the compile-time
+/// undeclared-external warning, which only `-Werror` turns fatal.
+#[test]
+fn werror_flag_overrides_a_manifest_profile_that_disables_it() {
+    let dir = scratch("manifest_werror_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/orphan.pmc"),
+        "main() { mark; }\nexport dead() { @missing(); }",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "werror": false } },
+            "targets": { "orphan": { "sources": ["src/orphan.pmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "orphan"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "manifest profile disables werror: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = pmt()
+        .args(["build", "-Werror", "orphan"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "-Werror flag must override the manifest profile's werror: false"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("treated as errors"));
+}
+
+/// `--run` needs exactly one selected target; with the two-target
+/// fixture and no target named, the gate must fire BEFORE either
+/// target builds (docs/pmt/cli.md (build)) — no `.pmx` written.
+#[test]
+fn run_flag_needs_exactly_one_target_and_fails_before_building() {
+    let dir = scratch("manifest_run_needs_one");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "--run"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("exactly one target"));
+    assert!(
+        !dir.join("app.pmx").exists(),
+        "the --run gate must fire before any target builds"
+    );
+    assert!(!dir.join("bench.pmx").exists());
+}
+
+/// `app.pmc`'s bare `@util()` is undeclared per-file but resolved by
+/// the manifest-level `sources` (`shared.pmc`) once the effective
+/// source list is compiled together — the undeclared-external
+/// refinement (docs/pmt/cli.md (build)) must drop that warning in
+/// manifest mode exactly as it does in argv mode.
+#[test]
+fn manifest_mode_refines_undeclared_external_resolved_by_shared_sources() {
+    let dir = scratch("manifest_refine_undeclared");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("undeclared"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A target's `libraries.dirs` must resolve against the manifest's
+/// directory, not the process cwd — proven by building from a
+/// subdirectory (`src/`) while the declared `libs` dir sits next to
+/// the manifest.
+#[test]
+fn library_dirs_resolve_against_the_manifest_directory_not_cwd() {
+    let dir = scratch("manifest_library_dirs");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("libs")).unwrap();
+    let lib_src = dir.join("libs/libutil.pmc");
+    fs::write(&lib_src, "export from_lib() { mark; }").unwrap();
+    let lib_obj = dir.join("libs/libutil.pmo");
+    let compiled = pmt()
+        .args([
+            "compile",
+            lib_src.to_str().unwrap(),
+            "-o",
+            lib_obj.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    fs::write(dir.join("src/uselib.pmc"), "main() { @from_lib(); }").unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "targets": { "uselib": {
+                "sources": ["src/uselib.pmc"],
+                "libraries": { "dirs": ["libs"], "link": ["libutil"] }
+            } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "uselib"])
+        .current_dir(dir.join("src"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.join("uselib.pmx").is_file());
+}
+
+/// Finding 1's fix: `--keep-objects` must write the intermediate
+/// `.pmo` for a `.pma` manifest source exactly as it does for `.pmc`
+/// sources (docs/pmt/cli.md (build)) — this fixture is the first to
+/// give the `.pma` arm of `build_one_target` any coverage.
+#[test]
+fn manifest_mode_keep_objects_writes_pmo_for_pma_sources_too() {
+    let dir = scratch("manifest_keep_objects_pma");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    let pmc = dir.join("src/asmtarget.pmc");
+    fs::write(&pmc, "main() { mark; }").unwrap();
+    let compiled = pmt()
+        .args(["compile", pmc.to_str().unwrap(), "-S"])
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(dir.join("src/asmtarget.pma").is_file());
+
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "targets": { "asmtarget": { "sources": ["src/asmtarget.pma"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "--keep-objects", "asmtarget"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        dir.join("src/asmtarget.pmo").is_file(),
+        "--keep-objects must write the .pma source's intermediate .pmo too"
+    );
+}
