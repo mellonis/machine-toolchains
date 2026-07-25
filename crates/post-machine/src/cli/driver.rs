@@ -243,40 +243,14 @@ fn build_one_target(
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
     for raw in manifest.effective_sources(target) {
         let path = resolve(&raw)?;
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("pmc") => {
-                let source = fs::read_to_string(&path)
-                    .map_err(|e| format!("target `{name}`: cannot read {}: {e}", path.display()))?;
-                let out = compile_source(&source, options.clone()).map_err(|e| {
-                    let mut stderr = String::new();
-                    render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
-                    stderr.trim_end().to_string()
-                })?;
-                if flags.keep_objects {
-                    let pmo = path.with_extension("pmo");
-                    fs::write(&pmo, out.object.to_bytes())
-                        .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
-                }
-                reports.push((path.clone(), out.report));
-                objects.push(out.object);
-            }
-            Some("pma") => {
-                let source = fs::read_to_string(&path)
-                    .map_err(|e| format!("target `{name}`: cannot read {}: {e}", path.display()))?;
-                let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
-                    let mut stderr = String::new();
-                    render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
-                    stderr.trim_end().to_string()
-                })?;
-                if flags.keep_objects {
-                    let pmo = path.with_extension("pmo");
-                    fs::write(&pmo, object.to_bytes())
-                        .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
-                }
-                objects.push(object);
-            }
-            _ => objects.push(read_object(&path)?),
-        }
+        load_one_source(
+            &path,
+            &options,
+            flags.keep_objects,
+            &format!("target `{name}`: "),
+            &mut objects,
+            &mut reports,
+        )?;
     }
 
     let libs = manifest.effective_libraries(target);
@@ -391,40 +365,14 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
     for file in files {
         let path = Path::new(file);
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("pmc") => {
-                let source = fs::read_to_string(path)
-                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                let out = compile_source(&source, options.clone()).map_err(|e| {
-                    let mut stderr = String::new();
-                    render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
-                    stderr.trim_end().to_string()
-                })?;
-                if flags.keep_objects {
-                    let pmo = path.with_extension("pmo");
-                    fs::write(&pmo, out.object.to_bytes())
-                        .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
-                }
-                reports.push((path.to_path_buf(), out.report));
-                objects.push(out.object);
-            }
-            Some("pma") => {
-                let source = fs::read_to_string(path)
-                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-                let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
-                    let mut stderr = String::new();
-                    render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
-                    stderr.trim_end().to_string()
-                })?;
-                if flags.keep_objects {
-                    let pmo = path.with_extension("pmo");
-                    fs::write(&pmo, object.to_bytes())
-                        .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
-                }
-                objects.push(object);
-            }
-            _ => objects.push(read_object(path)?),
-        }
+        load_one_source(
+            path,
+            &options,
+            flags.keep_objects,
+            "",
+            &mut objects,
+            &mut reports,
+        )?;
     }
 
     let mut libraries = Vec::new();
@@ -482,6 +430,62 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
         );
     }
     Ok(CliOutput::ok(String::new(), stderr))
+}
+
+/// Loads one already-resolved source path per its extension
+/// (docs/pmt/cli.md (build)): `.pmc` compiles, `.pma` assembles,
+/// anything else loads as a `.pmo` object — the one dispatch shared by
+/// argv mode and manifest mode's per-target loop, so a fix (like
+/// `--keep-objects` covering `.pma`) lands once instead of drifting
+/// between two copies. `read_err_prefix` lets a caller name context a
+/// bare `cannot read` message can't (manifest mode passes
+/// `` target `NAME`:  ``; argv mode passes `""`); everything past the
+/// read — compile/assemble, `render_fatal` on failure, the
+/// `--keep-objects` write, and appending to `objects`/`reports` — is
+/// identical between callers.
+fn load_one_source(
+    path: &Path,
+    options: &CompileOptions,
+    keep_objects: bool,
+    read_err_prefix: &str,
+    objects: &mut Vec<ObjectFile>,
+    reports: &mut Vec<(PathBuf, CompileReport)>,
+) -> Result<(), String> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("pmc") => {
+            let source = fs::read_to_string(path)
+                .map_err(|e| format!("{read_err_prefix}cannot read {}: {e}", path.display()))?;
+            let out = compile_source(&source, options.clone()).map_err(|e| {
+                let mut stderr = String::new();
+                render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+                stderr.trim_end().to_string()
+            })?;
+            if keep_objects {
+                let pmo = path.with_extension("pmo");
+                fs::write(&pmo, out.object.to_bytes())
+                    .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
+            }
+            reports.push((path.to_path_buf(), out.report));
+            objects.push(out.object);
+        }
+        Some("pma") => {
+            let source = fs::read_to_string(path)
+                .map_err(|e| format!("{read_err_prefix}cannot read {}: {e}", path.display()))?;
+            let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
+                let mut stderr = String::new();
+                render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+                stderr.trim_end().to_string()
+            })?;
+            if keep_objects {
+                let pmo = path.with_extension("pmo");
+                fs::write(&pmo, object.to_bytes())
+                    .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
+            }
+            objects.push(object);
+        }
+        _ => objects.push(read_object(path)?),
+    }
+    Ok(())
 }
 
 /// Every symbol name the declared set defines FOR CROSS-OBJECT
