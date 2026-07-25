@@ -2294,8 +2294,17 @@ divergence is spelled out with its code.
 
 - [ ] **Step 1: Port the PM module**
 
-Copy `crates/post-machine/src/project.rs` to `crates/turing-machine/src/project.rs`
-verbatim, then apply Steps 2–4. Add the `Invalid` variant to
+Copy `crates/post-machine/src/project.rs` to `crates/turing-machine/src/project.rs`,
+then apply Steps 2–4.
+
+**Copy the schema/validation half ONLY.** By the time this task runs, PM's
+`project.rs` has accumulated later tasks' work, and pulling it in wholesale
+would steal their scope. Explicitly NOT part of this task:
+`PmtFile` / `load_file` / `discover_manifest` / `parse_lint` (Task 10) and
+`Manifest::all_sources` (Task 15). What you want is the types, `Profiles::resolve`,
+the `effective_*` helpers, `output_of`, `normalize_rel`, the `as_*` /
+`invalid` / `parse_err` / `unknown_key` helpers, `valid_target_name`, the
+`parse_*` functions, and `validate_manifest` — nothing that reads a file. Add the `Invalid` variant to
 `crates/turing-machine/src/config.rs`'s `ConfigError` exactly as PM Task 1
 Step 1 did (same doc comment, same `path()`/`detail()` arms). Add
 `mod project;` to `lib.rs`.
