@@ -328,6 +328,62 @@ fn werror_flag_overrides_a_manifest_profile_that_disables_it() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("treated as errors"));
 }
 
+/// `pmt build --run TARGET` builds then runs the target's `run` block,
+/// adopting the machine's own exit code (docs/pmt/cli.md (build)):
+/// `bench`'s `run: { tape: " *" }` reaches `halt` -> exit 2 and the
+/// stdout carries the `run`-shaped `outcome:` report; `app` has no
+/// `run` block at all, so `run_target` must fall back to `pmt run`'s
+/// own defaults (empty tape) rather than erroring — its program stops
+/// cleanly -> exit 0.
+#[test]
+fn build_run_adopts_the_machine_exit_code() {
+    let dir = scratch("manifest_run");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "--run", "bench"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("outcome"));
+
+    let out = pmt()
+        .args(["build", "--run", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Without a named target and more than one target in the manifest,
+/// `--run` must still be rejected (the ambiguity gate in `build`
+/// itself, upstream of `run_target`) — this exercises the no-args
+/// invocation specifically, distinct from
+/// `run_flag_needs_exactly_one_target_and_fails_before_building` above
+/// which also asserts neither `.pmx` gets written.
+#[test]
+fn build_run_without_a_named_target_needs_exactly_one() {
+    let dir = scratch("manifest_run_ambiguous");
+    write_project(&dir);
+    let out = pmt()
+        .args(["build", "--run"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("exactly one"));
+}
+
 /// `--run` needs exactly one selected target; with the two-target
 /// fixture and no target named, the gate must fire BEFORE either
 /// target builds (docs/pmt/cli.md (build)) — no `.pmx` written.

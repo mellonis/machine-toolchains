@@ -191,7 +191,7 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
     if flags.run {
         let (name, output) = &built[0];
         let target = &manifest.targets[name.as_str()];
-        return run_target(&root, output, target.run.as_ref(), stderr); // Task 5
+        return run_target(&root, output, target.run.as_ref(), stderr);
     }
     Ok(CliOutput::ok(String::new(), stderr))
 }
@@ -321,13 +321,53 @@ fn build_one_target(
     Ok((output, stderr))
 }
 
+/// Maps a manifest `run` block onto `run.rs`'s `RunSettings` and runs
+/// the just-built executable (docs/pmt/project.md (run block)): an
+/// absent block runs `pmt run`'s own defaults (empty tape, head 0, no
+/// limits) rather than erroring. The build's stderr chunk is prefixed
+/// onto the run's so `--run`'s combined output reads as one build+run
+/// invocation.
 fn run_target(
-    _root: &Path,
-    _output: &Path,
-    _run: Option<&crate::project::RunSpec>,
-    _stderr: String,
+    root: &Path,
+    output: &Path,
+    run: Option<&crate::project::RunSpec>,
+    build_stderr: String,
 ) -> Result<CliOutput, String> {
-    Err("--run lands in the next task".to_string()) // Task 5 replaces this
+    use mtc_core::vm::TactProfile;
+    let spec = run.cloned().unwrap_or_default();
+    let settings = super::run::RunSettings {
+        tape_block: spec
+            .tape_block
+            .map(|raw| -> Result<String, String> {
+                Ok(root
+                    .join(crate::project::normalize_rel(&raw)?)
+                    .to_string_lossy()
+                    .into_owned())
+            })
+            .transpose()?,
+        tape_inline: spec.tape,
+        head: spec.head.unwrap_or(0),
+        save: None,
+        strict: spec.strict_cells,
+        no_step_limit: false,
+        max_steps: spec.max_steps,
+        max_tacts: spec.max_tacts,
+        // TactProfile has five fields since the TM-1 arc (table_read_cost,
+        // frame_load_cost); the manifest declares only the three PM-1 ones,
+        // so the rest come from the ELECTRONIC base.
+        profile: spec
+            .tact_profile
+            .map_or(TactProfile::ELECTRONIC, |[m, r, w]| TactProfile {
+                move_cost: m,
+                read_cost: r,
+                write_cost: w,
+                ..TactProfile::ELECTRONIC
+            }),
+        trace: false,
+    };
+    let mut run_out = super::run::execute_run(output, &settings, &mut std::io::sink())?;
+    run_out.stderr = format!("{build_stderr}{}", run_out.stderr);
+    Ok(run_out)
 }
 
 /// Compile options for argv mode: exactly `pmt compile`'s preset/flag

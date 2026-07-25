@@ -41,6 +41,39 @@ EXIT CODE: 0 stopped | 2 halted (hlt) | 3 trapped | 1 tool error.
 
 const DEFAULT_MAX_STEPS: u64 = 10_000_000;
 
+/// Parsed `pmt run` flags, also the shape `pmt build --run` maps a
+/// manifest `run` block onto (cli/driver.rs) — one execution path for
+/// both callers.
+pub(super) struct RunSettings {
+    pub tape_block: Option<String>,
+    pub tape_inline: Option<String>,
+    pub head: i64,
+    pub save: Option<String>,
+    pub strict: bool,
+    pub no_step_limit: bool,
+    pub max_steps: Option<u64>,
+    pub max_tacts: Option<u64>,
+    pub profile: TactProfile,
+    pub trace: bool,
+}
+
+impl Default for RunSettings {
+    fn default() -> Self {
+        Self {
+            tape_block: None,
+            tape_inline: None,
+            head: 0,
+            save: None,
+            strict: false,
+            no_step_limit: false,
+            max_steps: None,
+            max_tacts: None,
+            profile: TactProfile::ELECTRONIC,
+            trace: false,
+        }
+    }
+}
+
 pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     if args.flag("--help") {
@@ -83,22 +116,46 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
     };
     let exe_path = Path::new(exe_path);
 
+    let settings = RunSettings {
+        tape_block,
+        tape_inline,
+        head,
+        save,
+        strict,
+        no_step_limit,
+        max_steps,
+        max_tacts,
+        profile,
+        trace,
+    };
+    execute_run(exe_path, &settings, trace_out)
+}
+
+pub(super) fn execute_run(
+    exe_path: &Path,
+    settings: &RunSettings,
+    trace_out: &mut dyn std::io::Write,
+) -> Result<CliOutput, String> {
     let bytes =
         fs::read(exe_path).map_err(|e| format!("cannot read {}: {e}", exe_path.display()))?;
     let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{}: {e}", exe_path.display()))?;
 
-    let (mut tape, alphabet) = initial_tape(tape_block.as_deref(), tape_inline.as_deref(), head)?;
+    let (mut tape, alphabet) = initial_tape(
+        settings.tape_block.as_deref(),
+        settings.tape_inline.as_deref(),
+        settings.head,
+    )?;
 
     let limits = RunLimits {
-        max_steps: if no_step_limit {
+        max_steps: if settings.no_step_limit {
             None
         } else {
-            Some(max_steps.unwrap_or(DEFAULT_MAX_STEPS))
+            Some(settings.max_steps.unwrap_or(DEFAULT_MAX_STEPS))
         },
-        max_tacts,
+        max_tacts: settings.max_tacts,
     };
     let options = RunOptions {
-        profile,
+        profile: settings.profile,
         limits,
         ..Default::default()
     };
@@ -110,14 +167,14 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
     let map = super::inspect::sidecar_map(exe_path); // sidecar discovery, shared with `dis`
 
     let stderr = String::new(); // trace streams straight to trace_out, not buffered here
-    let (outcome, stats) = if strict {
+    let (outcome, stats) = if settings.strict {
         let mut wrapped = StrictTape::new(tape);
         let r = drive(
             &machine,
             &exe,
             &mut wrapped,
             options,
-            trace_to(trace, trace_out),
+            trace_to(settings.trace, trace_out),
             map.as_ref(),
         );
         tape = wrapped.into_inner();
@@ -128,7 +185,7 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
             &exe,
             &mut tape,
             options,
-            trace_to(trace, trace_out),
+            trace_to(settings.trace, trace_out),
             map.as_ref(),
         )
     };
@@ -146,13 +203,13 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
     );
     stdout.push_str(&render_tape(&snapshot, &alphabet));
 
-    if let Some(out_path) = save {
+    if let Some(out_path) = &settings.save {
         let block = TapeBlockFile {
             alphabet: alphabet.clone(),
             tapes: vec![snapshot],
         };
         let bytes = block.to_bytes().map_err(|e| e.to_string())?;
-        fs::write(&out_path, bytes).map_err(|e| format!("cannot write {out_path}: {e}"))?;
+        fs::write(out_path, bytes).map_err(|e| format!("cannot write {out_path}: {e}"))?;
     }
 
     let code = match outcome {
