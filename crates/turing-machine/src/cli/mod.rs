@@ -12,6 +12,7 @@
 
 mod build;
 mod completions;
+mod driver;
 mod fmt;
 mod inspect;
 mod lint;
@@ -83,6 +84,7 @@ pub fn execute_with(
         Some("compile") => build::compile(&args[1..]),
         Some("asm") => build::asm(&args[1..]),
         Some("link") => build::link(&args[1..]),
+        Some("build") => driver::build(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),
         Some("tape") => inspect::tape(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
