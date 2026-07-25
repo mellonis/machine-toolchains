@@ -124,8 +124,9 @@ names resolved from the `.pmx.map` sidecar that `link` wrote alongside it.
 Full flag reference: `docs/pmt/cli.md`.
 
 The five commands above are what `pmt build` collapses into one step once
-a project has more than a one-off source file. A `pmt.json` next to
-`sum.pmc`, declaring one target:
+a project has more than a one-off source file. A `pmt.json` at the
+repository root (alongside the `sum.pmt`/`sum.pmx` the walkthrough above
+wrote there), declaring one target:
 
 ```json
 {

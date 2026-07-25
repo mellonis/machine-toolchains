@@ -226,12 +226,15 @@ a build is either fully argv-driven or fully manifest-driven.
 - **Manifest mode only** (`--run`, `--list-targets`): argv mode has no
   notion of a target or a declared run block for either flag to act on.
 
-**Profile selection (manifest mode):** each target names a profile, or
-falls back to the manifest's default; `--debug`/`--release` and the
-individual compile-side flags above layer on top of the resolved
-profile's keys for that invocation — an individual flag always wins over
-whatever the profile declares, whether that profile was chosen by the
-target or overridden by `--debug`/`--release` on the command line.
+**Profile selection (manifest mode):** there is no per-target profile
+name in the manifest schema — selection happens once per invocation, the
+same base for every target that invocation builds. `--release` selects
+the `release` base; omitting both `--release` and `--debug` selects
+`debug`. The individual compile-side flags above then layer on top of
+that base's keys for this invocation only — an individual flag always
+wins over whatever the resolved profile declares
+(`docs/pmt/project.md (schema reference)` has the two bases' key
+tables).
 
 **`--run [TARGET]`:** builds first, then runs the target's declared run
 block (the same tape/limits shape `pmt run` reads), reached only after a
