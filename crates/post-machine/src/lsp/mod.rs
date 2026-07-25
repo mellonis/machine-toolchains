@@ -38,6 +38,15 @@ pub(crate) struct PmcLanguageService {
     ide_allow: Option<Result<Vec<String>, String>>,
     /// `pmt.json` parse cache keyed by winner path; (mtime, outcome).
     config_cache: HashMap<PathBuf, (SystemTime, Result<Vec<String>, String>)>,
+    /// `pmt.json` project-section discovery cache (docs/lsp.md
+    /// (configuration)), keyed the same way as `config_cache` but over
+    /// the manifest's `project` section instead of `lint.allow` — the
+    /// cross-file overlay's own manifest lookup (`overlay::project_view`).
+    manifest_cache: overlay::ManifestCache,
+    /// One open document's sibling-export scan cache (docs/lsp.md
+    /// (configuration)), shared across every document this service
+    /// builds an overlay for (`overlay::build_overlay`).
+    sibling_cache: overlay::SiblingCache,
 }
 
 impl PmcLanguageService {
@@ -46,6 +55,8 @@ impl PmcLanguageService {
             docs: HashMap::new(),
             ide_allow: None,
             config_cache: HashMap::new(),
+            manifest_cache: overlay::ManifestCache::new(),
+            sibling_cache: overlay::SiblingCache::new(),
         }
     }
 }
@@ -161,6 +172,14 @@ struct DocState {
     /// invalid-config messages that applied to this analysis (0..=2
     /// entries: project file first, then IDE settings).
     config_errors: Vec<String>,
+    /// The cross-file symbol table for this document (docs/lsp.md
+    /// (configuration)): `None` when the document degrades to
+    /// single-file behavior (no manifest found, the document is a
+    /// member of no target, or it has no `file:` path at all). Consumed
+    /// by later stages (completion, navigation, hover, diagnostic
+    /// refinement) — this task only builds and stores it.
+    #[allow(dead_code)] // read starting with a later task's diagnostics refinement.
+    pub overlay: Option<overlay::Overlay>,
 }
 
 /// `file:` URIs → percent-decoded filesystem path; any other scheme
@@ -454,7 +473,21 @@ impl LanguageService for PmcLanguageService {
         }
         .resolve(uri);
 
-        // 2. Staged analysis; lint over a successful analysis only, with
+        // 2. Cross-file overlay (docs/lsp.md (configuration) for the
+        //    shared mtime-cache discipline; `overlay.rs` for the rest):
+        //    the manifest-discovery view for this document, then its
+        //    sibling/library export table, built from `self.docs` BEFORE
+        //    step 4 below replaces this uri's own entry — so a sibling
+        //    read never has to reason about whether it might be looking
+        //    at a stale copy of the document currently being updated.
+        //    Untitled / non-`file:` URIs degrade to `None` (single-file
+        //    view) for free via `uri_to_path`.
+        let overlay = uri_to_path(uri).and_then(|p| {
+            overlay::project_view(&p, &mut self.manifest_cache)
+                .map(|view| overlay::build_overlay(&view, &p, &self.docs, &mut self.sibling_cache))
+        });
+
+        // 3. Staged analysis; lint over a successful analysis only, with
         //    the effective allow union of the valid config sources.
         let staged = analyze_staged(text);
         let lint = match (&staged.tokens, &staged.analysis) {
@@ -479,7 +512,7 @@ impl LanguageService for PmcLanguageService {
             _ => None,
         };
 
-        // 3. Store the doc state; a failed re-analysis keeps the
+        // 4. Store the doc state; a failed re-analysis keeps the
         //    previous last-good scopes (the names-only staleness
         //    exception for completion).
         let prev = self.docs.remove(uri);
@@ -496,6 +529,7 @@ impl LanguageService for PmcLanguageService {
             fatal: staged.fatal,
             scopes_for_completion,
             config_errors,
+            overlay,
         };
         let diagnostics = merged_diagnostics(&state);
         self.docs.insert(uri.to_string(), state);
@@ -1167,6 +1201,56 @@ export main() {
             service.config_cache.len() <= CONFIG_CACHE_LIMIT,
             "cache grew past its bound: {} entries",
             service.config_cache.len()
+        );
+    }
+
+    #[test]
+    fn did_update_stores_the_overlay_preferring_an_open_siblings_live_state() {
+        // A manifest declaring both files as one target's sources;
+        // helper.pmc's DISK copy exports `old`, but it's opened in this
+        // SAME service first with unsaved text exporting `new` — proving
+        // the wiring reads `self.docs`, not disk, for an open sibling.
+        let dir = unique_tmp_dir("overlay-wiring");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("helper.pmc"), "export old() { right; }\n").unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let helper_uri = file_uri(&dir.join("helper.pmc"));
+        service.did_update(&helper_uri, "export new() { right; }\n");
+
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        service.did_update(&app_uri, "main() {\nright;\n}\n");
+
+        let overlay = service
+            .docs
+            .get(&app_uri)
+            .unwrap()
+            .overlay
+            .as_ref()
+            .expect("app.pmc is a member of the app target");
+        assert!(
+            overlay.symbols.contains_key("new"),
+            "the sibling's live DocState, not its stale disk copy: {:?}",
+            overlay.symbols.keys().collect::<Vec<_>>()
+        );
+        assert!(!overlay.symbols.contains_key("old"));
+    }
+
+    #[test]
+    fn did_update_overlay_is_none_without_a_manifest() {
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+        let diags = service.did_update(uri, "main() {\nright;\n}\n");
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let state = service.docs.get(uri).unwrap();
+        assert!(
+            state.overlay.is_none(),
+            "no `file:` path at all — single-file degrade"
         );
     }
 
