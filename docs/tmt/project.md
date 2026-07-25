@@ -135,7 +135,9 @@ entry is what fixes the shape of the machine itself:
 
 - **The entry's routine signature is the machine's tape arity and
   per-tape cardinalities.** Every reachable frame descriptor's
-  physical-tape indices are validated against it.
+  physical-tape indices are validated against it. The signature is
+  visible in the linked image: `tmt dis` prints it as the leading
+  `.routine <entry>, tapes=…, alpha=(…)` line.
 - **In sectioned output — one carrying tables, or any signature at all,
   which is what the frames and hybrid lowerings produce — the entry
   must carry a routine signature.** An entry without one is a link error
