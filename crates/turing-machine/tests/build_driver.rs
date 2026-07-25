@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mtc_turing_machine::cli::execute;
 
@@ -11,6 +11,14 @@ fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// A committed `.tmc` fixture under `tests/golden/`, shared with
+/// `tmc_golden.rs`/`cli_programs.rs`.
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(name)
 }
 
 /// A one-state, one-tape program with no external references — used
@@ -182,4 +190,76 @@ fn argv_mode_rejects_s_emit_ir_and_stamped_asm() {
         let err = execute(&args(&["build", flag, main.to_str().unwrap()])).unwrap_err();
         assert!(err.contains("unknown flag"), "{flag}: {err}");
     }
+}
+
+/// `--entry` is one of the two fields TM's argv mode adds beyond PM's
+/// baseline (PM's argv mode always takes `LinkOptions::default()` for it,
+/// so there is no inherited test to lean on). `other.tmc` defines no
+/// `main` symbol at all — only an exported `other` — so a bare build must
+/// fail with the default-entry error, and only `--entry other` can make
+/// it succeed. This proves `flags.entry` actually reaches
+/// `LinkOptions.entry` rather than being parsed and dropped.
+#[test]
+fn argv_mode_entry_flag_selects_a_non_default_root() {
+    let dir = scratch("argv_entry_flag");
+    let src = dir.join("other.tmc");
+    fs::write(
+        &src,
+        "alphabet ab { '_', 'a' }\n\
+         export routine other(tape t: ab) {\n\
+           entry state s { [*] -> stop; }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let err = execute(&args(&["build", src.to_str().unwrap()])).unwrap_err();
+    assert!(err.contains("main"), "{err}");
+
+    let out = execute(&args(&["build", "--entry", "other", src.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(dir.join("other.tmx").is_file());
+}
+
+/// `--call-mech` is the other field TM's argv mode adds beyond PM's
+/// baseline. `a5_call_across_alphabets.tmc`'s cross-alphabet `with map`
+/// call site genuinely composes differently under mono (a specialized
+/// stamped copy) versus frames (the generic compose directory) — hand
+/// verified: 182 bytes under `--call-mech mono`, 166 under
+/// `--call-mech frames`, for the identical source. If
+/// `call_mech: flags.call_mech.unwrap_or_default()` ever reverted to a
+/// hardcoded default (or the field dropped from the `LinkOptions`
+/// literal), both builds below would collapse to the same bytes.
+#[test]
+fn argv_mode_call_mech_flag_changes_the_linked_image() {
+    let dir = scratch("argv_call_mech_flag");
+    let src = fixture("a5_call_across_alphabets.tmc");
+    let mono = dir.join("mono.tmx");
+    let frames = dir.join("frames.tmx");
+
+    let out = execute(&args(&[
+        "build",
+        "--call-mech",
+        "mono",
+        "-o",
+        mono.to_str().unwrap(),
+        src.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0);
+    let out = execute(&args(&[
+        "build",
+        "--call-mech",
+        "frames",
+        "-o",
+        frames.to_str().unwrap(),
+        src.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(out.code, 0);
+
+    assert_ne!(
+        fs::read(&mono).unwrap(),
+        fs::read(&frames).unwrap(),
+        "mono and frames should compose the cross-alphabet call site differently"
+    );
 }

@@ -135,8 +135,9 @@ pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
     }
 }
 
+// Manifest mode lands with the manifest-aware driver work.
 fn manifest_mode(_targets: &[String], _flags: &Flags) -> Result<CliOutput, String> {
-    Err("manifest mode lands in the next task".to_string()) // Task 12 replaces this
+    Err("manifest mode lands in the next task".to_string())
 }
 
 /// Compile options for argv mode: exactly `tmt compile`'s preset/flag
