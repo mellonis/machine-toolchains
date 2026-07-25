@@ -931,6 +931,7 @@ fn rewrite_blob<'a>(
             table: Cow::Owned(new_table),
             table_fixups: new_fixups,
             signature: f.signature,
+            origin: f.origin,
         },
         framed,
     ))

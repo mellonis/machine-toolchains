@@ -45,6 +45,10 @@ pub(crate) struct FuncRef<'a> {
     /// The function's generic-routine signature, when its object signs
     /// blobs (signatures are all-or-none per object, parallel to blobs).
     pub signature: Option<&'a RoutineSig>,
+    /// Index of the input that supplied this definition, counting through
+    /// the user objects then the libraries — provenance for the
+    /// name-resolution query surface (docs/core.md (name resolution)).
+    pub(crate) origin: usize,
 }
 
 #[derive(Debug)]
@@ -249,6 +253,7 @@ pub(crate) fn resolve<'a>(
                     .signatures
                     .as_ref()
                     .and_then(|s| s.get(site.1 as usize)),
+                origin: site.0,
             }
         })
         .collect();
@@ -262,6 +267,7 @@ pub(crate) fn resolve<'a>(
 mod tests {
     use super::*;
     use crate::formats::object::{BoundCall, ObjectFile, Relocation, Symbol, SymbolDef};
+    use crate::linker::{ResolvedName, ResolvedNames, SymbolOrigin, resolve_names};
 
     /// Object with `funcs` = (name, callees-by-name). Blob content is a
     /// stub: [0x0E] + one 5-byte call hole per callee (opcode 0x21).
@@ -519,5 +525,74 @@ mod tests {
         let a = obj(0x7E, &[("main", &[])]);
         let e = resolve(std::slice::from_ref(&a), &[], "start").unwrap_err();
         assert_eq!(e, LinkError::NoEntrySymbol("start".into()));
+    }
+
+    #[test]
+    fn resolve_names_reports_reached_with_provenance_and_dropped() {
+        // main (object 0) calls lib_fn (library 0); helper in object 0 unreached.
+        let a = obj(0x7E, &[("main", &["lib_fn"]), ("helper", &[])]);
+        let lib = obj(0x7E, &[("lib_fn", &[])]);
+        let names =
+            resolve_names(std::slice::from_ref(&a), std::slice::from_ref(&lib), "main").unwrap();
+        assert_eq!(
+            names,
+            ResolvedNames {
+                reached: vec![
+                    ResolvedName {
+                        name: "main".into(),
+                        origin: SymbolOrigin::Object(0),
+                    },
+                    ResolvedName {
+                        name: "lib_fn".into(),
+                        // Pins the off-by-one: the library is the sole
+                        // library, so it MUST report Library(0), not
+                        // Library(objects.len()) (= Library(1)).
+                        origin: SymbolOrigin::Library(0),
+                    },
+                ],
+                dropped: vec!["helper".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_names_user_definition_shadows_library() {
+        // "dup" defined in object 0 AND library 0; main calls dup.
+        let a = obj(0x7E, &[("main", &["dup"]), ("dup", &[])]);
+        let lib = obj(0x7E, &[("dup", &[])]);
+        let names =
+            resolve_names(std::slice::from_ref(&a), std::slice::from_ref(&lib), "main").unwrap();
+        let dup = names
+            .reached
+            .iter()
+            .find(|r| r.name == "dup")
+            .expect("dup is reached");
+        assert_eq!(dup.origin, SymbolOrigin::Object(0));
+    }
+
+    #[test]
+    fn resolve_names_reachable_unresolved_is_an_error() {
+        // main references "ghost" defined nowhere.
+        let a = obj(0x7E, &[("main", &["ghost"])]);
+        let e = resolve_names(std::slice::from_ref(&a), &[], "main").unwrap_err();
+        assert_eq!(e, LinkError::Unresolved(vec!["ghost".into()]));
+    }
+
+    #[test]
+    fn resolve_names_dead_code_may_be_broken() {
+        // unreached fn references "ghost" -> Ok, ghost never mentioned,
+        // the broken fn appears in dropped.
+        let a = obj(0x7E, &[("main", &[]), ("dead", &["ghost"])]);
+        let names = resolve_names(std::slice::from_ref(&a), &[], "main").unwrap();
+        assert_eq!(
+            names,
+            ResolvedNames {
+                reached: vec![ResolvedName {
+                    name: "main".into(),
+                    origin: SymbolOrigin::Object(0),
+                }],
+                dropped: vec!["dead".to_string()],
+            }
+        );
     }
 }

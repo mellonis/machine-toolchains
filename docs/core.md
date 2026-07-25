@@ -457,6 +457,16 @@ Objects in, one executable image out, in two phases.
   reaches are **dropped**, and a dropped function may reference anything
   at all: unresolved references only matter for what survives.
 
+**Name resolution** is also exposed on its own, without layout: a query
+answers which symbols the reachability walk reaches — in BFS order,
+each paired with which input supplied its winning definition (a user
+object or a library, and which one) — and which winning definitions
+never got reached. It runs the exact namespace-building and BFS code
+path linking does, just stopped short of layout and relaxation, so a
+consumer comparing itself against "what the linker actually resolves"
+(an editor overlay reasoning about cross-file symbols, say) gets an
+answer that can never drift from a real link.
+
 ### Relaxation
 
 **Layout** places the surviving functions and patches their call sites.
