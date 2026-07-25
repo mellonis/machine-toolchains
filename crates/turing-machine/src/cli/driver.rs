@@ -135,9 +135,248 @@ pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
     }
 }
 
-// Manifest mode lands with the manifest-aware driver work.
-fn manifest_mode(_targets: &[String], _flags: &Flags) -> Result<CliOutput, String> {
-    Err("manifest mode lands in the next task".to_string())
+/// Discovers the nearest `tmt.json` with a `project` section from the
+/// current directory upward, selects targets, and builds them
+/// (docs/tmt/project.md (discovery)). Flags that contradict the declared
+/// model (`-o`/`-L`/`-l`/`--nostdlib`/`--entry` — the manifest already
+/// declares outputs, libraries and entries) are rejected up front.
+/// `--call-mech` is deliberately NOT in that list: the manifest records
+/// the committed lowering, and the flag exists to experiment against it
+/// (docs/tmt/project.md (call-mech)) — resolved flag-first, then target
+/// key, then project key, then the linker's own default.
+fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, String> {
+    if flags.out.is_some()
+        || !flags.search_dirs.is_empty()
+        || !flags.lib_names.is_empty()
+        || flags.nostdlib
+        || flags.entry.is_some()
+    {
+        return Err(format!(
+            "-o/-L/-l/--nostdlib/--entry contradict the manifest — it declares outputs, libraries and entries\n\n{BUILD_USAGE}"
+        ));
+    }
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let Some((manifest_path, manifest)) =
+        crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
+    else {
+        return Err(
+            "no tmt.json with a `project` section found from the current directory upward".into(),
+        );
+    };
+    let root = manifest_path
+        .parent()
+        .expect("tmt.json has a parent")
+        .to_path_buf();
+
+    if flags.list_targets {
+        let mut stdout = String::new();
+        for (name, target) in &manifest.targets {
+            stdout.push_str(name);
+            if target.run.is_some() {
+                stdout.push_str("\trun");
+            }
+            stdout.push('\n');
+        }
+        return Ok(CliOutput::ok(stdout, String::new()));
+    }
+
+    for name in requested {
+        if !manifest.targets.contains_key(name) {
+            return Err(format!(
+                "no target `{name}` in {} (targets: {})",
+                manifest_path.display(),
+                manifest
+                    .targets
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    let selected: Vec<&str> = if requested.is_empty() {
+        manifest.targets.keys().map(String::as_str).collect() // BTreeMap: alphabetical
+    } else {
+        requested.iter().map(String::as_str).collect()
+    };
+
+    if flags.run && selected.len() != 1 {
+        return Err(format!(
+            "--run needs exactly one target (have {}): name it\n\n{BUILD_USAGE}",
+            selected.len()
+        ));
+    }
+
+    let mut stderr = String::new();
+    let mut built: Vec<(String, PathBuf)> = Vec::new();
+    for name in &selected {
+        let target = &manifest.targets[*name];
+        let (output, chunk) = build_one_target(&root, &manifest, name, target, flags)?;
+        stderr.push_str(&chunk);
+        built.push((name.to_string(), output));
+    }
+
+    if flags.run {
+        let (name, output) = &built[0];
+        let target = &manifest.targets[name.as_str()];
+        return run_target(&root, output, name, target.run.as_ref(), stderr);
+    }
+    Ok(CliOutput::ok(String::new(), stderr))
+}
+
+/// Builds one target: compile/assemble/load its effective sources with
+/// the resolved profile (+ flag overrides), refine warnings against the
+/// declared set, link with the declared libraries + entry + resolved
+/// call-mech, write the output (+ sidecar) relative to the manifest
+/// directory. Returns the absolute output path and the stderr chunk.
+fn build_one_target(
+    root: &Path,
+    manifest: &crate::project::Manifest,
+    name: &str,
+    target: &crate::project::Target,
+    flags: &Flags,
+) -> Result<(PathBuf, String), String> {
+    // In manifest mode --debug/--release are PURE profile selectors
+    // (docs/tmt/cli.md (build)): only the individual flags (-g, -O*,
+    // --strip-debugger, -Werror) override the resolved profile's keys.
+    let profile = manifest.profiles.resolve(flags.release_preset);
+    let mut options = CompileOptions {
+        debug_info: if flags.debug_info {
+            true
+        } else {
+            profile.debug_info
+        },
+        strip_debugger: if flags.strip_debugger {
+            true
+        } else {
+            profile.strip_debugger
+        },
+        opt_level: profile.opt_level,
+        disabled_passes: flags.disabled_passes.clone(),
+        capture_ir: false,
+        // Flag-only axes: never manifest keys (docs/tmt/project.md
+        // (profiles)) — the schema has no field for either. `outline`
+        // still reads `--foutline` exactly as argv mode does.
+        // `stamped_asm` stays unconditionally false: the driver never
+        // exposes `--stamped-asm`, and the `.rept` re-detection pass it
+        // would skip is self-check-proven to assemble the identical
+        // object either way, so there is nothing a manifest key could
+        // control even if one existed.
+        outline: flags.outline,
+        stamped_asm: false,
+    };
+    if flags.o0 {
+        options.opt_level = OptLevel::O0;
+    }
+    if flags.o1 {
+        options.opt_level = OptLevel::O1;
+    }
+    let werror = profile.werror || flags.werror;
+
+    let resolve = |raw: &str| -> Result<PathBuf, String> {
+        Ok(root.join(crate::project::normalize_rel(raw)?))
+    };
+
+    let read_err_prefix = format!("target `{name}`: ");
+    let mut objects: Vec<ObjectFile> = Vec::new();
+    let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
+    for raw in manifest.effective_sources(target) {
+        let path = resolve(&raw)?;
+        load_one_source(
+            &path,
+            &options,
+            flags.keep_objects,
+            &read_err_prefix,
+            &mut objects,
+            &mut reports,
+        )?;
+    }
+
+    let libs = manifest.effective_libraries(target);
+    let dirs: Vec<String> = libs
+        .dirs
+        .iter()
+        .map(|d| resolve(d).map(|p| p.to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()?;
+    let mut libraries = Vec::new();
+    for lib in &libs.link {
+        libraries.push(find_library(lib, &dirs)?);
+    }
+    if manifest.stdlib {
+        libraries.push(stdlib::object().clone());
+    }
+
+    refine_reports(&mut reports, &defined_names(&objects, &libraries));
+    let mut stderr = String::new();
+    let mut warning_count = 0usize;
+    for (path, report) in &reports {
+        warning_count += report.diagnostics.len();
+        render_warnings(&mut stderr, path, report);
+        if flags.verbose {
+            render_opt_report(&mut stderr, report);
+        }
+    }
+    if werror && warning_count > 0 {
+        return Err(format!(
+            "{stderr}-Werror: {warning_count} warning(s) treated as errors"
+        ));
+    }
+
+    let linked = crate::asm::link(
+        &objects,
+        &libraries,
+        LinkOptions {
+            relax: !flags.no_relax,
+            entry: target.entry.clone(),
+            // Flags win over the declared lowering, exactly as the
+            // profile flags win over profile keys.
+            call_mech: flags
+                .call_mech
+                .or_else(|| manifest.effective_call_mech(target))
+                .unwrap_or_default(),
+        },
+    )
+    .map_err(|e| format!("target `{name}`: {e}"))?;
+
+    let output = resolve(&manifest.output_of(name, target))?;
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    fs::write(&output, linked.executable.to_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
+    let map_path = sidecar_path(&output);
+    fs::write(&map_path, linked.map.to_json())
+        .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
+
+    if flags.verbose {
+        let r = &linked.report;
+        let _ = writeln!(
+            stderr,
+            "{name}: link: dropped [{}]; {} site(s) relaxed short, {} far",
+            r.dropped.join(", "),
+            r.relaxed_calls,
+            r.far_calls
+        );
+    }
+    Ok((output, stderr))
+}
+
+/// Runs a just-built target under `--run` (docs/tmt/cli.md (run)): the
+/// manifest `run` block split against a `RunSettings`-shaped driver, the
+/// way `build_one_target` splits `CompileOptions`/`LinkOptions`. TM's own
+/// run-settings type and executor don't exist in this crate yet, so this
+/// stub keeps the signature `manifest_mode` already calls (including the
+/// target name its error messages will need) so that landing them later
+/// replaces only this body.
+fn run_target(
+    _root: &Path,
+    _output: &Path,
+    _name: &str,
+    _run: Option<&crate::project::RunSpec>,
+    _stderr: String,
+) -> Result<CliOutput, String> {
+    Err("tmt build --run is not implemented yet".to_string())
 }
 
 /// Compile options for argv mode: exactly `tmt compile`'s preset/flag
