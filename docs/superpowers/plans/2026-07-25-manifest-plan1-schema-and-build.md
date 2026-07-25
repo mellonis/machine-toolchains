@@ -1014,6 +1014,7 @@ use crate::optimizer::OptLevel;
 use crate::stdlib;
 
 use super::build::{find_library, out_path, read_object, render_opt_report, render_warnings, sidecar_path, take_disabled_passes};
+use super::lint::render_fatal;
 use super::{Args, CliOutput};
 
 const BUILD_USAGE: &str = "\
@@ -1152,10 +1153,9 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
                 let source = fs::read_to_string(path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
                 let out = compile_source(&source, options.clone()).map_err(|e| {
-                    format!(
-                        "{}:{}:{}: error: {} [{}]",
-                        path.display(), e.span.start.line, e.span.start.col, e.kind, e.kind.code()
-                    )
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
                 })?;
                 if flags.keep_objects {
                     let pmo = path.with_extension("pmo");
@@ -1169,10 +1169,9 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
                 let source = fs::read_to_string(path)
                     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
                 let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
-                    format!(
-                        "{}:{}:{}: error: {} [{}]",
-                        path.display(), e.span.start.line, e.span.start.col, e.kind, e.kind.code()
-                    )
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
                 })?;
                 if flags.keep_objects {
                     let pmo = path.with_extension("pmo");
@@ -1553,10 +1552,9 @@ fn build_one_target(
                 let source = fs::read_to_string(&path)
                     .map_err(|e| format!("target `{name}`: cannot read {}: {e}", path.display()))?;
                 let out = compile_source(&source, options.clone()).map_err(|e| {
-                    format!(
-                        "{}:{}:{}: error: {} [{}]",
-                        path.display(), e.span.start.line, e.span.start.col, e.kind, e.kind.code()
-                    )
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
                 })?;
                 if flags.keep_objects {
                     let pmo = path.with_extension("pmo");
@@ -1570,10 +1568,9 @@ fn build_one_target(
                 let source = fs::read_to_string(&path)
                     .map_err(|e| format!("target `{name}`: cannot read {}: {e}", path.display()))?;
                 let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
-                    format!(
-                        "{}:{}:{}: error: {} [{}]",
-                        path.display(), e.span.start.line, e.span.start.col, e.kind, e.kind.code()
-                    )
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
                 })?;
                 objects.push(object);
             }
@@ -2610,6 +2607,15 @@ Expected: FAIL — `unknown subcommand \`build\``
 - [ ] **Step 3: Port `cli/driver.rs` with the TM flag set**
 
 Copy PM's `cli/driver.rs`, then:
+
+**Fatal-error rendering:** PM's driver reuses `render_fatal` rather than
+inlining the `"{path}:{line}:{col}: error: {kind} [{code}]"` format. TM has its
+own `render_fatal` at `crates/turing-machine/src/cli/lint.rs:223`, already
+`pub(super)` — import and use it the same way (`use super::lint::render_fatal;`,
+then write into a scratch `String` and `.trim_end().to_string()`). Note that
+TM's `cli/build.rs` still inlines that format twice (`compile` and `asm`), a
+pre-existing inconsistency this round does not have to fix — do NOT widen scope
+to it here; it is recorded for the final review to triage.
 
 Rewrite `BUILD_USAGE` for `tmt` (this string is what the `cli_docs` guard
 will compare against `docs/tmt/cli.md` in Task 14 — keep it accurate):
