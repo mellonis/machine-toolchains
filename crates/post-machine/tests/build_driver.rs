@@ -747,16 +747,19 @@ fn strip_debugger_flag_overrides_a_manifest_profile_that_keeps_it() {
 /// A bare `pmt lint` operates on the nearest manifest's declared source
 /// set (docs/pmt/project.md (the declared source set)) — never a
 /// directory scan. `src/stray.pmc` sits right next to the declared
-/// files but is not named by any target's `sources`, so it must not
-/// appear in the lint output even though it parses and would surface if
-/// the batch were ever built from a directory walk instead.
+/// files but is not named by any target's `sources`, so it must never
+/// be read. The fixture is deliberately unparseable (rather than valid
+/// but lint-clean code) so a regression that swaps the declared set for
+/// a directory scan is guaranteed to surface: a compile fatal always
+/// names its file on stderr, whereas valid PM-1 code can lint clean and
+/// leave no trace either way — silently defeating the assertion below.
 #[test]
 fn bare_lint_uses_the_manifests_declared_source_set() {
     let dir = scratch("manifest_bare_lint");
     write_project(&dir);
     // A file NOT in the manifest must not be linted, even though it sits
     // in the same directory — the declared set is the set, never a scan.
-    fs::write(dir.join("src/stray.pmc"), "main() { mark; mark; }").unwrap();
+    fs::write(dir.join("src/stray.pmc"), "@@@ not valid pmc syntax @@@").unwrap();
 
     let out = pmt().arg("lint").current_dir(&dir).output().unwrap();
     let combined = format!(
