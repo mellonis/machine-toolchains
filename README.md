@@ -5,7 +5,7 @@ one arch-agnostic core, each with its own source language, optimizing
 compiler, assembler/disassembler, linker, and bus-accurate processor (VM),
 and each driven by its own CLI:
 
-- the **Post machine** — a C-like source language (`.pmc`) compiled and
+- the **Post machine PM-1** — a C-like source language (`.pmc`) compiled and
   linked down to a single-tape, index-based processor, driven by `pmt`;
 - the **multi-tape Turing machine TM-1** — a source language (`.tmc`) with
   worlds, grafts, and link-time composition, compiled through a `.tma`
@@ -38,8 +38,7 @@ the CLI uses. The ready-made editor integrations live under `editors/`; see
 cargo build --release
 ```
 
-Produces two binaries at `target/release/`: `pmt` (the Post machine) and
-`tmt` (the Turing machine).
+Produces two binaries at `target/release/`: `pmt` (PM-1) and `tmt` (TM-1).
 
 ## Quick start
 
