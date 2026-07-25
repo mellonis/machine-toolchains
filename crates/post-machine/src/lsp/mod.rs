@@ -24,6 +24,7 @@ use crate::parser::FnDoc;
 
 mod complete;
 mod navigate;
+mod overlay;
 mod pma;
 mod tokens;
 mod walk;
