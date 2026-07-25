@@ -1078,3 +1078,352 @@ fn build_run_without_a_named_target_needs_exactly_one() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("exactly one"));
 }
+
+// The individual-flag-beats-the-profile contract, one test per axis
+// (docs/tmt/cli.md (build)). `build_one_target` resolves each axis in its
+// own independent branch, so an inverted condition in any one of them is
+// invisible to the others — and `docs/tmt/cli.md` states the contract for
+// all of them, which makes each one a published claim.
+
+/// `-g`'s effect is observable in the `.tmx.map` sidecar: `MapFunction`
+/// lines are only recorded from `-g` objects (docs/formats.md (map
+/// sidecar)). A manifest profile that declares `debug-info: false` — the
+/// opposite of the debug preset's own default — must still lose to an
+/// explicit `-g` flag. Failing mutation: taking `profile.debug_info`
+/// unconditionally instead of letting the flag win.
+#[test]
+fn debug_info_flag_overrides_a_manifest_profile_that_disables_it() {
+    let dir = scratch("tm_manifest_debug_info_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.tmc"), TRIVIAL_TMC).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "debug-info": false } },
+            "targets": { "prog": { "sources": ["src/prog.tmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let map = mtc_core::linker::MapFile::from_json(
+        &fs::read_to_string(dir.join("prog.tmx.map")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        map.functions.iter().all(|f| f.lines.is_empty()),
+        "manifest profile disables debug info: {map:?}"
+    );
+
+    let out = tmt()
+        .args(["build", "-g", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let map = mtc_core::linker::MapFile::from_json(
+        &fs::read_to_string(dir.join("prog.tmx.map")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        map.functions.iter().any(|f| !f.lines.is_empty()),
+        "-g flag must override the manifest profile's debug-info: false: {map:?}"
+    );
+}
+
+/// `-O0`'s effect is observable in the `-v` compile report, which renders
+/// the optimizer's round count (docs/tmt/cli.md (compile)): `-O0` returns
+/// immediately with zero rounds, while `-O1` always runs at least one even
+/// when it finds nothing to change — so the line differs deterministically
+/// between the two levels for any program. A manifest profile declaring
+/// `opt: "O1"` must still lose to an explicit `-O0`.
+#[test]
+fn o0_flag_overrides_a_manifest_profile_that_declares_o1() {
+    let dir = scratch("tm_manifest_o0_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.tmc"), TRIVIAL_TMC).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "opt": "O1" } },
+            "targets": { "prog": { "sources": ["src/prog.tmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "-v", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 1 round(s)"),
+        "manifest profile declares opt: O1: {stderr}"
+    );
+
+    let out = tmt()
+        .args(["build", "-v", "-O0", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 0 round(s)"),
+        "-O0 flag must override the manifest profile's opt: O1: {stderr}"
+    );
+}
+
+/// The `-O1` counterpart of the test above: a manifest profile declaring
+/// `opt: "O0"` — matching the debug preset's own default, made explicit —
+/// must still lose to an explicit `-O1`. Its own test because `flags.o0`
+/// and `flags.o1` are independent `if` branches; an inverted condition in
+/// either one is only caught by exercising both directions.
+#[test]
+fn o1_flag_overrides_a_manifest_profile_that_declares_o0() {
+    let dir = scratch("tm_manifest_o1_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/prog.tmc"), TRIVIAL_TMC).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "opt": "O0" } },
+            "targets": { "prog": { "sources": ["src/prog.tmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "-v", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 0 round(s)"),
+        "manifest profile declares opt: O0: {stderr}"
+    );
+
+    let out = tmt()
+        .args(["build", "-v", "-O1", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("opt: 1 round(s)"),
+        "-O1 flag must override the manifest profile's opt: O0: {stderr}"
+    );
+}
+
+/// `--strip-debugger`'s effect is observable via `tmt dis`: a kept
+/// `debugger` action disassembles as `brk`, a stripped one does not
+/// (docs/tmt/isa.md (brk)). A manifest profile declaring
+/// `strip-debugger: false` — the opposite of what the flag asks for —
+/// must still lose to the explicit flag.
+#[test]
+fn strip_debugger_flag_overrides_a_manifest_profile_that_keeps_it() {
+    let dir = scratch("tm_manifest_strip_debugger_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/prog.tmc"),
+        "alphabet ab { '_', 'a' }\n\
+         machine {\n\
+           tape t: ab;\n\
+           entry state s { [*] -> debugger write ['a'] goto done; }\n\
+           state done { [*] -> stop; }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "strip-debugger": false } },
+            "targets": { "prog": { "sources": ["src/prog.tmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dis = tmt()
+        .args(["dis", dir.join("prog.tmx").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        dis.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dis.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&dis.stdout).contains("brk"),
+        "manifest profile keeps the debugger action: {}",
+        String::from_utf8_lossy(&dis.stdout)
+    );
+
+    let out = tmt()
+        .args(["build", "--strip-debugger", "prog"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let dis = tmt()
+        .args(["dis", dir.join("prog.tmx").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        dis.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dis.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&dis.stdout).contains("brk"),
+        "--strip-debugger flag must override the manifest profile's strip-debugger: false: {}",
+        String::from_utf8_lossy(&dis.stdout)
+    );
+}
+
+/// `-Werror` is the one compile-side axis resolved by `||` rather than a
+/// branch, so it gets the same treatment: an unreachable exported routine
+/// calling a genuinely undefined `missing` warns (nothing in the declared
+/// set defines it, so the refinement pass cannot drop it) while still
+/// linking, because reachability drops the routine. The profile declaring
+/// `werror: false` must lose to an explicit `-Werror`.
+#[test]
+fn werror_flag_overrides_a_manifest_profile_that_disables_it() {
+    let dir = scratch("tm_manifest_werror_flag_wins");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/orphan.tmc"),
+        "alphabet ab { '_', 'a' }\n\
+         machine {\n\
+           tape t: ab;\n\
+           entry state s { [*] -> stop; }\n\
+         }\n\
+         export routine dead(tape t: ab) {\n\
+           entry state s { [*] -> call missing() then done; }\n\
+           state done { [*] -> return; }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "profiles": { "debug": { "werror": false } },
+            "targets": { "orphan": { "sources": ["src/orphan.tmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "orphan"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "manifest profile disables werror: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("undeclared"),
+        "the fixture must actually warn, or the -Werror half proves nothing: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = tmt()
+        .args(["build", "-Werror", "orphan"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "-Werror flag must override the manifest profile's werror: false"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("treated as errors"));
+}
+
+/// The manifest-mode half of `argv_mode_refines_undeclared_external_…`:
+/// the declared set a target is refined against is that target's OWN
+/// `sources` list (docs/tmt/cli.md (build)), not the files named on the
+/// command line — there are none in manifest mode. `main.tmc`'s bare
+/// `call util()` is undeclared per-file and resolved by the sibling
+/// source the same target declares, so no warning survives and `-Werror`
+/// still succeeds. Failing mutation: refining against a single file's own
+/// object instead of the whole target's — the warning would survive and
+/// `-Werror` would fail.
+#[test]
+fn manifest_mode_refines_undeclared_external_resolved_by_shared_sources() {
+    let dir = scratch("tm_manifest_refine_undeclared");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/main.tmc"), MAIN_CALLS_UTIL).unwrap();
+    fs::write(dir.join("src/util.tmc"), UTIL_EXPORTED).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "targets": { "app": { "sources": ["src/main.tmc", "src/util.tmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "-Werror", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("undeclared"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
