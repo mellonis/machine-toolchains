@@ -2599,7 +2599,7 @@ git add -A && git commit -m "feat(turing-machine): one tmt.json loader — full-
 - Create: `crates/turing-machine/src/cli/driver.rs`
 - Modify: `crates/turing-machine/src/cli/mod.rs` (add `mod driver;`, dispatch `Some("build")`, add the `build` line to `USAGE`)
 - Modify: `crates/turing-machine/src/cli/build.rs` (make `out_path`, `render_warnings`, `render_opt_report`, `read_object`, `find_library`, `sidecar_path`, `take_disabled_passes`, `parse_call_mech` `pub(super)`)
-- Modify: `docs/tmt/cli.md` — one line only, adding `build` to the root `SUBCOMMANDS:` list. **Forced, not optional**, exactly as its PM twin was in Task 3: `crates/turing-machine/tests/cli_docs.rs` quotes the ROOT usage block verbatim, so adding the `build` line to `USAGE` turns that guard red here. The full `## tmt build` section belongs to Task 14.
+- **Do NOT touch `cli/mod.rs`'s `USAGE` or `docs/tmt/cli.md` in this task.** This is where TM diverges from its PM twin, and the difference is a guard, not a preference. PM's `completions_registry.rs` checks the help text with a weak `help.contains(name)` substring test, so PM's Task 3 could add its `USAGE` line alone. TM's guard is strictly stronger: `parse_usage_subcommands` parses the rendered `SUBCOMMANDS:` block into a list and set-compares it three ways — registry ↔ `EXPECTED_TOP_LEVEL` ↔ parsed help. A `build` line in `USAGE` with no registry entry therefore fails immediately. **All three move together in Task 14**: `build_spec()`, `EXPECTED_TOP_LEVEL`, and the `USAGE` + `docs/tmt/cli.md` lines. Until then `tmt build` is dispatched and functional but deliberately unlisted in `tmt --help`.
 - Test: create `crates/turing-machine/tests/build_driver.rs`
 
 **Interfaces:**
@@ -2685,7 +2685,7 @@ COMMON:
 ";
 ```
 
-`Flags` gains four fields and loses none:
+`Flags` gains three fields and loses none:
 
 ```rust
     outline: bool,
@@ -3237,6 +3237,14 @@ fn build_spec() -> CommandSpec {
     }
 }
 ```
+
+**This task owns FOUR things that must land in one commit**, because TM's
+`completions_registry` guard set-compares registry ↔ `EXPECTED_TOP_LEVEL` ↔ the
+parsed `SUBCOMMANDS:` block of `tmt --help`, and any two-of-three combination
+fails it: (1) `build_spec()` registered, (2) `"build"` in `EXPECTED_TOP_LEVEL`,
+(3) the `build` line in `cli/mod.rs`'s `USAGE`, (4) the matching line in
+`docs/tmt/cli.md`'s subcommand list. Task 11 deliberately left (3) and (4)
+undone for this reason — `tmt build` is functional but unlisted until now.
 
 Register after `link_spec()`; add the `top_level_help` row; update the
 `registry()` doc comment (its current wording is "ten top-level
