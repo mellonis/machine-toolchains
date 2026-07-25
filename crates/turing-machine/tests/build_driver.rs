@@ -10,6 +10,10 @@ fn args(list: &[&str]) -> Vec<String> {
 
 fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    // CARGO_TARGET_TMPDIR persists across `cargo test` runs, so a stale
+    // artifact from an earlier pass could satisfy a file-existence
+    // assertion after the code that writes it has broken. Start clean.
+    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
 }

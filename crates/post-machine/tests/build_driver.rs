@@ -10,6 +10,10 @@ fn args(list: &[&str]) -> Vec<String> {
 
 fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    // CARGO_TARGET_TMPDIR persists across `cargo test` runs, so a stale
+    // artifact from an earlier pass could satisfy a file-existence
+    // assertion after the code that writes it has broken. Start clean.
+    let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -261,10 +265,52 @@ fn list_targets_prints_name_and_run_marker() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "app\nbench\trun\n");
 }
 
+/// Rewritten to a byte comparison instead of a bare `.is_file()` check.
+/// `write_project`'s own `app` source (`main() { @util(); }`, calling the
+/// exported `util() { mark; }`) was hand-verified to compile
+/// byte-IDENTICAL at both `-O0` and `-O1` in manifest mode (27 bytes
+/// either way) — a file-existence assertion built on it can never fail no
+/// matter what `manifest.profiles.resolve(flags.release_preset)` does, so
+/// it is not reused here. `main() { right; check(5, 5); 5: mark; }` — the
+/// `check(A, A)` self-fold shape from `opt_equivalence.rs`'s
+/// `check_fold_shrinks_and_preserves` (docs/pmt/language.md
+/// (optimization)) — was separately hand-verified via the same debug-vs-
+/// `--release` manifest-mode pair to diverge: 26 bytes plain, 24 bytes
+/// under `--release`. Uses its own scratch manifest (a single `app`
+/// target, not `write_project`'s) so the divergence is guaranteed by
+/// construction rather than riding a shared fixture that might stop
+/// diverging if `app`'s source ever changed. Failing mutation:
+/// `manifest.profiles.resolve(flags.release_preset)` collapsing to
+/// `resolve(false)` (i.e. `--release` never reaching profile selection) —
+/// both builds would then use the debug profile and produce identical
+/// bytes.
 #[test]
 fn release_flag_selects_the_release_profile() {
     let dir = scratch("manifest_release");
-    write_project(&dir);
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/app.pmc"),
+        "main() { right; check(5, 5); 5: mark; }",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": { "targets": { "app": { "sources": ["src/app.pmc"] } } } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "app"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let debug = fs::read(dir.join("app.pmx")).unwrap();
+
     let out = pmt()
         .args(["build", "--release", "app"])
         .current_dir(&dir)
@@ -275,7 +321,12 @@ fn release_flag_selects_the_release_profile() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(dir.join("app.pmx").is_file());
+    let release = fs::read(dir.join("app.pmx")).unwrap();
+
+    assert_ne!(
+        debug, release,
+        "--release must select the release profile (-O1) and reach build_one_target's CompileOptions"
+    );
 }
 
 /// The flags-win contract (docs/pmt/cli.md (build)): a manifest profile
