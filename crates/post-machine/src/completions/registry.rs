@@ -313,19 +313,36 @@ fn build_spec() -> CommandSpec {
             FlagSpec::suffix_family(
                 "--fno-",
                 "disable one optimizer pass (repeatable)",
-                crate::optimizer::pass_names().iter().map(|p| p.to_string()).collect(),
+                crate::optimizer::pass_names()
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect(),
             ),
             FlagSpec::boolean("-Werror", "treat post-refinement warnings as errors"),
             FlagSpec::boolean("--no-relax", "keep every symbol site in far form"),
             FlagSpec::boolean("--nostdlib", "argv mode: do not link the built-in std"),
-            FlagSpec::value("-L", "argv mode: library search directory", ValueHint::Directory)
-                .repeatable(),
-            FlagSpec::value("-l", "argv mode: link NAME.pmo from the search path", ValueHint::Text)
-                .repeatable(),
+            FlagSpec::value(
+                "-L",
+                "argv mode: library search directory",
+                ValueHint::Directory,
+            )
+            .repeatable(),
+            FlagSpec::value(
+                "-l",
+                "argv mode: link NAME.pmo from the search path",
+                ValueHint::Text,
+            )
+            .repeatable(),
             FlagSpec::value("-o", "argv mode: output path", ValueHint::File(any_file())),
-            FlagSpec::boolean("--keep-objects", "write each intermediate .pmo next to its source"),
+            FlagSpec::boolean(
+                "--keep-objects",
+                "write each intermediate .pmo next to its source",
+            ),
             FlagSpec::boolean("--run", "manifest mode: build then run the target"),
-            FlagSpec::boolean("--list-targets", "manifest mode: print NAME[\\trun] per target"),
+            FlagSpec::boolean(
+                "--list-targets",
+                "manifest mode: print NAME[\\trun] per target",
+            ),
             FlagSpec::boolean("-v", "render the build report"),
             FlagSpec::boolean("--help", "show subcommand help"),
         ],

@@ -485,12 +485,18 @@ mod tests {
     #[test]
     fn build_renders_dynamic_target_alternative_and_helper() {
         let script = render(&registry());
-        assert!(script.contains("__pmt_build_targets"), "helper function emitted");
+        assert!(
+            script.contains("__pmt_build_targets"),
+            "helper function emitted"
+        );
         assert!(
             script.contains("targets:target:__pmt_build_targets"),
             "positional _alternative wires the helper: {script}"
         );
-        assert!(script.contains("pmt build --list-targets"), "helper shells out to pmt");
+        assert!(
+            script.contains("pmt build --list-targets"),
+            "helper shells out to pmt"
+        );
     }
 
     #[test]
