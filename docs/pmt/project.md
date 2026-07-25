@@ -37,6 +37,8 @@ started from a subdirectory still resolves against the manifest found
 above it (see Path rules below). `pmt lint` and `pmt fmt`, invoked with
 no file arguments, use the same discovery — see The declared source set.
 
+### One loader
+
 One loader validates the **whole file** — both sections, every key —
 regardless of which one a given consumer asked for. A typo in `project`
 still fails a lint-only load of the same file, and vice versa: the two

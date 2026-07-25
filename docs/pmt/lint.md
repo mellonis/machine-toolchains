@@ -33,16 +33,16 @@ schema is deliberately tiny — it holds nothing but the allow-list:
 ```
 
 An empty object (`{}`) is valid — an empty allow-list. Validation is
-strict: any top-level key other than `lint` or `project` (`docs/pmt/
-project.md`), any key under `lint` other than `allow`, a non-array
-`allow`, a non-string entry in `allow`, or an `allow` entry naming no
-rule in either catalog (below) is a hard error naming the file and the
-offending key or code. A typo in a project file
-must not silently do nothing, the same posture `--allow` already takes
-on the command line. One `pmt.json` governs a directory regardless of
-which files under it are `.pmc` and which are `.pma` — its `allow`
-entries draw from the same union `--allow` does, so a single project
-file suppresses a code across both languages at once.
+strict: any top-level key other than `lint` or `project`
+(`docs/pmt/project.md`), any key under `lint` other than `allow`, a
+non-array `allow`, a non-string entry in `allow`, or an `allow` entry
+naming no rule in either catalog (below) is a hard error naming the file
+and the offending key or code. A typo in a project file must not
+silently do nothing, the same posture `--allow` already takes on the
+command line. One `pmt.json` governs a directory regardless of which
+files under it are `.pmc` and which are `.pma` — its `allow` entries
+draw from the same union `--allow` does, so a single project file
+suppresses a code across both languages at once.
 
 `pmt lint` locates the file per input by walking up from that file's
 directory through its ancestors and reading the FIRST `pmt.json` it
