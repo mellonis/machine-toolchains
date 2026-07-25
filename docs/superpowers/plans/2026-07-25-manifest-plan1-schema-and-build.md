@@ -2933,8 +2933,27 @@ and its link call resolves the lowering flag-first, then target, then project:
     .map_err(|e| format!("target `{name}`: {e}"))?;
 ```
 
-Source dispatch matches on `"tmc"` / `"tma"` (everything else loads as an
-object), and the output resolves through `manifest.output_of` (`.tmx`).
+**Source dispatch goes through the shared helper, not a second copy.** PM's
+driver carries exactly one per-source dispatch loop, extracted because having
+two is what produced a real bug (one copy honoured `--keep-objects`, the other
+silently did not):
+
+```rust
+fn load_one_source(
+    path: &Path,
+    options: &CompileOptions,
+    keep_objects: bool,
+    read_err_prefix: &str,
+    objects: &mut Vec<ObjectFile>,
+    reports: &mut Vec<(PathBuf, CompileReport)>,
+) -> Result<(), String>
+```
+
+Manifest mode passes `&format!("target `{name}`: ")` as the prefix, argv mode
+passes `""`. The TM port keeps this shape — match on `"tmc"` / `"tma"` inside
+the ONE helper (everything else loads as an object), and call it from both
+modes. Do not reintroduce a per-mode loop. The output resolves through
+`manifest.output_of` (`.tmx`).
 
 The `run_target` stub carries the target name from the start, so Task 13
 replaces a body rather than changing a signature:
