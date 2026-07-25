@@ -222,8 +222,9 @@ a build is either fully argv-driven or fully manifest-driven.
   libraries, standard-library opt-out, per-target output path), so
   manifest mode **rejects** `-o`, `-L`, `-l`, and `--nostdlib` outright
   rather than silently ignoring them.
-- **Common to both modes** (`--no-relax`, `--keep-objects`, `--run`,
-  `--list-targets`, `-v`).
+- **Common to both modes** (`--no-relax`, `--keep-objects`, `-v`).
+- **Manifest mode only** (`--run`, `--list-targets`): argv mode has no
+  notion of a target or a declared run block for either flag to act on.
 
 **Profile selection (manifest mode):** each target names a profile, or
 falls back to the manifest's default; `--debug`/`--release` and the
