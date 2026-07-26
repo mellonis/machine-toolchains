@@ -613,23 +613,32 @@ impl LanguageService for PmcLanguageService {
         // (shares definition's own walks — docs/lsp.md (hover)); the
         // doc-map lookup, content-emptiness gate, and rendering are
         // ours. Three legs, local first: this document's own
-        // `Analysis.docs`; the embedded stdlib's own doc map
-        // (`crate::stdlib::docs()`), gated on `std_enabled` — the only
-        // way the local map CAN miss for a `std::…` name, since it holds
-        // only functions THIS document flattened; the cross-file
-        // overlay's own `OverlaySym.doc`, for a name a sibling/library
-        // defines instead. The three key spaces are disjoint in
-        // practice (this document's own docs never hold a `std::…` or a
-        // sibling's key), so the ORDER among them carries no semantics —
-        // local stays first on principle.
+        // `Analysis.docs`; the cross-file overlay's own `OverlaySym.doc`,
+        // for a name a sibling/library defines instead; the embedded
+        // stdlib's own doc map (`crate::stdlib::docs()`) LAST — the same
+        // overlay-before-stdlib order `navigate.rs::std_path_target`
+        // resolves definitions in (docs/pmt/project.md (libraries)), so
+        // a sibling's own `namespace std { export … }` shows the
+        // sibling's doc, not the embedded routine's. `std_doc` is gated
+        // on BOTH `std_enabled` and the overlay NOT already owning the
+        // name — an owned name with no doc of its own (a `.pma`/`.pmo`
+        // shadow, which carries no doc surface at all) must show nothing
+        // rather than fall through to the embedded stdlib's unrelated
+        // prose. For every non-`std::` name the overlay can never own,
+        // so this gate is a no-op there — the two key spaces stay
+        // disjoint in practice, only `std::` collides.
         let state = self.docs.get(uri)?;
         let (name, origin) = navigate::hover_target(state, pos)?;
+        let overlay_owns = state
+            .overlay
+            .as_ref()
+            .is_some_and(|o| o.symbols.contains_key(&name));
         let overlay_doc = state
             .overlay
             .as_ref()
             .and_then(|o| o.symbols.get(&name))
             .and_then(|s| s.doc.as_ref());
-        let std_doc = if std_enabled(state) {
+        let std_doc = if !overlay_owns && std_enabled(state) {
             crate::stdlib::docs().get(&name)
         } else {
             None
@@ -639,8 +648,8 @@ impl LanguageService for PmcLanguageService {
             .as_ref()?
             .docs
             .get(&name)
-            .or(std_doc)
-            .or(overlay_doc)?;
+            .or(overlay_doc)
+            .or(std_doc)?;
         let text = render_doc(doc)?;
         Some(HoverContent { text, span: origin })
     }
@@ -1055,6 +1064,101 @@ export main() {
              The head must begin on a mark; the tape itself is left unchanged."
         );
         assert_eq!(hover.span, span_of(SRC, "std::goToEnd"));
+    }
+
+    #[test]
+    fn hover_still_reads_the_embedded_stdlibs_doc_when_unshadowed_in_a_real_project() {
+        // Regression guard, in a REAL project (an overlay exists, unlike
+        // the untitled-buffer test above): a sibling exists but defines
+        // something else entirely, so the overlay genuinely misses
+        // `std::goToEnd` and hover must still fall through to the
+        // embedded stdlib's own doc, exactly as before this fix.
+        let dir = unique_tmp_dir("hover-std-unshadowed");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("shared.pmc"), "export unrelated() { right; }\n").unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "std::goToEnd", 6);
+        let hover = service
+            .hover(&app_uri, pos)
+            .expect("std::goToEnd is not shadowed by any sibling in this project");
+        assert!(
+            hover.text.starts_with("Moves the head to the last mark"),
+            "{hover:?}"
+        );
+    }
+
+    #[test]
+    fn hover_on_a_shadowed_std_call_shows_the_siblings_own_doc() {
+        // THE defect this task fixes, on the hover surface: a sibling's
+        // own `namespace std { export goToEnd() {...} }` shadows the
+        // embedded routine, so hover must show the SIBLING's doc line,
+        // never the embedded stdlib's unrelated prose about tape marks.
+        let dir = unique_tmp_dir("hover-std-shadow");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("shared.pmc"),
+            "namespace std {\n?The sibling's own goToEnd.\nexport goToEnd() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "std::goToEnd", 6);
+        let hover = service
+            .hover(&app_uri, pos)
+            .expect("the shadowing sibling's own doc surfaces");
+        assert_eq!(hover.text, "The sibling's own goToEnd.");
+        assert!(
+            !hover.text.contains("Moves the head to the last mark"),
+            "must not show the embedded stdlib's own doc: {hover:?}"
+        );
+    }
+
+    #[test]
+    fn stdlib_false_still_shows_a_shadowing_siblings_hover_doc() {
+        // The `"stdlib": false` gate silences only the EMBEDDED doc map
+        // (`hover()`'s own `std_doc`, gated on `std_enabled`); a
+        // sibling's own `namespace std { export … }` is ordinary linked
+        // code, owned by the overlay outright, and its doc must still
+        // surface.
+        let dir = unique_tmp_dir("hover-std-shadow-stdlib-false");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"stdlib":false,"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("shared.pmc"),
+            "namespace std {\n?The sibling's own goToEnd.\nexport goToEnd() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "std::goToEnd", 6);
+        let hover = service
+            .hover(&app_uri, pos)
+            .expect("the shadowing sibling's own doc still surfaces under stdlib:false");
+        assert_eq!(hover.text, "The sibling's own goToEnd.");
     }
 
     #[test]

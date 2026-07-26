@@ -1375,6 +1375,91 @@ mod faithfulness {
     }
 
     #[test]
+    fn overlay_resolution_matches_linker_resolution_for_a_shadowed_std_name() {
+        // The `ns::dup` shape (the sibling-vs-library shadowing case
+        // above), one level over: a sibling's own `namespace std {
+        // export goToEnd() {...} }` mangles to the SAME `std::goToEnd`
+        // key the embedded stdlib roster answers under, creating a
+        // genuine two-definer collision — the embedded stdlib object
+        // really does export a symbol named `std::goToEnd`
+        // (`overlay_resolution_matches_linker_resolution_with_provenance`'s
+        // own `origin_of("std::goToEnd") == Library(1)` assertion, for
+        // the UNSHADOWED case, already proves this). Both sides must
+        // pick the sibling: the overlay because a name it owns always
+        // wins over the materialized roster, the linker because the
+        // embedded stdlib links as an ordinary library, appended LAST,
+        // behind every declared source — so its own sources-before-
+        // libraries rule already prefers the sibling. This is exactly
+        // the case an overlay that special-cased the `std::` PREFIX
+        // (routing it straight to the materialized roster without ever
+        // consulting the overlay) would get wrong, and it is what
+        // caught that defect originally.
+        let root = temp_tree();
+        fs::write(
+            root.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "namespace std {\nexport goToEnd() { right; }\n}\n";
+        fs::write(root.join("shared.pmc"), SHARED).unwrap();
+
+        const APP: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        fs::write(root.join("app.pmc"), APP).unwrap();
+
+        // --- Overlay side. ---
+        let app_uri = path_to_file_uri(&root.join("app.pmc"));
+        let mut svc = crate::lsp::PmcLanguageService::new();
+        let diags = svc.did_update(&app_uri, APP);
+        let state = svc.docs.get(&app_uri).expect("did_update just inserted it");
+        let overlay = state
+            .overlay
+            .as_ref()
+            .expect("app.pmc is a member of target `app`");
+
+        let shared_uri = path_to_file_uri(&root.join("shared.pmc"));
+        let sym = overlay.symbols.get("std::goToEnd").unwrap_or_else(|| {
+            panic!("the sibling's own namespace-std export registers under the same mangled key the embedded roster answers under")
+        });
+        let (uri, _span) = sym
+            .target
+            .as_ref()
+            .expect("std::goToEnd is source-backed here, carries a span");
+        assert_eq!(
+            uri, &shared_uri,
+            "the overlay must pick the sibling, not the embedded stdlib"
+        );
+
+        assert!(
+            diags.iter().all(|d| d.code != Some("undeclared-external")),
+            "std::goToEnd resolves through the overlay: {diags:?}"
+        );
+
+        // --- Linker side: the same effective source order `pmt build`
+        //     would use for target `app` — no declared libraries, so the
+        //     embedded stdlib is the sole entry in `libraries`. ---
+        let object_files = ["shared.pmc", "app.pmc"];
+        let objects: Vec<ObjectFile> = object_files
+            .iter()
+            .map(|f| load_as_object(&root.join(f)))
+            .collect();
+        let libraries = vec![crate::stdlib::object().clone()];
+
+        let resolved = resolve_names(&objects, &libraries, "main")
+            .expect("std::goToEnd resolves — the sibling, not a genuine unresolved miss");
+        let origin = resolved
+            .reached
+            .iter()
+            .find(|r| r.name == "std::goToEnd")
+            .expect("std::goToEnd is reached from main")
+            .origin;
+        assert_eq!(
+            origin,
+            SymbolOrigin::Object(0),
+            "shared.pmc must win — NOT the embedded stdlib library"
+        );
+    }
+
+    #[test]
     fn overlay_unresolved_matches_linker_unresolved() {
         // A bare call to a name defined NOWHERE — no sibling, no library,
         // no stdlib routine — the negative half of the contract: the

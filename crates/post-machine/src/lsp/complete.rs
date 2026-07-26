@@ -391,14 +391,25 @@ fn enclosing_ns_path(items: &[TopItem], pos: Pos) -> Vec<String> {
 }
 
 /// Context 1/2's shared member lookup for an exact namespace `path`:
-/// `path == ["std"]` is special-cased to the embedded stdlib roster (bare
-/// routine names, Function kind) since `std` is magic — it never has a
-/// `ScopeSummary` entry of its own — gated on [`std_enabled`]: a project
-/// opting out of the stdlib gets an empty result for `std::` instead of
-/// falling through to the generic lookup below (which would answer empty
-/// anyway, since nothing in this codebase registers a real `defs`/overlay
-/// entry under a namespace literally named `std`; the explicit early
-/// return states the intent rather than relying on that coincidence).
+/// `path == ["std"]` is special-cased since `std` is magic — it never has
+/// a `ScopeSummary` entry of its own, so the generic lookup below (which
+/// only ever reads `scopes`/`overlay.members`) would answer empty for it
+/// regardless. The special case still consults the overlay FIRST, same
+/// as every other overlay leg in this function: a sibling's own
+/// `namespace std { export … }` registers under `overlay.members[["std"]]`
+/// exactly like any other namespaced export (`overlay.rs::insert_export`
+/// mangles it the same way), so it is offered — and, via `seen`, wins
+/// first — before the embedded stdlib roster fills in the rest, gated on
+/// [`std_enabled`]: a project opting out of the stdlib only drops the
+/// ROSTER half, never a sibling's own overlay-registered names (those are
+/// ordinary linked code, unaffected by the stdlib toggle). Unlike the
+/// generic path below, this doesn't also scan for overlay child
+/// namespaces one segment deeper (a sibling's `std::sub::thing` won't
+/// offer `sub` here) — `std`'s own members are the only thing this
+/// narrow special case is for; a project nesting real namespaces under a
+/// literal `std` is exotic enough that the generic path's fuller
+/// treatment isn't worth duplicating into this branch.
+///
 /// Otherwise: `scopes.defs` under the exact path (Function kind) plus
 /// child namespaces exactly one segment deeper, derived the same way
 /// `use_roots` derives roots (Module kind); the overlay contributes the
@@ -427,19 +438,41 @@ fn member_candidates(
     let docs = state.analysis.as_ref().map(|a| &a.docs);
 
     if path.len() == 1 && path[0] == "std" {
-        if !std_enabled(state) {
-            return Vec::new();
+        let mut out: Vec<Candidate> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        if let Some(overlay) = state.overlay.as_ref()
+            && let Some(members) = overlay.members.get(path)
+        {
+            for (bare, full) in members {
+                if seen.insert(bare.clone()) {
+                    out.push(mk_overlay_candidate(
+                        bare,
+                        full,
+                        overlay.symbols.get(full),
+                        replace_span,
+                    ));
+                }
+            }
         }
-        let mut out: Vec<Candidate> = roster()
-            .iter()
-            .map(|entry| {
+
+        if std_enabled(state) {
+            for entry in roster() {
                 let name = entry
                     .full_path
                     .strip_prefix("std::")
                     .unwrap_or(&entry.full_path);
-                mk_function_candidate(name, &entry.full_path, docs, replace_span)
-            })
-            .collect();
+                if seen.insert(name.to_string()) {
+                    out.push(mk_function_candidate(
+                        name,
+                        &entry.full_path,
+                        docs,
+                        replace_span,
+                    ));
+                }
+            }
+        }
+
         out.sort_by(|a, b| a.label.cmp(&b.label));
         return out;
     }
@@ -534,9 +567,17 @@ fn use_roots(scopes: &ScopeSummary, state: &DocState, replace_span: Span) -> Vec
 /// roster (gated on [`std_enabled`]) and (d) the cross-file overlay's own
 /// top-level bare exports ride in after, subject to the same `seen`
 /// shadow-check — a local name still always wins; both then contribute
-/// their remaining, `::`-qualified entries as fully qualified paths, in a
-/// disjoint label space (bare names never contain `::`) so those never
-/// compete for `seen` at all.
+/// their remaining, `::`-qualified entries as fully qualified paths. Bare
+/// names and qualified names never collide with EACH OTHER (a bare name
+/// never contains `::`), but (c)'s and (d)'s own qualified entries CAN
+/// collide with each other — a sibling/library's own `namespace std {
+/// export … }` mangles to the same `std::…` label a roster entry already
+/// carries (docs/pmt/project.md (libraries): the embedded stdlib links
+/// as an ordinary library, so a same-named user object shadows it). (c)
+/// resolves that by skipping any roster entry the overlay already owns
+/// (`overlay.symbols.contains_key`) — (d) still emits every overlay
+/// qualified entry unconditionally, so the shadowing sibling's own entry
+/// rides in from there instead of being duplicated or losing to (c)'s.
 fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candidate> {
     let Some(scopes) = names_roster(state) else {
         return Vec::new();
@@ -612,9 +653,21 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     // qualified name here, so `detail` comes back `None` by
     // construction (nothing to add beyond the label itself) — gated on
     // `std_enabled`: a project opting out of the stdlib gets none of
-    // these.
+    // these. A roster entry the overlay already owns (a sibling/library's
+    // own `namespace std { export … }`, this function's own doc comment)
+    // is skipped here — (d) below emits the overlay's own entry for that
+    // same qualified label instead, first-wins, the overlay's copy
+    // shadowing the embedded one exactly as the linker's own
+    // sources-before-libraries order does.
     if std_enabled(state) {
         for entry in roster() {
+            if state
+                .overlay
+                .as_ref()
+                .is_some_and(|o| o.symbols.contains_key(&entry.full_path))
+            {
+                continue;
+            }
             out.push(mk_function_candidate(
                 &entry.full_path,
                 &entry.full_path,
@@ -632,7 +685,9 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     // candidate, mirroring (c)'s std-roster shape exactly: label already
     // IS the qualified name, a space that bare local names never occupy (no
     // bare name contains `::`), so it never needs — or competes for —
-    // `seen`.
+    // `seen`. This is also where a shadowed `std::…` name's own entry
+    // comes from — (c) above already skipped it — so nothing further is
+    // needed here to keep the two in sync.
     if let Some(overlay) = state.overlay.as_ref() {
         let empty_path: Vec<String> = Vec::new();
         if let Some(top_level) = overlay.members.get(&empty_path) {
@@ -1658,6 +1713,120 @@ export main() {
         assert!(
             single_candidates.iter().any(|c| c.label == "std::goToEnd"),
             "{single_candidates:?}"
+        );
+    }
+
+    // --- `std::` names shadowed by a sibling's own `namespace std {}` ---
+
+    #[test]
+    fn std_member_list_prefers_a_shadowing_siblings_export() {
+        // A sibling redefining `std::goToEnd` must win the member list
+        // under `std::` — exactly once, carrying the SIBLING's own
+        // deprecation tag (the embedded roster ships nothing deprecated,
+        // so a deprecated `goToEnd` proves the overlay's own candidate is
+        // what came back, not the roster's, and the single occurrence
+        // proves it isn't offered twice).
+        let dir = unique_tmp_dir("std-member-shadow");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("shared.pmc"),
+            "namespace std {\n! [deprecated] shadowed.\nexport goToEnd() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "use std::x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "std::", 5);
+        let candidates = service.completion(&app_uri, pos);
+
+        let matches: Vec<&Candidate> = candidates.iter().filter(|c| c.label == "goToEnd").collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "goToEnd must appear exactly once, not duplicated by the roster: {candidates:?}"
+        );
+        assert!(matches[0].deprecated, "the sibling's own copy: {matches:?}");
+
+        // Every other roster routine is still offered unshadowed — this
+        // sibling only redefines `goToEnd`.
+        assert!(candidates.iter().any(|c| c.label == "goToBegin"));
+    }
+
+    #[test]
+    fn qualified_call_std_prefers_a_shadowing_siblings_export() {
+        // Same shadowing proof, in the OTHER `std::`-qualified surface —
+        // `call_candidates`' (c)/(d) split — where the label is the full
+        // `std::goToEnd` path rather than the bare member name.
+        let dir = unique_tmp_dir("std-call-shadow");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("shared.pmc"),
+            "namespace std {\n! [deprecated] shadowed.\nexport goToEnd() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @x();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@x()", 1);
+        let candidates = service.completion(&app_uri, pos);
+
+        let matches: Vec<&Candidate> = candidates
+            .iter()
+            .filter(|c| c.label == "std::goToEnd")
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "std::goToEnd must appear exactly once, not duplicated by the roster: {candidates:?}"
+        );
+        assert!(matches[0].deprecated, "the sibling's own copy: {matches:?}");
+    }
+
+    #[test]
+    fn stdlib_false_still_offers_a_shadowing_siblings_std_export() {
+        // The stdlib toggle drops only the EMBEDDED roster; a sibling's
+        // own `namespace std { export … }` is ordinary linked code and
+        // stays offered regardless — the same distinction
+        // `stdlib_false_removes_std_candidates_everywhere` draws for
+        // navigation, here for completion's `["std"]` member block.
+        let dir = unique_tmp_dir("std-member-shadow-stdlib-false");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"stdlib":false,"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("shared.pmc"),
+            "namespace std {\nexport goToEnd() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "use std::x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "std::", 5);
+        let candidates = service.completion(&app_uri, pos);
+
+        assert_eq!(
+            labels(&candidates),
+            BTreeSet::from(["goToEnd".to_string()]),
+            "stdlib:false drops the roster but keeps the sibling's own export: {candidates:?}"
         );
     }
 }

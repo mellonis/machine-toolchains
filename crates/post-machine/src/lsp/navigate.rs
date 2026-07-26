@@ -7,12 +7,20 @@
 //! cross-file [`super::overlay::Overlay`] before falling back to today's
 //! single-file behavior (docs/lsp.md (configuration)): a sibling's own
 //! declaration wins over an `ImportBinding`'s bare `use`-span jump, and
-//! over `QualifiedExternal`'s/`Unresolved`'s plain `None`; a `std::` path
-//! stays gated on [`super::std_enabled`] throughout, and an overlay hit
-//! with no source location (a `.pmo`-backed symbol) yields `None` rather
-//! than a bogus jump. Analysis-tier: every query degrades to `None` when
-//! `DocState::analysis` is `None` (a post-parse fatal anywhere in the
-//! document), not just the part that failed.
+//! over `QualifiedExternal`'s/`Unresolved`'s plain `None`. A `std::` path
+//! is no exception to that overlay-first order (docs/pmt/project.md
+//! (libraries)): the overlay is consulted FIRST regardless of the
+//! `std::` prefix — a sibling's own `namespace std { export … }` shadows
+//! the embedded copy exactly the way a user's own object shadows a
+//! library at link time — and only a genuine overlay miss falls through
+//! to the materialized stdlib roster, itself still gated on
+//! [`super::std_enabled`]. An overlay hit with no source location (a
+//! `.pmo`-backed symbol) yields `None` rather than a bogus jump — even
+//! when the missing location is for a shadowed `std::` name, since the
+//! overlay already OWNS that name and the materialized stdlib must not
+//! be consulted behind its back. Analysis-tier: every query degrades to
+//! `None` when `DocState::analysis` is `None` (a post-parse fatal
+//! anywhere in the document), not just the part that failed.
 
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::DefTarget;
@@ -42,16 +50,17 @@ fn resolve_at(analysis: &Analysis, pos: Pos) -> Option<(Span, &Resolution)> {
 /// (docs/lsp.md (go-to-definition)):
 ///
 /// 1. a resolution-table entry whose span contains `pos` (the call name
-///    under the cursor) — resolved per its [`Resolution`] variant,
-///    `std::` paths routed through the materialized roster (gated on
-///    [`std_enabled`]) and everything else consulting the document's
-///    cross-file overlay before its own single-file fallback;
+///    under the cursor) — resolved per its [`Resolution`] variant, every
+///    path (std-prefixed or not) consulting the document's cross-file
+///    overlay before falling back to its own single-file behavior — a
+///    `std::` path's fallback is the materialized roster (gated on
+///    [`std_enabled`]), see [`std_path_target`];
 /// 2. failing that, a label reference (`goto` target, a `check` arm, or
 ///    a labeled successor) hit-tested against the innermost enclosing
 ///    function's own labels;
-/// 3. failing that, a `use …` path segment — `std::` through the
-///    materialized roster (same [`std_enabled`] gate), any other path
-///    through the overlay;
+/// 3. failing that, a `use …` path segment — `std::` through
+///    [`std_path_target`] (overlay first, materialized roster on a
+///    miss), any other path through the overlay alone;
 /// 4. otherwise `None`.
 pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTarget> {
     let analysis = state.analysis.as_ref()?;
@@ -74,11 +83,7 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
 
     if let Some((full_path, origin)) = use_path_at(&cst.items, pos) {
         return if full_path.starts_with("std::") {
-            if std_enabled(state) {
-                std_target(&full_path, origin)
-            } else {
-                None
-            }
+            std_path_target(state, &full_path, origin)
         } else {
             overlay_target(state, &full_path, origin)
         };
@@ -110,11 +115,13 @@ fn resolve_call(
             full_path,
         } => {
             if full_path.starts_with("std::") {
-                if std_enabled(state) {
-                    std_target(full_path, origin)
-                } else {
-                    None
-                }
+                // `std_path_target` already tries the overlay before the
+                // roster — no separate overlay attempt here, and (like
+                // the sibling `QualifiedExternal` arm below) no
+                // `use_span` fallback on a miss: that fallback is this
+                // arm's own single-file behavior for a name nothing
+                // cross-file defines, not std's.
+                std_path_target(state, full_path, origin)
             } else if let Some(target) = overlay_target(state, full_path, origin) {
                 Some(target)
             } else {
@@ -131,11 +138,7 @@ fn resolve_call(
         }
         Resolution::QualifiedExternal { full_path } => {
             if full_path.starts_with("std::") {
-                if std_enabled(state) {
-                    std_target(full_path, origin)
-                } else {
-                    None
-                }
+                std_path_target(state, full_path, origin)
             } else {
                 overlay_target(state, full_path, origin)
             }
@@ -167,6 +170,37 @@ fn overlay_target(state: &DocState, full_path: &str, origin: Span) -> Option<Def
         span: *span,
         origin: Some(origin),
     })
+}
+
+/// The one seam every `std::`-prefixed full path funnels through
+/// (docs/pmt/project.md (libraries)): the embedded stdlib links as an
+/// ordinary library, LAST, behind every declared source and library — a
+/// sibling or library exporting the same mangled name under `std::`
+/// shadows it, the identical user-object-beats-library precedent the
+/// linker itself follows. So this checks OWNERSHIP first —
+/// `overlay.symbols.contains_key(full_path)` — not [`overlay_target`]'s
+/// `Option`: the overlay can OWN a name yet still answer no location (a
+/// `.pma`/`.pmo` shadow), and that must still short-circuit here rather
+/// than falling through to the materialized stdlib behind the owner's
+/// back. Only a genuine miss — no project, or no sibling/library defines
+/// this name at all — reaches the materialized roster, itself still
+/// gated on [`std_enabled`] (a project declaring `"stdlib": false` gets
+/// no materialized jump, exactly as before). Every one of `navigate.rs`'s
+/// three `std::`-branch sites reduces to a call here, so a future arch
+/// twin only needs to copy this one function's shape, not each call
+/// site's.
+fn std_path_target(state: &DocState, full_path: &str, origin: Span) -> Option<DefTarget> {
+    let overlay_owns = state
+        .overlay
+        .as_ref()
+        .is_some_and(|o| o.symbols.contains_key(full_path));
+    if overlay_owns {
+        overlay_target(state, full_path, origin)
+    } else if std_enabled(state) {
+        std_target(full_path, origin)
+    } else {
+        None
+    }
 }
 
 /// Slices the literal source text `span` denotes straight out of `text` —
@@ -277,11 +311,12 @@ fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
 /// blocks — imports are legal at any nesting level. Every path is
 /// returned, not just `std::…` ones — each caller does its OWN
 /// `std::`-branching at its own seam instead: [`definition`]'s step 3
-/// routes a `std::` path through [`std_target`] (gated on
-/// [`super::std_enabled`]) and everything else through
-/// [`overlay_target`], which can genuinely SUCCEED for a sibling's own
-/// `use`-imported path, not just miss; hover's caller (`mod.rs`) looks
-/// up whatever qualified name comes back against this document's own
+/// routes a `std::` path through [`std_path_target`] (overlay first, the
+/// materialized roster only on a miss, itself still gated on
+/// [`super::std_enabled`]) and everything else through [`overlay_target`]
+/// alone, which can genuinely SUCCEED for a sibling's own `use`-imported
+/// path, not just miss; hover's caller (`mod.rs`) looks up whatever
+/// qualified name comes back against this document's own
 /// `Analysis.docs`, the overlay's doc map, or the stdlib's — local,
 /// sibling, and `std::` names alike. Filtering by `std` here would only
 /// duplicate work every caller already does on its own.
@@ -1105,7 +1140,7 @@ mod tests {
         );
 
         // The `use std::goToEnd;` path segment itself (step 3, `use_path_at`)
-        // is the third and last `std_target` call site — gate it too.
+        // is the third and last `std_path_target` call site — gate it too.
         const USE_SRC: &str = "use std::goToEnd;\nexport main() { right; }\n";
         service.did_update(&app_uri, USE_SRC);
         let use_pos = pos_at(USE_SRC, "goToEnd");
@@ -1140,5 +1175,165 @@ mod tests {
             .find(|e| e.full_path == "std::goToEnd")
             .expect("goToEnd is in the roster");
         assert_eq!(single_target.span, entry.name_span);
+    }
+
+    // --- `std::` names shadowed by a sibling's own `namespace std {}` ---
+
+    #[test]
+    fn std_import_binding_still_reaches_the_materialized_stdlib_when_unshadowed() {
+        // Regression guard, in a REAL project (an overlay exists, unlike
+        // `NAV_FIXTURE`'s no-manifest baseline above): a sibling exists
+        // but defines something else entirely, so the overlay genuinely
+        // MISSES `std::goToEnd` and the fall-through to the materialized
+        // roster must still fire, exactly as it did before this fix.
+        let dir = unique_tmp_dir("nav-std-unshadowed");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("shared.pmc"), "export unrelated() { right; }\n").unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "use std::goToEnd as ge;\nexport main() {\n    @ge();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@ge()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("std::goToEnd is not shadowed by any sibling in this project");
+
+        let std_uri = materialized_std_uri().expect("materialization succeeds in this env");
+        assert_eq!(target.uri, std_uri);
+        let entry = roster()
+            .iter()
+            .find(|e| e.full_path == "std::goToEnd")
+            .expect("goToEnd is in the roster");
+        assert_eq!(target.span, entry.name_span);
+    }
+
+    #[test]
+    fn std_qualified_call_jumps_into_the_shadowing_sibling_not_the_materialized_stdlib() {
+        // THE defect this task fixes: a sibling's own `namespace std {
+        // export goToEnd() {...} }` shadows the embedded routine of the
+        // same name — the linker's own user-object-beats-library rule —
+        // so go-to-definition on `@std::goToEnd()` must land in the
+        // sibling, never the materialized stdlib URI.
+        let dir = unique_tmp_dir("nav-std-shadow-qualified");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "namespace std {\nexport goToEnd() { right; }\n}\n";
+        fs::write(dir.join("shared.pmc"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@std::goToEnd()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("std::goToEnd resolves to the shadowing sibling");
+
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
+        assert_eq!(target.span, span_of(SHARED, "goToEnd"));
+        let std_uri = materialized_std_uri().expect("materialization succeeds in this env");
+        assert_ne!(
+            target.uri, std_uri,
+            "must NOT land in the embedded stdlib copy"
+        );
+    }
+
+    #[test]
+    fn std_import_binding_alias_jumps_into_the_shadowing_sibling() {
+        // Same shadowing proof, through the `ImportBinding` arm instead
+        // of `QualifiedExternal` (`use std::goToEnd as ge;` — the alias
+        // this repo's own `stdlib_false_kills_std_hover_and_the_materialized_jump`
+        // test also exercises separately for the OTHER (disabled) half
+        // of this same gate).
+        let dir = unique_tmp_dir("nav-std-shadow-import-binding");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "namespace std {\nexport goToEnd() { right; }\n}\n";
+        fs::write(dir.join("shared.pmc"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "use std::goToEnd as ge;\nexport main() {\n    @ge();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@ge()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("the aliased std import resolves to the shadowing sibling");
+
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
+        assert_eq!(target.span, span_of(SHARED, "goToEnd"));
+    }
+
+    #[test]
+    fn std_use_path_itself_jumps_into_the_shadowing_sibling() {
+        // Step 3's own `use std::…` path segment (the third
+        // `std_path_target` call site, `use_path_at`'s caller in
+        // `definition`) — same shadowing proof, one seam over.
+        let dir = unique_tmp_dir("nav-std-shadow-use-path");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "namespace std {\nexport goToEnd() { right; }\n}\n";
+        fs::write(dir.join("shared.pmc"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "use std::goToEnd;\nexport main() { right; }\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_at(SRC, "goToEnd");
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("the use-path segment itself resolves to the shadowing sibling");
+
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
+        assert_eq!(target.span, span_of(SHARED, "goToEnd"));
+    }
+
+    #[test]
+    fn stdlib_false_still_jumps_into_a_shadowing_siblings_std_export() {
+        // The `"stdlib": false` gate silences only the EMBEDDED roster
+        // (`std_path_target`'s own `std_enabled` check); a sibling's own
+        // `namespace std { export … }` is ordinary linked code, owned by
+        // the overlay outright, and must still navigate — completing the
+        // picture `stdlib_false_kills_std_hover_and_the_materialized_jump`
+        // draws for the (correctly) suppressed unshadowed case.
+        let dir = unique_tmp_dir("nav-std-shadow-stdlib-false");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"stdlib":false,"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "namespace std {\nexport goToEnd() { right; }\n}\n";
+        fs::write(dir.join("shared.pmc"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@std::goToEnd()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("the shadowing sibling still resolves under stdlib:false");
+
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
+        assert_eq!(target.span, span_of(SHARED, "goToEnd"));
     }
 }
