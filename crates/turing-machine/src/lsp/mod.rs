@@ -234,15 +234,7 @@ pub(crate) struct DocState {
 /// offers — completion (`complete.rs`), and go-to-definition/hover's name
 /// resolution and doc lookup (`navigate.rs`) — each gating its own
 /// `std::` call site.
-///
-/// Visibility is plain module-private, not `pub(super)`: `DocState`
-/// itself is only nameable within `lsp` and its descendants (its
-/// `overlay` field's own doc gives the identical reason), and every
-/// actual caller (`complete.rs`, `navigate.rs`) is a descendant of `lsp`
-/// already — plain privacy reaches them exactly as well as `pub(super)`
-/// would, with no risk of widening this function's reach past where
-/// `DocState` itself can even be named.
-fn std_enabled(state: &DocState) -> bool {
+pub(super) fn std_enabled(state: &DocState) -> bool {
     state.overlay.as_ref().is_none_or(|o| o.stdlib)
 }
 
