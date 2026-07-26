@@ -50,6 +50,7 @@ mod context;
 #[cfg(test)]
 mod e2e;
 mod navigate;
+mod overlay;
 mod quickfix;
 mod roster;
 mod tma;
@@ -69,6 +70,15 @@ pub(crate) struct TmcLanguageService {
     ide_warn: Option<Result<Vec<String>, String>>,
     /// `tmt.json` parse cache keyed by winner path; (mtime, outcome).
     config_cache: HashMap<PathBuf, (SystemTime, Result<Vec<String>, String>)>,
+    /// `tmt.json` project-section discovery cache (docs/lsp.md
+    /// (configuration)), keyed the same way as `config_cache` but over
+    /// the manifest's `project` section instead of `lint.allow` — the
+    /// cross-file overlay's own manifest lookup (`overlay::project_view`).
+    manifest_cache: overlay::ManifestCache,
+    /// One open document's sibling-export scan cache (docs/lsp.md
+    /// (configuration)), shared across every document this service
+    /// builds an overlay for (`overlay::build_overlay`).
+    sibling_cache: overlay::SiblingCache,
 }
 
 impl Default for TmcLanguageService {
@@ -84,6 +94,8 @@ impl TmcLanguageService {
             ide_allow: None,
             ide_warn: None,
             config_cache: HashMap::new(),
+            manifest_cache: overlay::ManifestCache::new(),
+            sibling_cache: overlay::SiblingCache::new(),
         }
     }
 }
@@ -198,6 +210,22 @@ pub(crate) struct DocState {
     /// invalid-config messages that applied to this analysis (0..=2
     /// entries: project file first, then IDE settings).
     config_errors: Vec<String>,
+    /// The cross-file symbol table for this document (docs/lsp.md
+    /// (configuration)): `None` when the document degrades to
+    /// single-file behavior (no manifest found, the document is a
+    /// member of no target, or it has no `file:` path at all). Not yet
+    /// consumed outside this module's own tests — completion,
+    /// navigation, hover, and diagnostics refinement each wire in their
+    /// own read of it separately.
+    // consumer: cross-file completion/navigation/hover/diagnostics,
+    // wired in separately from this task. Deliberately narrower than
+    // this struct's other fields (`pub(crate)`): `Overlay` itself is
+    // `pub(super)` (visible within `lsp` and its descendants only,
+    // overlay.rs's own reach), and no consumer of this field lives
+    // outside that tree, so a wider modifier here would just be a
+    // `private_interfaces` mismatch waiting to happen.
+    #[allow(dead_code)]
+    overlay: Option<overlay::Overlay>,
 }
 
 /// `file:` URIs → percent-decoded filesystem path; any other scheme
@@ -552,7 +580,21 @@ impl LanguageService for TmcLanguageService {
             }
         };
 
-        // 2. Staged analysis, then — only over a clean resolve — the
+        // 2. Cross-file overlay (docs/lsp.md (configuration) for the
+        //    shared mtime-cache discipline; `overlay.rs` for the rest):
+        //    the manifest-discovery view for this document, then its
+        //    sibling/library export table, built from `self.docs` BEFORE
+        //    step 5 below replaces this uri's own entry — so a sibling
+        //    read never has to reason about whether it might be looking
+        //    at a stale copy of the document currently being updated.
+        //    Untitled / non-`file:` URIs degrade to `None` (single-file
+        //    view) for free via `uri_to_path`.
+        let overlay = uri_to_path(uri).and_then(|p| {
+            overlay::project_view(&p, &mut self.manifest_cache)
+                .map(|view| overlay::build_overlay(&view, &p, &self.docs, &mut self.sibling_cache))
+        });
+
+        // 3. Staged analysis, then — only over a clean resolve — the
         //    expansion stage, for its fatal alone (the binding-map
         //    legality family lives there).
         let staged = analyze_staged(text);
@@ -564,7 +606,7 @@ impl LanguageService for TmcLanguageService {
             fatal = Some(e);
         }
 
-        // 3. Lint over the resolved module when there is one. The rules also
+        // 4. Lint over the resolved module when there is one. The rules also
         //    read the AST and a COMMENT-FREE token stream; the editor lexes
         //    with comment trivia, so filter to `significant` to match the
         //    batch path's comment-free stream (identical findings either way).
@@ -586,7 +628,7 @@ impl LanguageService for TmcLanguageService {
             _ => None,
         };
 
-        // 4. Store the doc state; a failed re-analysis keeps the previous
+        // 5. Store the doc state; a failed re-analysis keeps the previous
         //    last-good roster (the names-only staleness exception).
         let prev = self.docs.remove(uri);
         let roster = match &staged.resolved {
@@ -604,6 +646,7 @@ impl LanguageService for TmcLanguageService {
             fatal,
             roster,
             config_errors,
+            overlay,
         };
         let diagnostics = merged_diagnostics(&state);
         self.docs.insert(uri.to_string(), state);
