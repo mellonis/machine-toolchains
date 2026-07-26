@@ -18,9 +18,11 @@
 //! `SOURCE`, and the materializer writes `SOURCE` to a real file on disk
 //! once per toolchain version so an editor has something to open. [`docs`]
 //! serves hover (docs/lsp.md (hover)): the embedded stdlib's own resolved
-//! doc map, covering every documented entity — routines, graphs, and
-//! alphabets (docs/tmt/stdlib.md (roster)) — keyed the same fully-qualified
-//! way `roster`'s `full_path` is, since a requesting document's own
+//! doc map, keyed the same fully-qualified way `roster`'s `full_path` is
+//! and covering every declaration `SOURCE` documents — routines, graphs,
+//! and alphabets, three of the kinds a doc run may attach to
+//! (docs/tmt/language.md (doc lines and attention lines)) — not just
+//! `roster`'s linkable routines, since a requesting document's own
 //! analysis never contains std entries (`std::` references are external to
 //! it).
 
@@ -164,13 +166,14 @@ fn is_uri_literal(byte: u8) -> bool {
 /// Builds a `file:` URI for an absolute path: forward slashes,
 /// percent-encoding every byte outside [`is_uri_literal`]. On windows,
 /// prefixes `file:///C:/...` (the extra `/` before the drive letter).
-/// `pub(crate)` rather than private: a general path-to-URI encoder, not
-/// stdlib-specific, so a future cross-file consumer (docs/lsp.md
+/// Infallible — built entirely on `Path::to_string_lossy`, which never
+/// fails. `pub(crate)` rather than private: a general path-to-URI encoder,
+/// not stdlib-specific, so a future cross-file consumer (docs/lsp.md
 /// (configuration)) can reuse it instead of hand-rolling a second one.
 // consumer: materialize_into() below, plus any future caller needing the
 // same path->URI encoding.
 #[allow(dead_code)]
-pub(crate) fn path_to_file_uri(path: &Path) -> Option<String> {
+pub(crate) fn path_to_file_uri(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let normalized = if cfg!(windows) {
         raw.replace('\\', "/")
@@ -188,7 +191,7 @@ pub(crate) fn path_to_file_uri(path: &Path) -> Option<String> {
             uri.push_str(&format!("%{:02X}", byte));
         }
     }
-    Some(uri)
+    uri
 }
 
 /// Writes `SOURCE` to `<root>/tmt/<CARGO_PKG_VERSION>/std.tmc` if the
@@ -209,7 +212,7 @@ fn materialize_into(root: &Path) -> Option<String> {
     if needs_write {
         fs::write(&file, SOURCE).ok()?;
     }
-    path_to_file_uri(&file)
+    Some(path_to_file_uri(&file))
 }
 
 /// The embedded `std.tmc`, written once per toolchain version to
