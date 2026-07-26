@@ -10,7 +10,10 @@
 //! decision — until a third tool exists, two near-identical copies read
 //! more plainly than a premature abstraction.
 
-mod build;
+// `pub(crate)`: the LSP's overlay-vs-linker faithfulness test
+// (`lsp/overlay.rs`) reaches `build::find_library` directly — the module
+// path itself must be nameable from outside `cli`, not just the function.
+pub(crate) mod build;
 mod completions;
 mod driver;
 mod fmt;

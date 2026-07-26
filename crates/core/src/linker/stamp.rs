@@ -495,6 +495,7 @@ fn mono_stamps<'a>(
             table: Cow::Owned(body.table),
             table_fixups: body.table_fixups,
             signature: None,
+            origin: callee.origin,
         });
     }
 

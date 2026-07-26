@@ -580,46 +580,15 @@ fn defined_names(objects: &[ObjectFile], libraries: &[ObjectFile]) -> HashSet<St
         .collect()
 }
 
-/// The name inside the first backtick pair of an `undeclared-external`
-/// message — the compiler's fixed format ("reference to undeclared
-/// external `NAME` — declare it with `use NAME;`"), pinned by
-/// `refinement_name_extraction_matches_the_compiler_format` below.
-fn undeclared_name(message: &str) -> Option<&str> {
-    let start = message.find('`')? + 1;
-    let rest = &message[start..];
-    Some(&rest[..rest.find('`')?])
-}
-
 /// The undeclared-external refinement (docs/tmt/cli.md (build)): a bare
 /// call that is undeclared per-file but resolved by the declared set is
 /// not a defect of the BUILD — drop its warning. Runs before -Werror
-/// counting so -Werror judges the post-filter set.
+/// counting so -Werror judges the post-filter set. The retain predicate
+/// itself lives in `compiler.rs`, next to the warning it refines
+/// (docs/tmt/cli.md (undeclared-external)) — this just walks every
+/// report in the build.
 fn refine_reports(reports: &mut [(PathBuf, CompileReport)], defined: &HashSet<String>) {
     for (_, report) in reports.iter_mut() {
-        report.diagnostics.retain(|d| {
-            !(d.code == "undeclared-external"
-                && undeclared_name(&d.message).is_some_and(|n| defined.contains(n)))
-        });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pins the extraction against the compiler's REAL warning format —
-    /// if the message ever changes shape, this fails here rather than
-    /// silently breaking the refinement.
-    #[test]
-    fn refinement_name_extraction_matches_the_compiler_format() {
-        let src = "alphabet ab { '_', 'a' }\nmachine { tape t: ab; entry state s { [*] -> call go() then s; } }";
-        let out = compile_source(src, CompileOptions::default()).unwrap();
-        let diag = out
-            .report
-            .diagnostics
-            .iter()
-            .find(|d| d.code == "undeclared-external")
-            .expect("bare call go() warns");
-        assert_eq!(undeclared_name(&diag.message), Some("go"));
+        crate::compiler::refine_undeclared(&mut report.diagnostics, defined);
     }
 }

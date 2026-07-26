@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use mtc_core::diagnostics::{Edit, Fix};
 use serde_json::json;
@@ -275,6 +276,224 @@ machine {
 }
 
 #[test]
+fn undeclared_external_still_published_for_bare_names() {
+    // A bare (no `::`) call target nothing declares publishes through
+    // `did_update` exactly as the batch compiler warns — the channel a
+    // later round narrows to genuinely-undeclared names, pinned here so
+    // that narrowing has something to change against.
+    let src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { [*] -> call helper() then s; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let diagnostics = service.did_update(&uri, src);
+    let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
+    assert!(codes.contains(&Some("undeclared-external")), "{codes:?}");
+}
+
+// -- cross-file diagnostics refinement through the overlay --------------
+
+#[test]
+fn undeclared_external_is_refined_by_the_overlay_call_variant() {
+    // A bare call the overlay resolves stops warning; a bare call nothing
+    // resolves is the live positive control proving the refinement — and
+    // diagnostics generally — are still working, in the SAME project.
+    let dir = unique_tmp_dir("refine-call");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine helper(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { ['_'] -> call helper() then g; ['1'] -> call ghost() then g; }
+  state g { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "the sibling's export refines the bare call away: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`ghost`")),
+        "no sibling defines ghost — the live positive control: {diags:?}"
+    );
+}
+
+#[test]
+fn undeclared_external_stays_without_a_manifest_on_a_real_file_path() {
+    // A real `file:` path with no tmt.json anywhere on the walk — the
+    // OTHER route to a `None` overlay besides an untitled buffer
+    // (`undeclared_external_still_published_for_bare_names` covers that
+    // one). The SAME name the call-variant test above resolves, so this
+    // also serves as that test's control: `helper` really does warn on
+    // its own when no link set is declared at all.
+    let dir = unique_tmp_dir("refine-no-manifest");
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { [*] -> call helper() then s; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "no manifest anywhere on the walk — per-file honest: {diags:?}"
+    );
+    let state = service.docs.get(&app_uri).unwrap();
+    assert!(
+        state.overlay.is_none(),
+        "no tmt.json on the walk — single-file degrade"
+    );
+}
+
+#[test]
+fn stdlib_resolved_bare_name_is_not_suppressed() {
+    // The stdlib defines `std::binaryNumbersBare::plusOne`, never a bare
+    // `plusOne` — a bare call to it must keep warning even though the
+    // project has the stdlib enabled (the default), exactly matching what
+    // the build driver's own `defined_names` union produces. `helper`,
+    // resolved by an actual sibling in the SAME project, is the live
+    // positive control proving the overlay refinement is genuinely active
+    // here, not merely inert.
+    let dir = unique_tmp_dir("refine-stdlib");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine helper(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { ['_'] -> call helper() then g; ['1'] -> call plusOne() then g; }
+  state g { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "the sibling's export refines the bare call away: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`plusOne`")),
+        "std::binaryNumbersBare::plusOne is not a bare plusOne: {diags:?}"
+    );
+
+    // The `helper` control above only proves an overlay exists — it says
+    // nothing about the STDLIB leg specifically. Pin that leg directly:
+    // the project really does have `stdlib` on, and the roster's
+    // NAMESPACED path is in the defined set while the bare name is not —
+    // the exact reason the bare call above keeps warning.
+    let state = service.docs.get(&app_uri).unwrap();
+    let overlay = state.overlay.as_ref().expect("a real project");
+    assert!(overlay.stdlib, "the manifest defaults the stdlib on");
+    let defined = overlay.defined_names();
+    assert!(
+        defined.contains("std::binaryNumbersBare::plusOne"),
+        "the roster leg really is in the defined set: {defined:?}"
+    );
+    assert!(
+        !defined.contains("plusOne"),
+        "…and only as a namespaced path — never the bare name: {defined:?}"
+    );
+}
+
+#[test]
+fn undeclared_external_is_refined_by_the_overlay_bind_variant() {
+    // This crate's warning fires for bare BIND targets too
+    // (`compiler::tests::bind_target_must_be_a_routine`); the overlay
+    // refinement must apply there identically to the call variant. A
+    // third bind, through a `use` import, pins the orthogonal invariant
+    // that a qualified/imported target never warns in the first place
+    // (`warn_undeclared_if_bare`'s bare-only check) — regardless of
+    // whether an overlay exists at all.
+    let dir = unique_tmp_dir("refine-bind");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine helper(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let app_src = "\
+alphabet abc { '_', 'a', 'b' }
+use lib::r;
+machine {
+  tape t: abc;
+  bind helper(t = t) as h1;
+  bind ghost(t = t) as h2;
+  bind r(t = t) as h3;
+  entry state s { ['_'] -> call h1() then s; ['a'] -> call h2() then s; ['b'] -> call h3() then s; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "the sibling's export refines the bare bind target away: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`ghost`")),
+        "no sibling defines ghost — the live positive control: {diags:?}"
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`r`")),
+        "a qualified/imported bind target never warns regardless of the overlay: {diags:?}"
+    );
+}
+
+#[test]
 fn did_close_forgets_the_document() {
     let (mut service, uri) = opened(TWO_TAPE);
     service.did_close(&uri);
@@ -388,6 +607,25 @@ fn complete_typing(prefix: &str, settled: &str, suffix: &str) -> Vec<Candidate> 
     let pos = pos_at_byte(&src, prefix.len());
     service.did_update(&uri, &src);
     service.completion(&uri, pos)
+}
+
+/// [`complete_typing`]'s settle-then-break sequence, but driven against
+/// `uri` on an ALREADY-CONSTRUCTED `service` instead of a fresh untitled
+/// one — for a project `file:` document, so the cross-file overlay
+/// (docs/lsp.md (project overlay)) is genuinely active for the completion
+/// request under test.
+fn complete_typing_in(
+    service: &mut TmcLanguageService,
+    uri: &str,
+    prefix: &str,
+    settled: &str,
+    suffix: &str,
+) -> Vec<Candidate> {
+    service.did_update(uri, &format!("{prefix}{settled}{suffix}"));
+    let src = format!("{prefix}{suffix}");
+    let pos = pos_at_byte(&src, prefix.len());
+    service.did_update(uri, &src);
+    service.completion(uri, pos)
 }
 
 /// Completion in a document that needs no repair — `prefix + suffix` is
@@ -544,6 +782,102 @@ machine {
     let got = labels(&complete_typing(head, "g", tail));
     assert!(got.contains(&"g".to_string()), "{got:?}");
     assert!(!got.contains(&"r".to_string()), "{got:?}");
+}
+
+#[test]
+fn use_path_completion_offers_std_and_its_members() {
+    let src = "\
+use std::binaryNumbers::goToNumber;
+
+alphabet a { '_', '0' }
+
+machine {
+  tape t: a;
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let got = labels(&service.completion(&uri, pos_after(src, "use ", 4)));
+    assert!(got.contains(&"std".to_string()), "{got:?}");
+    assert!(
+        got.contains(&"std::binaryNumbers::goToNumber".to_string()),
+        "{got:?}"
+    );
+    assert!(
+        got.contains(&"std::binaryNumbersBare::plusOne".to_string()),
+        "{got:?}"
+    );
+    // Routines only — the stdlib's graphs and alphabets contribute no
+    // linkable symbol a `use` path could ever bind.
+    assert!(
+        !got.contains(&"std::binaryNumbers::plusOneGraph".to_string()),
+        "{got:?}"
+    );
+    assert!(
+        !got.contains(&"std::binaryNumbers::symbols".to_string()),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn call_target_completion_offers_qualified_std_routines() {
+    let call_head = "\
+alphabet bits { '_', '1' }
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call ";
+    let call_tail = "() then main;\n  }\n}\n";
+    let call_got = labels(&complete_typing(
+        call_head,
+        "std::binaryNumbers::goToNumber",
+        call_tail,
+    ));
+    assert!(
+        call_got.contains(&"std::binaryNumbers::goToNumber".to_string()),
+        "{call_got:?}"
+    );
+
+    let bind_head = "\
+alphabet bits { '_', '1' }
+
+machine {
+  tape ctl: bits;
+  bind ";
+    // Argless, like the transparent form `call` uses across a link
+    // boundary — a BOUND tape argument into an external routine is
+    // `external-binding-unsupported` at `tmt compile` (docs/tmt/stdlib.md
+    // (transparent call)), and the fixture should stay legal code, not
+    // merely something the LSP's staged analysis happens to tolerate.
+    let bind_tail = "() as inc1;\n  entry state main { [*] -> call inc1() then main; }\n}\n";
+    let bind_got = labels(&complete_typing(
+        bind_head,
+        "std::binaryNumbersBare::plusOne",
+        bind_tail,
+    ));
+    assert!(
+        bind_got.contains(&"std::binaryNumbersBare::plusOne".to_string()),
+        "{bind_got:?}"
+    );
+}
+
+#[test]
+fn graft_target_completion_never_offers_std_names() {
+    // R1: across a link boundary a graft has no source to splice, so the
+    // stdlib contributes nothing here — same fixture as the graphs-only
+    // test above, plus the negative assertion.
+    let head = "\
+alphabet bits { '_', '1' }
+
+graph g(tape t: bits, state done) { entry state s { [*] -> done; } }
+
+machine {
+  tape ctl: bits;
+  entry graft ";
+    let tail = "(t = ctl, done = fin) as seek;\n  state fin { [*] -> stop; }\n}\n";
+    let got = labels(&complete_typing(head, "g", tail));
+    assert!(got.contains(&"g".to_string()), "{got:?}");
+    assert!(!got.iter().any(|l| l.starts_with("std::")), "{got:?}");
 }
 
 #[test]
@@ -813,6 +1147,34 @@ fn a_use_path_navigates_to_the_routine_it_imports() {
 }
 
 #[test]
+fn definition_on_a_std_call_target_jumps_into_materialized_std_tmc() {
+    let src = "\
+use std::binaryNumbers::goToNumber;
+
+alphabet a { '_', '^', '$', '0', '1' }
+
+machine {
+  tape num: a;
+  entry state s { [*] -> call goToNumber() then done; }
+  state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let target = service
+        .definition(&uri, pos_after(src, "call goToNumber", 5))
+        .expect("a definition");
+
+    let want_uri = crate::stdlib::materialized_std_uri().expect("materializes in test env");
+    assert_eq!(target.uri, want_uri);
+
+    let entry = crate::stdlib::roster()
+        .iter()
+        .find(|e| e.full_path == "std::binaryNumbers::goToNumber")
+        .expect("goToNumber is in the roster");
+    assert_eq!(target.span, entry.name_span);
+}
+
+#[test]
 fn definition_survives_a_resolve_stage_fatal() {
     // The program outlives resolution, and every reference span lives on
     // it — so navigation keeps working on a document that does not yet
@@ -887,6 +1249,60 @@ fn hovering_an_alphabet_lists_its_symbols() {
         .expect("a hover");
     assert!(hover.text.contains("alphabet bits"), "{}", hover.text);
     assert!(hover.text.contains("_, 0, 1"), "{}", hover.text);
+}
+
+#[test]
+fn hover_on_a_std_call_target_returns_its_doc() {
+    // The reported gap this reproduces, inverted: a `std::` call target
+    // now hovers with the routine's own doc, resolved through the
+    // embedded stdlib's analysis rather than this document's (which never
+    // holds a std entry) — previously such a hover returned nothing.
+    let src = "\
+alphabet a { '_', '^', '$', '0', '1' }
+
+machine {
+  tape num: a;
+  entry state s { [*] -> call std::binaryNumbers::goToNumber() then done; }
+  state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(
+            &uri,
+            pos_after(src, "call std::binaryNumbers::goToNumber", 5),
+        )
+        .expect("a hover");
+    assert!(
+        hover
+            .text
+            .contains("Walk right to the current number's end marker"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn hovering_a_genuine_external_with_no_std_doc_shows_nothing() {
+    // `External` covers any qualified/aliased name this document does not
+    // declare, not only std ones. With no doc to show, the head alone
+    // would just echo the reference's own text back at the cursor — the
+    // emptiness rule says that is not a hover, so this must stay `None`
+    // exactly like an undocumented LOCAL declaration does.
+    let src = "\
+alphabet a { '_', '0' }
+use lib::helper;
+machine {
+  tape t: a;
+  entry state s { [*] -> call helper() then s; }
+}
+";
+    let (mut service, uri) = opened(src);
+    assert!(
+        service
+            .hover(&uri, pos_after(src, "call helper", 5))
+            .is_none()
+    );
 }
 
 #[test]
@@ -1153,4 +1569,971 @@ fn every_request_survives_every_truncation_of_a_real_document() {
         service.semantic_tokens(&uri);
         service.format(&uri);
     }
+}
+
+// -- cross-file completion, navigation, and hover through the overlay ----
+//
+// The surface is deliberately narrower than the diagnostics refinement
+// above: only `use`-path context and a bare `call`/`bind` TARGET position
+// ever offer an overlay candidate — a transparent, argless `call` is the
+// one shape that works across a compiled-object boundary
+// (docs/tmt/stdlib.md (transparent call)). Graft-target, binding-name,
+// binding-value, and map contexts must never see one; each negative below
+// is paired with a live positive control proving the context itself still
+// works, not merely that the overlay stayed out of it.
+
+#[test]
+fn use_path_completion_offers_sibling_namespaces_and_routines() {
+    let dir = unique_tmp_dir("use-path-overlay");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    // The sibling's OWN `machine` block matters here, not just its
+    // routines: a machine always contributes its linker symbol `main` to
+    // the overlay table (the diagnostics refinement this table also
+    // serves treats it as a legitimately defined external name), but
+    // `main` is a program's own entry, never a `use`-able unit — this is
+    // the live negative for that exclusion, not a vacuous one, since
+    // without the sibling machine block `main` could never have leaked
+    // in the first place.
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\n\
+         namespace mylib {\n  export routine plusOne(tape num: b) { entry state s { [*] -> return; } }\n}\n\
+         export routine bare(tape t: b) { entry state s { [*] -> return; } }\n\
+         machine {\n  tape t: b;\n  entry state s { [*] -> stop; }\n}\n",
+    )
+    .unwrap();
+
+    // A fully-formed `use` statement already in place — `Context::UsePath`
+    // doesn't care what the path already spells, only that the cursor
+    // sits somewhere inside one (mirrors `use_path_completion_offers_std_
+    // and_its_members`, which positions the cursor the same way).
+    let app_src = "\
+alphabet bits { '_', '1' }
+use std::binaryNumbers::goToNumber;
+
+machine {
+  tape t: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    service.did_update(&app_uri, app_src);
+    let got = labels(&service.completion(&app_uri, pos_after(app_src, "use ", 4)));
+
+    // Member ROOTS: a namespace worth typing past, the same convenience
+    // the hardcoded "std" literal offers for the embedded library.
+    assert!(got.contains(&"mylib".to_string()), "{got:?}");
+    // Members: the full qualified path, pickable whole.
+    assert!(got.contains(&"mylib::plusOne".to_string()), "{got:?}");
+    // A bare top-level sibling export.
+    assert!(got.contains(&"bare".to_string()), "{got:?}");
+    // The sibling's OWN machine entry never leaks in as a `use`-able name.
+    assert!(!got.contains(&"main".to_string()), "{got:?}");
+    // Positive control: the overlay's own additions don't crowd out the
+    // pre-existing stdlib offer.
+    assert!(got.contains(&"std".to_string()), "{got:?}");
+}
+
+// This test is also Task 17's TM-only negative: it already exercises every
+// context the plan calls out by name — graft-target (`Target(Graft)`),
+// `BindingName`, `BindingValue`, `VectorCell`, `MapSrc`, `MapDst` — each a
+// leak-negative paired with a live LOCAL positive control, driven through a
+// real `did_update` with a genuinely active overlay (the sanity check just
+// below the call-target assertions). A second, separate test would only
+// repeat this one's own fixture and assertions.
+#[test]
+fn call_and_bind_target_completion_offers_sibling_exported_routines() {
+    let dir = unique_tmp_dir("target-overlay");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    // The sibling's OWN `machine` block: its linker symbol `main` must
+    // never surface at a call/bind target either — the negative both
+    // probes below assert, right alongside the positive `mylib::plusOne`.
+    // `plusOne` itself carries a `! [deprecated]` doc line; `freshOne`
+    // stays undeprecated as its control — the candidate's `deprecated`
+    // flag must come from the SIBLING's own doc, not default to false or
+    // to true across the board.
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nnamespace mylib {\n\
+         ! [deprecated] use freshOne instead.\n  export routine plusOne(tape num: b) { entry state s { [*] -> return; } }\n\
+         export routine freshOne(tape num: b) { entry state s { [*] -> return; } }\n}\n\
+         machine {\n  tape t: b;\n  entry state s { [*] -> stop; }\n}\n",
+    )
+    .unwrap();
+
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+
+    // A `call` target: the sibling's qualified routine joins the local one.
+    // The inline `t = ctl` binding is load-bearing — an ARGLESS direct call
+    // to a LOCAL routine with a required tape parameter is a resolve-stage
+    // fatal (unlike an external target, whose binding validation the
+    // compiler skips entirely), which would leave no roster to complete
+    // from at all.
+    let call_head = "\
+alphabet bits { '_', '1' }
+
+routine localR(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call ";
+    let call_tail = "(t = ctl) then main;\n  }\n}\n";
+    let call_candidates =
+        complete_typing_in(&mut service, &app_uri, call_head, "localR", call_tail);
+    let call_got = labels(&call_candidates);
+    assert!(
+        call_got.contains(&"mylib::plusOne".to_string()),
+        "{call_got:?}"
+    );
+    assert!(
+        call_got.contains(&"localR".to_string()),
+        "local control: {call_got:?}"
+    );
+    assert!(
+        !call_got.contains(&"main".to_string()),
+        "the sibling's machine entry is not a call target: {call_got:?}"
+    );
+    // Sanity: every negative in this test (graft target, binding name,
+    // binding value, vector-cell glyph, map source, map destination, all
+    // below) is only meaningful with a real, active overlay behind it —
+    // `mylib::plusOne` surfacing above already proves that behaviorally,
+    // but a literal peek at the overlay's own table closes the gap a
+    // regression that disabled the overlay outright would otherwise slip
+    // through (every negative assertion below would pass vacuously).
+    let overlay = service
+        .docs
+        .get(&app_uri)
+        .unwrap()
+        .overlay
+        .as_ref()
+        .expect("a real, active overlay exists for this document");
+    assert!(
+        overlay.symbols.contains_key("mylib::plusOne"),
+        "{:?}",
+        overlay.symbols.keys().collect::<Vec<_>>()
+    );
+    // The deprecation tag comes from the SIBLING's own doc, not this
+    // document's roster: `plusOne` carries `! [deprecated]`, `freshOne`
+    // (also exported by the sibling, so a live positive control rather
+    // than an untested field) does not.
+    let deprecated_of = |label: &str| {
+        call_candidates
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("{label} missing from {call_got:?}"))
+            .deprecated
+    };
+    assert!(deprecated_of("mylib::plusOne"), "{call_got:?}");
+    assert!(!deprecated_of("mylib::freshOne"), "{call_got:?}");
+
+    // A `bind` target: the same qualified label.
+    let bind_head = "\
+alphabet bits { '_', '1' }
+
+routine localR(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  bind ";
+    let bind_tail = "(t = ctl) as b1;\n  entry state main { [*] -> call b1() then main; }\n}\n";
+    let bind_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        bind_head,
+        "localR",
+        bind_tail,
+    ));
+    assert!(
+        bind_got.contains(&"mylib::plusOne".to_string()),
+        "{bind_got:?}"
+    );
+    assert!(
+        bind_got.contains(&"localR".to_string()),
+        "local control: {bind_got:?}"
+    );
+    assert!(
+        !bind_got.contains(&"main".to_string()),
+        "the sibling's machine entry is not a bind target: {bind_got:?}"
+    );
+
+    // R1: a graft target never sees the overlay — a local graph is the
+    // positive control that graft completion itself still works here.
+    let graft_head = "\
+alphabet bits { '_', '1' }
+
+graph localG(tape t: bits, state done) { entry state s { [*] -> done; } }
+
+machine {
+  tape ctl: bits;
+  entry graft ";
+    let graft_tail = "(t = ctl, done = fin) as seek;\n  state fin { [*] -> stop; }\n}\n";
+    let graft_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        graft_head,
+        "localG",
+        graft_tail,
+    ));
+    assert!(
+        graft_got.contains(&"localG".to_string()),
+        "local control: {graft_got:?}"
+    );
+    assert!(
+        !graft_got.contains(&"mylib::plusOne".to_string()),
+        "{graft_got:?}"
+    );
+
+    // R2: a binding NAME context (the callee's own parameter names) never
+    // sees the overlay — the positive control is the local routine's own
+    // parameter `t` still being offered.
+    let bname_head = "\
+alphabet bits { '_', '1' }
+
+routine localR(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  bind localR(";
+    let bname_tail = ") as b1;\n  entry state main { [*] -> call b1() then main; }\n}\n";
+    let bname_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        bname_head,
+        "t = ctl",
+        bname_tail,
+    ));
+    assert!(
+        bname_got.contains(&"t".to_string()),
+        "local param control: {bname_got:?}"
+    );
+    assert!(
+        !bname_got.contains(&"mylib::plusOne".to_string()),
+        "{bname_got:?}"
+    );
+    assert!(!bname_got.contains(&"mylib".to_string()), "{bname_got:?}");
+
+    // R2: a binding VALUE context (this world's own tapes/states) never
+    // sees the overlay — the positive control is the enclosing machine's
+    // own tape `ctl`.
+    let bvalue_head = "\
+alphabet bits { '_', '1' }
+
+routine localR(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  bind localR(t = ";
+    let bvalue_tail = ") as b1;\n  entry state main { [*] -> call b1() then main; }\n}\n";
+    let bvalue_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        bvalue_head,
+        "ctl",
+        bvalue_tail,
+    ));
+    assert!(
+        bvalue_got.contains(&"ctl".to_string()),
+        "local tape control: {bvalue_got:?}"
+    );
+    assert!(
+        !bvalue_got.contains(&"mylib::plusOne".to_string()),
+        "{bvalue_got:?}"
+    );
+
+    // R1/R2: a vector-cell glyph slot never sees the overlay — a cell's
+    // glyphs resolve through a LOCAL alphabet by definition. The local
+    // alphabet's own glyphs are the positive control.
+    let vcell_head = "\
+alphabet bits { '_', '1' }
+
+machine {
+  tape ctl: bits;
+  entry state main { [";
+    let vcell_tail = "] -> stop;\n  }\n}\n";
+    let vcell_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        vcell_head,
+        "'1'",
+        vcell_tail,
+    ));
+    assert!(
+        vcell_got.contains(&"'1'".to_string()),
+        "local glyph control: {vcell_got:?}"
+    );
+    assert!(
+        !vcell_got.contains(&"mylib::plusOne".to_string()),
+        "{vcell_got:?}"
+    );
+
+    // R1/R2: a binding map's source and destination glyph slots never see
+    // the overlay either — each resolves through a LOCAL alphabet (the
+    // host tape's, then the callee's own signature alphabet). The host
+    // and callee alphabets are deliberately DIFFERENT here (mirrors
+    // `a_map_pair_offers_the_host_alphabet_left_and_the_callee_alphabet_
+    // right`), so each side's own glyphs are a positive control that
+    // distinguishes the two.
+    let map_head = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+routine localR(tape t: wide) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call localR(t = ctl with map { ";
+    let map_tail = " }) then main;\n  }\n}\n";
+
+    let mapsrc_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        map_head,
+        "'0' -> 'a'",
+        map_tail,
+    ));
+    assert!(
+        mapsrc_got.contains(&"'0'".to_string()),
+        "host alphabet control: {mapsrc_got:?}"
+    );
+    assert!(
+        !mapsrc_got.contains(&"mylib::plusOne".to_string()),
+        "{mapsrc_got:?}"
+    );
+
+    let mapdst_head = format!("{map_head}'0' -> ");
+    let mapdst_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        &mapdst_head,
+        "'a'",
+        map_tail,
+    ));
+    assert!(
+        mapdst_got.contains(&"'a'".to_string()),
+        "callee alphabet control: {mapdst_got:?}"
+    );
+    assert!(
+        !mapdst_got.contains(&"mylib::plusOne".to_string()),
+        "{mapdst_got:?}"
+    );
+}
+
+#[test]
+fn definition_and_hover_reach_a_tmc_sibling() {
+    let dir = unique_tmp_dir("nav-tmc-sibling");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    // A real `?` doc line — the fixture that closes the gap left by every
+    // OTHER overlay test, none of which exercises `ExportedSym.doc` with
+    // an actual `Some(Doc)`.
+    let helper_src = "\
+alphabet b { '_', '0' }
+namespace ns {
+?Adds one to the number under the head.
+  export routine addOne(tape num: b) { entry state s { [*] -> return; } }
+}
+";
+    fs::write(dir.join("helper.tmc"), helper_src).unwrap();
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call ns::addOne() then main; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    service.did_update(&app_uri, app_src);
+    let helper_uri = file_uri(&dir.join("helper.tmc"));
+
+    let pos = pos_after(app_src, "call ", 5);
+
+    let target = service
+        .definition(&app_uri, pos)
+        .expect("the call target resolves through the overlay to the sibling's export");
+    assert_eq!(target.uri, helper_uri, "{target:?}");
+    assert_eq!(target.span, span_of(helper_src, "addOne"), "{target:?}");
+
+    let hover = service
+        .hover(&app_uri, pos)
+        .expect("hover resolves through the overlay to the sibling's export");
+    assert!(
+        hover
+            .text
+            .contains("Adds one to the number under the head."),
+        "the sibling's OWN doc text must surface, not merely SOME text: {hover:?}"
+    );
+}
+
+#[test]
+fn definition_reaches_a_tma_sibling_and_tmo_names_navigate_null() {
+    let dir = unique_tmp_dir("nav-tma-tmo");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","sibling.tma","sibling.tmo"]}}}}"#,
+    )
+    .unwrap();
+
+    // Both names are `::`-qualified — a BARE, unqualified external
+    // reference isn't recognized as an `External` navigation target at all
+    // (`external_path` only resolves a `::`-qualified name or a `use`-bound
+    // alias), a pre-existing single-file limitation this test must not
+    // exercise by accident.
+    let tma_src = ".func ns::tmaFn\nhlt\n";
+    fs::write(dir.join("sibling.tma"), tma_src).unwrap();
+
+    let tmo_bytes = crate::compiler::compile(
+        "alphabet b { '_', '0' }\nnamespace ns2 {\n  export routine tmoFn(tape t: b) { entry state s { [*] -> return; } }\n}\n",
+        crate::compiler::CompileOptions::default(),
+    )
+    .expect("tmoFn compiles")
+    .object
+    .to_bytes();
+    fs::write(dir.join("sibling.tmo"), &tmo_bytes).unwrap();
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape ctl: bits;
+  entry state s { ['_'] -> call ns::tmaFn() then g; ['1'] -> call ns2::tmoFn() then g; }
+  state g { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    service.did_update(&app_uri, app_src);
+
+    // The `.tma` sibling's non-`local` `.func` carries its own name span —
+    // real navigation, URI and span alike.
+    let tma_pos = pos_after(app_src, "call ns::tmaFn", 5);
+    let target = service
+        .definition(&app_uri, tma_pos)
+        .expect("a .tma sibling's non-local func navigates");
+    assert_eq!(target.uri, file_uri(&dir.join("sibling.tma")), "{target:?}");
+    assert_eq!(target.span, span_of(tma_src, "ns::tmaFn"), "{target:?}");
+
+    // The `.tmo` sibling's defined symbol carries no source location at
+    // all — the overlay OWNS the name (it resolves calls, refines
+    // diagnostics), but navigation must answer null rather than guess.
+    let tmo_pos = pos_after(app_src, "call ns2::tmoFn", 5);
+    assert_eq!(
+        service.definition(&app_uri, tmo_pos),
+        None,
+        "a `.tmo`-backed overlay symbol carries no source location to jump to"
+    );
+}
+
+#[test]
+fn a_shadowing_sibling_wins_over_the_stdlib_at_every_leg() {
+    // The plan's governing rule, stated in the brief: resolution order is
+    // local file, then declared sources, then declared libraries
+    // (first-wins), then the embedded stdlib LAST — mirroring the
+    // linker's own user-object-beats-library precedence. A sibling that
+    // mangles to the IDENTICAL qualified name an embedded roster entry
+    // carries is the exact shadowed case the sibling crate shipped
+    // BACKWARDS (stdlib-first) and needed a dedicated follow-up fix for.
+    // The faithfulness fixtures elsewhere in this file only cover the
+    // UNSHADOWED path, where overlay and stdlib agree by construction —
+    // this is the one where they disagree, and the sibling's own answer
+    // must win at every leg: navigation, hover, and completion's dedupe.
+    let dir = unique_tmp_dir("shadow-stdlib");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    // Nested namespaces mangle to `full_name`'s "::"-joined form exactly
+    // like the embedded roster's own entries — `std::binaryNumbers::
+    // goToNumber` here is the SAME string the roster carries for the
+    // real routine of that name.
+    let helper_src = "\
+alphabet b { '_', '0' }
+namespace std {
+  namespace binaryNumbers {
+? Shadows the embedded stdlib routine of the same qualified name.
+    export routine goToNumber(tape num: b) { entry state s { [*] -> return; } }
+  }
+}
+";
+    fs::write(dir.join("helper.tmc"), helper_src).unwrap();
+    let helper_uri = file_uri(&dir.join("helper.tmc"));
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call std::binaryNumbers::goToNumber() then main; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    service.did_update(&app_uri, app_src);
+    let pos = pos_after(app_src, "call std::binaryNumbers::goToNumber", 5);
+
+    // Navigation: the SIBLING's own declaration, never the materialized
+    // stdlib copy.
+    let target = service
+        .definition(&app_uri, pos)
+        .expect("the shadowing sibling still resolves");
+    assert_eq!(target.uri, helper_uri, "{target:?}");
+    assert_eq!(target.span, span_of(helper_src, "goToNumber"), "{target:?}");
+
+    // Hover: the SIBLING's own doc line, never the embedded routine's.
+    let hover = service
+        .hover(&app_uri, pos)
+        .expect("the shadowing sibling still hovers");
+    assert!(
+        hover.text.contains("Shadows the embedded stdlib routine"),
+        "{hover:?}"
+    );
+
+    // Completion: exactly ONE candidate for the shadowed label — the
+    // dedupe proof, not merely a shadow-blind union that would surface it
+    // twice.
+    let call_head = "\
+alphabet bits { '_', '1' }
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call ";
+    let call_tail = "() then main;\n  }\n}\n";
+    let call_got = complete_typing_in(
+        &mut service,
+        &app_uri,
+        call_head,
+        "std::binaryNumbers::goToNumber",
+        call_tail,
+    );
+    let matches = call_got
+        .iter()
+        .filter(|c| c.label == "std::binaryNumbers::goToNumber")
+        .count();
+    assert_eq!(
+        matches,
+        1,
+        "the shadowed label must surface exactly once: {:?}",
+        labels(&call_got)
+    );
+
+    // Positive control: a DIFFERENT, genuinely UNSHADOWED roster entry
+    // still appears — proving the whole stdlib completion lane didn't
+    // die, rather than merely deduplicating one label away.
+    assert!(
+        labels(&call_got).contains(&"std::binaryNumbersBare::plusOne".to_string()),
+        "{:?}",
+        labels(&call_got)
+    );
+}
+
+#[test]
+fn stdlib_false_gates_std_surfaces_tm_side() {
+    // Task 6/7's matrix, TM spellings: every std surface this service
+    // offers — completion, hover, go-to-definition — turns off under a
+    // manifest's `"stdlib": false`, while a live positive control (a
+    // genuinely LOCAL declaration, in the SAME project) keeps every
+    // feature working. Without each control, a regression that broke a
+    // feature OUTRIGHT whenever `state.overlay` is `Some` would pass every
+    // negative assertion here vacuously.
+    let dir = unique_tmp_dir("stdlib-false-tm");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"stdlib":false,"targets":{"app":{"sources":["app.tmc"]}}}}"#,
+    )
+    .unwrap();
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+
+?Local doc.
+routine localR(tape t: bits) { entry state s { [*] -> return; } }
+
+use std::binaryNumbers::goToNumber;
+
+machine {
+  tape ctl: bits;
+  entry state main {
+    ['_'] -> call localR(t = ctl) then main;
+    ['1'] -> call plusOne() then main;
+  }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    // Gate 1 + control: no "std" root in the `use` path root list, but the
+    // genuinely local export is unaffected.
+    let use_got = labels(&service.completion(&app_uri, pos_after(app_src, "use ", 4)));
+    assert!(!use_got.contains(&"std".to_string()), "{use_got:?}");
+    assert!(
+        use_got.contains(&"localR".to_string()),
+        "a genuinely local export must still be offered under stdlib:false: {use_got:?}"
+    );
+
+    // Gate 2 + control: no qualified `std::` label at a call target, but
+    // the local routine still completes there.
+    let call_head = "\
+alphabet bits { '_', '1' }
+
+routine localR(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call ";
+    let call_tail = "(t = ctl) then main;\n  }\n}\n";
+    let call_got = labels(&complete_typing_in(
+        &mut service,
+        &app_uri,
+        call_head,
+        "localR",
+        call_tail,
+    ));
+    assert!(
+        !call_got.iter().any(|l| l.starts_with("std::")),
+        "{call_got:?}"
+    );
+    assert!(
+        call_got.contains(&"localR".to_string()),
+        "a genuinely local routine must still complete under stdlib:false: {call_got:?}"
+    );
+
+    // Gates 3 + 4 + controls: no std hover, no materialized go-to-
+    // definition — but a genuinely local call in the SAME project keeps
+    // hovering and navigating.
+    let std_src = "\
+alphabet bits { '_', '1' }
+use std::binaryNumbers::goToNumber;
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call std::binaryNumbers::goToNumber() then main; }
+}
+";
+    service.did_update(&app_uri, std_src);
+    let std_pos = pos_after(std_src, "call std::binaryNumbers::goToNumber", 5);
+    assert_eq!(
+        service.hover(&app_uri, std_pos),
+        None,
+        "stdlib:false kills std hover"
+    );
+    assert_eq!(
+        service.definition(&app_uri, std_pos),
+        None,
+        "stdlib:false kills the materialized jump"
+    );
+
+    let local_src = "\
+alphabet bits { '_', '1' }
+
+?Local doc.
+routine localR(tape t: bits) { entry state s { [*] -> return; } }
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call localR(t = ctl) then main; }
+}
+";
+    service.did_update(&app_uri, local_src);
+    let local_pos = pos_after(local_src, "call localR", 5);
+    let local_hover = service
+        .hover(&app_uri, local_pos)
+        .expect("a local, non-std call still hovers under stdlib:false");
+    assert!(local_hover.text.contains("Local doc."), "{local_hover:?}");
+    let local_target = service
+        .definition(&app_uri, local_pos)
+        .expect("a local, non-std call still navigates under stdlib:false");
+    assert_eq!(local_target.uri, app_uri);
+    assert_eq!(local_target.span, span_of(local_src, "localR"));
+
+    // Gate 5: a bare std-shaped call still warns — `stdlib:false` only
+    // ever removes `std::`-keyed names from `Overlay::defined_names`; a
+    // BARE `plusOne` (unrelated to the `goToNumber` import above, so
+    // `resolve_written`'s import-binding leg can't quietly resolve it
+    // either) was never one of those — the stdlib exports only namespaced
+    // paths, never a bare name — so nothing new is suppressed here.
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`plusOne`")),
+        "a bare plusOne() is not a std:: name — must keep warning: {diags:?}"
+    );
+}
+
+// --- Task 17: overlay integration matrix — the remaining cells the plan
+// calls for, each a real `TmcLanguageService` driven through `did_update` +
+// feature calls over a temp tree. Two cells the matrix names are already
+// pinned elsewhere and are NOT repeated here:
+//   - `stdlib_false_gates_std_surfaces_tm_side` (above) is already the
+//     stdlib:false matrix, TM spellings, with a live control on every gate.
+//   - `overlay::tests::broken_sibling_contributes_nothing_others_still_do`
+//     already pins one unparseable sibling contributing nothing while a
+//     fine sibling's export still does — at the `build_overlay` layer,
+//     which is the exact claim; a service-level repeat would add nothing.
+// The TM-only overlay-leak negative is likewise not a new test here — see
+// the comment above `call_and_bind_target_completion_offers_sibling_
+// exported_routines`, which already covers it. ---
+
+#[test]
+fn manifest_edit_changes_the_next_answer() {
+    let dir = unique_tmp_dir("manifest-edit");
+    let manifest_path = dir.join("tmt.json");
+    fs::write(
+        &manifest_path,
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine bare(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    // A fully-formed `use` statement already in place — `Context::UsePath`
+    // doesn't care what the path already spells, only that the cursor sits
+    // somewhere inside one (mirrors `use_path_completion_offers_sibling_
+    // namespaces_and_routines`, which positions the cursor the same way).
+    let app_src = "\
+alphabet bits { '_', '1' }
+use std::binaryNumbers::goToNumber;
+
+machine {
+  tape t: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let pos = pos_after(app_src, "use ", 4);
+
+    service.did_update(&app_uri, app_src);
+    let before = labels(&service.completion(&app_uri, pos));
+    assert!(
+        before.contains(&"bare".to_string()),
+        "the sibling's export starts out visible: {before:?}"
+    );
+
+    // Rewrite the manifest dropping helper.tmc from the target, with a
+    // guaranteed-newer mtime (the manifest cache is mtime-keyed; the
+    // filesystem's own timestamp granularity is not to be trusted in a
+    // fast test — mirrors `overlay::tests::manifest_cache_is_mtime_keyed_
+    // and_bounded`'s own rewrite sequence).
+    let old_mtime = fs::metadata(&manifest_path).unwrap().modified().unwrap();
+    fs::write(
+        &manifest_path,
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&manifest_path)
+        .unwrap()
+        .set_modified(old_mtime + Duration::from_secs(2))
+        .unwrap();
+
+    // Core's own `republish_all` re-runs `did_update` on every open
+    // document when a watched `tmt.json` changes in production; a test
+    // drives that re-update itself.
+    service.did_update(&app_uri, app_src);
+
+    // A positive control before re-checking the narrowed completion list:
+    // `app.tmc` is still a target member post-edit (the rewritten manifest
+    // only dropped `helper.tmc` from the sources, not the target itself),
+    // so the overlay must still be `Some` — a regression where the second
+    // `did_update` degraded to `overlay: None` (project membership lost
+    // outright, not merely narrowed) would also make `!after.contains
+    // (&"bare")` pass below, since a `None` overlay offers no sibling
+    // exports either.
+    assert!(
+        service.docs.get(&app_uri).unwrap().overlay.is_some(),
+        "app.tmc must still resolve to a project overlay after the edit"
+    );
+
+    let after = labels(&service.completion(&app_uri, pos));
+    assert!(
+        !after.contains(&"bare".to_string()),
+        "the manifest edit must drop the now-undeclared sibling: {after:?}"
+    );
+}
+
+#[test]
+fn untitled_documents_keep_the_single_file_view() {
+    // An untitled buffer has no filesystem path at all, so it can never be
+    // discovered as a project member. This closes the two legs that
+    // actually consume a `None` overlay: cross-file refinement stays off
+    // (a bare undeclared call keeps warning), and the embedded stdlib
+    // surface (hover, go-to-definition) is exactly what it was before the
+    // overlay feature existed.
+    let src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s {
+    ['_'] -> call ghost() then g;
+    ['1'] -> call std::binaryNumbers::goToNumber() then g;
+  }
+  state g { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let diags = service.did_update(&uri, src);
+
+    assert!(
+        service.docs.get(&uri).unwrap().overlay.is_none(),
+        "no `file:` path at all — single-file degrade"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`ghost`")),
+        "no overlay to refine the bare call away: {diags:?}"
+    );
+
+    let std_pos = pos_after(src, "call std::binaryNumbers::goToNumber", 5);
+    let hover = service
+        .hover(&uri, std_pos)
+        .expect("std:: hover is untouched without an overlay");
+    // Deliberately coupled to `goToNumber`'s own doc prose (the same
+    // substring `hover_on_a_std_call_target_returns_its_doc` pins in full)
+    // — this test's job is proving the untitled route reaches the SAME
+    // embedded doc, not re-deriving its wording.
+    assert!(
+        hover
+            .text
+            .contains("Walk right to the current number's end marker"),
+        "the embedded stdlib's own doc: {hover:?}"
+    );
+
+    let target = service
+        .definition(&uri, std_pos)
+        .expect("std:: go-to-definition is untouched without an overlay");
+    let std_uri =
+        crate::stdlib::materialized_std_uri().expect("materialization succeeds in this env");
+    assert_eq!(target.uri, std_uri);
+}
+
+#[test]
+fn dotdot_declared_source_gets_exact_features_when_opened_from_the_tree() {
+    // Mirrors `overlay::tests::dotdot_membership_resolves_lexically`,
+    // driven through the real service instead of `project_view` directly:
+    // `proj/tmt.json` declares `"../shared.tmc"`, and `proj/app.tmc` — a
+    // member of `proj`'s own `app` target — is the document actually
+    // opened, so discovery starts at `proj/`, the opened document's own
+    // directory. The sibling's export is reached through a `::`-qualified
+    // name (`sh::shared`): `external_path` never resolves a bare,
+    // unqualified reference (`definition_reaches_a_tma_sibling_and_tmo_
+    // names_navigate_null` documents that limitation), so a bare call is
+    // needed for navigation to even have something to resolve — but a
+    // QUALIFIED name (any `::`-qualified reference, not only a resolved
+    // one) never produces `undeclared-external` in the first place
+    // (`Analysis::warn_undeclared_if_bare`'s own `!name.contains("::")`
+    // gate), so this test carries the `../`-declared-source claim through
+    // `definition`/`hover` alone rather than through a diagnostics
+    // assertion that would pass identically with no `../` source declared
+    // at all (confirmed by temporarily dropping the declaration and
+    // rerunning: `definition` failed exactly as expected, at its own
+    // `.expect`, with no diagnostics assertion anywhere near the failure).
+    let root = unique_tmp_dir("dotdot-service");
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(
+        proj.join("tmt.json"),
+        r#"{"project":{"sources":["../shared.tmc"],"targets":{"app":{"sources":["app.tmc"]}}}}"#,
+    )
+    .unwrap();
+    let shared_src = "\
+alphabet b { '_', '0' }
+namespace sh {
+?Shared doc.
+  export routine shared(tape num: b) { entry state s { [*] -> return; } }
+}
+";
+    fs::write(root.join("shared.tmc"), shared_src).unwrap();
+
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&proj.join("app.tmc"));
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state main { [*] -> call sh::shared() then main; }
+}
+";
+    service.did_update(&app_uri, app_src);
+
+    let pos = pos_after(app_src, "call sh::shared", 5);
+    let target = service
+        .definition(&app_uri, pos)
+        .expect("../shared.tmc's export navigates");
+    assert_eq!(
+        target.uri,
+        file_uri(&root.join("shared.tmc")),
+        "must resolve to shared.tmc's own file, not a literal `..` segment"
+    );
+    assert_eq!(target.span, span_of(shared_src, "shared"), "{target:?}");
+
+    let hover = service
+        .hover(&app_uri, pos)
+        .expect("../shared.tmc's own doc surfaces through the overlay");
+    assert!(hover.text.contains("Shared doc."), "{hover:?}");
+}
+
+#[test]
+fn semantic_tokens_are_unchanged_by_the_overlay() {
+    // R2: the overlay must never touch semantic tokens — a purely lexical
+    // layer with no resolution tier. The SAME text, analyzed once with no
+    // overlay at all and once inside a real project whose sibling
+    // genuinely resolves the fixture's own bare call, must produce
+    // byte-for-byte identical token streams.
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call helper() then main; }
+}
+";
+    let (mut plain_service, plain_uri) = opened(app_src);
+    let without_overlay = plain_service
+        .semantic_tokens(&plain_uri)
+        .expect("tokens without an overlay");
+
+    let dir = unique_tmp_dir("tokens-overlay");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine helper(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+    let mut overlaid_service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    overlaid_service.did_update(&app_uri, app_src);
+    assert!(
+        overlaid_service
+            .docs
+            .get(&app_uri)
+            .unwrap()
+            .overlay
+            .is_some(),
+        "sanity: a real, active overlay exists here"
+    );
+    let with_overlay = overlaid_service
+        .semantic_tokens(&app_uri)
+        .expect("tokens with an overlay");
+
+    assert_eq!(without_overlay, with_overlay);
 }

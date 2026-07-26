@@ -28,10 +28,10 @@
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{DefTarget, HoverContent};
 
-use super::{DocState, render_doc, span_touches};
+use super::{DocState, render_doc, span_touches, std_enabled};
 use crate::compiler::{Resolved, WorldKind, full_name};
 use crate::parser::{
-    Alphabet, Bind, BindingArg, BindingValue, Continuation, Graft, Program, SigParamKind,
+    Alphabet, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Program, SigParamKind,
     Signature, State, Transition,
 };
 
@@ -54,6 +54,16 @@ enum Target {
     /// A signature parameter of another world, named on a binding
     /// argument's left-hand side.
     Param { world: String, name: String },
+    /// A `call`/`bind` target this document does not declare: a
+    /// `::`-qualified name, or the full path a `use` binding names. `path`
+    /// is exactly what a cross-unit reference must be — never re-resolved
+    /// against this document's own tables, since the whole point is a name
+    /// they do not contain. Resolved against the cross-file overlay first,
+    /// the standard library's materialized on-disk copy last
+    /// (`external_declaration`, docs/lsp.md (materialized standard
+    /// library)); a `graft` never produces this target — grafting splices
+    /// a graph's source, which a link boundary does not carry.
+    External { path: String },
 }
 
 /// A world seen uniformly, whatever its carrier: the machine block's tape
@@ -177,6 +187,23 @@ fn resolve_written(
     None
 }
 
+/// Resolves a `call`/`bind` target AS WRITTEN to a full path OUTSIDE this
+/// document, for when [`resolve_written`] has already found nothing local:
+/// a `::`-qualified name is used as-is, else a bare name is looked up
+/// against the document's own `use` bindings (alias → full path). Unlike
+/// `resolve_written`, the result is never checked against a local table —
+/// that is exactly what the caller already ruled out.
+fn external_path(program: &Program, written: &str) -> Option<String> {
+    if written.contains("::") {
+        return Some(written.to_string());
+    }
+    program
+        .imports
+        .iter()
+        .find(|import| import.binding() == written)
+        .map(|import| import.full_path())
+}
+
 fn alphabet_exists(program: &Program) -> impl Fn(&str) -> bool + '_ {
     move |name: &str| {
         program
@@ -281,13 +308,14 @@ fn reference_in_world(
     }
     for bind in world.binds {
         if span_touches(bind.target.span, pos) {
-            let mangled = resolve_written(
-                program,
-                &bind.target.joined(),
-                world.ns,
-                world_exists(program),
-            )?;
-            return Some((Target::World(mangled), bind.target.span));
+            let written = bind.target.joined();
+            let hit = match resolve_written(program, &written, world.ns, world_exists(program)) {
+                Some(mangled) => Target::World(mangled),
+                None => Target::External {
+                    path: external_path(program, &written)?,
+                },
+            };
+            return Some((hit, bind.target.span));
         }
         if span_touches(bind.as_name.span, pos) {
             return Some((
@@ -336,9 +364,18 @@ fn reference_in_world(
                                 target.span,
                             ));
                         }
-                        let mangled =
-                            resolve_written(program, &written, world.ns, world_exists(program))?;
-                        return Some((Target::World(mangled), target.span));
+                        let hit = match resolve_written(
+                            program,
+                            &written,
+                            world.ns,
+                            world_exists(program),
+                        ) {
+                            Some(mangled) => Target::World(mangled),
+                            None => Target::External {
+                                path: external_path(program, &written)?,
+                            },
+                        };
+                        return Some((hit, target.span));
                     }
                     if let Continuation::State { name, span } = then {
                         let at = name_span(*span, name);
@@ -438,7 +475,7 @@ fn binding_args_reference(
 }
 
 /// Where a target is declared, in this document.
-fn declaration_span(program: &Program, target: &Target) -> Option<Span> {
+fn declaration_span(state: &DocState, program: &Program, target: &Target) -> Option<Span> {
     match target {
         Target::Alphabet(mangled) => program
             .alphabets
@@ -516,7 +553,62 @@ fn declaration_span(program: &Program, target: &Target) -> Option<Span> {
                     .map(|p| p.name_span)
             })
         }
+        // Declared outside this document; `definition` special-cases the
+        // URI, but still drives the SPAN through here, off the overlay or
+        // the stdlib roster.
+        Target::External { path } => external_declaration(state, path).map(|(_, span)| span),
     }
+}
+
+/// Where an `External` target is declared, as `(uri, span)`: the
+/// cross-file overlay (docs/lsp.md (project overlay)) is consulted FIRST —
+/// a sibling that OWNS `path` answers here even when it carries no
+/// source location of its own (a `.tma`/`.tmo` sibling, or a linked
+/// library), since ownership is exactly what makes the embedded stdlib's
+/// own, possibly same-named, entry the WRONG place to jump to. This
+/// mirrors the linker's own user-sources-beat-libraries precedence
+/// (docs/tmt/project.md (schema reference)): a project that writes its
+/// own `namespace std { export routine goToNumber … }` shadows the
+/// embedded routine of the same mangled name, and the overlay already
+/// resolves that the same way the linker does. Only a genuine overlay
+/// MISS falls through to the standard library's materialized on-disk
+/// copy, matched against its roster by full path (docs/lsp.md
+/// (materialized standard library)) and itself gated on [`std_enabled`].
+fn external_declaration(state: &DocState, path: &str) -> Option<(String, Span)> {
+    if let Some(overlay) = state.overlay.as_ref()
+        && let Some(sym) = overlay.symbols.get(path)
+    {
+        return sym.target.clone();
+    }
+    if !std_enabled(state) {
+        return None;
+    }
+    let entry = crate::stdlib::roster()
+        .iter()
+        .find(|e| e.full_path == *path)?;
+    let uri = crate::stdlib::materialized_std_uri()?;
+    Some((uri.to_string(), entry.name_span))
+}
+
+/// An `External` target's own documentation, resolved by the SAME
+/// overlay-first, stdlib-last precedence [`external_declaration`] uses
+/// for its location: the overlay's contributing sibling's own `Doc` when
+/// the overlay owns `path` at all — a `.tma`/`.tmo`-backed sibling owns
+/// the path but carries no `Doc`, and that still short-circuits here,
+/// since falling through would render an unrelated stdlib entry's doc
+/// for a name the overlay itself defines. Only a genuine overlay miss
+/// falls through to the standard library's own doc map, gated on
+/// [`std_enabled`].
+fn external_doc<'a>(state: &'a DocState, path: &str) -> Option<&'a Doc> {
+    if let Some(overlay) = state.overlay.as_ref()
+        && let Some(sym) = overlay.symbols.get(path)
+    {
+        return sym.doc.as_ref();
+    }
+    if !std_enabled(state) {
+        return None;
+    }
+    crate::stdlib::docs().get(path)
 }
 
 fn graft_of<'a>(program: &'a Program, world: &str, instance: &str) -> Option<&'a Graft> {
@@ -535,9 +627,16 @@ fn graft_of<'a>(program: &'a Program, world: &str, instance: &str) -> Option<&'a
 pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTarget> {
     let program = state.program.as_ref()?;
     let (target, origin) = reference_at(program, pos)?;
-    let span = declaration_span(program, &target)?;
+    // Every target but `External` is declared IN this document; `External`
+    // is declared wherever `external_declaration` found it — a sibling
+    // through the overlay, or the stdlib's materialized copy — so it takes
+    // a different URI than `uri`.
+    let (doc_uri, span) = match &target {
+        Target::External { path } => external_declaration(state, path)?,
+        _ => (uri.to_string(), declaration_span(state, program, &target)?),
+    };
     Some(DefTarget {
-        uri: uri.to_string(),
+        uri: doc_uri,
         span,
         origin: Some(origin),
     })
@@ -546,13 +645,14 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
 pub(super) fn hover(state: &DocState, pos: Pos) -> Option<HoverContent> {
     let program = state.program.as_ref()?;
     let (target, origin) = reference_at(program, pos)?;
-    let text = render(program, state.resolved.as_ref(), &target)?;
+    let text = render(program, state, &target)?;
     Some(HoverContent { text, span: origin })
 }
 
 /// The hover body for a target: a signature line first, then the
 /// declaration's doc and deprecation callouts under it.
-fn render(program: &Program, resolved: Option<&Resolved>, target: &Target) -> Option<String> {
+fn render(program: &Program, state: &DocState, target: &Target) -> Option<String> {
+    let resolved = state.resolved.as_ref();
     let (head, doc_key) = match target {
         Target::Alphabet(mangled) => {
             let alphabet = program
@@ -584,10 +684,35 @@ fn render(program: &Program, resolved: Option<&Resolved>, target: &Target) -> Op
             )
         }
         Target::Param { name, .. } => (format!("binding argument {name}"), None),
+        // The qualified path IS the head — a requesting document's own
+        // analysis never holds a std entry, so there is no local signature
+        // to render one from (unlike `World`, above).
+        Target::External { path } => (path.clone(), Some(path)),
     };
     let doc = doc_key
-        .and_then(|key| resolved.and_then(|r| r.docs.get(key)))
+        .and_then(|key| match target {
+            // `external_doc` carries its OWN overlay-first/stdlib-last
+            // precedence, matching `external_declaration`'s — a plain
+            // `resolved.docs` lookup would never hit for an External path
+            // anyway (that map is keyed by this document's OWN mangled
+            // names), and unconditionally falling through to
+            // `crate::stdlib::docs()` here would skip both the overlay leg
+            // and the `std_enabled` gate.
+            Target::External { .. } => external_doc(state, key),
+            _ => resolved
+                .and_then(|r| r.docs.get(key))
+                .or_else(|| crate::stdlib::docs().get(key)),
+        })
         .and_then(render_doc);
+    // Every other head carries real information the source text alone does
+    // not (a signature, a resolved binding, a world/alphabet name) — worth
+    // showing even undocumented. `External`'s head is just the reference's
+    // own qualified text: with no doc body it would be a hover that only
+    // echoes what the cursor is already sitting on, which the emptiness
+    // rule forbids (docs/lsp.md (hover)).
+    if doc.is_none() && matches!(target, Target::External { .. }) {
+        return None;
+    }
     Some(match doc {
         Some(body) => format!("{head}\n\n{body}"),
         None => head,

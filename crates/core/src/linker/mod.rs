@@ -429,6 +429,62 @@ pub fn link(
     })
 }
 
+/// Which input supplied a winning definition: index into the user-object
+/// list or the library list as passed to [`resolve_names`] / [`link`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolOrigin {
+    Object(usize),
+    Library(usize),
+}
+
+/// One reached function: its linked symbol name and where its winning
+/// definition came from (docs/core.md (name resolution)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedName {
+    pub name: String,
+    pub origin: SymbolOrigin,
+}
+
+/// The linker's name-resolution answer, without layout: which symbols the
+/// reachability BFS reaches (in BFS order, with provenance) and which
+/// winning definitions it drops. This is the query surface editor tooling
+/// compares itself against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNames {
+    pub reached: Vec<ResolvedName>,
+    pub dropped: Vec<String>,
+}
+
+/// The name-resolution half of [`link`] as a standalone query
+/// (docs/core.md (name resolution)): the same namespace-building and BFS
+/// reachability `link` runs, reported with provenance and without layout
+/// or relaxation. Consumers that only need "what does the linker resolve,
+/// and from where" — editor tooling comparing itself against the real
+/// linker, say — call this instead of running a full link.
+pub fn resolve_names(
+    objects: &[ObjectFile],
+    libraries: &[ObjectFile],
+    entry: &str,
+) -> Result<ResolvedNames, LinkError> {
+    let resolved = resolve::resolve(objects, libraries, entry)?;
+    let n = objects.len();
+    Ok(ResolvedNames {
+        reached: resolved
+            .order
+            .iter()
+            .map(|f| ResolvedName {
+                name: f.name.clone().into_owned(),
+                origin: if f.origin < n {
+                    SymbolOrigin::Object(f.origin)
+                } else {
+                    SymbolOrigin::Library(f.origin - n)
+                },
+            })
+            .collect(),
+        dropped: resolved.dropped.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

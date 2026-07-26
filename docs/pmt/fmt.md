@@ -1,13 +1,17 @@
-# Formatting `.pmc` — `pmt fmt`
+# Formatting `.pmc`/`.pma` — `pmt fmt`
 
-`pmt fmt` reprints a `.pmc` file to one canonical layout — indentation,
-label/command alignment, comma-group line breaks, blank lines, and
-comment position. It is the fix side of `pmt lint`'s `line-too-long`
-finding (`docs/pmt/lint.md`): a line that only needs rewrapping, fmt rewraps
-it. fmt changes whitespace and comment placement only — it never touches
-a token. Leading zeros on a label stay leading zeros, `@goToEnd` stays
-`@goToEnd`; renaming, reordering `use` paths, and rewriting numbers are
-lint's or the author's job, not fmt's.
+`pmt fmt` reprints a source file to one canonical layout. Each input's
+extension picks its formatter: a `.pmc` file goes through the language's
+own printer — indentation, label/command alignment, comma-group line
+breaks, blank lines, and comment position, described on this page; a
+`.pma` file goes through the canonical assembly grid shared with the rest
+of the toolchain (`docs/formats.md`; see **`.pma` formatting**, below). For
+`.pmc`, it is the fix side of `pmt lint`'s `line-too-long` finding
+(`docs/pmt/lint.md`): a line that only needs rewrapping, fmt rewraps it.
+In either language, fmt changes whitespace and comment placement only —
+it never touches a token. Leading zeros on a label stay leading zeros,
+`@goToEnd` stays `@goToEnd`; renaming, reordering `use` paths, and
+rewriting numbers are lint's or the author's job, not fmt's.
 
 ## Indentation
 
@@ -213,6 +217,36 @@ Canonical intra-statement spacing, independent of what the source wrote:
 A spaced form the grammar still accepts (`1 : right;`, `std :: goToEnd`)
 is normalized to the tight form above; fmt never strips a token, so a
 mandatory pair of call parens (`@f();`) is left exactly as written.
+
+## `.pma` formatting
+
+A `.pma` file formats through the canonical assembly grid — labels,
+mnemonics, and operands in fixed columns — shared with the toolchain's
+other assembly dialect and documented with the format itself
+(`docs/formats.md`). `pmt compile -S` and `pmt dis` already emit this
+grid directly, so formatting their output is always a no-op; `pmt fmt` is
+what enforces it on hand-written or hand-edited `.pma` source. A real
+`pmt compile -S` output, already canonical:
+
+```
+.func scan local
+L1:
+        rgt
+        jnm     L3
+        jmp     L1
+L3:
+        wr      1
+        ret
+.func main
+        call    scan
+        stp
+```
+
+The grid is whitespace-only and idempotent on the same terms as the
+`.pmc` printer above. Rewrapping an overlong line is not part of it: a
+`.pma` line over 80 characters — a long callee name past a `call`
+mnemonic, say — stays reported by `line-too-long` after formatting, the
+same as an unwrappable `.pmc` line.
 
 ## `--check`, stdin, and exit codes
 

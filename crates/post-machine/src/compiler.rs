@@ -926,6 +926,29 @@ fn flatten(program: crate::parser::Program) -> Flattened {
     }
 }
 
+/// The name inside the first backtick pair of an `undeclared-external`
+/// message — this function's own fixed format
+/// ("call to undeclared external `NAME` — ..."), pinned by
+/// `undeclared_name_matches_the_warning_format` below.
+pub(crate) fn undeclared_name(message: &str) -> Option<&str> {
+    let start = message.find('`')? + 1;
+    let rest = &message[start..];
+    Some(&rest[..rest.find('`')?])
+}
+
+/// The build driver and the language server refine this warning the same
+/// way wherever a full link set is declared: a bare call the declared set
+/// defines stops warning (docs/pmt/cli.md (undeclared-external)).
+pub(crate) fn refine_undeclared(
+    diags: &mut Vec<Diagnostic>,
+    defined: &std::collections::HashSet<String>,
+) {
+    diags.retain(|d| {
+        !(d.code == "undeclared-external"
+            && undeclared_name(&d.message).is_some_and(|n| defined.contains(n)))
+    });
+}
+
 /// The assembler recorded `(code_offset, pma_line)`; compose with the
 /// codegen's `(pma_line, pmc_line)` map so debug info speaks `.pmc`.
 /// Offsets with no source correspondence (synthetic returns) are dropped.
@@ -944,6 +967,8 @@ fn remap_debug_lines(object: &mut ObjectFile, line_map: &[(u32, u32)]) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::lexer::TokenKind;
     use mtc_core::formats::object::SymbolDef;
@@ -1666,5 +1691,63 @@ main() { mark; }
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "undefined-label");
+    }
+
+    /// Pins the extraction against this module's REAL warning format — if
+    /// the message ever changes shape, this fails here rather than
+    /// silently breaking the refinement (moved from cli/driver.rs, which
+    /// now delegates to `refine_undeclared` here).
+    #[test]
+    fn undeclared_name_matches_the_warning_format() {
+        let out = compile("main() { @go(); }", CompileOptions::default()).unwrap();
+        let diag = out
+            .report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "undeclared-external")
+            .expect("bare @go() warns");
+        assert_eq!(undeclared_name(&diag.message), Some("go"));
+    }
+
+    #[test]
+    fn refine_undeclared_drops_only_defined_undeclared_externals() {
+        // All three diagnostics come from a real compile — not hand-typed
+        // strings — so this test cannot silently drift away from the
+        // compiler's actual message shapes the way a copied literal could.
+        let out = compile(
+            "use ghost; main() { @a(); @b(); }",
+            CompileOptions::default(),
+        )
+        .unwrap();
+        let mut diags = out.report.diagnostics;
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == "undeclared-external")
+                .count(),
+            2,
+            "both bare calls should warn undeclared"
+        );
+        assert!(diags.iter().any(|d| d.code == "unused-import"));
+
+        let defined: HashSet<String> = ["a".to_string()].into_iter().collect();
+        refine_undeclared(&mut diags, &defined);
+
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == "undeclared-external" && d.message.contains("`a`")),
+            "the defined name's warning is dropped"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "undeclared-external" && d.message.contains("`b`")),
+            "the undefined name's warning survives"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "unused-import"),
+            "unrelated diagnostics are untouched"
+        );
     }
 }

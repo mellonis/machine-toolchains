@@ -376,7 +376,7 @@ pub(super) fn read_object(path: &Path) -> Result<ObjectFile, String> {
     ObjectFile::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-pub(super) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, String> {
+pub(crate) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, String> {
     for dir in dirs {
         let candidate = Path::new(dir).join(format!("{name}.tmo"));
         if candidate.exists() {

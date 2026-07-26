@@ -230,8 +230,10 @@ machine {
       `markSpot` in the `call markSpot(...)` line. Confirm it jumps to the
       `routine markSpot(tape t: marks) {` declaration in this file. The
       whole-file underline on hover is the known limitation above — the
-      jump itself must land correctly. Navigation is **single-file** in
-      this release.
+      jump itself must land correctly. This checks local resolution
+      only — the cross-file and standard-library cases have their own
+      steps below (**Cross-file overlay and the standard-library
+      bridge**).
 - [ ] **Hover**: hover over `markSpot` at the same call site. Confirm a
       tooltip showing the routine's signature, `routine markSpot(tape t:
       marks)`.
@@ -276,6 +278,85 @@ machine {
       directly. Confirm **zero diagnostics**, that semantic tokens are
       visible, and that **Reformat Code** is a **no-op** — the checked-in
       file is already canonically formatted.
+
+### Cross-file overlay and the standard-library bridge
+
+`tmt lsp` resolves names against a project's declared siblings and
+libraries — and against the embedded standard library — for a document
+that belongs to a target declared in a `tmt.json` project file
+(`docs/lsp.md` in this repository, "Cross-file resolution (the project
+overlay)"). Walk this in its own fresh scratch directory, separate from
+`check.tmc` above, so its `tmt.json` never interacts with the settings
+or file-watch steps earlier.
+
+Create `tmt.json`:
+
+```json
+{
+  "project": {
+    "targets": {
+      "app": { "sources": ["overlay.tmc", "sibling.tmc"] }
+    }
+  }
+}
+```
+
+Create `sibling.tmc`:
+
+```tmc
+alphabet marks { '_', 'x', 'y' }
+
+export routine sweep(tape t: marks) {
+  entry state s {
+    [*] -> return;
+  }
+}
+```
+
+Create `overlay.tmc`:
+
+```tmc
+alphabet marks { '_', 'x', 'y' }
+alphabet bits { '_', '0', '1' }
+
+use std::binaryNumbersBare::plusOne;
+
+export routine useSibling(tape t: marks) {
+  entry state go {
+    [*] -> call sweep() then go;
+  }
+}
+
+export routine useStd(tape num: bits) {
+  entry state go {
+    [*] -> call plusOne() then go;
+  }
+}
+```
+
+- [ ] **Open** `overlay.tmc`. Confirm **no** `undeclared-external` warning
+      on `sweep` in `call sweep() then go;` — `sibling.tmc` is a declared
+      source of the same target, so the overlay resolves the bare call
+      before the compile warning ever fires. (Opening this file with no
+      `tmt.json` above it would warn on `sweep`; that is the single-file
+      behavior the overlay adds to.)
+- [ ] **Go-to-definition — sibling**: invoke it (Cmd/Ctrl+B, or
+      Cmd/Ctrl+click) on `sweep` in `call sweep() then go;`. Confirm it
+      jumps into `sibling.tmc`, landing on
+      `export routine sweep(tape t: marks) {` — a real cross-file jump,
+      unlike the local-only case checked above.
+- [ ] **Go-to-definition — standard library**: invoke it on `plusOne`,
+      either in `use std::binaryNumbersBare::plusOne;` or inside
+      `call plusOne() then go;`. Confirm it jumps into a materialized
+      `std.tmc` — a cached copy outside this workspace, not a file
+      you're editing — landing on
+      `export routine plusOne(tape num: symbols) {` inside
+      `namespace binaryNumbersBare`. See `docs/lsp.md` in this repository
+      for where that cache lives.
+- [ ] **Hover — standard library**: hover over `plusOne` at either
+      reference. Confirm a tooltip showing its signature line and doc
+      text ("Add one to a number…") — this is the `.tmc` standard-library
+      bridge (`docs/lsp.md`, "The `.tmc` standard-library bridge").
 
 ### `.tma` checklist
 
@@ -333,13 +414,16 @@ L_step: mov     [>, ., .]
 - [ ] **Reformat Code**: mangle the indentation, then run it. Confirm the
       file snaps back to the canonical column grid — labels at column 0,
       mnemonics at column 8, operands at column 16.
-- [ ] **No `unused-label` findings**: add an unreferenced label (e.g.
-      `SPARE: nop`) inside `main` and confirm **no** warning appears. The
-      arch-agnostic `unused-label` rule is deliberately suppressed on the
-      `.tma` path: it cannot see label references made through `.targets`,
-      `.target`, or `.exits`, so leaving it on would false-flag every
-      dispatch and exit target. The code stays valid in an allow-list.
-      Remove the label.
+- [ ] **`unused-label` resolves table references**: add a genuinely
+      unreferenced label (e.g. `SPARE: nop`) inside `main` — nothing
+      points to it via a jump, a call, a `.targets`/`.target` entry, or
+      an `.exits` list. Confirm a warning appears (`unused-label`) — this
+      arch-agnostic rule runs unmodified on `.tma`, with no suppression.
+      Remove `SPARE`, then confirm `L_hit`, `L_dead`, and `L_step` —
+      each reached only through `Dscan`'s `.targets` entry, never by a
+      jump or call operand — carry **no** `unused-label` warning: the
+      rule counts a dispatch or exit target as a reference, so it never
+      false-flags the labels a table's own entries name.
 - [ ] **`.tmc` still works**: switch back to `check.tmc`, still in this same
       IDE session. Confirm its diagnostics are still live — opening and
       editing `.tma` documents never perturbed the `.tmc` service. One

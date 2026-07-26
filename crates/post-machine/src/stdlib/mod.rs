@@ -137,7 +137,10 @@ fn is_uri_literal(byte: u8) -> bool {
 /// Builds a `file:` URI for an absolute path: forward slashes,
 /// percent-encoding every byte outside [`is_uri_literal`]. On windows,
 /// prefixes `file:///C:/...` (the extra `/` before the drive letter).
-fn path_to_file_uri(path: &Path) -> String {
+/// `pub(crate)`: also the overlay's own way of turning a sibling's
+/// resolved path into the key it looks up in `did_update`'s live
+/// `open_docs` map (docs/lsp.md (project overlay)).
+pub(crate) fn path_to_file_uri(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let normalized = if cfg!(windows) {
         raw.replace('\\', "/")
