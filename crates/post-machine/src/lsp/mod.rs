@@ -209,19 +209,22 @@ fn std_enabled(state: &DocState) -> bool {
 }
 
 /// Whether `state`'s cross-file overlay (docs/lsp.md (configuration))
-/// defines `full_path` OUTRIGHT — the ownership check every `std::`-
-/// branch in this feature gates on before falling through to the
-/// embedded stdlib. Resolution order is local file, then declared
-/// sources, then declared libraries (first-wins), then the embedded
-/// stdlib LAST (docs/pmt/project.md (libraries)) — the same order the
-/// linker itself follows, which is why a user's own `namespace std {
-/// export … }` shadows the embedded routine of the same mangled name
-/// even though the name starts with `std::`. Checking ownership first,
-/// rather than `Option`-chaining straight into a lookup, matters because
-/// the overlay can OWN a name yet still answer no location or doc (a
-/// `.pma`/`.pmo`-backed sibling) — that must still short-circuit here
-/// instead of falling through to the unrelated embedded stdlib entry
-/// behind the owner's back.
+/// defines `name` OUTRIGHT — the ownership check every `std::`-branch in
+/// this feature gates on before falling through to the embedded stdlib.
+/// `name` may be either a written bare name or a fully-qualified path
+/// (e.g. `std::goToEnd`) — callers pass whichever shape they already
+/// have in hand, since both live in the SAME `Overlay.symbols` key
+/// space. Resolution order is local file, then declared sources, then
+/// declared libraries (first-wins), then the embedded stdlib LAST
+/// (docs/pmt/project.md (libraries)) — the same order the linker itself
+/// follows, which is why a user's own `namespace std { export … }`
+/// shadows the embedded routine of the same mangled name even though the
+/// name starts with `std::`. Checking ownership first, rather than
+/// `Option`-chaining straight into a lookup, matters because the overlay
+/// can OWN a name yet still answer no location or doc (a `.pma`/`.pmo`-
+/// backed sibling) — that must still short-circuit here instead of
+/// falling through to the unrelated embedded stdlib entry behind the
+/// owner's back.
 ///
 /// The single ownership check every `std::`-surfacing feature in this
 /// service shares — deliberately NOT enumerated by caller here, for the
@@ -232,11 +235,11 @@ fn std_enabled(state: &DocState) -> bool {
 /// several near-identical copies. Visibility mirrors [`std_enabled`]'s
 /// own: plain module-private, not `pub(super)`, for the identical
 /// `DocState`-nameability reason documented there.
-fn overlay_owns(state: &DocState, full_path: &str) -> bool {
+fn overlay_owns(state: &DocState, name: &str) -> bool {
     state
         .overlay
         .as_ref()
-        .is_some_and(|overlay| overlay.symbols.contains_key(full_path))
+        .is_some_and(|overlay| overlay.symbols.contains_key(name))
 }
 
 /// `file:` URIs → percent-decoded filesystem path; any other scheme
@@ -2047,6 +2050,17 @@ export main() {
         // matrix calls for at once — each already pinned individually
         // elsewhere (`complete.rs`/`navigate.rs`/this file's own
         // `stdlib_false_*` tests), but never together on one fixture.
+        //
+        // Every negative gate (std suppressed) is paired with a live
+        // positive control (the SAME feature, on a genuinely local name,
+        // in the SAME project) — without one, a regression that broke
+        // completion/hover/definition OUTRIGHT whenever `state.overlay`
+        // is `Some` would pass every negative assertion here vacuously
+        // (an empty candidate list, or `None` from a feature that always
+        // returns `None`, both satisfy "no std::"). This mirrors
+        // `complete.rs::stdlib_false_removes_std_candidates_everywhere`,
+        // which pairs its own root-list negative with `roots.iter().any(|c|
+        // c.label == "ns")`.
         let dir = unique_tmp_dir("stdlib-false-matrix");
         fs::write(
             dir.join("pmt.json"),
@@ -2056,15 +2070,22 @@ export main() {
 
         let mut service = PmcLanguageService::new();
         let app_uri = file_uri(&dir.join("app.pmc"));
-        const SRC: &str = "use x;\nexport main() {\n    @goToEnd();\n    @std::goToEnd();\n}\n";
+        const SRC: &str = "namespace ns {\n    helper() { right; }\n}\n?Local doc.\nlocal() { right; }\nuse x;\nexport main() {\n    @goToEnd();\n    @std::goToEnd();\n    @local();\n}\n";
         let diags = service.did_update(&app_uri, SRC);
 
-        // Gate 1: no "std" root in the `use` path root list.
+        // Gate 1 + control: no "std" root in the `use` path root list,
+        // but the genuinely local "ns" root is unaffected.
         let root_pos = pos_after(SRC, "use x", 4);
         let roots = service.completion(&app_uri, root_pos);
         assert!(!roots.iter().any(|c| c.label == "std"), "{roots:?}");
+        assert!(
+            roots.iter().any(|c| c.label == "ns"),
+            "a genuinely local root must still be offered under stdlib:false: {roots:?}"
+        );
 
-        // Gates 2 + 3: no std hover, no materialized go-to-definition.
+        // Gates 2 + 3 + controls: no std hover, no materialized
+        // go-to-definition — but a genuinely local call in the SAME
+        // project keeps hovering and navigating.
         let std_pos = pos_after(SRC, "std::goToEnd", 6);
         assert_eq!(
             service.hover(&app_uri, std_pos),
@@ -2076,6 +2097,17 @@ export main() {
             None,
             "stdlib:false kills the materialized jump"
         );
+
+        let local_pos = pos_after(SRC, "@local()", 1);
+        let local_hover = service
+            .hover(&app_uri, local_pos)
+            .expect("a local, non-std call still hovers under stdlib:false");
+        assert!(local_hover.text.contains("Local doc."), "{local_hover:?}");
+        let local_target = service
+            .definition(&app_uri, local_pos)
+            .expect("a local, non-std call still navigates under stdlib:false");
+        assert_eq!(local_target.uri, app_uri);
+        assert_eq!(local_target.span, span_of(SRC, "local"));
 
         // Gate 4: a bare std-shaped call still warns — `stdlib:false`
         // only ever removes `std::`-keyed names from
