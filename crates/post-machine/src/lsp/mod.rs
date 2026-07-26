@@ -187,16 +187,23 @@ struct DocState {
 /// no manifest found on the ancestor walk, a member of no target, or an
 /// untitled/non-`file:` buffer — keeps today's unconditional stdlib
 /// surface; only an actual project manifest declaring `"stdlib": false`
-/// turns it off. Consumed by `complete.rs`'s three std-gated legs
-/// (`member_candidates`, `use_roots`, `call_candidates`).
+/// turns it off. Consumed by every `std::`-surfacing feature this
+/// service offers — completion (`complete.rs`), go-to-definition and
+/// hover's name resolution (`navigate.rs`), and hover's own doc-map
+/// lookup below — each gating its own `std::` call site. Deliberately
+/// NOT enumerated by name here: that list has already gone stale once
+/// (this comment used to name three `complete.rs` legs and stopped being
+/// true the moment `navigate.rs` grew call sites of its own), and every
+/// future `std::`-touching feature would go on growing it again.
 ///
 /// Visibility is plain module-private, not `pub(super)`: `DocState`
 /// itself is only nameable within `lsp` and its descendants, and
 /// `pub(super)` here would widen this function's own reach to the whole
 /// crate — a real private-interface mismatch (`DocState` unnameable at
 /// that wider reach), not just a style nit. Every actual caller
-/// (`complete.rs`) is a descendant of `lsp`, so plain privacy is the
-/// identical practical reach with none of the mismatch.
+/// (`complete.rs`, `navigate.rs`, this module's own `hover`) is a
+/// descendant of `lsp`, so plain privacy is the identical practical
+/// reach with none of the mismatch.
 fn std_enabled(state: &DocState) -> bool {
     state.overlay.as_ref().is_none_or(|o| o.stdlib)
 }

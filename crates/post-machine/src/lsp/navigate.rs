@@ -172,7 +172,7 @@ fn overlay_target(state: &DocState, full_path: &str, origin: Span) -> Option<Def
 /// Slices the literal source text `span` denotes straight out of `text` —
 /// the one place [`Resolution::Unresolved`] (which carries no name of its
 /// own) recovers the written call name for an overlay lookup. Spans are
-/// 1-based, half-open (docs/core.md (position mapping)); this walks lines
+/// 1-based, half-open (docs/lsp.md (position encoding)); this walks lines
 /// via `text.split('\n')` and each line's `chars()`/`char_indices()`
 /// exactly the way `mtc_core::lsp`'s position mapper does — column
 /// offsets are character counts, never byte counts, so a multi-byte UTF-8
@@ -275,12 +275,16 @@ fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
 /// (`"std::goToEnd"`, `"ns::helper"`) plus the path's own span
 /// (`UsePath.span`), the origin. Searched recursively through namespace
 /// blocks — imports are legal at any nesting level. Every path is
-/// returned, not just `std::…` ones: [`definition`]'s own caller
-/// ([`std_target`]) already degrades a non-std path to `None` on its
-/// own (the roster lookup misses), and hover's caller (`mod.rs`) looks
-/// up whatever qualified name comes back in `Analysis.docs` — local
-/// paths included — so filtering by `std` here would just be a second,
-/// redundant gate duplicating that miss.
+/// returned, not just `std::…` ones — each caller does its OWN
+/// `std::`-branching at its own seam instead: [`definition`]'s step 3
+/// routes a `std::` path through [`std_target`] (gated on
+/// [`super::std_enabled`]) and everything else through
+/// [`overlay_target`], which can genuinely SUCCEED for a sibling's own
+/// `use`-imported path, not just miss; hover's caller (`mod.rs`) looks
+/// up whatever qualified name comes back against this document's own
+/// `Analysis.docs`, the overlay's doc map, or the stdlib's — local,
+/// sibling, and `std::` names alike. Filtering by `std` here would only
+/// duplicate work every caller already does on its own.
 fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
     for item in items {
         match &item.kind {
@@ -997,6 +1001,21 @@ mod tests {
             None,
             "a .pmo-backed overlay symbol carries no source location to jump to"
         );
+
+        // The SAME `.pmo`-backed miss through `ImportBinding` instead of
+        // `Unresolved` is a DIFFERENT, deliberate outcome (the comment on
+        // `resolve_call`'s `ImportBinding` fallback documents this): the
+        // overlay hit still carries no location, but that arm falls back
+        // to the `use` statement's own span rather than degrading to
+        // `None`.
+        const IMPORT_SRC: &str = "use ghostlib;\nexport main() {\n    @ghostlib();\n}\n";
+        service.did_update(&app_uri, IMPORT_SRC);
+        let import_pos = pos_after(IMPORT_SRC, "@ghostlib()", 1);
+        let import_target = service
+            .definition(&app_uri, import_pos)
+            .expect("a .pmo-backed ImportBinding falls back to its own use span, not None");
+        assert_eq!(import_target.uri, app_uri);
+        assert_eq!(import_target.span, span_of(IMPORT_SRC, "ghostlib"));
     }
 
     #[test]
