@@ -34,9 +34,17 @@
 //!    comma-in-parens construct) matches none of these and falls
 //!    through to no-context-match.
 //!
-//! No match → empty (cross-file namespaces are invisible by design —
-//! only this file's scopes and the embedded stdlib roster ever
-//! contribute a candidate).
+//! No match → empty. Otherwise a matched context's candidates flow from
+//! up to three tiers, in order: this file's own scopes first; then, when
+//! the document is a member of a project target, the cross-file
+//! [`super::overlay::Overlay`]'s sibling/library exports (docs/lsp.md
+//! (configuration)) — a name the local roster already offers is never
+//! shadowed or duplicated by an overlay candidate, the same
+//! definition-beats-library precedent the linker itself follows; then the
+//! embedded stdlib roster, unless the project's own manifest opts out
+//! (`super::std_enabled`) — a document with no overlay at all (single-file,
+//! untitled, or a member of no target) keeps the unconditional stdlib
+//! surface.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -50,6 +58,8 @@ use crate::parser::{FnDoc, RESERVED};
 use crate::stdlib::roster;
 
 use super::DocState;
+use super::overlay::OverlaySym;
+use super::std_enabled;
 use super::walk::{enclosing_function_chain, function_labels, span_contains};
 
 /// The completion candidates for `pos` in `state`'s current document.
@@ -73,12 +83,11 @@ pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
         let Some(scopes) = names_roster(state) else {
             return Vec::new();
         };
-        let docs = state.analysis.as_ref().map(|a| &a.docs);
         let (segments, _) = walk_path_chain(&sig, cursor_idx);
         return if segments.is_empty() {
-            use_roots(scopes, replace_span)
+            use_roots(scopes, state, replace_span)
         } else {
-            member_candidates(scopes, &segments, docs, replace_span)
+            member_candidates(scopes, &segments, state, replace_span)
         };
     }
 
@@ -93,8 +102,7 @@ pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
             let Some(scopes) = names_roster(state) else {
                 return Vec::new();
             };
-            let docs = state.analysis.as_ref().map(|a| &a.docs);
-            member_candidates(scopes, &segments, docs, replace_span)
+            member_candidates(scopes, &segments, state, replace_span)
         };
     }
 
@@ -172,6 +180,39 @@ fn mk_function_candidate(
 ) -> Candidate {
     let deprecated = docs
         .and_then(|docs| docs.get(qualified))
+        .is_some_and(|doc| doc.deprecated.is_some());
+    Candidate {
+        label: label.to_string(),
+        kind: CandidateKind::Function,
+        replace_span,
+        insert_text: label.to_string(),
+        detail: (qualified != label).then(|| qualified.to_string()),
+        deprecated,
+    }
+}
+
+/// An overlay-sourced `Function` candidate: the SAME label/detail shape as
+/// [`mk_function_candidate`] (`detail` is the qualified name only when it
+/// differs from `label`), but `deprecated` comes from the contributing
+/// SIBLING's own `OverlaySym.doc` rather than this document's
+/// `Analysis.docs` — the two are different documents' doc maps, and this
+/// document's own map never holds a sibling's key (mirrors
+/// `mk_function_candidate`'s std-candidate scope stop, but for a REAL
+/// answer instead of a deliberately absent one: a sibling's `.pmc` doc
+/// comment is exactly as available here as it is to that sibling's own
+/// hover). `sym` is `None` only when `full` names something the overlay's
+/// `members` index registered but its `symbols` table doesn't carry
+/// (never happens in practice — both are populated together by the same
+/// `insert_export` call — but the caller has no easy proof of that at the
+/// type level).
+fn mk_overlay_candidate(
+    label: &str,
+    qualified: &str,
+    sym: Option<&OverlaySym>,
+    replace_span: Span,
+) -> Candidate {
+    let deprecated = sym
+        .and_then(|sym| sym.doc.as_ref())
         .is_some_and(|doc| doc.deprecated.is_some());
     Candidate {
         label: label.to_string(),
@@ -350,22 +391,39 @@ fn enclosing_ns_path(items: &[TopItem], pos: Pos) -> Vec<String> {
 }
 
 /// Context 1/2's shared member lookup for an exact namespace `path`:
-/// `path == ["std"]` is special-cased to the embedded stdlib roster
-/// (bare routine names, Function kind) since `std` is magic — it never
-/// has a `ScopeSummary` entry of its own. Otherwise: `scopes.defs` under
-/// the exact path (Function kind) plus child namespaces exactly one
-/// segment deeper, derived the same way `use_roots` derives roots
-/// (Module kind). Sorted by label for a deterministic result — the
+/// `path == ["std"]` is special-cased to the embedded stdlib roster (bare
+/// routine names, Function kind) since `std` is magic — it never has a
+/// `ScopeSummary` entry of its own — gated on [`std_enabled`]: a project
+/// opting out of the stdlib gets an empty result for `std::` instead of
+/// falling through to the generic lookup below (which would answer empty
+/// anyway, since nothing in this codebase registers a real `defs`/overlay
+/// entry under a namespace literally named `std`; the explicit early
+/// return states the intent rather than relying on that coincidence).
+/// Otherwise: `scopes.defs` under the exact path (Function kind) plus
+/// child namespaces exactly one segment deeper, derived the same way
+/// `use_roots` derives roots (Module kind), UNIONED with the cross-file
+/// overlay's own `members` entry for this exact path (docs/lsp.md
+/// (configuration)) — every overlay name whose bare label a local def or
+/// child namespace already produced is skipped (`seen`): a local name
+/// always wins, the same definition-beats-library precedent the linker
+/// itself follows. Sorted by label for a deterministic result — the
 /// underlying maps are hash-ordered. `docs` (`None` when analysis
-/// itself is stale/absent) backs every Function candidate's
-/// `detail`/`deprecated` — see `mk_function_candidate`.
+/// itself is stale/absent) backs every LOCAL Function candidate's
+/// `detail`/`deprecated` — see `mk_function_candidate`; an overlay
+/// candidate's `deprecated` instead comes from that sibling's own
+/// `OverlaySym.doc` — see `mk_overlay_candidate`.
 fn member_candidates(
     scopes: &ScopeSummary,
     path: &[String],
-    docs: Option<&HashMap<String, FnDoc>>,
+    state: &DocState,
     replace_span: Span,
 ) -> Vec<Candidate> {
+    let docs = state.analysis.as_ref().map(|a| &a.docs);
+
     if path.len() == 1 && path[0] == "std" {
+        if !std_enabled(state) {
+            return Vec::new();
+        }
         let mut out: Vec<Candidate> = roster()
             .iter()
             .map(|entry| {
@@ -381,8 +439,10 @@ fn member_candidates(
     }
 
     let mut out: Vec<Candidate> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     if let Some(defs) = scopes.defs.get(path) {
         for (name, full) in defs {
+            seen.insert(name.clone());
             out.push(mk_function_candidate(name, full, docs, replace_span));
         }
     }
@@ -393,26 +453,55 @@ fn member_candidates(
         }
     }
     for name in children {
+        seen.insert(name.to_string());
         out.push(mk_candidate(name, CandidateKind::Module, replace_span));
     }
+
+    if let Some(overlay) = state.overlay.as_ref()
+        && let Some(members) = overlay.members.get(path)
+    {
+        for (bare, full) in members {
+            if seen.insert(bare.clone()) {
+                out.push(mk_overlay_candidate(
+                    bare,
+                    full,
+                    overlay.symbols.get(full),
+                    replace_span,
+                ));
+            }
+        }
+    }
+
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out
 }
 
 /// Context 1's no-`::` case: the file's namespace roots (the distinct
-/// first segments of `scopes.defs`/`scopes.bindings` keys) plus `std` —
-/// always offered even though `std` never appears in either map.
-fn use_roots(scopes: &ScopeSummary, replace_span: Span) -> Vec<Candidate> {
-    let mut names: BTreeSet<&str> = scopes
+/// first segments of `scopes.defs`/`scopes.bindings` keys), the first
+/// segment of every NAMESPACED cross-file overlay export (a `members` key
+/// with a non-empty path — a bare, unnamespaced overlay export has
+/// nothing to offer as a `use`-able root), plus `std` when
+/// [`std_enabled`] says the project hasn't opted out.
+fn use_roots(scopes: &ScopeSummary, state: &DocState, replace_span: Span) -> Vec<Candidate> {
+    let mut names: BTreeSet<String> = scopes
         .defs
         .keys()
         .chain(scopes.bindings.keys())
-        .filter_map(|k| k.first().map(String::as_str))
+        .filter_map(|k| k.first().cloned())
         .collect();
-    names.insert("std");
+    if let Some(overlay) = state.overlay.as_ref() {
+        for path in overlay.members.keys() {
+            if let Some(first) = path.first() {
+                names.insert(first.clone());
+            }
+        }
+    }
+    if std_enabled(state) {
+        names.insert("std".to_string());
+    }
     names
         .into_iter()
-        .map(|name| mk_candidate(name, CandidateKind::Module, replace_span))
+        .map(|name| mk_candidate(&name, CandidateKind::Module, replace_span))
         .collect()
 }
 
@@ -421,9 +510,13 @@ fn use_roots(scopes: &ScopeSummary, replace_span: Span) -> Vec<Candidate> {
 /// innermost-outward, THEN each enclosing namespace prefix longest-first
 /// with that level's defs before its bindings) — first-wins per bare
 /// name via `seen`, so a definition always outranks a same-named import,
-/// and an inner nested def always outranks an outer one. The std roster
-/// rides in last, as fully qualified paths, in a disjoint label space
-/// (bare names never contain `::`) so it never competes for `seen`.
+/// and an inner nested def always outranks an outer one. Then (c) the std
+/// roster (gated on [`std_enabled`]) and (d) the cross-file overlay's own
+/// top-level bare exports ride in after, subject to the same `seen`
+/// shadow-check — a local name still always wins; both then contribute
+/// their remaining, `::`-qualified entries as fully qualified paths, in a
+/// disjoint label space (bare names never contain `::`) so those never
+/// compete for `seen` at all.
 fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candidate> {
     let Some(scopes) = names_roster(state) else {
         return Vec::new();
@@ -497,14 +590,52 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
 
     // (c) the std roster, as qualified paths — label already IS the
     // qualified name here, so `detail` comes back `None` by
-    // construction (nothing to add beyond the label itself).
-    for entry in roster() {
-        out.push(mk_function_candidate(
-            &entry.full_path,
-            &entry.full_path,
-            docs,
-            replace_span,
-        ));
+    // construction (nothing to add beyond the label itself) — gated on
+    // `std_enabled`: a project opting out of the stdlib gets none of
+    // these.
+    if std_enabled(state) {
+        for entry in roster() {
+            out.push(mk_function_candidate(
+                &entry.full_path,
+                &entry.full_path,
+                docs,
+                replace_span,
+            ));
+        }
+    }
+
+    // (d) the cross-file overlay (docs/lsp.md (configuration)): its
+    // top-level BARE exports (`members[[]]`, label = bare name) subject
+    // to the same `seen` shadow-check as every local name above — a local
+    // def/import always wins; then every NAMESPACED overlay symbol (a
+    // `::`-qualified key of `overlay.symbols`) as a qualified-label
+    // candidate, mirroring (c)'s std-roster shape exactly: label already
+    // IS the qualified name, a space that bare local names never occupy (no
+    // bare name contains `::`), so it never needs — or competes for —
+    // `seen`.
+    if let Some(overlay) = state.overlay.as_ref() {
+        let empty_path: Vec<String> = Vec::new();
+        if let Some(top_level) = overlay.members.get(&empty_path) {
+            for (bare, full) in top_level {
+                if seen.insert(bare.clone()) {
+                    out.push(mk_overlay_candidate(
+                        bare,
+                        full,
+                        overlay.symbols.get(full),
+                        replace_span,
+                    ));
+                }
+            }
+        }
+        let mut qualified: Vec<(&String, &OverlaySym)> = overlay
+            .symbols
+            .iter()
+            .filter(|(name, _)| name.contains("::"))
+            .collect();
+        qualified.sort_by(|a, b| a.0.cmp(b.0));
+        for (full, sym) in qualified {
+            out.push(mk_overlay_candidate(full, full, Some(sym), replace_span));
+        }
     }
 
     out
@@ -558,12 +689,38 @@ fn label_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candi
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::super::PmcLanguageService;
     use super::*;
     use mtc_core::lsp::LanguageService;
 
     const URI: &str = "untitled:Complete-1";
+
+    /// A fresh scratch directory under `std::env::temp_dir()`, unique per
+    /// call (process id + an atomic counter — this crate has no tempfile
+    /// dependency, matching the zero-new-deps constraint; house
+    /// convention has no shared test-support module, so each file defines
+    /// its own local helper — mirrors `overlay.rs`'s and `lsp/mod.rs`'s
+    /// own copies).
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "pmt-complete-{label}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A real client's own `file:` URI construction, byte-for-byte —
+    /// `crate::stdlib::path_to_file_uri` percent-encodes.
+    fn file_uri(path: &Path) -> String {
+        crate::stdlib::path_to_file_uri(path)
+    }
 
     /// 1-based (line, col) of the first byte of `anchor`'s occurrence in
     /// `src`, plus a `skip` char offset into the anchor. Pure ASCII
@@ -1205,6 +1362,244 @@ export main() {
                 .iter()
                 .any(|c| c.label == "sib" && c.kind == CandidateKind::Function),
             "names still offered from the stale scopes: {candidates:?}"
+        );
+    }
+
+    // --- Task 6: cross-file completion through the overlay ---
+
+    #[test]
+    fn member_completion_unions_overlay_namespace_members() {
+        let dir = unique_tmp_dir("member-union");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("helper.pmc"),
+            "namespace ns {\nexport inner() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @ns::x();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "ns::", 4);
+        let candidates = service.completion(&app_uri, pos);
+
+        let inner = candidates
+            .iter()
+            .find(|c| c.label == "inner")
+            .expect("the sibling's ns::inner export is offered");
+        assert_eq!(inner.kind, CandidateKind::Function);
+        assert_eq!(inner.detail, Some("ns::inner".to_string()), "{inner:?}");
+    }
+
+    #[test]
+    fn member_completion_local_definition_shadows_overlay_namespace_member() {
+        // The overlay's own `ns::inner` is DEPRECATED; app.pmc defines its
+        // OWN (undeprecated) `ns::inner` locally — proves the local
+        // definition wins OUTRIGHT (exactly one `inner` candidate, not a
+        // duplicate) and that the surviving candidate really is the local
+        // one, not the overlay's: `seen`'s skip is exercised, not merely
+        // present in the source.
+        let dir = unique_tmp_dir("member-local-wins");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("helper.pmc"),
+            "namespace ns {\n?old.\n! [deprecated] use other.\nexport inner() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str =
+            "namespace ns {\nexport inner() { right; }\n}\nexport main() {\n    @ns::x();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "ns::", 4);
+        let candidates = service.completion(&app_uri, pos);
+
+        let matches: Vec<_> = candidates.iter().filter(|c| c.label == "inner").collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "the local def wins outright, no overlay duplicate: {candidates:?}"
+        );
+        assert!(
+            !matches[0].deprecated,
+            "the surviving candidate is the LOCAL inner, not the overlay's deprecated one: {:?}",
+            matches[0]
+        );
+    }
+
+    #[test]
+    fn use_path_completion_offers_sibling_roots_and_members() {
+        let dir = unique_tmp_dir("use-roots-members");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("helper.pmc"),
+            "namespace ns {\nexport inner() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+
+        const ROOTS_SRC: &str = "use n;\nexport main() { right; }\n";
+        service.did_update(&app_uri, ROOTS_SRC);
+        let pos = pos_after(ROOTS_SRC, "use n", 4);
+        let roots = service.completion(&app_uri, pos);
+        assert!(
+            roots
+                .iter()
+                .any(|c| c.label == "ns" && c.kind == CandidateKind::Module),
+            "{roots:?}"
+        );
+
+        const MEMBERS_SRC: &str = "use ns::x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, MEMBERS_SRC);
+        let pos = pos_after(MEMBERS_SRC, "use ns::", 8);
+        let members = service.completion(&app_uri, pos);
+        assert!(
+            members
+                .iter()
+                .any(|c| c.label == "inner" && c.kind == CandidateKind::Function),
+            "{members:?}"
+        );
+    }
+
+    #[test]
+    fn bare_call_position_offers_top_level_sibling_exports_and_qualified_paths() {
+        let dir = unique_tmp_dir("call-position-overlay");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("helper.pmc"),
+            "export helper() { right; }\nnamespace ns {\nexport inner() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @x();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@x()", 1);
+        let candidates = service.completion(&app_uri, pos);
+
+        let bare = candidates
+            .iter()
+            .find(|c| c.label == "helper")
+            .expect("the sibling's bare top-level export is offered");
+        assert_eq!(bare.kind, CandidateKind::Function);
+        assert_eq!(bare.detail, None, "{bare:?}");
+
+        let qualified = candidates
+            .iter()
+            .find(|c| c.label == "ns::inner")
+            .expect("the sibling's namespaced export is offered fully qualified");
+        assert_eq!(qualified.kind, CandidateKind::Function);
+        assert_eq!(
+            qualified.detail, None,
+            "label already is the qualified name: {qualified:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_deprecated_docs_tag_candidates() {
+        let dir = unique_tmp_dir("overlay-deprecated");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("helper.pmc"),
+            "?deprecated helper.\n! [deprecated] use other.\nexport old() { right; }\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @x();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@x()", 1);
+        let candidates = service.completion(&app_uri, pos);
+
+        let old = candidates
+            .iter()
+            .find(|c| c.label == "old")
+            .expect("the sibling's deprecated export is offered");
+        assert!(old.deprecated, "{old:?}");
+    }
+
+    #[test]
+    fn stdlib_false_removes_std_candidates_everywhere() {
+        let dir = unique_tmp_dir("stdlib-false");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"stdlib":false,"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("helper.pmc"), "export helper() { right; }\n").unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+
+        // Root list: no "std" root; a genuinely local root ("ns") is
+        // unaffected by the gate.
+        const ROOTS_SRC: &str =
+            "namespace ns {\n    helper() { right; }\n}\nuse x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, ROOTS_SRC);
+        let pos = pos_after(ROOTS_SRC, "use x", 4);
+        let roots = service.completion(&app_uri, pos);
+        assert!(!roots.iter().any(|c| c.label == "std"), "{roots:?}");
+        assert!(roots.iter().any(|c| c.label == "ns"), "{roots:?}");
+
+        // Member list under `std::`: empty — never the 11-routine roster.
+        const STD_MEMBER_SRC: &str = "use std::x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, STD_MEMBER_SRC);
+        let pos = pos_after(STD_MEMBER_SRC, "std::", 5);
+        let std_members = service.completion(&app_uri, pos);
+        assert_eq!(std_members, Vec::new(), "{std_members:?}");
+
+        // Bare call position: no `std::…` qualified candidates, but the
+        // sibling's own top-level export is still offered — the gate
+        // silences only std, not completion wholesale.
+        const CALL_SRC: &str = "export main() {\n    @x();\n}\n";
+        service.did_update(&app_uri, CALL_SRC);
+        let pos = pos_after(CALL_SRC, "@x()", 1);
+        let call = service.completion(&app_uri, pos);
+        assert!(
+            !call.iter().any(|c| c.label.starts_with("std::")),
+            "{call:?}"
+        );
+        assert!(call.iter().any(|c| c.label == "helper"), "{call:?}");
+
+        // A single-file doc (no manifest at all) keeps the unconditional
+        // stdlib surface — the gate is manifest-driven, not global.
+        let mut single = PmcLanguageService::new();
+        single.did_update("untitled:Untitled-1", CALL_SRC);
+        let pos = pos_after(CALL_SRC, "@x()", 1);
+        let single_candidates = single.completion("untitled:Untitled-1", pos);
+        assert!(
+            single_candidates.iter().any(|c| c.label == "std::goToEnd"),
+            "{single_candidates:?}"
         );
     }
 }

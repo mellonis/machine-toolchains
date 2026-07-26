@@ -176,9 +176,28 @@ struct DocState {
     /// (configuration)): `None` when the document degrades to
     /// single-file behavior (no manifest found, the document is a
     /// member of no target, or it has no `file:` path at all). Consumed
-    /// by `did_update`'s own diagnostics refinement; not yet consumed by
-    /// completion, navigation, or hover.
+    /// by `did_update`'s own diagnostics refinement and by `complete.rs`'s
+    /// cross-file legs; not yet consumed by navigation or hover.
     pub overlay: Option<overlay::Overlay>,
+}
+
+/// Whether the embedded stdlib's `std::` surface should be offered at all
+/// (docs/pmt/project.md (schema reference)): a document with NO overlay —
+/// no manifest found on the ancestor walk, a member of no target, or an
+/// untitled/non-`file:` buffer — keeps today's unconditional stdlib
+/// surface; only an actual project manifest declaring `"stdlib": false`
+/// turns it off. Consumed by `complete.rs`'s three std-gated legs
+/// (`member_candidates`, `use_roots`, `call_candidates`).
+///
+/// Visibility is plain module-private, not `pub(super)`: `DocState`
+/// itself is only nameable within `lsp` and its descendants, and
+/// `pub(super)` here would widen this function's own reach to the whole
+/// crate — a real private-interface mismatch (`DocState` unnameable at
+/// that wider reach), not just a style nit. Every actual caller
+/// (`complete.rs`) is a descendant of `lsp`, so plain privacy is the
+/// identical practical reach with none of the mismatch.
+fn std_enabled(state: &DocState) -> bool {
+    state.overlay.as_ref().is_none_or(|o| o.stdlib)
 }
 
 /// `file:` URIs → percent-decoded filesystem path; any other scheme
