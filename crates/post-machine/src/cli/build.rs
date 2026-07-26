@@ -298,7 +298,12 @@ pub(super) fn read_object(path: &Path) -> Result<ObjectFile, String> {
     ObjectFile::from_bytes(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-pub(super) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, String> {
+/// `pub(crate)`, not `pub(super)`: the LSP's overlay-vs-linker
+/// faithfulness test (`lsp/overlay.rs`) builds the same declared library
+/// set `pmt build` would, to compare its cross-file overlay against
+/// `mtc_core::linker::resolve_names` — the one call site outside `cli`
+/// that needs this.
+pub(crate) fn find_library(name: &str, dirs: &[String]) -> Result<ObjectFile, String> {
     for dir in dirs {
         let candidate = Path::new(dir).join(format!("{name}.pmo"));
         if candidate.exists() {

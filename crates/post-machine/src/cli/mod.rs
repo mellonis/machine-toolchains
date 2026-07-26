@@ -1,7 +1,10 @@
 //! The `pmt` command-line tool: a thin renderer over the library API.
 //! Libraries never print; every byte of terminal output originates here.
 
-mod build;
+// `pub(crate)`: the LSP's overlay-vs-linker faithfulness test
+// (`lsp/overlay.rs`) reaches `build::find_library` directly — the module
+// path itself must be nameable from outside `cli`, not just the function.
+pub(crate) mod build;
 mod completions;
 mod driver;
 mod fmt;

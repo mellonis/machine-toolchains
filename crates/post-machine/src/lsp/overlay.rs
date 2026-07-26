@@ -1054,3 +1054,371 @@ mod tests {
         assert!(!overlay.symbols.contains_key("old"));
     }
 }
+
+/// The faithfulness contract: the overlay is a per-file APPROXIMATION of
+/// what the real linker resolves (docs/pmt/project.md (the declared
+/// source set); the module-level doc comment above). This is the one
+/// place that checks the approximation is actually right, by building
+/// BOTH sides of one fixture — the overlay through the real service
+/// (`did_update` + `DocState.overlay`), the linker side through the same
+/// effective-source-order dispatch `cli::driver::build_one_target` uses
+/// (`.pmc` compiles, `.pma` assembles, `.pmo` loads) — and comparing them
+/// by PROVENANCE (`mtc_core::linker::SymbolOrigin`, which object or
+/// library index won), not just by name: two candidates can share a
+/// name (the shadowing case below), so only provenance tells them apart.
+/// Scope, precisely: restricted to call sites reachable from the
+/// fixture's `main`, every name the overlay resolves must point at the
+/// same definition `resolve_names` picks, and every reachable name the
+/// overlay leaves unresolved must be one `resolve_names` also reports
+/// unresolved — `resolve_names` only ever errors on a REACHABLE
+/// unresolved name, and a dropped (unreached) function may reference
+/// anything, even names that don't exist, so the fixture keeps every
+/// call reachable from `main` to stay inside the comparable region.
+#[cfg(test)]
+mod faithfulness {
+    use std::fs;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use mtc_core::linker::{LinkError, SymbolOrigin, resolve_names};
+    use mtc_core::lsp::LanguageService;
+
+    use super::*;
+
+    /// A fresh scratch directory under `std::env::temp_dir()`, unique per
+    /// call (process id + an atomic counter — this crate has no tempfile
+    /// dependency, matching the zero-new-deps constraint; house
+    /// convention has no shared test-support module, so each file
+    /// defines its own local helper — mirrors `overlay::tests`' own
+    /// copy).
+    fn temp_tree() -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "pmt-faithfulness-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Loads one already-resolved source path per its extension, exactly
+    /// mirroring `cli::driver::load_one_source`'s own three-way dispatch
+    /// (`.pmc` compiles, `.pma` assembles, anything else loads as a
+    /// `.pmo` object) — the SAME dispatch a real `pmt build` runs over a
+    /// target's effective sources, so the objects handed to
+    /// `resolve_names` below are the objects the real linker would see,
+    /// not a shape invented for this test.
+    fn load_as_object(path: &Path) -> ObjectFile {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("pmc") => {
+                let source = fs::read_to_string(path).unwrap();
+                crate::compiler::compile(&source, crate::compiler::CompileOptions::default())
+                    .unwrap_or_else(|e| panic!("{}: failed to compile: {e}", path.display()))
+                    .object
+            }
+            Some("pma") => {
+                let source = fs::read_to_string(path).unwrap();
+                crate::asm::assemble(&source, false)
+                    .unwrap_or_else(|e| panic!("{}: failed to assemble: {e:?}", path.display()))
+            }
+            _ => {
+                let bytes = fs::read(path).unwrap();
+                ObjectFile::from_bytes(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            }
+        }
+    }
+
+    #[test]
+    fn overlay_resolution_matches_linker_resolution_with_provenance() {
+        // One target, everything reachable from `main` (see this module's
+        // own doc comment): `shared.pmc` a manifest-level source (bare
+        // top-level `helper`, `ns::inner`, and `ns::dup` — the LAST one
+        // deliberately re-declared by the library below too); `app.pmc`
+        // the target's own entry, calling every kind of cross-file name
+        // this task's design distinguishes: a bare `.pmc` sibling export,
+        // a qualified `.pmc` sibling export, the SHADOWED qualified name,
+        // a bare `.pma` sibling export, a bare `.pmo`-backed source
+        // export, and a `std::` call routed through the separate stdlib
+        // channel; `helpers.pma` a `.pma` sibling; `pre.pmo` a `.pmo`
+        // declared directly as a target source; `libs/bitops.pmo` a
+        // declared LIBRARY that also defines `ns::dup` (the shadowing
+        // case: the linker's rule is user objects beat libraries) plus an
+        // unrelated `bit_only` export that APP calls too — the ONLY
+        // library-provenance leg in this fixture: every other name has a
+        // `.pmc`/`.pma`/`.pmo` SOURCE contributor, so `bit_only` is what
+        // proves a `.pmo`-shaped overlay answer can also mean "the
+        // declared library", not just "some source `.pmo`".
+        let root = temp_tree();
+        fs::create_dir_all(root.join("libs")).unwrap();
+        fs::write(
+            root.join("pmt.json"),
+            r#"{"project":{
+                "sources":["shared.pmc"],
+                "libraries":{"dirs":["libs"],"link":["bitops"]},
+                "targets":{"app":{"sources":["app.pmc","helpers.pma","pre.pmo"]}}
+            }}"#,
+        )
+        .unwrap();
+
+        const SHARED: &str = "export helper() { right; }\nnamespace ns {\nexport inner() { right; }\n}\nnamespace ns {\nexport dup() { right; }\n}\n";
+        fs::write(root.join("shared.pmc"), SHARED).unwrap();
+
+        const APP: &str = "export main() {\n    @helper();\n    @ns::inner();\n    @ns::dup();\n    @asm_fn();\n    @pre_fn();\n    @bit_only();\n    @std::goToEnd();\n}\n";
+        fs::write(root.join("app.pmc"), APP).unwrap();
+
+        const HELPERS: &str = ".func asm_fn\nstp\n";
+        fs::write(root.join("helpers.pma"), HELPERS).unwrap();
+
+        let pre_bytes = crate::compiler::compile(
+            "export pre_fn() { right; }\n",
+            crate::compiler::CompileOptions::default(),
+        )
+        .expect("pre_fn's source compiles")
+        .object
+        .to_bytes();
+        fs::write(root.join("pre.pmo"), &pre_bytes).unwrap();
+
+        let bitops_bytes = crate::compiler::compile(
+            "namespace ns {\nexport dup() { left; }\n}\nexport bit_only() { right; }\n",
+            crate::compiler::CompileOptions::default(),
+        )
+        .expect("bitops's source compiles")
+        .object
+        .to_bytes();
+        fs::write(root.join("libs").join("bitops.pmo"), &bitops_bytes).unwrap();
+
+        // --- Overlay side: the real service, driven exactly as an
+        //     editor would (`did_update` over the on-disk text). ---
+        let app_uri = path_to_file_uri(&root.join("app.pmc"));
+        let mut svc = crate::lsp::PmcLanguageService::new();
+        let diags = svc.did_update(&app_uri, APP);
+        let state = svc.docs.get(&app_uri).expect("did_update just inserted it");
+        let overlay = state
+            .overlay
+            .as_ref()
+            .expect("app.pmc is a member of target `app`");
+
+        let shared_uri = path_to_file_uri(&root.join("shared.pmc"));
+        let helpers_uri = path_to_file_uri(&root.join("helpers.pma"));
+
+        // Every source-backed name: the overlay's own pick, by file.
+        for (name, expect_uri) in [
+            ("helper", &shared_uri),
+            ("ns::inner", &shared_uri),
+            ("ns::dup", &shared_uri),
+            ("asm_fn", &helpers_uri),
+        ] {
+            let sym = overlay
+                .symbols
+                .get(name)
+                .unwrap_or_else(|| panic!("overlay resolves {name}"));
+            let (uri, _span) = sym
+                .target
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} is source-backed, carries a span"));
+            assert_eq!(uri, expect_uri, "{name}: overlay's own pick");
+        }
+        // `pre_fn` and `bit_only` are both `.pmo`-backed: name-only
+        // answers, no location — one from a source `.pmo`, the other
+        // from the declared library.
+        for name in ["pre_fn", "bit_only"] {
+            assert!(
+                overlay
+                    .symbols
+                    .get(name)
+                    .unwrap_or_else(|| panic!("overlay resolves {name}"))
+                    .target
+                    .is_none(),
+                "{name} comes from a .pmo — no source location to carry"
+            );
+        }
+        // `std::goToEnd` is never inserted into `overlay.symbols` at all
+        // — it resolves through the SEPARATE stdlib channel
+        // (`Overlay.stdlib` + `crate::stdlib::roster()`), not the
+        // sibling/library scan this struct otherwise represents.
+        assert!(!overlay.symbols.contains_key("std::goToEnd"));
+        assert!(overlay.stdlib, "the manifest's default stdlib flag is on");
+        assert!(
+            crate::stdlib::roster()
+                .iter()
+                .any(|e| e.full_path == "std::goToEnd"),
+            "std::goToEnd is a real embedded-stdlib routine"
+        );
+
+        // Every bare call in APP (`helper`, `asm_fn`, `pre_fn`,
+        // `bit_only`) is covered by a sibling/library export, so the
+        // cross-file refinement (docs/pmt/cli.md (undeclared-external))
+        // must have silenced every one of them — proving this fixture's
+        // calls are the SAME calls just inspected above, not a
+        // coincidence of two disconnected checks.
+        assert!(
+            diags.iter().all(|d| d.code != Some("undeclared-external")),
+            "every bare call in APP resolves through the overlay: {diags:?}"
+        );
+
+        // --- Linker side: the same effective source order + declared
+        //     libraries `pmt build` would use for target `app`
+        //     (`cli::driver::build_one_target`). ---
+        let object_files = ["shared.pmc", "app.pmc", "helpers.pma", "pre.pmo"];
+        let objects: Vec<ObjectFile> = object_files
+            .iter()
+            .map(|f| load_as_object(&root.join(f)))
+            .collect();
+
+        let libs_dir = root.join("libs").to_string_lossy().into_owned();
+        let mut libraries = vec![
+            crate::cli::build::find_library("bitops", &[libs_dir])
+                .expect("bitops.pmo resolves via the declared library dir"),
+        ];
+        libraries.push(crate::stdlib::object().clone());
+
+        let resolved = resolve_names(&objects, &libraries, "main")
+            .expect("every reachable call in this fixture resolves");
+        let origin_of = |name: &str| -> SymbolOrigin {
+            resolved
+                .reached
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("{name} is reached from main"))
+                .origin
+        };
+
+        assert_eq!(origin_of("helper"), SymbolOrigin::Object(0), "shared.pmc");
+        assert_eq!(
+            origin_of("ns::inner"),
+            SymbolOrigin::Object(0),
+            "shared.pmc"
+        );
+        // THE discriminating assertion: the linker's own, independently
+        // implemented shadowing rule (`resolve::resolve` — user objects
+        // beat libraries) also picks shared.pmc over libs/bitops.pmo. If
+        // the overlay's first-wins ordering (`insert_export`, above) ever
+        // diverged from the linker's — say, libraries were merged before
+        // sources, or a `.pmo` library name were preferred by
+        // registration order rather than by kind — the two independent
+        // answers being compared here (this one, and the overlay's own
+        // `ns::dup` pick asserted above) would disagree, and only THIS
+        // fixture's duplicate-defined `ns::dup` can catch that: every
+        // other name in this fixture has exactly one definer, so picking
+        // the wrong one would be invisible to a name-only comparison.
+        assert_eq!(
+            origin_of("ns::dup"),
+            SymbolOrigin::Object(0),
+            "shared.pmc must win — NOT libs/bitops.pmo"
+        );
+        assert_eq!(origin_of("asm_fn"), SymbolOrigin::Object(2), "helpers.pma");
+        assert_eq!(origin_of("pre_fn"), SymbolOrigin::Object(3), "pre.pmo");
+        assert_eq!(
+            origin_of("bit_only"),
+            SymbolOrigin::Library(0),
+            "libs/bitops.pmo, the first (only non-stdlib) declared library"
+        );
+        assert_eq!(
+            origin_of("std::goToEnd"),
+            SymbolOrigin::Library(1),
+            "the embedded stdlib, the second declared library"
+        );
+
+        // Map every Object-origin name back to the SAME file the overlay
+        // named, by provenance (`SymbolOrigin::Object(i)` ->
+        // `object_files[i]`), for every name that carries a navigable
+        // overlay location.
+        for name in ["helper", "ns::inner", "ns::dup", "asm_fn"] {
+            let SymbolOrigin::Object(i) = origin_of(name) else {
+                panic!("{name} must come from a user object, not a library");
+            };
+            let expect_uri = path_to_file_uri(&root.join(object_files[i]));
+            let overlay_uri = &overlay.symbols[name].target.as_ref().unwrap().0;
+            assert_eq!(
+                *overlay_uri, expect_uri,
+                "{name}: overlay pick and linker provenance name the same file"
+            );
+        }
+
+        // `pre_fn` and `bit_only`: each overlay answer is unlocated
+        // ("some .pmo"); the linker names a specific object or library
+        // index for each. The two agree by PROVENANCE, not coincidence:
+        // each name has exactly ONE object-or-library contributor in
+        // this whole fixture (the combined `objects` then `libraries`
+        // index space `SymbolOrigin` itself counts through), so there is
+        // no OTHER candidate the overlay's name-only answer could have
+        // silently meant instead.
+        let sole_definer = |name: &str| -> usize {
+            let definers: Vec<usize> = objects
+                .iter()
+                .chain(libraries.iter())
+                .enumerate()
+                .filter(|(_, o)| {
+                    o.symbols
+                        .iter()
+                        .any(|s| s.name == name && matches!(s.def, SymbolDef::Defined { .. }))
+                })
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                definers.len(),
+                1,
+                "{name} must have exactly one object-or-library definer: {definers:?}"
+            );
+            definers[0]
+        };
+        assert_eq!(
+            sole_definer("pre_fn"),
+            3,
+            "pre_fn: pre.pmo (object index 3) alone"
+        );
+        assert_eq!(
+            sole_definer("bit_only"),
+            objects.len(),
+            "bit_only: libs/bitops.pmo (library index 0 = combined index objects.len())"
+        );
+    }
+
+    #[test]
+    fn overlay_unresolved_matches_linker_unresolved() {
+        // A bare call to a name defined NOWHERE — no sibling, no library,
+        // no stdlib routine — the negative half of the contract: the
+        // overlay must leave it unresolved (its warning stays
+        // unsuppressed, docs/pmt/cli.md (undeclared-external)) exactly
+        // when `resolve_names` also reports it as reachable-unresolved.
+        let root = temp_tree();
+        fs::write(
+            root.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const APP: &str = "export main() {\n    @ghost();\n}\n";
+        fs::write(root.join("app.pmc"), APP).unwrap();
+
+        // --- Overlay side. ---
+        let app_uri = path_to_file_uri(&root.join("app.pmc"));
+        let mut svc = crate::lsp::PmcLanguageService::new();
+        let diags = svc.did_update(&app_uri, APP);
+        let state = svc.docs.get(&app_uri).expect("did_update just inserted it");
+        let overlay = state
+            .overlay
+            .as_ref()
+            .expect("app.pmc is a member of target `app`");
+
+        assert!(
+            !overlay.symbols.contains_key("ghost"),
+            "ghost is defined nowhere in this fixture"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some("undeclared-external") && d.message.contains("ghost")),
+            "nothing defines ghost, so its warning must stay unsuppressed: {diags:?}"
+        );
+
+        // --- Linker side: the same one-source, stdlib-linked build
+        //     `pmt build` would run for this target. ---
+        let object = crate::compiler::compile(APP, crate::compiler::CompileOptions::default())
+            .expect("app.pmc compiles despite the undeclared call")
+            .object;
+        let libraries = vec![crate::stdlib::object().clone()];
+        let err = resolve_names(std::slice::from_ref(&object), &libraries, "main")
+            .expect_err("ghost is reachable from main and defined nowhere");
+        assert_eq!(err, LinkError::Unresolved(vec!["ghost".to_string()]));
+    }
+}
