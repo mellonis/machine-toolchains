@@ -1294,13 +1294,21 @@ mod faithfulness {
         d
     }
 
-    /// Loads one already-resolved source path per its extension, exactly
-    /// mirroring `cli::driver::load_one_source`'s own three-way dispatch
+    /// Loads one already-resolved source path per its extension, mirroring
+    /// `cli::driver::load_one_source`'s own three-way EXTENSION dispatch
     /// (`.tmc` compiles, `.tma` assembles, anything else loads as a
-    /// `.tmo` object) — the SAME dispatch a real `tmt build` runs over a
+    /// `.tmo` object) — the same branch a real `tmt build` takes over a
     /// target's effective sources, so the objects handed to
-    /// `resolve_names` below are the objects the real linker would see,
-    /// not a shape invented for this test.
+    /// `resolve_names` below are shaped the way the real linker would see
+    /// them, not a shape invented for this test. The COMPILE/ASSEMBLE
+    /// OPTIONS are not a full mirror, though, and this module's fixtures
+    /// never need them to be: `.tma` always assembles with debug info off
+    /// (`assemble(&source, false)`, not the driver's profile-derived
+    /// flag), and `.tmc` always compiles with `CompileOptions::default()`
+    /// (not a manifest-profile-resolved one). Neither affects the symbol
+    /// TABLE a compiled/assembled object carries — names, `Defined`/
+    /// `Local` kind, provenance — which is the only thing this module's
+    /// comparisons read.
     fn load_as_object(path: &Path) -> ObjectFile {
         match path.extension().and_then(|e| e.to_str()) {
             Some("tmc") => {
@@ -1623,20 +1631,33 @@ machine {
         // mangles to the SAME `std::binaryNumbers::goToNumber` key the
         // embedded stdlib roster answers under, creating a genuine
         // two-definer collision — the embedded stdlib object really
-        // does export a symbol named `std::binaryNumbers::goToNumber`
-        // (the navigation-level test
-        // `a_shadowing_sibling_wins_over_the_stdlib_at_every_leg` in
-        // `lsp/tests.rs` already proves the shadow exists; this is the
-        // LINKER-provenance half of the same case). Both sides must pick
-        // the sibling: the overlay because a name it owns always wins
-        // over the materialized roster, the linker because the embedded
-        // stdlib links as an ordinary library, appended LAST, behind
-        // every declared source — so its own sources-before-libraries
-        // rule already prefers the sibling. This is exactly the case an
-        // overlay that special-cased the `std::` PREFIX (routing it
-        // straight to the materialized roster without ever consulting
-        // the overlay) would get wrong — the sibling crate's own history
-        // records that defect and the follow-up fix it took.
+        // does export a symbol named `std::binaryNumbers::goToNumber`.
+        // Both sides must pick the sibling: `Overlay.symbols`'s own
+        // first-wins `insert_export` (sources before libraries) against
+        // `resolve_names`'s independently-implemented shadowing rule
+        // (user objects beat libraries).
+        //
+        // SCOPE, PRECISELY — what this test does and does not cover:
+        // `Overlay.symbols` is built ONLY from `view.siblings` and
+        // `view.library_paths` (`build_overlay`, above); the embedded
+        // stdlib is never inserted into it at all — it is folded in
+        // separately, only inside `Overlay::defined_names()`, and never
+        // as a candidate `insert_export` could shadow. So there is no
+        // OTHER entry this lookup could confuse the sibling with, which
+        // makes this test's own `sym.target == shared_uri` assertion
+        // close to guaranteed-true by the current architecture — it
+        // would NOT catch a regression where `navigate.rs` special-cased
+        // the `std::` prefix and routed straight to the materialized
+        // roster without ever consulting the overlay (the sibling
+        // crate's own history records exactly that defect, in its
+        // `navigate.rs`). This test proves the LINKER-provenance half
+        // only: that `resolve_names` genuinely agrees with whatever
+        // `Overlay.symbols` already contains. The regression guard for
+        // `navigate.rs`'s routing ORDER lives solely in
+        // `a_shadowing_sibling_wins_over_the_stdlib_at_every_leg`
+        // (`lsp/tests.rs`), which drives `service.definition`/`hover`
+        // directly and is what would actually fail if that routing ever
+        // special-cased `std::` again.
         //
         // Positive control FIRST: pin that the embedded stdlib object
         // really does export a `Defined` symbol named exactly
@@ -1682,10 +1703,17 @@ machine {
 ";
         fs::write(root.join("app.tmc"), APP).unwrap();
 
-        // --- Overlay side. ---
+        // --- Overlay side. --- (No diagnostics assertion here: this
+        // fixture's only cross-file call is the fully-qualified
+        // `std::binaryNumbers::goToNumber`, and `Scopes::resolve`
+        // (compiler.rs) returns `Some(...)` unconditionally for any name
+        // containing `::` — the `undeclared-external` warning fires only
+        // on a BARE miss, so it could never fire here regardless of
+        // which side of the shadow wins. Test 1's four bare calls are
+        // where that refinement is actually load-bearing.)
         let app_uri = path_to_file_uri(&root.join("app.tmc"));
         let mut svc = crate::lsp::TmcLanguageService::new();
-        let diags = svc.did_update(&app_uri, APP);
+        svc.did_update(&app_uri, APP);
         let state = svc.docs.get(&app_uri).expect("did_update just inserted it");
         let overlay = state
             .overlay
@@ -1708,11 +1736,6 @@ machine {
         assert_eq!(
             uri, &shared_uri,
             "the overlay must pick the sibling, not the embedded stdlib"
-        );
-
-        assert!(
-            diags.iter().all(|d| d.code != Some("undeclared-external")),
-            "std::binaryNumbers::goToNumber resolves through the overlay: {diags:?}"
         );
 
         // --- Linker side: the same effective source order `tmt build`
