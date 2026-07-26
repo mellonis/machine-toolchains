@@ -352,19 +352,22 @@ L1:     rgt
         stp
 ```
 
-One instruction per line, `;` line comments. The **canonical column grid**
-emitted by `pmt compile -S` and `pmt dis` (and produced by `grid_line`):
-labels at column 0, mnemonics at column 8, operands at column 16, trailing
-comments at column 32, trailing spaces trimmed; the assembler's parser
-itself accepts any whitespace on input. A label field of 8 characters or
-more (the name plus its `:`) moves to its own line rather than sharing
-the instruction's line, so a long label never pushes the mnemonic column
-out of alignment; a field of 7 characters or fewer stays inline. `pmt dis`
-output is always valid assembler input — round-tripping through `asm`
-reproduces the original bytes exactly. `pmt fmt` (`docs/pmt/cli.md`) is the
-tool that enforces this grid on hand-written `.pma` source — `pmt compile
--S` and `pmt dis` already emit it directly, so formatting their output is
-always a no-op.
+One instruction per line, `;` line comments. The **canonical column
+grid** — labels at column 0, mnemonics at column 8, operands at column
+16, trailing comments at column 32, trailing spaces trimmed — is what
+`pmt fmt` (`docs/pmt/cli.md`) enforces on hand-written `.pma` source, and
+what `pmt compile -S` and `pmt dis` emit directly; the assembler's parser
+itself accepts any whitespace on input. The two producers differ on one
+point, the long-label rule: `pmt dis`'s grid (`grid_line`) keeps a short
+label field — 7 characters or fewer, the name plus its `:` — inline with
+its instruction, and moves only a field of 8 characters or more to its
+own line, so a long label never pushes the mnemonic column out of
+alignment; `pmt compile -S` puts every label on its own line
+unconditionally, regardless of length. `pmt fmt` treats both shapes as
+already canonical, so reformatting the output of either `pmt compile -S`
+or `pmt dis` is always a no-op. `pmt dis` output is always valid
+assembler input — round-tripping through `asm` reproduces the original
+bytes exactly.
 
 `pmt dis` accepts either binary. From a `.pmo`: real names come from the
 symbol table, code is shown per function, and call sites are named from

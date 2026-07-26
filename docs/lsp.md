@@ -149,11 +149,14 @@ cascade.
 
 Each file holds up to two independent sections. Only the `lint` section is
 configuration in the sense this page means; its schema is documented at
-`docs/pmt/lint.md` and `docs/tmt/cli.md` respectively. The other section,
+`docs/pmt/lint.md` and `docs/tmt/lint.md` respectively. The other section,
 `project`, is the declared project model the build drivers read
 (`docs/pmt/project.md`, `docs/tmt/project.md`); it is found by its own
 ancestor walk — one that passes through a lint-only file rather than
-stopping at it — and configures nothing about how a document is analyzed.
+stopping at it. It is also what a document's project-overlay membership
+keys on: see **Cross-file resolution (the project overlay)**, below, for
+how a declared target's sources, libraries, and `stdlib` flag shape what
+a document belonging to it resolves names against.
 
 Both services of a server read the same file and the same IDE-settings
 channel. A `lint.allow` entry applies uniformly no matter which language's
@@ -447,6 +450,15 @@ and a frame descriptor are data structures, not jump targets, and a reader
 scanning the tables section benefits from seeing them apart from the code
 labels they point at.
 
+The project overlay (**Cross-file resolution (the project overlay)**,
+below) changes nothing here. `.pmc`'s legend is already resolution-aware,
+so a call resolved through a sibling or the embedded stdlib still
+tokenizes as a plain `function`, never the `defaultLibrary` modifier —
+that modifier is reserved for a resolution landing in the embedded copy
+directly. `.tmc`'s legend is gated on the token stream alone, with no
+resolution tier for a cross-file distinction to key on at all: semantic
+tokens are the one `.tmc` feature the overlay does not extend.
+
 ## Document symbols
 
 The outline, structural in every service and never gated on resolution.
@@ -526,25 +538,37 @@ everywhere above, unchanged.
 
 Within the overlay, a name resolves in exactly the order the linker
 resolves it: the document's own local declarations first, then the
-declared sources — their **exported** symbols only, an unexported routine
-never crosses the boundary — then the declared libraries (first library
-wins on a name collision), and the embedded standard library **last**.
+declared sources, then the declared libraries (first library wins on a
+name collision), and the embedded standard library **last**. What a
+declared source contributes is not simply "exported symbols" on both
+toolchains: for `.pmc` it is exactly that — an unexported function never
+crosses the boundary. For `.tmc` the rule is per world kind, since only
+some of its world kinds even accept the `export` keyword: a `routine`
+contributes iff exported, the same as `.pmc`; a `graph` never
+contributes, exported or not, because a graph is spliced into a world
+rather than called; and a `machine` world always contributes its `main`
+regardless of `export` — the grammar does not accept `export` on a
+`machine` block at all, and the linker reaches its `main` unconditionally.
 Because the standard library resolves last, a project that legitimately
 shadows it with its own `namespace std { export … }` gets an editor that
 follows the project's own definition, not the embedded one, the same way
 the linker would.
 
 A project may declare `"stdlib": false`; doing so removes the `std::`
-surface entirely — no completion candidates, no hover, no materialized
-jump (below), and no contribution to the refinement in the next
-paragraph.
+surface entirely — no completion candidates, no hover, and no
+materialized jump (below).
 
 One diagnostic rides the same table: a bare call or bind to a name the
 document itself never declares, which would otherwise warn as
 `undeclared-external`, is silenced when the overlay's declared set —
-project siblings, libraries, or the stdlib — actually defines it,
-mirroring exactly what `pmt build`/`tmt build` already do for the same
-declared set (**Diagnostics**, above).
+project siblings or libraries — actually defines it, mirroring exactly
+what `pmt build`/`tmt build` already do for the same declared set
+(**Diagnostics**, above). The stdlib never contributes to this
+particular silencing: the warning fires only on a **bare** name, and
+every roster entry is a full `std::`-prefixed path — a qualified name is
+already self-declaring and never warns in the first place, so there is
+no bare name a roster entry could ever match. Both crates carry a test
+pinning exactly this.
 
 ### What lights up, per toolchain
 
@@ -598,7 +622,7 @@ them file-for-file, including the shadowed-stdlib case above.
 
 ### Caveats
 
-Four limitations are real and worth stating plainly rather than glossing
+Five limitations are real and worth stating plainly rather than glossing
 over:
 
 - **Lexical path identity.** Membership and sibling lookup compare paths
@@ -628,13 +652,28 @@ over:
   declared set at a time. A document belonging to two targets, where a
   name is declared only in one target's sources, can show no warning in
   the editor while building the other target alone would still emit one.
+- **Silent degradation on a broken sibling or a missing library.** A
+  declared sibling that fails to read from disk, or whose text fails to
+  parse, contributes an *empty* export list to the overlay rather than
+  its last-good one — unlike the last-good-roster exception the
+  single-file view keeps for its own open document (**Staged analysis**,
+  above), a sibling gets no such memory. A declared library name absent
+  from every declared search directory likewise contributes nothing.
+  Both are deliberate: a broken or missing contributor quietly drops out
+  of the overlay rather than raising a warning about itself, so one bad
+  sibling degrades only the names it would have added, never the
+  requesting document's own diagnostics.
 - **Span conversion into unopened files.** A jump into a file the editor
   does not currently have open converts the target span using the
   char-equals-UTF-16-unit identity (**Position encoding**, above), which
-  is exact only when the target's lines are ASCII up to the span. Both
-  materialized standard libraries are ASCII by construction, so this
-  bites only a non-ASCII sibling source, at the position of a non-ASCII
-  character before the span.
+  is exact only when the target's lines are ASCII up to the span.
+  Neither materialized standard library is ASCII by construction — both
+  carry non-ASCII prose in their doc/attention comments — but every
+  **declaration** line, the only kind of line a jump ever lands on,
+  stays plain ASCII in practice, and a guard test pins the roster's
+  declaration lines to prove it. So this caveat bites only a non-ASCII
+  sibling source, at the position of a non-ASCII character before the
+  span — never the materialized copies.
 
 ## The `.pmc` service
 
@@ -658,6 +697,7 @@ or not.
 | Semantic tokens | a full successful analysis (resolution-aware) | `null` — clients keep the previous tokens or static grammar coloring |
 | Document symbols | a successful parse (CST only) | `null` |
 | Formatting | a successful parse (CST only) | `null` — the parse error is already on screen as a diagnostic |
+| Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) | the single-file view described everywhere above |
 
 ### Materialized standard library
 
@@ -723,6 +763,7 @@ service adds for its fatal (**Diagnostics**, above).
 | Semantic tokens | the source lexes | `null` |
 | Document symbols | a successful parse (CST only) | `null` |
 | Formatting | a successful parse (CST only) | `null` — the parse error is already on screen as a diagnostic |
+| Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) — semantic tokens are NOT part of this row: `.tmc`'s legend has no resolution tier for the overlay to extend | the single-file view described everywhere above |
 
 Two of those tiers are lower than the `.pmc` equivalents, deliberately.
 Navigation answers off the flat program rather than the resolution table,

@@ -269,3 +269,11 @@ defined only in a sibling target's own (non-shared) source does not
 refine another target's warnings. `pmt compile`, working one file at a
 time with no visibility into any declared set, stays per-file honest and
 always warns on a bare undeclared call.
+
+## Editor resolution
+
+The `project` section isn't only read by `pmt build`: `pmt lsp` reads the
+same declared sources, libraries, and `stdlib` flag to resolve cross-file
+names for an open document that belongs to a target here — the project
+overlay documented at `docs/lsp.md` ("Cross-file resolution (the project
+overlay)").
