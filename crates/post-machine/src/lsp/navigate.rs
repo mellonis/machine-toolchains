@@ -30,8 +30,8 @@ use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
 use crate::stdlib::{materialized_std_uri, roster};
 
 use super::DocState;
-use super::std_enabled;
 use super::walk::{enclosing_function_chain, function_labels, label_refs, span_contains};
+use super::{overlay_owns, std_enabled};
 
 /// Step 1's shared scan — the ONE place a position is hit-tested
 /// against the resolution table: the entry whose call-site span
@@ -178,23 +178,18 @@ fn overlay_target(state: &DocState, full_path: &str, origin: Span) -> Option<Def
 /// sibling or library exporting the same mangled name under `std::`
 /// shadows it, the identical user-object-beats-library precedent the
 /// linker itself follows. So this checks OWNERSHIP first —
-/// `overlay.symbols.contains_key(full_path)` — not [`overlay_target`]'s
-/// `Option`: the overlay can OWN a name yet still answer no location (a
-/// `.pma`/`.pmo` shadow), and that must still short-circuit here rather
-/// than falling through to the materialized stdlib behind the owner's
-/// back. Only a genuine miss — no project, or no sibling/library defines
-/// this name at all — reaches the materialized roster, itself still
-/// gated on [`std_enabled`] (a project declaring `"stdlib": false` gets
-/// no materialized jump, exactly as before). Every one of `navigate.rs`'s
-/// three `std::`-branch sites reduces to a call here, so a future arch
-/// twin only needs to copy this one function's shape, not each call
-/// site's.
+/// [`overlay_owns`] — not [`overlay_target`]'s `Option`: the overlay can
+/// OWN a name yet still answer no location (a `.pma`/`.pmo` shadow), and
+/// that must still short-circuit here rather than falling through to the
+/// materialized stdlib behind the owner's back. Only a genuine miss — no
+/// project, or no sibling/library defines this name at all — reaches the
+/// materialized roster, itself still gated on [`std_enabled`] (a project
+/// declaring `"stdlib": false` gets no materialized jump, exactly as
+/// before). Every one of `navigate.rs`'s three `std::`-branch sites
+/// reduces to a call here, so a future arch twin only needs to copy this
+/// one function's shape, not each call site's.
 fn std_path_target(state: &DocState, full_path: &str, origin: Span) -> Option<DefTarget> {
-    let overlay_owns = state
-        .overlay
-        .as_ref()
-        .is_some_and(|o| o.symbols.contains_key(full_path));
-    if overlay_owns {
+    if overlay_owns(state, full_path) {
         overlay_target(state, full_path, origin)
     } else if std_enabled(state) {
         std_target(full_path, origin)

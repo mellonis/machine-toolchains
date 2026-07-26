@@ -31,7 +31,7 @@ use crate::parser::Item;
 use super::walk::label_refs;
 use super::{
     DocState, MODIFIER_DECLARATION, MODIFIER_DEFAULT_LIBRARY, TOKEN_TYPE_FUNCTION,
-    TOKEN_TYPE_NAMESPACE, TOKEN_TYPE_NUMBER,
+    TOKEN_TYPE_NAMESPACE, TOKEN_TYPE_NUMBER, overlay_owns,
 };
 
 /// The document's semantic token stream, or `None` on any failed
@@ -205,22 +205,6 @@ fn digit_run_len(text: &str, pos: Pos) -> u32 {
         .skip((pos.col - 1) as usize)
         .take_while(|c| c.is_ascii_digit())
         .count() as u32
-}
-
-/// Whether `state`'s cross-file overlay (docs/lsp.md (configuration))
-/// defines `full_path` OUTRIGHT — the ownership check every
-/// `defaultLibrary` decision in this file gates on, mirroring
-/// `navigate.rs::std_path_target`'s identical ownership-first rule for
-/// go-to-definition/hover: a name the overlay owns resolves to a
-/// sibling/library in the user's own project, never the embedded
-/// stdlib, regardless of whether the name happens to start with `std::`
-/// (a sibling's own `namespace std { export … }` shadows the embedded
-/// routine of the same mangled name — docs/pmt/project.md (libraries)).
-fn overlay_owns(state: &DocState, full_path: &str) -> bool {
-    state
-        .overlay
-        .as_ref()
-        .is_some_and(|overlay| overlay.symbols.contains_key(full_path))
 }
 
 /// A `use` path's per-segment tokens: every segment but the last is

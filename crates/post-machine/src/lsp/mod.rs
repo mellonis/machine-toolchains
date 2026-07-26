@@ -208,6 +208,37 @@ fn std_enabled(state: &DocState) -> bool {
     state.overlay.as_ref().is_none_or(|o| o.stdlib)
 }
 
+/// Whether `state`'s cross-file overlay (docs/lsp.md (configuration))
+/// defines `full_path` OUTRIGHT — the ownership check every `std::`-
+/// branch in this feature gates on before falling through to the
+/// embedded stdlib. Resolution order is local file, then declared
+/// sources, then declared libraries (first-wins), then the embedded
+/// stdlib LAST (docs/pmt/project.md (libraries)) — the same order the
+/// linker itself follows, which is why a user's own `namespace std {
+/// export … }` shadows the embedded routine of the same mangled name
+/// even though the name starts with `std::`. Checking ownership first,
+/// rather than `Option`-chaining straight into a lookup, matters because
+/// the overlay can OWN a name yet still answer no location or doc (a
+/// `.pma`/`.pmo`-backed sibling) — that must still short-circuit here
+/// instead of falling through to the unrelated embedded stdlib entry
+/// behind the owner's back.
+///
+/// The single ownership check every `std::`-surfacing feature in this
+/// service shares — deliberately NOT enumerated by caller here, for the
+/// same reason [`std_enabled`]'s own doc gives for skipping its own
+/// caller list: that list has already gone stale once and every future
+/// `std::`-touching feature would go on growing it again. A future arch
+/// twin only needs to copy this one function's shape, not reconcile
+/// several near-identical copies. Visibility mirrors [`std_enabled`]'s
+/// own: plain module-private, not `pub(super)`, for the identical
+/// `DocState`-nameability reason documented there.
+fn overlay_owns(state: &DocState, full_path: &str) -> bool {
+    state
+        .overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.symbols.contains_key(full_path))
+}
+
 /// `file:` URIs → percent-decoded filesystem path; any other scheme
 /// (`untitled:` buffers, …) → `None`. An authority component
 /// (`file://localhost/x`) is skipped — editors emit the empty-authority
@@ -621,24 +652,21 @@ impl LanguageService for PmcLanguageService {
         // a sibling's own `namespace std { export … }` shows the
         // sibling's doc, not the embedded routine's. `std_doc` is gated
         // on BOTH `std_enabled` and the overlay NOT already owning the
-        // name — an owned name with no doc of its own (a `.pma`/`.pmo`
-        // shadow, which carries no doc surface at all) must show nothing
-        // rather than fall through to the embedded stdlib's unrelated
-        // prose. For every non-`std::` name the overlay can never own,
-        // so this gate is a no-op there — the two key spaces stay
-        // disjoint in practice, only `std::` collides.
+        // name (`overlay_owns`) — an owned name with no doc of its own (a
+        // `.pma`/`.pmo` shadow, which carries no doc surface at all) must
+        // show nothing rather than fall through to the embedded stdlib's
+        // unrelated prose. The gate is a no-op for every non-`std::` name
+        // because `crate::stdlib::docs()` only ever holds `std::`-keyed
+        // entries, so `std_doc` is `None` there regardless of ownership.
         let state = self.docs.get(uri)?;
         let (name, origin) = navigate::hover_target(state, pos)?;
-        let overlay_owns = state
-            .overlay
-            .as_ref()
-            .is_some_and(|o| o.symbols.contains_key(&name));
+        let owns_name = overlay_owns(state, &name);
         let overlay_doc = state
             .overlay
             .as_ref()
             .and_then(|o| o.symbols.get(&name))
             .and_then(|s| s.doc.as_ref());
-        let std_doc = if !overlay_owns && std_enabled(state) {
+        let std_doc = if !owns_name && std_enabled(state) {
             crate::stdlib::docs().get(&name)
         } else {
             None
