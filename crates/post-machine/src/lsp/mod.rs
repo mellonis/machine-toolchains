@@ -1976,6 +1976,10 @@ export main() {
         let hover = service
             .hover(uri, std_pos)
             .expect("std:: hover is untouched without an overlay");
+        // Deliberately coupled to `goToEnd`'s own doc prose (the same
+        // substring `hover_on_a_std_call_reads_the_embedded_stdlibs_own_doc`
+        // pins in full) — this test's job is proving the untitled route
+        // reaches the SAME embedded doc, not re-deriving its wording.
         assert!(
             hover.text.contains("Moves the head"),
             "the embedded stdlib's own doc: {hover:?}"
@@ -2076,9 +2080,15 @@ export main() {
         // Gate 4: a bare std-shaped call still warns — `stdlib:false`
         // only ever removes `std::`-keyed names from
         // `Overlay::defined_names`; a BARE `goToEnd` was never one of
-        // those, so nothing new is suppressed here.
+        // those, so nothing new is suppressed here. Matched on the
+        // message, not just the code, so an unrelated undeclared-external
+        // (the unused `use x;` above names an import, never a call, so it
+        // cannot produce one — but nothing rules out a future fixture
+        // change adding one) can't make this pass vacuously.
         assert!(
-            diags.iter().any(|d| d.code == Some("undeclared-external")),
+            diags
+                .iter()
+                .any(|d| d.code == Some("undeclared-external") && d.message.contains("`goToEnd`")),
             "a bare goToEnd() is not a std:: name — must keep warning: {diags:?}"
         );
     }
