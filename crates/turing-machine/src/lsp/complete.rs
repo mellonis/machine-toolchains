@@ -204,6 +204,8 @@ fn transition_targets(cursor: &Cursor, roster: Option<&Roster>, span: Span) -> V
 /// right.
 fn target_names(kind: CallKind, cursor: &Cursor, roster: &Roster, span: Span) -> Vec<Candidate> {
     match kind {
+        // A graft splices a graph's SOURCE, which a link boundary does not
+        // carry — the stdlib exposes no name here (docs/tmt/stdlib.md).
         CallKind::Graft => named_decls(
             roster,
             roster.graph_names(),
@@ -211,13 +213,17 @@ fn target_names(kind: CallKind, cursor: &Cursor, roster: &Roster, span: Span) ->
             "graph",
             span,
         ),
-        CallKind::Bind => named_decls(
-            roster,
-            roster.routine_names(),
-            CandidateKind::Function,
-            "routine",
-            span,
-        ),
+        CallKind::Bind => {
+            let mut out = named_decls(
+                roster,
+                roster.routine_names(),
+                CandidateKind::Function,
+                "routine",
+                span,
+            );
+            out.extend(std_routine_candidates(span));
+            out
+        }
         CallKind::Call => {
             let mut out = named_decls(
                 roster,
@@ -234,9 +240,28 @@ fn target_names(kind: CallKind, cursor: &Cursor, roster: &Roster, span: Span) ->
                     span,
                 ));
             }
+            out.extend(std_routine_candidates(span));
             out
         }
     }
+}
+
+/// The stdlib roster's qualified routine names, as `call`/`bind` target
+/// candidates — a transparent, argless `call` (or a `bind` that skips
+/// binding-arg validation) is the one call shape that works against the
+/// linked object (docs/tmt/stdlib.md).
+fn std_routine_candidates(span: Span) -> Vec<Candidate> {
+    crate::stdlib::roster()
+        .iter()
+        .map(|entry| Candidate {
+            label: entry.full_path.clone(),
+            kind: CandidateKind::Function,
+            replace_span: span,
+            insert_text: entry.full_path.clone(),
+            detail: Some("routine".to_string()),
+            deprecated: false,
+        })
+        .collect()
 }
 
 /// A binding argument's parameter names: the target world's signature,
@@ -318,8 +343,10 @@ fn binding_value(
 }
 
 /// The names a `use` path may reach: every top-level world and alphabet
-/// the file defines, by mangled name. Cross-file namespaces are invisible
-/// by design — only this document ever contributes a candidate.
+/// the file defines, by mangled name, plus the standard library — the one
+/// well-known external always available without configuration. Any OTHER
+/// cross-file namespace is invisible by design — only this document and
+/// the stdlib ever contribute a candidate.
 fn importable(roster: &Roster, span: Span) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     for name in roster.alphabet_names() {
@@ -345,6 +372,26 @@ fn importable(roster: &Roster, span: Span) -> Vec<Candidate> {
             detail,
             span,
         ));
+    }
+    out.push(Candidate {
+        label: "std".to_string(),
+        kind: CandidateKind::Module,
+        replace_span: span,
+        insert_text: "std".to_string(),
+        detail: Some("standard library".to_string()),
+        deprecated: false,
+    });
+    // Routines only — the stdlib's graphs and alphabets contribute no
+    // linkable symbol a `use` path could ever bind (docs/tmt/stdlib.md).
+    for entry in crate::stdlib::roster() {
+        out.push(Candidate {
+            label: entry.full_path.clone(),
+            kind: CandidateKind::Function,
+            replace_span: span,
+            insert_text: entry.full_path.clone(),
+            detail: Some("routine".to_string()),
+            deprecated: false,
+        });
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
     out

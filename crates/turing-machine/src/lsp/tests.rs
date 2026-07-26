@@ -275,6 +275,25 @@ machine {
 }
 
 #[test]
+fn undeclared_external_still_published_for_bare_names() {
+    // A bare (no `::`) call target nothing declares publishes through
+    // `did_update` exactly as the batch compiler warns — the channel a
+    // later round narrows to genuinely-undeclared names, pinned here so
+    // that narrowing has something to change against.
+    let src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { [*] -> call helper() then s; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let diagnostics = service.did_update(&uri, src);
+    let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
+    assert!(codes.contains(&Some("undeclared-external")), "{codes:?}");
+}
+
+#[test]
 fn did_close_forgets_the_document() {
     let (mut service, uri) = opened(TWO_TAPE);
     service.did_close(&uri);
@@ -547,6 +566,102 @@ machine {
 }
 
 #[test]
+fn use_path_completion_offers_std_and_its_members() {
+    let src = "\
+use std::binaryNumbers::goToNumber;
+
+alphabet a { '_', '0' }
+
+machine {
+  tape t: a;
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let got = labels(&service.completion(&uri, pos_after(src, "use ", 4)));
+    assert!(got.contains(&"std".to_string()), "{got:?}");
+    assert!(
+        got.contains(&"std::binaryNumbers::goToNumber".to_string()),
+        "{got:?}"
+    );
+    assert!(
+        got.contains(&"std::binaryNumbersBare::plusOne".to_string()),
+        "{got:?}"
+    );
+    // Routines only — the stdlib's graphs and alphabets contribute no
+    // linkable symbol a `use` path could ever bind.
+    assert!(
+        !got.contains(&"std::binaryNumbers::plusOneGraph".to_string()),
+        "{got:?}"
+    );
+    assert!(
+        !got.contains(&"std::binaryNumbers::symbols".to_string()),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn call_target_completion_offers_qualified_std_routines() {
+    let call_head = "\
+alphabet bits { '_', '1' }
+
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> call ";
+    let call_tail = "() then main;\n  }\n}\n";
+    let call_got = labels(&complete_typing(
+        call_head,
+        "std::binaryNumbers::goToNumber",
+        call_tail,
+    ));
+    assert!(
+        call_got.contains(&"std::binaryNumbers::goToNumber".to_string()),
+        "{call_got:?}"
+    );
+
+    let bind_head = "\
+alphabet bits { '_', '1' }
+
+machine {
+  tape ctl: bits;
+  bind ";
+    // Argless, like the transparent form `call` uses across a link
+    // boundary — a BOUND tape argument into an external routine is
+    // `external-binding-unsupported` at `tmt compile` (docs/tmt/stdlib.md),
+    // and the fixture should stay legal code, not merely something the
+    // LSP's staged analysis happens to tolerate.
+    let bind_tail = "() as inc1;\n  entry state main { [*] -> call inc1() then main; }\n}\n";
+    let bind_got = labels(&complete_typing(
+        bind_head,
+        "std::binaryNumbersBare::plusOne",
+        bind_tail,
+    ));
+    assert!(
+        bind_got.contains(&"std::binaryNumbersBare::plusOne".to_string()),
+        "{bind_got:?}"
+    );
+}
+
+#[test]
+fn graft_target_completion_never_offers_std_names() {
+    // R1: across a link boundary a graft has no source to splice, so the
+    // stdlib contributes nothing here — same fixture as the graphs-only
+    // test above, plus the negative assertion.
+    let head = "\
+alphabet bits { '_', '1' }
+
+graph g(tape t: bits, state done) { entry state s { [*] -> done; } }
+
+machine {
+  tape ctl: bits;
+  entry graft ";
+    let tail = "(t = ctl, done = fin) as seek;\n  state fin { [*] -> stop; }\n}\n";
+    let got = labels(&complete_typing(head, "g", tail));
+    assert!(got.contains(&"g".to_string()), "{got:?}");
+    assert!(!got.iter().any(|l| l.starts_with("std::")), "{got:?}");
+}
+
+#[test]
 fn a_binding_argument_offers_the_targets_parameter_names_then_its_own_values() {
     let head = "\
 alphabet bits { '_', '1' }
@@ -813,6 +928,34 @@ fn a_use_path_navigates_to_the_routine_it_imports() {
 }
 
 #[test]
+fn definition_on_a_std_call_target_jumps_into_materialized_std_tmc() {
+    let src = "\
+use std::binaryNumbers::goToNumber;
+
+alphabet a { '_', '^', '$', '0', '1' }
+
+machine {
+  tape num: a;
+  entry state s { [*] -> call goToNumber() then done; }
+  state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let target = service
+        .definition(&uri, pos_after(src, "call goToNumber", 5))
+        .expect("a definition");
+
+    let want_uri = crate::stdlib::materialized_std_uri().expect("materializes in test env");
+    assert_eq!(target.uri, want_uri);
+
+    let entry = crate::stdlib::roster()
+        .iter()
+        .find(|e| e.full_path == "std::binaryNumbers::goToNumber")
+        .expect("goToNumber is in the roster");
+    assert_eq!(target.span, entry.name_span);
+}
+
+#[test]
 fn definition_survives_a_resolve_stage_fatal() {
     // The program outlives resolution, and every reference span lives on
     // it — so navigation keeps working on a document that does not yet
@@ -887,6 +1030,60 @@ fn hovering_an_alphabet_lists_its_symbols() {
         .expect("a hover");
     assert!(hover.text.contains("alphabet bits"), "{}", hover.text);
     assert!(hover.text.contains("_, 0, 1"), "{}", hover.text);
+}
+
+#[test]
+fn hover_on_a_std_call_target_returns_its_doc() {
+    // Issue #37's exact reproduction, inverted: a `std::` call target now
+    // hovers with the routine's own doc, resolved through the embedded
+    // stdlib's analysis rather than this document's (which never holds a
+    // std entry).
+    let src = "\
+alphabet a { '_', '^', '$', '0', '1' }
+
+machine {
+  tape num: a;
+  entry state s { [*] -> call std::binaryNumbers::goToNumber() then done; }
+  state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(
+            &uri,
+            pos_after(src, "call std::binaryNumbers::goToNumber", 5),
+        )
+        .expect("a hover");
+    assert!(
+        hover
+            .text
+            .contains("Walk right to the current number's end marker"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn hovering_a_genuine_external_with_no_std_doc_shows_nothing() {
+    // `External` covers any qualified/aliased name this document does not
+    // declare, not only std ones. With no doc to show, the head alone
+    // would just echo the reference's own text back at the cursor — the
+    // emptiness rule says that is not a hover, so this must stay `None`
+    // exactly like an undocumented LOCAL declaration does.
+    let src = "\
+alphabet a { '_', '0' }
+use lib::helper;
+machine {
+  tape t: a;
+  entry state s { [*] -> call helper() then s; }
+}
+";
+    let (mut service, uri) = opened(src);
+    assert!(
+        service
+            .hover(&uri, pos_after(src, "call helper", 5))
+            .is_none()
+    );
 }
 
 #[test]
