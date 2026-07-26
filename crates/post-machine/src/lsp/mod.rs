@@ -176,8 +176,9 @@ struct DocState {
     /// (configuration)): `None` when the document degrades to
     /// single-file behavior (no manifest found, the document is a
     /// member of no target, or it has no `file:` path at all). Consumed
-    /// by `did_update`'s own diagnostics refinement and by `complete.rs`'s
-    /// cross-file legs; not yet consumed by navigation or hover.
+    /// by `did_update`'s own diagnostics refinement, by `complete.rs`'s
+    /// cross-file legs, and by `navigate.rs`'s go-to-definition/hover
+    /// legs (via `hover`'s own doc-map lookup below).
     pub overlay: Option<overlay::Overlay>,
 }
 
@@ -604,20 +605,35 @@ impl LanguageService for PmcLanguageService {
         // Position→qualified-name resolution is navigate.rs's job
         // (shares definition's own walks — docs/lsp.md (hover)); the
         // doc-map lookup, content-emptiness gate, and rendering are
-        // ours. `name` falls back to the embedded stdlib's own doc map
-        // (`crate::stdlib::docs()`) when this document's own analysis
-        // misses — the only way it CAN miss for a `std::…` name, since
-        // that map holds only functions THIS document flattened. No
-        // `std::` guard needed on the fallback: `stdlib::docs()` has no
-        // non-`std::` keys, so a local, non-std miss just misses again.
+        // ours. Three legs, local first: this document's own
+        // `Analysis.docs`; the embedded stdlib's own doc map
+        // (`crate::stdlib::docs()`), gated on `std_enabled` — the only
+        // way the local map CAN miss for a `std::…` name, since it holds
+        // only functions THIS document flattened; the cross-file
+        // overlay's own `OverlaySym.doc`, for a name a sibling/library
+        // defines instead. The three key spaces are disjoint in
+        // practice (this document's own docs never hold a `std::…` or a
+        // sibling's key), so the ORDER among them carries no semantics —
+        // local stays first on principle.
         let state = self.docs.get(uri)?;
         let (name, origin) = navigate::hover_target(state, pos)?;
+        let overlay_doc = state
+            .overlay
+            .as_ref()
+            .and_then(|o| o.symbols.get(&name))
+            .and_then(|s| s.doc.as_ref());
+        let std_doc = if std_enabled(state) {
+            crate::stdlib::docs().get(&name)
+        } else {
+            None
+        };
         let doc = state
             .analysis
             .as_ref()?
             .docs
             .get(&name)
-            .or_else(|| crate::stdlib::docs().get(&name))?;
+            .or(std_doc)
+            .or(overlay_doc)?;
         let text = render_doc(doc)?;
         Some(HoverContent { text, span: origin })
     }

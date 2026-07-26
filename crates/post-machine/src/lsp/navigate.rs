@@ -1,10 +1,18 @@
 //! Go-to-definition (docs/lsp.md (go-to-definition)): resolves a document
 //! position to a [`DefTarget`] through a four-step resolution order —
 //! the resolution table (a call's name), a label reference (`goto` /
-//! `check` / a labeled successor), a `use std::…` path, else `None`.
-//! Analysis-tier: every query degrades to `None` when `DocState::analysis`
-//! is `None` (a post-parse fatal anywhere in the document), not just the
-//! part that failed.
+//! `check` / a labeled successor), a `use std::…` path, else `None`. A
+//! resolution-table hit or `use`-path segment naming something this
+//! document does NOT itself define is tried against the document's
+//! cross-file [`super::overlay::Overlay`] before falling back to today's
+//! single-file behavior (docs/lsp.md (configuration)): a sibling's own
+//! declaration wins over an `ImportBinding`'s bare `use`-span jump, and
+//! over `QualifiedExternal`'s/`Unresolved`'s plain `None`; a `std::` path
+//! stays gated on [`super::std_enabled`] throughout, and an overlay hit
+//! with no source location (a `.pmo`-backed symbol) yields `None` rather
+//! than a bogus jump. Analysis-tier: every query degrades to `None` when
+//! `DocState::analysis` is `None` (a post-parse fatal anywhere in the
+//! document), not just the part that failed.
 
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::DefTarget;
@@ -14,6 +22,7 @@ use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
 use crate::stdlib::{materialized_std_uri, roster};
 
 use super::DocState;
+use super::std_enabled;
 use super::walk::{enclosing_function_chain, function_labels, label_refs, span_contains};
 
 /// Step 1's shared scan — the ONE place a position is hit-tested
@@ -34,18 +43,21 @@ fn resolve_at(analysis: &Analysis, pos: Pos) -> Option<(Span, &Resolution)> {
 ///
 /// 1. a resolution-table entry whose span contains `pos` (the call name
 ///    under the cursor) — resolved per its [`Resolution`] variant,
-///    `std::` paths routed through the materialized roster;
+///    `std::` paths routed through the materialized roster (gated on
+///    [`std_enabled`]) and everything else consulting the document's
+///    cross-file overlay before its own single-file fallback;
 /// 2. failing that, a label reference (`goto` target, a `check` arm, or
 ///    a labeled successor) hit-tested against the innermost enclosing
 ///    function's own labels;
-/// 3. failing that, a `use std::…` path segment, through the
-///    materialized roster;
+/// 3. failing that, a `use …` path segment — `std::` through the
+///    materialized roster (same [`std_enabled`] gate), any other path
+///    through the overlay;
 /// 4. otherwise `None`.
 pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTarget> {
     let analysis = state.analysis.as_ref()?;
 
     if let Some((origin, resolution)) = resolve_at(analysis, pos) {
-        return resolve_call(uri, resolution, origin);
+        return resolve_call(state, uri, resolution, origin);
     }
 
     let cst = state.cst.as_ref()?;
@@ -61,7 +73,15 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
     }
 
     if let Some((full_path, origin)) = use_path_at(&cst.items, pos) {
-        return std_target(&full_path, origin);
+        return if full_path.starts_with("std::") {
+            if std_enabled(state) {
+                std_target(&full_path, origin)
+            } else {
+                None
+            }
+        } else {
+            overlay_target(state, &full_path, origin)
+        };
     }
 
     None
@@ -69,8 +89,16 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
 
 /// Step 1's per-variant resolution. `origin` is the call-site name span
 /// that `resolution` was keyed by (the reference under the cursor) —
-/// carried through to every arm's `DefTarget`.
-fn resolve_call(uri: &str, resolution: &Resolution, origin: Span) -> Option<DefTarget> {
+/// carried through to every arm's `DefTarget`. `state` supplies both the
+/// cross-file overlay (`Resolution::Local` never needs it — a local
+/// definition always wins on its own) and, for `Unresolved`, the raw
+/// source text a bare call's written name is sliced from.
+fn resolve_call(
+    state: &DocState,
+    uri: &str,
+    resolution: &Resolution,
+    origin: Span,
+) -> Option<DefTarget> {
     match resolution {
         Resolution::Local { def_name_span } => Some(DefTarget {
             uri: uri.to_string(),
@@ -82,8 +110,18 @@ fn resolve_call(uri: &str, resolution: &Resolution, origin: Span) -> Option<DefT
             full_path,
         } => {
             if full_path.starts_with("std::") {
-                std_target(full_path, origin)
+                if std_enabled(state) {
+                    std_target(full_path, origin)
+                } else {
+                    None
+                }
+            } else if let Some(target) = overlay_target(state, full_path, origin) {
+                Some(target)
             } else {
+                // No overlay hit (no project, no matching sibling/library
+                // export, or a name-only `.pmo` symbol) — today's
+                // single-file behavior: jump to this document's own `use`
+                // statement.
                 Some(DefTarget {
                     uri: uri.to_string(),
                     span: *use_span,
@@ -93,13 +131,90 @@ fn resolve_call(uri: &str, resolution: &Resolution, origin: Span) -> Option<DefT
         }
         Resolution::QualifiedExternal { full_path } => {
             if full_path.starts_with("std::") {
-                std_target(full_path, origin)
+                if std_enabled(state) {
+                    std_target(full_path, origin)
+                } else {
+                    None
+                }
             } else {
-                None
+                overlay_target(state, full_path, origin)
             }
         }
-        Resolution::Unresolved => None,
+        Resolution::Unresolved => {
+            // No name is carried on this variant at all — recover the
+            // written token straight from source before consulting the
+            // overlay under it (bare top-level exports are keyed by
+            // their bare name).
+            let written = text_at_span(&state.text, origin)?;
+            overlay_target(state, written, origin)
+        }
     }
+}
+
+/// One `full_path` (or, for `Resolution::Unresolved`, the call's own
+/// written bare name) resolved through `state`'s cross-file
+/// [`super::overlay::Overlay`] (docs/lsp.md (configuration)): a hit whose
+/// `OverlaySym.target` carries a source location becomes a `DefTarget`
+/// keyed by `origin`; no overlay at all, a name miss, or a name-only hit
+/// (a `.pmo`-backed symbol, which has no location to jump to) all
+/// degrade to `None`, leaving the caller free to fall through to its own
+/// next step.
+fn overlay_target(state: &DocState, full_path: &str, origin: Span) -> Option<DefTarget> {
+    let overlay = state.overlay.as_ref()?;
+    let (target_uri, span) = overlay.symbols.get(full_path)?.target.as_ref()?;
+    Some(DefTarget {
+        uri: target_uri.clone(),
+        span: *span,
+        origin: Some(origin),
+    })
+}
+
+/// Slices the literal source text `span` denotes straight out of `text` —
+/// the one place [`Resolution::Unresolved`] (which carries no name of its
+/// own) recovers the written call name for an overlay lookup. Spans are
+/// 1-based, half-open (docs/core.md (position mapping)); this walks lines
+/// via `text.split('\n')` and each line's `chars()`/`char_indices()`
+/// exactly the way `mtc_core::lsp`'s position mapper does — column
+/// offsets are character counts, never byte counts, so a multi-byte UTF-8
+/// character anywhere on the line before `span` cannot corrupt the slice
+/// (`char_indices` only ever yields valid char-boundary byte offsets).
+/// `None` for a multi-line span (no name-carrying resolution ever
+/// produces one), a line past end-of-file, or an end column before the
+/// start column.
+pub(super) fn text_at_span(text: &str, span: Span) -> Option<&str> {
+    if span.start.line != span.end.line {
+        return None;
+    }
+    let line_ix = span.start.line.checked_sub(1)?;
+    let line = text.split('\n').nth(line_ix as usize)?;
+    let line = line.strip_suffix('\r').unwrap_or(line);
+
+    let start_char = span.start.col.checked_sub(1)?;
+    let end_char = span.end.col.checked_sub(1)?;
+    if end_char < start_char {
+        return None;
+    }
+
+    let mut start_byte = None;
+    let mut end_byte = None;
+    let mut count = 0u32;
+    for (byte_ix, _) in line.char_indices() {
+        if count == start_char {
+            start_byte = Some(byte_ix);
+        }
+        if count == end_char {
+            end_byte = Some(byte_ix);
+        }
+        count += 1;
+    }
+    if count == start_char {
+        start_byte = Some(line.len());
+    }
+    if count == end_char {
+        end_byte = Some(line.len());
+    }
+
+    line.get(start_byte?..end_byte?)
 }
 
 /// A `std::…` full path through the materialized roster: a non-`std`
@@ -189,15 +304,19 @@ fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
 
 /// Hover's own position→target resolution (docs/lsp.md (hover)): the
 /// documented target's fully-qualified name — `Analysis.docs`' own key
-/// form — plus the origin span of the reference under the cursor.
-/// Shares every WALK [`definition`] uses (the resolution table, and
-/// [`use_path_at`] above) instead of re-walking the CST a second time;
-/// only the OUTPUT shape differs (a name here, a `DefTarget` location
-/// there). Step order:
+/// form, or a cross-file overlay symbol's own key — plus the origin span
+/// of the reference under the cursor. Shares every WALK [`definition`]
+/// uses (the resolution table, and [`use_path_at`] above) instead of
+/// re-walking the CST a second time; only the OUTPUT shape differs (a
+/// name here, a `DefTarget` location there). Step order:
 ///
 /// 1. a resolution-table entry whose span contains `pos` (a call site)
 ///    — the shared [`resolve_at`] scan — resolved to a name via
-///    [`resolution_qualified_name`];
+///    [`resolution_qualified_name`]; when that comes back empty (only
+///    `Resolution::Unresolved` ever does — it carries no name of its
+///    own), the written token is recovered via [`text_at_span`] and
+///    tried against the overlay directly, since a bare call's overlay
+///    key IS its written name;
 /// 2. failing that, a function's OWN declaration name — hover-only
 ///    (`definition` never needs to resolve a position sitting ON a
 ///    definition: the location IS the definition already). Every
@@ -209,15 +328,22 @@ fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
 /// 4. otherwise `None`.
 ///
 /// Analysis-tier, same as `definition`: every query degrades to `None`
-/// once `DocState::analysis` is `None`. Doc-map lookup, the
-/// content-emptiness gate, and rendering are `mod.rs`'s job — this
-/// function only ever answers a NAME, never doc content.
+/// once `DocState::analysis` is `None`. Doc-map lookup (local, stdlib, or
+/// overlay), the content-emptiness gate, and rendering are `mod.rs`'s
+/// job — this function only ever answers a NAME, never doc content.
 pub(super) fn hover_target(state: &DocState, pos: Pos) -> Option<(String, Span)> {
     let analysis = state.analysis.as_ref()?;
 
     if let Some((origin, resolution)) = resolve_at(analysis, pos) {
-        let name = resolution_qualified_name(analysis, resolution)?;
-        return Some((name, origin));
+        if let Some(name) = resolution_qualified_name(analysis, resolution) {
+            return Some((name, origin));
+        }
+        let written = text_at_span(&state.text, origin)?;
+        let overlay = state.overlay.as_ref()?;
+        return overlay
+            .symbols
+            .contains_key(written)
+            .then(|| (written.to_string(), origin));
     }
 
     if let Some(f) = analysis
@@ -245,7 +371,9 @@ pub(super) fn hover_target(state: &DocState, pos: Pos) -> Option<(String, Span)>
 /// instead (the target IS some function's own `name_span`, exactly).
 /// `ImportBinding`/`QualifiedExternal` already carry the qualified
 /// string verbatim (mangling never touches an external path);
-/// `Unresolved` has no target at all.
+/// `Unresolved` carries no name at all here — [`hover_target`] recovers
+/// one itself, via [`text_at_span`] plus the overlay, when this function
+/// comes back empty.
 fn resolution_qualified_name(analysis: &Analysis, resolution: &Resolution) -> Option<String> {
     match resolution {
         Resolution::Local { def_name_span } => analysis
@@ -262,6 +390,10 @@ fn resolution_qualified_name(analysis: &Analysis, resolution: &Resolution) -> Op
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     use mtc_core::diagnostics::Pos;
     use mtc_core::lsp::LanguageService;
 
@@ -270,6 +402,29 @@ mod tests {
     use crate::lsp::uri_to_path;
 
     const URI: &str = "untitled:Nav-1";
+
+    /// A fresh scratch directory under `std::env::temp_dir()`, unique per
+    /// call (process id + an atomic counter — this crate has no tempfile
+    /// dependency, matching the zero-new-deps constraint; house
+    /// convention has no shared test-support module, so each file defines
+    /// its own local helper — mirrors `overlay.rs`'s and `complete.rs`'s
+    /// own copies).
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "pmt-navigate-{label}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A real client's own `file:` URI construction, byte-for-byte —
+    /// `crate::stdlib::path_to_file_uri` percent-encodes.
+    fn file_uri(path: &Path) -> String {
+        crate::stdlib::path_to_file_uri(path)
+    }
 
     /// Task-3-shaped fixture, extended for navigation coverage:
     /// - `sib()` / `@sib()` — a plain top-level local call (as opposed
@@ -631,5 +786,340 @@ mod tests {
                 "pos {pos:?} must degrade to None once analysis fails"
             );
         }
+    }
+
+    // --- Task 7: cross-file navigation + hover through the overlay ---
+
+    #[test]
+    fn text_at_span_slices_by_characters_not_bytes() {
+        // The line ABOVE the target carries a multi-byte char — proves
+        // `text.split('\n')`'s own line-splitting is untroubled by it
+        // (a plain ASCII delimiter search, byte-safe regardless of what
+        // sits on other lines).
+        const ACROSS_LINES: &str = "?é\nhelper();\n";
+        assert_eq!(
+            text_at_span(ACROSS_LINES, Span::new(2, 1, 2, 7)),
+            Some("helper")
+        );
+
+        // The load-bearing case: a multi-byte char on the SAME line,
+        // BEFORE the target — `é` is 2 bytes/1 char, so a byte-indexed
+        // slice would land two bytes short and read `" helpe"` instead.
+        const SAME_LINE: &str = "@é helper";
+        assert_eq!(
+            text_at_span(SAME_LINE, Span::new(1, 4, 1, 10)),
+            Some("helper")
+        );
+
+        // A line past end-of-file degrades to `None` rather than
+        // panicking (`ACROSS_LINES` has 3 lines after the trailing
+        // `split('\n')` empty tail — line 9 doesn't exist).
+        assert_eq!(text_at_span(ACROSS_LINES, Span::new(9, 1, 9, 2)), None);
+    }
+
+    #[test]
+    fn definition_jumps_into_a_pmc_sibling() {
+        // `ns::inner` is not defined anywhere in app.pmc itself, so the
+        // resolution table types the call `QualifiedExternal` — the
+        // overlay leg on THAT arm is what this pins.
+        let dir = unique_tmp_dir("nav-pmc-sibling");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "namespace ns {\nexport inner() { right; }\n}\n";
+        fs::write(dir.join("shared.pmc"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @ns::inner();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@ns::inner()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("ns::inner is defined in the shared.pmc sibling");
+
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
+        assert_eq!(target.span, span_of(SHARED, "inner"));
+        assert_eq!(target.origin, Some(span_after(SRC, "@ns::inner()", 1, 9)));
+    }
+
+    #[test]
+    fn definition_jumps_into_a_pma_sibling() {
+        // `greet` is bare, undeclared anywhere in app.pmc (no local def,
+        // no `use`) — the resolution table types the call `Unresolved`.
+        // The sibling is `.pma`, exercising `exports_from_pma`'s own
+        // `FuncCst.name_span` as the overlay target, through the SAME
+        // `Unresolved` arm `unresolved_bare_call_resolves_through_the_overlay`
+        // exercises with a `.pmc` sibling below.
+        let dir = unique_tmp_dir("nav-pma-sibling");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pma"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = ".func greet\nstp\n";
+        fs::write(dir.join("shared.pma"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @greet();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@greet()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("greet is defined in the shared.pma sibling");
+
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pma")));
+        assert_eq!(target.span, span_of(SHARED, "greet"));
+    }
+
+    #[test]
+    fn import_binding_prefers_the_sibling_definition_over_the_use_span() {
+        // Half A: `ext` is bound by `use ext;` AND exported by the
+        // sibling — the sibling's own definition must win over the
+        // `use`-span fallback `import_binding_call_resolves_to_the_use_span`
+        // (above, no-overlay `NAV_FIXTURE`) pins as the single-file
+        // baseline.
+        let dir = unique_tmp_dir("nav-import-binding-overlay");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "export ext() { right; }\n";
+        fs::write(dir.join("shared.pmc"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "use ext;\nexport main() {\n    @ext();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@ext()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("ext is bound by use AND exported by the sibling");
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
+        assert_eq!(target.span, span_of(SHARED, "ext"));
+
+        // Half B: same project (an overlay DOES exist), but `ghost` is
+        // bound by `use` with NO sibling exporting it — the overlay leg
+        // must miss and fall through to today's `use`-span behavior,
+        // not to `None`. This is the case the brief's own report
+        // contract asks to be pinned distinctly from the no-overlay-at-
+        // all baseline above.
+        const GHOST_SRC: &str = "use ghost;\nexport main() {\n    @ghost();\n}\n";
+        service.did_update(&app_uri, GHOST_SRC);
+        let ghost_pos = pos_after(GHOST_SRC, "@ghost()", 1);
+        let ghost_target = service
+            .definition(&app_uri, ghost_pos)
+            .expect("ghost falls back to its own use span when the overlay misses");
+        assert_eq!(ghost_target.uri, app_uri);
+        assert_eq!(ghost_target.span, span_of(GHOST_SRC, "ghost"));
+    }
+
+    #[test]
+    fn unresolved_bare_call_resolves_through_the_overlay() {
+        let dir = unique_tmp_dir("nav-unresolved-bare");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        const SHARED: &str = "?Frobs the tape.\nexport helper() { right; }\n";
+        fs::write(dir.join("shared.pmc"), SHARED).unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @helper();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@helper()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("the bare call resolves through the overlay to the sibling's export");
+        assert_eq!(target.uri, file_uri(&dir.join("shared.pmc")));
+        assert_eq!(target.span, span_of(SHARED, "helper"));
+
+        // Same position's hover: the sibling's doc line surfaces too
+        // (the `Unresolved`-arm overlay leg `hover_target` gains in this
+        // same task).
+        let hover = service
+            .hover(&app_uri, pos)
+            .expect("hover on the same bare call carries the sibling's doc line");
+        assert!(hover.text.contains("Frobs the tape."), "{hover:?}");
+    }
+
+    #[test]
+    fn pmo_backed_names_navigate_null() {
+        // Positive control FIRST: `known` is a `.pmc` sibling's bare
+        // export, carrying a real span — proves the fixture's overall
+        // wiring resolves through the overlay at all, so the `.pmo`
+        // assertion below means "no location", not "overlay never
+        // fired".
+        let dir = unique_tmp_dir("nav-pmo-null");
+        const KNOWN: &str = "export known() { right; }\n";
+        fs::write(dir.join("known.pmc"), KNOWN).unwrap();
+
+        let ghost_bytes = crate::compiler::compile(
+            "export ghostlib() { right; }\n",
+            crate::compiler::CompileOptions::default(),
+        )
+        .expect("ghostlib.pmc compiles")
+        .object
+        .to_bytes();
+        fs::write(dir.join("ghostlib.pmo"), ghost_bytes).unwrap();
+
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","known.pmc","ghostlib.pmo"]}}}}"#,
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @known();\n    @ghostlib();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let known_pos = pos_after(SRC, "@known()", 1);
+        let known_target = service
+            .definition(&app_uri, known_pos)
+            .expect("positive control: known is source-backed with a real span");
+        assert_eq!(known_target.uri, file_uri(&dir.join("known.pmc")));
+        assert_eq!(known_target.span, span_of(KNOWN, "known"));
+
+        let ghost_pos = pos_after(SRC, "@ghostlib()", 1);
+        assert_eq!(
+            service.definition(&app_uri, ghost_pos),
+            None,
+            "a .pmo-backed overlay symbol carries no source location to jump to"
+        );
+    }
+
+    #[test]
+    fn hover_carries_the_siblings_doc_lines() {
+        // `ns::inner` is `QualifiedExternal` (not defined in app.pmc) —
+        // `resolution_qualified_name` already answers its qualified name
+        // today; this pins that `mod.rs`'s hover doc chain then finds
+        // that name in the OVERLAY's doc map, not this document's own
+        // (which never flattened a sibling's function at all).
+        let dir = unique_tmp_dir("nav-hover-overlay-doc");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","shared.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("shared.pmc"),
+            "namespace ns {\n?Frobs the tape.\nexport inner() { right; }\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @ns::inner();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let pos = pos_after(SRC, "@ns::inner()", 1);
+        let hover = service
+            .hover(&app_uri, pos)
+            .expect("the sibling's doc line surfaces through the overlay");
+        assert!(hover.text.contains("Frobs the tape."), "{hover:?}");
+    }
+
+    #[test]
+    fn stdlib_false_kills_std_hover_and_the_materialized_jump() {
+        let dir = unique_tmp_dir("nav-stdlib-false");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"stdlib":false,"targets":{"app":{"sources":["app.pmc"]}}}}"#,
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+
+        // Non-std, LOCAL half: proves the gate silences only std, not
+        // hover/navigation wholesale, within the very same stdlib:false
+        // project.
+        const SRC: &str = "?Local doc.\nhelper() { right; }\nexport main() {\n    @helper();\n    @std::goToEnd();\n}\n";
+        service.did_update(&app_uri, SRC);
+
+        let helper_pos = pos_after(SRC, "@helper()", 1);
+        let helper_hover = service
+            .hover(&app_uri, helper_pos)
+            .expect("a local, non-std call still hovers under stdlib:false");
+        assert!(helper_hover.text.contains("Local doc."), "{helper_hover:?}");
+        let helper_target = service
+            .definition(&app_uri, helper_pos)
+            .expect("a local, non-std call still navigates under stdlib:false");
+        assert_eq!(helper_target.uri, app_uri);
+        assert_eq!(helper_target.span, span_of(SRC, "helper"));
+
+        // std half: both hover and the materialized jump are gone.
+        let std_pos = pos_after(SRC, "std::goToEnd", 6);
+        assert_eq!(
+            service.hover(&app_uri, std_pos),
+            None,
+            "stdlib:false kills the std hover"
+        );
+        assert_eq!(
+            service.definition(&app_uri, std_pos),
+            None,
+            "stdlib:false kills the materialized jump"
+        );
+
+        // The aliased `ImportBinding` shape (`use std::goToEnd as ge;`)
+        // goes through a different `resolve_call` arm than the bare
+        // qualified call above — gate it too, not just
+        // `QualifiedExternal`.
+        const ALIAS_SRC: &str = "use std::goToEnd as ge;\nexport main() {\n    @ge();\n}\n";
+        service.did_update(&app_uri, ALIAS_SRC);
+        let alias_pos = pos_after(ALIAS_SRC, "@ge()", 1);
+        assert_eq!(
+            service.definition(&app_uri, alias_pos),
+            None,
+            "stdlib:false kills the materialized jump for an aliased std import too"
+        );
+
+        // The `use std::goToEnd;` path segment itself (step 3, `use_path_at`)
+        // is the third and last `std_target` call site — gate it too.
+        const USE_SRC: &str = "use std::goToEnd;\nexport main() { right; }\n";
+        service.did_update(&app_uri, USE_SRC);
+        let use_pos = pos_at(USE_SRC, "goToEnd");
+        assert_eq!(
+            service.definition(&app_uri, use_pos),
+            None,
+            "stdlib:false kills the use-path jump onto std itself"
+        );
+
+        // Single-file doc (no manifest at all): both keep working — the
+        // gate is manifest-driven, not global.
+        let mut single = PmcLanguageService::new();
+        const SINGLE_SRC: &str = "export main() {\n    @std::goToEnd();\n}\n";
+        single.did_update(URI, SINGLE_SRC);
+        let single_pos = pos_after(SINGLE_SRC, "std::goToEnd", 6);
+
+        let single_hover = single
+            .hover(URI, single_pos)
+            .expect("single-file doc keeps the std hover");
+        assert!(!single_hover.text.is_empty());
+
+        let single_target = single
+            .definition(URI, single_pos)
+            .expect("single-file doc keeps the materialized jump");
+        assert!(
+            single_target.uri.starts_with("file://"),
+            "uri: {}",
+            single_target.uri
+        );
+        let entry = roster()
+            .iter()
+            .find(|e| e.full_path == "std::goToEnd")
+            .expect("goToEnd is in the roster");
+        assert_eq!(single_target.span, entry.name_span);
     }
 }

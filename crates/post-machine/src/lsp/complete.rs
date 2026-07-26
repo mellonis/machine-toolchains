@@ -401,17 +401,23 @@ fn enclosing_ns_path(items: &[TopItem], pos: Pos) -> Vec<String> {
 /// return states the intent rather than relying on that coincidence).
 /// Otherwise: `scopes.defs` under the exact path (Function kind) plus
 /// child namespaces exactly one segment deeper, derived the same way
-/// `use_roots` derives roots (Module kind), UNIONED with the cross-file
-/// overlay's own `members` entry for this exact path (docs/lsp.md
-/// (configuration)) — every overlay name whose bare label a local def or
-/// child namespace already produced is skipped (`seen`): a local name
-/// always wins, the same definition-beats-library precedent the linker
-/// itself follows. Sorted by label for a deterministic result — the
-/// underlying maps are hash-ordered. `docs` (`None` when analysis
-/// itself is stale/absent) backs every LOCAL Function candidate's
-/// `detail`/`deprecated` — see `mk_function_candidate`; an overlay
-/// candidate's `deprecated` instead comes from that sibling's own
-/// `OverlaySym.doc` — see `mk_overlay_candidate`.
+/// `use_roots` derives roots (Module kind); the overlay contributes the
+/// SAME two shapes at this same seam — its own child namespaces one
+/// segment deeper (an overlay `members` key only ever exists at a
+/// symbol's full leaf depth, so a sibling's `outer::inner::f` registers
+/// under `["outer","inner"]` alone, never `["outer"]` — without this
+/// scan, typing `outer::` would offer nothing even though `use_roots`
+/// already offered `outer` as a root), and its own `members` entry for
+/// this EXACT path (Function kind, docs/lsp.md (configuration)). Every
+/// overlay name whose bare label a local def or child namespace already
+/// produced is skipped (`seen`): a local name always wins, the same
+/// definition-beats-library precedent the linker itself follows. Sorted
+/// by label for a deterministic result — the underlying maps are
+/// hash-ordered. `docs` (`None` when analysis itself is stale/absent)
+/// backs every LOCAL Function candidate's `detail`/`deprecated` — see
+/// `mk_function_candidate`; an overlay candidate's `deprecated` instead
+/// comes from that sibling's own `OverlaySym.doc` — see
+/// `mk_overlay_candidate`.
 fn member_candidates(
     scopes: &ScopeSummary,
     path: &[String],
@@ -455,6 +461,20 @@ fn member_candidates(
     for name in children {
         seen.insert(name.to_string());
         out.push(mk_candidate(name, CandidateKind::Module, replace_span));
+    }
+
+    if let Some(overlay) = state.overlay.as_ref() {
+        let mut overlay_children: BTreeSet<&str> = BTreeSet::new();
+        for key in overlay.members.keys() {
+            if key.len() == path.len() + 1 && key.starts_with(path) {
+                overlay_children.insert(key[path.len()].as_str());
+            }
+        }
+        for name in overlay_children {
+            if seen.insert(name.to_string()) {
+                out.push(mk_candidate(name, CandidateKind::Module, replace_span));
+            }
+        }
     }
 
     if let Some(overlay) = state.overlay.as_ref()
@@ -1476,6 +1496,44 @@ export main() {
                 .iter()
                 .any(|c| c.label == "inner" && c.kind == CandidateKind::Function),
             "{members:?}"
+        );
+    }
+
+    #[test]
+    fn use_path_completion_offers_a_second_level_namespace_from_a_deeper_sibling_export() {
+        // A genuinely 2-level-deep sibling namespace: `insert_export`
+        // registers `outer::inner::f` under the `members` key
+        // `["outer","inner"]` alone — there is no separate `["outer"]`
+        // entry at all. `use_roots` already offers `outer` as a root (it
+        // scans `path.first()` at any depth), but before this fix,
+        // `member_candidates`'s overlay leg looked up `["outer"]` by
+        // EXACT key only and found nothing, so typing `outer::` offered
+        // no `inner` — this pins the fix (the child-namespace scan one
+        // segment deeper, mirroring the local-scope leg just above it).
+        let dir = unique_tmp_dir("use-roots-nested-ns");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("helper.pmc"),
+            "namespace outer {\nnamespace inner {\nexport f() { right; }\n}\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+
+        const SRC: &str = "use outer::x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, SRC);
+        let pos = pos_after(SRC, "use outer::", 11);
+        let candidates = service.completion(&app_uri, pos);
+        assert!(
+            candidates
+                .iter()
+                .any(|c| c.label == "inner" && c.kind == CandidateKind::Module),
+            "{candidates:?}"
         );
     }
 
