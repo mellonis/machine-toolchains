@@ -176,9 +176,8 @@ struct DocState {
     /// (configuration)): `None` when the document degrades to
     /// single-file behavior (no manifest found, the document is a
     /// member of no target, or it has no `file:` path at all). Consumed
-    /// by later stages (completion, navigation, hover, diagnostic
-    /// refinement) — this task only builds and stores it.
-    #[allow(dead_code)] // read starting with a later task's diagnostics refinement.
+    /// by `did_update`'s own diagnostics refinement; not yet consumed by
+    /// completion, navigation, or hover.
     pub overlay: Option<overlay::Overlay>,
 }
 
@@ -520,7 +519,7 @@ impl LanguageService for PmcLanguageService {
             Some(analysis) => Some(analysis.scopes.clone()),
             None => prev.and_then(|d| d.scopes_for_completion),
         };
-        let state = DocState {
+        let mut state = DocState {
             text: text.to_string(),
             tokens: staged.tokens,
             cst: staged.cst,
@@ -531,6 +530,19 @@ impl LanguageService for PmcLanguageService {
             config_errors,
             overlay,
         };
+
+        // 5. Cross-file diagnostics refinement (docs/pmt/cli.md
+        //    (undeclared-external)): the same retain predicate `pmt build`
+        //    runs over its declared link set, applied here over this
+        //    document's own overlay — a bare call the overlay defines
+        //    stops being a defect of THIS document. A document with no
+        //    overlay (no manifest found, member of no target, or an
+        //    untitled buffer) keeps every warning untouched — the
+        //    single-file honesty rule stays exact.
+        if let (Some(overlay), Some(analysis)) = (state.overlay.as_ref(), state.analysis.as_mut()) {
+            crate::compiler::refine_undeclared(&mut analysis.warnings, &overlay.defined_names());
+        }
+
         let diagnostics = merged_diagnostics(&state);
         self.docs.insert(uri.to_string(), state);
         diagnostics
@@ -647,8 +659,13 @@ mod tests {
         dir
     }
 
+    /// A real client's own `file:` URI construction, byte-for-byte —
+    /// `crate::stdlib::path_to_file_uri` percent-encodes; a hand-rolled
+    /// `format!("file://{}", path.display())` would silently agree only
+    /// while every path used in these tests stays free of characters
+    /// that need escaping.
     fn file_uri(path: &Path) -> String {
-        format!("file://{}", path.display())
+        crate::stdlib::path_to_file_uri(path)
     }
 
     /// 1-based (line, col) of the first byte of `anchor`'s occurrence in
@@ -1209,8 +1226,14 @@ export main() {
         // A manifest declaring both files as one target's sources;
         // helper.pmc's DISK copy exports `old`, but it's opened in this
         // SAME service first with unsaved text exporting `new` — proving
-        // the wiring reads `self.docs`, not disk, for an open sibling.
-        let dir = unique_tmp_dir("overlay-wiring");
+        // the wiring reads `self.docs`, not disk, for an open sibling. A
+        // space in the fixture dir makes both the client-sent URI's
+        // percent-ENCODING (`file_uri`, mimicking a real client) and
+        // `uri_to_path`'s percent-DECODING load-bearing: without one, a
+        // regression on either side would go uncaught, since every
+        // character in an unescaped path is already its own encoding.
+        let dir = unique_tmp_dir("overlay-wiring").join("has space");
+        fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("pmt.json"),
             r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
@@ -1252,6 +1275,104 @@ export main() {
             state.overlay.is_none(),
             "no `file:` path at all — single-file degrade"
         );
+    }
+
+    // --- Task 5: undeclared-external refinement through the overlay ---
+
+    #[test]
+    fn undeclared_external_is_dropped_when_the_overlay_defines_the_name() {
+        let dir = unique_tmp_dir("refine-defined");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("helper.pmc"), "export helper() { right; }\n").unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        let diags = service.did_update(&app_uri, "main() {\n@helper();\n}\n");
+
+        assert!(
+            diags.iter().all(|d| d.code != Some("undeclared-external")),
+            "the sibling's export refines the bare call away: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn undeclared_external_stays_for_names_the_overlay_lacks() {
+        let dir = unique_tmp_dir("refine-lacks");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc"]}}}}"#,
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        let diags = service.did_update(&app_uri, "main() {\n@ghost();\n}\n");
+
+        assert!(
+            diags.iter().any(|d| d.code == Some("undeclared-external")),
+            "no sibling defines `ghost` — the warning must stay: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn single_file_documents_keep_todays_warning() {
+        // A real `file:` path, but with no `pmt.json` anywhere on the
+        // walk — the OTHER route to a `None` overlay besides an untitled
+        // buffer (`did_update_overlay_is_none_without_a_manifest` covers
+        // that one). The bare call is the SAME name (`helper`) the
+        // positive-suppression test above uses, so this also serves as
+        // that test's control: it proves an unresolved `@helper()`
+        // really does warn on its own, rather than `helper` being a
+        // name that never warns for an unrelated reason.
+        let dir = unique_tmp_dir("refine-no-manifest");
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        let diags = service.did_update(&app_uri, "main() {\n@helper();\n}\n");
+
+        assert!(
+            diags.iter().any(|d| d.code == Some("undeclared-external")),
+            "no manifest anywhere on the walk — per-file honest: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn stdlib_resolved_bare_name_is_not_suppressed() {
+        // The stdlib defines `std::goToEnd`, never a bare `goToEnd` — a
+        // bare call to it must keep warning even though the project has
+        // the stdlib enabled (the default), exactly matching what the
+        // build driver's own `defined_names` union produces.
+        let dir = unique_tmp_dir("refine-stdlib");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc"]}}}}"#,
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        let diags = service.did_update(&app_uri, "main() {\n@goToEnd();\n}\n");
+
+        assert!(
+            diags.iter().any(|d| d.code == Some("undeclared-external")),
+            "std::goToEnd is not a bare goToEnd: {diags:?}"
+        );
+
+        // Pin the discriminating fact directly: a match loosened to a
+        // suffix/substring comparison would wrongly treat these as equal.
+        let names = service
+            .docs
+            .get(&app_uri)
+            .unwrap()
+            .overlay
+            .as_ref()
+            .unwrap()
+            .defined_names();
+        assert!(names.contains("std::goToEnd"), "{names:?}");
+        assert!(!names.contains("goToEnd"), "{names:?}");
     }
 
     #[test]

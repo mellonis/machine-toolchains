@@ -401,7 +401,6 @@ impl Overlay {
     /// resolve to a `std::` name, so the roster contributes only its
     /// full, namespaced paths — exactly what the driver's own union
     /// does).
-    #[allow(dead_code)] // consumed by did_update's diagnostics refinement, wired in a later task.
     pub(super) fn defined_names(&self) -> HashSet<String> {
         let mut names: HashSet<String> = self.symbols.keys().cloned().collect();
         if self.stdlib {
@@ -449,9 +448,13 @@ fn insert_export(
 /// a member of), then `view.library_paths`, first-wins throughout. `doc_path`
 /// is the document the overlay is being built FOR; `view.siblings` never
 /// contains it (`project_view`'s own self-exclusion), and the guard below
-/// is a second line of defense against ever re-reading the document
-/// currently being edited as if it were one of its own siblings, should
-/// that contract ever loosen.
+/// is a genuine second line of defense: it re-derives the SAME
+/// `std::path::absolute` comparison `project_view` itself used to exclude
+/// `doc_path` from `siblings` (each already an absolute path, built by
+/// `resolve`), rather than comparing `doc_path` in whatever raw form the
+/// caller happened to pass in — a raw-path comparison would silently stop
+/// catching anything the moment `doc_path`'s form ever diverged from what
+/// `siblings` compare against.
 pub(super) fn build_overlay(
     view: &ProjectView,
     doc_path: &Path,
@@ -460,9 +463,10 @@ pub(super) fn build_overlay(
 ) -> Overlay {
     let mut symbols: HashMap<String, OverlaySym> = HashMap::new();
     let mut members: HashMap<Vec<String>, BTreeMap<String, String>> = HashMap::new();
+    let doc_abs = std::path::absolute(doc_path).ok();
 
     for sibling in &view.siblings {
-        if sibling == doc_path {
+        if doc_abs.as_deref() == Some(sibling.as_path()) {
             continue;
         }
         let uri = path_to_file_uri(sibling);
@@ -958,7 +962,12 @@ mod tests {
 
     #[test]
     fn open_sibling_is_read_from_its_doc_state_not_disk() {
-        let root = temp_tree();
+        // A space in the fixture path makes the `path_to_file_uri`
+        // round-trip load-bearing: without one, a bug that stopped
+        // percent-encoding (or decoding) would go uncaught, since every
+        // character in an unescaped path is already its own encoding.
+        let root = temp_tree().join("has space");
+        fs::create_dir_all(&root).unwrap();
         let sibling = root.join("sibling.pmc");
         fs::write(&sibling, "export old() { right; }\n").unwrap();
 
