@@ -53,7 +53,7 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
         .collect();
 
     let mut out = Vec::new();
-    walk_items(&cst.items, &resolutions, &state.text, &mut out);
+    walk_items(&cst.items, &resolutions, state, &mut out);
     out.sort_by_key(|token| token.span.start);
     debug_assert!(
         out.windows(2)
@@ -64,13 +64,14 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
 }
 
 /// One file/namespace-level item list, recursively (namespace blocks
-/// nest their own `items`). `text` is the document's own source
-/// (threaded down to `label_def_span`, which derives the declaration
-/// span from the written digits rather than the parser's span).
+/// nest their own `items`). `state` is threaded down for its `text`
+/// (used by `label_def_span`, which derives the declaration span from
+/// the written digits rather than the parser's span) and its `overlay`
+/// (consulted by `emit_call_name` for an `Unresolved` call's name).
 fn walk_items(
     items: &[TopItem],
     resolutions: &BTreeMap<Span, &Resolution>,
-    text: &str,
+    state: &DocState,
     out: &mut Vec<SemToken>,
 ) {
     for item in items {
@@ -87,9 +88,9 @@ fn walk_items(
                     token_type: TOKEN_TYPE_NAMESPACE,
                     modifiers: MODIFIER_DECLARATION,
                 });
-                walk_items(&ns.items, resolutions, text, out);
+                walk_items(&ns.items, resolutions, state, out);
             }
-            TopKind::Function(f) => walk_function(f, resolutions, text, out),
+            TopKind::Function(f) => walk_function(f, resolutions, state, out),
         }
     }
 }
@@ -100,7 +101,7 @@ fn walk_items(
 fn walk_function(
     f: &FunctionCst,
     resolutions: &BTreeMap<Span, &Resolution>,
-    text: &str,
+    state: &DocState,
     out: &mut Vec<SemToken>,
 ) {
     out.push(SemToken {
@@ -111,8 +112,8 @@ fn walk_function(
     for item in &f.body {
         match &item.kind {
             BodyKind::Comment(_) => {}
-            BodyKind::Statement(stmt) => walk_statement(stmt, resolutions, text, out),
-            BodyKind::Nested(nested) => walk_function(nested, resolutions, text, out),
+            BodyKind::Statement(stmt) => walk_statement(stmt, resolutions, state, out),
+            BodyKind::Nested(nested) => walk_function(nested, resolutions, state, out),
         }
     }
 }
@@ -122,18 +123,18 @@ fn walk_function(
 fn walk_statement(
     stmt: &StatementCst,
     resolutions: &BTreeMap<Span, &Resolution>,
-    text: &str,
+    state: &DocState,
     out: &mut Vec<SemToken>,
 ) {
     for label in &stmt.labels {
         out.push(SemToken {
-            span: label_def_span(label.span, text),
+            span: label_def_span(label.span, &state.text),
             token_type: TOKEN_TYPE_NUMBER,
             modifiers: MODIFIER_DECLARATION,
         });
     }
     for comma in &stmt.items {
-        walk_item(&comma.item, resolutions, out);
+        walk_item(&comma.item, resolutions, state, out);
     }
 }
 
@@ -141,9 +142,16 @@ fn walk_statement(
 /// enumeration (`Goto.label_span`, a `Check` arm's own span only when
 /// that arm is `CheckArm::Label`, a builtin/call's `succ_label_span`) —
 /// as bare, no-modifier `number` tokens, plus a call's resolved name
-/// segments. `Unresolved` calls emit nothing for their name — the quiet
-/// visual cue complementing `undeclared-external`.
-fn walk_item(item: &Item, resolutions: &BTreeMap<Span, &Resolution>, out: &mut Vec<SemToken>) {
+/// segments. An `Unresolved` call emits nothing for its name UNLESS the
+/// document's cross-file overlay (docs/lsp.md (configuration)) resolves
+/// the written name to a sibling export — that quiet-cue default is
+/// `emit_call_name`'s own fallback, complementing `undeclared-external`.
+fn walk_item(
+    item: &Item,
+    resolutions: &BTreeMap<Span, &Resolution>,
+    state: &DocState,
+    out: &mut Vec<SemToken>,
+) {
     for (_, span) in label_refs(item).into_iter().flatten() {
         out.push(number_reference(span));
     }
@@ -151,7 +159,7 @@ fn walk_item(item: &Item, resolutions: &BTreeMap<Span, &Resolution>, out: &mut V
         name, name_span, ..
     } = item
     {
-        emit_call_name(name, *name_span, resolutions, out);
+        emit_call_name(name, *name_span, resolutions, state, out);
     }
 }
 
@@ -213,16 +221,35 @@ fn emit_use_path(path: &UsePath, out: &mut Vec<SemToken>) {
 /// AST's (flatten mutates only the `name` string, never its span).
 /// `defaultLibrary` applies to the final segment when the resolution is
 /// `ImportBinding`/`QualifiedExternal` with a `std::`-prefixed full path.
+/// An `Unresolved` call falls back to the document's cross-file overlay
+/// (docs/lsp.md (configuration)): a hit tokenizes as a plain `function`
+/// (never `defaultLibrary` — a sibling in the user's own project is not
+/// the standard library) regardless of whether the symbol carries a
+/// navigable `target` (a `.pmo`-backed sibling has none; tokenizing only
+/// asserts the name exists, navigation is a separate concern). No hit
+/// keeps today's quiet cue: no token at all.
 fn emit_call_name(
     name: &str,
     name_span: Span,
     resolutions: &BTreeMap<Span, &Resolution>,
+    state: &DocState,
     out: &mut Vec<SemToken>,
 ) {
     let Some(&resolution) = resolutions.get(&name_span) else {
         return;
     };
     if matches!(resolution, Resolution::Unresolved) {
+        let Some(written) = super::navigate::text_at_span(&state.text, name_span) else {
+            return;
+        };
+        if state
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.symbols.contains_key(written))
+        {
+            let segments: Vec<&str> = written.split("::").collect();
+            emit_path_segments(&segments, name_span.start, false, out);
+        }
         return;
     }
     let default_library = matches!(
@@ -276,7 +303,7 @@ fn emit_path_segments(
 mod tests {
     use mtc_core::lsp::LanguageService;
 
-    use super::super::PmcLanguageService;
+    use super::super::{PmcLanguageService, overlay};
     use super::*;
 
     const URI: &str = "untitled:Tokens-1";
@@ -527,6 +554,68 @@ mod tests {
         );
 
         assert_eq!(service.semantic_tokens(URI), None);
+    }
+
+    /// The overlay fallback (module doc, `emit_call_name`'s doc): a bare
+    /// call unresolved in-file but present in the document's cross-file
+    /// overlay tokenizes as a plain `function`, no `defaultLibrary` (a
+    /// sibling export is not the standard library) — and the OverlaySym
+    /// is built with `target: None`, the exact shape a `.pmo`-backed
+    /// symbol carries (`overlay.rs::insert_export`), proving tokenizing
+    /// asserts existence only, never navigability. The negative half
+    /// re-runs the identical source with NO overlay at all, confirming
+    /// the site still emits nothing — a positive-only test would also
+    /// pass if tokens were emitted unconditionally, which would destroy
+    /// the quiet no-token cue this whole arm exists to preserve.
+    #[test]
+    fn overlay_resolved_bare_call_tokenizes_as_function_without_default_library() {
+        const FIXTURE: &str = "main() {\n    @sibling();\n}\n";
+        // "    @sibling();" — cols 1..4 are the indent, 5 is '@', 6..13 is
+        // the 7-char name.
+        let call_name_span = Span::new(2, 6, 2, 13);
+
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update(URI, FIXTURE);
+        assert!(
+            diags.iter().any(|d| d.code == Some("undeclared-external")),
+            "sanity: unresolved with no overlay wired up yet, {diags:?}"
+        );
+
+        service.docs.get_mut(URI).unwrap().overlay = Some(overlay::Overlay {
+            stdlib: false,
+            symbols: std::collections::HashMap::from([(
+                "sibling".to_string(),
+                overlay::OverlaySym {
+                    target: None,
+                    doc: None,
+                },
+            )]),
+            members: std::collections::HashMap::new(),
+        });
+
+        let tokens = service
+            .semantic_tokens(URI)
+            .expect("analysis-tier answer on a clean parse");
+        let hit = tokens
+            .iter()
+            .find(|t| t.span == call_name_span)
+            .unwrap_or_else(|| panic!("no token at the call name span: {tokens:?}"));
+        assert_eq!(hit.token_type, TOKEN_TYPE_FUNCTION);
+        assert_eq!(
+            hit.modifiers & MODIFIER_DEFAULT_LIBRARY,
+            0,
+            "a sibling export must never read as defaultLibrary: {hit:?}"
+        );
+
+        let mut plain_service = PmcLanguageService::new();
+        plain_service.did_update(URI, FIXTURE);
+        let plain_tokens = plain_service
+            .semantic_tokens(URI)
+            .expect("analysis-tier answer on a clean parse");
+        assert!(
+            !plain_tokens.iter().any(|t| t.span == call_name_span),
+            "no overlay: the quiet no-token cue must hold, {plain_tokens:?}"
+        );
     }
 
     #[test]
