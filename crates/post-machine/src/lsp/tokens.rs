@@ -705,6 +705,59 @@ mod tests {
         );
     }
 
+    /// [`emit_use_path`]'s own gate has the identical `!overlay_owns(...)`
+    /// shape as [`emit_call_name`]'s, but is a SEPARATE call site — the
+    /// test above only exercises the call-name gate. `RICH_FIXTURE`'s own
+    /// `use std::goToEnd as ge;` pins the unshadowed half of this one
+    /// (`defaultLibrary` set); this test wires the same shadowing overlay
+    /// directly onto a bare `use std::goToEnd;` and re-checks that ONE
+    /// use-path fixture, proving the shadowed half too — a fix that
+    /// simply dropped `emit_use_path`'s clause entirely (rather than
+    /// gating it on ownership) would still pass the unshadowed half but
+    /// fail here.
+    #[test]
+    fn std_use_path_default_library_modifier_follows_overlay_ownership() {
+        const FIXTURE: &str = "use std::goToEnd;\nexport main() { right; }\n";
+        // "use std::goToEnd;" — cols 1..4 "use ", 5..8 "std", 8..10 "::",
+        // 10..17 the 7-char "goToEnd" segment.
+        let function_span = Span::new(1, 10, 1, 17);
+
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update(URI, FIXTURE);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity != mtc_core::lsp::ServiceSeverity::Error),
+            "sanity: the fixture must parse and analyze cleanly, {diags:?}"
+        );
+
+        service.docs.get_mut(URI).unwrap().overlay = Some(overlay::Overlay {
+            stdlib: true,
+            symbols: std::collections::HashMap::from([(
+                "std::goToEnd".to_string(),
+                overlay::OverlaySym {
+                    target: None,
+                    doc: None,
+                },
+            )]),
+            members: std::collections::HashMap::new(),
+        });
+
+        let tokens = service
+            .semantic_tokens(URI)
+            .expect("analysis-tier answer on a clean parse");
+        let hit = tokens
+            .iter()
+            .find(|t| t.span == function_span)
+            .unwrap_or_else(|| panic!("no token at the function span: {tokens:?}"));
+        assert_eq!(hit.token_type, TOKEN_TYPE_FUNCTION);
+        assert_eq!(
+            hit.modifiers & MODIFIER_DEFAULT_LIBRARY,
+            0,
+            "a shadowed std:: use path must never read as defaultLibrary: {hit:?}"
+        );
+    }
+
     #[test]
     fn drift_guard_every_emitted_token_fits_the_legend() {
         let mut service = PmcLanguageService::new();

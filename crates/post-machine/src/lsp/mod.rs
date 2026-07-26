@@ -1889,6 +1889,200 @@ export main() {
         assert_eq!(reformatted, canonical);
     }
 
+    // --- Task 10: overlay integration matrix — the remaining cells the
+    // spec's matrix calls for, each a real `PmcLanguageService` driven
+    // through `did_update` + feature calls over a temp tree
+    // (`broken_sibling_degrades_only_itself` is NOT repeated here:
+    // `overlay::tests::broken_sibling_contributes_nothing_others_still_do`
+    // already pins the identical claim — one unparseable sibling
+    // contributes nothing while a fine sibling's export still does). ---
+
+    #[test]
+    fn manifest_edit_changes_the_next_answer() {
+        let dir = unique_tmp_dir("manifest-edit");
+        let manifest_path = dir.join("pmt.json");
+        fs::write(
+            &manifest_path,
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(dir.join("helper.pmc"), "export helper() { right; }\n").unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @x();\n}\n";
+        let pos = pos_after(SRC, "@x()", 1);
+
+        service.did_update(&app_uri, SRC);
+        let before = service.completion(&app_uri, pos);
+        assert!(
+            before.iter().any(|c| c.label == "helper"),
+            "the sibling's export starts out visible: {before:?}"
+        );
+
+        // Rewrite the manifest dropping helper.pmc from the target, with a
+        // guaranteed-newer mtime (the manifest cache is mtime-keyed; the
+        // filesystem's own timestamp granularity is not to be trusted in
+        // a fast test).
+        let old_mtime = fs::metadata(&manifest_path).unwrap().modified().unwrap();
+        fs::write(
+            &manifest_path,
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&manifest_path)
+            .unwrap()
+            .set_modified(old_mtime + Duration::from_secs(2))
+            .unwrap();
+
+        // Core's own `republish_all` re-runs `did_update` on every open
+        // document when a watched `pmt.json` changes in production; a
+        // test drives that re-update itself.
+        service.did_update(&app_uri, SRC);
+        let after = service.completion(&app_uri, pos);
+        assert!(
+            !after.iter().any(|c| c.label == "helper"),
+            "the manifest edit must drop the now-undeclared sibling: {after:?}"
+        );
+    }
+
+    #[test]
+    fn untitled_documents_keep_the_single_file_view() {
+        // An untitled buffer has no filesystem path at all, so it can
+        // never be discovered as a project member —
+        // `did_update_overlay_is_none_without_a_manifest` already pins
+        // that `overlay` half. This closes the two legs that actually
+        // consume a `None` overlay: cross-file refinement stays off (a
+        // bare undeclared call keeps warning), and the embedded stdlib
+        // surface (hover, go-to-definition) is exactly what it was
+        // before the overlay feature existed.
+        let mut service = PmcLanguageService::new();
+        let uri = "untitled:Untitled-1";
+        const SRC: &str = "export main() {\n    @ghost();\n    @std::goToEnd();\n}\n";
+        let diags = service.did_update(uri, SRC);
+
+        assert!(
+            service.docs.get(uri).unwrap().overlay.is_none(),
+            "no `file:` path at all — single-file degrade"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == Some("undeclared-external")),
+            "no overlay to refine the bare call away: {diags:?}"
+        );
+
+        let std_pos = pos_after(SRC, "std::goToEnd", 6);
+        let hover = service
+            .hover(uri, std_pos)
+            .expect("std:: hover is untouched without an overlay");
+        assert!(
+            hover.text.contains("Moves the head"),
+            "the embedded stdlib's own doc: {hover:?}"
+        );
+
+        let target = service
+            .definition(uri, std_pos)
+            .expect("std:: go-to-definition is untouched without an overlay");
+        let std_uri =
+            crate::stdlib::materialized_std_uri().expect("materialization succeeds in this env");
+        assert_eq!(target.uri, std_uri);
+    }
+
+    #[test]
+    fn dotdot_declared_source_gets_exact_features_when_opened_from_the_tree() {
+        // Mirrors `overlay::tests::dotdot_membership_resolves_lexically`,
+        // driven through the real service instead of `project_view`
+        // directly: `proj/pmt.json` declares `"../shared.pmc"`, and
+        // `proj/app.pmc` — a member of `proj`'s own `app` target — is the
+        // document actually opened, so discovery starts at `proj/`, the
+        // opened document's own directory.
+        let root = unique_tmp_dir("dotdot-service");
+        let proj = root.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(
+            proj.join("pmt.json"),
+            r#"{"project":{"sources":["../shared.pmc"],"targets":{"app":{"sources":["app.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("shared.pmc"),
+            "?Shared doc.\nexport shared() { right; }\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&proj.join("app.pmc"));
+        const SRC: &str = "export main() {\n    @shared();\n}\n";
+        let diags = service.did_update(&app_uri, SRC);
+
+        assert!(
+            diags.iter().all(|d| d.code != Some("undeclared-external")),
+            "the ../-declared source refines the bare call away: {diags:?}"
+        );
+
+        let pos = pos_after(SRC, "@shared()", 1);
+        let target = service
+            .definition(&app_uri, pos)
+            .expect("../shared.pmc's export navigates");
+        assert_eq!(
+            target.uri,
+            file_uri(&root.join("shared.pmc")),
+            "must resolve to shared.pmc's own file, not a literal `..` segment"
+        );
+
+        let hover = service
+            .hover(&app_uri, pos)
+            .expect("../shared.pmc's own doc surfaces through the overlay");
+        assert!(hover.text.contains("Shared doc."), "{hover:?}");
+    }
+
+    #[test]
+    fn stdlib_false_matrix() {
+        // One project, one `did_update`, all four gates the spec's
+        // matrix calls for at once — each already pinned individually
+        // elsewhere (`complete.rs`/`navigate.rs`/this file's own
+        // `stdlib_false_*` tests), but never together on one fixture.
+        let dir = unique_tmp_dir("stdlib-false-matrix");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"stdlib":false,"targets":{"app":{"sources":["app.pmc"]}}}}"#,
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+        const SRC: &str = "use x;\nexport main() {\n    @goToEnd();\n    @std::goToEnd();\n}\n";
+        let diags = service.did_update(&app_uri, SRC);
+
+        // Gate 1: no "std" root in the `use` path root list.
+        let root_pos = pos_after(SRC, "use x", 4);
+        let roots = service.completion(&app_uri, root_pos);
+        assert!(!roots.iter().any(|c| c.label == "std"), "{roots:?}");
+
+        // Gates 2 + 3: no std hover, no materialized go-to-definition.
+        let std_pos = pos_after(SRC, "std::goToEnd", 6);
+        assert_eq!(
+            service.hover(&app_uri, std_pos),
+            None,
+            "stdlib:false kills std hover"
+        );
+        assert_eq!(
+            service.definition(&app_uri, std_pos),
+            None,
+            "stdlib:false kills the materialized jump"
+        );
+
+        // Gate 4: a bare std-shaped call still warns — `stdlib:false`
+        // only ever removes `std::`-keyed names from
+        // `Overlay::defined_names`; a BARE `goToEnd` was never one of
+        // those, so nothing new is suppressed here.
+        assert!(
+            diags.iter().any(|d| d.code == Some("undeclared-external")),
+            "a bare goToEnd() is not a std:: name — must keep warning: {diags:?}"
+        );
+    }
+
     // --- End-to-end scripted session: the REAL service driven through
     // core's blocking server loop over in-memory pipes, exactly as
     // `pmt lsp` drives it over stdio — the CLI subcommand (`cli/lsp.rs`)
