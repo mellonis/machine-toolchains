@@ -69,7 +69,6 @@ pub fn object() -> &'static ObjectFile {
 /// `std::<name>` call site.
 // consumer: the .tmc language service's navigation and completion surfaces,
 // wired in separately from this module.
-#[allow(dead_code)]
 pub(crate) struct RosterEntry {
     /// The fully-qualified `ns::name` form (`crate::compiler::full_name`),
     /// e.g. `std::binaryNumbers::goToNumber`.
@@ -93,7 +92,6 @@ pub(crate) struct RosterEntry {
 /// from — one pass already produces both, so a second `OnceLock` would
 /// just be caching a field projection.
 // consumer: roster() and docs() below.
-#[allow(dead_code)]
 fn analysis() -> &'static (Vec<RosterEntry>, HashMap<String, Doc>) {
     static ANALYSIS: OnceLock<(Vec<RosterEntry>, HashMap<String, Doc>)> = OnceLock::new();
     ANALYSIS.get_or_init(|| {
@@ -119,7 +117,6 @@ fn analysis() -> &'static (Vec<RosterEntry>, HashMap<String, Doc>) {
 /// grafts it, and a cross-unit graft is a compile error.
 // consumer: the .tmc language service's navigation and completion surfaces,
 // wired in separately from this module.
-#[allow(dead_code)]
 pub(crate) fn roster() -> &'static [RosterEntry] {
     &analysis().0
 }
@@ -132,7 +129,6 @@ pub(crate) fn roster() -> &'static [RosterEntry] {
 /// can ever be a go-to-definition target of its own.
 // consumer: the .tmc language service's hover surface, wired in separately
 // from this module.
-#[allow(dead_code)]
 pub(crate) fn docs() -> &'static HashMap<String, Doc> {
     &analysis().1
 }
@@ -142,7 +138,6 @@ pub(crate) fn docs() -> &'static HashMap<String, Doc> {
 /// relevant environment variable(s) are unset — the materializer
 /// degrades to `None` rather than guessing a location.
 // consumer: materialized_std_uri() below.
-#[allow(dead_code)]
 fn cache_root() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
@@ -158,7 +153,6 @@ fn cache_root() -> Option<PathBuf> {
 /// unescaped in a `pchar` per RFC 3986 §3.3, sub-delims/`:`/`@` — and
 /// needed literal for a windows drive letter, `file:///C:/...`).
 // consumer: path_to_file_uri() below.
-#[allow(dead_code)]
 fn is_uri_literal(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':')
 }
@@ -172,7 +166,6 @@ fn is_uri_literal(byte: u8) -> bool {
 /// (configuration)) can reuse it instead of hand-rolling a second one.
 // consumer: materialize_into() below, plus any future caller needing the
 // same path->URI encoding.
-#[allow(dead_code)]
 pub(crate) fn path_to_file_uri(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let normalized = if cfg!(windows) {
@@ -200,7 +193,6 @@ pub(crate) fn path_to_file_uri(path: &Path) -> String {
 /// failure degrades to `None` (docs/lsp.md (materialized standard
 /// library)).
 // consumer: materialized_std_uri() below.
-#[allow(dead_code)]
 fn materialize_into(root: &Path) -> Option<String> {
     let dir = root.join("tmt").join(env!("CARGO_PKG_VERSION"));
     fs::create_dir_all(&dir).ok()?;
@@ -222,7 +214,6 @@ fn materialize_into(root: &Path) -> Option<String> {
 /// degrades to null rather than pointing at a file that doesn't exist.
 // consumer: the .tmc language service's go-to-definition surface, wired in
 // separately from this module.
-#[allow(dead_code)]
 pub(crate) fn materialized_std_uri() -> Option<&'static str> {
     static URI: OnceLock<Option<String>> = OnceLock::new();
     URI.get_or_init(|| cache_root().and_then(|root| materialize_into(&root)))

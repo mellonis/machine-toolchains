@@ -220,7 +220,7 @@ pub(super) struct ExportedSym {
 /// inserting a new key at capacity, and is arbitrary (not LRU) — a miss
 /// only costs a re-scan, never a wrong answer. Never consulted for a
 /// `.pmc` sibling that is currently OPEN in this service — that answer
-/// comes from the live `DocState` instead (docs/lsp.md (configuration)).
+/// comes from the live `DocState` instead (docs/lsp.md (project overlay)).
 pub(super) type SiblingCache = HashMap<PathBuf, (SystemTime, Vec<ExportedSym>)>;
 
 /// Bounds `SiblingCache`'s growth for the same reason as
@@ -382,8 +382,10 @@ pub(super) struct OverlaySym {
 /// each in `ProjectView`'s own order, mirroring the linker's own
 /// user-objects-beat-libraries / first-dir-wins precedent), plus a
 /// `members` index for namespace-qualified lookups (a bare name under
-/// its namespace path; top-level exports live under the empty path) and
-/// the project's own `stdlib` flag.
+/// its namespace path; top-level exports live under the empty path;
+/// EVERY intermediate namespace level along a name's path is registered
+/// too — not only its own leaf level — so a lookup at any ancestor path
+/// can drill one level deeper) and the project's own `stdlib` flag.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Overlay {
     pub stdlib: bool,
@@ -411,14 +413,23 @@ impl Overlay {
 }
 
 /// Inserts one contributed export into `symbols` (first wins) and
-/// registers it into `members` regardless of whether it won: the
-/// (namespace path, bare name) pair `members` keys on is a pure,
+/// registers its FULL namespace path into `members` — every intermediate
+/// level, not only the leaf one, regardless of whether the `symbols`
+/// insert won: a name `a::b::c` registers three levels — `[]` gains `a`
+/// (mapping to the partial path `a`), `[a]` gains `b` (mapping to `a::b`),
+/// and `[a, b]` gains `c` (mapping to the full `a::b::c`) — so a
+/// namespace-qualified lookup can drill down one segment at a time from
+/// the top, rather than only ever landing exactly on a name's own full
+/// leaf path. Each level's (namespace path, bare segment) pair is a pure,
 /// reversible function of the full name alone (never of WHICH sibling
-/// contributed it), so a losing contributor's registration is always
-/// identical to the winner's, never a conflicting overwrite. `uri` is
-/// `None` for a library contribution (never a "document" with a URI of
-/// its own) and for any `.pmo` sibling — `sym.span` is already `None` in
-/// that case, so `target` comes out `None` either way.
+/// contributed it, nor of whether it won the `symbols` insert), so a
+/// losing contributor's registration is always identical to the winner's,
+/// never a conflicting overwrite; two different full names sharing a
+/// namespace prefix register the exact same intermediate entries, so a
+/// second registration is redundant but never wrong. `uri` is `None` for
+/// a library contribution (never a "document" with a URI of its own) and
+/// for any `.pmo` sibling — `sym.span` is already `None` in that case, so
+/// `target` comes out `None` either way.
 fn insert_export(
     symbols: &mut HashMap<String, OverlaySym>,
     members: &mut HashMap<Vec<String>, BTreeMap<String, String>>,
@@ -434,13 +445,16 @@ fn insert_export(
         doc: sym.doc,
     });
 
-    let mut segments: Vec<&str> = sym.name.split("::").collect();
-    let bare = segments.pop().unwrap_or(sym.name.as_str());
-    let ns_path: Vec<String> = segments.iter().map(|s| s.to_string()).collect();
-    members
-        .entry(ns_path)
-        .or_default()
-        .insert(bare.to_string(), sym.name.clone());
+    let segments: Vec<&str> = sym.name.split("::").collect();
+    for k in 1..=segments.len() {
+        let ns_path: Vec<String> = segments[..k - 1].iter().map(|s| s.to_string()).collect();
+        let bare = segments[k - 1];
+        let full = segments[..k].join("::");
+        members
+            .entry(ns_path)
+            .or_default()
+            .insert(bare.to_string(), full);
+    }
 }
 
 /// Builds one open document's [`Overlay`]: `view.siblings` first (each in
@@ -826,15 +840,37 @@ mod tests {
         // source, `libonly` only via a linked library) — so each leg's
         // contribution is independently load-bearing; the same object
         // reused for both would leave the library loop provably
-        // untested (deleting it would still pass).
+        // untested (deleting it would still pass). The source object also
+        // carries a NON-exported function (`hidden`, compiling to a
+        // `SymbolDef::Local` entry): without it, this test would still
+        // pass even if `exports_from_object`'s `Defined`-only filter were
+        // weakened to admit every variant, since neither fixture object
+        // had ever contained a `Local` symbol to wrongly admit.
         let root = temp_tree();
         let source_bytes = crate::compiler::compile(
-            "export tiny() { right; }\n",
+            "export tiny() { right; }\nhidden() { right; }\n",
             crate::compiler::CompileOptions::default(),
         )
         .expect("tiny.pmc compiles")
         .object
         .to_bytes();
+
+        // Positive control FIRST: `hidden` really does land in the
+        // compiled object's symbol table as `SymbolDef::Local` — without
+        // this, the negative assertion below would pass just as well if
+        // codegen dropped an uncalled, non-exported function entirely,
+        // which would leave the strengthening vacuous.
+        let source_obj = ObjectFile::from_bytes(&source_bytes).expect("source_bytes decodes");
+        assert!(
+            source_obj
+                .symbols
+                .iter()
+                .any(|s| s.name == "hidden" && matches!(s.def, SymbolDef::Local { .. })),
+            "hidden must be a genuine SymbolDef::Local entry, else there is nothing for the \
+             Defined-only filter to reject: {:?}",
+            source_obj.symbols
+        );
+
         let library_bytes = crate::compiler::compile(
             "export libonly() { right; }\n",
             crate::compiler::CompileOptions::default(),
@@ -871,6 +907,12 @@ mod tests {
             .expect("libonly exported via the object resolved as a library");
         assert!(libonly.target.is_none(), "a `.pmo` has no source location");
         assert!(libonly.doc.is_none());
+
+        assert!(
+            !overlay.symbols.contains_key("hidden"),
+            "a non-exported function compiles to SymbolDef::Local, never linkable: {:?}",
+            overlay.symbols.keys().collect::<Vec<_>>()
+        );
     }
 
     #[test]

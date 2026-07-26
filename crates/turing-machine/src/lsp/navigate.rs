@@ -561,7 +561,7 @@ fn declaration_span(state: &DocState, program: &Program, target: &Target) -> Opt
 }
 
 /// Where an `External` target is declared, as `(uri, span)`: the
-/// cross-file overlay (docs/lsp.md (configuration)) is consulted FIRST —
+/// cross-file overlay (docs/lsp.md (project overlay)) is consulted FIRST —
 /// a sibling that OWNS `path` answers here even when it carries no
 /// source location of its own (a `.tma`/`.tmo` sibling, or a linked
 /// library), since ownership is exactly what makes the embedded stdlib's

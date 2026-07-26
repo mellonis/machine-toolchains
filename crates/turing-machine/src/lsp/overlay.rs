@@ -231,7 +231,7 @@ pub(super) struct ExportedSym {
 /// inserting a new key at capacity, and is arbitrary (not LRU) — a miss
 /// only costs a re-scan, never a wrong answer. Never consulted for a
 /// `.tmc` sibling that is currently OPEN in this service — that answer
-/// comes from the live `DocState` instead (docs/lsp.md (configuration)).
+/// comes from the live `DocState` instead (docs/lsp.md (project overlay)).
 pub(super) type SiblingCache = HashMap<PathBuf, (SystemTime, Vec<ExportedSym>)>;
 
 /// Bounds `SiblingCache`'s growth for the same reason as

@@ -612,7 +612,7 @@ fn complete_typing(prefix: &str, settled: &str, suffix: &str) -> Vec<Candidate> 
 /// [`complete_typing`]'s settle-then-break sequence, but driven against
 /// `uri` on an ALREADY-CONSTRUCTED `service` instead of a fresh untitled
 /// one — for a project `file:` document, so the cross-file overlay
-/// (docs/lsp.md (configuration)) is genuinely active for the completion
+/// (docs/lsp.md (project overlay)) is genuinely active for the completion
 /// request under test.
 fn complete_typing_in(
     service: &mut TmcLanguageService,
@@ -1253,10 +1253,10 @@ fn hovering_an_alphabet_lists_its_symbols() {
 
 #[test]
 fn hover_on_a_std_call_target_returns_its_doc() {
-    // Issue #37's exact reproduction, inverted: a `std::` call target now
-    // hovers with the routine's own doc, resolved through the embedded
-    // stdlib's analysis rather than this document's (which never holds a
-    // std entry).
+    // The reported gap this reproduces, inverted: a `std::` call target
+    // now hovers with the routine's own doc, resolved through the
+    // embedded stdlib's analysis rather than this document's (which never
+    // holds a std entry) — previously such a hover returned nothing.
     let src = "\
 alphabet a { '_', '^', '$', '0', '1' }
 
@@ -2346,6 +2346,20 @@ machine {
     // document when a watched `tmt.json` changes in production; a test
     // drives that re-update itself.
     service.did_update(&app_uri, app_src);
+
+    // A positive control before re-checking the narrowed completion list:
+    // `app.tmc` is still a target member post-edit (the rewritten manifest
+    // only dropped `helper.tmc` from the sources, not the target itself),
+    // so the overlay must still be `Some` — a regression where the second
+    // `did_update` degraded to `overlay: None` (project membership lost
+    // outright, not merely narrowed) would also make `!after.contains
+    // (&"bare")` pass below, since a `None` overlay offers no sibling
+    // exports either.
+    assert!(
+        service.docs.get(&app_uri).unwrap().overlay.is_some(),
+        "app.tmc must still resolve to a project overlay after the edit"
+    );
+
     let after = labels(&service.completion(&app_uri, pos));
     assert!(
         !after.contains(&"bare".to_string()),

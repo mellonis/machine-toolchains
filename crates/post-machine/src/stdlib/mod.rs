@@ -139,7 +139,7 @@ fn is_uri_literal(byte: u8) -> bool {
 /// prefixes `file:///C:/...` (the extra `/` before the drive letter).
 /// `pub(crate)`: also the overlay's own way of turning a sibling's
 /// resolved path into the key it looks up in `did_update`'s live
-/// `open_docs` map (docs/lsp.md (configuration)).
+/// `open_docs` map (docs/lsp.md (project overlay)).
 pub(crate) fn path_to_file_uri(path: &Path) -> String {
     let raw = path.to_string_lossy();
     let normalized = if cfg!(windows) {

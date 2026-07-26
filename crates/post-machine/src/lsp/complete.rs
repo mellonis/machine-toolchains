@@ -414,14 +414,20 @@ fn enclosing_ns_path(items: &[TopItem], pos: Pos) -> Vec<String> {
 /// child namespaces exactly one segment deeper, derived the same way
 /// `use_roots` derives roots (Module kind); the overlay contributes the
 /// SAME two shapes at this same seam — its own child namespaces one
-/// segment deeper (an overlay `members` key only ever exists at a
-/// symbol's full leaf depth, so a sibling's `outer::inner::f` registers
-/// under `["outer","inner"]` alone, never `["outer"]` — without this
-/// scan, typing `outer::` would offer nothing even though `use_roots`
-/// already offered `outer` as a root), and its own `members` entry for
-/// this EXACT path (Function kind, docs/lsp.md (configuration)). Every
-/// overlay name whose bare label a local def or child namespace already
-/// produced is skipped (`seen`): a local name always wins, the same
+/// segment deeper (`overlay.rs::insert_export` registers EVERY
+/// intermediate namespace level along an export's path, not only its own
+/// leaf level, so a sibling's `outer::inner::f` registers a key at
+/// `["outer"]` — mapping `inner` onward — in addition to its own leaf key
+/// at `["outer","inner"]`; without this scan, typing `outer::` would
+/// offer nothing even though `use_roots` already offered `outer` as a
+/// root, and the scan keeps working at any nesting depth since every
+/// ancestor level is registered), and its own `members` entry for this
+/// EXACT path (Function kind, docs/lsp.md (project overlay); when the exact
+/// path is itself an intermediate namespace level rather than a leaf, its
+/// bare names were already offered as Module kind by the child-namespace
+/// scan above and `seen` skips the duplicate here). Every overlay name
+/// whose bare label a local def or child namespace already produced is
+/// skipped (`seen`): a local name always wins, the same
 /// definition-beats-library precedent the linker itself follows. Sorted
 /// by label for a deterministic result — the underlying maps are
 /// hash-ordered. `docs` (`None` when analysis itself is stale/absent)
@@ -677,7 +683,7 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
         }
     }
 
-    // (d) the cross-file overlay (docs/lsp.md (configuration)): its
+    // (d) the cross-file overlay (docs/lsp.md (project overlay)): its
     // top-level BARE exports (`members[[]]`, label = bare name) subject
     // to the same `seen` shadow-check as every local name above — a local
     // def/import always wins; then every NAMESPACED overlay symbol (a
@@ -1589,6 +1595,60 @@ export main() {
                 .iter()
                 .any(|c| c.label == "inner" && c.kind == CandidateKind::Module),
             "{candidates:?}"
+        );
+    }
+
+    #[test]
+    fn use_path_completion_drills_down_three_namespace_levels_deep() {
+        // A genuinely THREE-level-deep sibling namespace: the full export
+        // path `a::b::c::f` carries three namespace segments before its
+        // own leaf. Before `overlay.rs::insert_export` registered every
+        // intermediate namespace level, it registered only the leaf's own
+        // immediate parent — `members[["a","b","c"]] = {"f": "a::b::c::f"}`
+        // — and nothing at `["a"]` or `["a","b"]` at all. `use_roots`
+        // still offered `a` as a root (it scans `path.first()` at any
+        // depth), and typing `outer::` one level in worked by coincidence
+        // whenever the leaf sat exactly two segments down (the sibling
+        // test above), but here typing `a::` found no length-2 member key
+        // and offered nothing, and `a::b::` likewise found no length-3
+        // key — the drill-down died at the second hop. This test pins
+        // BOTH hops on a fixture where the old code had nothing to find at
+        // either one.
+        let dir = unique_tmp_dir("use-roots-three-deep-ns");
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{"project":{"targets":{"app":{"sources":["app.pmc","helper.pmc"]}}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("helper.pmc"),
+            "namespace a {\nnamespace b {\nnamespace c {\nexport f() { right; }\n}\n}\n}\n",
+        )
+        .unwrap();
+
+        let mut service = PmcLanguageService::new();
+        let app_uri = file_uri(&dir.join("app.pmc"));
+
+        const FIRST_HOP_SRC: &str = "use a::x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, FIRST_HOP_SRC);
+        let pos = pos_after(FIRST_HOP_SRC, "use a::", 7);
+        let first_hop = service.completion(&app_uri, pos);
+        assert!(
+            first_hop
+                .iter()
+                .any(|c| c.label == "b" && c.kind == CandidateKind::Module),
+            "`use a::` must offer `b`: {first_hop:?}"
+        );
+
+        const SECOND_HOP_SRC: &str = "use a::b::x;\nexport main() { right; }\n";
+        service.did_update(&app_uri, SECOND_HOP_SRC);
+        let pos = pos_after(SECOND_HOP_SRC, "use a::b::", 10);
+        let second_hop = service.completion(&app_uri, pos);
+        assert!(
+            second_hop
+                .iter()
+                .any(|c| c.label == "c" && c.kind == CandidateKind::Module),
+            "`use a::b::` must offer `c`: {second_hop:?}"
         );
     }
 

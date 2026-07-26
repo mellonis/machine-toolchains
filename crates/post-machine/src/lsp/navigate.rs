@@ -5,7 +5,7 @@
 //! resolution-table hit or `use`-path segment naming something this
 //! document does NOT itself define is tried against the document's
 //! cross-file [`super::overlay::Overlay`] before falling back to today's
-//! single-file behavior (docs/lsp.md (configuration)): a sibling's own
+//! single-file behavior (docs/lsp.md (project overlay)): a sibling's own
 //! declaration wins over an `ImportBinding`'s bare `use`-span jump, and
 //! over `QualifiedExternal`'s/`Unresolved`'s plain `None`. A `std::` path
 //! is no exception to that overlay-first order (docs/pmt/project.md
@@ -156,7 +156,7 @@ fn resolve_call(
 
 /// One `full_path` (or, for `Resolution::Unresolved`, the call's own
 /// written bare name) resolved through `state`'s cross-file
-/// [`super::overlay::Overlay`] (docs/lsp.md (configuration)): a hit whose
+/// [`super::overlay::Overlay`] (docs/lsp.md (project overlay)): a hit whose
 /// `OverlaySym.target` carries a source location becomes a `DefTarget`
 /// keyed by `origin`; no overlay at all, a name miss, or a name-only hit
 /// (a `.pmo`-backed symbol, which has no location to jump to) all

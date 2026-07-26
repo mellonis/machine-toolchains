@@ -304,7 +304,7 @@ fn std_routine_candidates(state: &DocState, span: Span) -> Vec<Candidate> {
 }
 
 /// The cross-file overlay's own `call`/`bind` target candidates: every
-/// name it defines (docs/lsp.md (configuration)), as a qualified label —
+/// name it defines (docs/lsp.md (project overlay)), as a qualified label —
 /// the SAME transparent-call shape the stdlib roster offers, since both
 /// cross a compiled-object boundary the same way. `deprecated` comes
 /// from the contributing SIBLING's own `OverlaySym.doc` rather than this

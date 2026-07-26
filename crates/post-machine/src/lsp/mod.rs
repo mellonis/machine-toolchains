@@ -208,7 +208,7 @@ fn std_enabled(state: &DocState) -> bool {
     state.overlay.as_ref().is_none_or(|o| o.stdlib)
 }
 
-/// Whether `state`'s cross-file overlay (docs/lsp.md (configuration))
+/// Whether `state`'s cross-file overlay (docs/lsp.md (project overlay))
 /// defines `name` OUTRIGHT — the ownership check every `std::`-branch in
 /// this feature gates on before falling through to the embedded stdlib.
 /// `name` may be either a written bare name or a fully-qualified path
