@@ -79,7 +79,7 @@ fn walk_items(
             TopKind::Comment(_) => {}
             TopKind::Import(use_cst) => {
                 for path in &use_cst.paths {
-                    emit_use_path(path, out);
+                    emit_use_path(path, state, out);
                 }
             }
             TopKind::Namespace(ns) => {
@@ -207,11 +207,32 @@ fn digit_run_len(text: &str, pos: Pos) -> u32 {
         .count() as u32
 }
 
+/// Whether `state`'s cross-file overlay (docs/lsp.md (configuration))
+/// defines `full_path` OUTRIGHT — the ownership check every
+/// `defaultLibrary` decision in this file gates on, mirroring
+/// `navigate.rs::std_path_target`'s identical ownership-first rule for
+/// go-to-definition/hover: a name the overlay owns resolves to a
+/// sibling/library in the user's own project, never the embedded
+/// stdlib, regardless of whether the name happens to start with `std::`
+/// (a sibling's own `namespace std { export … }` shadows the embedded
+/// routine of the same mangled name — docs/pmt/project.md (libraries)).
+fn overlay_owns(state: &DocState, full_path: &str) -> bool {
+    state
+        .overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.symbols.contains_key(full_path))
+}
+
 /// A `use` path's per-segment tokens: every segment but the last is
 /// `namespace`; the last is `function`, plus `defaultLibrary` when the
-/// path's own first segment is literally `std`.
-fn emit_use_path(path: &UsePath, out: &mut Vec<SemToken>) {
-    let default_library = path.path.first().map(String::as_str) == Some("std");
+/// path's own first segment is literally `std` AND the overlay does NOT
+/// own the full joined path — [`overlay_owns`]'s own doc comment. A
+/// sibling's own `use std::goToEnd;` importing ITS shadowing definition
+/// (not the embedded one) therefore tokenizes as a plain `function`.
+fn emit_use_path(path: &UsePath, state: &DocState, out: &mut Vec<SemToken>) {
+    let full_path = path.path.join("::");
+    let default_library =
+        path.path.first().map(String::as_str) == Some("std") && !overlay_owns(state, &full_path);
     let segments: Vec<&str> = path.path.iter().map(String::as_str).collect();
     emit_path_segments(&segments, path.span.start, default_library, out);
 }
@@ -220,14 +241,20 @@ fn emit_use_path(path: &UsePath, out: &mut Vec<SemToken>) {
 /// resolution table by the CST's own `name_span` — identical to the
 /// AST's (flatten mutates only the `name` string, never its span).
 /// `defaultLibrary` applies to the final segment when the resolution is
-/// `ImportBinding`/`QualifiedExternal` with a `std::`-prefixed full path.
-/// An `Unresolved` call falls back to the document's cross-file overlay
-/// (docs/lsp.md (configuration)): a hit tokenizes as a plain `function`
-/// (never `defaultLibrary` — a sibling in the user's own project is not
-/// the standard library) regardless of whether the symbol carries a
-/// navigable `target` (a `.pmo`-backed sibling has none; tokenizing only
-/// asserts the name exists, navigation is a separate concern). No hit
-/// keeps today's quiet cue: no token at all.
+/// `ImportBinding`/`QualifiedExternal` with a `std::`-prefixed full path
+/// AND the overlay does not own that full path ([`overlay_owns`]) — a
+/// sibling's own `namespace std { export … }` shadows the embedded
+/// routine of the same name (the identical overlay-first order
+/// `navigate.rs::std_path_target` resolves definitions in), so its call
+/// sites read as plain `function`, exactly like any other sibling-
+/// resolved call. An `Unresolved` call falls back to the document's
+/// cross-file overlay (docs/lsp.md (configuration)) directly: a hit
+/// tokenizes as a plain `function` (never `defaultLibrary` — a sibling
+/// in the user's own project is not the standard library) regardless of
+/// whether the symbol carries a navigable `target` (a `.pmo`-backed
+/// sibling has none; tokenizing only asserts the name exists, navigation
+/// is a separate concern). No hit keeps today's quiet cue: no token at
+/// all.
 fn emit_call_name(
     name: &str,
     name_span: Span,
@@ -242,21 +269,19 @@ fn emit_call_name(
         let Some(written) = super::navigate::text_at_span(&state.text, name_span) else {
             return;
         };
-        if state
-            .overlay
-            .as_ref()
-            .is_some_and(|overlay| overlay.symbols.contains_key(written))
-        {
+        if overlay_owns(state, written) {
             let segments: Vec<&str> = written.split("::").collect();
             emit_path_segments(&segments, name_span.start, false, out);
         }
         return;
     }
-    let default_library = matches!(
-        resolution,
-        Resolution::ImportBinding { full_path, .. } | Resolution::QualifiedExternal { full_path }
-            if full_path.starts_with("std::")
-    );
+    let default_library = match resolution {
+        Resolution::ImportBinding { full_path, .. }
+        | Resolution::QualifiedExternal { full_path } => {
+            full_path.starts_with("std::") && !overlay_owns(state, full_path)
+        }
+        Resolution::Local { .. } | Resolution::Unresolved => false,
+    };
     let segments: Vec<&str> = name.split("::").collect();
     emit_path_segments(&segments, name_span.start, default_library, out);
 }
@@ -615,6 +640,84 @@ mod tests {
         assert!(
             !plain_tokens.iter().any(|t| t.span == call_name_span),
             "no overlay: the quiet no-token cue must hold, {plain_tokens:?}"
+        );
+    }
+
+    /// The `defaultLibrary` modifier must track WHERE `std::goToEnd`
+    /// actually resolves, not the bare `std::` prefix
+    /// (`overlay_owns`'s own doc comment): a sibling's own `namespace
+    /// std { export goToEnd() {...} }` shadows the embedded routine —
+    /// same overlay-first order as go-to-definition and hover — so its
+    /// call site must read as a plain `function`, no modifier. Both
+    /// halves are pinned on the SAME fixture/span so a fix that simply
+    /// stopped emitting the modifier unconditionally (rather than
+    /// gating it on overlay ownership) would fail the unshadowed half.
+    #[test]
+    fn std_call_default_library_modifier_follows_overlay_ownership() {
+        const FIXTURE: &str = "main() {\n    @std::goToEnd();\n}\n";
+        // "    @std::goToEnd();" — cols 1..4 indent, 5 '@', 6..9 "std",
+        // 9..11 "::", 11..18 the 7-char "goToEnd" segment.
+        let function_span = Span::new(2, 11, 2, 18);
+
+        let mut service = PmcLanguageService::new();
+        let diags = service.did_update(URI, FIXTURE);
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity != mtc_core::lsp::ServiceSeverity::Error),
+            "sanity: the fixture must parse and analyze cleanly, {diags:?}"
+        );
+
+        // Unshadowed half: no overlay defines `std::goToEnd` (no overlay
+        // wired up at all here) — this genuinely resolves to the
+        // embedded stdlib, so `defaultLibrary` must still be set. A
+        // regression guard: this is the SAME assertion `RICH_FIXTURE`'s
+        // own `@std::goToEnd()` case already pins, restated here on a
+        // minimal fixture so it sits right next to the shadowed half
+        // below.
+        let plain_tokens = service
+            .semantic_tokens(URI)
+            .expect("analysis-tier answer on a clean parse");
+        let plain_hit = plain_tokens
+            .iter()
+            .find(|t| t.span == function_span)
+            .unwrap_or_else(|| panic!("no token at the function span: {plain_tokens:?}"));
+        assert_eq!(plain_hit.token_type, TOKEN_TYPE_FUNCTION);
+        assert_eq!(
+            plain_hit.modifiers & MODIFIER_DEFAULT_LIBRARY,
+            MODIFIER_DEFAULT_LIBRARY,
+            "unshadowed std::goToEnd must still read as defaultLibrary: {plain_hit:?}"
+        );
+
+        // Shadowed half: a sibling's own `namespace std { export
+        // goToEnd() {...} }`, wired directly into the overlay (mirroring
+        // `overlay_resolved_bare_call_tokenizes_as_function_without_default_library`
+        // above) rather than standing up a whole on-disk project tree —
+        // only `symbols`' ownership matters to `overlay_owns`.
+        service.docs.get_mut(URI).unwrap().overlay = Some(overlay::Overlay {
+            stdlib: true,
+            symbols: std::collections::HashMap::from([(
+                "std::goToEnd".to_string(),
+                overlay::OverlaySym {
+                    target: None,
+                    doc: None,
+                },
+            )]),
+            members: std::collections::HashMap::new(),
+        });
+
+        let shadowed_tokens = service
+            .semantic_tokens(URI)
+            .expect("analysis-tier answer on a clean parse");
+        let shadowed_hit = shadowed_tokens
+            .iter()
+            .find(|t| t.span == function_span)
+            .unwrap_or_else(|| panic!("no token at the function span: {shadowed_tokens:?}"));
+        assert_eq!(shadowed_hit.token_type, TOKEN_TYPE_FUNCTION);
+        assert_eq!(
+            shadowed_hit.modifiers & MODIFIER_DEFAULT_LIBRARY,
+            0,
+            "a sibling's own std::goToEnd must never read as defaultLibrary: {shadowed_hit:?}"
         );
     }
 
