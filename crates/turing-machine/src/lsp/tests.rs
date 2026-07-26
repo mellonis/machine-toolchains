@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use mtc_core::diagnostics::{Edit, Fix};
 use serde_json::json;
@@ -1638,6 +1639,13 @@ machine {
     assert!(got.contains(&"std".to_string()), "{got:?}");
 }
 
+// This test is also Task 17's TM-only negative: it already exercises every
+// context the plan calls out by name — graft-target (`Target(Graft)`),
+// `BindingName`, `BindingValue`, `VectorCell`, `MapSrc`, `MapDst` — each a
+// leak-negative paired with a live LOCAL positive control, driven through a
+// real `did_update` with a genuinely active overlay (the sanity check just
+// below the call-target assertions). A second, separate test would only
+// repeat this one's own fixture and assertions.
 #[test]
 fn call_and_bind_target_completion_offers_sibling_exported_routines() {
     let dir = unique_tmp_dir("target-overlay");
@@ -1694,6 +1702,25 @@ machine {
     assert!(
         !call_got.contains(&"main".to_string()),
         "the sibling's machine entry is not a call target: {call_got:?}"
+    );
+    // Sanity: every negative in this test (graft target, binding name,
+    // binding value, vector-cell glyph, map source, map destination, all
+    // below) is only meaningful with a real, active overlay behind it —
+    // `mylib::plusOne` surfacing above already proves that behaviorally,
+    // but a literal peek at the overlay's own table closes the gap a
+    // regression that disabled the overlay outright would otherwise slip
+    // through (every negative assertion below would pass vacuously).
+    let overlay = service
+        .docs
+        .get(&app_uri)
+        .unwrap()
+        .overlay
+        .as_ref()
+        .expect("a real, active overlay exists for this document");
+    assert!(
+        overlay.symbols.contains_key("mylib::plusOne"),
+        "{:?}",
+        overlay.symbols.keys().collect::<Vec<_>>()
     );
     // The deprecation tag comes from the SIBLING's own doc, not this
     // document's roster: `plusOne` carries `! [deprecated]`, `freshOne`
@@ -2242,6 +2269,210 @@ machine {
             .any(|d| d.code == Some("undeclared-external") && d.message.contains("`plusOne`")),
         "a bare plusOne() is not a std:: name — must keep warning: {diags:?}"
     );
+}
+
+// --- Task 17: overlay integration matrix — the remaining cells the plan
+// calls for, each a real `TmcLanguageService` driven through `did_update` +
+// feature calls over a temp tree. Two cells the matrix names are already
+// pinned elsewhere and are NOT repeated here:
+//   - `stdlib_false_gates_std_surfaces_tm_side` (above) is already the
+//     stdlib:false matrix, TM spellings, with a live control on every gate.
+//   - `overlay::tests::broken_sibling_contributes_nothing_others_still_do`
+//     already pins one unparseable sibling contributing nothing while a
+//     fine sibling's export still does — at the `build_overlay` layer,
+//     which is the exact claim; a service-level repeat would add nothing.
+// The TM-only overlay-leak negative is likewise not a new test here — see
+// the comment above `call_and_bind_target_completion_offers_sibling_
+// exported_routines`, which already covers it. ---
+
+#[test]
+fn manifest_edit_changes_the_next_answer() {
+    let dir = unique_tmp_dir("manifest-edit");
+    let manifest_path = dir.join("tmt.json");
+    fs::write(
+        &manifest_path,
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine bare(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    // A fully-formed `use` statement already in place — `Context::UsePath`
+    // doesn't care what the path already spells, only that the cursor sits
+    // somewhere inside one (mirrors `use_path_completion_offers_sibling_
+    // namespaces_and_routines`, which positions the cursor the same way).
+    let app_src = "\
+alphabet bits { '_', '1' }
+use std::binaryNumbers::goToNumber;
+
+machine {
+  tape t: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let pos = pos_after(app_src, "use ", 4);
+
+    service.did_update(&app_uri, app_src);
+    let before = labels(&service.completion(&app_uri, pos));
+    assert!(
+        before.contains(&"bare".to_string()),
+        "the sibling's export starts out visible: {before:?}"
+    );
+
+    // Rewrite the manifest dropping helper.tmc from the target, with a
+    // guaranteed-newer mtime (the manifest cache is mtime-keyed; the
+    // filesystem's own timestamp granularity is not to be trusted in a
+    // fast test — mirrors `overlay::tests::manifest_cache_is_mtime_keyed_
+    // and_bounded`'s own rewrite sequence).
+    let old_mtime = fs::metadata(&manifest_path).unwrap().modified().unwrap();
+    fs::write(
+        &manifest_path,
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&manifest_path)
+        .unwrap()
+        .set_modified(old_mtime + Duration::from_secs(2))
+        .unwrap();
+
+    // Core's own `republish_all` re-runs `did_update` on every open
+    // document when a watched `tmt.json` changes in production; a test
+    // drives that re-update itself.
+    service.did_update(&app_uri, app_src);
+    let after = labels(&service.completion(&app_uri, pos));
+    assert!(
+        !after.contains(&"bare".to_string()),
+        "the manifest edit must drop the now-undeclared sibling: {after:?}"
+    );
+}
+
+#[test]
+fn untitled_documents_keep_the_single_file_view() {
+    // An untitled buffer has no filesystem path at all, so it can never be
+    // discovered as a project member. This closes the two legs that
+    // actually consume a `None` overlay: cross-file refinement stays off
+    // (a bare undeclared call keeps warning), and the embedded stdlib
+    // surface (hover, go-to-definition) is exactly what it was before the
+    // overlay feature existed.
+    let src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s {
+    ['_'] -> call ghost() then g;
+    ['1'] -> call std::binaryNumbers::goToNumber() then g;
+  }
+  state g { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let diags = service.did_update(&uri, src);
+
+    assert!(
+        service.docs.get(&uri).unwrap().overlay.is_none(),
+        "no `file:` path at all — single-file degrade"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`ghost`")),
+        "no overlay to refine the bare call away: {diags:?}"
+    );
+
+    let std_pos = pos_after(src, "call std::binaryNumbers::goToNumber", 5);
+    let hover = service
+        .hover(&uri, std_pos)
+        .expect("std:: hover is untouched without an overlay");
+    // Deliberately coupled to `goToNumber`'s own doc prose (the same
+    // substring `hover_on_a_std_call_target_returns_its_doc` pins in full)
+    // — this test's job is proving the untitled route reaches the SAME
+    // embedded doc, not re-deriving its wording.
+    assert!(
+        hover
+            .text
+            .contains("Walk right to the current number's end marker"),
+        "the embedded stdlib's own doc: {hover:?}"
+    );
+
+    let target = service
+        .definition(&uri, std_pos)
+        .expect("std:: go-to-definition is untouched without an overlay");
+    let std_uri =
+        crate::stdlib::materialized_std_uri().expect("materialization succeeds in this env");
+    assert_eq!(target.uri, std_uri);
+}
+
+#[test]
+fn dotdot_declared_source_gets_exact_features_when_opened_from_the_tree() {
+    // Mirrors `overlay::tests::dotdot_membership_resolves_lexically`,
+    // driven through the real service instead of `project_view` directly:
+    // `proj/tmt.json` declares `"../shared.tmc"`, and `proj/app.tmc` — a
+    // member of `proj`'s own `app` target — is the document actually
+    // opened, so discovery starts at `proj/`, the opened document's own
+    // directory. The sibling's export is reached through a `::`-qualified
+    // name (`sh::shared`): `external_path` never resolves a bare,
+    // unqualified reference (`definition_reaches_a_tma_sibling_and_tmo_
+    // names_navigate_null` documents that limitation), so a bare call is
+    // needed for navigation to even have something to resolve — but a
+    // QUALIFIED name (any `::`-qualified reference, not only a resolved
+    // one) never produces `undeclared-external` in the first place
+    // (`Analysis::warn_undeclared_if_bare`'s own `!name.contains("::")`
+    // gate), so this test carries the `../`-declared-source claim through
+    // `definition`/`hover` alone rather than through a diagnostics
+    // assertion that would pass identically with no `../` source declared
+    // at all (confirmed by temporarily dropping the declaration and
+    // rerunning: `definition` failed exactly as expected, at its own
+    // `.expect`, with no diagnostics assertion anywhere near the failure).
+    let root = unique_tmp_dir("dotdot-service");
+    let proj = root.join("proj");
+    fs::create_dir_all(&proj).unwrap();
+    fs::write(
+        proj.join("tmt.json"),
+        r#"{"project":{"sources":["../shared.tmc"],"targets":{"app":{"sources":["app.tmc"]}}}}"#,
+    )
+    .unwrap();
+    let shared_src = "\
+alphabet b { '_', '0' }
+namespace sh {
+?Shared doc.
+  export routine shared(tape num: b) { entry state s { [*] -> return; } }
+}
+";
+    fs::write(root.join("shared.tmc"), shared_src).unwrap();
+
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&proj.join("app.tmc"));
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state main { [*] -> call sh::shared() then main; }
+}
+";
+    service.did_update(&app_uri, app_src);
+
+    let pos = pos_after(app_src, "call sh::shared", 5);
+    let target = service
+        .definition(&app_uri, pos)
+        .expect("../shared.tmc's export navigates");
+    assert_eq!(
+        target.uri,
+        file_uri(&root.join("shared.tmc")),
+        "must resolve to shared.tmc's own file, not a literal `..` segment"
+    );
+    assert_eq!(target.span, span_of(shared_src, "shared"), "{target:?}");
+
+    let hover = service
+        .hover(&app_uri, pos)
+        .expect("../shared.tmc's own doc surfaces through the overlay");
+    assert!(hover.text.contains("Shared doc."), "{hover:?}");
 }
 
 #[test]
