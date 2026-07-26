@@ -2517,6 +2517,27 @@ impl WorldCtx<'_> {
     }
 }
 
+/// The name inside the first backtick pair of an `undeclared-external`
+/// message — this function's own fixed format ("reference to undeclared
+/// external `NAME` — declare it with `use NAME;`"), pinned by
+/// `undeclared_name_matches_the_warning_format` below.
+pub(crate) fn undeclared_name(message: &str) -> Option<&str> {
+    let start = message.find('`')? + 1;
+    let rest = &message[start..];
+    Some(&rest[..rest.find('`')?])
+}
+
+/// The build driver and the language server refine this warning the same
+/// way wherever a full link set is declared: a bare reference the
+/// declared set defines stops warning (docs/tmt/cli.md
+/// (undeclared-external)).
+pub(crate) fn refine_undeclared(diags: &mut Vec<Diagnostic>, defined: &HashSet<String>) {
+    diags.retain(|d| {
+        !(d.code == "undeclared-external"
+            && undeclared_name(&d.message).is_some_and(|n| defined.contains(n)))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3021,6 +3042,57 @@ alphabet b { '_', '0', '1' }
         // bind → an undeclared BARE name: undeclared-external (today's behavior).
         let src = "alphabet b { '_', '0' }\nmachine { tape t: b; bind ghost(t = t) as h; entry state s { [*] -> call h() then s; } }";
         assert!(diag_codes(src).contains(&"undeclared-external"));
+    }
+
+    /// Pins the extraction against this module's REAL warning format — if
+    /// the message ever changes shape, this fails here rather than
+    /// silently breaking the refinement (moved from `cli/driver.rs`, which
+    /// now delegates to `refine_undeclared` here).
+    #[test]
+    fn undeclared_name_matches_the_warning_format() {
+        let src = "alphabet ab { '_', 'a' }\nmachine { tape t: ab; entry state s { [*] -> call go() then s; } }";
+        let out = compile(src, CompileOptions::default()).unwrap();
+        let diag = out
+            .report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "undeclared-external")
+            .expect("bare call go() warns");
+        assert_eq!(undeclared_name(&diag.message), Some("go"));
+    }
+
+    #[test]
+    fn refine_undeclared_drops_only_defined_undeclared_externals() {
+        // Both diagnostics come from a real compile — not hand-typed
+        // strings — so this test cannot silently drift away from the
+        // compiler's actual message shapes the way a copied literal could.
+        let src = "alphabet bits { '_', '1' }\nmachine { tape t: bits; entry state s { ['_'] -> call a() then g; ['1'] -> call b() then g; } state g { [*] -> stop; } }";
+        let out = compile(src, CompileOptions::default()).unwrap();
+        let mut diags = out.report.diagnostics;
+        assert_eq!(
+            diags
+                .iter()
+                .filter(|d| d.code == "undeclared-external")
+                .count(),
+            2,
+            "both bare calls should warn undeclared: {diags:?}"
+        );
+
+        let defined: HashSet<String> = ["a".to_string()].into_iter().collect();
+        refine_undeclared(&mut diags, &defined);
+
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.code == "undeclared-external" && d.message.contains("`a`")),
+            "{diags:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "undeclared-external" && d.message.contains("`b`")),
+            "b stays undeclared — the live positive control: {diags:?}"
+        );
     }
 
     #[test]

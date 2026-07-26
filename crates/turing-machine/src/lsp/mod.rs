@@ -213,18 +213,15 @@ pub(crate) struct DocState {
     /// The cross-file symbol table for this document (docs/lsp.md
     /// (configuration)): `None` when the document degrades to
     /// single-file behavior (no manifest found, the document is a
-    /// member of no target, or it has no `file:` path at all). Not yet
-    /// consumed outside this module's own tests — completion,
-    /// navigation, hover, and diagnostics refinement each wire in their
-    /// own read of it separately.
-    // consumer: cross-file completion/navigation/hover/diagnostics,
-    // wired in separately from this task. Deliberately narrower than
-    // this struct's other fields (`pub(crate)`): `Overlay` itself is
-    // `pub(super)` (visible within `lsp` and its descendants only,
-    // overlay.rs's own reach), and no consumer of this field lives
-    // outside that tree, so a wider modifier here would just be a
-    // `private_interfaces` mismatch waiting to happen.
-    #[allow(dead_code)]
+    /// member of no target, or it has no `file:` path at all). Consumed
+    /// by `did_update`'s own diagnostics refinement; completion,
+    /// navigation, and hover each wire in their own read of it
+    /// separately, in a later round. Deliberately narrower than this
+    /// struct's other fields (`pub(crate)`): `Overlay` itself is
+    /// `pub(super)` (visible within `lsp` and its descendants only,
+    /// overlay.rs's own reach), and no consumer of this field lives
+    /// outside that tree, so a wider modifier here would just be a
+    /// `private_interfaces` mismatch waiting to happen.
     overlay: Option<overlay::Overlay>,
 }
 
@@ -635,7 +632,7 @@ impl LanguageService for TmcLanguageService {
             Some(resolved) => Some(Roster::build(resolved, staged.program.as_ref())),
             None => prev.and_then(|d| d.roster),
         };
-        let state = DocState {
+        let mut state = DocState {
             text: text.to_string(),
             tokens: staged.tokens,
             cst: staged.cst,
@@ -648,6 +645,23 @@ impl LanguageService for TmcLanguageService {
             config_errors,
             overlay,
         };
+
+        // 6. Cross-file diagnostics refinement (docs/tmt/cli.md
+        //    (undeclared-external)): the same retain predicate `tmt build`
+        //    runs over its declared link set, applied here over this
+        //    document's own overlay — a bare reference the overlay
+        //    defines stops being a defect of THIS document. A document
+        //    with no overlay (no manifest found, member of no target, or
+        //    an untitled buffer) keeps every warning untouched — the
+        //    single-file honesty rule stays exact. Runs on `state.warnings`
+        //    (through the disjoint `state.overlay` borrow) rather than on
+        //    `staged.diagnostics` before assembly, so the stored DocState
+        //    carries the REFINED set — a later consumer reading
+        //    `state.warnings` must never see a warning the user never saw.
+        if let Some(overlay) = state.overlay.as_ref() {
+            crate::compiler::refine_undeclared(&mut state.warnings, &overlay.defined_names());
+        }
+
         let diagnostics = merged_diagnostics(&state);
         self.docs.insert(uri.to_string(), state);
         diagnostics

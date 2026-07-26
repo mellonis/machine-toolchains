@@ -421,10 +421,7 @@ impl Overlay {
     /// project's `stdlib` flag is set (a bare undeclared call can never
     /// resolve to a `std::` name, so the roster contributes only its
     /// full, namespaced paths — exactly what the driver's own union
-    /// does).
-    // consumer: cross-file diagnostics refinement, wired in separately
-    // from this task.
-    #[allow(dead_code)]
+    /// does). Consumed by `did_update`'s own diagnostics refinement.
     pub(super) fn defined_names(&self) -> HashSet<String> {
         let mut names: HashSet<String> = self.symbols.keys().cloned().collect();
         if self.stdlib {

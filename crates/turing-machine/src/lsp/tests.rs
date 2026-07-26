@@ -293,6 +293,205 @@ machine {
     assert!(codes.contains(&Some("undeclared-external")), "{codes:?}");
 }
 
+// -- cross-file diagnostics refinement through the overlay --------------
+
+#[test]
+fn undeclared_external_is_refined_by_the_overlay_call_variant() {
+    // A bare call the overlay resolves stops warning; a bare call nothing
+    // resolves is the live positive control proving the refinement — and
+    // diagnostics generally — are still working, in the SAME project.
+    let dir = unique_tmp_dir("refine-call");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine helper(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { ['_'] -> call helper() then g; ['1'] -> call ghost() then g; }
+  state g { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "the sibling's export refines the bare call away: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`ghost`")),
+        "no sibling defines ghost — the live positive control: {diags:?}"
+    );
+}
+
+#[test]
+fn undeclared_external_stays_without_a_manifest_on_a_real_file_path() {
+    // A real `file:` path with no tmt.json anywhere on the walk — the
+    // OTHER route to a `None` overlay besides an untitled buffer
+    // (`undeclared_external_still_published_for_bare_names` covers that
+    // one). The SAME name the call-variant test above resolves, so this
+    // also serves as that test's control: `helper` really does warn on
+    // its own when no link set is declared at all.
+    let dir = unique_tmp_dir("refine-no-manifest");
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { [*] -> call helper() then s; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "no manifest anywhere on the walk — per-file honest: {diags:?}"
+    );
+    let state = service.docs.get(&app_uri).unwrap();
+    assert!(
+        state.overlay.is_none(),
+        "no tmt.json on the walk — single-file degrade"
+    );
+}
+
+#[test]
+fn stdlib_resolved_bare_name_is_not_suppressed() {
+    // The stdlib defines `std::binaryNumbersBare::plusOne`, never a bare
+    // `plusOne` — a bare call to it must keep warning even though the
+    // project has the stdlib enabled (the default), exactly matching what
+    // the build driver's own `defined_names` union produces. `helper`,
+    // resolved by an actual sibling in the SAME project, is the live
+    // positive control proving the overlay refinement is genuinely active
+    // here, not merely inert.
+    let dir = unique_tmp_dir("refine-stdlib");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine helper(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let app_src = "\
+alphabet bits { '_', '1' }
+machine {
+  tape t: bits;
+  entry state s { ['_'] -> call helper() then g; ['1'] -> call plusOne() then g; }
+  state g { [*] -> stop; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "the sibling's export refines the bare call away: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`plusOne`")),
+        "std::binaryNumbersBare::plusOne is not a bare plusOne: {diags:?}"
+    );
+
+    // The `helper` control above only proves an overlay exists — it says
+    // nothing about the STDLIB leg specifically. Pin that leg directly:
+    // the project really does have `stdlib` on, and the roster's
+    // NAMESPACED path is in the defined set while the bare name is not —
+    // the exact reason the bare call above keeps warning.
+    let state = service.docs.get(&app_uri).unwrap();
+    let overlay = state.overlay.as_ref().expect("a real project");
+    assert!(overlay.stdlib, "the manifest defaults the stdlib on");
+    let defined = overlay.defined_names();
+    assert!(
+        defined.contains("std::binaryNumbersBare::plusOne"),
+        "the roster leg really is in the defined set: {defined:?}"
+    );
+    assert!(
+        !defined.contains("plusOne"),
+        "…and only as a namespaced path — never the bare name: {defined:?}"
+    );
+}
+
+#[test]
+fn undeclared_external_is_refined_by_the_overlay_bind_variant() {
+    // This crate's warning fires for bare BIND targets too
+    // (`compiler::tests::bind_target_must_be_a_routine`); the overlay
+    // refinement must apply there identically to the call variant. A
+    // third bind, through a `use` import, pins the orthogonal invariant
+    // that a qualified/imported target never warns in the first place
+    // (`warn_undeclared_if_bare`'s bare-only check) — regardless of
+    // whether an overlay exists at all.
+    let dir = unique_tmp_dir("refine-bind");
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{"project":{"targets":{"app":{"sources":["app.tmc","helper.tmc"]}}}}"#,
+    )
+    .unwrap();
+    fs::write(
+        dir.join("helper.tmc"),
+        "alphabet b { '_', '0' }\nexport routine helper(tape t: b) { entry state s { [*] -> return; } }\n",
+    )
+    .unwrap();
+
+    let app_src = "\
+alphabet abc { '_', 'a', 'b' }
+use lib::r;
+machine {
+  tape t: abc;
+  bind helper(t = t) as h1;
+  bind ghost(t = t) as h2;
+  bind r(t = t) as h3;
+  entry state s { ['_'] -> call h1() then s; ['a'] -> call h2() then s; ['b'] -> call h3() then s; }
+}
+";
+    let mut service = TmcLanguageService::new();
+    let app_uri = file_uri(&dir.join("app.tmc"));
+    let diags = service.did_update(&app_uri, app_src);
+
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`helper`")),
+        "the sibling's export refines the bare bind target away: {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`ghost`")),
+        "no sibling defines ghost — the live positive control: {diags:?}"
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some("undeclared-external") && d.message.contains("`r`")),
+        "a qualified/imported bind target never warns regardless of the overlay: {diags:?}"
+    );
+}
+
 #[test]
 fn did_close_forgets_the_document() {
     let (mut service, uri) = opened(TWO_TAPE);
