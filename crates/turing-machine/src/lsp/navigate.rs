@@ -28,10 +28,10 @@
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{DefTarget, HoverContent};
 
-use super::{DocState, render_doc, span_touches};
+use super::{DocState, render_doc, span_touches, std_enabled};
 use crate::compiler::{Resolved, WorldKind, full_name};
 use crate::parser::{
-    Alphabet, Bind, BindingArg, BindingValue, Continuation, Graft, Program, SigParamKind,
+    Alphabet, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Program, SigParamKind,
     Signature, State, Transition,
 };
 
@@ -58,8 +58,9 @@ enum Target {
     /// `::`-qualified name, or the full path a `use` binding names. `path`
     /// is exactly what a cross-unit reference must be — never re-resolved
     /// against this document's own tables, since the whole point is a name
-    /// they do not contain. The standard library is the only source this
-    /// resolves against today (docs/lsp.md (materialized standard
+    /// they do not contain. Resolved against the cross-file overlay first,
+    /// the standard library's materialized on-disk copy last
+    /// (`external_declaration`, docs/lsp.md (materialized standard
     /// library)); a `graft` never produces this target — grafting splices
     /// a graph's source, which a link boundary does not carry.
     External { path: String },
@@ -474,7 +475,7 @@ fn binding_args_reference(
 }
 
 /// Where a target is declared, in this document.
-fn declaration_span(program: &Program, target: &Target) -> Option<Span> {
+fn declaration_span(state: &DocState, program: &Program, target: &Target) -> Option<Span> {
     match target {
         Target::Alphabet(mangled) => program
             .alphabets
@@ -553,24 +554,61 @@ fn declaration_span(program: &Program, target: &Target) -> Option<Span> {
             })
         }
         // Declared outside this document; `definition` special-cases the
-        // URI, but still drives the SPAN through here, off the stdlib
-        // roster.
-        Target::External { path } => external_declaration(path).map(|(_, span)| span),
+        // URI, but still drives the SPAN through here, off the overlay or
+        // the stdlib roster.
+        Target::External { path } => external_declaration(state, path).map(|(_, span)| span),
     }
 }
 
 /// Where an `External` target is declared, as `(uri, span)`: the
-/// standard library's materialized on-disk copy today, matched against its
-/// roster by full path (docs/lsp.md (materialized standard library)). A
-/// cross-file overlay leg is the natural next source for a workspace-local
-/// `External` reference — it belongs here, tried BEFORE this stdlib
-/// fallback, once the overlay exists.
-fn external_declaration(path: &str) -> Option<(String, Span)> {
+/// cross-file overlay (docs/lsp.md (configuration)) is consulted FIRST —
+/// a sibling that OWNS `path` answers here even when it carries no
+/// source location of its own (a `.tma`/`.tmo` sibling, or a linked
+/// library), since ownership is exactly what makes the embedded stdlib's
+/// own, possibly same-named, entry the WRONG place to jump to. This
+/// mirrors the linker's own user-sources-beat-libraries precedence
+/// (docs/tmt/project.md (schema reference)): a project that writes its
+/// own `namespace std { export routine goToNumber … }` shadows the
+/// embedded routine of the same mangled name, and the overlay already
+/// resolves that the same way the linker does. Only a genuine overlay
+/// MISS falls through to the standard library's materialized on-disk
+/// copy, matched against its roster by full path (docs/lsp.md
+/// (materialized standard library)) and itself gated on [`std_enabled`].
+fn external_declaration(state: &DocState, path: &str) -> Option<(String, Span)> {
+    if let Some(overlay) = state.overlay.as_ref()
+        && let Some(sym) = overlay.symbols.get(path)
+    {
+        return sym.target.clone();
+    }
+    if !std_enabled(state) {
+        return None;
+    }
     let entry = crate::stdlib::roster()
         .iter()
         .find(|e| e.full_path == *path)?;
     let uri = crate::stdlib::materialized_std_uri()?;
     Some((uri.to_string(), entry.name_span))
+}
+
+/// An `External` target's own documentation, resolved by the SAME
+/// overlay-first, stdlib-last precedence [`external_declaration`] uses
+/// for its location: the overlay's contributing sibling's own `Doc` when
+/// the overlay owns `path` at all — a `.tma`/`.tmo`-backed sibling owns
+/// the path but carries no `Doc`, and that still short-circuits here,
+/// since falling through would render an unrelated stdlib entry's doc
+/// for a name the overlay itself defines. Only a genuine overlay miss
+/// falls through to the standard library's own doc map, gated on
+/// [`std_enabled`].
+fn external_doc<'a>(state: &'a DocState, path: &str) -> Option<&'a Doc> {
+    if let Some(overlay) = state.overlay.as_ref()
+        && let Some(sym) = overlay.symbols.get(path)
+    {
+        return sym.doc.as_ref();
+    }
+    if !std_enabled(state) {
+        return None;
+    }
+    crate::stdlib::docs().get(path)
 }
 
 fn graft_of<'a>(program: &'a Program, world: &str, instance: &str) -> Option<&'a Graft> {
@@ -590,11 +628,12 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
     let program = state.program.as_ref()?;
     let (target, origin) = reference_at(program, pos)?;
     // Every target but `External` is declared IN this document; `External`
-    // is declared wherever `external_declaration` found it — the stdlib's
-    // materialized copy today — so it takes a different URI than `uri`.
+    // is declared wherever `external_declaration` found it — a sibling
+    // through the overlay, or the stdlib's materialized copy — so it takes
+    // a different URI than `uri`.
     let (doc_uri, span) = match &target {
-        Target::External { path } => external_declaration(path)?,
-        _ => (uri.to_string(), declaration_span(program, &target)?),
+        Target::External { path } => external_declaration(state, path)?,
+        _ => (uri.to_string(), declaration_span(state, program, &target)?),
     };
     Some(DefTarget {
         uri: doc_uri,
@@ -606,13 +645,14 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
 pub(super) fn hover(state: &DocState, pos: Pos) -> Option<HoverContent> {
     let program = state.program.as_ref()?;
     let (target, origin) = reference_at(program, pos)?;
-    let text = render(program, state.resolved.as_ref(), &target)?;
+    let text = render(program, state, &target)?;
     Some(HoverContent { text, span: origin })
 }
 
 /// The hover body for a target: a signature line first, then the
 /// declaration's doc and deprecation callouts under it.
-fn render(program: &Program, resolved: Option<&Resolved>, target: &Target) -> Option<String> {
+fn render(program: &Program, state: &DocState, target: &Target) -> Option<String> {
+    let resolved = state.resolved.as_ref();
     let (head, doc_key) = match target {
         Target::Alphabet(mangled) => {
             let alphabet = program
@@ -650,10 +690,18 @@ fn render(program: &Program, resolved: Option<&Resolved>, target: &Target) -> Op
         Target::External { path } => (path.clone(), Some(path)),
     };
     let doc = doc_key
-        .and_then(|key| {
-            resolved
+        .and_then(|key| match target {
+            // `external_doc` carries its OWN overlay-first/stdlib-last
+            // precedence, matching `external_declaration`'s — a plain
+            // `resolved.docs` lookup would never hit for an External path
+            // anyway (that map is keyed by this document's OWN mangled
+            // names), and unconditionally falling through to
+            // `crate::stdlib::docs()` here would skip both the overlay leg
+            // and the `std_enabled` gate.
+            Target::External { .. } => external_doc(state, key),
+            _ => resolved
                 .and_then(|r| r.docs.get(key))
-                .or_else(|| crate::stdlib::docs().get(key))
+                .or_else(|| crate::stdlib::docs().get(key)),
         })
         .and_then(render_doc);
     // Every other head carries real information the source text alone does

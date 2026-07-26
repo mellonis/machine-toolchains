@@ -225,6 +225,27 @@ pub(crate) struct DocState {
     overlay: Option<overlay::Overlay>,
 }
 
+/// Whether the embedded stdlib's `std::` surface should be offered at all
+/// (docs/tmt/project.md (schema reference)): a document with NO overlay —
+/// no manifest found on the ancestor walk, a member of no target, or an
+/// untitled/non-`file:` buffer — keeps today's unconditional stdlib
+/// surface; only an actual project manifest declaring `"stdlib": false`
+/// turns it off. Consumed by every `std::`-surfacing feature this service
+/// offers — completion (`complete.rs`), and go-to-definition/hover's name
+/// resolution and doc lookup (`navigate.rs`) — each gating its own
+/// `std::` call site.
+///
+/// Visibility is plain module-private, not `pub(super)`: `DocState`
+/// itself is only nameable within `lsp` and its descendants (its
+/// `overlay` field's own doc gives the identical reason), and every
+/// actual caller (`complete.rs`, `navigate.rs`) is a descendant of `lsp`
+/// already — plain privacy reaches them exactly as well as `pub(super)`
+/// would, with no risk of widening this function's reach past where
+/// `DocState` itself can even be named.
+fn std_enabled(state: &DocState) -> bool {
+    state.overlay.as_ref().is_none_or(|o| o.stdlib)
+}
+
 /// `file:` URIs → percent-decoded filesystem path; any other scheme
 /// (`untitled:` buffers, …) → `None`. An authority component
 /// (`file://localhost/x`) is skipped — editors emit the empty-authority
