@@ -111,7 +111,10 @@ A server always negotiates `utf-16` — the one encoding every LSP client
 supports. Internally, every position is 1-based and counts Unicode scalar
 values (characters), the same currency the compilers' own diagnostics use;
 the char-to-UTF-16 conversion happens once, at the wire boundary, against
-the document's current text.
+the document's current text. A span pairs two such positions and is
+**half-open** — its start is inclusive and its end exclusive — the same
+convention every compiler diagnostic, lint finding, and navigation target
+in this codebase uses for a range of text.
 
 ### Staged analysis
 
@@ -204,7 +207,7 @@ noise, not information.
 |---|---|
 | `.pmc` | compile warnings (undeclared externals, unused imports, unused functions) and lint findings (`docs/pmt/lint.md`) |
 | `.pma` | lint findings only (`docs/pmt/lint.md`) — there is no separate compile-warning channel |
-| `.tmc` | compile warnings (unused imports) and lint findings (`docs/tmt/lint.md`) |
+| `.tmc` | compile warnings (undeclared externals, unused imports) and lint findings (`docs/tmt/lint.md`) |
 | `.tma` | lint findings (`docs/tmt/lint.md`) plus the frame-descriptor channel described in its profile below |
 
 Lint findings carry the source `"pmt lint"` / `"tmt lint"`; compile
@@ -491,13 +494,158 @@ alphabets — can carry it. Neither assembly dialect has an equivalent
 attribute grammar, so every `.pma` and `.tma` diagnostic and candidate
 stays untagged — permanently, the same way their hover does.
 
+## Cross-file resolution (the project overlay)
+
+Both source-language services layer one more analysis tier on top of the
+single-file view described so far. When an open document belongs to a
+declared project target, the service also resolves names against that
+target's declared siblings and libraries, in the same order the linker
+itself uses — not a re-implementation of the linker, but a lightweight
+per-file scan over the same declared set. The two assembly services and
+the object-file format contribute to this only as a source of exported
+names; they gain no new feature of their own from it.
+
+### Membership
+
+An open document's containing directory walks up to the nearest project
+file (`pmt.json` / `tmt.json`) that HAS a `project` section — a lint-only
+manifest on the way is transparent to this walk, exactly as it is to
+`pmt build`/`tmt build`'s own discovery (`docs/pmt/project.md
+(discovery)`, `docs/tmt/project.md (discovery)`). The document is a
+member of a target once its normalized path appears in that target's
+effective source list; when it belongs to more than one target, the
+overlay set is the **union** of every containing target's declared
+siblings and libraries. A document with no project file above it, an
+untitled buffer, a document no target declares, or a candidate project
+file on the walk that fails to parse (the walk ends there rather than
+skipping past it, since a broken file's own `invalid-config` diagnostic
+already says so) all fall back to the single-file view described
+everywhere above, unchanged.
+
+### Resolution order
+
+Within the overlay, a name resolves in exactly the order the linker
+resolves it: the document's own local declarations first, then the
+declared sources — their **exported** symbols only, an unexported routine
+never crosses the boundary — then the declared libraries (first library
+wins on a name collision), and the embedded standard library **last**.
+Because the standard library resolves last, a project that legitimately
+shadows it with its own `namespace std { export … }` gets an editor that
+follows the project's own definition, not the embedded one, the same way
+the linker would.
+
+A project may declare `"stdlib": false`; doing so removes the `std::`
+surface entirely — no completion candidates, no hover, no materialized
+jump (below), and no contribution to the refinement in the next
+paragraph.
+
+One diagnostic rides the same table: a bare call or bind to a name the
+document itself never declares, which would otherwise warn as
+`undeclared-external`, is silenced when the overlay's declared set —
+project siblings, libraries, or the stdlib — actually defines it,
+mirroring exactly what `pmt build`/`tmt build` already do for the same
+declared set (**Diagnostics**, above).
+
+### What lights up, per toolchain
+
+**`.pmc`** gets the full surface: completion, go-to-definition, hover,
+semantic tokens, and the `undeclared-external` refinement above. A
+cross-file call tokenizes as a plain `function`, never carrying the
+`defaultLibrary` modifier the embedded stdlib's own calls do — that
+modifier is reserved for a resolution that genuinely lands in the
+embedded copy.
+
+**`.tmc`** gets the same list minus semantic tokens: its token layer is
+purely lexical, with no resolution tier to gate a cross-file distinction
+on (**Semantic tokens**, above). The overlay's own surface is also
+narrower by language rule, not merely by omission — only a transparent,
+argless call or bind can cross a compiled translation unit, so a
+sibling's or a library's routine names appear in exactly two places: a
+`use` path, and a bare `call`/`bind` **target** position. The overlay
+contributes nothing to a graft target (grafting a library's graph is the
+compile error `undefined-graph`), a binding name or value, a `with map`
+pair, or a vector-cell glyph — none of those can legally name something
+outside the current file. `.tmc` hover on a cross-file or `std::`
+reference shows the qualified name plus the declaration's own doc text
+where one exists, rather than the fuller signature line a local world's
+hover gets, since building one needs an analysis that belongs to a
+different document entirely.
+
+### The `.tmc` standard-library bridge
+
+`.tmc` now has its own materialized-stdlib counterpart to `.pmc`'s (its
+own service profile, below): a `std::` routine hovers with the embedded
+library's real documentation, completes in a `use` path and a
+`call`/`bind` target, and go-to-definition opens a materialized `std.tmc`
+the same way `.pmc` opens `std.pmc`. This closes what had been the
+standard library's largest editor gap — roughly a hundred lines of
+doc/attention prose that were previously invisible to the language
+server entirely.
+
+### Faithfulness
+
+For the SAME declared source set, the design contract is that the
+overlay never disagrees with the linker: for any name it resolves, the
+file it points at is the same file the real linker would bind that name
+to — checked not merely by name (two candidates can share one) but by
+provenance, which object or library actually won. (The multi-target
+union below is a deliberately different set from any one target's own —
+that is a documented policy choice, not a faithfulness gap.) Both crates
+carry a fixture that builds both sides of one small project — the
+overlay through the real service, the linker through the same
+effective-source-order dispatch the build driver uses — and compares
+them file-for-file, including the shadowed-stdlib case above.
+
+### Caveats
+
+Four limitations are real and worth stating plainly rather than glossing
+over:
+
+- **Lexical path identity.** Membership and sibling lookup compare paths
+  after `..`-folding only, never after resolving symlinks — the same
+  posture the CLI's own manifest validation documents (`docs/pmt/project.md
+  (path rules)`, `docs/tmt/project.md (path rules)`). A file reached
+  through a symlink, or reached under a spelling the filesystem treats as
+  the same file but the path comparison does not, silently fails to
+  match.
+- **Cross-document staleness.** A server watches only its project file
+  (`**/pmt.json` / `**/tmt.json`, **Capability merge**, above) and
+  re-publishes every open document's diagnostics when that file, or a
+  live IDE setting, changes — never when a sibling source changes on its
+  own. A sibling of the same language that is open in the same service is
+  read live from its own editor buffer, so its unsaved edits do reach a
+  consuming document's overlay — but only the next time that consuming
+  document is itself opened, edited, or otherwise re-analyzed, not
+  proactively. Every other sibling — an assembly file (even open in the
+  *other* service), or an object file — is read from disk and re-read
+  only once its modification time changes. Concretely: silence a warning
+  by adding an export to a sibling, then remove that export again — the
+  silenced document keeps showing no warning until it is itself touched.
+- **Multi-target membership vs. single-target builds.** The overlay
+  unions siblings across every target a document belongs to, which is
+  right for completion — offering more names never hurts — but `pmt
+  build`/`tmt build` refine `undeclared-external` against **one** target's
+  declared set at a time. A document belonging to two targets, where a
+  name is declared only in one target's sources, can show no warning in
+  the editor while building the other target alone would still emit one.
+- **Span conversion into unopened files.** A jump into a file the editor
+  does not currently have open converts the target span using the
+  char-equals-UTF-16-unit identity (**Position encoding**, above), which
+  is exact only when the target's lines are ASCII up to the span. Both
+  materialized standard libraries are ASCII by construction, so this
+  bites only a non-ASCII sibling source, at the position of a non-ASCII
+  character before the span.
+
 ## The `.pmc` service
 
-`.pmc` has no project model — `use` binds a name that resolves at link
-time, never at compile time — so each open document is a complete,
-independently analyzable unit. No workspace indexing, no cross-file
-invalidation. One well-known external library, the embedded standard
-library, is available everywhere without configuration.
+Standalone, `.pmc` has no project model — `use` binds a name that
+resolves at link time, never at compile time — so an open document that
+no project target declares is a complete, independently analyzable unit,
+with no workspace indexing and no cross-file invalidation. A document
+that a project target *does* declare additionally gains the cross-file
+overlay described above. One well-known external library, the embedded
+standard library, is available everywhere without configuration, project
+or not.
 
 | Feature | Needs | Degrades to (when the tier fails) |
 |---|---|---|
@@ -527,10 +675,11 @@ instance) degrades go-to-definition on `std::` targets to `null` rather
 than pointing at a file that does not exist; nothing else in the session
 is affected.
 
-The `.tmc` service has no counterpart to this. Its analysis knows only the
-open document, so a `std::` reference in `.tmc` completes, navigates and
-hovers no differently from any other name the document has not declared —
-the TM-1 standard library enters at link time (`docs/tmt/stdlib.md`).
+The `.tmc` service has the same mechanism, at the same cache lifetime and
+self-healing behavior, over its own `std.tmc` copy — see its own profile
+below (**The `.tmc` service**). A `std::` reference in `.tmc` is not a
+plain undeclared name the way it once was: it completes, navigates, and
+hovers through the project overlay (**Cross-file resolution**, above).
 
 ## The `.pma` service
 
@@ -555,11 +704,13 @@ assemble) and a fatal-or-lint split built on the same assembler and linter
 
 ## The `.tmc` service
 
-`.tmc` likewise has no project model: a `use` path is resolved against the
-open document's own declarations, and a name that is not declared there is
-a link-time concern. The staged analysis runs lex → parse → resolve, each
-stage keeping its partial result, plus the expansion stage the service
-adds for its fatal (**Diagnostics**, above).
+Standalone, `.tmc` likewise has no project model: a `use` path resolves
+against the open document's own declarations, and a name not declared
+there is a link-time concern — unless the document is a member of a
+declared project target, in which case the cross-file overlay described
+above resolves it first. The staged analysis runs lex → parse → resolve,
+each stage keeping its partial result, plus the expansion stage the
+service adds for its fatal (**Diagnostics**, above).
 
 | Feature | Needs | Degrades to (when the tier fails) |
 |---|---|---|
@@ -586,6 +737,27 @@ through resolution therefore surfaces exactly one diagnostic — the fatal —
 and none of the warnings the earlier, unaffected declarations would have
 produced. That is a property of the analysis seam, not of the service; the
 last-good roster is the part the service can do something about.
+
+### Materialized standard library
+
+The same problem, the same fix, over the `.tmc` grammar: go-to-definition
+on a `std::` routine has nowhere to point without a real file on disk, so
+on first demand the server writes the embedded source to
+`$XDG_CACHE_HOME/tmt/<version>/std.tmc` — the same Unix/Windows fallback,
+the same once-per-server-run self-heal, and the same degradation to
+`null` on an IO failure the `.pmc` service's own copy has (above). Hover
+does not need a file: a `std::` reference's documentation comes from the
+embedded library's own resolved doc map, a plain in-memory lookup keyed
+the same fully-qualified way the go-to-definition roster is, covering
+routines, graphs, and alphabets alike — not just the routines
+go-to-definition can jump to — since a requesting document's own analysis
+never holds a stdlib entry to begin with.
+
+Both surfaces, and completion in a `use` path or a `call`/`bind` target,
+consult the project overlay FIRST (**Cross-file resolution**, above): a
+project that defines its own `namespace std { export routine … }` shadows
+the embedded routine of the same mangled name, exactly as the linker
+resolves it.
 
 ## The `.tma` service
 
