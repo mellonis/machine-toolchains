@@ -47,7 +47,16 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `pub fn parse_glyph_list(text: &str) -> Result<Vec<String>, GlyphListError>` and `pub enum GlyphListError`, re-exported from `mtc_core::formats`.
+- Produces: `pub fn parse_glyph_list`, `pub fn parse_glyph_sequence`, and `pub enum GlyphListError`, re-exported from `mtc_core::formats`.
+
+**Two entry points, not one** (found in Task 7, where `--cells "0='1','1','1'"`
+was rejected as a duplicate glyph): the notation is shared but the *semantics*
+are not. An **alphabet** is a set — glyphs unique, at most 127. A run of
+**cells** is a sequence — repeats are ordinary, and the tape may be far longer
+than 127. `parse_glyph_list` is the alphabet form and layers uniqueness and the
+cap over `parse_glyph_sequence`, which is the bare notation. `--alphabet` uses
+the former, `--cells` the latter. The drift guard stays on `parse_glyph_list`,
+since it is `.tmc`'s `alphabet { … }` that must agree.
 
 The notation mirrors `.tmc` alphabet elements exactly (spec R4). Elements are comma-separated; each is a glyph literal `'x'` (with `\'` and `\\` escapes, no others), a bare decimal number, or an inclusive `lo..hi` range whose endpoints are the same kind. A number's label is the decimal string of its **value**, so `05` and `5` both label `"5"`. Glyph ranges require single-scalar endpoints and walk code points. Duplicates are rejected; so is an empty list or one exceeding 127 glyphs.
 
@@ -1067,6 +1076,13 @@ git commit -m "feat(cli)!: rename tape to tape-block and realign the run tape fl
 
 Splits `KEY=VALUE` and rejects a repeated key for the same flag (spec §4.1: repeating a flag for one tape is an error, not last-wins).
 
+**This task does not commit on its own** (established during execution, same
+cause as Task 4's): a `pub(crate)` helper whose only callers are `#[cfg(test)]`
+is dead code under `-D warnings`. `parse_keyed` therefore ships **with its first
+real consumer in each crate** — the TM copy lands in Task 7, the PM copy in
+Task 10. Write both copies from this task's code; just do not add PM's until
+Task 10, or the workspace gate fails for the intervening tasks.
+
 - [ ] **Step 1: Write the failing tests**
 
 Add to **each** crate's `cli/mod.rs` test module:
@@ -1165,6 +1181,14 @@ git commit -m "feat(cli): keyed edit-flag parsing for tape-block authoring"
 ```
 
 ---
+
+> **Tasks 7–9 land as one commit** (decided during execution). All three
+> rewrite functions in the same file — `tape_new`, `from_source_or_image`,
+> `tape_set`, `tape_show` — and Task 8 is a single `match` arm inside a
+> function Task 7 introduces. Splitting them would mean staging hunks of one
+> file rather than whole files, which is worse to review, not better. Each
+> task's targeted tests were run green in sequence; the full suite gates the
+> combined state.
 
 ### Task 7: TM `tape-block new` — keyed edits, image and freehand provenance
 

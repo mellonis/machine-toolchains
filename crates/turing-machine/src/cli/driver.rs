@@ -393,6 +393,9 @@ fn run_target(
                 .to_string_lossy()
                 .into_owned(),
         ),
+        // The manifest `run` block declares no save target, matching PM's
+        // driver: `--save-tape-block` is a `tmt run` flag, not a target key.
+        save: None,
         no_step_limit: spec.no_step_limit,
         max_steps: spec.max_steps,
         max_tacts: spec.max_tacts,

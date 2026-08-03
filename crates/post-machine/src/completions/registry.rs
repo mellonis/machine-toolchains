@@ -447,6 +447,24 @@ fn tape_build_spec() -> CommandSpec {
     }
 }
 
+/// The repeatable keyed edit flags, shared by `tape-block new` and `set`.
+fn edit_flags() -> Vec<FlagSpec> {
+    vec![
+        FlagSpec::value(
+            "--alphabet",
+            "repin a tape's glyphs (KEY=GLYPHS)",
+            ValueHint::Text,
+        ),
+        FlagSpec::value(
+            "--cells",
+            "set a tape's cells (KEY=GLYPHS)",
+            ValueHint::Text,
+        ),
+        FlagSpec::value("--head", "set a tape's head (KEY=N)", ValueHint::Text),
+        FlagSpec::value("--origin", "set a tape's origin (KEY=N)", ValueHint::Text),
+    ]
+}
+
 fn tape_new_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["tape-block", "new"]),
@@ -462,7 +480,10 @@ fn tape_new_spec() -> CommandSpec {
                 "output path (default blank.pmt)",
                 ValueHint::File(ext(&["pmt"])),
             ),
-        ],
+        ]
+        .into_iter()
+        .chain(edit_flags())
+        .collect(),
     }
 }
 
@@ -478,15 +499,10 @@ fn tape_set_spec() -> CommandSpec {
             )
             .exclusive("set-output"),
             FlagSpec::boolean("--in-place", "write back over the input").exclusive("set-output"),
-            FlagSpec::value("--tape", "tape index to edit (default 0)", ValueHint::Text),
-            FlagSpec::value(
-                "--cells",
-                "glyph pattern for the tape's cells",
-                ValueHint::Text,
-            ),
-            FlagSpec::value("--origin", "leftmost cell's coordinate", ValueHint::Text),
-            FlagSpec::value("--head", "head position", ValueHint::Text),
-        ],
+        ]
+        .into_iter()
+        .chain(edit_flags())
+        .collect(),
     }
 }
 
@@ -494,7 +510,10 @@ fn tape_show_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["tape-block", "show"]),
         positional: Positional::One(PositionalHint::File(ext(&["pmt"]))),
-        flags: vec![],
+        flags: vec![
+            FlagSpec::boolean("--dense", "never separate cells").exclusive("show-delimit"),
+            FlagSpec::boolean("--separated", "always separate cells").exclusive("show-delimit"),
+        ],
     }
 }
 

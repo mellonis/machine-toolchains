@@ -152,6 +152,28 @@ pub(crate) fn render_tape(
     )
 }
 
+/// Split repeatable `KEY=VALUE` edit flags into pairs, preserving order.
+/// The key is everything before the FIRST `=`, so a value may contain `=`.
+/// A key repeated within one flag is an error rather than last-wins: silently
+/// dropping an edit the author wrote is worse than making them look
+/// (docs/pmt/cli.md (tape-block edit flags)).
+pub(crate) fn parse_keyed(flag: &str, values: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for raw in values {
+        let Some((key, value)) = raw.split_once('=') else {
+            return Err(format!("{flag} `{raw}`: expected KEY=VALUE"));
+        };
+        if key.is_empty() {
+            return Err(format!("{flag} `{raw}`: empty tape key"));
+        }
+        if out.iter().any(|(k, _)| k == key) {
+            return Err(format!("{flag}: tape `{key}` given twice"));
+        }
+        out.push((key.to_string(), value.to_string()));
+    }
+    Ok(out)
+}
+
 /// Minimal flag scanner: flags may appear anywhere; `--name value` and
 /// `--name=value` are both accepted; remaining tokens are positionals.
 pub(crate) struct Args {
@@ -302,5 +324,51 @@ mod tests {
             "cells: {cells}\ncaret: {caret}"
         );
         assert!(caret.trim_start().chars().all(|c| c == '^'));
+    }
+
+    fn owned(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_keyed_splits_at_the_first_equals() {
+        let got = parse_keyed("--cells", &owned(&["0='a','b'", "main='c'"])).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("0".to_string(), "'a','b'".to_string()),
+                ("main".to_string(), "'c'".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_keyed_allows_equals_inside_the_value() {
+        let got = parse_keyed("--cells", &owned(&["0='='"])).unwrap();
+        assert_eq!(got, vec![("0".to_string(), "'='".to_string())]);
+    }
+
+    #[test]
+    fn parse_keyed_allows_an_empty_value() {
+        let got = parse_keyed("--cells", &owned(&["1="])).unwrap();
+        assert_eq!(got, vec![("1".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn parse_keyed_rejects_a_missing_equals() {
+        let err = parse_keyed("--cells", &owned(&["0"])).unwrap_err();
+        assert!(err.contains("--cells"), "got: {err}");
+        assert!(err.contains("KEY="), "got: {err}");
+    }
+
+    #[test]
+    fn parse_keyed_rejects_an_empty_key() {
+        assert!(parse_keyed("--cells", &owned(&["='a'"])).is_err());
+    }
+
+    #[test]
+    fn parse_keyed_rejects_a_repeated_key() {
+        let err = parse_keyed("--cells", &owned(&["0='a'", "0='b'"])).unwrap_err();
+        assert!(err.contains("twice"), "got: {err}");
     }
 }

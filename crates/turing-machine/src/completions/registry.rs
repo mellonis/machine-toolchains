@@ -491,22 +491,44 @@ fn dis_spec() -> CommandSpec {
 /// child: those parsers never consume one, so `positionals()` would
 /// reject it as an unknown flag (the group's own bare invocation prints
 /// the usage instead).
+/// The repeatable keyed edit flags, shared by `tape-block new` and `set`.
+fn edit_flags() -> Vec<FlagSpec> {
+    vec![
+        FlagSpec::value(
+            "--alphabet",
+            "repin a tape's glyphs (KEY=GLYPHS)",
+            ValueHint::Text,
+        ),
+        FlagSpec::value(
+            "--cells",
+            "set a tape's cells (KEY=GLYPHS)",
+            ValueHint::Text,
+        ),
+        FlagSpec::value("--head", "set a tape's head (KEY=N)", ValueHint::Text),
+        FlagSpec::value("--origin", "set a tape's origin (KEY=N)", ValueHint::Text),
+    ]
+}
+
 fn tape_new_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["tape-block", "new"]),
         positional: Positional::None,
-        flags: vec![
-            FlagSpec::value(
-                "--from",
-                "executable to size the blank template to",
-                ValueHint::File(ext(&["tmx"])),
-            ),
-            FlagSpec::value(
-                "-o",
-                "output path (default blank.tmt)",
-                ValueHint::File(ext(&["tmt"])),
-            ),
-        ],
+        flags: {
+            let mut flags = vec![
+                FlagSpec::value(
+                    "--from",
+                    "executable or .tmc source to shape the block from",
+                    ValueHint::File(ext(&["tmx", "tmc"])),
+                ),
+                FlagSpec::value(
+                    "-o",
+                    "output path (default blank.tmt)",
+                    ValueHint::File(ext(&["tmt"])),
+                ),
+            ];
+            flags.extend(edit_flags());
+            flags
+        },
     }
 }
 
@@ -522,15 +544,15 @@ fn tape_set_spec() -> CommandSpec {
             )
             .exclusive("set-output"),
             FlagSpec::boolean("--in-place", "write back over the input").exclusive("set-output"),
-            FlagSpec::value("--tape", "tape index to edit (default 0)", ValueHint::Text),
             FlagSpec::value(
-                "--cells",
-                "glyph pattern for the tape's cells",
-                ValueHint::Text,
+                "--from",
+                ".tmc source supplying tape names for the edit keys",
+                ValueHint::File(ext(&["tmc"])),
             ),
-            FlagSpec::value("--origin", "leftmost cell's coordinate", ValueHint::Text),
-            FlagSpec::value("--head", "head position", ValueHint::Text),
-        ],
+        ]
+        .into_iter()
+        .chain(edit_flags())
+        .collect(),
     }
 }
 
@@ -538,7 +560,10 @@ fn tape_show_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["tape-block", "show"]),
         positional: Positional::One(PositionalHint::File(ext(&["tmt"]))),
-        flags: vec![],
+        flags: vec![
+            FlagSpec::boolean("--dense", "never separate cells").exclusive("show-delimit"),
+            FlagSpec::boolean("--separated", "always separate cells").exclusive("show-delimit"),
+        ],
     }
 }
 
@@ -551,6 +576,11 @@ fn run_spec() -> CommandSpec {
             // TM-1 image runs a whole band, and the band always comes
             // from an MT snapshot (there is no inline glyph-pattern
             // form to be mutually exclusive with).
+            FlagSpec::value(
+                "--save-tape-block",
+                "write the final tape band as an MT snapshot",
+                ValueHint::File(ext(&["tmt"])),
+            ),
             FlagSpec::value(
                 "--tape-block",
                 "load the initial tape band from an MT snapshot",

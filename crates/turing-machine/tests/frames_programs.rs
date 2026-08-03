@@ -353,10 +353,8 @@ fn seed_happy(tape: &Path) {
             "set",
             tape.to_str().unwrap(),
             "--in-place",
-            "--tape",
-            band,
             "--cells",
-            "1",
+            &format!("{band}='1'"),
         ]))
         .unwrap();
     }

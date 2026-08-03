@@ -384,8 +384,15 @@ fn zsh_escape_word(word: &str) -> String {
 /// call sites so "this is help/description text" vs "this is a literal
 /// completion value" stays readable, even though today's escaping rule
 /// happens to be identical.
+/// Escape a help string for embedding in a zsh `_arguments` spec.
+///
+/// Two characters are structural there: `:` separates the spec's fields, and
+/// `'` terminates the single-quoted spec itself. A description containing an
+/// apostrophe used to close the quote early and silently mangle the rest of
+/// the spec — `zsh -n` and `compinit` both accept the result, so only reading
+/// the emitted script reveals it. The `'\''` idiom closes, escapes, reopens.
 fn zsh_escape_desc(text: &str) -> String {
-    text.replace(':', "\\:")
+    text.replace(':', "\\:").replace('\'', "'\\''")
 }
 
 #[cfg(test)]
@@ -512,5 +519,15 @@ mod tests {
         // output paths get plain `_files`, no `-g` filter (design doc:
         // read-vs-write split).
         assert!(script.contains("-o[output path]:file:_files'"), "{script}");
+    }
+
+    /// A description containing an apostrophe must not close the enclosing
+    /// single-quoted `_arguments` spec early. `zsh -n` and `compinit` both
+    /// accept the mangled form, so only an explicit check catches it.
+    #[test]
+    fn a_description_with_an_apostrophe_is_quote_escaped() {
+        assert_eq!(zsh_escape_desc("the tape's cells"), "the tape'\\''s cells");
+        // Colons stay escaped too — both characters are structural.
+        assert_eq!(zsh_escape_desc("a:b"), "a\\:b");
     }
 }

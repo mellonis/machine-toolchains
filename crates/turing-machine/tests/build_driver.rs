@@ -900,10 +900,8 @@ fn build_run_adopts_the_machine_exit_code() {
             "set",
             "tapes/app-in.tmt",
             "--in-place",
-            "--tape",
-            "0",
             "--cells",
-            "2",
+            "0='2'",
         ])
         .current_dir(&dir)
         .output()
@@ -920,10 +918,8 @@ fn build_run_adopts_the_machine_exit_code() {
             "set",
             "tapes/app-in.tmt",
             "--in-place",
-            "--tape",
-            "1",
             "--cells",
-            "1",
+            "1='1'",
         ])
         .current_dir(&dir)
         .output()

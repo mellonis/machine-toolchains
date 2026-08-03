@@ -79,7 +79,7 @@ directory. From the repository root, with `pmt` built as above:
 ```
 $ target/release/pmt compile crates/post-machine/tests/golden/sum.pmc -o sum.pmo
 $ target/release/pmt link sum.pmo -o sum.pmx
-$ target/release/pmt tape build "*** **" -o sum.pmt
+$ target/release/pmt tape-block build "*** **" -o sum.pmt
 $ target/release/pmt run sum.pmx --tape-block sum.pmt
 outcome: Stopped
 steps 53, core tacts 142, stall tacts 50 (total 192)
@@ -169,24 +169,25 @@ machine {
 One difference from `pmt` shows up in the tape. TM-1's processor is
 index-based — a cell holds a symbol *index*, never a glyph — and a linked
 image records only how many symbols each tape has, not their source names.
-So `tmt tape new` builds a blank tape whose cells are labelled by index,
-`0` through `card-1`, and `run` prints those indices back. The `alphabet ab`
-above numbers its symbols `'_'` → `0`, `'a'` → `1`, `'b'` → `2`, so the
-input `abba` is entered as `1221` and the result `aaaa` followed by a blank
-prints as `11110`. A `.tmt` can also store a real glyph alphabet — `tmt
-tape show` renders whatever labels the snapshot carries — but a tape built
-from an image uses the indices, since that is all the image knows.
+Glyphs live on the tape side alone, so where a tape block gets its labels
+depends on what you build it from. Point `tmt tape-block new` at the
+**source** and it reads the real glyphs, and the tape names, straight out of
+the `machine` block — so the program below is fed `'a','b','b','a'` and
+prints `aaaa` back. Point it at the **image** instead and all it can know is
+each tape's cardinality, so bands are labelled `0` through `card-1`; `tmt
+tape-block set --alphabet` repins them afterwards, relabelling without moving
+a cell.
 
 ```
 $ target/release/tmt compile crates/turing-machine/tests/golden/a1_replace_b.tmc -o replace.tmo
 $ target/release/tmt link replace.tmo -o replace.tmx
-$ target/release/tmt tape new --from replace.tmx -o blank.tmt
-$ target/release/tmt tape set blank.tmt --cells "1221" -o replace.tmt
-$ target/release/tmt run replace.tmx --tape replace.tmt
+$ target/release/tmt tape-block new --from crates/turing-machine/tests/golden/a1_replace_b.tmc \
+    --cells "0='a','b','b','a'" -o replace.tmt
+$ target/release/tmt run replace.tmx --tape-block replace.tmt
 outcome: Stopped
 steps 24, core tacts 113, stall tacts 67 (total 180)
 tape 0: origin 0, head 4
-|11110|
+|aaaa_|
      ^
 $ target/release/tmt dis replace.tmx
 .routine main, tapes=1, alpha=(3)

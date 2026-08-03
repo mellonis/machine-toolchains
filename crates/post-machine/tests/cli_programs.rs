@@ -509,9 +509,9 @@ fn tape_set_clones_with_edits() {
         "-o",
         b.to_str().unwrap(),
         "--cells",
-        "**",
+        "0='*','*'",
         "--head",
-        "0",
+        "0=0",
     ]))
     .unwrap();
 
@@ -543,7 +543,7 @@ fn tape_set_requires_output() {
         "set",
         a.to_str().unwrap(),
         "--head",
-        "2",
+        "0=2",
     ]))
     .unwrap_err();
     assert!(err.contains("--in-place"), "{err}");
@@ -1665,4 +1665,122 @@ fn run_resolves_a_per_tape_alphabet_override_and_save_preserves_it() {
         "--save-tape-block persisted the fallback glyphs:\n{}",
         shown.stdout
     );
+}
+
+// --- tape-block: keyed edits and glyph repinning (docs/pmt/cli.md) ---------
+
+#[test]
+fn pm_tape_block_repins_the_block_alphabet_and_stays_v1() {
+    let dir = scratch("pm_repin");
+    let path = dir.join("t.pmt");
+    execute(&args(&[
+        "tape-block",
+        "build",
+        " ** ",
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    execute(&args(&[
+        "tape-block",
+        "set",
+        path.to_str().unwrap(),
+        "--in-place",
+        "--alphabet",
+        "0='0','1'",
+    ]))
+    .expect("repin succeeds");
+
+    let shown = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
+    assert!(shown.stdout.contains("|0110|"), "got:\n{}", shown.stdout);
+
+    // A PM block is single-tape and single-alphabet, so a repin writes the
+    // BLOCK table and leaves the per-tape override unset — which is what
+    // keeps the file at MT v1 and PM's byte-compared goldens intact.
+    // Version is the u16 at offset 3..5 (docs/formats.md).
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        u16::from_le_bytes([bytes[3], bytes[4]]),
+        1,
+        "PM must keep emitting MT v1"
+    );
+}
+
+#[test]
+fn pm_tape_block_rejects_a_repin_of_the_wrong_cardinality() {
+    let dir = scratch("pm_repin_card");
+    let path = dir.join("t.pmt");
+    execute(&args(&[
+        "tape-block",
+        "build",
+        " * ",
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        path.to_str().unwrap(),
+        "--in-place",
+        "--alphabet",
+        "0='a','b','c'",
+    ]))
+    .unwrap_err();
+    assert!(err.contains("cardinality 2"), "got: {err}");
+}
+
+#[test]
+fn pm_tape_block_new_applies_cells_in_the_same_call() {
+    let dir = scratch("pm_new_cells");
+    let path = dir.join("t.pmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','*'",
+        "--cells",
+        "0='*','*',' '",
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .expect("new succeeds");
+    let shown = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
+    assert!(shown.stdout.contains("|** |"), "got:\n{}", shown.stdout);
+}
+
+#[test]
+fn pm_tape_block_rejects_a_tape_name_key() {
+    let dir = scratch("pm_name_key");
+    let path = dir.join("t.pmt");
+    execute(&args(&[
+        "tape-block",
+        "build",
+        " * ",
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        path.to_str().unwrap(),
+        "--in-place",
+        "--cells",
+        "main='*'",
+    ]))
+    .unwrap_err();
+    assert!(err.contains("tape index"), "got: {err}");
+}
+
+#[test]
+fn pm_tape_block_new_bare_is_a_single_empty_band() {
+    let dir = scratch("pm_new_bare");
+    let path = dir.join("t.pmt");
+    execute(&args(&["tape-block", "new", "-o", path.to_str().unwrap()]))
+        .expect("PM-1's alphabet is fixed, so a bare new needs no --alphabet");
+    let shown = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
+    assert!(shown.stdout.contains("tape 0"), "got:\n{}", shown.stdout);
+    assert!(!shown.stdout.contains("tape 1"), "got:\n{}", shown.stdout);
 }

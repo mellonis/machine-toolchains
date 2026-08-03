@@ -25,7 +25,7 @@ pub mod glyphs;
 pub mod object;
 pub mod tapeblock;
 
-pub use glyphs::{GlyphListError, parse_glyph_list};
+pub use glyphs::{GlyphListError, parse_glyph_list, parse_glyph_sequence};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FormatError {

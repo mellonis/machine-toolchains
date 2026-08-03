@@ -66,13 +66,33 @@ impl Lit {
     }
 }
 
-/// Parse a comma-separated glyph list into its glyphs in position order.
-/// Index 0 is the blank by convention; this parser imposes no meaning on it.
+/// Parse a comma-separated glyph list as an ALPHABET: glyphs are unique and
+/// at most [`MAX_GLYPHS`] of them. Index 0 is the blank by convention; this
+/// parser imposes no meaning on it.
+///
+/// For a run of tape CELLS use [`parse_glyph_sequence`] — cells are a
+/// sequence, not a set, so neither restriction applies there.
 pub fn parse_glyph_list(text: &str) -> Result<Vec<String>, GlyphListError> {
+    let glyphs = parse_glyph_sequence(text)?;
+    let mut seen: HashSet<&str> = HashSet::new();
+    for glyph in &glyphs {
+        if !seen.insert(glyph.as_str()) {
+            return Err(GlyphListError::Duplicate(glyph.clone()));
+        }
+    }
+    if glyphs.len() > MAX_GLYPHS {
+        return Err(GlyphListError::TooMany(glyphs.len()));
+    }
+    Ok(glyphs)
+}
+
+/// Parse the same notation as a SEQUENCE: repeats are expected (a tape run
+/// like `'1','1','1'` is ordinary) and there is no length cap — an alphabet
+/// is bounded at 127 symbols, but the tape written over it is not.
+pub fn parse_glyph_sequence(text: &str) -> Result<Vec<String>, GlyphListError> {
     let chars: Vec<char> = text.chars().collect();
     let mut at = 0usize;
     let mut glyphs: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
 
     skip_spaces(&chars, &mut at);
     if at == chars.len() {
@@ -83,20 +103,13 @@ pub fn parse_glyph_list(text: &str) -> Result<Vec<String>, GlyphListError> {
         let lo = parse_lit(&chars, &mut at)?;
         skip_spaces(&chars, &mut at);
 
-        let labels = if chars.get(at) == Some(&'.') && chars.get(at + 1) == Some(&'.') {
+        if chars.get(at) == Some(&'.') && chars.get(at + 1) == Some(&'.') {
             at += 2;
             skip_spaces(&chars, &mut at);
             let hi = parse_lit(&chars, &mut at)?;
-            expand_range(&lo, &hi)?
+            glyphs.extend(expand_range(&lo, &hi)?);
         } else {
-            vec![lo.label()]
-        };
-
-        for label in labels {
-            if !seen.insert(label.clone()) {
-                return Err(GlyphListError::Duplicate(label));
-            }
-            glyphs.push(label);
+            glyphs.push(lo.label());
         }
 
         skip_spaces(&chars, &mut at);
@@ -110,9 +123,6 @@ pub fn parse_glyph_list(text: &str) -> Result<Vec<String>, GlyphListError> {
         }
     }
 
-    if glyphs.len() > MAX_GLYPHS {
-        return Err(GlyphListError::TooMany(glyphs.len()));
-    }
     Ok(glyphs)
 }
 
@@ -323,6 +333,47 @@ mod tests {
         assert!(matches!(
             parse_glyph_list("'a',,'b'"),
             Err(GlyphListError::ExpectedElement)
+        ));
+    }
+
+    #[test]
+    fn a_sequence_allows_repeats_that_an_alphabet_rejects() {
+        // Cells are a sequence: `1,1,1` is an ordinary tape run.
+        assert_eq!(
+            parse_glyph_sequence("'1','1','1'").unwrap(),
+            vec!["1", "1", "1"]
+        );
+        assert!(matches!(
+            parse_glyph_list("'1','1','1'"),
+            Err(GlyphListError::Duplicate(_))
+        ));
+    }
+
+    #[test]
+    fn a_sequence_has_no_length_cap() {
+        // An alphabet is bounded at 127 symbols; the tape written over it
+        // is not.
+        let seq = parse_glyph_sequence("0..300").unwrap();
+        assert_eq!(seq.len(), 301);
+        assert!(matches!(
+            parse_glyph_list("0..300"),
+            Err(GlyphListError::TooMany(301))
+        ));
+    }
+
+    #[test]
+    fn a_sequence_still_rejects_malformed_input() {
+        assert!(matches!(
+            parse_glyph_sequence(""),
+            Err(GlyphListError::Empty)
+        ));
+        assert!(matches!(
+            parse_glyph_sequence("'a"),
+            Err(GlyphListError::UnterminatedLiteral)
+        ));
+        assert!(matches!(
+            parse_glyph_sequence("'9'..'0'"),
+            Err(GlyphListError::RangeDescending)
         ));
     }
 }

@@ -499,8 +499,9 @@ for byte. `--listing` applies to executables only.
 USAGE: tmt run APP.tmx --tape-block TAPES.tmt [FLAGS]
 
 TAPE:
-  --tape-block TAPES.tmt  load the initial tape band from an MT snapshot
-                      (one band per image tape; alphabets sized per band)
+  --tape-block TAPES.tmt     load the initial tape band from an MT snapshot
+                             (one band per image tape; alphabets sized per band)
+  --save-tape-block OUT.tmt  write the final band as an MT snapshot
 
 LIMITS:
   --max-steps N       step budget (default 10000000)
@@ -575,59 +576,151 @@ machine level.
 ## `tmt tape-block`
 
 ```
-USAGE: tmt tape-block new --from APP.tmx [-o OUT.tmt]
+USAGE: tmt tape-block new [--from APP.tmx | --from APP.tmc] [-o OUT.tmt] [EDITS]
        tmt tape-block set IN.tmt (-o OUT.tmt | --in-place)
-                    [--tape N] [--cells PATTERN] [--origin N] [--head N]
+                    [--from APP.tmc] [EDITS]
        tmt tape-block show FILE.tmt [--dense | --separated]
 
-new: a blank template sized to the executable's tape count, each tape's
-alphabet the decimal labels 0..card-1 from the image's per-tape
-cardinalities. set: clone IN.tmt, applying edits to tape N (default 0);
---cells maps each character through tape N's effective alphabet. show:
-renders any .tmt with its own alphabet.
+EDITS (repeatable; KEY is a tape index, or a tape name with --from a .tmc):
+  --alphabet KEY=GLYPHS   repin tape KEY's glyphs (relabels; same cardinality)
+  --cells    KEY=GLYPHS   set tape KEY's cells
+  --head     KEY=N        set tape KEY's head
+  --origin   KEY=N        set tape KEY's origin
+
+GLYPHS is alphabet notation: ' ','s','1' or '0'..'9'. --alphabet applies
+before --cells, so cells resolve against the glyphs just pinned.
 ```
 
 Three subcommands author and inspect `.tmt` tape-block snapshots without
-hand-editing bytes. There is no `tape build`: PM-1's is glyph-pattern sugar
-tied to a fixed two-symbol alphabet, and TM-1 tapes carry per-tape
-alphabets, so cells are set through `set --cells` against a template minted
-by `new --from`. Note that the group's children take no `--help` of their
-own — run `tmt tape-block` bare for the usage above.
+hand-editing bytes. The unit is the **block** — the whole multi-tape band —
+so one invocation authors all of it. There is no `tape-block build`: PM-1's
+is glyph-pattern sugar tied to a fixed two-symbol alphabet, while TM-1 tapes
+carry per-tape alphabets. Note that the group's children take no `--help` of
+their own — run `tmt tape-block` bare for the usage above.
 
-**`tape new --from APP.tmx`** writes a blank snapshot shaped to a specific
-program: one empty band per tape the image expects, origin and head at 0,
-each band carrying its own alphabet of the decimal labels `0..card-1` taken
-from the image's per-tape cardinalities. `--from` must be an executable
-image, magic-sniffed; anything else is an error. `-o` names the output
-(default `blank.tmt`).
+### Edit flags
 
-**`tape set IN.tmt`** has clone semantics: it reads the input, applies edits
-to one band, and writes the result elsewhere; the source is never modified
-unless you ask. Exactly one output destination is required — `-o OUT.tmt`
-writes a new file, `--in-place` writes back over the input — and the two are
-mutually exclusive. Supplying neither is an error; refusing the ambiguous
-case is what keeps `set` from silently clobbering its input. Any subset of
-the edit flags may be given, and with none `set` is a plain copy.
-
-Edits target the band selected by `--tape N` (default `0`); an index past
-the block's tape count is an error naming how many bands it has. `--origin`
-and `--head` take an `i64`, negatives included. `--cells PATTERN` replaces
-the band's cells, resolving each character through *that band's effective
-alphabet* — its own glyph table if present, otherwise the block's — with the
-leftmost character as cell 0. A character outside that alphabet is an error
-listing the alphabet it was checked against:
+The four edit flags are **keyed and repeatable**, so a whole block is set up
+in a single call:
 
 ```
-$ tmt tape-block set t.tmt -o out.tmt --cells "Z"
-tmt: bad cell character `Z` (alphabet: ["0", "1", "2"])
+--alphabet KEY=GLYPHS   repin tape KEY's glyphs
+--cells    KEY=GLYPHS   set tape KEY's cells
+--head     KEY=N        set tape KEY's head
+--origin   KEY=N        set tape KEY's origin
 ```
 
-Only the flags you pass change; every other band and every unspecified field
-is copied through untouched.
+`KEY` is a tape index. It may also be a declared **tape name** when the
+invocation passes `--from` a `.tmc` source, which is the only thing that can
+supply names; a name without one is an error saying so. Names are resolved to
+indices at parse time and never stored — the container addresses bands by
+number, exactly as the bus does.
 
-**`tape show FILE.tmt`** renders any snapshot through its own alphabets —
-the block's fallback plus each band's override — so it works for tapes built
-against a glyph set the reader knows nothing about.
+Repeating the same flag for the same tape is an error rather than last-wins:
+silently dropping an edit is worse than making the author look at it.
+
+`GLYPHS` is the same notation a program's `alphabet { … }` body uses, so it
+copy-pastes out of the source — quoted symbols, comma-separated, with
+inclusive `lo..hi` ranges expanded. `--alphabet` applies **before** `--cells`
+for a given tape, so cells resolve against the glyphs just pinned. One
+difference between the two: an alphabet is a set (glyphs unique, at most 127)
+while cells are a sequence, so `--cells "0='1','1','1'"` is an ordinary run.
+
+### `tape-block new`
+
+`new` mints a block and applies this invocation's edits to it. It has two
+provenance paths plus a freehand one; `--from` dispatches on the container
+magic, never on the file extension.
+
+**`--from APP.tmx`** takes the band count and each band's cardinality from
+the image header. An image carries symbol indices and no glyphs, so the bands
+are labelled with the decimal strings `0..card-1`, which `--alphabet` then
+repins.
+
+**`--from APP.tmc`** additionally reads the real **glyphs and tape names**
+out of the `machine` block's tape declarations, so the common case needs no
+`--alphabet` at all:
+
+```
+$ tmt tape-block new --from pow2.tmc --cells "main='s','b','1','1','1','k'" -o in.tmt
+$ tmt tape-block show in.tmt
+tape 0: origin 0, head 0, alphabet [" ", "s", "b", "k", "1"]
+|sb111k|
+ ^
+tape 1: origin 0, head 0, alphabet [" ", "1"]
+||
+
+tape 2: origin 0, head 0, alphabet [" ", "1"]
+||
+
+```
+
+A source with no `machine` block is a library — it takes its tapes from each
+routine's signature and has no single band to describe — so `new` refuses it
+by name.
+
+**Without `--from`**, the `--alphabet` flags define the block: one per tape,
+keyed contiguously from `0`. TM-1 has no fixed alphabet, so every band needs
+one. The contiguity rule is what makes a mistyped key an error rather than a
+silently oversized block.
+
+### `tape-block set`
+
+`set` has clone semantics: it reads the input, applies the edits, and writes
+the result out. Exactly one output destination is required — `-o OUT.tmt` or
+`--in-place` — and the two are mutually exclusive; supplying neither is an
+error, which is what keeps `set` from silently clobbering its input. Any
+subset of the edit flags may be given, and with none `set` is a plain copy.
+
+`--from APP.tmc` on `set` supplies tape **names only**, so edits can be keyed
+by name; it never reshapes the block.
+
+`--alphabet` **relabels, it never re-maps**. Cell indices are untouched; only
+the glyph table they are read through is replaced. That is what makes an
+already-authored block repinnable in place:
+
+```
+$ tmt tape-block show t.tmt
+tape 0: origin 0, head 0, alphabet ["0", "1", "2", "3", "4"]
+|124|
+ ^
+$ tmt tape-block set t.tmt --in-place --alphabet "0=' ','s','b','k','1'"
+$ tmt tape-block show t.tmt
+tape 0: origin 0, head 0, alphabet [" ", "s", "b", "k", "1"]
+|sb1|
+ ^
+```
+
+A repin must keep the tape's **effective cardinality** exactly. Cells are
+validated against that alphabet on read, so a narrowing repin would strand a
+cell holding a now-out-of-range index and make the block unloadable:
+
+```
+$ tmt tape-block set t.tmt --in-place --alphabet "0=' ','x'"
+tmt: --alphabet `0`: tape 0 has cardinality 5, the given alphabet has 2 glyphs
+```
+
+A `--cells` glyph outside the band's effective alphabet is an error naming
+what it was checked against:
+
+```
+$ tmt tape-block set t.tmt --in-place --cells "0='Z'"
+tmt: --cells `0`: glyph `Z` is not in [" ", "s", "b", "k", "1"]
+```
+
+### `tape-block show`
+
+`show` renders each band through **its own** effective alphabet — its glyph
+table if it has one, otherwise the block's fallback — and prints that
+alphabet per band. A single header line could not: on a block minted from a
+multi-alphabet program the bands genuinely differ, and the block-level table
+is only a default for bands carrying none.
+
+Cells are delimited **adaptively**: dense when every glyph in the band's
+alphabet is a single character, since nothing can be misread, and separated
+when any glyph is longer, since `|011|` would otherwise be ambiguous between
+three cells and two. `--dense` and `--separated` force either form for stable
+output; passing both is an error.
 
 ## `tmt ir`
 

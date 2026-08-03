@@ -211,10 +211,8 @@ fn stdlib_auto_links_and_nostdlib_opts_out() {
         "set",
         tape.to_str().unwrap(),
         "--in-place",
-        "--tape",
-        "0",
         "--cells",
-        "1",
+        "0='1'",
     ]))
     .unwrap();
     let out = execute(&args(&[
@@ -264,10 +262,8 @@ fn full_pipeline_marked_tape_stops_with_exit_0() {
         "set",
         tape.to_str().unwrap(),
         "--in-place",
-        "--tape",
-        "0",
         "--cells",
-        "1",
+        "0='1'",
     ]))
     .unwrap();
 
@@ -302,7 +298,7 @@ fn halt_variant_exits_2() {
         tape.to_str().unwrap(),
         "--in-place",
         "--cells",
-        "1",
+        "0='1'",
     ]))
     .unwrap();
     let out = execute(&args(&[
@@ -362,7 +358,7 @@ fn trace_streams_listing_lines_and_still_reports_the_outcome() {
         tape.to_str().unwrap(),
         "--in-place",
         "--cells",
-        "1",
+        "0='1'",
     ]))
     .unwrap();
 
@@ -663,7 +659,7 @@ fn compile_link_run_a1_stops_with_exit_0() {
         tape.to_str().unwrap(),
         "--in-place",
         "--cells",
-        "212",
+        "0='2','1','2'",
     ]))
     .unwrap();
     let out = execute(&args(&[
@@ -727,10 +723,8 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
         "set",
         tape.to_str().unwrap(),
         "--in-place",
-        "--tape",
-        "0",
         "--cells",
-        "2",
+        "0='2'",
     ]))
     .unwrap();
     // data (tape 1, card 5): index 1 = 'a', a holey wide symbol → unmapped-read.
@@ -739,10 +733,8 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
         "set",
         tape.to_str().unwrap(),
         "--in-place",
-        "--tape",
-        "1",
         "--cells",
-        "1",
+        "1='1'",
     ]))
     .unwrap();
     let out = execute(&args(&[
@@ -960,4 +952,519 @@ fn ir_graph_renders_mermaid_and_filters_by_world() {
     ]))
     .unwrap_err();
     assert!(err.contains("nope"), "{err}");
+}
+
+// --- tape-block: whole-block authoring (docs/tmt/cli.md (tape-block)) -------
+
+/// Three tapes with cardinalities 5 / 2 / 2 — the shape that makes the
+/// block fallback (sized to the widest band) differ from each band's own
+/// width, which is what the repin cardinality check must measure against.
+const POW2_SRC: &str = "\
+alphabet mainAlpha { ' ', 's', 'b', 'k', '1' }
+alphabet workAlpha { ' ', '1' }
+
+machine {
+  tape main: mainAlpha;
+  tape cnt:  workAlpha;
+  tape tmp:  workAlpha;
+
+  entry state s { ['b', *, *] -> stop; }
+}
+";
+
+fn compile_and_link_pow2(dir: &Path) -> PathBuf {
+    let src = dir.join("pow2.tmc");
+    fs::write(&src, POW2_SRC).unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("pow2.tmo").to_str().unwrap()])).unwrap();
+    dir.join("pow2.tmx")
+}
+
+#[test]
+fn tape_block_new_from_an_image_pins_glyphs_and_cells_in_one_call() {
+    let dir = scratch("tb_new_image");
+    let exe = compile_and_link_pow2(&dir);
+    let out_path = dir.join("in.tmt");
+
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "--alphabet",
+        "0=' ','s','b','k','1'",
+        "--alphabet",
+        "1=' ','1'",
+        "--alphabet",
+        "2=' ','1'",
+        "--cells",
+        "0='s','b','1','1','1','k'",
+        "-o",
+        out_path.to_str().unwrap(),
+    ]))
+    .expect("new succeeds");
+
+    let shown = execute(&args(&["tape-block", "show", out_path.to_str().unwrap()])).unwrap();
+    assert!(shown.stdout.contains("|sb111k|"), "got:\n{}", shown.stdout);
+}
+
+#[test]
+fn tape_block_new_without_from_sizes_the_block_from_the_alphabet_flags() {
+    let dir = scratch("tb_new_freehand");
+    let out_path = dir.join("in.tmt");
+
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "--alphabet",
+        "1=' ','1'",
+        "--cells",
+        "0='a','a'",
+        "-o",
+        out_path.to_str().unwrap(),
+    ]))
+    .expect("new succeeds");
+
+    let shown = execute(&args(&["tape-block", "show", out_path.to_str().unwrap()])).unwrap();
+    assert!(shown.stdout.contains("tape 0"), "got:\n{}", shown.stdout);
+    assert!(shown.stdout.contains("tape 1"), "got:\n{}", shown.stdout);
+    assert!(!shown.stdout.contains("tape 2"), "got:\n{}", shown.stdout);
+    assert!(shown.stdout.contains("|aa|"), "got:\n{}", shown.stdout);
+}
+
+#[test]
+fn tape_block_new_freehand_rejects_non_contiguous_keys() {
+    let dir = scratch("tb_new_gap");
+    let err = execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "--alphabet",
+        "5=' ','b'",
+        "-o",
+        dir.join("x.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("contiguously"), "got: {err}");
+}
+
+#[test]
+fn tape_block_new_rejects_an_alphabet_of_the_wrong_cardinality() {
+    let dir = scratch("tb_new_card");
+    let exe = compile_and_link_pow2(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "--alphabet",
+        "0=' ','x'", // tape 0 is 5 wide
+        "-o",
+        dir.join("x.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("cardinality 5"), "got: {err}");
+    assert!(err.contains("2 glyphs"), "got: {err}");
+}
+
+#[test]
+fn tape_block_cells_resolve_against_the_alphabet_pinned_in_the_same_call() {
+    // `s` exists only in the NEW alphabet, never in the image's decimal
+    // labels — so this only succeeds if --alphabet applied before --cells.
+    let dir = scratch("tb_new_order");
+    let exe = compile_and_link_pow2(&dir);
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "--alphabet",
+        "0=' ','s','b','k','1'",
+        "--cells",
+        "0='s'",
+        "-o",
+        dir.join("ok.tmt").to_str().unwrap(),
+    ]))
+    .expect("--alphabet must apply before --cells");
+}
+
+#[test]
+fn tape_block_new_rejects_a_tape_index_past_the_block() {
+    let dir = scratch("tb_new_range");
+    let exe = compile_and_link_pow2(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "--cells",
+        "7='1'",
+        "-o",
+        dir.join("x.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("out of range"), "got: {err}");
+    assert!(err.contains("3 tape(s)"), "got: {err}");
+}
+
+#[test]
+fn a_tape_name_without_a_source_is_a_clear_error() {
+    let dir = scratch("tb_name_no_src");
+    let exe = compile_and_link_pow2(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "--cells",
+        "main='s'",
+        "-o",
+        dir.join("in.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains(".tmc"), "got: {err}");
+}
+
+#[test]
+fn tape_block_edit_flags_reject_a_repeated_key() {
+    let dir = scratch("tb_dup_key");
+    let err = execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "--cells",
+        "0='a'",
+        "--cells",
+        "0='a','a'",
+        "-o",
+        dir.join("x.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("twice"), "got: {err}");
+}
+
+#[test]
+fn tape_block_new_from_source_takes_glyphs_and_names_from_the_program() {
+    let dir = scratch("tb_new_src");
+    let src = dir.join("pow2.tmc");
+    fs::write(&src, POW2_SRC).unwrap();
+    let out_path = dir.join("in.tmt");
+
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        src.to_str().unwrap(),
+        "--cells",
+        "main='s','b','1','1','1','k'",
+        "-o",
+        out_path.to_str().unwrap(),
+    ]))
+    .expect("new from source succeeds");
+
+    let shown = execute(&args(&["tape-block", "show", out_path.to_str().unwrap()])).unwrap();
+    assert!(shown.stdout.contains("|sb111k|"), "got:\n{}", shown.stdout);
+}
+
+#[test]
+fn tape_block_new_from_source_accepts_an_index_key_too() {
+    let dir = scratch("tb_new_src_ix");
+    let src = dir.join("pow2.tmc");
+    fs::write(&src, POW2_SRC).unwrap();
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        src.to_str().unwrap(),
+        "--cells",
+        "0='s'",
+        "-o",
+        dir.join("in.tmt").to_str().unwrap(),
+    ]))
+    .expect("index keys stay legal on the source path");
+}
+
+#[test]
+fn tape_block_new_from_source_rejects_an_unknown_tape_name() {
+    let dir = scratch("tb_new_src_bad");
+    let src = dir.join("pow2.tmc");
+    fs::write(&src, POW2_SRC).unwrap();
+    let err = execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        src.to_str().unwrap(),
+        "--cells",
+        "nope='s'",
+        "-o",
+        dir.join("in.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("no such tape"), "got: {err}");
+    assert!(err.contains("main"), "got: {err}");
+}
+
+/// A library resolves fine but has no single band to describe, so the CLI —
+/// not the compiler — is the one that refuses.
+#[test]
+fn tape_block_new_from_a_library_source_is_a_clear_error() {
+    let dir = scratch("tb_new_src_lib");
+    let src = dir.join("lib.tmc");
+    fs::write(
+        &src,
+        "alphabet a { ' ', '1' }\nroutine r(tape t: a) { entry state s { [*] -> stop; } }\n",
+    )
+    .unwrap();
+    let err = execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        src.to_str().unwrap(),
+        "-o",
+        dir.join("x.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("no `machine` block"), "got: {err}");
+}
+
+/// Cell indices of one band, decoded from a written block — the repin
+/// invariant asserts on these directly.
+fn cells_of(path: &Path, tape: usize) -> Vec<u8> {
+    let bytes = fs::read(path).unwrap();
+    TapeBlockFile::from_bytes(&bytes).unwrap().tapes[tape]
+        .cells
+        .clone()
+}
+
+#[test]
+fn tape_block_set_repins_glyphs_without_moving_a_cell() {
+    let dir = scratch("tb_set_repin");
+    let exe = compile_and_link_pow2(&dir);
+    let path = dir.join("in.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "--cells",
+        "0='1','2','4','4','4','3'", // the image's decimal labels
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let before = cells_of(&path, 0);
+
+    execute(&args(&[
+        "tape-block",
+        "set",
+        path.to_str().unwrap(),
+        "--in-place",
+        "--alphabet",
+        "0=' ','s','b','k','1'",
+    ]))
+    .expect("repin succeeds");
+
+    let shown = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
+    assert!(shown.stdout.contains("|sb111k|"), "got:\n{}", shown.stdout);
+
+    // Relabel, never re-map: the cell INDICES are untouched, only the
+    // glyph table they are read through changed.
+    assert_eq!(cells_of(&path, 0), before, "a repin must not move cells");
+}
+
+#[test]
+fn tape_block_set_rejects_a_repin_of_the_wrong_cardinality() {
+    let dir = scratch("tb_set_card");
+    let exe = compile_and_link_pow2(&dir);
+    let path = dir.join("in.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        exe.to_str().unwrap(),
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        path.to_str().unwrap(),
+        "--in-place",
+        "--alphabet",
+        "1=' ','a','b'", // tape 1 is 2 wide
+    ]))
+    .unwrap_err();
+    assert!(err.contains("cardinality 2"), "got: {err}");
+}
+
+#[test]
+fn tape_block_set_takes_names_from_a_source() {
+    let dir = scratch("tb_set_names");
+    let src = dir.join("pow2.tmc");
+    fs::write(&src, POW2_SRC).unwrap();
+    let path = dir.join("in.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        src.to_str().unwrap(),
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "tape-block",
+        "set",
+        path.to_str().unwrap(),
+        "--in-place",
+        "--from",
+        src.to_str().unwrap(),
+        "--cells",
+        "cnt='1'",
+    ]))
+    .expect("name keys resolve on set");
+}
+
+#[test]
+fn tape_block_show_prints_each_bands_effective_alphabet() {
+    let dir = scratch("tb_show_alpha");
+    let src = dir.join("pow2.tmc");
+    fs::write(&src, POW2_SRC).unwrap();
+    let path = dir.join("in.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        src.to_str().unwrap(),
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let shown = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
+    assert!(
+        shown.stdout.contains("tape 0: origin 0, head 0, alphabet"),
+        "got:\n{}",
+        shown.stdout
+    );
+    // Band 0 is mainAlpha (5 glyphs), band 1 workAlpha (2) — a single
+    // header line could not have shown both.
+    assert!(shown.stdout.contains("\"k\""), "got:\n{}", shown.stdout);
+    let band1 = shown
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("tape 1:"))
+        .unwrap();
+    assert!(band1.contains("[\" \", \"1\"]"), "got: {band1}");
+}
+
+#[test]
+fn tape_block_show_honours_the_delimit_flags() {
+    let dir = scratch("tb_show_delim");
+    let path = dir.join("in.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a','b'",
+        "--cells",
+        "0='a','b'",
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let dense = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
+    assert!(dense.stdout.contains("|ab|"), "got:\n{}", dense.stdout);
+    let sep = execute(&args(&[
+        "tape-block",
+        "show",
+        path.to_str().unwrap(),
+        "--separated",
+    ]))
+    .unwrap();
+    assert!(sep.stdout.contains("|a|b|"), "got:\n{}", sep.stdout);
+}
+
+#[test]
+fn run_save_tape_block_preserves_every_bands_glyphs() {
+    let dir = scratch("tm_save");
+    let src = dir.join("pow2.tmc");
+    fs::write(&src, POW2_SRC).unwrap();
+    let exe = compile_and_link_pow2(&dir);
+    let input = dir.join("in.tmt");
+    let saved = dir.join("out.tmt");
+
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        src.to_str().unwrap(),
+        "--cells",
+        "main='b'",
+        "-o",
+        input.to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape-block",
+        input.to_str().unwrap(),
+        "--save-tape-block",
+        saved.to_str().unwrap(),
+    ]))
+    .expect("run succeeds");
+
+    let shown = execute(&args(&["tape-block", "show", saved.to_str().unwrap()])).unwrap();
+    // Band 0 is mainAlpha (5 glyphs), band 1 workAlpha (2). A save that
+    // collapsed to one block alphabet could not express both.
+    assert!(
+        shown.stdout.contains("\"k\""),
+        "band 0 lost its glyphs:\n{}",
+        shown.stdout
+    );
+    let band1 = shown
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("tape 1:"))
+        .unwrap();
+    assert!(
+        band1.contains("[\" \", \"1\"]"),
+        "band 1 lost its glyphs: {band1}"
+    );
+}
+
+#[test]
+fn run_rejects_a_block_whose_cardinality_disagrees_with_the_image() {
+    let dir = scratch("tm_card");
+    let exe = compile_and_link_pow2(&dir); // tape 0 is 5 wide
+    let bad = dir.join("bad.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','x'", // 2 wide
+        "--alphabet",
+        "1=' ','1'",
+        "--alphabet",
+        "2=' ','1'",
+        "-o",
+        bad.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let err = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape-block",
+        bad.to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("tape 0"), "got: {err}");
+    assert!(err.contains("2 glyph(s)"), "got: {err}");
+    assert!(err.contains("expects 5"), "got: {err}");
 }

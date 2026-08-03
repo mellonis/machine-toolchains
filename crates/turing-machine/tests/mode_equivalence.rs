@@ -848,10 +848,8 @@ fn program_a_runs_identically_via_the_cli_in_all_three_modes() {
             "set",
             tape.to_str().unwrap(),
             "--in-place",
-            "--tape",
-            "0",
             "--cells",
-            "1",
+            "0='1'",
         ]))
         .unwrap();
 

@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
-use mtc_core::formats::{ARCH_TM1, ContainerKind, sniff};
+use mtc_core::formats::{ARCH_TM1, ContainerKind, parse_glyph_list, parse_glyph_sequence, sniff};
 use mtc_core::linker::MapFile;
 use mtc_core::vm::LoadError;
 
 use crate::ir::IrProgram;
 
-use super::{Args, CliOutput, Delimit, render_tape};
+use super::{Args, CliOutput, Delimit, parse_keyed, render_tape};
 
 const DIS_USAGE: &str = "\
 USAGE: tmt dis FILE.tmo|FILE.tmx [--listing] [--map FILE.tmx.map]
@@ -103,17 +103,213 @@ fn load_map(exe_path: &Path, explicit: Option<String>) -> Result<Option<MapFile>
 }
 
 const TAPE_USAGE: &str = "\
-USAGE: tmt tape-block new --from APP.tmx [-o OUT.tmt]
+USAGE: tmt tape-block new [--from APP.tmx | --from APP.tmc] [-o OUT.tmt] [EDITS]
        tmt tape-block set IN.tmt (-o OUT.tmt | --in-place)
-                    [--tape N] [--cells PATTERN] [--origin N] [--head N]
+                    [--from APP.tmc] [EDITS]
        tmt tape-block show FILE.tmt [--dense | --separated]
 
-new: a blank template sized to the executable's tape count, each tape's
-alphabet the decimal labels 0..card-1 from the image's per-tape
-cardinalities. set: clone IN.tmt, applying edits to tape N (default 0);
---cells maps each character through tape N's effective alphabet. show:
-renders any .tmt with its own alphabet.
+EDITS (repeatable; KEY is a tape index, or a tape name with --from a .tmc):
+  --alphabet KEY=GLYPHS   repin tape KEY's glyphs (relabels; same cardinality)
+  --cells    KEY=GLYPHS   set tape KEY's cells
+  --head     KEY=N        set tape KEY's head
+  --origin   KEY=N        set tape KEY's origin
+
+GLYPHS is alphabet notation: ' ','s','1' or '0'..'9'. --alphabet applies
+before --cells, so cells resolve against the glyphs just pinned.
 ";
+
+/// The keyed edits one invocation carries, in flag order.
+pub(super) struct Edits {
+    pub alphabets: Vec<(String, String)>,
+    pub cells: Vec<(String, String)>,
+    pub heads: Vec<(String, String)>,
+    pub origins: Vec<(String, String)>,
+}
+
+pub(super) fn collect_edits(args: &mut Args) -> Result<Edits, String> {
+    Ok(Edits {
+        alphabets: parse_keyed("--alphabet", &args.values("--alphabet")?)?,
+        cells: parse_keyed("--cells", &args.values("--cells")?)?,
+        heads: parse_keyed("--head", &args.values("--head")?)?,
+        origins: parse_keyed("--origin", &args.values("--origin")?)?,
+    })
+}
+
+/// Resolve a tape key to its band index. A key is an index, or — when `names`
+/// is non-empty, i.e. a `.tmc` source supplied them — a declared tape name
+/// (docs/tmt/cli.md (tape-block)).
+fn resolve_key(key: &str, names: &[String], tape_count: usize) -> Result<usize, String> {
+    if let Some(i) = names.iter().position(|n| n == key) {
+        return Ok(i);
+    }
+    let Ok(index) = key.parse::<usize>() else {
+        return if names.is_empty() {
+            Err(format!(
+                "tape key `{key}`: expected an index — tape names need `--from` a .tmc source"
+            ))
+        } else {
+            Err(format!(
+                "tape key `{key}`: no such tape (declared: {})",
+                names.join(", ")
+            ))
+        };
+    };
+    if index >= tape_count {
+        return Err(format!(
+            "tape {index}: out of range (block has {tape_count} tape(s))"
+        ));
+    }
+    Ok(index)
+}
+
+/// Apply every edit to `block`. `--alphabet` runs first for each tape so
+/// `--cells` in the same invocation resolves against the newly pinned glyphs.
+///
+/// `pm_block_alphabet` writes a repin to the BLOCK alphabet instead of a
+/// per-tape override — PM-1 blocks are single-tape and single-alphabet, and
+/// keeping the override unset keeps them at MT v1
+/// (docs/formats.md (tape-block snapshot)). TM always writes per-tape tables.
+pub(super) fn apply_edits(
+    block: &mut TapeBlockFile,
+    edits: &Edits,
+    names: &[String],
+    pm_block_alphabet: bool,
+) -> Result<(), String> {
+    let tape_count = block.tapes.len();
+
+    for (key, text) in &edits.alphabets {
+        let index = resolve_key(key, names, tape_count)?;
+        let glyphs = parse_glyph_list(text).map_err(|e| format!("--alphabet `{key}`: {e}"))?;
+        // A repin relabels; it never resizes. Measured against the TAPE's
+        // effective width, which on a multi-band block differs from the block
+        // fallback's (docs/formats.md (per-tape glyph tables)).
+        let current = block.tapes[index]
+            .alphabet
+            .as_deref()
+            .unwrap_or(&block.alphabet)
+            .len();
+        if glyphs.len() != current {
+            return Err(format!(
+                "--alphabet `{key}`: tape {index} has cardinality {current}, \
+                 the given alphabet has {} glyphs",
+                glyphs.len()
+            ));
+        }
+        if pm_block_alphabet {
+            block.alphabet = glyphs;
+            block.tapes[index].alphabet = None;
+        } else {
+            block.tapes[index].alphabet = Some(glyphs);
+        }
+    }
+
+    for (key, text) in &edits.cells {
+        let index = resolve_key(key, names, tape_count)?;
+        let effective: Vec<String> = block.tapes[index]
+            .alphabet
+            .clone()
+            .unwrap_or_else(|| block.alphabet.clone());
+        let cells = if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            let glyphs = parse_glyph_sequence(text).map_err(|e| format!("--cells `{key}`: {e}"))?;
+            glyphs
+                .iter()
+                .map(|g| {
+                    effective
+                        .iter()
+                        .position(|e| e == g)
+                        .map(|i| i as u8)
+                        .ok_or_else(|| {
+                            format!("--cells `{key}`: glyph `{g}` is not in {effective:?}")
+                        })
+                })
+                .collect::<Result<Vec<u8>, String>>()?
+        };
+        block.tapes[index].cells = cells;
+    }
+
+    for (key, text) in &edits.heads {
+        let index = resolve_key(key, names, tape_count)?;
+        block.tapes[index].head = text
+            .parse()
+            .map_err(|_| format!("--head `{key}`: bad value `{text}`"))?;
+    }
+
+    for (key, text) in &edits.origins {
+        let index = resolve_key(key, names, tape_count)?;
+        block.tapes[index].origin = text
+            .parse()
+            .map_err(|_| format!("--origin `{key}`: bad value `{text}`"))?;
+    }
+
+    Ok(())
+}
+
+/// Without `--from`, the `--alphabet` flags define the block. Their keys must
+/// be indices contiguous from 0, so a mistyped key cannot silently inflate the
+/// band count (docs/tmt/cli.md (tape-block)).
+fn freehand_bands(edits: &Edits) -> Result<Vec<Vec<String>>, String> {
+    let mut bands: Vec<(usize, Vec<String>)> = Vec::new();
+    for (key, text) in &edits.alphabets {
+        let index = key.parse::<usize>().map_err(|_| {
+            format!(
+                "--alphabet `{key}`: expected an index — tape names need `--from` a .tmc source"
+            )
+        })?;
+        let glyphs = parse_glyph_list(text).map_err(|e| format!("--alphabet `{key}`: {e}"))?;
+        bands.push((index, glyphs));
+    }
+    bands.sort_by_key(|(index, _)| *index);
+    if bands.is_empty() || bands.iter().enumerate().any(|(i, (index, _))| i != *index) {
+        return Err(format!(
+            "tape-block new without --from needs one --alphabet per tape, \
+             keyed contiguously from 0\n\n{TAPE_USAGE}"
+        ));
+    }
+    Ok(bands.into_iter().map(|(_, glyphs)| glyphs).collect())
+}
+
+/// `--from` dispatches on the container magic, never on the extension
+/// (docs/formats.md (shared conventions)). Returns each band's glyphs and,
+/// when the source supplied them, the tape names.
+fn from_source_or_image(path: &str) -> Result<(Vec<Vec<String>>, Vec<String>), String> {
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    match sniff(&bytes) {
+        Some(ContainerKind::Executable) => {
+            let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{path}: {e}"))?;
+            let cards: Vec<u32> = if exe.alphabet_cardinalities.is_empty() {
+                vec![2; usize::from(exe.tape_count).max(1)]
+            } else {
+                exe.alphabet_cardinalities.clone()
+            };
+            // An image carries cardinalities and nothing else, so each band is
+            // labelled with the decimal strings `0..card-1` — the author repins
+            // them with `--alphabet` (docs/formats.md (glyph tables)).
+            let glyphs = cards
+                .iter()
+                .map(|&c| (0..c).map(|i| i.to_string()).collect())
+                .collect();
+            Ok((glyphs, Vec::new()))
+        }
+        Some(_) => Err(format!("{path}: not an executable image (.tmx)")),
+        // Not a container: treat it as source text. A `.tmc` supplies both the
+        // glyphs and the tape names, so the common case needs no --alphabet at
+        // all (docs/tmt/cli.md (tape-block)).
+        None => {
+            let text = String::from_utf8(bytes)
+                .map_err(|_| format!("{path}: not an executable image and not UTF-8 source"))?;
+            let layout = crate::compiler::machine_tape_layout(&text)
+                .map_err(|e| format!("{path}: {e:?}"))?
+                .ok_or_else(|| {
+                    format!("{path}: declares no `machine` block, so it has no tape band")
+                })?;
+            let glyphs = layout.iter().map(|t| t.glyphs.clone()).collect();
+            let names = layout.iter().map(|t| t.name.clone()).collect();
+            Ok((glyphs, names))
+        }
+    }
+}
 
 pub(super) fn tape_block(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
@@ -124,87 +320,69 @@ pub(super) fn tape_block(raw: &[String]) -> Result<CliOutput, String> {
     }
 }
 
-/// `tmt tape-block new --from APP.tmx [-o OUT.tmt]` — a blank tape template sized
-/// to the executable's tape count, one band per tape. Each band carries
-/// its own alphabet: the decimal-string labels `0..card-1` taken from the
-/// image's per-tape `alphabet_cardinalities` (MT v2 per-tape alphabets).
-/// A v1 code-only image (no cardinalities) falls back to a binary `["0",
-/// "1"]` alphabet per its single band.
+/// `tmt tape-block new [--from APP.tmx] [-o OUT.tmt] [EDITS]` — mint a block
+/// and apply this invocation's edits to it in one call.
+///
+/// With `--from` an executable, the band count and each band's cardinality
+/// come from the image header, and glyphs default to the decimal labels
+/// `0..card-1`. Without `--from`, the `--alphabet` flags define the block:
+/// their keys must be contiguous from 0 (docs/tmt/cli.md (tape-block)).
 fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     let from = args.value("--from")?;
     let out = args.value("-o")?.unwrap_or_else(|| "blank.tmt".into());
+    let edits = collect_edits(&mut args)?;
     let extra = args.positionals()?;
     if !extra.is_empty() {
         return Err(format!(
             "tape-block new takes no positional arguments\n\n{TAPE_USAGE}"
         ));
     }
-    let Some(from) = from else {
-        return Err(format!(
-            "tape-block new needs --from APP.tmx\n\n{TAPE_USAGE}"
-        ));
-    };
-    let bytes = fs::read(&from).map_err(|e| format!("cannot read {from}: {e}"))?;
-    match sniff(&bytes) {
-        Some(ContainerKind::Executable) => {}
-        _ => return Err(format!("{from}: not an executable image (.tmx)")),
-    }
-    let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{from}: {e}"))?;
 
-    // Per-tape cardinalities drive per-band alphabets. A v1 code-only
-    // image carries none, so fall back to one binary band per tape.
-    let cardinalities: Vec<u32> = if exe.alphabet_cardinalities.is_empty() {
-        vec![2; usize::from(exe.tape_count).max(1)]
-    } else {
-        exe.alphabet_cardinalities.clone()
+    let (band_glyphs, names): (Vec<Vec<String>>, Vec<String>) = match from.as_deref() {
+        Some(path) => from_source_or_image(path)?,
+        None => (freehand_bands(&edits)?, Vec::new()),
     };
-    let labels = |card: u32| -> Vec<String> { (0..card).map(|i| i.to_string()).collect() };
 
-    let block = TapeBlockFile {
+    let widest = band_glyphs.iter().map(Vec::len).max().unwrap_or(2);
+    let mut block = TapeBlockFile {
         // The block-level alphabet is a fallback only (every band overrides
-        // it); size it to the widest band so `tape show` renders sanely if a
-        // band ever drops its override.
-        alphabet: labels(cardinalities.iter().copied().max().unwrap_or(2)),
-        tapes: cardinalities
+        // it); size it to the widest band so `tape-block show` renders sanely
+        // if a band ever drops its override.
+        alphabet: (0..widest).map(|i| i.to_string()).collect(),
+        tapes: band_glyphs
             .iter()
-            .map(|&card| TapeSnapshot {
+            .map(|glyphs| TapeSnapshot {
                 origin: 0,
                 cells: Vec::new(),
                 head: 0,
-                alphabet: Some(labels(card)),
+                alphabet: Some(glyphs.clone()),
             })
             .collect(),
     };
-    let bytes = block.to_bytes().map_err(|e| format!("{from}: {e}"))?;
+
+    apply_edits(&mut block, &edits, &names, false)?;
+
+    let bytes = block.to_bytes().map_err(|e| format!("{out}: {e}"))?;
     fs::write(&out, bytes).map_err(|e| format!("cannot write {out}: {e}"))?;
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 
-/// `tmt tape-block set IN.tmt (-o OUT.tmt | --in-place) [--tape N] [--cells P]
-/// [--origin N] [--head N]` — clone semantics: read `IN.tmt`, apply the
-/// given edits to tape N (default 0), and write the result out. The source
-/// is never mutated; the output goes to `-o` or, with `--in-place`, back
-/// over the input. Any subset of edits may be given; none is a plain copy.
-/// `--cells` maps each character of the pattern through tape N's effective
-/// alphabet (its own if present, else the block's) by glyph.
+/// `tmt tape-block set IN.tmt (-o OUT.tmt | --in-place) [--from APP.tmc]
+/// [EDITS]` — clone semantics: read `IN.tmt`, apply this invocation's edits,
+/// and write the result out. The source is never mutated; the output goes to
+/// `-o` or, with `--in-place`, back over the input. Any subset of edits may
+/// be given; none is a plain copy.
+///
+/// `--from APP.tmc` supplies tape NAMES only, so an edit may be keyed by name
+/// instead of index; it never reshapes the block
+/// (docs/tmt/cli.md (tape-block)).
 fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     let out = args.value("-o")?;
     let in_place = args.flag("--in-place");
-    let tape_index: usize = match args.value("--tape")? {
-        Some(text) => text.parse().map_err(|_| format!("bad --tape `{text}`"))?,
-        None => 0,
-    };
-    let cells = args.value("--cells")?;
-    let origin: Option<i64> = match args.value("--origin")? {
-        Some(text) => Some(text.parse().map_err(|_| format!("bad --origin `{text}`"))?),
-        None => None,
-    };
-    let head: Option<i64> = match args.value("--head")? {
-        Some(text) => Some(text.parse().map_err(|_| format!("bad --head `{text}`"))?),
-        None => None,
-    };
+    let from = args.value("--from")?;
+    let edits = collect_edits(&mut args)?;
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
         return Err(format!(
@@ -231,51 +409,15 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
 
     let bytes = fs::read(input).map_err(|e| format!("cannot read {input}: {e}"))?;
     let mut block = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{input}: {e}"))?;
-    let tape_count = block.tapes.len();
-    if tape_index >= tape_count {
-        return Err(format!(
-            "--tape {tape_index}: out of range (block has {tape_count} tape(s))"
-        ));
-    }
 
-    // Map the pattern under two shared borrows (the tape's own alphabet
-    // and the block fallback) BEFORE taking the mutable tape borrow.
-    let new_cells: Option<Vec<u8>> = match cells {
-        Some(pattern) => {
-            let effective: &[String] = block.tapes[tape_index]
-                .alphabet
-                .as_deref()
-                .unwrap_or(&block.alphabet);
-            let mapped = pattern
-                .chars()
-                .map(|c| {
-                    let glyph = c.to_string();
-                    effective
-                        .iter()
-                        .position(|g| *g == glyph)
-                        .map(|i| i as u8)
-                        .ok_or_else(|| {
-                            format!("bad cell character `{c}` (alphabet: {effective:?})")
-                        })
-                })
-                .collect::<Result<Vec<u8>, _>>()?;
-            Some(mapped)
-        }
-        None => None,
+    let names: Vec<String> = match from.as_deref() {
+        Some(path) => from_source_or_image(path)?.1,
+        None => Vec::new(),
     };
 
-    let tape = &mut block.tapes[tape_index];
-    if let Some(cells) = new_cells {
-        tape.cells = cells;
-    }
-    if let Some(origin) = origin {
-        tape.origin = origin;
-    }
-    if let Some(head) = head {
-        tape.head = head;
-    }
+    apply_edits(&mut block, &edits, &names, false)?;
 
-    let bytes = block.to_bytes().map_err(|e| e.to_string())?;
+    let bytes = block.to_bytes().map_err(|e| format!("{dest}: {e}"))?;
     fs::write(&dest, bytes).map_err(|e| format!("cannot write {dest}: {e}"))?;
     Ok(CliOutput::ok(String::new(), String::new()))
 }
@@ -340,14 +482,19 @@ fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
     };
     let bytes = fs::read(input).map_err(|e| format!("cannot read {input}: {e}"))?;
     let block = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{input}: {e}"))?;
-    let mut out = format!("alphabet: {:?}\n", block.alphabet);
+    let mut out = String::new();
     for (i, tape) in block.tapes.iter().enumerate() {
-        // Each band renders through its own effective alphabet (its
-        // override if present, else the block fallback).
+        // Each band renders through its own effective alphabet, and PRINTS
+        // it: which glyphs a band actually uses is not derivable from the
+        // block fallback, which is only a default for bands that carry no
+        // table of their own (docs/formats.md (per-tape glyph tables)).
         let effective: &[String] = tape.alphabet.as_deref().unwrap_or(&block.alphabet);
+        let rendered = render_tape(tape, effective, delimit);
+        let (head_line, rest) = rendered
+            .split_once('\n')
+            .expect("render_tape emits a head line then the span");
         out.push_str(&format!(
-            "tape {i}: {}",
-            render_tape(tape, effective, delimit)
+            "tape {i}: {head_line}, alphabet {effective:?}\n{rest}"
         ));
     }
     Ok(CliOutput::ok(out, String::new()))
