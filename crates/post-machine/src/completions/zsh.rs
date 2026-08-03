@@ -71,8 +71,11 @@ pub fn render(registry: &Registry) -> String {
     out
 }
 
+/// Helper-function name for a command path. Hyphens in a subcommand name
+/// (`tape-block`) become underscores: zsh tolerates `-` in a function name,
+/// but `_` is the convention every other completion helper here follows.
 fn function_name(path: &[String]) -> String {
-    format!("_pmt_{}", path.join("_"))
+    format!("_pmt_{}", path.join("_").replace('-', "_"))
 }
 
 /// `pmt build`'s target names come from the nearest manifest, not a
@@ -141,7 +144,10 @@ fn render_root(out: &mut String, root: &CommandSpec, leaves: &[&CommandSpec], gr
         ));
     }
     for group in groups {
-        out.push_str(&format!("        {group}) _pmt_{group} ;;\n"));
+        out.push_str(&format!(
+            "        {group}) {} ;;\n",
+            function_name(&[(*group).to_string()])
+        ));
     }
     out.push_str("      esac\n");
     out.push_str("      ;;\n");
@@ -150,7 +156,7 @@ fn render_root(out: &mut String, root: &CommandSpec, leaves: &[&CommandSpec], gr
 }
 
 fn render_group(out: &mut String, group: &str, children: &[&CommandSpec]) {
-    out.push_str(&format!("_pmt_{group}() {{\n"));
+    out.push_str(&format!("{}() {{\n", function_name(&[group.to_string()])));
     out.push_str("  local -a subcommands\n");
     out.push_str("  subcommands=(\n");
     for child in children {
@@ -165,7 +171,7 @@ fn render_group(out: &mut String, group: &str, children: &[&CommandSpec]) {
     out.push_str("  )\n");
     // `-C` here (matching the root's) is what lets each child's OWN
     // nested `_arguments` call re-base its positional numbering to start
-    // after "tape build"/"ir graph" rather than after just "tape"/"ir".
+    // after "tape-block build"/"ir graph" rather than after just "tape-block"/"ir".
     out.push_str("  _arguments -C \\\n");
     out.push_str("    '1: :->subs' \\\n");
     out.push_str("    '*::arg:->args'\n\n");
@@ -378,8 +384,15 @@ fn zsh_escape_word(word: &str) -> String {
 /// call sites so "this is help/description text" vs "this is a literal
 /// completion value" stays readable, even though today's escaping rule
 /// happens to be identical.
+/// Escape a help string for embedding in a zsh `_arguments` spec.
+///
+/// Two characters are structural there: `:` separates the spec's fields, and
+/// `'` terminates the single-quoted spec itself. A description containing an
+/// apostrophe used to close the quote early and silently mangle the rest of
+/// the spec — `zsh -n` and `compinit` both accept the result, so only reading
+/// the emitted script reveals it. The `'\''` idiom closes, escapes, reopens.
 fn zsh_escape_desc(text: &str) -> String {
-    text.replace(':', "\\:")
+    text.replace(':', "\\:").replace('\'', "'\\''")
 }
 
 #[cfg(test)]
@@ -396,7 +409,7 @@ mod tests {
             "link",
             "lint",
             "dis",
-            "tape",
+            "tape-block",
             "run",
             "ir",
             "completions",
@@ -408,8 +421,8 @@ mod tests {
         }
         assert!(script.contains("--version"));
         assert!(script.contains("--help"));
-        assert!(script.contains("_pmt_tape_build"));
-        assert!(script.contains("_pmt_tape_show"));
+        assert!(script.contains("_pmt_tape_block_build"));
+        assert!(script.contains("_pmt_tape_block_show"));
         assert!(script.contains("_pmt_ir_graph"));
     }
 
@@ -450,7 +463,7 @@ mod tests {
         assert!(script.contains("_files -g \"*.pmo\""), "{script}"); // link
         assert!(script.contains("_files -g \"*.(pmo|pmx)\""), "{script}"); // dis
         assert!(script.contains("_files -g \"*.pmx.map\""), "{script}"); // dis --map
-        assert!(script.contains("_files -g \"*.pmt\""), "{script}"); // tape show / --tape-block
+        assert!(script.contains("_files -g \"*.pmt\""), "{script}"); // tape-block show / run --tape-block
         assert!(script.contains("_files -g \"*.pmx\""), "{script}"); // run
         assert!(script.contains("_files -g \"*.ir.json\""), "{script}"); // ir graph
     }
@@ -460,8 +473,8 @@ mod tests {
         let script = render(&registry());
         assert!(script.contains("(-O1)-O0["), "{script}");
         assert!(script.contains("(-O0)-O1["), "{script}");
-        assert!(script.contains("(--tape)--tape-block["), "{script}");
-        assert!(script.contains("(--tape-block)--tape["), "{script}");
+        assert!(script.contains("(--tape-cells)--tape-block["), "{script}");
+        assert!(script.contains("(--tape-block)--tape-cells["), "{script}");
     }
 
     #[test]
@@ -506,5 +519,15 @@ mod tests {
         // output paths get plain `_files`, no `-g` filter (design doc:
         // read-vs-write split).
         assert!(script.contains("-o[output path]:file:_files'"), "{script}");
+    }
+
+    /// A description containing an apostrophe must not close the enclosing
+    /// single-quoted `_arguments` spec early. `zsh -n` and `compinit` both
+    /// accept the mangled form, so only an explicit check catches it.
+    #[test]
+    fn a_description_with_an_apostrophe_is_quote_escaped() {
+        assert_eq!(zsh_escape_desc("the tape's cells"), "the tape'\\''s cells");
+        // Colons stay escaped too — both characters are structural.
+        assert_eq!(zsh_escape_desc("a:b"), "a\\:b");
     }
 }

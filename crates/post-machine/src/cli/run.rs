@@ -14,14 +14,14 @@ use mtc_core::vm::{
 
 use crate::arch::{DEFAULT_GLYPHS, Pm1};
 
-use super::{Args, CliOutput, render_tape};
+use super::{Args, CliOutput, Delimit, render_tape};
 
 const RUN_USAGE: &str = "\
 USAGE: pmt run APP.pmx [FLAGS]
 
 TAPE (default: empty, head 0):
   --tape-block IN.pmt        load the initial tape from a snapshot
-  --tape \" * *\" [--head N]   build the initial tape inline
+  --tape-cells \" * *\" [--head N]  build the initial tape inline
   --save-tape-block OUT.pmt  write the final tape as a snapshot
 
 LIMITS AND SEMANTICS:
@@ -104,7 +104,7 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         None => TactProfile::ELECTRONIC,
     };
     let tape_block = args.value("--tape-block")?;
-    let tape_inline = args.value("--tape")?;
+    let tape_inline = args.value("--tape-cells")?;
     let head: i64 = match args.value("--head")? {
         Some(text) => text.parse().map_err(|_| format!("bad --head `{text}`"))?,
         None => 0,
@@ -201,7 +201,7 @@ pub(super) fn execute_run(
         stats.stall_tacts,
         stats.total_tacts()
     );
-    stdout.push_str(&render_tape(&snapshot, &alphabet));
+    stdout.push_str(&render_tape(&snapshot, &alphabet, Delimit::Auto));
 
     if let Some(out_path) = &settings.save {
         let block = TapeBlockFile {
@@ -264,7 +264,7 @@ fn initial_tape(
     head: i64,
 ) -> Result<(InfiniteTape, Vec<String>), String> {
     if block.is_some() && inline.is_some() {
-        return Err("--tape-block and --tape are mutually exclusive".into());
+        return Err("--tape-block and --tape-cells are mutually exclusive".into());
     }
     let default_alphabet: Vec<String> = DEFAULT_GLYPHS.iter().map(|g| g.to_string()).collect();
     if let Some(path) = block {
@@ -274,7 +274,15 @@ fn initial_tape(
             return Err(format!("{path}: PM-1 blocks hold exactly one tape"));
         };
         let tape = InfiniteTape::from_snapshot(snapshot).map_err(|e| format!("{path}: {e:?}"))?;
-        return Ok((tape, file.alphabet));
+        // The band's own glyph table wins over the block fallback. Falling
+        // back unconditionally would render — and, through
+        // `--save-tape-block`, rewrite — a foreign block with the wrong
+        // glyphs (docs/formats.md (per-tape glyph tables)).
+        let effective = snapshot
+            .alphabet
+            .clone()
+            .unwrap_or_else(|| file.alphabet.clone());
+        return Ok((tape, effective));
     }
     if let Some(pattern) = inline {
         let cells: Result<Vec<bool>, String> = pattern

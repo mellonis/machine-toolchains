@@ -835,7 +835,7 @@ fn program_a_runs_identically_via_the_cli_in_all_three_modes() {
         // on tape 0 — the happy path that stops.
         let tape = dir.join(format!("a-{mech}.tmt"));
         execute(&args(&[
-            "tape",
+            "tape-block",
             "new",
             "--from",
             exe.to_str().unwrap(),
@@ -844,21 +844,19 @@ fn program_a_runs_identically_via_the_cli_in_all_three_modes() {
         ]))
         .unwrap();
         execute(&args(&[
-            "tape",
+            "tape-block",
             "set",
             tape.to_str().unwrap(),
             "--in-place",
-            "--tape",
-            "0",
             "--cells",
-            "1",
+            "0='1'",
         ]))
         .unwrap();
 
         let out = execute(&args(&[
             "run",
             exe.to_str().unwrap(),
-            "--tape",
+            "--tape-block",
             tape.to_str().unwrap(),
         ]))
         .unwrap();

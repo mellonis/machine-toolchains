@@ -53,7 +53,7 @@ else — a mismatch is a clean "corrupt file" error, never a trap mid-run.
 `pmt dis` and `tmt dis` accept either an object or an executable on the same
 command line, and what turns a mistaken argument into a diagnosis rather
 than a decode failure — `tmt dis` handed a tape block answers "that is a
-tape block — use `tmt tape show`".
+tape block — use `tmt tape-block show`".
 
 The `arch` byte says which architecture the content is for, and every
 subcommand that reads it refuses content it cannot handle rather than
@@ -315,21 +315,32 @@ side.** A tape block's alphabet is the authoritative rendering source; with
 no tape block at hand, tooling falls back to whatever default the
 architecture can supply. PM-1 has a fixed pair — `" "` for blank, `"*"` for
 mark — because its alphabet is fixed at two symbols. TM-1 has no fixed
-alphabet and therefore no fixed glyphs: `tmt tape new` reads the per-tape
-cardinalities out of the executable's header and labels each tape's symbols
-with the decimal strings `0`…`card-1`, which the author then edits or
-replaces. Code-side artifacts — objects, executables, and the map
-sidecar — carry symbol indices only, never glyphs, matching the
-hardware-realizability rule that the processor never sees glyphs
-(`docs/pmt/isa.md`).
+alphabet and therefore no fixed glyphs, so what a band is labelled with
+depends on where the block came from. From an **executable**,
+`tmt tape-block new --from app.tmx` has only the per-tape cardinalities in
+the image header to go on, and labels each band's symbols with the decimal
+strings `0`…`card-1`. From **source**, `tmt tape-block new --from app.tmc`
+reads the real glyphs — and the tape names — out of the `machine` block's
+tape declarations. Either way `tmt tape-block set --alphabet` repins a band's
+glyph table afterwards, relabelling without moving a cell.
 
-CLI: `pmt tape build " * * *" --head 3 -o in.pmt`, `pmt tape show in.pmt`,
+Code-side artifacts — objects, executables, and the map sidecar — carry
+symbol indices only, never glyphs, matching the hardware-realizability rule
+that the processor never sees glyphs (`docs/pmt/isa.md`). Tape **names**
+follow the same rule and are never stored: the bus addresses bands by
+number, so a name given on the command line is resolved to an index at parse
+time and discarded.
+
+CLI: `pmt tape-block build " * * *" --head 3 -o in.pmt`,
+`pmt tape-block show in.pmt`,
 `pmt run app.pmx --tape-block in.pmt [--save-tape-block out.pmt]`
-(`docs/pmt/cli.md`). The TM-1 side starts from the executable rather than
-from a literal, since the tape count and each tape's cardinality are
-properties of the program: `tmt tape new --from app.tmx -o in.tmt`, then
-`tmt tape set in.tmt --in-place --tape 1 --cells "0110"`, and
-`tmt tape show in.tmt` (`docs/tmt/cli.md`).
+(`docs/pmt/cli.md`). The TM-1 side starts from the program rather than from a
+literal, since the tape count and each tape's cardinality are properties of
+it — and one invocation authors the whole band:
+`tmt tape-block new --from app.tmc --cells "main='s','b','1'" -o in.tmt`,
+then `tmt tape-block show in.tmt`, and
+`tmt run app.tmx --tape-block in.tmt [--save-tape-block out.tmt]`
+(`docs/tmt/cli.md`).
 
 ## `.pma` — assembly text
 

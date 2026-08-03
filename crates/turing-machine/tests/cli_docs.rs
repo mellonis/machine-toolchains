@@ -51,7 +51,7 @@ fn quoted_blocks() -> Vec<(Option<&'static str>, Vec<&'static str>)> {
         (Some("dis"), vec!["dis", "--help"]),
         (Some("run"), vec!["run", "--help"]),
         // Group commands: bare, not `--help` (see the module note).
-        (Some("tape"), vec!["tape"]),
+        (Some("tape-block"), vec!["tape-block"]),
         (Some("ir"), vec!["ir"]),
         (Some("lint"), vec!["lint", "--help"]),
         (Some("fmt"), vec!["fmt", "--help"]),

@@ -12,7 +12,7 @@
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     /// Dotted path from the root, e.g. `["compile"]` or
-    /// `["tape", "build"]`. The empty path is the bare `pmt` invocation.
+    /// `["tape-block", "build"]`. The empty path is the bare `pmt` invocation.
     pub path: Vec<String>,
     pub flags: Vec<FlagSpec>,
     pub positional: Positional,
@@ -39,7 +39,7 @@ pub struct FlagSpec {
     pub exclusive_group: Option<String>,
     /// Set when a flag is meaningful only alongside another — e.g.
     /// `pmt lint --fix --force`, where `--force` requires `--fix`, and
-    /// `pmt run --head` requiring `--tape`.
+    /// `pmt run --head` requiring `--tape-cells`.
     pub requires: Option<String>,
 }
 
@@ -430,7 +430,7 @@ fn dis_spec() -> CommandSpec {
 
 fn tape_build_spec() -> CommandSpec {
     CommandSpec {
-        path: strings(&["tape", "build"]),
+        path: strings(&["tape-block", "build"]),
         positional: Positional::One(PositionalHint::Text),
         flags: vec![
             FlagSpec::value(
@@ -447,9 +447,27 @@ fn tape_build_spec() -> CommandSpec {
     }
 }
 
+/// The repeatable keyed edit flags, shared by `tape-block new` and `set`.
+fn edit_flags() -> Vec<FlagSpec> {
+    vec![
+        FlagSpec::value(
+            "--alphabet",
+            "repin a tape's glyphs (KEY=GLYPHS)",
+            ValueHint::Text,
+        ),
+        FlagSpec::value(
+            "--cells",
+            "set a tape's cells (KEY=GLYPHS)",
+            ValueHint::Text,
+        ),
+        FlagSpec::value("--head", "set a tape's head (KEY=N)", ValueHint::Text),
+        FlagSpec::value("--origin", "set a tape's origin (KEY=N)", ValueHint::Text),
+    ]
+}
+
 fn tape_new_spec() -> CommandSpec {
     CommandSpec {
-        path: strings(&["tape", "new"]),
+        path: strings(&["tape-block", "new"]),
         positional: Positional::None,
         flags: vec![
             FlagSpec::value(
@@ -462,13 +480,16 @@ fn tape_new_spec() -> CommandSpec {
                 "output path (default blank.pmt)",
                 ValueHint::File(ext(&["pmt"])),
             ),
-        ],
+        ]
+        .into_iter()
+        .chain(edit_flags())
+        .collect(),
     }
 }
 
 fn tape_set_spec() -> CommandSpec {
     CommandSpec {
-        path: strings(&["tape", "set"]),
+        path: strings(&["tape-block", "set"]),
         positional: Positional::One(PositionalHint::File(ext(&["pmt"]))),
         flags: vec![
             FlagSpec::value(
@@ -478,23 +499,21 @@ fn tape_set_spec() -> CommandSpec {
             )
             .exclusive("set-output"),
             FlagSpec::boolean("--in-place", "write back over the input").exclusive("set-output"),
-            FlagSpec::value("--tape", "tape index to edit (default 0)", ValueHint::Text),
-            FlagSpec::value(
-                "--cells",
-                "glyph pattern for the tape's cells",
-                ValueHint::Text,
-            ),
-            FlagSpec::value("--origin", "leftmost cell's coordinate", ValueHint::Text),
-            FlagSpec::value("--head", "head position", ValueHint::Text),
-        ],
+        ]
+        .into_iter()
+        .chain(edit_flags())
+        .collect(),
     }
 }
 
 fn tape_show_spec() -> CommandSpec {
     CommandSpec {
-        path: strings(&["tape", "show"]),
+        path: strings(&["tape-block", "show"]),
         positional: Positional::One(PositionalHint::File(ext(&["pmt"]))),
-        flags: vec![],
+        flags: vec![
+            FlagSpec::boolean("--dense", "never separate cells").exclusive("show-delimit"),
+            FlagSpec::boolean("--separated", "always separate cells").exclusive("show-delimit"),
+        ],
     }
 }
 
@@ -509,14 +528,18 @@ fn run_spec() -> CommandSpec {
                 ValueHint::File(ext(&["pmt"])),
             )
             .exclusive("tape-source"),
-            FlagSpec::value("--tape", "build the initial tape inline", ValueHint::Text)
-                .exclusive("tape-source"),
             FlagSpec::value(
-                "--head",
-                "head position for --tape (default 0)",
+                "--tape-cells",
+                "build the initial tape inline",
                 ValueHint::Text,
             )
-            .requires("--tape"),
+            .exclusive("tape-source"),
+            FlagSpec::value(
+                "--head",
+                "head position for --tape-cells (default 0)",
+                ValueHint::Text,
+            )
+            .requires("--tape-cells"),
             FlagSpec::value(
                 "--save-tape-block",
                 "write the final tape as a snapshot",
@@ -588,7 +611,7 @@ fn top_level_help(name: &str) -> &'static str {
         "fmt" => "format .pmc/.pma sources in place (--check to preview; -)",
         "dis" => "disassemble a .pmo or .pmx (--listing for the address view)",
         "run" => "execute a .pmx on a tape",
-        "tape" => "build/new/set/show .pmt tape-block snapshots",
+        "tape-block" => "build/new/set/show .pmt tape-block snapshots",
         "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
         "lsp" => "run the LSP server on stdio",
         "completions" => "emit a shell completion script (zsh; bash/fish follow-on)",
@@ -601,10 +624,12 @@ fn group_child_help(path: &[String]) -> &'static str {
         path.first().map(String::as_str),
         path.get(1).map(String::as_str),
     ) {
-        (Some("tape"), Some("build")) => "write a .pmt tape-block snapshot from a glyph pattern",
-        (Some("tape"), Some("new")) => "write a blank .pmt template sized to an executable",
-        (Some("tape"), Some("set")) => "clone a .pmt tape-block snapshot with edits",
-        (Some("tape"), Some("show")) => "render a .pmt tape-block snapshot",
+        (Some("tape-block"), Some("build")) => {
+            "write a .pmt tape-block snapshot from a glyph pattern"
+        }
+        (Some("tape-block"), Some("new")) => "write a blank .pmt template sized to an executable",
+        (Some("tape-block"), Some("set")) => "clone a .pmt tape-block snapshot with edits",
+        (Some("tape-block"), Some("show")) => "render a .pmt tape-block snapshot",
         (Some("ir"), Some("graph")) => "render --emit-ir JSON as a Mermaid flowchart",
         _ => "",
     }
@@ -722,7 +747,7 @@ mod tests {
                 "lint",
                 "fmt",
                 "dis",
-                "tape",
+                "tape-block",
                 "run",
                 "ir",
                 "lsp",

@@ -18,14 +18,15 @@ use mtc_core::vm::{
 
 use crate::arch::Tm1;
 
-use super::{Args, CliOutput, render_tape};
+use super::{Args, CliOutput, Delimit, render_tape};
 
 const RUN_USAGE: &str = "\
-USAGE: tmt run APP.tmx --tape TAPES.tmt [FLAGS]
+USAGE: tmt run APP.tmx --tape-block TAPES.tmt [FLAGS]
 
 TAPE:
-  --tape TAPES.tmt    load the initial tape band from an MT snapshot
-                      (one band per image tape; alphabets sized per band)
+  --tape-block TAPES.tmt     load the initial tape band from an MT snapshot
+                             (one band per image tape; alphabets sized per band)
+  --save-tape-block OUT.tmt  write the final band as an MT snapshot
 
 LIMITS:
   --max-steps N       step budget (default 10000000)
@@ -51,10 +52,12 @@ const DEFAULT_MAX_STEPS: u64 = 10_000_000;
 /// no `--tact-profile` knob to carry.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RunSettings {
-    /// `--tape PATH.tmt`. `None` reaches `execute_run` only from a bare
+    /// `--tape-block PATH.tmt`. `None` reaches `execute_run` only from a bare
     /// `tmt run` with no flag, which errors there as it does today —
     /// the driver checks earlier so it can name the target.
     pub tape: Option<String>,
+    /// `--save-tape-block PATH.tmt`: the final band, written back out.
+    pub save: Option<String>,
     pub no_step_limit: bool,
     pub max_steps: Option<u64>,
     pub max_tacts: Option<u64>,
@@ -85,7 +88,8 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         ),
         None => None,
     };
-    let tape = args.value("--tape")?;
+    let tape = args.value("--tape-block")?;
+    let save = args.value("--save-tape-block")?;
     let inputs = args.positionals()?;
     let [exe_path] = inputs.as_slice() else {
         return Err(format!("run takes exactly one executable\n\n{RUN_USAGE}"));
@@ -94,6 +98,7 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
 
     let settings = RunSettings {
         tape,
+        save,
         no_step_limit,
         max_steps,
         max_tacts,
@@ -112,7 +117,7 @@ pub(super) fn execute_run(
     let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{}: {e}", exe_path.display()))?;
 
     let Some(tape_path) = settings.tape.as_deref() else {
-        return Err(format!("run needs --tape TAPES.tmt\n\n{RUN_USAGE}"));
+        return Err(format!("run needs --tape-block TAPES.tmt\n\n{RUN_USAGE}"));
     };
     let tape_bytes = fs::read(tape_path).map_err(|e| format!("cannot read {tape_path}: {e}"))?;
     let block = TapeBlockFile::from_bytes(&tape_bytes).map_err(|e| format!("{tape_path}: {e}"))?;
@@ -127,6 +132,29 @@ pub(super) fn execute_run(
             block.tapes.len(),
             exe_path.display(),
         ));
+    }
+
+    // Band count is not enough: a band whose alphabet is narrower than the
+    // program's would load, then render `?` for every out-of-range index.
+    // The image's per-tape cardinalities are the authority
+    // (docs/formats.md (executable image)). `.get(i)` rather than indexing —
+    // the count check above pins `block.tapes.len()`, but nothing pins
+    // `alphabet_cardinalities.len()`, and a v1 code-only image carries none.
+    for (i, snap) in block.tapes.iter().enumerate() {
+        let Some(&declared) = exe.alphabet_cardinalities.get(i) else {
+            continue;
+        };
+        let width = snap
+            .alphabet
+            .as_ref()
+            .map_or(block.alphabet.len(), Vec::len);
+        let expected_width = declared as usize;
+        if width != expected_width {
+            return Err(format!(
+                "{tape_path}: tape {i} has {width} glyph(s), but {} expects {expected_width}",
+                exe_path.display(),
+            ));
+        }
     }
 
     // Each band renders/round-trips through its own effective alphabet: its
@@ -202,8 +230,31 @@ pub(super) fn execute_run(
         let _ = write!(
             stdout,
             "tape {i}: {}",
-            render_tape(&tape.to_snapshot(), &alphabets[i])
+            render_tape(&tape.to_snapshot(), &alphabets[i], Delimit::Auto)
         );
+    }
+
+    if let Some(out_path) = &settings.save {
+        // Each band keeps its OWN glyph table. Collapsing to one block
+        // alphabet would silently relabel a block whose bands differ — the
+        // same failure `tape-block show` used to have
+        // (docs/formats.md (per-tape glyph tables)). `WideTape::to_snapshot`
+        // leaves `alphabet: None`, so this supplies the table rather than
+        // replacing one.
+        let saved = TapeBlockFile {
+            alphabet: block.alphabet.clone(),
+            tapes: tapes
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let mut snap = t.to_snapshot();
+                    snap.alphabet = Some(alphabets[i].clone());
+                    snap
+                })
+                .collect(),
+        };
+        let bytes = saved.to_bytes().map_err(|e| e.to_string())?;
+        fs::write(out_path, bytes).map_err(|e| format!("cannot write {out_path}: {e}"))?;
     }
 
     let code = match outcome {

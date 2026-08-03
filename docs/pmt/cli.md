@@ -22,7 +22,7 @@ SUBCOMMANDS:
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
-  tape         build/new/set/show .pmt tape-block snapshots
+  tape-block   build/new/set/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
@@ -427,57 +427,113 @@ control-flow path reaches), branch/call targets resolved to
 not reassembleable — it exists to inspect what a `.pmx` actually contains,
 byte for byte, not to round-trip it.
 
-## `pmt tape`
+## `pmt tape-block`
 
 ```
-USAGE: pmt tape build " * * *" [--head N] [-o OUT.pmt]
-       pmt tape new --from APP.pmx [-o OUT.pmt]
-       pmt tape set IN.pmt (-o OUT.pmt | --in-place)
-                    [--tape N] [--cells PATTERN] [--origin N] [--head N]
-       pmt tape show FILE.pmt
+USAGE: pmt tape-block build " * * *" [--head N] [-o OUT.pmt]
+       pmt tape-block new [--from APP.pmx] [-o OUT.pmt] [EDITS]
+       pmt tape-block set IN.pmt (-o OUT.pmt | --in-place) [EDITS]
+       pmt tape-block show FILE.pmt [--dense | --separated]
 
-build: cell characters are the PM-1 glyphs (space = blank, * = mark);
-the leftmost character is cell 0. new: a blank template sized to the
-executable's tape count. set: clone IN.pmt, applying edits to tape N
-(default 0). show: renders any .pmt with its own alphabet.
+EDITS (repeatable; KEY is a tape index):
+  --alphabet KEY=GLYPHS   repin the block's glyphs (relabels; same cardinality)
+  --cells    KEY=GLYPHS   set tape KEY's cells
+  --head     KEY=N        set tape KEY's head
+  --origin   KEY=N        set tape KEY's origin
+
+build: cell characters are the PM-1 glyphs (space = blank, * = mark); the
+leftmost character is cell 0. GLYPHS is alphabet notation: ' ','*'.
 ```
 
-`build` writes a fresh snapshot from a glyph pattern using PM-1's default
-glyphs (`docs/formats.md`); `show` renders any `.pmt` using its own
-embedded alphabet, so it works for tapes built with a different glyph set.
-`new` and `set` author snapshots without hand-editing bytes: `new` mints a
-blank template shaped to a specific program, and `set` edits an existing
-snapshot in place or as a copy.
+Four subcommands author and inspect `.pmt` tape-block snapshots without
+hand-editing bytes. The unit is the **block**; PM-1 is a one-tape-device
+architecture, so a PM block holds a single band and a single alphabet.
 
-**`tape new --from APP.pmx`:** writes a blank snapshot sized to the
-executable's tape count — one empty band per tape the image expects (v1
-images have exactly one), origin and head at 0, using PM-1's default
-glyphs. `--from` must be a `.pmx` image (magic-sniffed, `docs/formats.md`);
-anything else is an error. `-o` names the output (default `blank.pmt`).
-The result is the same shape `build` writes, minus the cells — a ready
-template to fill in with `set`.
+### Edit flags
 
-**`tape set IN.pmt`:** clone semantics. It reads `IN.pmt`, applies the
-requested edits to one band, and writes the result out; the source file is
-never modified unless you ask for it. Exactly one output destination is
-required — `-o OUT.pmt` writes a new file, `--in-place` writes back over
-`IN.pmt` — and the two are mutually exclusive. Supplying neither is an
-error: refusing the ambiguous case is what keeps `set` from silently
-clobbering the input. Any subset of the edit flags may be given; with none,
-`set` is a plain copy.
+`new` and `set` take four **keyed, repeatable** edit flags, so one invocation
+sets up the whole block:
 
-Edits target the band selected by `--tape N` (default `0`); an index past
-the block's tape count is an error naming how many bands it has. `--origin`
-and `--head` take an `i64`, negatives included, and replace that band's
-origin and head. `--cells PATTERN` replaces the band's cells: each
-character of the pattern is resolved through *that band's effective
-alphabet* — its own embedded glyph table if it has one, otherwise the
-block's — mapping glyph to cell index, leftmost character as cell 0. This
-is the key difference from `build`, whose pattern is always the fixed
-space/`*` PM-1 glyphs: `set --cells` speaks whatever alphabet the target
-tape carries. A character not in that alphabet is an error listing the
-alphabet it was checked against. Only the flags you pass change; every
-other band and every unspecified field is copied through untouched.
+```
+--alphabet KEY=GLYPHS   repin the block's glyphs
+--cells    KEY=GLYPHS   set tape KEY's cells
+--head     KEY=N        set tape KEY's head
+--origin   KEY=N        set tape KEY's origin
+```
+
+`KEY` is always a tape index here. Tape names are a source-language
+construct, and `pmt` has no source-provenance path — PM-1's alphabet is fixed
+at two glyphs, so a `.pmc` has nothing to contribute that the arch does not
+already supply. (`tmt` accepts names, from a `.tmc`.) Repeating a flag for
+the same tape is an error rather than last-wins.
+
+`GLYPHS` is alphabet notation — quoted symbols, comma-separated, with
+inclusive `lo..hi` ranges. `--alphabet` applies before `--cells`, so cells
+resolve against the glyphs just pinned. An alphabet is a set (unique, at most
+127 glyphs); cells are a sequence, so repeats are ordinary.
+
+### `tape-block build`
+
+Unchanged fixed-alphabet sugar: cell characters are the PM-1 glyphs (space =
+blank, `*` = mark), leftmost character is cell 0. It only ever creates
+blocks.
+
+### `tape-block new`
+
+`new` mints a block and applies this invocation's edits. `--from APP.pmx`
+takes the band count from the image header; without it, the `--alphabet`
+keys size the block, and with no flags at all it is a single empty band on
+PM-1's default glyphs.
+
+```
+$ pmt tape-block new --alphabet "0=' ','*'" --cells "0='*','*',' '" -o t.pmt
+$ pmt tape-block show t.pmt
+tape 0: origin 0, head 0, alphabet [" ", "*"]
+|** |
+ ^
+```
+
+### `tape-block set`
+
+Clone semantics: read the input, apply the edits, write the result out.
+Exactly one output destination is required — `-o OUT.pmt` or `--in-place`,
+mutually exclusive — and supplying neither is an error, which keeps `set`
+from silently clobbering its input.
+
+`--alphabet` **relabels, it never re-maps**: cell indices are untouched and
+only the glyph table changes. Because a PM block is single-tape and
+single-alphabet, a repin writes the **block** table and leaves the per-tape
+override unset, so the file stays MT version 1:
+
+```
+$ pmt tape-block build " ** " -o t.pmt
+$ pmt tape-block set t.pmt --in-place --alphabet "0='0','1'"
+$ pmt tape-block show t.pmt
+tape 0: origin 0, head 0, alphabet ["0", "1"]
+|0110|
+ ^
+```
+
+A repin must keep the tape's effective cardinality exactly — cells are
+validated against that alphabet on read, so a narrowing repin would strand an
+out-of-range cell:
+
+```
+$ pmt tape-block set t.pmt --in-place --alphabet "0='a','b','c'"
+pmt: --alphabet `0`: tape 0 has cardinality 2, the given alphabet has 3 glyphs
+```
+
+### `tape-block show`
+
+`show` renders each band through **its own** effective alphabet — its glyph
+table if present, otherwise the block's fallback — and prints that alphabet
+per band. `.pmt` and `.tmt` are one container, so a block authored by `tmt`
+with per-band tables reads correctly here too.
+
+Cells are delimited adaptively: dense when every glyph is a single character,
+separated when any is longer, so `|011|` can never be ambiguous between three
+cells and two. PM-1's fixed pair is single-character, so PM tapes stay dense.
+`--dense` and `--separated` force either form; passing both is an error.
 
 ## `pmt run`
 
@@ -486,7 +542,7 @@ USAGE: pmt run APP.pmx [FLAGS]
 
 TAPE (default: empty, head 0):
   --tape-block IN.pmt        load the initial tape from a snapshot
-  --tape " * *" [--head N]   build the initial tape inline
+  --tape-cells " * *" [--head N]  build the initial tape inline
   --save-tape-block OUT.pmt  write the final tape as a snapshot
 
 LIMITS AND SEMANTICS:
