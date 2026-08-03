@@ -430,7 +430,9 @@ git commit -m "feat(core): glyph-list notation parser for tape-block authoring"
 
 **Interfaces:**
 - Consumes: `mtc_core::formats::parse_glyph_list` (Task 1).
-- Produces: `pub struct TapeLayout { pub name: String, pub glyphs: Vec<String> }` and `pub fn machine_tape_layout(source: &str) -> Result<Vec<TapeLayout>, CompileError>` in `mtc_turing_machine::compiler`. Tasks 8 and 9 consume both.
+- Produces: `pub struct TapeLayout { pub name: String, pub glyphs: Vec<String> }` and `pub fn machine_tape_layout(source: &str) -> Result<Option<Vec<TapeLayout>>, CompileError>` in `mtc_turing_machine::compiler`. Tasks 8 and 9 consume both.
+
+**Why `Option` and not a new error kind** (decided during execution): "this source has no `machine` block" is not a compile error — a library compiles fine, and only the tape-block CLI needs a band. Adding a `CompileErrorKind` variant would require a `code_registry!` entry *and* a row in `docs/tmt/cli.md`'s **published** compile-error catalog, which `tests/error_code_docs.rs` set-compares. Publishing a user-facing compile code for a tooling precondition is the wrong trade. `Ok(None)` says it, and the CLI renders its own message.
 
 Two jobs in one task because they share the accessor: expose per-tape glyphs from `.tmc` source, and use that same surface to prove core's parser agrees with the language.
 
@@ -552,23 +554,22 @@ pub struct TapeLayout {
     pub glyphs: Vec<String>,
 }
 
-/// Resolve `source` far enough to report the `machine` block's tape table.
-/// Analysis only — no expansion, lowering, optimization, or codegen runs, so
-/// a program that compiles is not required, only one that resolves.
+/// Resolve `source` far enough to report the `machine` block's tape table,
+/// in vector-position order. Analysis only — no expansion, lowering,
+/// optimization, or codegen runs, so a program that fully compiles is not
+/// required, only one that resolves.
 ///
-/// Errors when the source has no `machine` block: a library declares its
-/// tapes per routine signature, so there is no single band to describe.
-pub fn machine_tape_layout(source: &str) -> Result<Vec<TapeLayout>, CompileError> {
+/// `Ok(None)` means the source declares no `machine` block: a library takes
+/// its tapes from each routine's signature, so there is no single band to
+/// describe. That is a legitimate source, not a compile error, so the caller
+/// decides whether it can proceed (docs/tmt/cli.md (tape-block provenance)).
+pub fn machine_tape_layout(source: &str) -> Result<Option<Vec<TapeLayout>>, CompileError> {
     let analysis = analyze(source)?;
     let resolved = &analysis.resolved;
     let Some(index) = resolved.entry_world else {
-        return Err(CompileError {
-            span: Span::default(),
-            kind: CompileErrorKind::NoMachineBlock,
-        });
+        return Ok(None);
     };
-    let world = &resolved.worlds[index];
-    world
+    let layout = resolved.worlds[index]
         .tapes
         .iter()
         .map(|tape| {
@@ -576,33 +577,18 @@ pub fn machine_tape_layout(source: &str) -> Result<Vec<TapeLayout>, CompileError
                 .alphabets
                 .get(&tape.alphabet)
                 .expect("resolution guarantees every tape's alphabet exists");
-            Ok(TapeLayout {
+            TapeLayout {
                 name: tape.name.clone(),
                 glyphs: alphabet.glyphs.clone(),
-            })
+            }
         })
-        .collect()
+        .collect();
+    Ok(Some(layout))
 }
 ```
 
-Add the error variant to `CompileErrorKind` in the same file, alongside the existing variants:
-
-```rust
-    /// `machine_tape_layout` was asked for a band from a library source.
-    NoMachineBlock,
-```
-
-and give it a message in that enum's `Display`/message arm, matching the
-surrounding style:
-
-```rust
-    Self::NoMachineBlock => "source declares no `machine` block".to_string(),
-```
-
-If `CompileErrorKind` carries a registered error code (check whether
-`crates/turing-machine/tests/error_code_docs.rs` set-compares the enum against
-a `code_registry!` inventory), add the new variant to that registry and to the
-docs inventory table it guards, or the drift guard will fail.
+No `CompileErrorKind` variant is added, so neither `code_registry!` nor
+`docs/tmt/cli.md`'s published error-code inventory moves.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 

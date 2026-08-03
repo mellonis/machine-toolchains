@@ -1794,6 +1794,48 @@ pub struct CompileReport {
     pub opt: OptReport,
 }
 
+/// One tape of the `machine` block: its source name and the glyphs of the
+/// alphabet it draws from, in position order. The tape-block CLI reads this
+/// to mint a block whose bands carry a program's real glyphs rather than
+/// index labels (docs/tmt/cli.md (tape-block provenance)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TapeLayout {
+    pub name: String,
+    pub glyphs: Vec<String>,
+}
+
+/// Resolve `source` far enough to report the `machine` block's tape table,
+/// in vector-position order. Analysis only — no expansion, lowering,
+/// optimization, or codegen runs, so a program that fully compiles is not
+/// required, only one that resolves.
+///
+/// `Ok(None)` means the source declares no `machine` block: a library takes
+/// its tapes from each routine's signature, so there is no single band to
+/// describe. That is a legitimate source, not a compile error, so the caller
+/// decides whether it can proceed (docs/tmt/cli.md (tape-block provenance)).
+pub fn machine_tape_layout(source: &str) -> Result<Option<Vec<TapeLayout>>, CompileError> {
+    let analysis = analyze(source)?;
+    let resolved = &analysis.resolved;
+    let Some(index) = resolved.entry_world else {
+        return Ok(None);
+    };
+    let layout = resolved.worlds[index]
+        .tapes
+        .iter()
+        .map(|tape| {
+            let alphabet = resolved
+                .alphabets
+                .get(&tape.alphabet)
+                .expect("resolution guarantees every tape's alphabet exists");
+            TapeLayout {
+                name: tape.name.clone(),
+                glyphs: alphabet.glyphs.clone(),
+            }
+        })
+        .collect();
+    Ok(Some(layout))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileOutput {
     pub object: ObjectFile,
