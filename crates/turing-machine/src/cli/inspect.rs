@@ -17,7 +17,7 @@ use mtc_core::vm::LoadError;
 
 use crate::ir::IrProgram;
 
-use super::{Args, CliOutput, render_tape};
+use super::{Args, CliOutput, Delimit, render_tape};
 
 const DIS_USAGE: &str = "\
 USAGE: tmt dis FILE.tmo|FILE.tmx [--listing] [--map FILE.tmx.map]
@@ -104,7 +104,7 @@ const TAPE_USAGE: &str = "\
 USAGE: tmt tape new --from APP.tmx [-o OUT.tmt]
        tmt tape set IN.tmt (-o OUT.tmt | --in-place)
                     [--tape N] [--cells PATTERN] [--origin N] [--head N]
-       tmt tape show FILE.tmt
+       tmt tape show FILE.tmt [--dense | --separated]
 
 new: a blank template sized to the executable's tape count, each tape's
 alphabet the decimal labels 0..card-1 from the image's per-tape
@@ -315,10 +315,20 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
 }
 
 fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
-    let args = Args::new(raw);
+    let mut args = Args::new(raw);
+    let dense = args.flag("--dense");
+    let separated = args.flag("--separated");
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
         return Err(format!("tape show takes exactly one file\n\n{TAPE_USAGE}"));
+    };
+    let delimit = match (dense, separated) {
+        (true, true) => {
+            return Err("tape show: --dense and --separated are mutually exclusive".into());
+        }
+        (true, false) => Delimit::Dense,
+        (false, true) => Delimit::Separated,
+        (false, false) => Delimit::Auto,
     };
     let bytes = fs::read(input).map_err(|e| format!("cannot read {input}: {e}"))?;
     let block = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{input}: {e}"))?;
@@ -327,7 +337,10 @@ fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
         // Each band renders through its own effective alphabet (its
         // override if present, else the block fallback).
         let effective: &[String] = tape.alphabet.as_deref().unwrap_or(&block.alphabet);
-        out.push_str(&format!("tape {i}: {}", render_tape(tape, effective)));
+        out.push_str(&format!(
+            "tape {i}: {}",
+            render_tape(tape, effective, delimit)
+        ));
     }
     Ok(CliOutput::ok(out, String::new()))
 }

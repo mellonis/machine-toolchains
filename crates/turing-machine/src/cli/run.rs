@@ -18,7 +18,7 @@ use mtc_core::vm::{
 
 use crate::arch::Tm1;
 
-use super::{Args, CliOutput, render_tape};
+use super::{Args, CliOutput, Delimit, render_tape};
 
 const RUN_USAGE: &str = "\
 USAGE: tmt run APP.tmx --tape TAPES.tmt [FLAGS]
@@ -202,7 +202,7 @@ pub(super) fn execute_run(
         let _ = write!(
             stdout,
             "tape {i}: {}",
-            render_tape(&tape.to_snapshot(), &alphabets[i])
+            render_tape(&tape.to_snapshot(), &alphabets[i], Delimit::Auto)
         );
     }
 

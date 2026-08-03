@@ -578,7 +578,7 @@ machine level.
 USAGE: tmt tape new --from APP.tmx [-o OUT.tmt]
        tmt tape set IN.tmt (-o OUT.tmt | --in-place)
                     [--tape N] [--cells PATTERN] [--origin N] [--head N]
-       tmt tape show FILE.tmt
+       tmt tape show FILE.tmt [--dense | --separated]
 
 new: a blank template sized to the executable's tape count, each tape's
 alphabet the decimal labels 0..card-1 from the image's per-tape

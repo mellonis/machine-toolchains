@@ -14,7 +14,7 @@ use mtc_core::vm::{
 
 use crate::arch::{DEFAULT_GLYPHS, Pm1};
 
-use super::{Args, CliOutput, render_tape};
+use super::{Args, CliOutput, Delimit, render_tape};
 
 const RUN_USAGE: &str = "\
 USAGE: pmt run APP.pmx [FLAGS]
@@ -201,7 +201,7 @@ pub(super) fn execute_run(
         stats.stall_tacts,
         stats.total_tacts()
     );
-    stdout.push_str(&render_tape(&snapshot, &alphabet));
+    stdout.push_str(&render_tape(&snapshot, &alphabet, Delimit::Auto));
 
     if let Some(out_path) = &settings.save {
         let block = TapeBlockFile {

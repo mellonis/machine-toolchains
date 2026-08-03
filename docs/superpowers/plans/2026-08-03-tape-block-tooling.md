@@ -795,6 +795,14 @@ git commit -m "fix(post-machine): resolve per-tape glyph overrides in tape show 
 
 Spec R8: dense when every glyph in the effective alphabet is a single character (ambiguity is impossible), separated when any is longer. The two crates keep separate copies, as they already do.
 
+**Scope moved here during execution:** the `--dense` / `--separated` flags on
+`tape show` were originally Task 9's and Task 10's. Splitting the enum from its
+only non-test consumer made `Dense` and `Separated` dead code, which
+`-D warnings` rejects — and a temporary `#[allow(dead_code)]` would have been a
+lie that outlived its reason. Wiring the flags here makes the variants honestly
+live in the same commit that introduces them. Tasks 9 and 10 therefore only add
+the per-band alphabet line to `show`.
+
 - [ ] **Step 1: Write the failing tests**
 
 In **each** crate's `cli/mod.rs` test module, keep the existing test (updating its call to pass `Delimit::Auto`) and add:

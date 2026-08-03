@@ -91,9 +91,39 @@ pub fn execute_with(
     }
 }
 
-/// Render one tape with its glyphs: the dense span line plus a caret
-/// line under the head. Glyph 0 is blank by convention.
-pub(crate) fn render_tape(snapshot: &TapeSnapshot, alphabet: &[String]) -> String {
+/// Cell-delimiting policy for [`render_tape`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delimit {
+    /// Dense when every glyph is one character, separated otherwise.
+    Auto,
+    /// Never separate. Ambiguous with multi-character glyphs, by request.
+    Dense,
+    /// Always separate.
+    Separated,
+}
+
+impl Delimit {
+    /// Resolve `Auto` against the alphabet actually in play. PM-1's fixed pair
+    /// is single-character, so a PM tape can never be read two ways and stays
+    /// dense; a foreign block with wider glyphs gets borders
+    /// (docs/pmt/cli.md (tape-block show)).
+    fn separates(self, alphabet: &[String]) -> bool {
+        match self {
+            Self::Dense => false,
+            Self::Separated => true,
+            Self::Auto => alphabet.iter().any(|g| g.chars().count() != 1),
+        }
+    }
+}
+
+/// Render one tape with its glyphs: the span line plus a caret line under the
+/// head. Glyph 0 is blank by convention.
+pub(crate) fn render_tape(
+    snapshot: &TapeSnapshot,
+    alphabet: &[String],
+    delimit: Delimit,
+) -> String {
+    let separated = delimit.separates(alphabet);
     let glyph = |index: u8| -> &str {
         alphabet
             .get(usize::from(index))
@@ -103,14 +133,15 @@ pub(crate) fn render_tape(snapshot: &TapeSnapshot, alphabet: &[String]) -> Strin
     let mut cells_line = String::new();
     let mut caret_line = String::new();
     for (i, &cell) in snapshot.cells.iter().enumerate() {
+        if separated && i > 0 {
+            cells_line.push('|');
+            caret_line.push(' ');
+        }
         let g = glyph(cell);
         let here = snapshot.origin + i as i64 == snapshot.head;
         cells_line.push_str(g);
-        caret_line.push_str(&if here {
-            "^".repeat(g.chars().count().max(1))
-        } else {
-            " ".repeat(g.chars().count().max(1))
-        });
+        let width = g.chars().count().max(1);
+        caret_line.push_str(&if here { "^" } else { " " }.repeat(width));
     }
     format!(
         "origin {}, head {}\n|{}|\n {}\n",
@@ -205,7 +236,71 @@ mod tests {
             alphabet: None,
         };
         let alphabet: Vec<String> = vec![" ".into(), "*".into()];
-        let rendered = render_tape(&snapshot, &alphabet);
+        let rendered = render_tape(&snapshot, &alphabet, Delimit::Auto);
         assert_eq!(rendered, "origin 0, head 2\n|* *|\n   ^\n");
+    }
+
+    #[test]
+    fn render_tape_stays_dense_for_single_character_alphabets() {
+        let snapshot = TapeSnapshot {
+            origin: 0,
+            cells: vec![1, 0, 1],
+            head: 1,
+            alphabet: None,
+        };
+        let alphabet = vec!["_".to_string(), "*".to_string()];
+        let text = render_tape(&snapshot, &alphabet, Delimit::Auto);
+        assert!(text.contains("|*_*|"), "got:\n{text}");
+    }
+
+    #[test]
+    fn render_tape_separates_when_a_glyph_is_multi_character() {
+        let snapshot = TapeSnapshot {
+            origin: 0,
+            cells: vec![0, 1, 1],
+            head: 0,
+            alphabet: None,
+        };
+        let alphabet = vec!["0".to_string(), "11".to_string()];
+        let text = render_tape(&snapshot, &alphabet, Delimit::Auto);
+        assert!(text.contains("|0|11|11|"), "got:\n{text}");
+    }
+
+    #[test]
+    fn render_tape_honours_forced_modes() {
+        let snapshot = TapeSnapshot {
+            origin: 0,
+            cells: vec![0, 1],
+            head: 0,
+            alphabet: None,
+        };
+        let single = vec!["a".to_string(), "b".to_string()];
+        assert!(render_tape(&snapshot, &single, Delimit::Separated).contains("|a|b|"));
+
+        let multi = vec!["0".to_string(), "11".to_string()];
+        assert!(render_tape(&snapshot, &multi, Delimit::Dense).contains("|011|"));
+    }
+
+    #[test]
+    fn the_caret_tracks_the_head_through_separators() {
+        let snapshot = TapeSnapshot {
+            origin: 0,
+            cells: vec![0, 1],
+            head: 1,
+            alphabet: None,
+        };
+        let alphabet = vec!["0".to_string(), "11".to_string()];
+        let text = render_tape(&snapshot, &alphabet, Delimit::Auto);
+        let mut lines = text.lines().skip(1); // past the "origin …, head …" line
+        let cells = lines.next().unwrap();
+        let caret = lines.next().unwrap();
+        // Carets sit under the head cell's glyph, not under a separator.
+        let start = cells.find("11").unwrap();
+        assert_eq!(
+            caret.trim_end().len(),
+            start + 2,
+            "cells: {cells}\ncaret: {caret}"
+        );
+        assert!(caret.trim_start().chars().all(|c| c == '^'));
     }
 }
