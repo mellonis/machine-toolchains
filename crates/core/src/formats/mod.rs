@@ -21,8 +21,11 @@ pub const PROFILE_BASE: u8 = 0;
 pub const PROFILE_FRAMES: u8 = 1;
 
 pub mod executable;
+pub mod glyphs;
 pub mod object;
 pub mod tapeblock;
+
+pub use glyphs::{GlyphListError, parse_glyph_list};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FormatError {
