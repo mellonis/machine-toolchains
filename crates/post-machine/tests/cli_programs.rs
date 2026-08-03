@@ -1584,3 +1584,71 @@ fn fmt_pma_raw_line_is_a_per_file_error_on_stderr() {
         ".func f\n        rgt\n"
     );
 }
+
+/// A block whose per-tape override disagrees with the block fallback: cell 0
+/// holds index 1, which the override labels `y` and the fallback labels `B`.
+/// No tool in either toolchain emits that shape — PM never writes per-tape
+/// overrides, and TM's decimal labels are equal at every shared index — which
+/// is why the defect below went unseen. Both PM sites must resolve the
+/// override, as `tape_set` and both TM twins already do.
+///
+/// NOTE: the subcommand is still spelled `tape`; the rename to `tape-block`
+/// updates these two tests along with every other call site.
+fn per_tape_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/per_tape_alphabet.pmt")
+}
+
+#[test]
+fn tape_show_resolves_a_per_tape_alphabet_override() {
+    let path = per_tape_fixture();
+    let out = execute(&args(&["tape", "show", path.to_str().unwrap()])).unwrap();
+    assert!(
+        out.stdout.contains("|y|"),
+        "expected the override glyph `y`, got:\n{}",
+        out.stdout
+    );
+    assert!(
+        !out.stdout.contains("|B|"),
+        "rendered through the block fallback instead of the override:\n{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn run_resolves_a_per_tape_alphabet_override_and_save_preserves_it() {
+    let dir = scratch("per_tape_override");
+    let src = dir.join("noop.pmc");
+    fs::write(&src, "main() { 1: right(!); }").unwrap();
+    execute(&args(&["compile", src.to_str().unwrap()])).unwrap();
+    execute(&args(&["link", dir.join("noop.pmo").to_str().unwrap()])).unwrap();
+    let saved = dir.join("saved.pmt");
+
+    let out = execute(&args(&[
+        "run",
+        dir.join("noop.pmx").to_str().unwrap(),
+        "--tape-block",
+        per_tape_fixture().to_str().unwrap(),
+        "--save-tape-block",
+        saved.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        out.stdout.contains('y'),
+        "run rendered through the block fallback:\n{}",
+        out.stdout
+    );
+
+    // The saved block must carry the glyphs the run actually used, not the
+    // fallback: --save-tape-block persists whatever `initial_tape` resolved.
+    let shown = execute(&args(&["tape", "show", saved.to_str().unwrap()])).unwrap();
+    assert!(
+        shown.stdout.contains('y'),
+        "--save-tape-block persisted the wrong glyphs:\n{}",
+        shown.stdout
+    );
+    assert!(
+        !shown.stdout.contains('B'),
+        "--save-tape-block persisted the fallback glyphs:\n{}",
+        shown.stdout
+    );
+}

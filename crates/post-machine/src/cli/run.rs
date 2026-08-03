@@ -274,7 +274,15 @@ fn initial_tape(
             return Err(format!("{path}: PM-1 blocks hold exactly one tape"));
         };
         let tape = InfiniteTape::from_snapshot(snapshot).map_err(|e| format!("{path}: {e:?}"))?;
-        return Ok((tape, file.alphabet));
+        // The band's own glyph table wins over the block fallback. Falling
+        // back unconditionally would render — and, through
+        // `--save-tape-block`, rewrite — a foreign block with the wrong
+        // glyphs (docs/formats.md (per-tape glyph tables)).
+        let effective = snapshot
+            .alphabet
+            .clone()
+            .unwrap_or_else(|| file.alphabet.clone());
+        return Ok((tape, effective));
     }
     if let Some(pattern) = inline {
         let cells: Result<Vec<bool>, String> = pattern

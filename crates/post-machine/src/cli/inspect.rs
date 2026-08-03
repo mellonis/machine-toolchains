@@ -302,7 +302,13 @@ fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
     let block = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{input}: {e}"))?;
     let mut out = format!("alphabet: {:?}\n", block.alphabet);
     for (i, tape) in block.tapes.iter().enumerate() {
-        out.push_str(&format!("tape {i}: {}", render_tape(tape, &block.alphabet)));
+        // Each band renders through its own effective alphabet (its override
+        // if present, else the block fallback). PM-1's own tools never write
+        // per-tape tables, but `.pmt` and `.tmt` are one container, so a block
+        // authored elsewhere can carry them
+        // (docs/formats.md (per-tape glyph tables)).
+        let effective: &[String] = tape.alphabet.as_deref().unwrap_or(&block.alphabet);
+        out.push_str(&format!("tape {i}: {}", render_tape(tape, effective)));
     }
     Ok(CliOutput::ok(out, String::new()))
 }
