@@ -198,7 +198,7 @@ fn stdlib_auto_links_and_nostdlib_opts_out() {
     // yields "10", stopping with exit 0.
     let tape = dir.join("consumer.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -207,7 +207,7 @@ fn stdlib_auto_links_and_nostdlib_opts_out() {
     ]))
     .unwrap();
     execute(&args(&[
-        "tape",
+        "tape-block",
         "set",
         tape.to_str().unwrap(),
         "--in-place",
@@ -220,7 +220,7 @@ fn stdlib_auto_links_and_nostdlib_opts_out() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -250,7 +250,7 @@ fn full_pipeline_marked_tape_stops_with_exit_0() {
     // tape new --from mints a blank one-band template with a binary alphabet.
     let tape = dir.join("prog.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -260,7 +260,7 @@ fn full_pipeline_marked_tape_stops_with_exit_0() {
     .unwrap();
     // tape set marks the start cell so `rd; mtc T0` yields MR=1.
     execute(&args(&[
-        "tape",
+        "tape-block",
         "set",
         tape.to_str().unwrap(),
         "--in-place",
@@ -274,7 +274,7 @@ fn full_pipeline_marked_tape_stops_with_exit_0() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -288,7 +288,7 @@ fn halt_variant_exits_2() {
     let exe = asm_and_link(&dir, "prog", &one_tape_program("hlt"));
     let tape = dir.join("prog.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -297,7 +297,7 @@ fn halt_variant_exits_2() {
     ]))
     .unwrap();
     execute(&args(&[
-        "tape",
+        "tape-block",
         "set",
         tape.to_str().unwrap(),
         "--in-place",
@@ -308,7 +308,7 @@ fn halt_variant_exits_2() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -323,7 +323,7 @@ fn blank_tape_mr0_djmp_traps_with_exit_3() {
     // A blank tape reads 0, so `mtc T0` yields MR=0 and `djmp` traps.
     let tape = dir.join("prog.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -334,7 +334,7 @@ fn blank_tape_mr0_djmp_traps_with_exit_3() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -348,7 +348,7 @@ fn trace_streams_listing_lines_and_still_reports_the_outcome() {
     let exe = asm_and_link(&dir, "prog", &one_tape_program("stp"));
     let tape = dir.join("prog.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -357,7 +357,7 @@ fn trace_streams_listing_lines_and_still_reports_the_outcome() {
     ]))
     .unwrap();
     execute(&args(&[
-        "tape",
+        "tape-block",
         "set",
         tape.to_str().unwrap(),
         "--in-place",
@@ -374,7 +374,7 @@ fn trace_streams_listing_lines_and_still_reports_the_outcome() {
         &args(&[
             "run",
             exe.to_str().unwrap(),
-            "--tape",
+            "--tape-block",
             tape.to_str().unwrap(),
             "--trace",
         ]),
@@ -412,7 +412,7 @@ fn tape_count_mismatch_is_a_tool_error_naming_both_numbers() {
     let two = asm_and_link(&dir, "two", two_src);
     let tape = dir.join("two.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         two.to_str().unwrap(),
@@ -424,7 +424,7 @@ fn tape_count_mismatch_is_a_tool_error_naming_both_numbers() {
     let err = execute(&args(&[
         "run",
         one.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap_err();
@@ -448,7 +448,7 @@ fn wide_alphabet_tape_writes_a_symbol_beyond_binary_and_stops() {
     let exe = asm_and_link(&dir, "prog", src);
     let tape = dir.join("prog.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -460,7 +460,7 @@ fn wide_alphabet_tape_writes_a_symbol_beyond_binary_and_stops() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -492,7 +492,7 @@ fn tape_new_sizes_per_tape_alphabets_from_cardinalities() {
     let exe = asm_and_link(&dir, "prog", src);
     let tape = dir.join("prog.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -531,7 +531,7 @@ fn tape_new_rejects_an_oversize_alphabet_without_panicking() {
     let exe = asm_and_link(&dir, "oversize", src);
     let tape = dir.join("oversize.tmt");
     let err = execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -648,7 +648,7 @@ fn compile_link_run_a1_stops_with_exit_0() {
     let exe = compile_and_link(&dir, "a1", "a1_replace_b.tmc");
     let tape = dir.join("a1.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -658,7 +658,7 @@ fn compile_link_run_a1_stops_with_exit_0() {
     .unwrap();
     // ab card 3 → labels "0"/"1"/"2"; seed "bab" = indices [2,1,2], head 0.
     execute(&args(&[
-        "tape",
+        "tape-block",
         "set",
         tape.to_str().unwrap(),
         "--in-place",
@@ -669,7 +669,7 @@ fn compile_link_run_a1_stops_with_exit_0() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -698,7 +698,7 @@ fn compile_link_run_a4_overflow_halts_with_exit_2() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -713,7 +713,7 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
     let exe = compile_and_link(&dir, "a5", "a5_call_across_alphabets.tmc");
     let tape = dir.join("a5.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -723,7 +723,7 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
     .unwrap();
     // ctl (tape 0, card 3): index 2 = '1' triggers the call.
     execute(&args(&[
-        "tape",
+        "tape-block",
         "set",
         tape.to_str().unwrap(),
         "--in-place",
@@ -735,7 +735,7 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
     .unwrap();
     // data (tape 1, card 5): index 1 = 'a', a holey wide symbol → unmapped-read.
     execute(&args(&[
-        "tape",
+        "tape-block",
         "set",
         tape.to_str().unwrap(),
         "--in-place",
@@ -748,7 +748,7 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();

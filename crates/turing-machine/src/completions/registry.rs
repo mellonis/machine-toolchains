@@ -16,7 +16,7 @@
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     /// Dotted path from the root, e.g. `["compile"]` or
-    /// `["tape", "show"]`. The empty path is the bare `tmt` invocation.
+    /// `["tape-block", "show"]`. The empty path is the bare `tmt` invocation.
     pub path: Vec<String>,
     pub flags: Vec<FlagSpec>,
     pub positional: Positional,
@@ -493,7 +493,7 @@ fn dis_spec() -> CommandSpec {
 /// the usage instead).
 fn tape_new_spec() -> CommandSpec {
     CommandSpec {
-        path: strings(&["tape", "new"]),
+        path: strings(&["tape-block", "new"]),
         positional: Positional::None,
         flags: vec![
             FlagSpec::value(
@@ -512,7 +512,7 @@ fn tape_new_spec() -> CommandSpec {
 
 fn tape_set_spec() -> CommandSpec {
     CommandSpec {
-        path: strings(&["tape", "set"]),
+        path: strings(&["tape-block", "set"]),
         positional: Positional::One(PositionalHint::File(ext(&["tmt"]))),
         flags: vec![
             FlagSpec::value(
@@ -536,7 +536,7 @@ fn tape_set_spec() -> CommandSpec {
 
 fn tape_show_spec() -> CommandSpec {
     CommandSpec {
-        path: strings(&["tape", "show"]),
+        path: strings(&["tape-block", "show"]),
         positional: Positional::One(PositionalHint::File(ext(&["tmt"]))),
         flags: vec![],
     }
@@ -552,7 +552,7 @@ fn run_spec() -> CommandSpec {
             // from an MT snapshot (there is no inline glyph-pattern
             // form to be mutually exclusive with).
             FlagSpec::value(
-                "--tape",
+                "--tape-block",
                 "load the initial tape band from an MT snapshot",
                 ValueHint::File(ext(&["tmt"])),
             ),
@@ -613,7 +613,7 @@ fn top_level_help(name: &str) -> &'static str {
         "build" => "compile+link driver: .tmc/.tma/.tmo inputs or manifest targets",
         "dis" => "disassemble a .tmo or .tmx (--listing for the address view)",
         "run" => "execute a .tmx on a multi-tape .tmt block",
-        "tape" => "new/set/show .tmt tape-block snapshots",
+        "tape-block" => "new/set/show .tmt tape-block snapshots",
         "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
         "lint" => "hygiene findings over .tmc and .tma sources",
         "fmt" => "canonical formatting for .tmc and .tma sources",
@@ -628,9 +628,9 @@ fn group_child_help(path: &[String]) -> &'static str {
         path.first().map(String::as_str),
         path.get(1).map(String::as_str),
     ) {
-        (Some("tape"), Some("new")) => "write a blank .tmt template sized to an executable",
-        (Some("tape"), Some("set")) => "clone a .tmt tape-block snapshot with edits",
-        (Some("tape"), Some("show")) => "render a .tmt tape-block snapshot",
+        (Some("tape-block"), Some("new")) => "write a blank .tmt template sized to an executable",
+        (Some("tape-block"), Some("set")) => "clone a .tmt tape-block snapshot with edits",
+        (Some("tape-block"), Some("show")) => "render a .tmt tape-block snapshot",
         (Some("ir"), Some("graph")) => "render --emit-ir JSON as a Mermaid flowchart",
         _ => "",
     }
@@ -757,7 +757,7 @@ mod tests {
                 "build",
                 "dis",
                 "run",
-                "tape",
+                "tape-block",
                 "ir",
                 "lint",
                 "fmt",

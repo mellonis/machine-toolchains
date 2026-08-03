@@ -25,7 +25,7 @@ SUBCOMMANDS:
   build        compile+link driver: .tmc/.tma/.tmo inputs or manifest targets
   dis          disassemble a .tmo or .tmx (--listing for the address view)
   run          execute a .tmx on a multi-tape .tmt block
-  tape         new/set/show .tmt tape-block snapshots
+  tape-block   new/set/show .tmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lint         hygiene findings over .tmc and .tma sources
   fmt          canonical formatting for .tmc and .tma sources
@@ -475,7 +475,7 @@ code view: addresses + raw bytes, not reassembleable.
 
 Accepts either a `.tmo` or a `.tmx` on the same command line, told apart by
 magic sniffing rather than by extension (`docs/formats.md`). Handed a `.tmt`
-tape block it says so and points at `tmt tape show`.
+tape block it says so and points at `tmt tape-block show`.
 
 **Sidecar discovery:** an explicit `--map` always wins; failing that, `tmt`
 looks for `FILE.tmx.map` beside the executable. A missing or unparsable
@@ -496,10 +496,10 @@ for byte. `--listing` applies to executables only.
 ## `tmt run`
 
 ```
-USAGE: tmt run APP.tmx --tape TAPES.tmt [FLAGS]
+USAGE: tmt run APP.tmx --tape-block TAPES.tmt [FLAGS]
 
 TAPE:
-  --tape TAPES.tmt    load the initial tape band from an MT snapshot
+  --tape-block TAPES.tmt  load the initial tape band from an MT snapshot
                       (one band per image tape; alphabets sized per band)
 
 LIMITS:
@@ -521,8 +521,8 @@ step and tact counts, and every tape's final contents with its head marked.
 
 `--tape` is **required** — unlike `pmt run`, which defaults to an empty tape,
 a TM-1 image runs a whole band of tapes and there is no inline glyph-pattern
-form to build one from. Mint a template with `tmt tape new --from` and fill
-it in with `tmt tape set`. The block's band count must equal the image's tape
+form to build one from. Mint a template with `tmt tape-block new --from` and fill
+it in with `tmt tape-block set`. The block's band count must equal the image's tape
 count; a mismatch is a tool error naming both numbers:
 
 ```
@@ -572,13 +572,13 @@ program is wrong — it may only mean it needed a longer leash. Read the
 outcome line before concluding. `docs/tmt/isa.md` covers trap kinds at the
 machine level.
 
-## `tmt tape`
+## `tmt tape-block`
 
 ```
-USAGE: tmt tape new --from APP.tmx [-o OUT.tmt]
-       tmt tape set IN.tmt (-o OUT.tmt | --in-place)
+USAGE: tmt tape-block new --from APP.tmx [-o OUT.tmt]
+       tmt tape-block set IN.tmt (-o OUT.tmt | --in-place)
                     [--tape N] [--cells PATTERN] [--origin N] [--head N]
-       tmt tape show FILE.tmt [--dense | --separated]
+       tmt tape-block show FILE.tmt [--dense | --separated]
 
 new: a blank template sized to the executable's tape count, each tape's
 alphabet the decimal labels 0..card-1 from the image's per-tape
@@ -592,7 +592,7 @@ hand-editing bytes. There is no `tape build`: PM-1's is glyph-pattern sugar
 tied to a fixed two-symbol alphabet, and TM-1 tapes carry per-tape
 alphabets, so cells are set through `set --cells` against a template minted
 by `new --from`. Note that the group's children take no `--help` of their
-own — run `tmt tape` bare for the usage above.
+own — run `tmt tape-block` bare for the usage above.
 
 **`tape new --from APP.tmx`** writes a blank snapshot shaped to a specific
 program: one empty band per tape the image expects, origin and head at 0,
@@ -618,7 +618,7 @@ leftmost character as cell 0. A character outside that alphabet is an error
 listing the alphabet it was checked against:
 
 ```
-$ tmt tape set t.tmt -o out.tmt --cells "Z"
+$ tmt tape-block set t.tmt -o out.tmt --cells "Z"
 tmt: bad cell character `Z` (alphabet: ["0", "1", "2"])
 ```
 

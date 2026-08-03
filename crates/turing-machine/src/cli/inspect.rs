@@ -71,7 +71,9 @@ pub(super) fn dis(raw: &[String]) -> Result<CliOutput, String> {
             };
             Ok(CliOutput::ok(text, String::new()))
         }
-        Some(ContainerKind::TapeBlock) => Err("that is a tape block — use `tmt tape show`".into()),
+        Some(ContainerKind::TapeBlock) => {
+            Err("that is a tape block — use `tmt tape-block show`".into())
+        }
         None => Err(format!("{}: not a toolchain container", path.display())),
     }
 }
@@ -101,10 +103,10 @@ fn load_map(exe_path: &Path, explicit: Option<String>) -> Result<Option<MapFile>
 }
 
 const TAPE_USAGE: &str = "\
-USAGE: tmt tape new --from APP.tmx [-o OUT.tmt]
-       tmt tape set IN.tmt (-o OUT.tmt | --in-place)
+USAGE: tmt tape-block new --from APP.tmx [-o OUT.tmt]
+       tmt tape-block set IN.tmt (-o OUT.tmt | --in-place)
                     [--tape N] [--cells PATTERN] [--origin N] [--head N]
-       tmt tape show FILE.tmt [--dense | --separated]
+       tmt tape-block show FILE.tmt [--dense | --separated]
 
 new: a blank template sized to the executable's tape count, each tape's
 alphabet the decimal labels 0..card-1 from the image's per-tape
@@ -113,7 +115,7 @@ cardinalities. set: clone IN.tmt, applying edits to tape N (default 0);
 renders any .tmt with its own alphabet.
 ";
 
-pub(super) fn tape(raw: &[String]) -> Result<CliOutput, String> {
+pub(super) fn tape_block(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
         Some("new") => tape_new(&raw[1..]),
         Some("set") => tape_set(&raw[1..]),
@@ -122,7 +124,7 @@ pub(super) fn tape(raw: &[String]) -> Result<CliOutput, String> {
     }
 }
 
-/// `tmt tape new --from APP.tmx [-o OUT.tmt]` — a blank tape template sized
+/// `tmt tape-block new --from APP.tmx [-o OUT.tmt]` — a blank tape template sized
 /// to the executable's tape count, one band per tape. Each band carries
 /// its own alphabet: the decimal-string labels `0..card-1` taken from the
 /// image's per-tape `alphabet_cardinalities` (MT v2 per-tape alphabets).
@@ -135,11 +137,13 @@ fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
     let extra = args.positionals()?;
     if !extra.is_empty() {
         return Err(format!(
-            "tape new takes no positional arguments\n\n{TAPE_USAGE}"
+            "tape-block new takes no positional arguments\n\n{TAPE_USAGE}"
         ));
     }
     let Some(from) = from else {
-        return Err(format!("tape new needs --from APP.tmx\n\n{TAPE_USAGE}"));
+        return Err(format!(
+            "tape-block new needs --from APP.tmx\n\n{TAPE_USAGE}"
+        ));
     };
     let bytes = fs::read(&from).map_err(|e| format!("cannot read {from}: {e}"))?;
     match sniff(&bytes) {
@@ -177,7 +181,7 @@ fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
     Ok(CliOutput::ok(String::new(), String::new()))
 }
 
-/// `tmt tape set IN.tmt (-o OUT.tmt | --in-place) [--tape N] [--cells P]
+/// `tmt tape-block set IN.tmt (-o OUT.tmt | --in-place) [--tape N] [--cells P]
 /// [--origin N] [--head N]` — clone semantics: read `IN.tmt`, apply the
 /// given edits to tape N (default 0), and write the result out. The source
 /// is never mutated; the output goes to `-o` or, with `--in-place`, back
@@ -203,7 +207,9 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     };
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
-        return Err(format!("tape set takes exactly one file\n\n{TAPE_USAGE}"));
+        return Err(format!(
+            "tape-block set takes exactly one file\n\n{TAPE_USAGE}"
+        ));
     };
 
     // Output destination: exactly one of -o / --in-place. Refusing the
@@ -211,14 +217,14 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     let dest: String = match (out, in_place) {
         (Some(_), true) => {
             return Err(format!(
-                "tape set: -o and --in-place are mutually exclusive\n\n{TAPE_USAGE}"
+                "tape-block set: -o and --in-place are mutually exclusive\n\n{TAPE_USAGE}"
             ));
         }
         (Some(path), false) => path,
         (None, true) => input.clone(),
         (None, false) => {
             return Err(format!(
-                "tape set needs -o OUT.tmt or --in-place\n\n{TAPE_USAGE}"
+                "tape-block set needs -o OUT.tmt or --in-place\n\n{TAPE_USAGE}"
             ));
         }
     };
@@ -320,11 +326,13 @@ fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
     let separated = args.flag("--separated");
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
-        return Err(format!("tape show takes exactly one file\n\n{TAPE_USAGE}"));
+        return Err(format!(
+            "tape-block show takes exactly one file\n\n{TAPE_USAGE}"
+        ));
     };
     let delimit = match (dense, separated) {
         (true, true) => {
-            return Err("tape show: --dense and --separated are mutually exclusive".into());
+            return Err("tape-block show: --dense and --separated are mutually exclusive".into());
         }
         (true, false) => Delimit::Dense,
         (false, true) => Delimit::Separated,

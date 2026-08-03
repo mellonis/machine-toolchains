@@ -334,7 +334,7 @@ fn cli_setup(dir: &Path) -> (PathBuf, PathBuf) {
     .unwrap();
     let tape = dir.join("milestone.tmt");
     execute(&args(&[
-        "tape",
+        "tape-block",
         "new",
         "--from",
         exe.to_str().unwrap(),
@@ -349,7 +349,7 @@ fn cli_setup(dir: &Path) -> (PathBuf, PathBuf) {
 fn seed_happy(tape: &Path) {
     for band in ["2", "0"] {
         execute(&args(&[
-            "tape",
+            "tape-block",
             "set",
             tape.to_str().unwrap(),
             "--in-place",
@@ -370,7 +370,7 @@ fn cli_happy_path_runs_and_exits_zero() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -387,7 +387,7 @@ fn cli_blank_tape_traps_no_transition_and_exits_three() {
     let out = execute(&args(&[
         "run",
         exe.to_str().unwrap(),
-        "--tape",
+        "--tape-block",
         tape.to_str().unwrap(),
     ]))
     .unwrap();
@@ -405,7 +405,7 @@ fn cli_trace_shows_fr_zero_outside_and_non_zero_inside_the_frame() {
         &args(&[
             "run",
             exe.to_str().unwrap(),
-            "--tape",
+            "--tape-block",
             tape.to_str().unwrap(),
             "--trace",
         ]),

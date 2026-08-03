@@ -2326,6 +2326,15 @@ git commit -m "feat(turing-machine): tmt run --save-tape-block and a per-tape ca
 
 The registry is the single in-crate description of the CLI surface, and its drift guard probes the real parser with every entry. Task 5 renamed the paths; this task adds the new flags.
 
+**Pre-existing defect to fix here** (found during Task 5, not caused by it): a
+registry description containing an apostrophe is emitted **unescaped** inside a
+zsh single-quoted string. Today `"glyph pattern for the tape's cells"` renders
+as `'--cells[glyph pattern for the tape's cells]:value:'`, which zsh parses as
+quote-concatenation and mangles the description. `zsh -n` and `compinit` both
+accept it, so the existing integration tests cannot catch it. Escape `'` as
+`'\''` in the renderer's description path, and add a unit test asserting a
+description containing an apostrophe round-trips.
+
 - [ ] **Step 1: Update TM's specs**
 
 In `crates/turing-machine/src/completions/registry.rs`, replace `tape_new_spec`, `tape_set_spec`, `tape_show_spec` flag lists. The four edit flags are repeatable `KEY=GLYPHS` values with `ValueHint::Text`:

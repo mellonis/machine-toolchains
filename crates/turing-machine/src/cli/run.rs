@@ -21,10 +21,10 @@ use crate::arch::Tm1;
 use super::{Args, CliOutput, Delimit, render_tape};
 
 const RUN_USAGE: &str = "\
-USAGE: tmt run APP.tmx --tape TAPES.tmt [FLAGS]
+USAGE: tmt run APP.tmx --tape-block TAPES.tmt [FLAGS]
 
 TAPE:
-  --tape TAPES.tmt    load the initial tape band from an MT snapshot
+  --tape-block TAPES.tmt  load the initial tape band from an MT snapshot
                       (one band per image tape; alphabets sized per band)
 
 LIMITS:
@@ -51,7 +51,7 @@ const DEFAULT_MAX_STEPS: u64 = 10_000_000;
 /// no `--tact-profile` knob to carry.
 #[derive(Debug, Clone, Default)]
 pub(super) struct RunSettings {
-    /// `--tape PATH.tmt`. `None` reaches `execute_run` only from a bare
+    /// `--tape-block PATH.tmt`. `None` reaches `execute_run` only from a bare
     /// `tmt run` with no flag, which errors there as it does today —
     /// the driver checks earlier so it can name the target.
     pub tape: Option<String>,
@@ -85,7 +85,7 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         ),
         None => None,
     };
-    let tape = args.value("--tape")?;
+    let tape = args.value("--tape-block")?;
     let inputs = args.positionals()?;
     let [exe_path] = inputs.as_slice() else {
         return Err(format!("run takes exactly one executable\n\n{RUN_USAGE}"));
@@ -112,7 +112,7 @@ pub(super) fn execute_run(
     let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{}: {e}", exe_path.display()))?;
 
     let Some(tape_path) = settings.tape.as_deref() else {
-        return Err(format!("run needs --tape TAPES.tmt\n\n{RUN_USAGE}"));
+        return Err(format!("run needs --tape-block TAPES.tmt\n\n{RUN_USAGE}"));
     };
     let tape_bytes = fs::read(tape_path).map_err(|e| format!("cannot read {tape_path}: {e}"))?;
     let block = TapeBlockFile::from_bytes(&tape_bytes).map_err(|e| format!("{tape_path}: {e}"))?;

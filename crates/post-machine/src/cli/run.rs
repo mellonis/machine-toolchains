@@ -21,7 +21,7 @@ USAGE: pmt run APP.pmx [FLAGS]
 
 TAPE (default: empty, head 0):
   --tape-block IN.pmt        load the initial tape from a snapshot
-  --tape \" * *\" [--head N]   build the initial tape inline
+  --tape-cells \" * *\" [--head N]  build the initial tape inline
   --save-tape-block OUT.pmt  write the final tape as a snapshot
 
 LIMITS AND SEMANTICS:
@@ -104,7 +104,7 @@ pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<
         None => TactProfile::ELECTRONIC,
     };
     let tape_block = args.value("--tape-block")?;
-    let tape_inline = args.value("--tape")?;
+    let tape_inline = args.value("--tape-cells")?;
     let head: i64 = match args.value("--head")? {
         Some(text) => text.parse().map_err(|_| format!("bad --head `{text}`"))?,
         None => 0,
@@ -264,7 +264,7 @@ fn initial_tape(
     head: i64,
 ) -> Result<(InfiniteTape, Vec<String>), String> {
     if block.is_some() && inline.is_some() {
-        return Err("--tape-block and --tape are mutually exclusive".into());
+        return Err("--tape-block and --tape-cells are mutually exclusive".into());
     }
     let default_alphabet: Vec<String> = DEFAULT_GLYPHS.iter().map(|g| g.to_string()).collect();
     if let Some(path) = block {

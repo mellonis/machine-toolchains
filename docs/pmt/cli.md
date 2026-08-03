@@ -22,7 +22,7 @@ SUBCOMMANDS:
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
-  tape         build/new/set/show .pmt tape-block snapshots
+  tape-block   build/new/set/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
@@ -427,14 +427,14 @@ control-flow path reaches), branch/call targets resolved to
 not reassembleable — it exists to inspect what a `.pmx` actually contains,
 byte for byte, not to round-trip it.
 
-## `pmt tape`
+## `pmt tape-block`
 
 ```
-USAGE: pmt tape build " * * *" [--head N] [-o OUT.pmt]
-       pmt tape new --from APP.pmx [-o OUT.pmt]
-       pmt tape set IN.pmt (-o OUT.pmt | --in-place)
+USAGE: pmt tape-block build " * * *" [--head N] [-o OUT.pmt]
+       pmt tape-block new --from APP.pmx [-o OUT.pmt]
+       pmt tape-block set IN.pmt (-o OUT.pmt | --in-place)
                     [--tape N] [--cells PATTERN] [--origin N] [--head N]
-       pmt tape show FILE.pmt [--dense | --separated]
+       pmt tape-block show FILE.pmt [--dense | --separated]
 
 build: cell characters are the PM-1 glyphs (space = blank, * = mark);
 the leftmost character is cell 0. new: a blank template sized to the
@@ -486,7 +486,7 @@ USAGE: pmt run APP.pmx [FLAGS]
 
 TAPE (default: empty, head 0):
   --tape-block IN.pmt        load the initial tape from a snapshot
-  --tape " * *" [--head N]   build the initial tape inline
+  --tape-cells " * *" [--head N]  build the initial tape inline
   --save-tape-block OUT.pmt  write the final tape as a snapshot
 
 LIMITS AND SEMANTICS:

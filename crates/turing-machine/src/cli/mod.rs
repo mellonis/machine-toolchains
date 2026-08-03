@@ -53,7 +53,7 @@ SUBCOMMANDS:
   build        compile+link driver: .tmc/.tma/.tmo inputs or manifest targets
   dis          disassemble a .tmo or .tmx (--listing for the address view)
   run          execute a .tmx on a multi-tape .tmt block
-  tape         new/set/show .tmt tape-block snapshots
+  tape-block   new/set/show .tmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lint         hygiene findings over .tmc and .tma sources
   fmt          canonical formatting for .tmc and .tma sources
@@ -90,7 +90,7 @@ pub fn execute_with(
         Some("link") => build::link(&args[1..]),
         Some("build") => driver::build(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),
-        Some("tape") => inspect::tape(&args[1..]),
+        Some("tape-block") => inspect::tape_block(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
         Some("lint") => lint::lint(&args[1..]),

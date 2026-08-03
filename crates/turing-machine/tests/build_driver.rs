@@ -359,7 +359,14 @@ fn write_project(dir: &Path) {
     );
     fs::create_dir_all(dir.join("tapes")).unwrap();
     let out = tmt()
-        .args(["tape", "new", "--from", "app.tmx", "-o", "tapes/app-in.tmt"])
+        .args([
+            "tape-block",
+            "new",
+            "--from",
+            "app.tmx",
+            "-o",
+            "tapes/app-in.tmt",
+        ])
         .current_dir(dir)
         .output()
         .unwrap();
@@ -870,7 +877,14 @@ fn build_run_adopts_the_machine_exit_code() {
     );
     fs::create_dir_all(dir.join("tapes")).unwrap();
     let out = tmt()
-        .args(["tape", "new", "--from", "app.tmx", "-o", "tapes/app-in.tmt"])
+        .args([
+            "tape-block",
+            "new",
+            "--from",
+            "app.tmx",
+            "-o",
+            "tapes/app-in.tmt",
+        ])
         .current_dir(&dir)
         .output()
         .unwrap();
@@ -882,7 +896,7 @@ fn build_run_adopts_the_machine_exit_code() {
     // ctl (tape 0, card 3): index 2 = '1' triggers the call.
     let out = tmt()
         .args([
-            "tape",
+            "tape-block",
             "set",
             "tapes/app-in.tmt",
             "--in-place",
@@ -902,7 +916,7 @@ fn build_run_adopts_the_machine_exit_code() {
     // data (tape 1, card 5): index 1 = 'a', a holey wide symbol → unmapped-read.
     let out = tmt()
         .args([
-            "tape",
+            "tape-block",
             "set",
             "tapes/app-in.tmt",
             "--in-place",
@@ -921,7 +935,7 @@ fn build_run_adopts_the_machine_exit_code() {
     );
 
     let direct = tmt()
-        .args(["run", "--tape", "tapes/app-in.tmt", "app.tmx"])
+        .args(["run", "--tape-block", "tapes/app-in.tmt", "app.tmx"])
         .current_dir(&dir)
         .output()
         .unwrap();

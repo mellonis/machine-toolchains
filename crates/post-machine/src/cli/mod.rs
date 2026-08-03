@@ -46,7 +46,7 @@ SUBCOMMANDS:
   fmt          format .pmc/.pma sources in place (--check to preview; -)
   dis          disassemble a .pmo or .pmx (--listing for the address view)
   run          execute a .pmx on a tape
-  tape         build/new/set/show .pmt tape-block snapshots
+  tape-block   build/new/set/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
@@ -82,7 +82,7 @@ pub fn execute_with(
         Some("lint") => lint::lint(&args[1..]),
         Some("fmt") => fmt::fmt(&args[1..]),
         Some("dis") => inspect::dis(&args[1..]),
-        Some("tape") => inspect::tape(&args[1..]),
+        Some("tape-block") => inspect::tape_block(&args[1..]),
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
         Some("lsp") => lsp::lsp(&args[1..]),
