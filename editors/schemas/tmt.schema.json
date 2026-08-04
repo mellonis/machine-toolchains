@@ -131,11 +131,11 @@
         "max-steps": {
           "type": "integer",
           "minimum": 0,
-          "description": "Step budget. Mutually exclusive with no-step-limit."
+          "description": "Step budget. Conflicts with no-step-limit set to true; an explicit false is accepted alongside it."
         },
         "no-step-limit": {
           "type": "boolean",
-          "description": "Remove the step budget entirely. Mutually exclusive with max-steps."
+          "description": "Remove the step budget entirely. Setting this to true conflicts with max-steps; an explicit false does not."
         },
         "max-tacts": {
           "type": "integer",
