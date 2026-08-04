@@ -880,13 +880,12 @@ mod tests {
         );
     }
 
-    /// Every key each inventory lists must be ACCEPTED by the walk. This
-    /// is the half that catches an inventory naming a key the parser
-    /// never had.
+    /// Every inventory must be non-empty, sorted, and duplicate-free — the
+    /// schema set-compare in the editor round reads against sorted lists,
+    /// and a duplicate would make a set-compare pass while the inventory
+    /// misdescribes the level.
     #[test]
-    fn every_inventoried_key_is_accepted() {
-        // (level JSON pointer builder, the level's inventory, a valid
-        // value for each key at that level)
+    fn every_inventory_is_sorted_and_unique() {
         let cases: &[(&str, &[&str])] = &[
             ("manifest", MANIFEST_KEYS),
             ("libraries", LIBRARIES_KEYS),
@@ -911,6 +910,85 @@ mod tests {
                 keys.len(),
                 "{level} inventory has a duplicate"
             );
+        }
+    }
+
+    /// Every key an inventory lists must be REACHABLE in its parse loop.
+    ///
+    /// The membership pre-check means an inventory entry with no match arm
+    /// panics on `unreachable!` instead of failing gracefully. This walks
+    /// every inventoried key through a minimal document that places it at
+    /// its own level and asserts the walk does not reject it as an unknown
+    /// key. A key that also violates a cross-key rule (`head` without
+    /// `tape`) fails with a DIFFERENT error, which is exactly the point:
+    /// this asserts acceptance of the KEY, not validity of the document.
+    ///
+    /// What it cannot check — matching this crate's other registry guards
+    /// — is a key the walk gained a match arm for but which was never
+    /// added to its inventory. Rust cannot enumerate match arms; the
+    /// pre-check makes such an arm dead, so any test exercising that key
+    /// fails instead.
+    #[test]
+    fn every_inventoried_key_is_reachable_in_its_parse_loop() {
+        // A right-TYPED value per key. Document validity is not the point.
+        let value_for = |key: &str| -> serde_json::Value {
+            match key {
+                "sources" => json!([]),
+                "libraries" => json!({}),
+                "stdlib" => json!(true),
+                "profiles" => json!({}),
+                "targets" => json!({}),
+                "dirs" | "link" => json!([]),
+                "debug" | "release" => json!({}),
+                "opt" => json!("O0"),
+                "debug-info" | "strip-debugger" | "werror" => json!(true),
+                "entry" => json!("main"),
+                "output" => json!("app.pmx"),
+                "run" => json!({}),
+                "tape" => json!("1"),
+                "tape-block" => json!("start.pmt"),
+                "head" => json!(0),
+                "strict-cells" => json!(true),
+                "max-steps" | "max-tacts" => json!(1),
+                "tact-profile" => json!([1, 1, 1]),
+                other => panic!("no test value for inventoried key `{other}`"),
+            }
+        };
+
+        // Places a one-key object at each level's position in the tree.
+        // `v` takes the `project` section itself, so the manifest level is
+        // the bare leaf.
+        let at_level = |level: &str, key: &str, value: serde_json::Value| -> serde_json::Value {
+            let leaf = json!({ key: value });
+            match level {
+                "manifest" => leaf,
+                "libraries" => json!({ "libraries": leaf }),
+                "profiles" => json!({ "profiles": leaf }),
+                "profile" => json!({ "profiles": { "debug": leaf } }),
+                "target" => json!({ "targets": { "app": leaf } }),
+                "run" => json!({ "targets": { "app": { "run": leaf } } }),
+                other => panic!("unknown level `{other}`"),
+            }
+        };
+
+        for (level, keys) in [
+            ("manifest", MANIFEST_KEYS),
+            ("libraries", LIBRARIES_KEYS),
+            ("profiles", PROFILES_KEYS),
+            ("profile", PROFILE_KEYS),
+            ("target", TARGET_KEYS),
+            ("run", RUN_KEYS),
+        ] {
+            for key in keys {
+                let doc = at_level(level, key, value_for(key));
+                if let Err(err) = v(doc.clone()) {
+                    assert!(
+                        !matches!(err, crate::config::ConfigError::UnknownKey { .. }),
+                        "`{key}` is in the {level} inventory but the walk rejects it \
+                         as an unknown key: {doc}"
+                    );
+                }
+            }
         }
     }
 
