@@ -116,7 +116,7 @@
       "properties": {
         "tape": {
           "type": "string",
-          "description": "Inline glyph pattern, as `pmt run --tape`. Mutually exclusive with tape-block."
+          "description": "Inline glyph pattern, as `pmt run --tape-cells`. Mutually exclusive with tape-block."
         },
         "tape-block": {
           "type": "string",

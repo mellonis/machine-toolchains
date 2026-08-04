@@ -279,7 +279,7 @@ UNUSED: nop
       directive, mnemonics, the `L1`/`UNUSED` labels, a `;` comment if you
       add one) — this is the shared TextMate grammar
       (`editors/grammars/pma.tmLanguage.json`), copied in by
-      `copy-grammar.js` alongside the `.pmc` one.
+      `copy-assets.js` alongside the `.pmc` one.
 - [x] **Typo mnemonic**: change `jm L1` to `jpm L1`. Confirm a squiggle on
       `jpm` carrying the `unknown-mnemonic` code. **Undo** the typo back to
       `jm L1` before continuing — per `docs/lsp.md`, a fatal error hides
