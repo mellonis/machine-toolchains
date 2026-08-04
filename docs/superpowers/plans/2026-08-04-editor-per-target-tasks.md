@@ -1468,8 +1468,21 @@ function parseTargets(stdout: string): TargetEntry[] {
 }
 
 class PmtTaskProvider implements vscode.TaskProvider {
-  /** Target lists by workspace-folder URI; invalidated by the watcher. */
-  private cache = new Map<string, TargetEntry[]>();
+  /**
+   * How long a successful target list stays cached. The watcher is the
+   * primary invalidation, but it can only observe files inside opened
+   * workspace folders, whereas `build --list-targets` walks up from the
+   * folder root without bound — so the manifest that answers may live
+   * above the watched tree and never fire an event. A short TTL bounds
+   * that staleness without spawning a process on every `provideTasks`.
+   */
+  private static readonly CACHE_TTL_MS = 5000;
+
+  /** Target lists by workspace-folder URI, with the time each was read. */
+  private cache = new Map<string, { entries: TargetEntry[]; at: number }>();
+
+  /** Bumped by every invalidation, to detect one landing mid-fetch. */
+  private epoch = 0;
 
   constructor(private pmtPath: string, private log: vscode.OutputChannel) {}
 
@@ -1480,6 +1493,7 @@ class PmtTaskProvider implements vscode.TaskProvider {
    * folder, so a whole-cache clear costs nothing worth optimizing.
    */
   invalidate() {
+    this.epoch += 1;
     this.cache.clear();
   }
 
@@ -1526,17 +1540,26 @@ class PmtTaskProvider implements vscode.TaskProvider {
   private async targetsFor(folder: vscode.WorkspaceFolder): Promise<TargetEntry[]> {
     const key = folder.uri.toString();
     const cached = this.cache.get(key);
-    if (cached) { return cached; }
-    let entries: TargetEntry[] = [];
+    if (cached && Date.now() - cached.at < PmtTaskProvider.CACHE_TTL_MS) {
+      return cached.entries;
+    }
+    const epoch = this.epoch;
+    let entries: TargetEntry[];
     try {
       entries = parseTargets(await this.listTargets(folder.uri.fsPath));
     } catch (err) {
-      // No manifest, an invalid manifest, or a missing binary. None of
-      // these may cost the user the file-scoped tasks, so this degrades
-      // to "no targets here" and is only reported to the log.
+      // Failures are NOT cached. No manifest, an invalid manifest, or a
+      // missing binary must cost this folder its target tasks only until
+      // the next call — never for the rest of the session. The
+      // file-scoped tasks are unaffected either way.
       this.log.appendLine(`[${folder.name}] build --list-targets: ${err}`);
+      return [];
     }
-    this.cache.set(key, entries);
+    // Drop the write-back if an invalidation landed while awaiting, or
+    // this completing fetch would restore pre-edit data.
+    if (epoch === this.epoch) {
+      this.cache.set(key, { entries, at: Date.now() });
+    }
     return entries;
   }
 
@@ -1710,8 +1733,21 @@ function parseTargets(stdout: string): TargetEntry[] {
 }
 
 class TmtTaskProvider implements vscode.TaskProvider {
-  /** Target lists by workspace-folder URI; invalidated by the watcher. */
-  private cache = new Map<string, TargetEntry[]>();
+  /**
+   * How long a successful target list stays cached. The watcher is the
+   * primary invalidation, but it can only observe files inside opened
+   * workspace folders, whereas `build --list-targets` walks up from the
+   * folder root without bound — so the manifest that answers may live
+   * above the watched tree and never fire an event. A short TTL bounds
+   * that staleness without spawning a process on every `provideTasks`.
+   */
+  private static readonly CACHE_TTL_MS = 5000;
+
+  /** Target lists by workspace-folder URI, with the time each was read. */
+  private cache = new Map<string, { entries: TargetEntry[]; at: number }>();
+
+  /** Bumped by every invalidation, to detect one landing mid-fetch. */
+  private epoch = 0;
 
   constructor(private tmtPath: string, private log: vscode.OutputChannel) {}
 
@@ -1722,6 +1758,7 @@ class TmtTaskProvider implements vscode.TaskProvider {
    * folder, so a whole-cache clear costs nothing worth optimizing.
    */
   invalidate() {
+    this.epoch += 1;
     this.cache.clear();
   }
 
@@ -1770,17 +1807,26 @@ class TmtTaskProvider implements vscode.TaskProvider {
   private async targetsFor(folder: vscode.WorkspaceFolder): Promise<TargetEntry[]> {
     const key = folder.uri.toString();
     const cached = this.cache.get(key);
-    if (cached) { return cached; }
-    let entries: TargetEntry[] = [];
+    if (cached && Date.now() - cached.at < TmtTaskProvider.CACHE_TTL_MS) {
+      return cached.entries;
+    }
+    const epoch = this.epoch;
+    let entries: TargetEntry[];
     try {
       entries = parseTargets(await this.listTargets(folder.uri.fsPath));
     } catch (err) {
-      // No manifest, an invalid manifest, or a missing binary. None of
-      // these may cost the user the file-scoped tasks, so this degrades
-      // to "no targets here" and is only reported to the log.
+      // Failures are NOT cached. No manifest, an invalid manifest, or a
+      // missing binary must cost this folder its target tasks only until
+      // the next call — never for the rest of the session. The
+      // file-scoped tasks are unaffected either way.
       this.log.appendLine(`[${folder.name}] build --list-targets: ${err}`);
+      return [];
     }
-    this.cache.set(key, entries);
+    // Drop the write-back if an invalidation landed while awaiting, or
+    // this completing fetch would restore pre-edit data.
+    if (epoch === this.epoch) {
+      this.cache.set(key, { entries, at: Date.now() });
+    }
     return entries;
   }
 
