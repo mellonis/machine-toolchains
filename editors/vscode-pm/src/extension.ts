@@ -23,8 +23,21 @@ export async function activate(context: vscode.ExtensionContext) {
   };
   client = new LanguageClient('pmt', 'pmt lsp', serverOptions, clientOptions);
   await client.start();
+
+  const log = vscode.window.createOutputChannel('pmt');
+  const provider = new PmtTaskProvider(pmtPath, log);
+  // The project file is the target list's only input, so watching it is
+  // a more precise invalidation than comparing mtimes on every
+  // provideTasks call (docs/pmt/project.md (discovery)).
+  const watcher = vscode.workspace.createFileSystemWatcher('**/pmt.json');
+  watcher.onDidCreate(() => provider.invalidate());
+  watcher.onDidChange(() => provider.invalidate());
+  watcher.onDidDelete(() => provider.invalidate());
   context.subscriptions.push(
-    vscode.tasks.registerTaskProvider('pmt', new PmtTaskProvider(pmtPath)),
+    log,
+    watcher,
+    vscode.workspace.onDidChangeWorkspaceFolders(() => provider.invalidate()),
+    vscode.tasks.registerTaskProvider('pmt', provider),
   );
 }
 
@@ -53,31 +66,135 @@ function older(a: number[], b: number[]): boolean {
   return false;
 }
 
+/** One entry of `pmt build --list-targets` output. */
+interface TargetEntry { name: string; run: boolean; }
+
+/**
+ * Parses `pmt build --list-targets` stdout: one line per target, the
+ * name optionally followed by a TAB and the literal `run` when the
+ * target declares a run block. The format is pinned by the crate's
+ * build_driver tests.
+ */
+function parseTargets(stdout: string): TargetEntry[] {
+  return stdout
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const [name, marker] = line.split('\t');
+      return { name, run: marker === 'run' };
+    })
+    .filter((entry) => entry.name.length > 0);
+}
+
 class PmtTaskProvider implements vscode.TaskProvider {
-  constructor(private pmtPath: string) {}
-  provideTasks(): vscode.Task[] {
+  /** Target lists by workspace-folder URI; invalidated by the watcher. */
+  private cache = new Map<string, TargetEntry[]>();
+
+  constructor(private pmtPath: string, private log: vscode.OutputChannel) {}
+
+  /**
+   * Drops every cached target list. Deliberately not per-folder: a
+   * project file appearing or disappearing changes WHICH folders resolve
+   * targets at all, and the cache holds at most one entry per workspace
+   * folder, so a whole-cache clear costs nothing worth optimizing.
+   */
+  invalidate() {
+    this.cache.clear();
+  }
+
+  async provideTasks(): Promise<vscode.Task[]> {
+    return [...this.fileTasks(), ...(await this.targetTasks())];
+  }
+
+  /** The file-scoped tasks, unchanged: they follow the active editor. */
+  private fileTasks(): vscode.Task[] {
     const doc = vscode.window.activeTextEditor?.document;
     if (!doc || (doc.languageId !== 'pmc' && doc.languageId !== 'pma')) { return []; }
     const file = doc.uri.fsPath;
     const tasks = [
-      this.task('lint', ['lint', file], file),
-      this.task('fmt-check', ['fmt', '--check', file], file),
+      this.fileTask('lint', ['lint', file], file),
+      this.fileTask('fmt-check', ['fmt', '--check', file], file),
     ];
     // `compile` stays .pmc-only — a .pma file assembles via `pmt asm`,
-    // which this v1 task provider doesn't offer (see the README).
+    // which this task provider doesn't offer (see the README).
     if (doc.languageId === 'pmc') {
-      tasks.unshift(this.task('compile', ['compile', file], file));
+      tasks.unshift(this.fileTask('compile', ['compile', file], file));
     }
     return tasks;
   }
+
+  /**
+   * One `build <target>` task per declared target, plus `build --run
+   * <target>` where a run block exists. The extension never looks for a
+   * manifest: `pmt build --list-targets` does its own nearest-ancestor
+   * discovery from its working directory, so running it at the folder
+   * root delegates the whole walk to the binary.
+   */
+  private async targetTasks(): Promise<vscode.Task[]> {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    const out: vscode.Task[] = [];
+    for (const folder of folders) {
+      for (const entry of await this.targetsFor(folder)) {
+        out.push(this.buildTask(folder, entry.name, false));
+        if (entry.run) { out.push(this.buildTask(folder, entry.name, true)); }
+      }
+    }
+    return out;
+  }
+
+  private async targetsFor(folder: vscode.WorkspaceFolder): Promise<TargetEntry[]> {
+    const key = folder.uri.toString();
+    const cached = this.cache.get(key);
+    if (cached) { return cached; }
+    let entries: TargetEntry[] = [];
+    try {
+      entries = parseTargets(await this.listTargets(folder.uri.fsPath));
+    } catch (err) {
+      // No manifest, an invalid manifest, or a missing binary. None of
+      // these may cost the user the file-scoped tasks, so this degrades
+      // to "no targets here" and is only reported to the log.
+      this.log.appendLine(`[${folder.name}] build --list-targets: ${err}`);
+    }
+    this.cache.set(key, entries);
+    return entries;
+  }
+
+  private listTargets(cwd: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      execFile(this.pmtPath, ['build', '--list-targets'], { cwd }, (err, stdout, stderr) => {
+        if (err) { reject(stderr.trim() || err.message); } else { resolve(stdout); }
+      });
+    });
+  }
+
   resolveTask(task: vscode.Task): vscode.Task | undefined {
-    const def = task.definition as unknown as vscode.TaskDefinition & { command: string; file?: string };
+    const def = task.definition as unknown as vscode.TaskDefinition & {
+      command: string; file?: string; target?: string; run?: boolean;
+    };
+    if (def.command === 'build') {
+      // A per-target task MUST know its folder: `--list-targets`
+      // discovery is cwd-driven, so resolving with the wrong cwd would
+      // not fail — it would silently build a different project's target
+      // of the same name. Refuse rather than guess.
+      const scope = task.scope;
+      if (!scope || typeof scope === 'number' || !def.target) { return undefined; }
+      return this.buildTask(scope, def.target, def.run === true);
+    }
     const file = def.file ?? '${file}';
     const args = def.command === 'fmt-check' ? ['fmt', '--check', file] : [def.command, file];
     return new vscode.Task(def, vscode.TaskScope.Workspace, `pmt ${def.command}`, 'pmt',
       new vscode.ProcessExecution(this.pmtPath, args), '$pmt');
   }
-  private task(command: string, args: string[], file: string): vscode.Task {
+
+  private buildTask(folder: vscode.WorkspaceFolder, target: string, run: boolean): vscode.Task {
+    const def: vscode.TaskDefinition = { type: 'pmt', command: 'build', target, run };
+    const args = run ? ['build', '--run', target] : ['build', target];
+    const name = run ? `pmt build --run ${target}` : `pmt build ${target}`;
+    return new vscode.Task(def, folder, name, 'pmt',
+      new vscode.ProcessExecution(this.pmtPath, args, { cwd: folder.uri.fsPath }), '$pmt');
+  }
+
+  private fileTask(command: string, args: string[], file: string): vscode.Task {
     const def: vscode.TaskDefinition = { type: 'pmt', command, file };
     return new vscode.Task(def, vscode.TaskScope.Workspace, `pmt ${command}`, 'pmt',
       new vscode.ProcessExecution(this.pmtPath, args), '$pmt');
