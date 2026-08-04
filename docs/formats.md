@@ -98,7 +98,7 @@ offset  size  field
 ```
 
 The initial tape contents are **not** embedded in a `.pmx` — they are
-supplied to the VM at run time (`pmt run app.pmx --tape-cells "..*..***" --head 2`,
+supplied to the VM at run time (`pmt run app.pmx --tape-cells "  *  ***" --head 2`,
 or a loaded `.pmt`, or via the API directly). `entry offset` is validated to
 be inside the code section, and the loader additionally checks that byte is
 `ent` before running (`docs/pmt/isa.md`). The linker guarantees the

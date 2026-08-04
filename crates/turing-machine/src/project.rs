@@ -517,7 +517,7 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
                     if !PROFILES_KEYS.contains(&pname.as_str()) {
                         return Err(invalid(
                             path,
-                            format!("unknown profile `{pname}` (debug | release)"),
+                            format!("unknown profile `{pname}` ({})", PROFILES_KEYS.join(" | ")),
                         ));
                     }
                     match pname.as_str() {
@@ -1035,6 +1035,16 @@ mod tests {
     /// DIFFERENT error, which is the point: this asserts acceptance of the
     /// KEY, not validity of the document.
     ///
+    /// The `profiles` level's own pre-check rejects a bad name with
+    /// `ConfigError::Invalid`, never `UnknownKey`, so the loop above can't
+    /// fail there by construction — every name it tries is drawn from
+    /// `PROFILES_KEYS` itself, which trivially satisfies the pre-check. A
+    /// second, literal-name check below closes that gap: `"debug"` and
+    /// `"release"` are pinned directly rather than read back off
+    /// `PROFILES_KEYS`, so a name silently dropped from the const (not just
+    /// from its match arm) still shows up as a real "unknown profile"
+    /// rejection here.
+    ///
     /// What it cannot check — matching this crate's other registry guards
     /// — is a key the walk gained a match arm for but which was never
     /// added to its inventory. Rust cannot enumerate match arms; the
@@ -1098,6 +1108,19 @@ mod tests {
                          as an unknown key: {doc}"
                     );
                 }
+            }
+        }
+
+        // `profiles` is name-pinned, not read off `PROFILES_KEYS` — see the
+        // doc comment above.
+        for key in ["debug", "release"] {
+            let doc = at_level("profiles", key, value_for(key));
+            if let Err(err) = v(doc.clone()) {
+                assert!(
+                    !err.detail().contains("unknown profile"),
+                    "`{key}` is a genuine profile name but the walk rejects it: {}",
+                    err.detail()
+                );
             }
         }
     }
@@ -1230,9 +1253,16 @@ mod tests {
         }
     }
 
-    /// TM-1's only cross-key run rule is a mutual exclusion. It has no
-    /// implication leg — PM-1's `head requires tape` has no TM-1 analogue,
-    /// because the TM run block drives a band from a `.tmt` snapshot.
+    /// TM-1's only cross-key run rule is a narrower-than-it-looks mutual
+    /// exclusion: `no-step-limit` is a plain `bool` (not an `Option`), so an
+    /// explicit `"no-step-limit": false` alongside `max-steps` is legal —
+    /// the parser's actual gate (`parse_run`) is
+    /// `max_steps.is_some() && no_step_limit`, which only bites when
+    /// `no-step-limit` is `true`. The schema encodes that with `not: allOf`
+    /// rather than a bare `not: required`, so it doesn't reject a manifest
+    /// the toolchain accepts. It also has no implication leg — PM-1's
+    /// `head requires tape` has no TM-1 analogue, because the TM run block
+    /// drives a band from a `.tmt` snapshot.
     #[test]
     fn the_schema_encodes_the_step_limit_exclusion() {
         let path = concat!(
@@ -1243,11 +1273,34 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let run = &schema["definitions"]["run"];
 
-        let excluded = run["not"]["required"]
+        let all_of = run["not"]["allOf"]
             .as_array()
-            .expect("run states the max-steps/no-step-limit exclusion");
-        let excluded: Vec<&str> = excluded.iter().map(|v| v.as_str().unwrap()).collect();
-        assert_eq!(excluded, vec!["max-steps", "no-step-limit"]);
+            .expect("run states the max-steps/no-step-limit exclusion as an allOf");
+        assert_eq!(all_of.len(), 2);
+
+        let max_steps_required = all_of[0]["required"]
+            .as_array()
+            .expect("the first allOf branch requires max-steps");
+        let max_steps_required: Vec<&str> = max_steps_required
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(max_steps_required, vec!["max-steps"]);
+
+        let no_step_limit_required = all_of[1]["required"]
+            .as_array()
+            .expect("the second allOf branch requires no-step-limit");
+        let no_step_limit_required: Vec<&str> = no_step_limit_required
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(no_step_limit_required, vec!["no-step-limit"]);
+        assert_eq!(
+            all_of[1]["properties"]["no-step-limit"]["const"],
+            serde_json::json!(true),
+            "the exclusion only bites when no-step-limit is true — an explicit \
+             `false` alongside max-steps is legal"
+        );
 
         assert!(
             run["dependencies"].is_null(),

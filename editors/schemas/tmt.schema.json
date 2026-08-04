@@ -144,7 +144,15 @@
         }
       },
       "additionalProperties": false,
-      "not": { "required": ["max-steps", "no-step-limit"] }
+      "not": {
+        "allOf": [
+          { "required": ["max-steps"] },
+          {
+            "required": ["no-step-limit"],
+            "properties": { "no-step-limit": { "const": true } }
+          }
+        ]
+      }
     }
   }
 }

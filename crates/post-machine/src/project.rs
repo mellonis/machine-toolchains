@@ -464,7 +464,7 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
                     if !PROFILES_KEYS.contains(&pname.as_str()) {
                         return Err(invalid(
                             path,
-                            format!("unknown profile `{pname}` (debug | release)"),
+                            format!("unknown profile `{pname}` ({})", PROFILES_KEYS.join(" | ")),
                         ));
                     }
                     match pname.as_str() {
@@ -923,6 +923,16 @@ mod tests {
     /// `tape`) fails with a DIFFERENT error, which is exactly the point:
     /// this asserts acceptance of the KEY, not validity of the document.
     ///
+    /// The `profiles` level's own pre-check rejects a bad name with
+    /// `ConfigError::Invalid`, never `UnknownKey`, so the loop above can't
+    /// fail there by construction — every name it tries is drawn from
+    /// `PROFILES_KEYS` itself, which trivially satisfies the pre-check. A
+    /// second, literal-name check below closes that gap: `"debug"` and
+    /// `"release"` are pinned directly rather than read back off
+    /// `PROFILES_KEYS`, so a name silently dropped from the const (not just
+    /// from its match arm) still shows up as a real "unknown profile"
+    /// rejection here.
+    ///
     /// What it cannot check — matching this crate's other registry guards
     /// — is a key the walk gained a match arm for but which was never
     /// added to its inventory. Rust cannot enumerate match arms; the
@@ -988,6 +998,19 @@ mod tests {
                          as an unknown key: {doc}"
                     );
                 }
+            }
+        }
+
+        // `profiles` is name-pinned, not read off `PROFILES_KEYS` — see the
+        // doc comment above.
+        for key in ["debug", "release"] {
+            let doc = at_level("profiles", key, value_for(key));
+            if let Err(err) = v(doc.clone()) {
+                assert!(
+                    !err.detail().contains("unknown profile"),
+                    "`{key}` is a genuine profile name but the walk rejects it: {}",
+                    err.detail()
+                );
             }
         }
     }

@@ -102,8 +102,9 @@ class TmtTaskProvider implements vscode.TaskProvider {
    * primary invalidation, but it can only observe files inside opened
    * workspace folders, whereas `build --list-targets` walks up from the
    * folder root without bound — so the manifest that answers may live
-   * above the watched tree and never fire an event. A short TTL bounds
-   * that staleness without spawning a process on every `provideTasks`.
+   * above the watched tree and never fire an event
+   * (docs/tmt/project.md (discovery)). A short TTL bounds that staleness
+   * without spawning a process on every `provideTasks` call.
    */
   private static readonly CACHE_TTL_MS = 5000;
 

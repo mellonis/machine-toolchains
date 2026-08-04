@@ -221,8 +221,9 @@ A target's optional `run` object is read only by `tmt build --run`
 | `no-step-limit` | bool | Remove the step budget entirely. |
 | `max-tacts` | non-negative integer | Tact budget. |
 
-`max-steps` and `no-step-limit` are mutually exclusive, rejected at
-manifest-validation time.
+`max-steps` together with `no-step-limit: true` is rejected at
+manifest-validation time; `no-step-limit` is a plain bool, so an explicit
+`no-step-limit: false` alongside `max-steps` is accepted.
 
 This block is deliberately smaller than PM-1's, because `tmt run` is a
 narrower tool. It always drives a whole multi-tape band loaded from a
@@ -251,8 +252,9 @@ actually be run.
 - **Profile names** must be `debug` or `release`.
 - **`call-mech` values** must be `mono`, `frames`, or `hybrid`.
 - **`entry`**, if given, must not be an empty string.
-- **`max-steps` and `no-step-limit`** cannot both be set on one `run`
-  block.
+- **`max-steps` and `no-step-limit: true`** cannot both be set on one
+  `run` block; an explicit `no-step-limit: false` alongside `max-steps`
+  is fine.
 - **Duplicate effective sources**: if the same path (after path
   normalization, below) appears twice in one target's effective source
   list — once from the project level and once from the target, or twice
