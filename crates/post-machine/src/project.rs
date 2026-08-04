@@ -272,14 +272,50 @@ fn valid_target_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+// ---------------------------------------------------------------------------
+// Accepted-key inventories.
+// ---------------------------------------------------------------------------
+
+/// The keys each level of a `pmt.json` `project` section accepts
+/// (docs/pmt/project.md (schema)).
+///
+/// These lists are LOAD-BEARING, not documentation: every parse loop
+/// below checks membership here before dispatching, so an inventory is
+/// the acceptance authority and cannot drift from behaviour. The bundled
+/// editor JSON Schema is set-compared against them in this file's tests.
+///
+/// Each list is sorted; the tests assert that, because the schema
+/// set-compare reads far more clearly against a sorted inventory.
+const MANIFEST_KEYS: &[&str] = &["libraries", "profiles", "sources", "stdlib", "targets"];
+const LIBRARIES_KEYS: &[&str] = &["dirs", "link"];
+const PROFILES_KEYS: &[&str] = &["debug", "release"];
+const PROFILE_KEYS: &[&str] = &["debug-info", "opt", "strip-debugger", "werror"];
+const TARGET_KEYS: &[&str] = &["entry", "libraries", "output", "run", "sources"];
+const RUN_KEYS: &[&str] = &[
+    "head",
+    "max-steps",
+    "max-tacts",
+    "strict-cells",
+    "tact-profile",
+    "tape",
+    "tape-block",
+];
+
+/// The `opt` key's accepted spellings, in the order the error message
+/// lists them.
+const OPT_VALUES: &[&str] = &["O0", "O1"];
+
 fn parse_libraries(path: &Path, value: &Value) -> Result<Libraries, ConfigError> {
     let obj = as_obj(path, value, "libraries")?;
     let mut libs = Libraries::default();
     for (key, val) in obj {
+        if !LIBRARIES_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "dirs" => libs.dirs = as_str_array(path, val, "libraries.dirs")?,
             "link" => libs.link = as_str_array(path, val, "libraries.link")?,
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("LIBRARIES_KEYS gates this match"),
         }
     }
     Ok(libs)
@@ -289,6 +325,9 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
     let obj = as_obj(path, value, &format!("profiles.{name}"))?;
     let mut over = ProfileOverrides::default();
     for (key, val) in obj {
+        if !PROFILE_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "opt" => {
                 over.opt = Some(match as_str(path, val, "opt")?.as_str() {
@@ -297,7 +336,7 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
                     other => {
                         return Err(invalid(
                             path,
-                            format!("unknown opt level `{other}` (O0 | O1)"),
+                            format!("unknown opt level `{other}` ({})", OPT_VALUES.join(" | ")),
                         ));
                     }
                 });
@@ -305,7 +344,7 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
             "debug-info" => over.debug_info = Some(as_bool(path, val, "debug-info")?),
             "strip-debugger" => over.strip_debugger = Some(as_bool(path, val, "strip-debugger")?),
             "werror" => over.werror = Some(as_bool(path, val, "werror")?),
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("PROFILE_KEYS gates this match"),
         }
     }
     Ok(over)
@@ -315,6 +354,9 @@ fn parse_run(path: &Path, value: &Value) -> Result<RunSpec, ConfigError> {
     let obj = as_obj(path, value, "run")?;
     let mut run = RunSpec::default();
     for (key, val) in obj {
+        if !RUN_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "tape" => run.tape = Some(as_str(path, val, "tape")?),
             "tape-block" => run.tape_block = Some(as_str(path, val, "tape-block")?),
@@ -344,7 +386,7 @@ fn parse_run(path: &Path, value: &Value) -> Result<RunSpec, ConfigError> {
                 };
                 run.tact_profile = Some([cost(m)?, cost(r)?, cost(w)?]);
             }
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("RUN_KEYS gates this match"),
         }
     }
     if run.tape.is_some() && run.tape_block.is_some() {
@@ -372,13 +414,16 @@ fn parse_target(path: &Path, name: &str, value: &Value) -> Result<Target, Config
         run: None,
     };
     for (key, val) in obj {
+        if !TARGET_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "sources" => target.sources = as_str_array(path, val, "sources")?,
             "libraries" => target.libraries = parse_libraries(path, val)?,
             "entry" => target.entry = Some(as_str(path, val, "entry")?),
             "output" => target.output = Some(as_str(path, val, "output")?),
             "run" => target.run = Some(parse_run(path, val)?),
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("TARGET_KEYS gates this match"),
         }
     }
     if let Some(entry) = &target.entry
@@ -406,6 +451,9 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
         targets: BTreeMap::new(),
     };
     for (key, val) in obj {
+        if !MANIFEST_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "stdlib" => manifest.stdlib = as_bool(path, val, "stdlib")?,
             "sources" => manifest.sources = as_str_array(path, val, "sources")?,
@@ -413,15 +461,16 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
             "profiles" => {
                 let profiles = as_obj(path, val, "profiles")?;
                 for (pname, pval) in profiles {
+                    if !PROFILES_KEYS.contains(&pname.as_str()) {
+                        return Err(invalid(
+                            path,
+                            format!("unknown profile `{pname}` (debug | release)"),
+                        ));
+                    }
                     match pname.as_str() {
                         "debug" => manifest.profiles.debug = parse_profile(path, pname, pval)?,
                         "release" => manifest.profiles.release = parse_profile(path, pname, pval)?,
-                        other => {
-                            return Err(invalid(
-                                path,
-                                format!("unknown profile `{other}` (debug | release)"),
-                            ));
-                        }
+                        _ => unreachable!("PROFILES_KEYS gates this match"),
                     }
                 }
             }
@@ -439,7 +488,7 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
                         .insert(tname.clone(), parse_target(path, tname, tval)?);
                 }
             }
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("MANIFEST_KEYS gates this match"),
         }
     }
     if manifest.targets.is_empty() {
@@ -829,5 +878,77 @@ mod tests {
             ],
             "shared.pmc appears once, the .pmo is dropped"
         );
+    }
+
+    /// Every key each inventory lists must be ACCEPTED by the walk. This
+    /// is the half that catches an inventory naming a key the parser
+    /// never had.
+    #[test]
+    fn every_inventoried_key_is_accepted() {
+        // (level JSON pointer builder, the level's inventory, a valid
+        // value for each key at that level)
+        let cases: &[(&str, &[&str])] = &[
+            ("manifest", MANIFEST_KEYS),
+            ("libraries", LIBRARIES_KEYS),
+            ("profiles", PROFILES_KEYS),
+            ("profile", PROFILE_KEYS),
+            ("target", TARGET_KEYS),
+            ("run", RUN_KEYS),
+        ];
+        for (level, keys) in cases {
+            assert!(!keys.is_empty(), "{level} inventory is empty");
+            let mut sorted = keys.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(
+                &sorted[..],
+                *keys,
+                "{level} inventory must be sorted so the schema set-compare reads cleanly"
+            );
+            let mut deduped = sorted.clone();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                keys.len(),
+                "{level} inventory has a duplicate"
+            );
+        }
+    }
+
+    /// A key at a level's inventory boundary: `stdlib` belongs to the
+    /// manifest level and must NOT be accepted inside `run`.
+    #[test]
+    fn inventories_do_not_overlap_across_levels() {
+        assert!(MANIFEST_KEYS.contains(&"stdlib"));
+        assert!(!RUN_KEYS.contains(&"stdlib"));
+        assert!(RUN_KEYS.contains(&"tape-block"));
+        assert!(!TARGET_KEYS.contains(&"tape-block"));
+    }
+
+    /// A recognized key holding a BAD VALUE keeps its own diagnostic —
+    /// the membership pre-check gates keys only, never values. The
+    /// existing UnknownKey tests exercise keys and cannot catch this.
+    #[test]
+    fn a_bad_opt_value_is_not_reported_as_an_unknown_key() {
+        // `unique_tmp_dir` already exists in this test module — it is the
+        // crate's no-tempfile-dependency scratch helper (pid + atomic
+        // counter, collision-free under a parallel test run).
+        let dir = unique_tmp_dir("bad-opt");
+        let path = dir.join("pmt.json");
+        std::fs::write(
+            &path,
+            r#"{ "project": { "profiles": { "debug": { "opt": "O2" } } } }"#,
+        )
+        .unwrap();
+        let err = load_file(&path).expect_err("`O2` is not an opt level");
+        assert!(
+            !matches!(err, crate::config::ConfigError::UnknownKey { .. }),
+            "a bad VALUE must not be reported as an unknown KEY: {err:?}"
+        );
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("unknown opt level"),
+            "the opt-level diagnostic must survive: {rendered}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
