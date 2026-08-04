@@ -644,15 +644,12 @@ out of the `machine` block's tape declarations, so the common case needs no
 ```
 $ tmt tape-block new --from pow2.tmc --cells "main='s','b','1','1','1','k'" -o in.tmt
 $ tmt tape-block show in.tmt
-tape 0: origin 0, head 0, alphabet [" ", "s", "b", "k", "1"]
+tape 0: origin 0, head 0 reads 's', alphabet [" ", "s", "b", "k", "1"]
 |sb111k|
- ^
-tape 1: origin 0, head 0, alphabet [" ", "1"]
+tape 1: origin 0, head 0 reads ' ', alphabet [" ", "1"]
 ||
-
-tape 2: origin 0, head 0, alphabet [" ", "1"]
+tape 2: origin 0, head 0 reads ' ', alphabet [" ", "1"]
 ||
-
 ```
 
 A source with no `machine` block is a library — it takes its tapes from each
@@ -681,14 +678,12 @@ already-authored block repinnable in place:
 
 ```
 $ tmt tape-block show t.tmt
-tape 0: origin 0, head 0, alphabet ["0", "1", "2", "3", "4"]
+tape 0: origin 0, head 0 reads '1', alphabet ["0", "1", "2", "3", "4"]
 |124|
- ^
 $ tmt tape-block set t.tmt --in-place --alphabet "0=' ','s','b','k','1'"
 $ tmt tape-block show t.tmt
-tape 0: origin 0, head 0, alphabet [" ", "s", "b", "k", "1"]
+tape 0: origin 0, head 0 reads 's', alphabet [" ", "s", "b", "k", "1"]
 |sb1|
- ^
 ```
 
 A repin must keep the tape's **effective cardinality** exactly. Cells are
@@ -721,6 +716,15 @@ alphabet is a single character, since nothing can be misread, and separated
 when any glyph is longer, since `|011|` would otherwise be ambiguous between
 three cells and two. `--dense` and `--separated` force either form for stable
 output; passing both is an error.
+
+The head line **names the glyph under the head** — `head 4 reads '1'` — rather
+than marking it with a caret line beneath the span. A caret must be padded
+from column zero out to the head, so a head resting far from the origin costs
+a line as long as the span itself: on a megacell tape that one line doubles
+the output while carrying a single character of information. The cell's index
+is already on the same line, and its offset within the span is `head - origin`.
+A head outside the stored span reads blank — the span is a window on an
+unbounded tape, not the whole of it.
 
 ## `tmt ir`
 

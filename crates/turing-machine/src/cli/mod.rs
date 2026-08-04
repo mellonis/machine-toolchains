@@ -126,8 +126,15 @@ impl Delimit {
     }
 }
 
-/// Render one tape with its glyphs: the span line plus a caret line under the
-/// head. Glyph 0 is blank by convention.
+/// Render one tape with its glyphs: the head line plus the span. Glyph 0 is
+/// blank by convention.
+///
+/// The head line names the glyph under the head rather than marking it with a
+/// caret line beneath the span. A caret has to be padded from column zero out
+/// to the head, so a head resting far from the origin costs a line as long as
+/// the span itself — on a megacell tape that one line doubles the output and
+/// carries a single character of information
+/// (docs/tmt/cli.md (tape-block show)).
 pub(crate) fn render_tape(
     snapshot: &TapeSnapshot,
     alphabet: &[String],
@@ -141,24 +148,24 @@ pub(crate) fn render_tape(
             .unwrap_or("?")
     };
     let mut cells_line = String::new();
-    let mut caret_line = String::new();
     for (i, &cell) in snapshot.cells.iter().enumerate() {
         if separated && i > 0 {
             cells_line.push('|');
-            caret_line.push(' ');
         }
-        let g = glyph(cell);
-        let here = snapshot.origin + i as i64 == snapshot.head;
-        cells_line.push_str(g);
-        let width = g.chars().count().max(1);
-        caret_line.push_str(&if here { "^" } else { " " }.repeat(width));
+        cells_line.push_str(glyph(cell));
     }
+    // The span is a window, not the whole tape: a head outside it rests on
+    // blank, which is glyph 0 by convention.
+    let under_head = usize::try_from(snapshot.head - snapshot.origin)
+        .ok()
+        .and_then(|i| snapshot.cells.get(i).copied())
+        .unwrap_or(0);
     format!(
-        "origin {}, head {}\n|{}|\n {}\n",
+        "origin {}, head {} reads '{}'\n|{}|\n",
         snapshot.origin,
         snapshot.head,
+        glyph(under_head),
         cells_line,
-        caret_line.trim_end()
     )
 }
 
@@ -257,9 +264,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_tape_draws_a_single_bordered_span_with_a_caret() {
+    fn render_tape_draws_a_single_bordered_span_and_names_the_head_glyph() {
         // cells {1, 0, 1}, head 2, glyphs "0"/"1": a single `|` border at
-        // each end and the caret under the last cell (the head).
+        // each end, and the head's glyph named on the head line.
         let snapshot = TapeSnapshot {
             origin: 0,
             cells: vec![1, 0, 1],
@@ -268,7 +275,7 @@ mod tests {
         };
         let alphabet: Vec<String> = vec!["0".into(), "1".into()];
         let rendered = render_tape(&snapshot, &alphabet, Delimit::Auto);
-        assert_eq!(rendered, "origin 0, head 2\n|101|\n   ^\n");
+        assert_eq!(rendered, "origin 0, head 2 reads '1'\n|101|\n");
     }
 
     #[test]
@@ -313,7 +320,9 @@ mod tests {
     }
 
     #[test]
-    fn the_caret_tracks_the_head_through_separators() {
+    fn the_head_glyph_is_named_whole_even_when_multi_character() {
+        // The head sits on a two-character glyph reached past a separator:
+        // the whole glyph is named, not a slice of it.
         let snapshot = TapeSnapshot {
             origin: 0,
             cells: vec![0, 1],
@@ -322,17 +331,40 @@ mod tests {
         };
         let alphabet = vec!["0".to_string(), "11".to_string()];
         let text = render_tape(&snapshot, &alphabet, Delimit::Auto);
-        let mut lines = text.lines().skip(1); // past the "origin …, head …" line
-        let cells = lines.next().unwrap();
-        let caret = lines.next().unwrap();
-        // Carets sit under the head cell's glyph, not under a separator.
-        let start = cells.find("11").unwrap();
-        assert_eq!(
-            caret.trim_end().len(),
-            start + 2,
-            "cells: {cells}\ncaret: {caret}"
-        );
-        assert!(caret.trim_start().chars().all(|c| c == '^'));
+        assert_eq!(text, "origin 0, head 1 reads '11'\n|0|11|\n");
+    }
+
+    #[test]
+    fn the_head_glyph_is_read_through_a_non_zero_origin() {
+        // head 4 on a span starting at 3 is the SECOND cell, not the fifth:
+        // the glyph is indexed from the origin, not from zero.
+        let snapshot = TapeSnapshot {
+            origin: 3,
+            cells: vec![0, 1, 0],
+            head: 4,
+            alphabet: None,
+        };
+        let alphabet = vec!["_".to_string(), "*".to_string()];
+        let text = render_tape(&snapshot, &alphabet, Delimit::Auto);
+        assert_eq!(text, "origin 3, head 4 reads '*'\n|_*_|\n");
+    }
+
+    #[test]
+    fn a_head_outside_the_span_reads_blank() {
+        // The span is a window on an unbounded tape; off either end the tape
+        // is blank, which is glyph 0. Below the origin exercises the negative
+        // offset, past the end exercises the length bound.
+        let alphabet = vec!["_".to_string(), "*".to_string()];
+        for head in [-7, 99] {
+            let snapshot = TapeSnapshot {
+                origin: 0,
+                cells: vec![1, 1],
+                head,
+                alphabet: None,
+            };
+            let text = render_tape(&snapshot, &alphabet, Delimit::Auto);
+            assert_eq!(text, format!("origin 0, head {head} reads '_'\n|**|\n"));
+        }
     }
 
     fn owned(items: &[&str]) -> Vec<String> {

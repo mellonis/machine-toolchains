@@ -83,9 +83,8 @@ $ target/release/pmt tape-block build "*** **" -o sum.pmt
 $ target/release/pmt run sum.pmx --tape-block sum.pmt
 outcome: Stopped
 steps 53, core tacts 142, stall tacts 50 (total 192)
-origin 0, head 0
+origin 0, head 0 reads '*'
 |****|
- ^
 $ target/release/pmt dis sum.pmx
 .func main
         call    std::goToEnd
@@ -186,9 +185,8 @@ $ target/release/tmt tape-block new --from crates/turing-machine/tests/golden/a1
 $ target/release/tmt run replace.tmx --tape-block replace.tmt
 outcome: Stopped
 steps 24, core tacts 113, stall tacts 67 (total 180)
-tape 0: origin 0, head 4
+tape 0: origin 0, head 4 reads '_'
 |aaaa_|
-     ^
 $ target/release/tmt dis replace.tmx
 .routine main, tapes=1, alpha=(3)
 .section tables
