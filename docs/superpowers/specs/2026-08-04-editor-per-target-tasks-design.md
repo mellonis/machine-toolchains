@@ -139,9 +139,17 @@ to "no targets for this folder", recorded in an output channel.
 The repository has one CI workflow (`audit.yml`); the real quality gate
 is `cargo test --workspace`. The drift guard is therefore a **Rust test
 per crate**, reading `../../editors/schemas/*.json` through
-`CARGO_MANIFEST_DIR` — the shape `crates/*/tests/editor_grammar.rs`
-already uses to guard the shared TextMate grammars against the parser. A
-guard written in npm would not run.
+`CARGO_MANIFEST_DIR` — the file-reading shape
+`crates/*/tests/editor_grammar.rs` already uses to guard the shared
+TextMate grammars against the parser. A guard written in npm would not
+run.
+
+**It is a unit test, not an integration test.** `mod project;` is private
+in both crates' `lib.rs`, so a test under `tests/` cannot see the key
+inventories, and making the module public purely so a test can read it
+would widen the crate's public API for no other reason. The guard lives
+in the `#[cfg(test)] mod tests` block that each `project.rs` already
+has.
 
 ### 3.2 The prerequisite: load-bearing key inventories
 
@@ -287,7 +295,7 @@ silently.
 |---|---|---|
 | key-inventory refactor is behaviour-neutral | `cargo test --workspace`; each crate's existing `project.rs` unit tests asserting `ConfigError::UnknownKey` | key acceptance unchanged |
 | bad enum values keep their own diagnostics | new unit tests per crate: `opt: "O2"`, and TM-1 `call-mech: "nope"` | the §3.2 pre-check gates keys only, never values |
-| schema ↔ parser agreement | new `crates/{post-machine,turing-machine}/tests/editor_schema.rs` | bidirectional set-compare per level, incl. enum values |
+| schema ↔ parser agreement | new unit tests in each crate's `src/project.rs` `#[cfg(test)] mod tests` | bidirectional set-compare per level, incl. enum values |
 | `--list-targets` format | existing `build_driver.rs` tests | the provider's input contract holds |
 | quality | `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` | round floor |
 | extensions typecheck | `npm run typecheck` in both | covers esbuild's blind spot |
