@@ -2297,7 +2297,36 @@ own validation stays authoritative and a manifest that an editor shows as
 clean can still be rejected with a precise error.
 ```
 
-- [ ] **Step 5: Check for forge references**
+- [ ] **Step 5: Fix the stale `--tape` flag name in two durable pages**
+
+Surfaced while auditing the PM-1 schema's descriptions during Task 3: a
+flag rename never propagated. `pmt run` accepts **`--tape-cells`**, not
+`--tape` — confirmed at `crates/post-machine/src/cli/run.rs:107`
+(`args.value("--tape-cells")?`) and in `pmt run --help`, which prints
+`--tape-cells " * *" [--head N]  build the initial tape inline`.
+
+Two published pages still name the old spelling:
+
+- `docs/pmt/project.md:153` — the run-block table row reads
+  ``| `tape` | string | Inline glyph pattern, as `pmt run --tape`. |``
+  → change to `` `pmt run --tape-cells` ``.
+- `docs/pmt/cli.md:570` — reads "``--tape-block`` and ``--tape`` are
+  mutually exclusive" → change to ``--tape-cells``. Verify the
+  surrounding sentence still reads correctly; the parser's own error
+  string is `--tape-block and --tape-cells are mutually exclusive`
+  (`crates/post-machine/src/cli/run.rs:267`), so the page should match it.
+
+Then re-grep for any others the audit missed:
+
+```bash
+rg -n 'pmt run --tape\b|`--tape`(?!-)' docs/
+```
+
+Expected after the fix: no hits naming a bare `--tape` for `pmt run`.
+Leave `--tape-block` and TM-1's `tmt run --tape` alone — `--tape-block`
+is a real PM flag, and `tmt run` genuinely does take `--tape`.
+
+- [ ] **Step 6: Check for forge references**
 
 Run:
 ```bash
@@ -2305,7 +2334,7 @@ rg -n 'github\.com|#[0-9]{1,3}\b' editors/*/README.md docs/pmt/project.md docs/t
 ```
 Expected: only the pre-existing `repository` URLs in package manifests, which are allowed. No issue numbers, no hosting URLs in the prose you added. Fix any you introduced.
 
-- [ ] **Step 6: Full gates**
+- [ ] **Step 7: Full gates**
 
 Run:
 ```bash
@@ -2314,7 +2343,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add editors docs crates/post-machine/tests/build_driver.rs crates/turing-machine/tests/build_driver.rs
