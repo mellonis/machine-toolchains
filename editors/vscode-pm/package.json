@@ -68,12 +68,14 @@
   },
   "scripts": {
     "copy-assets": "node scripts/copy-assets.js",
-    "compile": "npm run copy-assets && tsc -p .",
+    "typecheck": "tsc --noEmit -p .",
+    "bundle": "npm run copy-assets && node esbuild.js",
+    "compile": "npm run typecheck && npm run bundle",
     "package": "npm run compile && vsce package"
   },
   "dependencies": { "vscode-languageclient": "^10.1.0" },
   "devDependencies": {
     "@types/node": "^20.0.0", "@types/vscode": "^1.91.0",
-    "@vscode/vsce": "^3.9.2", "typescript": "^5.9.0"
+    "@vscode/vsce": "^3.9.2", "esbuild": "^0.25.0", "typescript": "^5.9.0"
   }
 }
