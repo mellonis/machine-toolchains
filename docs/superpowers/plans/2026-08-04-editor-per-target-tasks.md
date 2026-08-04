@@ -1169,18 +1169,18 @@ Create `editors/schemas/tmt.schema.json`:
       "properties": {
         "stdlib": {
           "type": "boolean",
-          "description": "Link the embedded standard library. Default true."
+          "description": "Default true. `false` is the manifest form of --nostdlib: every target in this file links without the standard library. Project-level only — there is no per-target override."
         },
         "sources": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Sources shared by every target, as manifest-relative paths."
+          "description": "Source paths prepended to every target's own sources, in order."
         },
         "libraries": { "$ref": "#/definitions/libraries" },
         "call-mech": {
           "type": "string",
           "enum": ["mono", "frames", "hybrid"],
-          "description": "Project-wide default call lowering. A target may override it, and --call-mech overrides both."
+          "description": "Default bound-call lowering for every target in this file. A target may override it, and --call-mech overrides both."
         },
         "profiles": { "$ref": "#/definitions/profiles" },
         "targets": {
@@ -1228,15 +1228,15 @@ Create `editors/schemas/tmt.schema.json`:
         },
         "debug-info": {
           "type": "boolean",
-          "description": "Emit the debug map sidecar."
+          "description": "Record debug info (labels and .tmc lines)."
         },
         "strip-debugger": {
           "type": "boolean",
-          "description": "Strip debugger breakpoints."
+          "description": "Drop `brk` at codegen."
         },
         "werror": {
           "type": "boolean",
-          "description": "Treat warnings as errors."
+          "description": "Treat post-refinement warnings as errors."
         }
       },
       "additionalProperties": false
@@ -1247,21 +1247,21 @@ Create `editors/schemas/tmt.schema.json`:
         "sources": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Sources for this target, appended to the project-level set."
+          "description": "Appended after the project-level sources to form this target's effective source list, in order. May be .tmc, .tma, or .tmo."
         },
         "libraries": { "$ref": "#/definitions/libraries" },
         "entry": {
           "type": "string",
-          "description": "Entry graph or routine name."
+          "description": "The linker's reachability root for this target; must not be empty. Defaults to `main`."
         },
         "output": {
           "type": "string",
-          "description": "Output path, manifest-relative."
+          "description": "Output path, resolved against the manifest's directory. Defaults to `<target-name>.tmx`. Two targets whose normalized output paths collide is a manifest error."
         },
         "call-mech": {
           "type": "string",
           "enum": ["mono", "frames", "hybrid"],
-          "description": "Call lowering for this target, overriding the project default."
+          "description": "This target's bound-call lowering, overriding the project default."
         },
         "run": { "$ref": "#/definitions/run" }
       },
@@ -1273,21 +1273,21 @@ Create `editors/schemas/tmt.schema.json`:
       "properties": {
         "tape": {
           "type": "string",
-          "description": "Path to the .tmt tape-block snapshot to run against."
+          "description": "Path to a .tmt tape-band snapshot, as `tmt run --tape`."
         },
         "max-steps": {
           "type": "integer",
           "minimum": 0,
-          "description": "Step limit. Mutually exclusive with no-step-limit."
+          "description": "Step budget. Mutually exclusive with no-step-limit."
         },
         "no-step-limit": {
           "type": "boolean",
-          "description": "Run without a step limit. Mutually exclusive with max-steps."
+          "description": "Remove the step budget entirely. Mutually exclusive with max-steps."
         },
         "max-tacts": {
           "type": "integer",
           "minimum": 0,
-          "description": "Tact limit."
+          "description": "Tact budget."
         }
       },
       "additionalProperties": false,
