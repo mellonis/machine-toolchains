@@ -1029,4 +1029,101 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// The bundled editor JSON Schema must describe EXACTLY the keys the
+    /// walk accepts, per level, in both directions: a key the walk gained
+    /// without a schema entry fails, and a schema entry naming a key the
+    /// walk does not accept fails too.
+    ///
+    /// The schema is an editing affordance layered on the walk, never the
+    /// authority — but a stale affordance is worse than none, so this is
+    /// a hard gate (docs/pmt/project.md (schema)).
+    #[test]
+    fn the_bundled_schema_matches_the_key_inventories() {
+        use std::collections::BTreeSet;
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../editors/schemas/pmt.schema.json"
+        );
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let schema: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path} is valid JSON: {e}"));
+
+        assert_eq!(
+            schema["$schema"], "http://json-schema.org/draft-07/schema#",
+            "the schema declares draft-07; `dependencies` (the head-requires-tape leg) is a draft-07 keyword"
+        );
+
+        // (a human name, the schema node holding this level's
+        //  `properties`, the crate's inventory for that level)
+        let levels: &[(&str, &serde_json::Value, &[&str])] = &[
+            ("manifest", &schema["properties"]["project"], MANIFEST_KEYS),
+            (
+                "libraries",
+                &schema["definitions"]["libraries"],
+                LIBRARIES_KEYS,
+            ),
+            (
+                "profiles",
+                &schema["definitions"]["profiles"],
+                PROFILES_KEYS,
+            ),
+            ("profile", &schema["definitions"]["profile"], PROFILE_KEYS),
+            ("target", &schema["definitions"]["target"], TARGET_KEYS),
+            ("run", &schema["definitions"]["run"], RUN_KEYS),
+        ];
+
+        for (name, node, inventory) in levels {
+            let props = node["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("schema level `{name}` has a properties object"));
+            let in_schema: BTreeSet<&str> = props.keys().map(String::as_str).collect();
+            let in_walk: BTreeSet<&str> = inventory.iter().copied().collect();
+            assert_eq!(
+                in_schema, in_walk,
+                "schema level `{name}` disagrees with the walk's inventory"
+            );
+            assert_eq!(
+                node["additionalProperties"], false,
+                "schema level `{name}` must reject unknown keys, like the walk does"
+            );
+        }
+
+        // Enum values come from the same const the CLI error renders from.
+        let opt_enum: Vec<&str> = schema["definitions"]["profile"]["properties"]["opt"]["enum"]
+            .as_array()
+            .expect("opt has an enum")
+            .iter()
+            .map(|v| v.as_str().expect("opt enum entries are strings"))
+            .collect();
+        assert_eq!(opt_enum, OPT_VALUES, "the opt enum must match the walk's");
+    }
+
+    /// The two cross-key run rules are DIFFERENT SHAPES and the schema
+    /// must not conflate them: `tape` vs `tape-block` is a mutual
+    /// exclusion, while `head` requires `tape` is an implication — an
+    /// exclusivity construct there would encode the opposite rule.
+    #[test]
+    fn the_schema_encodes_both_run_rule_shapes() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../editors/schemas/pmt.schema.json"
+        );
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let run = &schema["definitions"]["run"];
+
+        let excluded = run["not"]["required"]
+            .as_array()
+            .expect("run states the tape/tape-block exclusion via `not: { required: [...] }`");
+        let excluded: Vec<&str> = excluded.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(excluded, vec!["tape", "tape-block"]);
+
+        let dependency = run["dependencies"]["head"]
+            .as_array()
+            .expect("run states `head` requires `tape` via draft-07 `dependencies`");
+        let dependency: Vec<&str> = dependency.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(dependency, vec!["tape"]);
+    }
 }
