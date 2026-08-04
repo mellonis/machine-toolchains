@@ -2312,27 +2312,49 @@ Verified from the parsers and `--help`, not from any page:
 | PM-1 | `--tape-cells` (inline glyph pattern) | `crates/post-machine/src/cli/run.rs:107` → `args.value("--tape-cells")?`; `pmt run --help` |
 | TM-1 | `--tape-block` (`.tmt` band snapshot) | `crates/turing-machine/src/cli/run.rs:91` → `args.value("--tape-block")?`; `tmt run --help` |
 
-Four references to correct:
+**Seven** references to correct. Two of them are quoted command
+transcripts — commands the reference shows a reader running, which today
+fail with `unknown flag` — so those matter more than the prose ones:
 
-- `docs/pmt/project.md:153` — ``as `pmt run --tape``` → ``--tape-cells``
+PM-1, → `--tape-cells`:
+
+- `docs/pmt/project.md:153` — ``as `pmt run --tape```
 - `docs/pmt/cli.md:570` — "``--tape-block`` and ``--tape`` are mutually
-  exclusive" → ``--tape-cells``. The parser's own error string is
-  `--tape-block and --tape-cells are mutually exclusive`
+  exclusive". The parser's own error string is `--tape-block and
+  --tape-cells are mutually exclusive`
   (`crates/post-machine/src/cli/run.rs:267`); match it.
-- `docs/tmt/project.md:219` — ``as `tmt run --tape``` → ``--tape-block``
-- `docs/tmt/cli.md:523` — "``--tape`` is **required**" → ``--tape-block``.
-  Check the surrounding sentence still reads correctly; it contrasts with
-  `pmt run`, which defaults to an empty tape.
+- `docs/formats.md:101` — the inline example
+  `pmt run app.pmx --tape "..*..***" --head 2`. This is a shared root
+  page, not a per-toolchain one.
 
-Then sweep for any the audit missed:
+TM-1, → `--tape-block`:
+
+- `docs/tmt/project.md:219` — ``as `tmt run --tape```
+- `docs/tmt/cli.md:523` — "``--tape`` is **required**". Check the
+  surrounding sentence still reads correctly; it contrasts with
+  `pmt run`, which defaults to an empty tape.
+- `docs/tmt/cli.md:530` — **transcript**:
+  `$ tmt run two-tape.tmx --tape one-tape.tmt`
+- `docs/tmt/cli.md:567` — **transcript**:
+  `$ tmt run prog.tmx --tape t.tmt --max-steps 1`
+
+Then sweep with this pattern — note it is deliberately looser than
+matching on `run --tape`, because the transcripts put the executable name
+and other arguments between `run` and the flag, which a tighter pattern
+misses:
 
 ```bash
-rg -n '(pmt|tmt) run --tape\b|`--tape`[^-]' docs/ --glob '!docs/superpowers/**'
+rg -n '\-\-tape([^-a-z]|$)' docs/ --glob '!docs/superpowers/**'
 ```
 
 Expected after the fix: no hits. **Leave every `--tape-block` and
-`--tape-cells` occurrence alone** — those are real flags. Only a bare
-`--tape` is wrong.
+`--tape-cells` occurrence alone** — those are real flags; only a bare
+`--tape` is wrong. Since two of the seven are runnable transcripts, spot
+check one against the built binary rather than trusting the edit:
+
+```bash
+target/release/tmt run --help | rg -n 'tape'
+```
 
 - [ ] **Step 6: Check for forge references**
 
