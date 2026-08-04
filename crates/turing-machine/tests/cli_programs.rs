@@ -1347,7 +1347,9 @@ fn tape_block_show_prints_each_bands_effective_alphabet() {
     .unwrap();
     let shown = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
     assert!(
-        shown.stdout.contains("tape 0: origin 0, head 0, alphabet"),
+        shown
+            .stdout
+            .contains("tape 0: origin 0, head 0 reads ' ', alphabet"),
         "got:\n{}",
         shown.stdout
     );

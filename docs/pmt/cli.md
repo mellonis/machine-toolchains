@@ -488,9 +488,8 @@ PM-1's default glyphs.
 ```
 $ pmt tape-block new --alphabet "0=' ','*'" --cells "0='*','*',' '" -o t.pmt
 $ pmt tape-block show t.pmt
-tape 0: origin 0, head 0, alphabet [" ", "*"]
+tape 0: origin 0, head 0 reads '*', alphabet [" ", "*"]
 |** |
- ^
 ```
 
 ### `tape-block set`
@@ -509,9 +508,8 @@ override unset, so the file stays MT version 1:
 $ pmt tape-block build " ** " -o t.pmt
 $ pmt tape-block set t.pmt --in-place --alphabet "0='0','1'"
 $ pmt tape-block show t.pmt
-tape 0: origin 0, head 0, alphabet ["0", "1"]
+tape 0: origin 0, head 0 reads '0', alphabet ["0", "1"]
 |0110|
- ^
 ```
 
 A repin must keep the tape's effective cardinality exactly — cells are
@@ -534,6 +532,15 @@ Cells are delimited adaptively: dense when every glyph is a single character,
 separated when any is longer, so `|011|` can never be ambiguous between three
 cells and two. PM-1's fixed pair is single-character, so PM tapes stay dense.
 `--dense` and `--separated` force either form; passing both is an error.
+
+The head line **names the glyph under the head** — `head 4 reads '*'` — rather
+than marking it with a caret line beneath the span. A caret must be padded
+from column zero out to the head, so a head resting far from the origin costs
+a line as long as the span itself: on a megacell tape that one line doubles
+the output while carrying a single character of information. The cell's index
+is already on the same line, and its offset within the span is `head - origin`.
+A head outside the stored span reads blank — the span is a window on an
+unbounded tape, not the whole of it.
 
 ## `pmt run`
 
