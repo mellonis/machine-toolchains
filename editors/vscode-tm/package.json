@@ -63,8 +63,10 @@
       "type": "tmt",
       "required": ["command"],
       "properties": {
-        "command": { "type": "string", "enum": ["compile", "asm", "lint", "fmt-check"] },
-        "file": { "type": "string" }
+        "command": { "type": "string", "enum": ["compile", "asm", "lint", "fmt-check", "build"] },
+        "file": { "type": "string" },
+        "target": { "type": "string", "description": "Target name; `build` only." },
+        "run": { "type": "boolean", "description": "Run the target after building; `build` only." }
       }
     }]
   },
