@@ -1,0 +1,150 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "tmt.json",
+  "description": "Project configuration for the TM-1 toolchain. The runtime walk in the tmt binary remains authoritative; this schema is an editing affordance and cannot express path normalization or cross-target comparison.",
+  "type": "object",
+  "properties": {
+    "lint": {
+      "type": "object",
+      "description": "Lint configuration (schema 0.1; predates the project section).",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Lint codes to allow. Unioned with editor settings, never a cascade."
+        }
+      },
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "description": "Project manifest, schema 0.2.",
+      "properties": {
+        "stdlib": {
+          "type": "boolean",
+          "description": "Default true. `false` is the manifest form of --nostdlib: every target in this file links without the standard library. Project-level only — there is no per-target override."
+        },
+        "sources": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Source paths prepended to every target's own sources, in order."
+        },
+        "libraries": { "$ref": "#/definitions/libraries" },
+        "call-mech": {
+          "type": "string",
+          "enum": ["mono", "frames", "hybrid"],
+          "description": "Default bound-call lowering for every target in this file. A target may override it, and --call-mech overrides both."
+        },
+        "profiles": { "$ref": "#/definitions/profiles" },
+        "targets": {
+          "type": "object",
+          "description": "Named build targets.",
+          "additionalProperties": { "$ref": "#/definitions/target" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "libraries": {
+      "type": "object",
+      "properties": {
+        "dirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Library search directories."
+        },
+        "link": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Library names to link."
+        }
+      },
+      "additionalProperties": false
+    },
+    "profiles": {
+      "type": "object",
+      "properties": {
+        "debug": { "$ref": "#/definitions/profile" },
+        "release": { "$ref": "#/definitions/profile" }
+      },
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "opt": {
+          "type": "string",
+          "enum": ["O0", "O1"],
+          "description": "Optimization level."
+        },
+        "debug-info": {
+          "type": "boolean",
+          "description": "Record debug info (labels and .tmc lines)."
+        },
+        "strip-debugger": {
+          "type": "boolean",
+          "description": "Drop `brk` at codegen."
+        },
+        "werror": {
+          "type": "boolean",
+          "description": "Treat post-refinement warnings as errors."
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Appended after the project-level sources to form this target's effective source list, in order. May be .tmc, .tma, or .tmo."
+        },
+        "libraries": { "$ref": "#/definitions/libraries" },
+        "entry": {
+          "type": "string",
+          "description": "The linker's reachability root for this target; must not be empty. Defaults to `main`."
+        },
+        "output": {
+          "type": "string",
+          "description": "Output path, resolved against the manifest's directory. Defaults to `<target-name>.tmx`. Two targets whose normalized output paths collide is a manifest error."
+        },
+        "call-mech": {
+          "type": "string",
+          "enum": ["mono", "frames", "hybrid"],
+          "description": "This target's bound-call lowering, overriding the project default."
+        },
+        "run": { "$ref": "#/definitions/run" }
+      },
+      "additionalProperties": false
+    },
+    "run": {
+      "type": "object",
+      "description": "Settings for `tmt build --run <target>`. A target without this block cannot be run: tmt run drives a band from a .tmt snapshot and has no empty-tape default.",
+      "properties": {
+        "tape": {
+          "type": "string",
+          "description": "Path to a .tmt tape-band snapshot, as `tmt run --tape-block`."
+        },
+        "max-steps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Step budget. Mutually exclusive with no-step-limit."
+        },
+        "no-step-limit": {
+          "type": "boolean",
+          "description": "Remove the step budget entirely. Mutually exclusive with max-steps."
+        },
+        "max-tacts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tact budget."
+        }
+      },
+      "additionalProperties": false,
+      "not": { "required": ["max-steps", "no-step-limit"] }
+    }
+  }
+}

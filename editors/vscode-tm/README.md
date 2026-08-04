@@ -200,7 +200,7 @@ machine {
       `routine` / `machine` keywords, the `'x'` glyph literals, the `->`
       rule arrows, the `//` comments if you add one) — this is the shared
       TextMate grammar (`editors/grammars/tmc.tmLanguage.json`), copied in
-      by `copy-grammar.js`. Confirm **two** squiggles appear without any
+      by `copy-assets.js`. Confirm **two** squiggles appear without any
       manual trigger: one on `unusedHelper` (`unused-routine`) and one on
       the `debugger` marker (`leftover-debugger`).
 - [ ] **Completion**: put the cursor at the start of an action, after a

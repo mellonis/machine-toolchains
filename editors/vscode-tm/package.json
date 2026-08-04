@@ -55,6 +55,10 @@
         "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5, "code": 6
       }
     }],
+    "jsonValidation": [{
+      "fileMatch": "tmt.json",
+      "url": "./schemas/tmt.schema.json"
+    }],
     "taskDefinitions": [{
       "type": "tmt",
       "required": ["command"],
@@ -65,8 +69,8 @@
     }]
   },
   "scripts": {
-    "copy-grammar": "node scripts/copy-grammar.js",
-    "compile": "npm run copy-grammar && tsc -p .",
+    "copy-assets": "node scripts/copy-assets.js",
+    "compile": "npm run copy-assets && tsc -p .",
     "package": "npm run compile && vsce package"
   },
   "dependencies": { "vscode-languageclient": "^10.1.0" },
