@@ -1273,7 +1273,7 @@ Create `editors/schemas/tmt.schema.json`:
       "properties": {
         "tape": {
           "type": "string",
-          "description": "Path to a .tmt tape-band snapshot, as `tmt run --tape`."
+          "description": "Path to a .tmt tape-band snapshot, as `tmt run --tape-block`."
         },
         "max-steps": {
           "type": "integer",
@@ -2297,34 +2297,42 @@ own validation stays authoritative and a manifest that an editor shows as
 clean can still be rejected with a precise error.
 ```
 
-- [ ] **Step 5: Fix the stale `--tape` flag name in two durable pages**
+- [ ] **Step 5: Fix the stale bare `--tape` flag name in four durable pages**
 
-Surfaced while auditing the PM-1 schema's descriptions during Task 3: a
-flag rename never propagated. `pmt run` accepts **`--tape-cells`**, not
-`--tape` — confirmed at `crates/post-machine/src/cli/run.rs:107`
-(`args.value("--tape-cells")?`) and in `pmt run --help`, which prints
-`--tape-cells " * *" [--head N]  build the initial tape inline`.
+Surfaced while auditing the two schemas' descriptions: **neither** `pmt
+run` nor `tmt run` has a flag called `--tape`. Both had one once, and
+each was renamed to something different without every reference being
+updated. The manifest KEY is `tape` in both toolchains — that part is
+correct everywhere; only the CLI flag names in the prose are stale.
 
-Two published pages still name the old spelling:
+Verified from the parsers and `--help`, not from any page:
 
-- `docs/pmt/project.md:153` — the run-block table row reads
-  ``| `tape` | string | Inline glyph pattern, as `pmt run --tape`. |``
-  → change to `` `pmt run --tape-cells` ``.
-- `docs/pmt/cli.md:570` — reads "``--tape-block`` and ``--tape`` are
-  mutually exclusive" → change to ``--tape-cells``. Verify the
-  surrounding sentence still reads correctly; the parser's own error
-  string is `--tape-block and --tape-cells are mutually exclusive`
-  (`crates/post-machine/src/cli/run.rs:267`), so the page should match it.
+| Toolchain | Real flag | Evidence |
+|---|---|---|
+| PM-1 | `--tape-cells` (inline glyph pattern) | `crates/post-machine/src/cli/run.rs:107` → `args.value("--tape-cells")?`; `pmt run --help` |
+| TM-1 | `--tape-block` (`.tmt` band snapshot) | `crates/turing-machine/src/cli/run.rs:91` → `args.value("--tape-block")?`; `tmt run --help` |
 
-Then re-grep for any others the audit missed:
+Four references to correct:
+
+- `docs/pmt/project.md:153` — ``as `pmt run --tape``` → ``--tape-cells``
+- `docs/pmt/cli.md:570` — "``--tape-block`` and ``--tape`` are mutually
+  exclusive" → ``--tape-cells``. The parser's own error string is
+  `--tape-block and --tape-cells are mutually exclusive`
+  (`crates/post-machine/src/cli/run.rs:267`); match it.
+- `docs/tmt/project.md:219` — ``as `tmt run --tape``` → ``--tape-block``
+- `docs/tmt/cli.md:523` — "``--tape`` is **required**" → ``--tape-block``.
+  Check the surrounding sentence still reads correctly; it contrasts with
+  `pmt run`, which defaults to an empty tape.
+
+Then sweep for any the audit missed:
 
 ```bash
-rg -n 'pmt run --tape\b|`--tape`(?!-)' docs/
+rg -n '(pmt|tmt) run --tape\b|`--tape`[^-]' docs/ --glob '!docs/superpowers/**'
 ```
 
-Expected after the fix: no hits naming a bare `--tape` for `pmt run`.
-Leave `--tape-block` and TM-1's `tmt run --tape` alone — `--tape-block`
-is a real PM flag, and `tmt run` genuinely does take `--tape`.
+Expected after the fix: no hits. **Leave every `--tape-block` and
+`--tape-cells` occurrence alone** — those are real flags. Only a bare
+`--tape` is wrong.
 
 - [ ] **Step 6: Check for forge references**
 
