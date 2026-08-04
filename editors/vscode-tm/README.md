@@ -81,9 +81,25 @@ language server and for the auto-provided tasks. `tmt.lint.allow` and
 
 ## Tasks
 
-The extension registers a task provider for the `tmt` task type. With a
-`.tmc` file open, three file-scoped tasks become available under
-**Terminal → Run Task…**, each running against the active editor's file:
+Two families are offered under the `tmt` task type.
+
+**Per-target tasks** come from the project manifest. When a workspace
+folder resolves a `tmt.json` with a `project` section, every declared
+target gets a `tmt build <target>` task, and every target carrying a
+`run` block also gets `tmt build --run <target>`. The extension does not
+search for the manifest itself: it runs `tmt build --list-targets` with
+its working directory set to the workspace folder root and lets the
+binary's own nearest-ancestor discovery answer. The list is cached for a
+few seconds and refreshes sooner when the project file changes. In a
+multi-root window each folder contributes its own targets.
+
+A folder with no project file, an invalid manifest, or a missing `tmt`
+binary simply contributes no per-target tasks for that folder — the
+file-scoped tasks below keep working regardless. The reason is logged to
+the `tmt` output channel.
+
+**File-scoped tasks** act on the active editor's file. With a `.tmc` file
+open, three become available under **Terminal → Run Task…**:
 
 | Task | Runs |
 |---|---|
@@ -95,9 +111,9 @@ With a `.tma` file open the same three appear, except that `tmt compile` is
 replaced by `tmt asm` (`tmt asm <file>`) — each language has its own front
 end, and both are single-file commands.
 
-All are wired to the bundled `$tmt` problem matcher, which parses
-`FILE:LINE:COL: SEVERITY: MESSAGE [code]` lines (`error`, `warning`, or
-`lint`) into the Problems panel.
+Both families report through the bundled `$tmt` problem matcher, which
+parses `FILE:LINE:COL: SEVERITY: MESSAGE [code]` lines (`error`, `warning`,
+or `lint`) into the Problems panel.
 
 **Bracketed codes:** compile and assemble fatals carry one (e.g.
 `[undefined-state]`, `[table-discipline]`); `tmt lint`'s own findings print
@@ -113,14 +129,12 @@ terminal and as a failed task run), but the **Problems panel stays empty**
 for it. Reformat with `tmt fmt` (or format-on-save, below) and re-run to
 confirm clean.
 
-### A full build-and-run pipeline
+### Custom pipelines
 
-The task provider only emits the three single-file tasks above — it
-deliberately does not generate a compile → link → run pipeline, since
-linking and running need choices (which objects, which tape block, which
-call mechanism) it can't infer from one open file. Paste this into
-`.vscode/tasks.json` for a minimal one, treating the current file as the
-program:
+Per-target tasks cover the common case; they don't cover a build shape the
+manifest doesn't express. For that, write the stages by hand in
+`.vscode/tasks.json` and chain them with `dependsOn`. A minimal
+compile → link pipeline, treating the current file as the program:
 
 ```json
 {
@@ -149,10 +163,10 @@ program:
 }
 ```
 
-Running the linked `.tmx` needs a tape block, which `tmt tape new`/`set`
+Running the linked `.tmx` needs a tape block, which `tmt tape-block new`/`set`
 builds and which depends entirely on the program under test — so it is left
 out of the generic pipeline above rather than guessed at. Add a `tmt run`
-task with the `--tape` your program expects. `tmt link`'s `--call-mech`,
+task with the `--tape-block` your program expects. `tmt link`'s `--call-mech`,
 `--entry`, and `--nostdlib` flags and the full `tmt run` surface are
 documented in `docs/tmt/cli.md` in this repository.
 

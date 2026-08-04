@@ -73,9 +73,25 @@ table says.
 
 ## Tasks
 
-The extension registers a task provider for the `pmt` task type. With a
-`.pmc` file open, three file-scoped tasks become available under
-**Terminal → Run Task…**, each running against the active editor's file:
+Two families are offered under the `pmt` task type.
+
+**Per-target tasks** come from the project manifest. When a workspace
+folder resolves a `pmt.json` with a `project` section, every declared
+target gets a `pmt build <target>` task, and every target carrying a
+`run` block also gets `pmt build --run <target>`. The extension does not
+search for the manifest itself: it runs `pmt build --list-targets` with
+its working directory set to the workspace folder root and lets the
+binary's own nearest-ancestor discovery answer. The list is cached for a
+few seconds and refreshes sooner when the project file changes. In a
+multi-root window each folder contributes its own targets.
+
+A folder with no project file, an invalid manifest, or a missing `pmt`
+binary simply contributes no per-target tasks for that folder — the
+file-scoped tasks below keep working regardless. The reason is logged to
+the `pmt` output channel.
+
+**File-scoped tasks** act on the active editor's file. With a `.pmc` file
+open, three become available under **Terminal → Run Task…**:
 
 | Task | Runs |
 |---|---|
@@ -88,9 +104,9 @@ With a `.pma` file open, only `pmt lint` and `pmt fmt-check` are offered.
 not `pmt compile`, and driving that from the task provider is out of this
 v1's scope; assemble it from a terminal instead.
 
-All three are wired to the bundled `$pmt` problem matcher, which parses
-`FILE:LINE:COL: SEVERITY: MESSAGE [code]` lines (`error`, `warning`, or
-`lint`) into the Problems panel.
+Both families report through the bundled `$pmt` problem matcher, which
+parses `FILE:LINE:COL: SEVERITY: MESSAGE [code]` lines (`error`, `warning`,
+or `lint`) into the Problems panel.
 
 **`fmt-check` caveat:** `pmt fmt --check` reports a file that would be
 reformatted as a bare path, with no line or column — there is nothing
@@ -100,13 +116,12 @@ terminal and as a failed task run), but the **Problems panel stays empty**
 for it. Reformat with `pmt fmt` (or format-on-save, below) and re-run to
 confirm clean.
 
-### A full build-and-run pipeline
+### Custom pipelines
 
-The task provider only emits the three single-file tasks above — it
-deliberately does not generate a compile → link → run pipeline, since
-linking and running need choices (which objects, which tape) it can't infer
-from one open file. Paste this into `.vscode/tasks.json` for a minimal one,
-treating the current file as `main`:
+Per-target tasks cover the common case; they don't cover a build shape the
+manifest doesn't express. For that, write the stages by hand in
+`.vscode/tasks.json` and chain them with `dependsOn`. A minimal
+compile → link → run pipeline, treating the current file as `main`:
 
 ```json
 {
@@ -130,7 +145,7 @@ treating the current file as `main`:
       "label": "pmc: run",
       "type": "process",
       "command": "${config:pmt.path}",
-      "args": ["run", "${fileDirname}/${fileBasenameNoExtension}.pmx", "--tape", " * *"],
+      "args": ["run", "${fileDirname}/${fileBasenameNoExtension}.pmx", "--tape-cells", " * *"],
       "problemMatcher": "$pmt"
     },
     {
@@ -144,7 +159,7 @@ treating the current file as `main`:
 
 `pmc: build and run` compiles the open file, links it (against the embedded
 standard library, added implicitly unless `--nostdlib` is passed) into a
-`.pmx`, then runs it against an inline three-cell tape (`--tape " * *"`).
+`.pmx`, then runs it against an inline three-cell tape (`--tape-cells " * *"`).
 The three tasks use `"type": "process"` rather than `"shell"` — `args` go
 to `pmt` verbatim, as the extension's own tasks do, so the leading space
 and `*` glyphs in the tape argument reach `pmt` exactly as written instead

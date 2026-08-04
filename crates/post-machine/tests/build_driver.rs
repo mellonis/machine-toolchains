@@ -252,6 +252,10 @@ fn manifest_mode_unknown_target_and_missing_manifest_error() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("project"));
 }
 
+/// This exact byte format has a SECOND consumer that is not visible from
+/// here: the VS Code extension's task provider splits these lines on TAB
+/// to build its per-target tasks. Tidying the output would break the
+/// editors silently, so this assertion is a contract, not a convenience.
 #[test]
 fn list_targets_prints_name_and_run_marker() {
     let dir = scratch("manifest_list");

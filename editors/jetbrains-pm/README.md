@@ -135,14 +135,37 @@ no artifact tracking):
 Output streams to the Run tool window's console, including the process's
 exit code on completion.
 
-The dropdown deliberately does not offer `link` — building a runnable
-`.pmx` needs a `pmt compile` step followed by a `pmt link` step, and this
-run-configuration type doesn't model a multi-step pipeline (same scope
-line VS Code's task provider draws: see `editors/vscode-pm/README.md`'s "full
-build-and-run pipeline" section for the equivalent gap there). Produce a
-`.pmo`/`.pmx` with `pmt compile`/`pmt link` from a terminal (or a
-`compile`-subcommand run configuration for the compile half), then point a
-`run`-subcommand configuration at the resulting `.pmx`.
+The dropdown deliberately does not offer `link` or `build` — building a
+runnable `.pmx` by hand needs a `pmt compile` step followed by a `pmt
+link` step, and this run-configuration type doesn't model a multi-step
+pipeline (same scope line VS Code's task provider draws: see
+`editors/vscode-pm/README.md`'s "Custom pipelines" section for the
+equivalent gap there). Produce a `.pmo`/`.pmx` with `pmt compile`/`pmt
+link` from a terminal (or a `compile`-subcommand run configuration for
+the compile half), then point a `run`-subcommand configuration at the
+resulting `.pmx`. For a project manifest's declared targets, a Shell
+Script configuration running `pmt build <target>` is the better fit — see
+"Building a target" below.
+
+## Building a target
+
+The plugin ships no build integration — LSP features arrive through the
+server, and builds run as ordinary IDE run configurations.
+
+To add one: **Run → Edit Configurations → + → Shell Script**, set
+*Script text* to `pmt build <target>` and *Working directory* to the
+directory holding your `pmt.json`. Add `--run` to build and then run the
+target. `pmt build --list-targets` prints the declared target names, and
+marks the runnable ones.
+
+## Manifest validation
+
+`pmt.json` has a bundled JSON Schema, but JetBrains maps schemas through
+its own settings rather than a plugin contribution. To enable it:
+**Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema
+Mappings → +**, point *Schema file or URL* at
+`editors/schemas/pmt.schema.json` from this repository, select schema
+version *Draft-07*, and add a file-path pattern of `pmt.json`.
 
 ## Manual test checklist
 
@@ -255,16 +278,16 @@ main() {
       pmt link check.pmo -o check.pmx
       ```
       Then add a `pmt` run configuration with subcommand `run` and
-      arguments `check.pmx --tape " * *"`, and run it. Confirm the console
-      shows the run's tape output and the process's exit code (0 = the
-      program executed `stp`, 2 = `hlt`, 3 = a trap — see `docs/pmt/cli.md`).
+      arguments `check.pmx --tape-cells " * *"`, and run it. Confirm the
+      console shows the run's tape output and the process's exit code (0 =
+      the program executed `stp`, 2 = `hlt`, 3 = a trap — see
+      `docs/pmt/cli.md`).
       ```text
-      /Users/mellonis/.cargo/bin/pmt run check.pmx --tape " * *"
+      /Users/mellonis/.cargo/bin/pmt run check.pmx --tape-cells " * *"
       outcome: Halted
       steps 12, core tacts 32, stall tacts 8 (total 40)
-      origin 1, head 2
+      origin 1, head 2 reads ' '
       |* *|
-        ^
 
       Process finished with exit code 2
       ```

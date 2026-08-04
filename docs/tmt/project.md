@@ -216,7 +216,7 @@ A target's optional `run` object is read only by `tmt build --run`
 
 | Key | Type | Meaning |
 |---|---|---|
-| `tape` | string | Path to a `.tmt` tape-band snapshot, as `tmt run --tape`. |
+| `tape` | string | Path to a `.tmt` tape-band snapshot, as `tmt run --tape-block`. |
 | `max-steps` | non-negative integer | Step budget. |
 | `no-step-limit` | bool | Remove the step budget entirely. |
 | `max-tacts` | non-negative integer | Tact budget. |
@@ -363,3 +363,18 @@ overlay documented at `docs/lsp.md` ("Cross-file resolution (the project
 overlay)"). TM-1's own bridge for its embedded standard library — hover,
 completion, and go-to-definition into a materialized `std.tmc` — is
 covered on the same page ("The `.tmc` standard-library bridge").
+
+## Editor integration
+
+The VS Code extension turns each declared target into a task — one to
+build it, and one to build and run it where a `run` block exists. It
+discovers the manifest by running `tmt build --list-targets` at the
+workspace folder root, so editor and command line always agree on which
+project answers.
+
+The extension also bundles a JSON Schema for this file, giving key
+completion, hover text, and inline errors while editing it. The schema
+describes key names, types, and the mutually exclusive pairs; it cannot
+express the rules that compare paths or span targets, so the toolchain's
+own validation stays authoritative and a manifest that an editor shows as
+clean can still be rejected with a precise error.

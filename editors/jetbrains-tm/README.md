@@ -151,15 +151,37 @@ no artifact tracking):
 Output streams to the Run tool window's console, including the process's
 exit code on completion.
 
-The dropdown deliberately does not offer `link` — building a runnable
-`.tmx` needs a `tmt compile` (or `tmt asm`) step followed by a `tmt link`
-step, and this run-configuration type doesn't model a multi-step pipeline
-(the same scope line VS Code's task provider draws: see
-`editors/vscode-tm/README.md`'s "full build-and-run pipeline" section for
-the equivalent gap there). Produce a `.tmo`/`.tmx` from a terminal (or a
+The dropdown deliberately does not offer `link` or `build` — building a
+runnable `.tmx` by hand needs a `tmt compile` (or `tmt asm`) step followed
+by a `tmt link` step, and this run-configuration type doesn't model a
+multi-step pipeline (the same scope line VS Code's task provider draws:
+see `editors/vscode-tm/README.md`'s "Custom pipelines" section for the
+equivalent gap there). Produce a `.tmo`/`.tmx` from a terminal (or a
 `compile`/`asm`-subcommand run configuration for that half), then point a
 `run`-subcommand configuration at the resulting `.tmx` with the
-`--tape-block` its program expects.
+`--tape-block` its program expects. For a project manifest's declared
+targets, a Shell Script configuration running `tmt build <target>` is the
+better fit — see "Building a target" below.
+
+## Building a target
+
+The plugin ships no build integration — LSP features arrive through the
+server, and builds run as ordinary IDE run configurations.
+
+To add one: **Run → Edit Configurations → + → Shell Script**, set
+*Script text* to `tmt build <target>` and *Working directory* to the
+directory holding your `tmt.json`. Add `--run` to build and then run the
+target. `tmt build --list-targets` prints the declared target names, and
+marks the runnable ones.
+
+## Manifest validation
+
+`tmt.json` has a bundled JSON Schema, but JetBrains maps schemas through
+its own settings rather than a plugin contribution. To enable it:
+**Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema
+Mappings → +**, point *Schema file or URL* at
+`editors/schemas/tmt.schema.json` from this repository, select schema
+version *Draft-07*, and add a file-path pattern of `tmt.json`.
 
 ## Known limitation — Cmd+hover underlines the whole file
 
