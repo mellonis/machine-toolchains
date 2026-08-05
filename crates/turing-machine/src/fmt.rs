@@ -566,7 +566,12 @@ fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
         return format!("with map {{ {} }}", pairs.join(", "));
     }
     let entry_pad = " ".repeat(col + INDENT_UNIT);
-    let mut out = String::from("with map {\n");
+    // Slot 0's same-line comments precede every pair, so there is no
+    // preceding pair's line for them to trail — they ride the opening `{`
+    // itself (module doc, "Blank lines and comments").
+    let mut out = String::from("with map {");
+    out.push_str(&interior_trailing(&interior.slots[0]));
+    out.push('\n');
     for (i, pair) in pairs.iter().enumerate() {
         out.push_str(&interior_lines(&interior.slots[i], col + INDENT_UNIT));
         out.push_str(&entry_pad);
@@ -686,7 +691,12 @@ fn paren_list(
         return one_line;
     }
     let entry_pad = " ".repeat(col + INDENT_UNIT);
-    let mut out = format!("{head}(\n");
+    // Slot 0's same-line comments precede every entry, so there is no
+    // preceding entry's line for them to trail — they ride the opening `(`
+    // itself (module doc, "Blank lines and comments").
+    let mut out = format!("{head}(");
+    out.push_str(&interior_trailing(&interior.slots[0]));
+    out.push('\n');
     for (i, entry) in entries.iter().enumerate() {
         out.push_str(&interior_lines(&interior.slots[i], col + INDENT_UNIT));
         out.push_str(&entry_pad);
@@ -920,7 +930,21 @@ fn render_use(u: &UseCst, blank_before: bool, indent: usize) -> Rendered {
         let cont_pad = " ".repeat(indent + 4);
         let mut out = interior_lines(&interior.slots[0], indent);
         out.push_str(&pad);
-        out.push_str("use ");
+        out.push_str("use");
+        // Slot 0's same-line comments have no preceding entry to trail, so
+        // they ride the `use` keyword's own line instead — printing them
+        // before `use` would reorder the token stream. A LINE comment there
+        // eats the rest of the physical line, so the first path moves to a
+        // fresh continuation line whenever this slot is non-empty (module
+        // doc, "Blank lines and comments").
+        let slot0_trailing = interior_trailing(&interior.slots[0]);
+        if slot0_trailing.is_empty() {
+            out.push(' ');
+        } else {
+            out.push_str(&slot0_trailing);
+            out.push('\n');
+            out.push_str(&cont_pad);
+        }
         for (i, entry) in paths.iter().enumerate() {
             if i > 0 {
                 out.push('\n');
@@ -937,7 +961,16 @@ fn render_use(u: &UseCst, blank_before: bool, indent: usize) -> Rendered {
             out.push_str(&interior_trailing(&interior.slots[i + 1]));
         }
         let tail_lines = interior_lines(&interior.slots[paths.len()], indent + 4);
-        if tail_lines.is_empty() {
+        // A same-line LINE comment on the tail slot was already printed on
+        // the last entry's own line above (`interior_trailing`, drawn from
+        // this same slot); `tail_lines` only sees own-line comments, so it
+        // stays empty in that case even though `;` cannot follow `//` on
+        // that physical line — check the raw slot too before deciding the
+        // closer rides the last entry's line unchanged.
+        let tail_same_line_forces_break = interior.slots[paths.len()]
+            .iter()
+            .any(|c| !c.own_line && matches!(c.kind, CommentKind::Line));
+        if tail_lines.is_empty() && !tail_same_line_forces_break {
             out.push(';');
         } else {
             out.push('\n');

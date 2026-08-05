@@ -225,3 +225,113 @@ fn interior_map_pair_comments_print_in_place() {
         "it rides the pair it was written against, got: {comment_line:?}"
     );
 }
+
+/// A same-line comment written immediately after a binding list's opening
+/// `(` prints there instead of being dropped — `paren_list` is shared by
+/// `call`'s binding list, signature parameter lists, graft argument lists,
+/// and `bind` argument lists, so this one call proves all four.
+#[test]
+fn a_same_line_comment_after_the_opening_paren_prints_in_place() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               routine w(tape t: bits, state d) { entry state g { ['_'] -> goto d; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w( /* slot 0 */ t = m, d = stop) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let call_open = out
+        .lines()
+        .find(|l| l.contains("call w("))
+        .expect("the call opens on its own line");
+    assert!(
+        call_open.contains("/* slot 0 */"),
+        "the comment rides the opening `(`, got: {call_open:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// The same defect as the binding-list case, one level down: a same-line
+/// comment written immediately after a `with map`'s opening `{` prints
+/// there instead of being dropped — `sym_map_text` mirrors `paren_list`'s
+/// shape but is a separate renderer, so it needed the same fix on its own.
+#[test]
+fn a_same_line_comment_after_the_with_map_opening_brace_prints_in_place() {
+    let src = "alphabet bits { '_', '0', '1' }\n\
+               alphabet wide { '_', 'x', 'y' }\n\n\
+               routine walk(tape t: bits) { entry state g { ['_'] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: wide;\n\
+               \x20 entry state s { [*] -> call walk(t = m with map { /* map slot 0 */ 'x' -> '0', 'y' -> '1' }) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let map_open = out
+        .lines()
+        .find(|l| l.contains("with map {"))
+        .expect("the map opens on its own line");
+    assert!(
+        map_open.contains("/* map slot 0 */"),
+        "the comment rides the opening `{{`, got: {map_open:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// A same-line comment written immediately after the `use` keyword prints
+/// there instead of being dropped — and prints AFTER `use`, never before
+/// it, since moving it earlier would reorder the token stream.
+#[test]
+fn a_same_line_comment_after_use_prints_in_place() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               namespace mylib {\n\
+               \x20 export routine plusOne(tape t: bits) { entry state g { [*] -> stop; } }\n\
+               }\n\n\
+               use // the only import\n\
+               \x20   mylib::plusOne;\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call plusOne(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let use_line = out
+        .lines()
+        .find(|l| l.starts_with("use"))
+        .expect("the file has a `use` line");
+    assert_eq!(
+        use_line, "use // the only import",
+        "the comment rides `use`'s own line, got: {use_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// A same-line LINE comment trailing the last `use` path forces the
+/// terminator onto its own line — it cannot ride the comment's physical
+/// line, so appending `;` directly after it would merge the terminator
+/// into the comment text and make the output unparseable.
+#[test]
+fn a_trailing_line_comment_on_the_last_use_path_does_not_swallow_the_semicolon() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               namespace mylib {\n\
+               \x20 export routine plusOne(tape t: bits) { entry state g { [*] -> stop; } }\n\
+               }\n\n\
+               use mylib::plusOne // trailing comment\n\
+               \x20   ;\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call plusOne(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let comment_line = out
+        .lines()
+        .find(|l| l.contains("// trailing comment"))
+        .expect("the comment survives");
+    assert!(
+        !comment_line.contains(';'),
+        "the terminator must not merge into the LINE comment, got: {comment_line:?}"
+    );
+    // The strongest check: a corrupted terminator makes the output
+    // unparseable, so re-formatting it would fail outright.
+    let twice = format(&out).expect("the formatted output must still parse");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
