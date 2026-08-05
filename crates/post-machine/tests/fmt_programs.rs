@@ -360,3 +360,25 @@ fn dogfood_stdlib_and_goldens_are_already_fmt_clean() {
         assert_eq!(formatted, src, "{label} is not fmt-clean");
     }
 }
+
+/// A comment inside a `use` path list prints in place, not relocated below
+/// the statement (docs/pmt/fmt.md (interior comments)).
+#[test]
+fn interior_use_list_comments_print_in_place() {
+    let src = "use std::goToEnd, // walk right\n\
+               \x20   std::goToBegin;\n\n\
+               main() {\n 1: @goToEnd();\n 2: halt;\n}\n";
+    let out = format(src).expect("formats");
+    let comment_line = out
+        .lines()
+        .find(|l| l.contains("// walk right"))
+        .expect("the comment survives");
+    assert!(
+        comment_line.contains("std::goToEnd"),
+        "it rides the path it was written against, got: {comment_line:?}"
+    );
+    assert!(
+        !out.trim_end().ends_with("// walk right"),
+        "and is not relocated to the end"
+    );
+}

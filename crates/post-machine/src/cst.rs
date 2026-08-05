@@ -167,6 +167,14 @@ pub struct UseCst {
     pub span: Span,
     /// A comment on the same source line, after the `;`.
     pub trailing: Option<TrailingComment>,
+    /// Comments written INSIDE the path list, in source order, each keyed by
+    /// the index of the path it precedes. An index equal to the path count
+    /// means "after the last path, before the `;`".
+    ///
+    /// Sparse and index-keyed rather than a per-path wrapper, so [`UsePath`]
+    /// stays trivia-free and `lower_cst` hands it to the AST unchanged
+    /// (docs/pmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
 }
 
 /// One `namespace NAME { … }` block exactly as the author wrote it — a
