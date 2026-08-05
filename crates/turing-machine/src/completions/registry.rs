@@ -572,7 +572,7 @@ fn run_spec() -> CommandSpec {
         path: strings(&["run"]),
         positional: Positional::One(PositionalHint::File(ext(&["tmx"]))),
         flags: vec![
-            // One tape flag, not PM-1's `--tape-block`/`--tape` pair: a
+            // One tape flag, not PM-1's `--tape-block`/`--tape-cells` pair: a
             // TM-1 image runs a whole band, and the band always comes
             // from an MT snapshot (there is no inline glyph-pattern
             // form to be mutually exclusive with).

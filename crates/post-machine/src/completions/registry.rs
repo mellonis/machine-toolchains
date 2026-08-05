@@ -32,7 +32,7 @@ pub struct FlagSpec {
     /// `SuffixFamily` is inherently repeatable independent of this field.
     pub repeatable: bool,
     /// Flags sharing a group are mutually exclusive (`-O0`/`-O1`;
-    /// `--tape-block`/`--tape`). The parser itself does not enforce this
+    /// `--tape-block`/`--tape-cells`). The parser itself does not enforce this
     /// (whichever is scanned last wins, or there's an explicit runtime
     /// check — docs/pmt/cli.md) but a completion script can still steer the
     /// user away from the clash.

@@ -122,7 +122,7 @@
     },
     "run": {
       "type": "object",
-      "description": "Settings for `tmt build --run <target>`. A target without this block cannot be run: tmt run drives a band from a .tmt snapshot and has no empty-tape default.",
+      "description": "Settings for `tmt build --run <target>`. A target cannot be run without this block, nor with a block that omits tape: tmt run drives a band from a .tmt snapshot and has no empty-tape default. A tapeless block is still valid here — only --run refuses it, naming the target.",
       "properties": {
         "tape": {
           "type": "string",

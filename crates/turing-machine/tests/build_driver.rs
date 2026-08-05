@@ -846,7 +846,7 @@ fn foutline_flag_reaches_manifest_mode_compile_options() {
 /// `app`'s declared run block (`tapes/app-in.tmt`, `max-steps: 100000`)
 /// carries a real tape, so `--run` must build then run it and adopt
 /// `tmt run`'s own exit code — asserted as an EQUIVALENCE against a
-/// hand-driven `tmt build app` + `tmt run --tape ... app.tmx` rather than
+/// hand-driven `tmt build app` + `tmt run app.tmx --tape-block ...` rather than
 /// a hardcoded number, so the assertion survives a fixture swap. Uses its
 /// own scratch project seeded to TRAP (not `write_project`'s `app`, which
 /// always stops with exit 0): `A5_CALL_ACROSS_ALPHABETS` seeded through
@@ -965,7 +965,7 @@ fn build_run_adopts_the_machine_exit_code() {
 /// mutation: dropping the `run.is_none()` guard (e.g. falling through to
 /// `RunSpec::default()` the way PM's `run_target` does) — the build
 /// would then attempt `execute_run` with `settings.tape = None`, which
-/// fails with `run.rs`'s OWN "run needs --tape" message instead of one
+/// fails with `run.rs`'s OWN "run needs --tape-block" message instead of one
 /// naming the target `notape`; the `stderr.contains("notape")` assertion
 /// below is what catches that particular substitution, since both
 /// messages contain "tape".
@@ -992,7 +992,7 @@ fn build_run_on_a_target_without_a_tape_is_a_pointed_error() {
 /// reachable and needs its own coverage. Failing mutation: dropping this
 /// second guard (e.g. falling through to `settings.tape = None` the way
 /// a naive port of PM's `run_target` might) — `execute_run` would then
-/// fail with ITS OWN "run needs --tape TAPES.tmt" message, which still
+/// fail with ITS OWN "run needs --tape-block TAPES.tmt" message, which still
 /// contains "tape" but never names `notape2`; the
 /// `stderr.contains("notape2")` assertion is what catches that.
 #[test]
