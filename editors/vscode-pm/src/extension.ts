@@ -104,6 +104,13 @@ class PmtTaskProvider implements vscode.TaskProvider {
   /** Bumped by every invalidation, to detect one landing mid-fetch. */
   private epoch = 0;
 
+  /**
+   * Lookups currently awaiting the binary, by folder URI. `provideTasks`
+   * is called often enough that two calls can overlap; the second joins
+   * the first's promise instead of spawning a second process.
+   */
+  private inFlight = new Map<string, Promise<TargetEntry[]>>();
+
   constructor(private pmtPath: string, private log: vscode.OutputChannel) {}
 
   /**
@@ -111,10 +118,16 @@ class PmtTaskProvider implements vscode.TaskProvider {
    * project file appearing or disappearing changes WHICH folders resolve
    * targets at all, and the cache holds at most one entry per workspace
    * folder, so a whole-cache clear costs nothing worth optimizing.
+   *
+   * In-flight lookups are dropped too, not just cached results: a fetch
+   * that started before the edit would otherwise hand pre-edit data to
+   * every caller that joined it. The abandoned fetch still completes, but
+   * its write-back is refused by the epoch check.
    */
   invalidate() {
     this.epoch += 1;
     this.cache.clear();
+    this.inFlight.clear();
   }
 
   async provideTasks(): Promise<vscode.Task[]> {
@@ -157,12 +170,42 @@ class PmtTaskProvider implements vscode.TaskProvider {
     return out;
   }
 
+  /**
+   * This folder's targets — from the cache while fresh, otherwise from
+   * the binary. Every return is a COPY: the cached array is this
+   * provider's own state, and handing it out would let any caller's
+   * mutation corrupt what later calls read.
+   */
   private async targetsFor(folder: vscode.WorkspaceFolder): Promise<TargetEntry[]> {
     const key = folder.uri.toString();
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.at < PmtTaskProvider.CACHE_TTL_MS) {
-      return cached.entries;
+      return [...cached.entries];
     }
+    const running = this.inFlight.get(key);
+    if (running) { return [...(await running)]; }
+    const fetch = this.fetchTargets(folder, key);
+    this.inFlight.set(key, fetch);
+    try {
+      return [...(await fetch)];
+    } finally {
+      // Only retire our own entry: an invalidation during the fetch clears
+      // the map, and a later call may already have registered a new one.
+      if (this.inFlight.get(key) === fetch) { this.inFlight.delete(key); }
+    }
+  }
+
+  /**
+   * Runs the binary and records the result. RESOLVES, never rejects —
+   * every failure becomes an empty list plus a log line. That is what
+   * makes the promise safe to share between concurrent callers: a
+   * rejection here would propagate to all of them and surface as
+   * `provideTasks` throwing, costing the user the file-scoped tasks too.
+   */
+  private async fetchTargets(
+    folder: vscode.WorkspaceFolder,
+    key: string,
+  ): Promise<TargetEntry[]> {
     const epoch = this.epoch;
     let entries: TargetEntry[];
     try {
@@ -185,7 +228,15 @@ class PmtTaskProvider implements vscode.TaskProvider {
   private listTargets(cwd: string): Promise<string> {
     return new Promise((resolve, reject) => {
       execFile(this.pmtPath, ['build', '--list-targets'], { cwd }, (err, stdout, stderr) => {
-        if (err) { reject(stderr.trim() || err.message); } else { resolve(stdout); }
+        if (!err) { resolve(stdout); return; }
+        // The log line is the only diagnostic a user gets when a folder
+        // quietly contributes no target tasks, so keep the exit status
+        // alongside the binary's own message. `code` is the exit code for
+        // a process that ran, or a string like `ENOENT` when the spawn
+        // itself failed — both worth naming.
+        const detail = stderr.trim() || err.message;
+        const { code } = err as Error & { code?: number | string };
+        reject(new Error(code === undefined ? detail : `exit ${code}: ${detail}`));
       });
     });
   }
