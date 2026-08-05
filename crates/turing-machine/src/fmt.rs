@@ -20,18 +20,22 @@
 //!   reprints with only the two escapes the lexer accepts, and the bare-name
 //!   `goto` sugar stays bare (`Transition::Goto::explicit` is read, never
 //!   normalized either way).
-//! - **Trivia-preserving, with one exception** — every comment reprints
-//!   somewhere: own-line comments at their block's indent, same-line trailing
-//!   comments riding their line, brace-line comments riding the `{`/`}` they
-//!   were written on. Doc (`?`) and attention (`!`) runs — `[deprecated]`
-//!   included — stay directly above the declaration they document, in source
-//!   order. The exception: a comment written INSIDE a `call`/`graft` binding
-//!   list, a `routine`/`graph` signature parameter list, or an `alphabet`
-//!   body has nowhere in the tree to stay attached to its own entry, so it
-//!   reprints as an own-line comment after the enclosing item instead of in
-//!   place. Nothing is lost and the output is still idempotent, but the
-//!   comment reads as attached to whatever follows rather than to the entry
-//!   it was written next to.
+//! - **Trivia-preserving, with one narrow exception** — every comment
+//!   reprints somewhere: own-line comments at their block's indent, same-line
+//!   trailing comments riding their line, brace-line comments riding the
+//!   `{`/`}` they were written on. Doc (`?`) and attention (`!`) runs —
+//!   `[deprecated]` included — stay directly above the declaration they
+//!   document, in source order. A comment written INSIDE a comma-separated
+//!   list — an `alphabet` body, a `routine`/`graph` signature parameter list,
+//!   a `graft`/`bind` binding list, or a `use` path list — prints where its
+//!   author wrote it, keyed to the entry it precedes: a same-line comment
+//!   rides the preceding entry's line, an own-line comment keeps its own
+//!   line, and a comment after the last entry prints before the closer. A
+//!   `//` comment forces such a list onto multiple lines (nothing can follow
+//!   it on its physical line); a `/* … */` comment does not. The exception: a
+//!   `call` transition's own binding list has no comment slot yet, so a
+//!   comment written inside one is dropped rather than relocated
+//!   (docs/tmt/fmt.md (interior comments)).
 //!
 //! # Indentation
 //!
@@ -122,7 +126,7 @@ use crate::cst::{
     ReuseCarrier, ReuseCst, RuleItem, RuleKind, StateCst, TapeCst, TopItem, TopKind, UseCst,
     UsePath, WorldItem, WorldKind,
 };
-use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
+use crate::lexer::{Comment, CommentKind, LexMode, Token, TokenKind, lex_with};
 use crate::parser::{
     AlphabetElem, BindingArg, BindingValue, Continuation, MapArrow, MoveDir, MoveVec, Pattern,
     PatternCell, PatternCellKind, Rule, SigParamKind, Signature, SymLit, SymMap, TermKind,
@@ -281,6 +285,69 @@ fn open_trailing_text(comments: &[Comment]) -> String {
         .map(|c| normalize_comment_text(&c.text))
         .collect();
     format!(" {}", texts.join(" "))
+}
+
+/// One list's interior comments, bucketed per slot. `slots` has one entry
+/// per position `0..=entry_count`; the last bucket is the tail slot, printed
+/// before the closer (docs/tmt/fmt.md (interior comments)).
+struct Interior<'a> {
+    slots: Vec<Vec<&'a Comment>>,
+    /// A LINE comment anywhere in the list forces it multi-line — nothing
+    /// can follow `//` on its physical line.
+    forces_break: bool,
+}
+
+impl Interior<'_> {
+    fn is_empty(&self) -> bool {
+        self.slots.iter().all(|s| s.is_empty())
+    }
+}
+
+/// Buckets `interior` by slot. An index past `entry_count` is a bug in the
+/// parser's bookkeeping; in release it clamps to the tail slot, because a
+/// misplaced comment is recoverable and a dropped one is data loss.
+fn bucket(interior: &[(usize, Comment)], entry_count: usize) -> Interior<'_> {
+    let mut slots: Vec<Vec<&Comment>> = vec![Vec::new(); entry_count + 1];
+    let mut forces_break = false;
+    for (index, comment) in interior {
+        debug_assert!(
+            *index <= entry_count,
+            "interior comment index {index} exceeds entry count {entry_count}"
+        );
+        if matches!(comment.kind, CommentKind::Line) {
+            forces_break = true;
+        }
+        slots[(*index).min(entry_count)].push(comment);
+    }
+    Interior {
+        slots,
+        forces_break,
+    }
+}
+
+/// Own-line comments for one slot, each on its own line at `indent`.
+fn interior_lines(comments: &[&Comment], indent: usize) -> String {
+    let mut out = String::new();
+    for c in comments.iter().filter(|c| c.own_line) {
+        out.push_str(&comment_line(c, indent));
+        out.push('\n');
+    }
+    out
+}
+
+/// The same-line (trailing) comments for one slot, ready to append after a
+/// separator. Empty when the slot has only own-line comments.
+fn interior_trailing(comments: &[&Comment]) -> String {
+    let texts: Vec<String> = comments
+        .iter()
+        .filter(|c| !c.own_line)
+        .map(|c| normalize_comment_text(&c.text))
+        .collect();
+    if texts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", texts.join(" "))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,22 +579,38 @@ fn signature_params(sig: &Signature) -> Vec<String> {
 /// `head(entries)tail` on one line while it fits from column `col`, else one
 /// entry per line (module doc, "Argument lists and the width threshold").
 /// `head` starts AT `col` and never carries the leading indent itself — a
-/// caller opening a line emits that indent before calling.
-fn paren_list(col: usize, head: &str, entries: &[String], tail: &str) -> String {
+/// caller opening a line emits that indent before calling. `interior` is the
+/// list's interior comments, bucketed by [`bucket`]; a caller with no such
+/// list passes `&bucket(&[], entries.len())`.
+fn paren_list(
+    col: usize,
+    head: &str,
+    entries: &[String],
+    tail: &str,
+    interior: &Interior<'_>,
+) -> String {
     let one_line = format!("{head}({}){tail}", entries.join(", "));
-    if entries.is_empty() || col + one_line.chars().count() <= LINE_WIDTH {
+    if (entries.is_empty() || col + one_line.chars().count() <= LINE_WIDTH) && interior.is_empty() {
         return one_line;
     }
     let entry_pad = " ".repeat(col + INDENT_UNIT);
     let mut out = format!("{head}(\n");
     for (i, entry) in entries.iter().enumerate() {
+        out.push_str(&interior_lines(&interior.slots[i], col + INDENT_UNIT));
         out.push_str(&entry_pad);
         out.push_str(entry);
         if i + 1 < entries.len() {
             out.push(',');
         }
+        // The NEXT slot's same-line comments belong to THIS entry's line —
+        // see the indexing rule (module doc, "Blank lines and comments").
+        out.push_str(&interior_trailing(&interior.slots[i + 1]));
         out.push('\n');
     }
+    out.push_str(&interior_lines(
+        &interior.slots[entries.len()],
+        col + INDENT_UNIT,
+    ));
     out.push_str(&" ".repeat(col));
     out.push(')');
     out.push_str(tail);
@@ -660,7 +743,10 @@ fn transition_text(transition: &Transition, col: usize) -> String {
             // The `;` the caller appends is reserved by rendering it into the
             // tail used for the fit measurement.
             let tail = format!(" then {};", continuation_text(then));
-            let rendered = paren_list(col, &head, &entries, &tail);
+            // A call's own interior comments have nowhere to live until
+            // `RuleCst` gains its side-car field; a later change wires them
+            // up (docs/tmt/fmt.md (interior comments)).
+            let rendered = paren_list(col, &head, &entries, &tail, &bucket(&[], entries.len()));
             rendered
                 .strip_suffix(';')
                 .expect("the tail ends in the reserved `;`")
@@ -699,7 +785,65 @@ fn render_top_item(item: &TopItem, indent: usize, tokens: &[Token]) -> Rendered 
 
 fn render_use(u: &UseCst, blank_before: bool, indent: usize) -> Rendered {
     let paths: Vec<String> = u.paths.iter().map(use_path_text).collect();
-    let code = format!("{}use {};", " ".repeat(indent), paths.join(", "));
+    let interior = bucket(&u.interior, paths.len());
+    let pad = " ".repeat(indent);
+    let code = if interior.is_empty() {
+        format!("{pad}use {};", paths.join(", "))
+    } else if !interior.forces_break {
+        // Block-only interior comments stay inline, each before its entry —
+        // same treatment as `render_alphabet`'s inline branch.
+        let mut line = format!("{pad}use ");
+        for (i, entry) in paths.iter().enumerate() {
+            for c in interior.slots[i].iter() {
+                line.push_str(&normalize_comment_text(&c.text));
+                line.push(' ');
+            }
+            line.push_str(entry);
+            if i + 1 < paths.len() {
+                line.push_str(", ");
+            }
+        }
+        for c in interior.slots[paths.len()].iter() {
+            line.push(' ');
+            line.push_str(&normalize_comment_text(&c.text));
+        }
+        line.push(';');
+        line
+    } else {
+        // A LINE comment forces the path list onto multiple lines, each
+        // continuation aligned 4 columns past the statement indent — the
+        // column right past `use ` (module doc, "Argument lists and the
+        // width threshold").
+        let cont_pad = " ".repeat(indent + 4);
+        let mut out = interior_lines(&interior.slots[0], indent);
+        out.push_str(&pad);
+        out.push_str("use ");
+        for (i, entry) in paths.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+                out.push_str(&interior_lines(&interior.slots[i], indent + 4));
+                out.push_str(&cont_pad);
+            }
+            out.push_str(entry);
+            if i + 1 < paths.len() {
+                out.push(',');
+            }
+            // The NEXT slot's same-line comments belong to THIS entry's
+            // line — see the indexing rule (module doc, "Blank lines and
+            // comments").
+            out.push_str(&interior_trailing(&interior.slots[i + 1]));
+        }
+        let tail_lines = interior_lines(&interior.slots[paths.len()], indent + 4);
+        if tail_lines.is_empty() {
+            out.push(';');
+        } else {
+            out.push('\n');
+            out.push_str(&tail_lines);
+            out.push_str(&pad);
+            out.push(';');
+        }
+        out
+    };
     Rendered::new(blank_before, code).with_trailing(u.trailing.as_ref())
 }
 
@@ -721,11 +865,34 @@ fn render_alphabet(a: &AlphabetCst, blank_before: bool, indent: usize) -> Render
         a.name
     );
     let entries: Vec<String> = a.elems.iter().map(alphabet_elem_text).collect();
+    let interior = bucket(&a.interior, a.elems.len());
     let one_line = format!("{head} {{ {} }}", entries.join(", "));
-    // A comment on the `{` forces the body onto its own lines, whatever the
-    // width says.
-    if a.open_trailing.is_empty() && one_line.chars().count() <= LINE_WIDTH {
+    // A comment on the `{`, or any LINE comment inside the body, forces the
+    // body onto its own lines whatever the width says.
+    if a.open_trailing.is_empty() && interior.is_empty() && one_line.chars().count() <= LINE_WIDTH {
         code.push_str(&one_line);
+    } else if a.open_trailing.is_empty()
+        && !interior.forces_break
+        && one_line.chars().count() <= LINE_WIDTH
+    {
+        // Block-only interior comments stay inline, each before its entry.
+        let mut line = format!("{head} {{ ");
+        for (i, entry) in entries.iter().enumerate() {
+            for c in interior.slots[i].iter() {
+                line.push_str(&normalize_comment_text(&c.text));
+                line.push(' ');
+            }
+            line.push_str(entry);
+            if i + 1 < entries.len() {
+                line.push_str(", ");
+            }
+        }
+        for c in interior.slots[entries.len()].iter() {
+            line.push(' ');
+            line.push_str(&normalize_comment_text(&c.text));
+        }
+        line.push_str(" }");
+        code.push_str(&line);
     } else {
         code.push_str(&head);
         code.push_str(" {");
@@ -733,13 +900,22 @@ fn render_alphabet(a: &AlphabetCst, blank_before: bool, indent: usize) -> Render
         code.push('\n');
         let entry_pad = " ".repeat(indent + INDENT_UNIT);
         for (i, entry) in entries.iter().enumerate() {
+            code.push_str(&interior_lines(&interior.slots[i], indent + INDENT_UNIT));
             code.push_str(&entry_pad);
             code.push_str(entry);
             if i + 1 < entries.len() {
                 code.push(',');
             }
+            // The NEXT slot's same-line comments belong to THIS entry's line
+            // — see the indexing rule above (module doc, "Blank lines and
+            // comments").
+            code.push_str(&interior_trailing(&interior.slots[i + 1]));
             code.push('\n');
         }
+        code.push_str(&interior_lines(
+            &interior.slots[entries.len()],
+            indent + INDENT_UNIT,
+        ));
         code.push_str(&pad);
         code.push('}');
     }
@@ -782,7 +958,13 @@ fn render_reuse(r: &ReuseCst, blank_before: bool, indent: usize, tokens: &[Token
         r.name
     );
     code.push_str(&pad);
-    code.push_str(&paren_list(indent, &head, &signature_params(&r.sig), " {"));
+    code.push_str(&paren_list(
+        indent,
+        &head,
+        &signature_params(&r.sig),
+        " {",
+        &bucket(&r.sig_interior, r.sig.params.len()),
+    ));
     code.push_str(&open_trailing_text(&r.open_trailing));
     code.push('\n');
     code.push_str(&flush(&render_world_items(
@@ -1060,7 +1242,13 @@ fn render_graft(g: &GraftCst, blank_before: bool, indent: usize) -> Rendered {
     };
     let entries: Vec<String> = g.args.iter().map(binding_arg_text).collect();
     code.push_str(&" ".repeat(indent));
-    code.push_str(&paren_list(indent, &head, &entries, &tail));
+    code.push_str(&paren_list(
+        indent,
+        &head,
+        &entries,
+        &tail,
+        &bucket(&g.interior, entries.len()),
+    ));
     Rendered::new(leads_with_blank(blank_before, &g.doc_run), code)
         .with_trailing(g.trailing.as_ref())
 }
@@ -1071,7 +1259,13 @@ fn render_bind(b: &BindCst, blank_before: bool, indent: usize) -> Rendered {
     let tail = format!(" as {};", b.as_name.0);
     let entries: Vec<String> = b.args.iter().map(binding_arg_text).collect();
     code.push_str(&" ".repeat(indent));
-    code.push_str(&paren_list(indent, &head, &entries, &tail));
+    code.push_str(&paren_list(
+        indent,
+        &head,
+        &entries,
+        &tail,
+        &bucket(&b.interior, entries.len()),
+    ));
     Rendered::new(leads_with_blank(blank_before, &b.doc_run), code)
         .with_trailing(b.trailing.as_ref())
 }

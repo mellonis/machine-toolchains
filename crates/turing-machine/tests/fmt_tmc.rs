@@ -121,3 +121,61 @@ fn no_line_carries_trailing_whitespace() {
         }
     }
 }
+
+/// An interior list comment prints where it was written, not relocated
+/// below the enclosing item. A trailing comment (`own_line == false`)
+/// rides the preceding entry's line; an own-line comment keeps its own
+/// line. Either way a LINE comment forces the list multi-line, because
+/// nothing can follow `//` on its physical line.
+#[test]
+fn interior_list_comments_print_in_place() {
+    let src = "alphabet bits { '_', // the blank\n  '0', '1' }\n\n\
+               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
+    let out = format(src).expect("formats");
+    let alphabet: Vec<&str> = out
+        .lines()
+        .take_while(|l| !l.starts_with("machine"))
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        alphabet,
+        vec![
+            "alphabet bits {",
+            "  '_', // the blank",
+            "  '0',",
+            "  '1'",
+            "}"
+        ],
+        "the comment stays on the entry it was written against"
+    );
+}
+
+/// A comment after the last entry prints before the closer, still inside
+/// the list — the position a per-entry scheme could not express.
+#[test]
+fn a_comment_after_the_last_entry_prints_before_the_closer() {
+    let src = "alphabet bits { '_', '0', '1' // the last\n}\n\n\
+               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
+    let out = format(src).expect("formats");
+    let closer = out
+        .lines()
+        .position(|l| l == "}")
+        .expect("the alphabet closes on its own line");
+    assert!(
+        out.lines().nth(closer - 1).unwrap().contains("// the last"),
+        "the comment is the last thing inside the body, got:\n{out}"
+    );
+}
+
+/// A BLOCK comment with no LINE comment beside it does not force a break:
+/// something can follow `*/` on the same physical line.
+#[test]
+fn an_interior_block_comment_keeps_the_list_on_one_line() {
+    let src = "alphabet bits { '_', /* x */ '0', '1' }\n\n\
+               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
+    let out = format(src).expect("formats");
+    assert!(
+        out.lines().next().unwrap().contains("/* x */"),
+        "the block comment stays inline, got:\n{out}"
+    );
+}

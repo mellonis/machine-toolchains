@@ -804,6 +804,11 @@ struct CommentAt {
 type TopItemsResult = Result<(Vec<TopItem>, Option<Comment>, Option<Span>), CompileError>;
 type WorldItemsResult = Result<(Vec<WorldItem>, Option<Comment>, Option<Span>), CompileError>;
 
+/// A comma-separated list's interior comments: pairs of (index of the entry
+/// the comment precedes, comment) — see `Parser::interior_comments`
+/// (docs/tmt/fmt.md (interior comments)).
+type InteriorComments = Vec<(usize, Comment)>;
+
 fn join(a: Span, b: Span) -> Span {
     Span {
         start: a.start,
@@ -986,6 +991,18 @@ impl Parser<'_> {
             }
         }
         None
+    }
+
+    /// Drain every pending comment written before entry `index` of the list
+    /// being parsed, tagging each with that index. Called at the top of each
+    /// list-loop iteration and once more before the closer with
+    /// `index = entries.len()`, which is how a comment after the last entry
+    /// gets a home (docs/tmt/fmt.md (interior comments)).
+    fn interior_comments(&mut self, index: usize, out: &mut InteriorComments) {
+        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
+            out.push((index, self.comments[self.cpos].comment.clone()));
+            self.cpos += 1;
+        }
     }
 
     // ---- doc runs ---------------------------------------------------------
@@ -1243,8 +1260,10 @@ impl Parser<'_> {
         let use_tok = self.peek().clone();
         self.bump(); // `use`
         let mut paths: Vec<UsePath> = Vec::new();
+        let mut interior: Vec<(usize, Comment)> = Vec::new();
         let semi_line;
         loop {
+            self.interior_comments(paths.len(), &mut interior);
             let (first, first_span) = self.name("an imported name")?;
             let mut path = vec![first];
             let mut end = first_span;
@@ -1279,13 +1298,19 @@ impl Parser<'_> {
             }
         }
         self.prev_end_line = semi_line;
+        // `take_trailing` runs FIRST: the loop consumed the `;`, so both a
+        // comment after the last path and the statement's own trailing
+        // comment are pending here, and draining interior first would steal
+        // the trailing one (docs/tmt/fmt.md (interior comments)).
         let trailing = self.take_trailing(semi_line);
+        self.interior_comments(paths.len(), &mut interior);
         let span = join(
             paths.first().expect("a use list has a path").span,
             paths.last().expect("a use list has a path").span,
         );
         Ok(UseCst {
             paths,
+            interior,
             line: use_tok.line,
             span: join(use_tok.span(), span),
             trailing,
@@ -1304,8 +1329,10 @@ impl Parser<'_> {
         let brace = self.expect(&TokenKind::LBrace, "`{` to open the alphabet body")?;
         let open_trailing = self.capture_open_trailing(brace.line);
         let mut elems: Vec<AlphabetElem> = Vec::new();
+        let mut interior: Vec<(usize, Comment)> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
+                self.interior_comments(elems.len(), &mut interior);
                 elems.push(self.alphabet_elem()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -1314,6 +1341,7 @@ impl Parser<'_> {
                 }
             }
         }
+        self.interior_comments(elems.len(), &mut interior);
         let close = self.expect(&TokenKind::RBrace, "`}` to close the alphabet body")?;
         self.prev_end_line = close.line;
         let close_trailing = self.capture_close_trailing(close.line);
@@ -1324,6 +1352,7 @@ impl Parser<'_> {
             col: header_col,
             exported,
             elems,
+            interior,
             span: Span {
                 start: header_start,
                 end: close.span().end,
@@ -1390,7 +1419,7 @@ impl Parser<'_> {
             ReuseCarrier::Graph => "a graph name",
         };
         let (name, name_span) = self.name(what)?;
-        let sig = self.signature()?;
+        let (sig, sig_interior) = self.signature()?;
         let brace = self.expect(&TokenKind::LBrace, "`{` to open the body")?;
         let open_trailing = self.capture_open_trailing(brace.line);
         let (items, close_trailing, close_span) = self.world_body(false)?;
@@ -1402,6 +1431,7 @@ impl Parser<'_> {
             col: header_col,
             exported,
             sig,
+            sig_interior,
             items,
             span: Span {
                 start: header_start,
@@ -1433,11 +1463,13 @@ impl Parser<'_> {
         })
     }
 
-    fn signature(&mut self) -> Result<Signature, CompileError> {
+    fn signature(&mut self) -> Result<(Signature, InteriorComments), CompileError> {
         let lp = self.expect(&TokenKind::LParen, "`(` to open the signature")?;
         let mut params: Vec<SigParam> = Vec::new();
+        let mut interior: Vec<(usize, Comment)> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RParen) {
             loop {
+                self.interior_comments(params.len(), &mut interior);
                 params.push(self.sig_param()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -1446,11 +1478,15 @@ impl Parser<'_> {
                 }
             }
         }
+        self.interior_comments(params.len(), &mut interior);
         let rp = self.expect(&TokenKind::RParen, "`)` to close the signature")?;
-        Ok(Signature {
-            params,
-            span: join(lp.span(), rp.span()),
-        })
+        Ok((
+            Signature {
+                params,
+                span: join(lp.span(), rp.span()),
+            },
+            interior,
+        ))
     }
 
     fn sig_param(&mut self) -> Result<SigParam, CompileError> {
@@ -2065,7 +2101,10 @@ impl Parser<'_> {
             TokenKind::Ident(w) if w == "call" => {
                 self.bump();
                 let target = self.qual_name("a call target")?;
-                let args = self.binding_args()?;
+                // The call's own interior comments have nowhere to live until
+                // `RuleCst` gains its side-car fields; a later change wires
+                // them up (docs/tmt/fmt.md (interior comments)).
+                let (args, _interior) = self.binding_args()?;
                 self.expect_kw("then", "`then` after the call target")?;
                 let then = self.continuation()?;
                 let end = match &then {
@@ -2163,11 +2202,13 @@ impl Parser<'_> {
         })
     }
 
-    fn binding_args(&mut self) -> Result<Vec<BindingArg>, CompileError> {
+    fn binding_args(&mut self) -> Result<(Vec<BindingArg>, InteriorComments), CompileError> {
         self.expect(&TokenKind::LParen, "`(` to open the binding")?;
         let mut args: Vec<BindingArg> = Vec::new();
+        let mut interior: Vec<(usize, Comment)> = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RParen) {
             loop {
+                self.interior_comments(args.len(), &mut interior);
                 args.push(self.binding_arg()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -2176,8 +2217,9 @@ impl Parser<'_> {
                 }
             }
         }
+        self.interior_comments(args.len(), &mut interior);
         self.expect(&TokenKind::RParen, "`)` to close the binding")?;
-        Ok(args)
+        Ok((args, interior))
     }
 
     fn binding_arg(&mut self) -> Result<BindingArg, CompileError> {
@@ -2313,7 +2355,7 @@ impl Parser<'_> {
         let graft_tok = self.peek().clone();
         self.bump(); // `graft`
         let target = self.qual_name("a graft target")?;
-        let args = self.binding_args()?;
+        let (args, interior) = self.binding_args()?;
         let as_name = if self.at_kw("as") {
             self.bump();
             let (n, sp) = self.name("a graft instance name")?;
@@ -2335,6 +2377,7 @@ impl Parser<'_> {
             entry,
             target,
             args,
+            interior,
             as_name,
             line: graft_tok.line,
             span: Span {
@@ -2350,7 +2393,7 @@ impl Parser<'_> {
         let bind_tok = self.peek().clone();
         self.bump(); // `bind`
         let target = self.qual_name("a bind target")?;
-        let args = self.binding_args()?;
+        let (args, interior) = self.binding_args()?;
         self.expect_kw("as", "`as` (a bind needs an instance name)")?;
         let (n, sp) = self.name("a bind instance name")?;
         let semi = self.expect(&TokenKind::Semi, "`;` to end the bind")?;
@@ -2359,6 +2402,7 @@ impl Parser<'_> {
         Ok(BindCst {
             target,
             args,
+            interior,
             as_name: (n, sp),
             line: bind_tok.line,
             span: join(bind_tok.span(), semi.span()),

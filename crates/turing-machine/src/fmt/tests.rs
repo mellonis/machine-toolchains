@@ -457,17 +457,18 @@ alphabet wideEnoughToWrap {
 
 // -- blank lines, comments, doc runs ----------------------------------------
 
-// The next three fixtures pin a KNOWN LIMITATION named in the module doc's
-// "Trivia-preserving, with one exception" bullet, not a desired shape: the
-// CST has no comment slot on an alphabet element, a signature parameter, or
-// a binding argument, so a comment written inside one of those lists cannot
-// stay in place. It survives — reprinted as an own-line comment right after
-// the enclosing item — but a reader can misattribute it to whatever follows.
-// If the CST ever grows slots for these, these fixtures should change to
-// keep the comment in place, not merely stay passing.
+// The next three fixtures lock the interior-comment placement described in
+// the module doc's "Trivia-preserving, with one exception" bullet: an
+// alphabet body, a signature parameter list, and a graft/bind binding list
+// each carry a comment slot on the enclosing CST node, keyed by the index
+// of the entry the comment precedes, so a comment written inside one of
+// these lists prints where its author put it rather than being relocated
+// below the enclosing item. The one remaining case — a comment inside a
+// `call` transition's binding list — still has no slot to land in and is
+// dropped rather than merely relocated.
 
 #[test]
-fn a_comment_inside_an_alphabet_body_relocates_after_it() {
+fn a_comment_inside_an_alphabet_body_prints_in_place() {
     check(
         "\
 alphabet ab {
@@ -476,14 +477,16 @@ alphabet ab {
 }
 ",
         "\
-alphabet ab { '_', 'a' }
-// blank
+alphabet ab {
+  '_', // blank
+  'a'
+}
 ",
     );
 }
 
 #[test]
-fn a_comment_inside_a_grafts_binding_list_relocates_after_it() {
+fn a_comment_inside_a_grafts_binding_list_prints_in_place() {
     check(
         "\
 machine {
@@ -495,15 +498,17 @@ entry graft findSomething(
 ",
         "\
 machine {
-  entry graft findSomething(t = work, found = celebrateLoudly) as seek;
-  // note
+  entry graft findSomething(
+    t = work, // note
+    found = celebrateLoudly
+  ) as seek;
 }
 ",
     );
 }
 
 #[test]
-fn a_comment_inside_a_signature_relocates_after_it() {
+fn a_comment_inside_a_signature_prints_in_place() {
     check(
         "\
 export graph walk(
@@ -514,9 +519,10 @@ state s { [*] -> done; }
 }
 ",
         "\
-export graph walk(tape t: ab, state done) {
-  // note
-
+export graph walk(
+  tape t: ab, // note
+  state done
+) {
   state s { [*] -> done; }
 }
 ",

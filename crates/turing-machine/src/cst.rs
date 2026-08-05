@@ -32,6 +32,11 @@
 //!   [`AlphabetCst::doc_run`]).
 //! - **Blank-line presence is a bool** (`blank_before`): the printer collapses
 //!   any run of blank lines to at most one, so a count is never needed.
+//! - **Interior list comments are index-keyed** (`interior`): a comment
+//!   inside a comma-separated list is stored against the index of the entry
+//!   it precedes, with the entry count meaning "before the closer". The
+//!   entry types stay trivia-free, so `lower_cst` hands them to the AST
+//!   unchanged.
 //!
 //! Container nodes deliberately do NOT carry the AST's computed fields (no
 //! `ns` tag, no reduced `doc`, no tapes/behavior split) — a future `lower_cst`
@@ -89,6 +94,14 @@ pub struct UsePath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseCst {
     pub paths: Vec<UsePath>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
     /// Line of the `use` keyword.
     pub line: u32,
     /// First path's start → last path's end.
@@ -110,6 +123,14 @@ pub struct AlphabetCst {
     pub exported: bool,
     /// Elements in source order.
     pub elems: Vec<AlphabetElem>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
     /// Header first token → closing `}` end.
     pub span: Span,
     /// The `?`/`!` run bound to this declaration, in source order; empty when
@@ -143,6 +164,10 @@ pub struct ReuseCst {
     pub col: u32,
     pub exported: bool,
     pub sig: Signature,
+    /// Interior comments of the SIGNATURE's parameter list, keyed as
+    /// [`AlphabetCst::interior`] is. Named apart from a plain `interior`
+    /// because this node's list is `sig.params`, not a field of its own.
+    pub sig_interior: Vec<(usize, Comment)>,
     /// World-body items in source order (states, grafts, binds, comments).
     pub items: Vec<WorldItem>,
     /// Header first token → closing `}` end.
@@ -265,6 +290,14 @@ pub struct GraftCst {
     pub entry: bool,
     pub target: QualName,
     pub args: Vec<BindingArg>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
     /// `as NAME` instance name (name, span); required unless `entry`.
     pub as_name: Option<(String, Span)>,
     pub line: u32,
@@ -279,6 +312,14 @@ pub struct GraftCst {
 pub struct BindCst {
     pub target: QualName,
     pub args: Vec<BindingArg>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
     /// `as NAME` — always present for a bind.
     pub as_name: (String, Span),
     pub line: u32,
