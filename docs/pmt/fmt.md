@@ -113,6 +113,24 @@ A statement with no comma to break on — a single long command, most
 often a long qualified call — cannot be wrapped and stays over 80
 characters; `line-too-long` still reports it.
 
+## Comments inside a `use` list
+
+A comment written inside a `use` path list prints where it was written —
+trailing a path if that is where the author put it, on its own line if
+not:
+
+```c
+use std::goToEnd, // walk right
+    std::goToBegin;
+```
+
+Continuation lines align under the first path.
+
+Note this differs from a statement's comma group, above, where an
+own-line comment interleaved between commands is drawn up onto the
+preceding line instead of keeping its own line. That difference is
+deliberate: the comma-group behaviour is long-standing and unchanged.
+
 ## Blank lines
 
 The author's blank lines are preserved, runs of two or more collapsed

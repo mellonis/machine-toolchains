@@ -33,7 +33,10 @@
 //!   own-line comment keeps its own line, and a comment after the last entry
 //!   prints before the closer. A `//` comment forces such a list onto
 //!   multiple lines (nothing can follow it on its physical line); a
-//!   `/* … */` comment does not. The exception: a comment inside a pattern,
+//!   `/* … */` comment forces the same break too, EXCEPT in an `alphabet`
+//!   body and a `use` path list — the two list kinds that already have an
+//!   inline form for their entries, so a lone block comment can stay inline
+//!   there without forcing one. The exception: a comment inside a pattern,
 //!   write, or move vector still reprints as an own-line comment after the
 //!   enclosing rule rather than in place — those vectors are positional and
 //!   walked per row by the compiler, so giving them per-entry trivia is
