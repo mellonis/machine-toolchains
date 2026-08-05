@@ -150,7 +150,7 @@ A target's optional `run` object is read only by `pmt build --run`
 
 | Key | Type | Meaning |
 |---|---|---|
-| `tape` | string | Inline glyph pattern, as `pmt run --tape`. |
+| `tape` | string | Inline glyph pattern, as `pmt run --tape-cells`. |
 | `tape-block` | string | Path to a `.pmt` snapshot, as `pmt run --tape-block`. |
 | `head` | integer | Initial head position — only meaningful alongside `tape`. |
 | `strict-cells` | bool | Trap on double-mark/double-unmark. |
@@ -277,3 +277,18 @@ same declared sources, libraries, and `stdlib` flag to resolve cross-file
 names for an open document that belongs to a target here — the project
 overlay documented at `docs/lsp.md` ("Cross-file resolution (the project
 overlay)").
+
+## Editor integration
+
+The VS Code extension turns each declared target into a task — one to
+build it, and one to build and run it where a `run` block exists. It
+discovers the manifest by running `pmt build --list-targets` at the
+workspace folder root, so editor and command line always agree on which
+project answers.
+
+The extension also bundles a JSON Schema for this file, giving key
+completion, hover text, and inline errors while editing it. The schema
+describes key names, types, and the mutually exclusive pairs; it cannot
+express the rules that compare paths or span targets, so the toolchain's
+own validation stays authoritative and a manifest that an editor shows as
+clean can still be rejected with a precise error.

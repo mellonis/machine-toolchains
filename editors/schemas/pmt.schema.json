@@ -1,0 +1,156 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "pmt.json",
+  "description": "Project configuration for the PM-1 toolchain. The runtime walk in the pmt binary remains authoritative; this schema is an editing affordance and cannot express path normalization or cross-target comparison.",
+  "type": "object",
+  "properties": {
+    "lint": {
+      "type": "object",
+      "description": "Lint configuration (schema 0.1; predates the project section).",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Lint codes to allow. Unioned with editor settings, never a cascade."
+        }
+      },
+      "additionalProperties": false
+    },
+    "project": {
+      "type": "object",
+      "description": "Project manifest, schema 0.2.",
+      "properties": {
+        "stdlib": {
+          "type": "boolean",
+          "description": "Link the embedded standard library. Default true."
+        },
+        "sources": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Sources shared by every target, as manifest-relative paths."
+        },
+        "libraries": { "$ref": "#/definitions/libraries" },
+        "profiles": { "$ref": "#/definitions/profiles" },
+        "targets": {
+          "type": "object",
+          "description": "Named build targets.",
+          "additionalProperties": { "$ref": "#/definitions/target" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "libraries": {
+      "type": "object",
+      "properties": {
+        "dirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Library search directories."
+        },
+        "link": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Library names to link."
+        }
+      },
+      "additionalProperties": false
+    },
+    "profiles": {
+      "type": "object",
+      "properties": {
+        "debug": { "$ref": "#/definitions/profile" },
+        "release": { "$ref": "#/definitions/profile" }
+      },
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "opt": {
+          "type": "string",
+          "enum": ["O0", "O1"],
+          "description": "Optimization level."
+        },
+        "debug-info": {
+          "type": "boolean",
+          "description": "Record debug info (labels and .pmc lines)."
+        },
+        "strip-debugger": {
+          "type": "boolean",
+          "description": "Drop `brk` (the debugger breakpoint) at codegen."
+        },
+        "werror": {
+          "type": "boolean",
+          "description": "Treat post-refinement warnings as errors."
+        }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "sources": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Sources for this target, appended to the project-level set."
+        },
+        "libraries": { "$ref": "#/definitions/libraries" },
+        "entry": {
+          "type": "string",
+          "description": "Entry function name, the linker's reachability root for this target. Default main."
+        },
+        "output": {
+          "type": "string",
+          "description": "Output path, manifest-relative. Default <target-name>.pmx."
+        },
+        "run": { "$ref": "#/definitions/run" }
+      },
+      "additionalProperties": false
+    },
+    "run": {
+      "type": "object",
+      "description": "Settings for `pmt build --run <target>`. An absent or empty run block falls back to `pmt run`'s own defaults (empty tape, head 0, the usual 10,000,000-step budget, no tact limit) rather than erroring.",
+      "properties": {
+        "tape": {
+          "type": "string",
+          "description": "Inline glyph pattern, as `pmt run --tape-cells`. Mutually exclusive with tape-block."
+        },
+        "tape-block": {
+          "type": "string",
+          "description": "Path to a .pmt snapshot, as `pmt run --tape-block`. Mutually exclusive with tape."
+        },
+        "head": {
+          "type": "integer",
+          "description": "Initial head position. Only meaningful alongside tape."
+        },
+        "strict-cells": {
+          "type": "boolean",
+          "description": "Trap on double-mark/double-unmark."
+        },
+        "max-steps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Step budget."
+        },
+        "max-tacts": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tact budget."
+        },
+        "tact-profile": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "minItems": 3,
+          "maxItems": 3,
+          "description": "Device costs as [move, read, write], as `pmt run --tact-profile`."
+        }
+      },
+      "additionalProperties": false,
+      "not": { "required": ["tape", "tape-block"] },
+      "dependencies": { "head": ["tape"] }
+    }
+  }
+}

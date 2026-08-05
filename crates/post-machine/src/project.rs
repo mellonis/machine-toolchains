@@ -272,14 +272,50 @@ fn valid_target_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+// ---------------------------------------------------------------------------
+// Accepted-key inventories.
+// ---------------------------------------------------------------------------
+
+/// The keys each level of a `pmt.json` `project` section accepts
+/// (docs/pmt/project.md (schema)).
+///
+/// These lists are LOAD-BEARING, not documentation: every parse loop
+/// below checks membership here before dispatching, so an inventory is
+/// the acceptance authority and cannot drift from behaviour. The bundled
+/// editor JSON Schema is set-compared against them in this file's tests.
+///
+/// Each list is sorted; the tests assert that, because the schema
+/// set-compare reads far more clearly against a sorted inventory.
+const MANIFEST_KEYS: &[&str] = &["libraries", "profiles", "sources", "stdlib", "targets"];
+const LIBRARIES_KEYS: &[&str] = &["dirs", "link"];
+const PROFILES_KEYS: &[&str] = &["debug", "release"];
+const PROFILE_KEYS: &[&str] = &["debug-info", "opt", "strip-debugger", "werror"];
+const TARGET_KEYS: &[&str] = &["entry", "libraries", "output", "run", "sources"];
+const RUN_KEYS: &[&str] = &[
+    "head",
+    "max-steps",
+    "max-tacts",
+    "strict-cells",
+    "tact-profile",
+    "tape",
+    "tape-block",
+];
+
+/// The `opt` key's accepted spellings, in the order the error message
+/// lists them.
+const OPT_VALUES: &[&str] = &["O0", "O1"];
+
 fn parse_libraries(path: &Path, value: &Value) -> Result<Libraries, ConfigError> {
     let obj = as_obj(path, value, "libraries")?;
     let mut libs = Libraries::default();
     for (key, val) in obj {
+        if !LIBRARIES_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "dirs" => libs.dirs = as_str_array(path, val, "libraries.dirs")?,
             "link" => libs.link = as_str_array(path, val, "libraries.link")?,
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("LIBRARIES_KEYS gates this match"),
         }
     }
     Ok(libs)
@@ -289,6 +325,9 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
     let obj = as_obj(path, value, &format!("profiles.{name}"))?;
     let mut over = ProfileOverrides::default();
     for (key, val) in obj {
+        if !PROFILE_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "opt" => {
                 over.opt = Some(match as_str(path, val, "opt")?.as_str() {
@@ -297,7 +336,7 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
                     other => {
                         return Err(invalid(
                             path,
-                            format!("unknown opt level `{other}` (O0 | O1)"),
+                            format!("unknown opt level `{other}` ({})", OPT_VALUES.join(" | ")),
                         ));
                     }
                 });
@@ -305,7 +344,7 @@ fn parse_profile(path: &Path, name: &str, value: &Value) -> Result<ProfileOverri
             "debug-info" => over.debug_info = Some(as_bool(path, val, "debug-info")?),
             "strip-debugger" => over.strip_debugger = Some(as_bool(path, val, "strip-debugger")?),
             "werror" => over.werror = Some(as_bool(path, val, "werror")?),
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("PROFILE_KEYS gates this match"),
         }
     }
     Ok(over)
@@ -315,6 +354,9 @@ fn parse_run(path: &Path, value: &Value) -> Result<RunSpec, ConfigError> {
     let obj = as_obj(path, value, "run")?;
     let mut run = RunSpec::default();
     for (key, val) in obj {
+        if !RUN_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "tape" => run.tape = Some(as_str(path, val, "tape")?),
             "tape-block" => run.tape_block = Some(as_str(path, val, "tape-block")?),
@@ -344,7 +386,7 @@ fn parse_run(path: &Path, value: &Value) -> Result<RunSpec, ConfigError> {
                 };
                 run.tact_profile = Some([cost(m)?, cost(r)?, cost(w)?]);
             }
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("RUN_KEYS gates this match"),
         }
     }
     if run.tape.is_some() && run.tape_block.is_some() {
@@ -372,13 +414,16 @@ fn parse_target(path: &Path, name: &str, value: &Value) -> Result<Target, Config
         run: None,
     };
     for (key, val) in obj {
+        if !TARGET_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "sources" => target.sources = as_str_array(path, val, "sources")?,
             "libraries" => target.libraries = parse_libraries(path, val)?,
             "entry" => target.entry = Some(as_str(path, val, "entry")?),
             "output" => target.output = Some(as_str(path, val, "output")?),
             "run" => target.run = Some(parse_run(path, val)?),
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("TARGET_KEYS gates this match"),
         }
     }
     if let Some(entry) = &target.entry
@@ -406,6 +451,9 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
         targets: BTreeMap::new(),
     };
     for (key, val) in obj {
+        if !MANIFEST_KEYS.contains(&key.as_str()) {
+            return Err(unknown_key(path, key));
+        }
         match key.as_str() {
             "stdlib" => manifest.stdlib = as_bool(path, val, "stdlib")?,
             "sources" => manifest.sources = as_str_array(path, val, "sources")?,
@@ -413,15 +461,16 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
             "profiles" => {
                 let profiles = as_obj(path, val, "profiles")?;
                 for (pname, pval) in profiles {
+                    if !PROFILES_KEYS.contains(&pname.as_str()) {
+                        return Err(invalid(
+                            path,
+                            format!("unknown profile `{pname}` ({})", PROFILES_KEYS.join(" | ")),
+                        ));
+                    }
                     match pname.as_str() {
                         "debug" => manifest.profiles.debug = parse_profile(path, pname, pval)?,
                         "release" => manifest.profiles.release = parse_profile(path, pname, pval)?,
-                        other => {
-                            return Err(invalid(
-                                path,
-                                format!("unknown profile `{other}` (debug | release)"),
-                            ));
-                        }
+                        _ => unreachable!("PROFILES_KEYS gates this match"),
                     }
                 }
             }
@@ -439,7 +488,7 @@ pub(crate) fn validate_manifest(path: &Path, value: &Value) -> Result<Manifest, 
                         .insert(tname.clone(), parse_target(path, tname, tval)?);
                 }
             }
-            other => return Err(unknown_key(path, other)),
+            _ => unreachable!("MANIFEST_KEYS gates this match"),
         }
     }
     if manifest.targets.is_empty() {
@@ -829,5 +878,275 @@ mod tests {
             ],
             "shared.pmc appears once, the .pmo is dropped"
         );
+    }
+
+    /// Every inventory must be non-empty, sorted, and duplicate-free — the
+    /// schema set-compare in the editor round reads against sorted lists,
+    /// and a duplicate would make a set-compare pass while the inventory
+    /// misdescribes the level.
+    #[test]
+    fn every_inventory_is_sorted_and_unique() {
+        let cases: &[(&str, &[&str])] = &[
+            ("manifest", MANIFEST_KEYS),
+            ("libraries", LIBRARIES_KEYS),
+            ("profiles", PROFILES_KEYS),
+            ("profile", PROFILE_KEYS),
+            ("target", TARGET_KEYS),
+            ("run", RUN_KEYS),
+        ];
+        for (level, keys) in cases {
+            assert!(!keys.is_empty(), "{level} inventory is empty");
+            let mut sorted = keys.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(
+                &sorted[..],
+                *keys,
+                "{level} inventory must be sorted so the schema set-compare reads cleanly"
+            );
+            let mut deduped = sorted.clone();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                keys.len(),
+                "{level} inventory has a duplicate"
+            );
+        }
+    }
+
+    /// Every key an inventory lists must be REACHABLE in its parse loop.
+    ///
+    /// The membership pre-check means an inventory entry with no match arm
+    /// panics on `unreachable!` instead of failing gracefully. This walks
+    /// every inventoried key through a minimal document that places it at
+    /// its own level and asserts the walk does not reject it as an unknown
+    /// key. A key that also violates a cross-key rule (`head` without
+    /// `tape`) fails with a DIFFERENT error, which is exactly the point:
+    /// this asserts acceptance of the KEY, not validity of the document.
+    ///
+    /// The `profiles` level's own pre-check rejects a bad name with
+    /// `ConfigError::Invalid`, never `UnknownKey`, so the loop above can't
+    /// fail there by construction — every name it tries is drawn from
+    /// `PROFILES_KEYS` itself, which trivially satisfies the pre-check. A
+    /// second, literal-name check below closes that gap: `"debug"` and
+    /// `"release"` are pinned directly rather than read back off
+    /// `PROFILES_KEYS`, so a name silently dropped from the const (not just
+    /// from its match arm) still shows up as a real "unknown profile"
+    /// rejection here.
+    ///
+    /// What it cannot check — matching this crate's other registry guards
+    /// — is a key the walk gained a match arm for but which was never
+    /// added to its inventory. Rust cannot enumerate match arms; the
+    /// pre-check makes such an arm dead, so any test exercising that key
+    /// fails instead.
+    #[test]
+    fn every_inventoried_key_is_reachable_in_its_parse_loop() {
+        // A right-TYPED value per key. Document validity is not the point.
+        let value_for = |key: &str| -> serde_json::Value {
+            match key {
+                "sources" => json!([]),
+                "libraries" => json!({}),
+                "stdlib" => json!(true),
+                "profiles" => json!({}),
+                "targets" => json!({}),
+                "dirs" | "link" => json!([]),
+                "debug" | "release" => json!({}),
+                "opt" => json!("O0"),
+                "debug-info" | "strip-debugger" | "werror" => json!(true),
+                "entry" => json!("main"),
+                "output" => json!("app.pmx"),
+                "run" => json!({}),
+                "tape" => json!("1"),
+                "tape-block" => json!("start.pmt"),
+                "head" => json!(0),
+                "strict-cells" => json!(true),
+                "max-steps" | "max-tacts" => json!(1),
+                "tact-profile" => json!([1, 1, 1]),
+                other => panic!("no test value for inventoried key `{other}`"),
+            }
+        };
+
+        // Places a one-key object at each level's position in the tree.
+        // `v` takes the `project` section itself, so the manifest level is
+        // the bare leaf.
+        let at_level = |level: &str, key: &str, value: serde_json::Value| -> serde_json::Value {
+            let leaf = json!({ key: value });
+            match level {
+                "manifest" => leaf,
+                "libraries" => json!({ "libraries": leaf }),
+                "profiles" => json!({ "profiles": leaf }),
+                "profile" => json!({ "profiles": { "debug": leaf } }),
+                "target" => json!({ "targets": { "app": leaf } }),
+                "run" => json!({ "targets": { "app": { "run": leaf } } }),
+                other => panic!("unknown level `{other}`"),
+            }
+        };
+
+        for (level, keys) in [
+            ("manifest", MANIFEST_KEYS),
+            ("libraries", LIBRARIES_KEYS),
+            ("profiles", PROFILES_KEYS),
+            ("profile", PROFILE_KEYS),
+            ("target", TARGET_KEYS),
+            ("run", RUN_KEYS),
+        ] {
+            for key in keys {
+                let doc = at_level(level, key, value_for(key));
+                if let Err(err) = v(doc.clone()) {
+                    assert!(
+                        !matches!(err, crate::config::ConfigError::UnknownKey { .. }),
+                        "`{key}` is in the {level} inventory but the walk rejects it \
+                         as an unknown key: {doc}"
+                    );
+                }
+            }
+        }
+
+        // `profiles` is name-pinned, not read off `PROFILES_KEYS` — see the
+        // doc comment above.
+        for key in ["debug", "release"] {
+            let doc = at_level("profiles", key, value_for(key));
+            if let Err(err) = v(doc.clone()) {
+                assert!(
+                    !err.detail().contains("unknown profile"),
+                    "`{key}` is a genuine profile name but the walk rejects it: {}",
+                    err.detail()
+                );
+            }
+        }
+    }
+
+    /// A key at a level's inventory boundary: `stdlib` belongs to the
+    /// manifest level and must NOT be accepted inside `run`.
+    #[test]
+    fn inventories_do_not_overlap_across_levels() {
+        assert!(MANIFEST_KEYS.contains(&"stdlib"));
+        assert!(!RUN_KEYS.contains(&"stdlib"));
+        assert!(RUN_KEYS.contains(&"tape-block"));
+        assert!(!TARGET_KEYS.contains(&"tape-block"));
+    }
+
+    /// A recognized key holding a BAD VALUE keeps its own diagnostic —
+    /// the membership pre-check gates keys only, never values. The
+    /// existing UnknownKey tests exercise keys and cannot catch this.
+    #[test]
+    fn a_bad_opt_value_is_not_reported_as_an_unknown_key() {
+        // `unique_tmp_dir` already exists in this test module — it is the
+        // crate's no-tempfile-dependency scratch helper (pid + atomic
+        // counter, collision-free under a parallel test run).
+        let dir = unique_tmp_dir("bad-opt");
+        let path = dir.join("pmt.json");
+        std::fs::write(
+            &path,
+            r#"{ "project": { "profiles": { "debug": { "opt": "O2" } } } }"#,
+        )
+        .unwrap();
+        let err = load_file(&path).expect_err("`O2` is not an opt level");
+        assert!(
+            !matches!(err, crate::config::ConfigError::UnknownKey { .. }),
+            "a bad VALUE must not be reported as an unknown KEY: {err:?}"
+        );
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("unknown opt level"),
+            "the opt-level diagnostic must survive: {rendered}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The bundled editor JSON Schema must describe EXACTLY the keys the
+    /// walk accepts, per level, in both directions: a key the walk gained
+    /// without a schema entry fails, and a schema entry naming a key the
+    /// walk does not accept fails too.
+    ///
+    /// The schema is an editing affordance layered on the walk, never the
+    /// authority — but a stale affordance is worse than none, so this is
+    /// a hard gate (docs/pmt/project.md (schema)).
+    #[test]
+    fn the_bundled_schema_matches_the_key_inventories() {
+        use std::collections::BTreeSet;
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../editors/schemas/pmt.schema.json"
+        );
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let schema: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path} is valid JSON: {e}"));
+
+        assert_eq!(
+            schema["$schema"], "http://json-schema.org/draft-07/schema#",
+            "the schema declares draft-07; `dependencies` (the head-requires-tape leg) is a draft-07 keyword"
+        );
+
+        // (a human name, the schema node holding this level's
+        //  `properties`, the crate's inventory for that level)
+        let levels: &[(&str, &serde_json::Value, &[&str])] = &[
+            ("manifest", &schema["properties"]["project"], MANIFEST_KEYS),
+            (
+                "libraries",
+                &schema["definitions"]["libraries"],
+                LIBRARIES_KEYS,
+            ),
+            (
+                "profiles",
+                &schema["definitions"]["profiles"],
+                PROFILES_KEYS,
+            ),
+            ("profile", &schema["definitions"]["profile"], PROFILE_KEYS),
+            ("target", &schema["definitions"]["target"], TARGET_KEYS),
+            ("run", &schema["definitions"]["run"], RUN_KEYS),
+        ];
+
+        for (name, node, inventory) in levels {
+            let props = node["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("schema level `{name}` has a properties object"));
+            let in_schema: BTreeSet<&str> = props.keys().map(String::as_str).collect();
+            let in_walk: BTreeSet<&str> = inventory.iter().copied().collect();
+            assert_eq!(
+                in_schema, in_walk,
+                "schema level `{name}` disagrees with the walk's inventory"
+            );
+            assert_eq!(
+                node["additionalProperties"], false,
+                "schema level `{name}` must reject unknown keys, like the walk does"
+            );
+        }
+
+        // Enum values come from the same const the CLI error renders from.
+        let opt_enum: Vec<&str> = schema["definitions"]["profile"]["properties"]["opt"]["enum"]
+            .as_array()
+            .expect("opt has an enum")
+            .iter()
+            .map(|v| v.as_str().expect("opt enum entries are strings"))
+            .collect();
+        assert_eq!(opt_enum, OPT_VALUES, "the opt enum must match the walk's");
+    }
+
+    /// The two cross-key run rules are DIFFERENT SHAPES and the schema
+    /// must not conflate them: `tape` vs `tape-block` is a mutual
+    /// exclusion, while `head` requires `tape` is an implication — an
+    /// exclusivity construct there would encode the opposite rule.
+    #[test]
+    fn the_schema_encodes_both_run_rule_shapes() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../editors/schemas/pmt.schema.json"
+        );
+        let schema: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let run = &schema["definitions"]["run"];
+
+        let excluded = run["not"]["required"]
+            .as_array()
+            .expect("run states the tape/tape-block exclusion via `not: { required: [...] }`");
+        let excluded: Vec<&str> = excluded.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(excluded, vec!["tape", "tape-block"]);
+
+        let dependency = run["dependencies"]["head"]
+            .as_array()
+            .expect("run states `head` requires `tape` via draft-07 `dependencies`");
+        let dependency: Vec<&str> = dependency.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(dependency, vec!["tape"]);
     }
 }

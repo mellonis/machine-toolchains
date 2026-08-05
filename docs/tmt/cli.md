@@ -520,14 +520,14 @@ EXIT CODE: 0 stopped | 2 halted (hlt) | 3 trapped | 1 tool error.
 Consumes a `.tmx` image and a `.tmt` tape block; prints the outcome, the
 step and tact counts, and every tape's final contents with its head marked.
 
-`--tape` is **required** — unlike `pmt run`, which defaults to an empty tape,
+`--tape-block` is **required** — unlike `pmt run`, which defaults to an empty tape,
 a TM-1 image runs a whole band of tapes and there is no inline glyph-pattern
 form to build one from. Mint a template with `tmt tape-block new --from` and fill
 it in with `tmt tape-block set`. The block's band count must equal the image's tape
 count; a mismatch is a tool error naming both numbers:
 
 ```
-$ tmt run two-tape.tmx --tape one-tape.tmt
+$ tmt run two-tape.tmx --tape-block one-tape.tmt
 tmt: one-tape.tmt has 1 tape(s), but two-tape.tmx expects 2
 ```
 
@@ -564,7 +564,7 @@ saying the program did something it could not do — an unmapped read, a
 outcome line names which:
 
 ```
-$ tmt run prog.tmx --tape t.tmt --max-steps 1
+$ tmt run prog.tmx --tape-block t.tmt --max-steps 1
 outcome: Trapped(StepLimit)
 ```
 

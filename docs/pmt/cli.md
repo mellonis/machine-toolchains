@@ -567,7 +567,7 @@ OUTPUT:
 EXIT CODE: 0 stopped | 2 halted (hlt) | 3 trapped | 1 tool error.
 ```
 
-`--tape-block` and `--tape` are mutually exclusive; with neither, the
+`--tape-block` and `--tape-cells` are mutually exclusive; with neither, the
 initial tape is empty with the head at 0. `--max-steps` defaults to
 10,000,000 (`--no-step-limit` removes the budget entirely — use with a
 program you trust to terminate); `--max-tacts` has no default (unset =

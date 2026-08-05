@@ -216,13 +216,14 @@ A target's optional `run` object is read only by `tmt build --run`
 
 | Key | Type | Meaning |
 |---|---|---|
-| `tape` | string | Path to a `.tmt` tape-band snapshot, as `tmt run --tape`. |
+| `tape` | string | Path to a `.tmt` tape-band snapshot, as `tmt run --tape-block`. |
 | `max-steps` | non-negative integer | Step budget. |
 | `no-step-limit` | bool | Remove the step budget entirely. |
 | `max-tacts` | non-negative integer | Tact budget. |
 
-`max-steps` and `no-step-limit` are mutually exclusive, rejected at
-manifest-validation time.
+`max-steps` together with `no-step-limit: true` is rejected at
+manifest-validation time; `no-step-limit` is a plain bool, so an explicit
+`no-step-limit: false` alongside `max-steps` is accepted.
 
 This block is deliberately smaller than PM-1's, because `tmt run` is a
 narrower tool. It always drives a whole multi-tape band loaded from a
@@ -251,8 +252,9 @@ actually be run.
 - **Profile names** must be `debug` or `release`.
 - **`call-mech` values** must be `mono`, `frames`, or `hybrid`.
 - **`entry`**, if given, must not be an empty string.
-- **`max-steps` and `no-step-limit`** cannot both be set on one `run`
-  block.
+- **`max-steps` and `no-step-limit: true`** cannot both be set on one
+  `run` block; an explicit `no-step-limit: false` alongside `max-steps`
+  is fine.
 - **Duplicate effective sources**: if the same path (after path
   normalization, below) appears twice in one target's effective source
   list — once from the project level and once from the target, or twice
@@ -363,3 +365,18 @@ overlay documented at `docs/lsp.md` ("Cross-file resolution (the project
 overlay)"). TM-1's own bridge for its embedded standard library — hover,
 completion, and go-to-definition into a materialized `std.tmc` — is
 covered on the same page ("The `.tmc` standard-library bridge").
+
+## Editor integration
+
+The VS Code extension turns each declared target into a task — one to
+build it, and one to build and run it where a `run` block exists. It
+discovers the manifest by running `tmt build --list-targets` at the
+workspace folder root, so editor and command line always agree on which
+project answers.
+
+The extension also bundles a JSON Schema for this file, giving key
+completion, hover text, and inline errors while editing it. The schema
+describes key names, types, and the mutually exclusive pairs; it cannot
+express the rules that compare paths or span targets, so the toolchain's
+own validation stays authoritative and a manifest that an editor shows as
+clean can still be rejected with a precise error.

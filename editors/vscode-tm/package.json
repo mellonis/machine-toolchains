@@ -55,23 +55,31 @@
         "file": 1, "line": 2, "column": 3, "severity": 4, "message": 5, "code": 6
       }
     }],
+    "jsonValidation": [{
+      "fileMatch": "tmt.json",
+      "url": "./schemas/tmt.schema.json"
+    }],
     "taskDefinitions": [{
       "type": "tmt",
       "required": ["command"],
       "properties": {
-        "command": { "type": "string", "enum": ["compile", "asm", "lint", "fmt-check"] },
-        "file": { "type": "string" }
+        "command": { "type": "string", "enum": ["compile", "asm", "lint", "fmt-check", "build"] },
+        "file": { "type": "string" },
+        "target": { "type": "string", "description": "Target name; `build` only." },
+        "run": { "type": "boolean", "description": "Run the target after building; `build` only." }
       }
     }]
   },
   "scripts": {
-    "copy-grammar": "node scripts/copy-grammar.js",
-    "compile": "npm run copy-grammar && tsc -p .",
+    "copy-assets": "node scripts/copy-assets.js",
+    "typecheck": "tsc --noEmit -p .",
+    "bundle": "npm run copy-assets && node esbuild.js",
+    "compile": "npm run typecheck && npm run bundle",
     "package": "npm run compile && vsce package"
   },
   "dependencies": { "vscode-languageclient": "^10.1.0" },
   "devDependencies": {
     "@types/node": "^20.0.0", "@types/vscode": "^1.91.0",
-    "@vscode/vsce": "^3.9.2", "typescript": "^5.9.0"
+    "@vscode/vsce": "^3.9.2", "esbuild": "^0.25.0", "typescript": "^5.9.0"
   }
 }
