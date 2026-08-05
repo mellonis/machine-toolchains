@@ -460,12 +460,17 @@ alphabet wideEnoughToWrap {
 // The next three fixtures lock the interior-comment placement described in
 // the module doc's "Trivia-preserving, with one exception" bullet: an
 // alphabet body, a signature parameter list, and a graft/bind binding list
-// each carry a comment slot on the enclosing CST node, keyed by the index
-// of the entry the comment precedes, so a comment written inside one of
-// these lists prints where its author put it rather than being relocated
-// below the enclosing item. The one remaining case — a comment inside a
-// `call` transition's binding list — still has no slot to land in and is
-// dropped rather than merely relocated.
+// each carry a comment slot, keyed by the index of the entry the comment
+// precedes, so a comment written inside one of these lists prints where its
+// author put it rather than being relocated below the enclosing item. A
+// `call` transition's own binding list and any `with map` pair list nested
+// inside one of these binding lists behave the same way, via a side-car on
+// the enclosing RuleCst/GraftCst/BindCst rather than a field on the CST node
+// itself — those two nest inside a type the AST takes verbatim, so their
+// comment slot can't live on the entry. The one remaining case — a comment
+// inside a pattern, write, or move vector — still relocates to its own line
+// after the enclosing rule; those vectors are positional and walked per row
+// by the compiler, so giving them per-entry trivia is tracked separately.
 
 #[test]
 fn a_comment_inside_an_alphabet_body_prints_in_place() {

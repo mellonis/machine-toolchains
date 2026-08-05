@@ -809,6 +809,12 @@ type WorldItemsResult = Result<(Vec<WorldItem>, Option<Comment>, Option<Span>), 
 /// (docs/tmt/fmt.md (interior comments)).
 type InteriorComments = Vec<(usize, Comment)>;
 
+/// A binding list's `with map` interior comments, one level down from
+/// [`InteriorComments`]: triples of (binding-arg index, index of the map
+/// pair the comment precedes, comment) — see `Parser::binding_args`
+/// (docs/tmt/fmt.md (interior comments)).
+type MapInteriorComments = Vec<(usize, usize, Comment)>;
+
 fn join(a: Span, b: Span) -> Span {
     Span {
         start: a.start,
@@ -1698,19 +1704,28 @@ impl Parser<'_> {
             }
             let saved = self.prev_end_line;
             let rule_line = t.line;
-            let rule = self.rule()?;
+            let (rule, call_args, map_pairs) = self.rule()?;
             let trailing = self.take_trailing(self.prev_end_line);
             let blank_before = rule_line > saved + 1;
             rules.push(RuleItem {
                 blank_before,
-                kind: RuleKind::Rule(Box::new(RuleCst { rule, trailing })),
+                kind: RuleKind::Rule(Box::new(RuleCst {
+                    rule,
+                    trailing,
+                    call_args,
+                    map_pairs,
+                })),
             });
         }
     }
 
     // ---- rules ------------------------------------------------------------
 
-    fn rule(&mut self) -> Result<Rule, CompileError> {
+    /// Parses one rule; also returns its transition's interior comments
+    /// (empty for a non-`call` transition) — [`Rule`] is handed to the AST
+    /// verbatim, so `state_rules` stores these on [`RuleCst`]'s side-car
+    /// fields instead (docs/tmt/fmt.md (interior comments)).
+    fn rule(&mut self) -> Result<(Rule, InteriorComments, MapInteriorComments), CompileError> {
         let pattern = self.pattern()?;
         self.expect(&TokenKind::Arrow, "`->` after the pattern")?;
         let debugger = if self.at_kw("debugger") {
@@ -1736,27 +1751,36 @@ impl Parser<'_> {
         // `debugger`. With no action, `-> ;` stays the "expected a transition"
         // error (docs/tmt/language.md (rules)).
         let has_action = debugger || write.is_some() || mov.is_some();
-        let transition = if has_action && matches!(self.peek().kind, TokenKind::Semi) {
-            Transition::Stay {
-                span: self.peek().span(),
-            }
-        } else {
-            self.transition()?
-        };
+        let (transition, call_args, map_pairs) =
+            if has_action && matches!(self.peek().kind, TokenKind::Semi) {
+                (
+                    Transition::Stay {
+                        span: self.peek().span(),
+                    },
+                    InteriorComments::new(),
+                    MapInteriorComments::new(),
+                )
+            } else {
+                self.transition()?
+            };
         let semi = self.expect(&TokenKind::Semi, "`;` to end the rule")?;
         self.prev_end_line = semi.line;
         // Char arithmetic is deliberately absent: a `{c±k}` on a glyph-bound
         // pattern name is rejected here, where the rule's bindings are known.
         self.check_char_arithmetic(&pattern, &write)?;
-        Ok(Rule {
-            pattern: pattern.clone(),
-            debugger,
-            write,
-            mov,
-            transition,
-            line: pattern.span.start.line,
-            span: join(pattern.span, semi.span()),
-        })
+        Ok((
+            Rule {
+                pattern: pattern.clone(),
+                debugger,
+                write,
+                mov,
+                transition,
+                line: pattern.span.start.line,
+                span: join(pattern.span, semi.span()),
+            },
+            call_args,
+            map_pairs,
+        ))
     }
 
     fn check_char_arithmetic(
@@ -2086,25 +2110,32 @@ impl Parser<'_> {
         })
     }
 
-    fn transition(&mut self) -> Result<Transition, CompileError> {
+    /// Parses one transition; also returns its interior comments — a
+    /// `call`'s own binding-list comments, and every `with map` pair-list
+    /// comment nested inside that binding list — both empty for every
+    /// non-`call` variant (docs/tmt/fmt.md (interior comments)).
+    fn transition(
+        &mut self,
+    ) -> Result<(Transition, InteriorComments, MapInteriorComments), CompileError> {
         let t = self.peek().clone();
         match &t.kind {
             TokenKind::Ident(w) if w == "goto" => {
                 self.bump();
                 let (name, name_span) = self.name("a goto target")?;
-                Ok(Transition::Goto {
-                    name,
-                    explicit: true,
-                    span: join(t.span(), name_span),
-                })
+                Ok((
+                    Transition::Goto {
+                        name,
+                        explicit: true,
+                        span: join(t.span(), name_span),
+                    },
+                    InteriorComments::new(),
+                    MapInteriorComments::new(),
+                ))
             }
             TokenKind::Ident(w) if w == "call" => {
                 self.bump();
                 let target = self.qual_name("a call target")?;
-                // The call's own interior comments have nowhere to live until
-                // `RuleCst` gains its side-car fields; a later change wires
-                // them up (docs/tmt/fmt.md (interior comments)).
-                let (args, _interior) = self.binding_args()?;
+                let (args, call_args, map_pairs) = self.binding_args()?;
                 self.expect_kw("then", "`then` after the call target")?;
                 let then = self.continuation()?;
                 let end = match &then {
@@ -2113,33 +2144,53 @@ impl Parser<'_> {
                     | Continuation::Stop { span }
                     | Continuation::Halt { span } => *span,
                 };
-                Ok(Transition::Call {
-                    target,
-                    args,
-                    then,
-                    span: join(t.span(), end),
-                })
+                Ok((
+                    Transition::Call {
+                        target,
+                        args,
+                        then,
+                        span: join(t.span(), end),
+                    },
+                    call_args,
+                    map_pairs,
+                ))
             }
             TokenKind::Ident(w) if w == "return" => {
                 self.bump();
-                Ok(Transition::Return { span: t.span() })
+                Ok((
+                    Transition::Return { span: t.span() },
+                    InteriorComments::new(),
+                    MapInteriorComments::new(),
+                ))
             }
             TokenKind::Ident(w) if w == "stop" => {
                 self.bump();
-                Ok(Transition::Stop { span: t.span() })
+                Ok((
+                    Transition::Stop { span: t.span() },
+                    InteriorComments::new(),
+                    MapInteriorComments::new(),
+                ))
             }
             TokenKind::Ident(w) if w == "halt" => {
                 self.bump();
-                Ok(Transition::Halt { span: t.span() })
+                Ok((
+                    Transition::Halt { span: t.span() },
+                    InteriorComments::new(),
+                    MapInteriorComments::new(),
+                ))
             }
             TokenKind::Ident(w) if !RESERVED.contains(&w.as_str()) => {
                 // Bare-name transition = goto sugar.
                 self.bump();
-                Ok(Transition::Goto {
-                    name: w.clone(),
-                    explicit: false,
-                    span: t.span(),
-                })
+                Ok((
+                    Transition::Goto {
+                        name: w.clone(),
+                        explicit: false,
+                        span: t.span(),
+                    },
+                    InteriorComments::new(),
+                    MapInteriorComments::new(),
+                ))
             }
             _ => Err(Self::expected(
                 &t,
@@ -2202,14 +2253,28 @@ impl Parser<'_> {
         })
     }
 
-    fn binding_args(&mut self) -> Result<(Vec<BindingArg>, InteriorComments), CompileError> {
+    /// Parses a `(args)` binding list; also returns the list's own interior
+    /// comments and every `with map` pair-list comment nested inside one of
+    /// its arguments, the latter re-keyed by the owning argument's index
+    /// (docs/tmt/fmt.md (interior comments)).
+    fn binding_args(
+        &mut self,
+    ) -> Result<(Vec<BindingArg>, InteriorComments, MapInteriorComments), CompileError> {
         self.expect(&TokenKind::LParen, "`(` to open the binding")?;
         let mut args: Vec<BindingArg> = Vec::new();
-        let mut interior: Vec<(usize, Comment)> = Vec::new();
+        let mut interior: InteriorComments = Vec::new();
+        let mut map_interior: MapInteriorComments = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RParen) {
             loop {
                 self.interior_comments(args.len(), &mut interior);
-                args.push(self.binding_arg()?);
+                let arg_index = args.len();
+                let (arg, arg_map_interior) = self.binding_arg()?;
+                map_interior.extend(
+                    arg_map_interior
+                        .into_iter()
+                        .map(|(pair_index, comment)| (arg_index, pair_index, comment)),
+                );
+                args.push(arg);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
                     TokenKind::RParen => break,
@@ -2219,14 +2284,19 @@ impl Parser<'_> {
         }
         self.interior_comments(args.len(), &mut interior);
         self.expect(&TokenKind::RParen, "`)` to close the binding")?;
-        Ok((args, interior))
+        Ok((args, interior, map_interior))
     }
 
-    fn binding_arg(&mut self) -> Result<BindingArg, CompileError> {
+    /// Parses one `name = value` binding argument; also returns its map's
+    /// interior comments, if `value` carries one (empty otherwise) — a
+    /// [`BindingArg`] is handed to the AST verbatim, so `binding_args`
+    /// re-keys these by the argument's own index before returning them
+    /// (docs/tmt/fmt.md (interior comments)).
+    fn binding_arg(&mut self) -> Result<(BindingArg, InteriorComments), CompileError> {
         let (name, name_span) = self.name("a binding argument name")?;
         self.expect(&TokenKind::Eq, "`=` in the binding argument")?;
         let t = self.peek().clone();
-        let (value, end) = match &t.kind {
+        let (value, end, map_interior) = match &t.kind {
             TokenKind::Ident(w) if w == "return" => {
                 self.bump();
                 (
@@ -2235,6 +2305,7 @@ impl Parser<'_> {
                         span: t.span(),
                     },
                     t.span(),
+                    InteriorComments::new(),
                 )
             }
             TokenKind::Ident(w) if w == "stop" => {
@@ -2245,6 +2316,7 @@ impl Parser<'_> {
                         span: t.span(),
                     },
                     t.span(),
+                    InteriorComments::new(),
                 )
             }
             TokenKind::Ident(w) if w == "halt" => {
@@ -2255,19 +2327,20 @@ impl Parser<'_> {
                         span: t.span(),
                     },
                     t.span(),
+                    InteriorComments::new(),
                 )
             }
             TokenKind::Ident(w) if !RESERVED.contains(&w.as_str()) => {
                 let target = w.clone();
                 let target_span = t.span();
                 self.bump();
-                let (map, end) = if self.at_kw("with") {
+                let (map, end, map_interior) = if self.at_kw("with") {
                     self.bump();
-                    let m = self.sym_map()?;
+                    let (m, interior) = self.sym_map()?;
                     let sp = m.span;
-                    (Some(m), sp)
+                    (Some(m), sp, interior)
                 } else {
-                    (None, target_span)
+                    (None, target_span, InteriorComments::new())
                 };
                 (
                     BindingValue::Named {
@@ -2276,6 +2349,7 @@ impl Parser<'_> {
                         map,
                     },
                     end,
+                    map_interior,
                 )
             }
             _ => {
@@ -2285,21 +2359,27 @@ impl Parser<'_> {
                 ));
             }
         };
-        Ok(BindingArg {
-            name,
-            name_span,
-            value,
-            span: join(name_span, end),
-        })
+        Ok((
+            BindingArg {
+                name,
+                name_span,
+                value,
+                span: join(name_span, end),
+            },
+            map_interior,
+        ))
     }
 
-    /// `map { pairs }` after a consumed `with`.
-    fn sym_map(&mut self) -> Result<SymMap, CompileError> {
+    /// `map { pairs }` after a consumed `with`; returns its own interior
+    /// list, mirroring [`Parser::binding_args`].
+    fn sym_map(&mut self) -> Result<(SymMap, InteriorComments), CompileError> {
         let map_tok = self.expect_kw_tok("map", "`map` after `with`")?;
         self.expect(&TokenKind::LBrace, "`{` to open the map")?;
         let mut pairs: Vec<MapPair> = Vec::new();
+        let mut interior: InteriorComments = Vec::new();
         if !matches!(self.peek().kind, TokenKind::RBrace) {
             loop {
+                self.interior_comments(pairs.len(), &mut interior);
                 pairs.push(self.map_pair()?);
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
@@ -2308,11 +2388,15 @@ impl Parser<'_> {
                 }
             }
         }
+        self.interior_comments(pairs.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBrace, "`}` to close the map")?;
-        Ok(SymMap {
-            pairs,
-            span: join(map_tok.span(), rb.span()),
-        })
+        Ok((
+            SymMap {
+                pairs,
+                span: join(map_tok.span(), rb.span()),
+            },
+            interior,
+        ))
     }
 
     fn expect_kw_tok(
@@ -2355,7 +2439,7 @@ impl Parser<'_> {
         let graft_tok = self.peek().clone();
         self.bump(); // `graft`
         let target = self.qual_name("a graft target")?;
-        let (args, interior) = self.binding_args()?;
+        let (args, interior, map_pairs) = self.binding_args()?;
         let as_name = if self.at_kw("as") {
             self.bump();
             let (n, sp) = self.name("a graft instance name")?;
@@ -2378,6 +2462,7 @@ impl Parser<'_> {
             target,
             args,
             interior,
+            map_pairs,
             as_name,
             line: graft_tok.line,
             span: Span {
@@ -2393,7 +2478,7 @@ impl Parser<'_> {
         let bind_tok = self.peek().clone();
         self.bump(); // `bind`
         let target = self.qual_name("a bind target")?;
-        let (args, interior) = self.binding_args()?;
+        let (args, interior, map_pairs) = self.binding_args()?;
         self.expect_kw("as", "`as` (a bind needs an instance name)")?;
         let (n, sp) = self.name("a bind instance name")?;
         let semi = self.expect(&TokenKind::Semi, "`;` to end the bind")?;
@@ -2403,6 +2488,7 @@ impl Parser<'_> {
             target,
             args,
             interior,
+            map_pairs,
             as_name: (n, sp),
             line: bind_tok.line,
             span: join(bind_tok.span(), semi.span()),

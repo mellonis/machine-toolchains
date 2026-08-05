@@ -179,3 +179,49 @@ fn an_interior_block_comment_keeps_the_list_on_one_line() {
         "the block comment stays inline, got:\n{out}"
     );
 }
+
+/// A comment inside a `call`'s binding list prints in place, not below the
+/// rule that carries the call.
+#[test]
+fn interior_call_binding_comments_print_in_place() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               routine walk(tape t: bits, state done) {\n\
+               \x20 entry state g { ['_'] -> goto done; }\n\
+               }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call walk(t = m, // the work tape\n\
+               \x20                                  done = stop) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let comment_line = out
+        .lines()
+        .find(|l| l.contains("// the work tape"))
+        .expect("the comment survives");
+    assert!(
+        comment_line.contains("t = m"),
+        "it rides the binding it was written against, got: {comment_line:?}"
+    );
+}
+
+/// A comment inside a `with map` pair list prints in place.
+#[test]
+fn interior_map_pair_comments_print_in_place() {
+    let src = "alphabet bits { '_', '0', '1' }\n\
+               alphabet wide { '_', 'x', 'y' }\n\n\
+               routine walk(tape t: bits) { entry state g { ['_'] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: wide;\n\
+               \x20 entry state s { [*] -> call walk(t = m with map { 'x' -> '0', // low\n\
+               \x20                                                   'y' -> '1' }) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let comment_line = out
+        .lines()
+        .find(|l| l.contains("// low"))
+        .expect("the comment survives");
+    assert!(
+        comment_line.contains("'x' -> '0'"),
+        "it rides the pair it was written against, got: {comment_line:?}"
+    );
+}
