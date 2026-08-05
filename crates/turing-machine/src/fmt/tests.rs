@@ -4,6 +4,7 @@
 //! that caused it rather than only on the whole-corpus battery.
 
 use super::format;
+use super::{Comment, CommentKind, bucket};
 
 /// Formats, asserting the source is accepted.
 fn f(source: &str) -> String {
@@ -713,4 +714,33 @@ fn crlf_and_tabs_and_trailing_spaces_do_not_survive() {
 fn a_lex_or_parse_error_is_returned_not_printed() {
     assert!(format("machine {").is_err());
     assert!(format("alphabet ab { 'unterminated }\n").is_err());
+}
+
+/// An out-of-range index clamps to the tail slot rather than dropping
+/// the comment: a misplaced comment is a bug, a lost one is data loss. No
+/// fixture can reach this — the parser's own bookkeeping never hands
+/// `bucket` an index past `entry_count` — so it needs a direct unit test,
+/// and only in release: the `debug_assert!` in `bucket` fires first under
+/// `cargo test`'s default debug profile (guarded below accordingly). Run
+/// explicitly: `cargo test -p mtc-turing-machine --release --lib
+/// fmt::tests::an_out_of_range -- --ignored`.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "the debug_assert fires first; this pins release behaviour"
+)]
+fn an_out_of_range_interior_index_clamps_to_the_tail() {
+    let comment = Comment {
+        text: "// stray".into(),
+        kind: CommentKind::Line,
+        own_line: false,
+    };
+    let interior = vec![(99, comment)];
+    let bucketed = bucket(&interior, 2);
+    assert_eq!(bucketed.slots.len(), 3, "one slot per position 0..=count");
+    assert_eq!(bucketed.slots[2].len(), 1, "clamped into the tail slot");
+    assert!(
+        bucketed.forces_break,
+        "a line comment still forces the break"
+    );
 }

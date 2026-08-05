@@ -382,3 +382,104 @@ fn interior_use_list_comments_print_in_place() {
         "and is not relocated to the end"
     );
 }
+
+// -- the `use` path list, at every interior position ------------------------
+//
+// `print_use`'s correctness was verified by a 48-case fuzz sweep during this
+// branch's development, since deleted as a temporary test — these pin the
+// same positions permanently. Every assertion checks the comment SURVIVES
+// first (`.find`/`.position` panicking via `.expect`/`.unwrap` on a missing
+// comment, so a dropped comment fails loudly on that line, not silently),
+// then checks it landed in the right place.
+
+/// A comment on its own line, directly after the `use` keyword and before
+/// the first path — slot 0, own-line.
+#[test]
+fn interior_use_slot0_own_line() {
+    let src = "use\n// note\na::b, c::d;\n";
+    let out = format(src).expect("formats");
+    let idx = out
+        .lines()
+        .position(|l| l.contains("// note"))
+        .unwrap_or_else(|| panic!("the comment survives, got:\n{out}"));
+    assert!(
+        out.lines().nth(idx + 1).unwrap().contains("a::b"),
+        "it precedes the first path, got:\n{out}"
+    );
+}
+
+/// A comment on the SAME line as the `use` keyword, before the first path —
+/// slot 0, same-line. This is the exact position one of the four defects
+/// destroyed on the sibling crate; `print_use` never had that bug, but the
+/// position is worth pinning permanently now that the fuzz sweep is gone.
+#[test]
+fn interior_use_slot0_same_line() {
+    let src = "use // note\na::b, c::d;\n";
+    let out = format(src).expect("formats");
+    let use_line = out
+        .lines()
+        .find(|l| l.starts_with("use"))
+        .expect("the file has a `use` line");
+    assert_eq!(
+        use_line, "use // note",
+        "the comment rides `use`'s own line, got: {use_line:?}"
+    );
+}
+
+/// A same-line comment trailing the first path, before the second — between
+/// entries.
+#[test]
+fn interior_use_between_entries() {
+    let src = "use a::b, // note\nc::d;\n";
+    let out = format(src).expect("formats");
+    let comment_line = out
+        .lines()
+        .find(|l| l.contains("// note"))
+        .unwrap_or_else(|| panic!("the comment survives, got:\n{out}"));
+    assert!(
+        comment_line.contains("a::b"),
+        "it rides the path it was written against, got: {comment_line:?}"
+    );
+}
+
+/// A comment on its own line, after the last path and before the `;` — the
+/// tail slot, own-line.
+#[test]
+fn interior_use_tail_slot_own_line() {
+    let src = "use a::b, c::d\n// note\n;\n";
+    let out = format(src).expect("formats");
+    let idx = out
+        .lines()
+        .position(|l| l.contains("// note"))
+        .unwrap_or_else(|| panic!("the comment survives, got:\n{out}"));
+    assert_eq!(
+        out.lines().nth(idx + 1).unwrap().trim(),
+        ";",
+        "it precedes the terminator, got:\n{out}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// The tail-plus-terminator case: a same-line LINE comment trailing the last
+/// `use` path must not swallow the `;` — the fourth of the four defects this
+/// branch shipped and fixed on the sibling crate. Appending `;` directly
+/// after the comment text would merge the terminator into the comment, and
+/// the formatted output would no longer parse.
+#[test]
+fn interior_use_tail_slot_same_line_does_not_swallow_the_semicolon() {
+    let src = "use a::b // note\n;\n";
+    let out = format(src).expect("formats");
+    let comment_line = out
+        .lines()
+        .find(|l| l.contains("// note"))
+        .unwrap_or_else(|| panic!("the comment survives, got:\n{out}"));
+    assert!(
+        !comment_line.contains(';'),
+        "the terminator must not merge into the LINE comment, got: {comment_line:?}"
+    );
+    // The strongest check: a corrupted terminator makes the output
+    // unparseable, so re-formatting it would fail outright.
+    let twice = format(&out).expect("the formatted output must still parse");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
