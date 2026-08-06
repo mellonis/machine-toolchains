@@ -1,12 +1,18 @@
 //! The `.tmc` formatter's objective guard: on every `.tmc` source in the
-//! repository — the Appendix-A examples, the nested-graft fixture, and the
-//! embedded standard library — formatting must be IDEMPOTENT and must not
-//! change a single token.
+//! repository — the Appendix-A examples, the nested-graft fixture, the
+//! flagship brainfuck UTM doc example, and the embedded standard library —
+//! formatting must be IDEMPOTENT and must not change a single token.
 //!
 //! "Not a single token" is checked by re-lexing the formatted text and
 //! comparing the token stream with the original's, not by checking that the
 //! output still parses: a printer that dropped a `move` vector or rewrote a
 //! number's spelling would still parse fine.
+//!
+//! `every_tmc_source_is_already_fmt_clean` (mirrors
+//! `crates/post-machine/tests/fmt_programs.rs`'s
+//! `dogfood_stdlib_and_goldens_are_already_fmt_clean`) is the dogfood lock:
+//! every file `corpus()` enumerates must already be in canonical form, so
+//! `format` is a no-op on it byte-for-byte.
 
 use mtc_turing_machine::fmt::format;
 use mtc_turing_machine::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
@@ -33,6 +39,14 @@ fn corpus() -> Vec<(String, String)> {
         "std.tmc".to_string(),
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/stdlib/std.tmc"))
             .expect("the embedded stdlib source is readable"),
+    ));
+    out.push((
+        "docs/examples/brainfuck-utm.tmc".to_string(),
+        std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/examples/brainfuck-utm.tmc"
+        ))
+        .expect("the flagship UTM doc example is readable"),
     ));
     out
 }
@@ -92,6 +106,21 @@ fn formatting_never_changes_a_token() {
             token_signature(&formatted),
             "{name}: the formatted text does not lex to the same token stream"
         );
+    }
+}
+
+/// The dogfood lock (mirrors `crates/post-machine/tests/fmt_programs.rs`'s
+/// `dogfood_stdlib_and_goldens_are_already_fmt_clean`): every file `corpus()`
+/// enumerates — not a hand-written list, so a fixture added later is covered
+/// automatically — must already be in canonical form, so `format` is a no-op
+/// on it byte-for-byte. This is the regression guard: any future printer
+/// change that would reformat a shipped source fails here first, not
+/// silently on the next `tmt fmt` run.
+#[test]
+fn every_tmc_source_is_already_fmt_clean() {
+    for (name, source) in corpus() {
+        let formatted = format(&source).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(formatted, source, "{name} is not fmt-clean");
     }
 }
 
