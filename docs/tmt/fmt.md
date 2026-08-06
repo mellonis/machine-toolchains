@@ -61,9 +61,10 @@ stays omitted rather than gaining a `goto`. Renaming, reordering imports,
 and normalizing spellings are lint's business or the author's, never
 fmt's.
 
-**Trivia-preserving, with one exception.** Every comment reprints
-somewhere — see [Comments](#comments) below for the placement rules and
-the exception.
+**Trivia-preserving.** Every comment reprints somewhere — see
+[Comments](#comments) below for the placement rules, including the one
+list kind (a rule's pattern/`write`/`move` vector) whose layout depends
+on the comment's kind rather than only on its position.
 
 ## Indentation
 
@@ -140,9 +141,10 @@ pair list also break on a second, width-independent trigger: an interior
 comment written inside them, however short, forces the break regardless
 of whether the resulting line would have fit
 ([Comments inside a list](#comments-inside-a-list), below). An
-`alphabet` body does not share that trigger for a lone `/* … */`
-comment — only a `//` comment forces a break there, and it does so in
-any list, not just because of width.
+`alphabet` body only escapes that trigger for a SAME-LINE `/* … */`
+comment, which stays inline there; a `//` comment, or any own-line
+comment, block or line, still forces a break in an `alphabet` body
+exactly as it does in every other list — not just because of width.
 
 A single binding argument is never broken further on width alone — a
 `with map { … }` with no interior comment of its own stays inline, so one
@@ -274,28 +276,41 @@ routine w(
 }
 ```
 
-**The exception that remains**: a LINE comment inside a pattern, write,
-or move vector — `['0', // here` … `'1'] -> stop;` — still reprints as
-an own-line comment after the enclosing rule instead of in place. (A
-`/* … */` comment in that same position reprints as a same-line
-trailing comment on the rule instead — still relocated out of the
-vector, just not onto its own line.)
+**A pattern, `write`, or `move` vector is different**, because these
+three vectors double as the state-block grid's columns (above): a
+comment inside one of them decides not just how the vector prints, but
+whether its rule stays part of the grid at all.
+
+A same-line `/* … */` comment stays inline inside the vector. The rule
+stays a grid row — its width still counts toward the group's shared
+columns, so it keeps aligning against its neighbours exactly like an
+uncommented rule would.
+
+Anything else — a `//` comment, or any own-line comment, block or line —
+cannot sit inline. The rule carrying one comes off the grid and renders
+across several lines instead, excluded from the group's width
+computation in both directions: it neither pads to match the columns its
+neighbours share, nor widens those columns for them.
 
 ```
-alphabet bits { '_', '0', '1' }
-
-machine {
-  tape a: bits;
-  tape b: bits;
-  entry state s {
-    ['0', '1'] -> stop;
-    // first tape
-  }
-}
+['0', /* lo */ '1'] -> stop;
+[*, *]              -> move [>, .] goto s;
+[
+  '0', // note
+  '1'
+] -> stop;
+[
+  /* first */
+  '0',
+  '1'
+] -> stop;
 ```
 
-Those vectors are positional and are walked per row by the compiler, so
-giving them per-entry trivia is tracked separately.
+The first two rules share one grid: the same-line block comment sets the
+pattern column's width, and the plain rule beside it pads to match. The
+third and fourth rules both left the grid — one for its `//` comment,
+the other for an own-line block comment with no `//` in sight — and
+neither one moved the first two rules' shared column.
 
 ## `.tma` formatting
 

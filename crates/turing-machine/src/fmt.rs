@@ -40,12 +40,13 @@
 //!   signature, `call`/`graft`/`bind`, and `with map` lists, which have no
 //!   inline-with-comments form at all. A pattern/`write`/`move` vector's
 //!   SAME-LINE block comment stays inline like an `alphabet` body's or a
-//!   `use` path list's does; its `//` comment differs from every other list,
-//!   because these three vectors double as the state-block grid's columns
-//!   (below) — a LINE comment does not just force its own vector onto
-//!   several lines, it takes the WHOLE enclosing rule off the grid, so the
-//!   rule renders across several lines without widening the columns its
-//!   neighbours share (docs/tmt/fmt.md (interior comments)).
+//!   `use` path list's does; its `//` comment, and any OWN-LINE comment
+//!   (block or line), differ from every other list, because these three
+//!   vectors double as the state-block grid's columns (below) — either kind
+//!   does not just force its own vector onto several lines, it takes the
+//!   WHOLE enclosing rule off the grid, so the rule renders across several
+//!   lines without widening the columns its neighbours share
+//!   (docs/tmt/fmt.md (interior comments)).
 //!
 //! # Indentation
 //!
@@ -79,13 +80,15 @@
 //! padding it would leave a ragged gap in every table whose rules mix
 //! `write`-only and `write`+`move` actions.
 //!
-//! A rule whose pattern, `write`, or `move` vector carries a `//` comment
-//! cannot be a grid row — nothing may follow `//` on its physical line, so
-//! the vector (and the rule around it) renders across several lines
-//! instead. Such a rule is excluded from the group's width computation in
-//! both directions: it does not consume the group's shared columns, and it
-//! does not widen them for its neighbours (docs/tmt/fmt.md (interior
-//! comments)).
+//! A rule whose pattern, `write`, or `move` vector carries a `//` comment, or
+//! any OWN-LINE comment (block or line), cannot be a grid row — nothing may
+//! follow `//` on its physical line, and an own-line comment must keep its
+//! own line, so either way the vector (and the rule around it) renders
+//! across several lines instead. Only a SAME-LINE `/* … */` comment stays
+//! inline and leaves the rule on the grid. An off-grid rule is excluded from
+//! the group's width computation in both directions: it does not consume the
+//! group's shared columns, and it does not widen them for its neighbours
+//! (docs/tmt/fmt.md (interior comments)).
 //!
 //! # Single-line states
 //!
