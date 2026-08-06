@@ -95,6 +95,19 @@ fn brainfuck_fixture_fmt_is_idempotent_and_lossless() {
     assert_idempotent_and_lossless(&src, "brainfuck");
 }
 
+/// The `.tma` dogfood lock, mirroring `fmt_tmc.rs`'s
+/// `every_tmc_source_is_already_fmt_clean`: every `.tma` source the
+/// repository ships must already be in canonical form, so formatting it
+/// is a byte-for-byte no-op. Any future printer change that would
+/// reformat a shipped source fails here first.
+#[test]
+fn every_tma_source_is_already_fmt_clean() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma");
+    let src = fs::read_to_string(&path).expect("read brainfuck-utm.tma");
+    assert_eq!(fmt_tma(&src), src, "brainfuck-utm.tma is not fmt-clean");
+}
+
 #[test]
 fn fmt_check_on_canonical_tma_is_silent_and_exits_zero() {
     let dir = scratch("check-clean");
