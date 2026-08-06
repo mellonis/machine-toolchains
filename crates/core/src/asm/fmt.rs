@@ -13,11 +13,17 @@
 //! `.map` — which DO wrap: each runs onto further physical lines when
 //! its code would exceed [`LINE_WIDTH_LIMIT`] columns, continuation
 //! lines aligned under the list's first element (see
-//! [`wrap_operand_list`]). The budget bounds code only; a trailing
-//! comment still lands at its group's uncapped column same as every
-//! other line here, so a wrapped list's commented last line can still run
-//! past it. Columns below are 0-based (tab-stop convention, matching
-//! `disassembler.rs`'s `grid_line` and docs/formats.md); the CST's
+//! [`wrap_operand_list`]). This gets every element under the budget for
+//! `.targets`/`.exits`, whose elements are individual names — but NOT
+//! for `.map`, whose wrap point is between its `<k>`/`rmap=(…)`/`wmap=(…)`
+//! clauses rather than inside a clause's own pair list (see
+//! [`render_frame_directive`]): a single clause wider than the budget on
+//! its own still prints as one over-budget line. The budget bounds code
+//! only; a trailing comment still lands at its group's uncapped column
+//! same as every other line here, so a wrapped list's commented last
+//! line can still run past it. Columns below are 0-based (tab-stop
+//! convention, matching `disassembler.rs`'s `grid_line` and
+//! docs/formats.md); the CST's
 //! `Span`/`Pos::col` fields are 1-based, so a 0-based target of 32 is the
 //! 1-based column 33 a `TrailingComment.col` would report at the floor
 //! (a wider group's column shifts that report accordingly).
@@ -751,7 +757,9 @@ mod tests {
     use crate::asm::lexer::{AsmTokenKind, lex_line};
     use crate::asm::syntax::AsmCaps;
     use crate::asm::syntax::fixture::test_syntax;
+    use crate::asm::syntax::{ArchSyntax, Flow, SyntaxEntry};
     use crate::diagnostics::Span;
+    use crate::vm::OperandKind;
 
     // The `.pma` example from docs/formats.md (assembly text) — the
     // SAME constant `cst.rs`'s own doc-example test pins, reproduced
@@ -1467,6 +1475,34 @@ F0:     .frame  tapes=(0, 1)
             out.lines().count() > src.lines().count(),
             "the .map list actually wrapped:\n{out}"
         );
+        // Regression guard: the split must fall BETWEEN clauses, never
+        // inside one. Today the printer cannot do otherwise —
+        // `frame_map_operands` hands `render_fields` three atomic
+        // elements, so there is nowhere mid-`rmap=(…)` to break — but
+        // the shared CST fold is genuinely nesting-blind (a flat "is the
+        // line's last token a comma" check, no paren awareness), so a
+        // future change that flattened pairs into operands could move
+        // the split point silently. Every continuation line must open a
+        // new clause.
+        let map_lines: Vec<&str> = out
+            .lines()
+            .skip_while(|l| !l.contains(".map"))
+            .take_while(|l| !l.trim_start().starts_with(".section"))
+            .collect();
+        assert!(
+            map_lines.len() > 1,
+            "the .map item itself must span more than one line:\n{out}"
+        );
+        for line in &map_lines[1..] {
+            let t = line.trim_start();
+            assert!(
+                t.starts_with("rmap=")
+                    || t.starts_with("wmap=")
+                    || t.chars().next().is_some_and(|c| c.is_ascii_digit()),
+                "a .map continuation line must open a new clause, not \
+                 split inside one: {line:?}\n{out}"
+            );
+        }
         // The wrap must still be a fixed point, folding back into one
         // `.map` item rather than degrading into separate lines.
         let twice = format_asm_with(&out, caps_all()).unwrap();
@@ -1596,6 +1632,133 @@ F0:     .frame  tapes=(0, 1)
         assert_eq!(
             targets[0].trailing.as_ref().map(|tc| tc.text.as_str()),
             Some("; the dispatch table")
+        );
+    }
+
+    // -- List wrapping: assembler round trip ----------------------------
+    // Everything above proves the wrapped TEXT is well-shaped; none of it
+    // proves the assembler actually accepts it. This closes that gap: the
+    // grammar's continuation fold is a flat "does the line end in a
+    // comma" check with no semantic awareness of what a valid
+    // `.targets`/`.exits`/`.map` list looks like, so a wrap emitted in a
+    // shape the grammar declines is exactly the defect this printer
+    // could introduce without a test ever calling `assemble`.
+
+    /// Neutral fake dialect (per-file local helper, mirroring
+    /// `assembler.rs`'s and `disassembler.rs`'s own `fake_syntax`, since
+    /// there is no shared test-support module): `tdispatch` references a
+    /// `.targets` table (TableRef, Stop — a dispatch has no static
+    /// successor); `fcall` is a framed call (FramedCall, Call flow) for
+    /// `.frame`/`.map`/`.exits`; plus `nop`/`stp`.
+    fn fake_syntax() -> ArchSyntax {
+        use Flow::{Call, FallThrough as FT, Stop};
+        ArchSyntax {
+            entries: vec![
+                SyntaxEntry {
+                    opcode: 0x01,
+                    mnemonic: "nop",
+                    operand: OperandKind::None,
+                    flow: FT,
+                },
+                SyntaxEntry {
+                    opcode: 0x02,
+                    mnemonic: "stp",
+                    operand: OperandKind::None,
+                    flow: Stop,
+                },
+                SyntaxEntry {
+                    opcode: 0x12,
+                    mnemonic: "tdispatch",
+                    operand: OperandKind::TableRef,
+                    flow: Stop,
+                },
+                SyntaxEntry {
+                    opcode: 0x14,
+                    mnemonic: "fcall",
+                    operand: OperandKind::FramedCall,
+                    flow: Call,
+                },
+                SyntaxEntry {
+                    opcode: 0x0E,
+                    mnemonic: "ent",
+                    operand: OperandKind::None,
+                    flow: FT,
+                },
+            ],
+            relax_pairs: vec![],
+            entry_opcode: 0x0E,
+            break_opcode: None,
+            trap_opcode: None,
+            caps: caps_all(),
+        }
+    }
+
+    fn asm_fake(src: &str) -> crate::formats::object::ObjectFile {
+        assemble(&fake_syntax(), 0x7E, src, false).unwrap()
+    }
+
+    #[test]
+    fn a_wrapped_targets_list_assembles_to_the_same_object_as_unwrapped() {
+        let names: Vec<String> = (0..40).map(|i| format!("A{i:02}")).collect();
+        let code: String = names.iter().map(|n| format!("{n}: stp\n")).collect();
+        let src = format!(
+            ".section tables\nD0: .targets {}\n.section code\n.func main\n    tdispatch D0\n{code}",
+            names.join(", ")
+        );
+        let wrapped = format_asm_with(&src, caps_all()).unwrap();
+        assert!(
+            wrapped.lines().count() > src.lines().count(),
+            "the fixture must actually wrap:\n{wrapped}"
+        );
+        assert_eq!(
+            asm_fake(&wrapped),
+            asm_fake(&src),
+            "wrapped .targets must assemble to the identical object"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_exits_list_assembles_to_the_same_object_as_unwrapped() {
+        let names: Vec<String> = (0..30).map(|i| format!("E{i:02}")).collect();
+        let code: String = names.iter().map(|n| format!("{n}: stp\n")).collect();
+        let src = format!(
+            ".section tables\nF0: .frame tapes=(0)\n    .exits {}\n.section code\n.func main\n    fcall helper, F0\n{code}.func helper\n    stp\n",
+            names.join(", ")
+        );
+        let wrapped = format_asm_with(&src, caps_all()).unwrap();
+        assert!(
+            wrapped.lines().count() > src.lines().count(),
+            "the fixture must actually wrap:\n{wrapped}"
+        );
+        assert_eq!(
+            asm_fake(&wrapped),
+            asm_fake(&src),
+            "wrapped .exits must assemble to the identical object"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_map_clause_list_assembles_to_the_same_object_as_unwrapped() {
+        let src = "\
+.section tables
+F0: .frame tapes=(0, 1)
+    .map 0, rmap=(1->2, 3->4, 5->6, 7->8), wmap=(1->2, 3->4, 5->6, 7->8, 9->10)
+.section code
+.func main
+    fcall helper, F0
+    stp
+.func helper
+    stp
+";
+        let wrapped = format_asm_with(src, caps_all()).unwrap();
+        assert!(
+            wrapped.lines().count() > src.lines().count(),
+            "the fixture must actually wrap:\n{wrapped}"
+        );
+        assert_eq!(
+            asm_fake(&wrapped),
+            asm_fake(src),
+            "wrapped .map must assemble to the identical object"
         );
     }
 
