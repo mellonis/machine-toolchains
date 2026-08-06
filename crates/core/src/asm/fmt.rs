@@ -13,9 +13,9 @@
 //! 32 is the 1-based column 33 a `TrailingComment.col` would report.
 
 use super::cst::{
-    AsmCst, AsmItem, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, FuncCst, LabelCst,
-    LineCst, OperandToken, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst,
-    TableDirectiveKind, TrailingComment, parse_asm_cst_with,
+    AsmCst, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, FuncCst, LabelCst, LineCst,
+    OperandToken, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst, TableDirectiveKind,
+    TrailingComment, parse_asm_cst_with,
 };
 use super::syntax::AsmCaps;
 use super::{AsmError, AsmErrorKind};
@@ -60,16 +60,12 @@ pub fn format_asm(source: &str) -> Result<String, AsmError> {
 /// own-line one, which measures with empty `code`), then this loop
 /// emits them, padding each held-back comment to its own target column.
 ///
-/// The target-column scan below reproduces today's per-item column
-/// choice exactly — [`COMMENT_COL`] for every trailing comment,
-/// [`own_line_comment_col`] for an own-line one — as a `Vec<usize>`
-/// alongside `pieces` rather than folding the choice into
-/// [`render_pieces`] itself: a later pass computes per-GROUP columns
-/// instead of consulting this fixed table, and `render_pieces` (the
-/// measure phase) must not know about columns at all. `seen_func` here
-/// must reflect its value BEFORE the current item, mirroring the
-/// single-pass loop this replaced (which flipped it inside the `Func`
-/// arm as it printed) — flip it after recording `col`, not before.
+/// The target-column scan below chooses a column per piece — [`COMMENT_COL`]
+/// for every trailing comment, [`own_line_comment_col`] for an own-line one
+/// — as a `Vec<usize>` alongside `pieces` rather than folding the choice
+/// into [`render_pieces`] itself: a later pass computes per-GROUP columns
+/// instead of passing the fixed [`COMMENT_COL`] through, and `render_pieces`
+/// (the measure phase) must not know about columns at all.
 pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> {
     let cst = parse_asm_cst_with(source, caps);
     if let Some(raw) = cst.items.iter().find_map(|item| match &item.kind {
@@ -82,24 +78,16 @@ pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> 
         });
     }
 
-    let mut seen_func = false;
-    let comment_cols: Vec<usize> = cst
-        .items
+    let pieces = render_pieces(&cst, source);
+    let comment_cols: Vec<usize> = pieces
         .iter()
         .enumerate()
-        .map(|(i, item)| {
-            let col = match &item.kind {
-                AsmItemKind::Comment(_) => own_line_comment_col(&cst.items, i, seen_func),
-                _ => COMMENT_COL,
-            };
-            if matches!(item.kind, AsmItemKind::Func(_)) {
-                seen_func = true;
-            }
-            col
+        .map(|(i, p)| match p.kind {
+            PieceKind::Comment => own_line_comment_col(&pieces, i, COMMENT_COL),
+            _ => COMMENT_COL,
         })
         .collect();
 
-    let pieces = render_pieces(&cst, source);
     let mut out = String::new();
     for (i, p) in pieces.iter().enumerate() {
         // Blank-line runs already collapsed to one bool by the CST
@@ -159,10 +147,8 @@ enum PieceKind {
 struct Piece {
     code: String,
     comment: Option<String>,
-    /// Unread by this task's emit loop — the group scan a later task
-    /// adds is what consumes it, to tell an own-line comment apart from
-    /// a code line's trailing one.
-    #[allow(dead_code)]
+    /// Tells an own-line comment apart from a code line's trailing one —
+    /// consumed by [`own_line_comment_col`]'s group scan.
     kind: PieceKind,
     blank_before: bool,
 }
@@ -212,26 +198,36 @@ fn render_func(f: &FuncCst) -> Piece {
     }
 }
 
-/// Own-line comment indent (docs/formats.md (assembly text)): column 8
-/// inside a function's body, column 0 at top level — before the first
-/// `.func`, or in the gap between two functions. "The gap" is read as a
-/// forward-looking property, not a state reset: a run of own-line
-/// comments that leads into the NEXT `.func` (with no code line in
-/// between) reads as belonging to that upcoming function header, not to
-/// the body just left, so the whole run prints at column 0 — matching
-/// how such a comment block is typically meant (a header note for what
-/// follows) rather than a dangling footnote on what came before.
-fn own_line_comment_col(items: &[AsmItem], i: usize, seen_func: bool) -> usize {
-    if !seen_func {
-        return TOP_COL;
+/// Does the own-line comment at `i` continue a trailing comment above it
+/// (docs/formats.md (assembly text)), or open a new structural block? A
+/// blank line above breaks the continuation.
+fn continues_a_trailing_comment(pieces: &[Piece], i: usize) -> bool {
+    if pieces[i].blank_before {
+        return false;
     }
     let mut j = i;
-    while j < items.len() && matches!(items[j].kind, AsmItemKind::Comment(_)) {
-        j += 1;
+    while j > 0 {
+        j -= 1;
+        match pieces[j].kind {
+            PieceKind::Comment if !pieces[j].blank_before => continue,
+            PieceKind::Line => return pieces[j].comment.is_some(),
+            _ => return false,
+        }
     }
-    match items.get(j) {
-        Some(item) if matches!(item.kind, AsmItemKind::Func(_)) => TOP_COL,
-        _ => MNEMONIC_COL,
+    false
+}
+
+/// Own-line comment column (docs/formats.md (assembly text)). Two cases:
+/// a run continuing the trailing comment above it prints at that group's
+/// comment column; everything else is structural and prints at column 0.
+///
+/// Column 8 is the mnemonic column — where statements live. A comment is
+/// not a statement, so it is never placed there.
+fn own_line_comment_col(pieces: &[Piece], i: usize, group_col: usize) -> usize {
+    if continues_a_trailing_comment(pieces, i) {
+        group_col
+    } else {
+        TOP_COL
     }
 }
 
@@ -882,8 +878,10 @@ stp
         // `case1_doc_example_is_a_fixed_point`'s fixtures, but every
         // physical line — the `.func` header, a plain instruction line,
         // and an own-line comment — carries trailing spaces or a tab.
+        // D1: `abcdef: nop` above carries no trailing comment, so the
+        // own-line comment is structural — column 0, not MNEMONIC_COL.
         let src = ".func f  \nabcdef: nop\t\n        ; note   \n        stop  \n";
-        let expected = ".func f\nabcdef: nop\n        ; note\n        stop\n";
+        let expected = ".func f\nabcdef: nop\n; note\n        stop\n";
         let once = format_asm(src).unwrap();
         assert_eq!(once, expected);
         assert!(
@@ -933,9 +931,12 @@ stp
     }
 
     #[test]
-    fn comment_inside_a_function_body_is_col_8() {
+    fn comment_inside_a_function_body_is_col_0() {
+        // D1: `nop` above carries no trailing comment, so this own-line
+        // comment is structural, not a continuation — column 0.
         let src = ".func f\n        nop\n        ; note\n        ret\n";
-        assert_eq!(format_asm(src).unwrap(), src);
+        let expected = ".func f\n        nop\n; note\n        ret\n";
+        assert_eq!(format_asm(src).unwrap(), expected);
     }
 
     #[test]
@@ -945,11 +946,36 @@ stp
     }
 
     #[test]
-    fn trailing_comment_after_the_last_function_stays_col_8() {
-        // No upcoming `.func` to lead into (end of file) — reads as
-        // still belonging to the last function's body.
+    fn trailing_comment_after_the_last_function_is_col_0() {
+        // D1: no upcoming `.func`, but that no longer matters — `nop`
+        // above carries no trailing comment for this one to continue, so
+        // it is structural, not attached to the body above it.
         let src = ".func f\n        nop\n        ; done\n";
-        assert_eq!(format_asm(src).unwrap(), src);
+        let expected = ".func f\n        nop\n; done\n";
+        assert_eq!(format_asm(src).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_body_comment_prints_at_column_zero() {
+        // D1: MNEMONIC_COL leaves comment placement. A comment on its own
+        // line inside a .func body is structural, not attached, because the
+        // line above it carries no trailing comment to continue.
+        let src = ".func f\n        nop\n        ; note\n        ret\n";
+        let expected = ".func f\n        nop\n; note\n        ret\n";
+        assert_eq!(format_asm(src).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_comment_run_continues_the_line_above_it() {
+        // D1 rule 1: the line above carries a trailing comment, so the run
+        // is a continuation and prints at that group's comment column.
+        let src = ".func f\n        nop     ; first\n; continued\n        ret\n";
+        let expected = format!(
+            ".func f\n        nop{pad}; first\n{cont}; continued\n        ret\n",
+            pad = " ".repeat(COMMENT_COL - "        nop".len()),
+            cont = " ".repeat(COMMENT_COL),
+        );
+        assert_eq!(format_asm(src).unwrap(), expected);
     }
 
     // -- Case 11: `grid_line`'s long-label rule (unit test lives in
