@@ -582,6 +582,26 @@ machine {
 }
 
 #[test]
+fn a_run_aligns_even_when_a_member_then_crosses_eighty() {
+    // D4: alignment wins; line-too-long reports the result. Before this,
+    // the long member kept a single space and dropped out of the run.
+    let src = concat!(
+        "machine {\n",
+        "  tape prog: ops; // brainfuck source + 'H'; the head IS the instruction pointer\n",
+        "  tape cnt:  levels; // unary stack of bracket-nesting levels\n",
+        "}\n",
+    );
+    let out = stable(src);
+    let cols: Vec<usize> = out
+        .lines()
+        .filter(|l| l.contains("//"))
+        .map(|l| l.find("//").unwrap())
+        .collect();
+    assert_eq!(cols[0], cols[1], "both members share the run's column");
+    assert!(out.lines().any(|l| l.chars().count() > 80));
+}
+
+#[test]
 fn tape_declarations_line_their_alphabets_up() {
     check(
         "\
