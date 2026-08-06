@@ -6,15 +6,21 @@
 //!
 //! Pure CST walk (mirrors the `.pmc` printer's discipline, `crates/
 //! post-machine/src/fmt/mod.rs`, but is far simpler: assembly text is
-//! already line-oriented, so there is no comma-group wrapping, no
-//! indentation nesting, no line-width budget — every field lands on a
-//! fixed column, or on its group's comment column, or, failing that,
-//! one space past wherever the previous field ended). Columns below are
-//! 0-based (tab-stop convention, matching `disassembler.rs`'s
-//! `grid_line` and docs/formats.md); the CST's `Span`/`Pos::col` fields
-//! are 1-based, so a 0-based target of 32 is the 1-based column 33 a
-//! `TrailingComment.col` would report at the floor (a wider group's
-//! column shifts that report accordingly).
+//! already line-oriented, so there is no indentation nesting). Every
+//! field lands on a fixed column, or on its group's comment column, or,
+//! failing that, one space past wherever the previous field ended. The
+//! one exception is the three unbounded lists — `.targets`, `.exits`,
+//! `.map` — which DO wrap: each runs onto further physical lines when
+//! its code would exceed [`LINE_WIDTH_LIMIT`] columns, continuation
+//! lines aligned under the list's first element (see
+//! [`wrap_operand_list`]). The budget bounds code only; a trailing
+//! comment still lands at its group's uncapped column same as every
+//! other line here, so a wrapped list's commented last line can still run
+//! past it. Columns below are 0-based (tab-stop convention, matching
+//! `disassembler.rs`'s `grid_line` and docs/formats.md); the CST's
+//! `Span`/`Pos::col` fields are 1-based, so a 0-based target of 32 is the
+//! 1-based column 33 a `TrailingComment.col` would report at the floor
+//! (a wider group's column shifts that report accordingly).
 
 use super::cst::{
     AsmCst, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, FuncCst, LabelCst, LineCst,
@@ -28,6 +34,15 @@ const TOP_COL: usize = 0;
 const MNEMONIC_COL: usize = 8;
 const OPERAND_COL: usize = 16;
 const COMMENT_COL: usize = 32;
+
+/// The code-line width budget a `.targets`/`.exits`/`.map` list wraps
+/// against (docs/formats.md (assembly text)) — the same 80-column limit
+/// `line-too-long` reports past. Only the code is measured; a trailing
+/// comment still lands at its group's uncapped column (see
+/// [`comment_columns`]), so this constant plays no part in comment
+/// placement and does not by itself guarantee a wrapped line's full text
+/// — comment included — stays under it.
+const LINE_WIDTH_LIMIT: usize = 80;
 
 /// A label field (name + `:`) of this many chars or fewer leaves a
 /// mandatory `>= 1` space before [`MNEMONIC_COL`] and stays on the same
@@ -364,7 +379,9 @@ fn render_line(line: &LineCst) -> Piece {
         .instr
         .as_ref()
         .map(|i| (i.word.as_str(), i.operands.as_slice()));
-    render_fields(&line.labels, instr, &line.trailing)
+    // An ordinary instruction's operand list is never one of the three
+    // unbounded lists, so it never wraps.
+    render_fields(&line.labels, instr, &line.trailing, false)
 }
 
 /// The shared `label* [word operands] [; comment]` grid printer, driving
@@ -377,10 +394,16 @@ fn render_line(line: &LineCst) -> Piece {
 /// below) can never fire for one. The trailing comment is held back into
 /// `Piece::comment` rather than padded here — [`format_asm_with`]'s emit
 /// loop pads every such piece to its target column.
+///
+/// `wrap` opts into [`wrap_operand_list`] for the three unbounded lists
+/// (`.targets`, `.exits`, `.map`) — every other caller passes `false`,
+/// since their operand lists are bounded and never reach the width where
+/// a break would earn its keep (docs/formats.md (assembly text)).
 fn render_fields(
     labels: &[LabelCst],
     instr: Option<(&str, &[OperandToken])>,
     trailing: &Option<TrailingComment>,
+    wrap: bool,
 ) -> Piece {
     let mut out = String::new();
     let n = labels.len();
@@ -413,7 +436,11 @@ fn render_fields(
             // — held back into `Piece::comment` now, not computed here —
             // so this branch's last write to it is intentionally dropped.
             pad_to(&mut cur, &mut col, OPERAND_COL);
-            cur.push_str(&operand_text);
+            if wrap && col + operand_text.chars().count() > LINE_WIDTH_LIMIT {
+                cur.push_str(&wrap_operand_list(operands, col));
+            } else {
+                cur.push_str(&operand_text);
+            }
         }
     }
 
@@ -468,14 +495,22 @@ fn render_section(s: &SectionCst) -> Piece {
 /// keyword standing in for the mnemonic. Operands print verbatim from
 /// their CST tokens (a `.row` keeps its whole bracketed vector as one
 /// token; `.targets` comma-joins its names), so interior spelling
-/// survives.
+/// survives. `.targets` is the one unbounded list of the three
+/// (`.row`/`.target` are bounded by tape count and by taking a single
+/// operand), so it is the only kind here that wraps.
 fn render_table_directive(d: &TableDirectiveCst) -> Piece {
     let word = match d.kind {
         TableDirectiveKind::Row => ".row",
         TableDirectiveKind::Targets => ".targets",
         TableDirectiveKind::Target => ".target",
     };
-    render_fields(&d.labels, Some((word, d.operands.as_slice())), &d.trailing)
+    let wrap = matches!(d.kind, TableDirectiveKind::Targets);
+    render_fields(
+        &d.labels,
+        Some((word, d.operands.as_slice())),
+        &d.trailing,
+        wrap,
+    )
 }
 
 /// `.frame`/`.map`/`.exits` — the frame-descriptor directive family
@@ -484,7 +519,16 @@ fn render_table_directive(d: &TableDirectiveCst) -> Piece {
 /// descriptor label; `.map`/`.exits` are unlabeled. The operand text is
 /// reconstructed from the parsed fields (canonically spelled, so no token
 /// text changes — mirrors [`render_routine`]); `->`/`=>` survive exactly
-/// as authored (the CST records the one-way bit).
+/// as authored (the CST records the one-way bit). `.exits`, like
+/// `.targets`, grows with the program and wraps; `.frame`'s `tapes=(…)`
+/// is bounded by tape count and never does. `.map` wraps too — its
+/// unbounded part is the symbol-mapping pairs, which is why
+/// [`frame_map_operands`] keeps `rmap=(…)`/`wmap=(…)` as separate
+/// elements rather than one composed string: a trailing comma continues
+/// a `.map` list wherever it falls (docs/formats.md (assembly text)), so
+/// a break between clauses reparses exactly as one inside a clause would
+/// — this printer takes the simpler of the two and keeps each
+/// `rmap=(…)`/`wmap=(…)` group whole rather than splitting its pairs.
 fn render_frame_directive(d: &FrameDirectiveCst) -> Piece {
     match d {
         FrameDirectiveCst::Header(h) => {
@@ -502,31 +546,40 @@ fn render_frame_directive(d: &FrameDirectiveCst) -> Piece {
                 std::slice::from_ref(&h.label),
                 Some((".frame", &operand)),
                 &h.trailing,
+                false,
             )
         }
         FrameDirectiveCst::Map(m) => {
-            let operand = [OperandToken {
-                text: frame_map_operand(m),
-                span: m.span,
-            }];
-            render_fields(&[], Some((".map", &operand)), &m.trailing)
+            let operands = frame_map_operands(m);
+            render_fields(&[], Some((".map", &operands)), &m.trailing, true)
         }
         FrameDirectiveCst::Exits(e) => {
-            render_fields(&[], Some((".exits", &e.targets)), &e.trailing)
+            render_fields(&[], Some((".exits", &e.targets)), &e.trailing, true)
         }
     }
 }
 
-/// `<k>[, rmap=(…)][, wmap=(…)]` — the reconstructed `.map` operand text.
-fn frame_map_operand(m: &FrameMapCst) -> String {
-    let mut s = m.k.to_string();
+/// `<k>[, rmap=(…)][, wmap=(…)]` — the `.map` operand list, one element
+/// per top-level clause rather than one composed string (see
+/// [`render_frame_directive`] for why).
+fn frame_map_operands(m: &FrameMapCst) -> Vec<OperandToken> {
+    let mut operands = vec![OperandToken {
+        text: m.k.to_string(),
+        span: m.k_span,
+    }];
     if let Some(pairs) = &m.rmap {
-        s.push_str(&format!(", rmap=({})", frame_pairs_text(pairs)));
+        operands.push(OperandToken {
+            text: format!("rmap=({})", frame_pairs_text(pairs)),
+            span: m.rmap_span.unwrap_or(m.span),
+        });
     }
     if let Some(pairs) = &m.wmap {
-        s.push_str(&format!(", wmap=({})", frame_pairs_text(pairs)));
+        operands.push(OperandToken {
+            text: format!("wmap=({})", frame_pairs_text(pairs)),
+            span: m.wmap_span.unwrap_or(m.span),
+        });
     }
-    s
+    operands
 }
 
 /// A `(..)` pair list as `<from>-><to>` / `<from>=><to>`, comma-joined.
@@ -620,6 +673,60 @@ fn join_operands(operands: &[OperandToken]) -> String {
         .map(|o| o.text.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Packs `operands`' texts onto as few physical lines as fit within
+/// [`LINE_WIDTH_LIMIT`] (docs/formats.md (assembly text)) — the
+/// `.targets`/`.exits`/`.map` wrapping [`render_fields`] falls into once
+/// the plain [`join_operands`] line would run past the budget. `start_col`
+/// is the 0-based column the caller's line has already reached — where
+/// the first element is about to land — and doubles as the indent every
+/// continuation line reuses, so the whole list reads as one column of
+/// elements under the first one. Greedy: an element joins the current
+/// line whenever it (plus its separating comma, plus the one space that
+/// would precede it) still fits; otherwise it starts a fresh line. A
+/// break always falls right after a comma — never before one — so every
+/// wrapped line but the last ends in `,`, which is exactly what continues
+/// a `.targets`/`.exits`/`.map` list back into one logical item on the
+/// next parse (docs/formats.md (assembly text)): reformatting the
+/// wrapped output reproduces it unchanged.
+///
+/// A trailing EMPTY operand — the shape a `.targets aa,` / `bb,` join
+/// with nothing after it leaves behind (docs/formats.md (assembly
+/// text)) — carries no text of its own to place. It is skipped outright
+/// rather than packed: the comma already printed after the real operand
+/// before it is the whole story, and packing it would either strand a
+/// bare continuation line holding nothing but a comma or leave a stray
+/// trailing space before the line's own trim. Skipping it here still
+/// gives the preceding real operand its comma, because the separator
+/// decision below keys on this element's INDEX in `operands`, not on
+/// whether it prints anything.
+fn wrap_operand_list(operands: &[OperandToken], start_col: usize) -> String {
+    let mut out = String::new();
+    let mut col = start_col;
+    for (i, operand) in operands.iter().enumerate() {
+        let is_last = i + 1 == operands.len();
+        if operand.text.is_empty() && is_last {
+            continue;
+        }
+        let sep = if is_last { "" } else { "," };
+        let piece_len = operand.text.chars().count() + sep.len();
+        if out.is_empty() {
+            // The very first element lands right where the caller's
+            // line already stands — no separator, no wrap decision.
+        } else if col + 1 + piece_len > LINE_WIDTH_LIMIT {
+            out.push('\n');
+            out.push_str(&" ".repeat(start_col));
+            col = start_col;
+        } else {
+            out.push(' ');
+            col += 1;
+        }
+        out.push_str(&operand.text);
+        out.push_str(sep);
+        col += piece_len;
+    }
+    out
 }
 
 /// Advances `cur`/`col` to `target`: pads with spaces when there is
@@ -1263,6 +1370,233 @@ F0:     .frame  tapes=(3, 0)
         // node → the structural gate. This pins that PM-1 fmt is
         // unaffected by the opt-in surface.
         assert!(format_asm(".section tables\nT0: .row [1, 2]\n").is_err());
+    }
+
+    // -- List wrapping: `.targets`/`.exits`/`.map` ----------------------
+    // A trailing comma continues one of these three lists onto the next
+    // physical line (docs/formats.md (assembly text)); this is the write
+    // side of that rule — a list the printer would otherwise emit past
+    // the line-width budget wraps instead, using exactly that comma.
+
+    #[test]
+    fn a_long_targets_list_wraps_at_eighty_columns() {
+        let names: Vec<String> = (0..40).map(|i| format!("label_number_{i:02}")).collect();
+        let src = format!(".section tables\nD0:     .targets {}\n", names.join(", "));
+        let out = format_asm_with(
+            &src,
+            AsmCaps {
+                tables: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 80),
+            "every line fits: {:?}",
+            out.lines().map(|l| l.chars().count()).max()
+        );
+        assert!(out.lines().count() > 2, "the list actually wrapped");
+    }
+
+    #[test]
+    fn a_wrapped_targets_list_reparses_and_reformats_to_a_fixed_point() {
+        // format(format(x)) == format(x): the wrapped output's own
+        // trailing commas continue back into ONE logical `.targets` item
+        // on the next parse (the CST's list-continuation fold), and the
+        // printer must recompute the identical wrap from it.
+        let names: Vec<String> = (0..40).map(|i| format!("label_number_{i:02}")).collect();
+        let src = format!(".section tables\nD0:     .targets {}\n", names.join(", "));
+        let once = format_asm_with(&src, caps_all()).unwrap();
+        assert!(once.lines().count() > 2, "the fixture must actually wrap");
+        let twice = format_asm_with(&once, caps_all()).unwrap();
+        assert_eq!(twice, once, "not idempotent:\n{once}");
+        // And the fold really did rejoin the wrapped lines into one item
+        // — otherwise this would pass even if the wrap merely happened
+        // to reproduce itself by coincidence rather than by the fold.
+        let cst = parse_asm_cst_with(&once, caps_all());
+        let targets = cst
+            .items
+            .iter()
+            .filter(|i| matches!(i.kind, AsmItemKind::TableDirective(_)))
+            .count();
+        assert_eq!(
+            targets, 1,
+            "the wrapped lines must fold back into one directive"
+        );
+    }
+
+    #[test]
+    fn a_long_exits_list_wraps_at_eighty_columns() {
+        let names: Vec<String> = (0..30).map(|i| format!("exit_label_{i:02}")).collect();
+        let src = format!(
+            ".section tables\nF0:     .frame tapes=(0)\n        .exits {}\n.section code\n",
+            names.join(", ")
+        );
+        let out = format_asm_with(&src, caps_all()).unwrap();
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 80),
+            "every line fits: {:?}",
+            out.lines().map(|l| l.chars().count()).max()
+        );
+        // `.section tables` + `.frame` + `.section code` never move; only
+        // a genuinely wrapped `.exits` explains more than 4 lines total.
+        assert!(out.lines().count() > 4, "the list actually wrapped:\n{out}");
+        let twice = format_asm_with(&out, caps_all()).unwrap();
+        assert_eq!(twice, out, "not idempotent:\n{out}");
+    }
+
+    #[test]
+    fn a_long_map_clause_list_wraps_between_clauses() {
+        // `.map`'s wrap point is between its `<k>`, `rmap=(…)`, `wmap=(…)`
+        // clauses, not inside a clause's own pair list — see
+        // `render_frame_directive`'s doc for why. Each clause here stays
+        // short on its own; only the sum of the three earns the wrap.
+        let src = "\
+.section tables
+F0:     .frame  tapes=(0, 1)
+        .map    0, rmap=(1->2, 3->4, 5->6, 7->8), wmap=(1->2, 3->4, 5->6, 7->8, 9->10)
+.section code
+";
+        let out = format_asm_with(src, caps_all()).unwrap();
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 80),
+            "every line fits: {:?}",
+            out.lines().map(|l| l.chars().count()).max()
+        );
+        assert!(
+            out.lines().count() > src.lines().count(),
+            "the .map list actually wrapped:\n{out}"
+        );
+        // The wrap must still be a fixed point, folding back into one
+        // `.map` item rather than degrading into separate lines.
+        let twice = format_asm_with(&out, caps_all()).unwrap();
+        assert_eq!(twice, out, "not idempotent:\n{out}");
+        let cst = parse_asm_cst_with(&out, caps_all());
+        let maps = cst
+            .items
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i.kind,
+                    AsmItemKind::FrameDirective(FrameDirectiveCst::Map(_))
+                )
+            })
+            .count();
+        assert_eq!(maps, 1, "the wrapped lines must fold back into one .map");
+    }
+
+    #[test]
+    fn a_dangling_trailing_comma_on_one_line_keeps_the_bare_comma() {
+        // `.targets aa, bb,` on ONE physical line — short enough that
+        // wrapping never triggers — already carries a trailing EMPTY
+        // operand (`operand_region`'s general rule for any trailing
+        // comma, continuation or not). This pins the untouched
+        // `join_operands` path's decision as the baseline the wrapped
+        // path (below) must match: a bare dangling comma, no stray
+        // space.
+        let src = ".section tables\nD0:     .targets aa, bb,\n";
+        assert_eq!(format_asm_with(src, caps_all()).unwrap(), src);
+    }
+
+    #[test]
+    fn a_wrapped_list_with_a_trailing_empty_operand_keeps_a_bare_dangling_comma() {
+        // The shape a `.targets aa,` / `bb,` continuation with NOTHING
+        // after it leaves behind (docs/formats.md (assembly text)): the
+        // operand list ends in one empty entry. Forcing this shape at
+        // width proves `wrap_operand_list` does not turn that empty tail
+        // into a stray `, ` or a bare continuation line holding nothing
+        // but a comma — it must match the one-line baseline above.
+        let names: Vec<String> = (0..40).map(|i| format!("label_number_{i:02}")).collect();
+        let src = format!(".section tables\nD0:     .targets {},\n", names.join(", "));
+        let out = format_asm_with(&src, caps_all()).unwrap();
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 80),
+            "every line fits: {out:?}"
+        );
+        assert!(
+            out.lines()
+                .all(|l| !l.ends_with(' ') && !l.trim().is_empty()),
+            "no wrapped line is blank or carries trailing whitespace:\n{out}"
+        );
+        assert!(
+            out.trim_end().ends_with(','),
+            "the empty tail's dangling comma survives:\n{out}"
+        );
+        let twice = format_asm_with(&out, caps_all()).unwrap();
+        assert_eq!(twice, out, "not idempotent:\n{out}");
+        let cst = parse_asm_cst_with(&out, caps_all());
+        let targets: Vec<_> = cst
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                AsmItemKind::TableDirective(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets.len(), 1, "the fold must still see one directive");
+        assert_eq!(
+            targets[0].operands.last().map(|o| o.text.as_str()),
+            Some(""),
+            "the trailing empty operand survives the round trip"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_list_still_carries_its_trailing_comment_on_the_last_line() {
+        // The wrap decision reads only the code (`join_operands`'s
+        // length), so a trailing comment cannot feed back into where the
+        // list breaks — but the comment itself still has to land
+        // somewhere once the list is multi-line. `comment_columns` reads
+        // a piece's width from `p.code`'s LAST line
+        // (`rsplit('\n').next()`), so the comment must pad relative to
+        // the wrapped list's final line, not its first.
+        let names: Vec<String> = (0..40).map(|i| format!("label_number_{i:02}")).collect();
+        let src = format!(
+            ".section tables\nD0:     .targets {} ; the dispatch table\n",
+            names.join(", ")
+        );
+        let out = format_asm_with(&src, caps_all()).unwrap();
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 80),
+            "every code line fits: {out:?}"
+        );
+        let commented: Vec<&str> = out.lines().filter(|l| l.contains(';')).collect();
+        assert_eq!(
+            commented.len(),
+            1,
+            "exactly one physical line carries the comment:\n{out}"
+        );
+        let targets_lines: Vec<&str> = out
+            .lines()
+            .skip_while(|l| !l.contains(".targets"))
+            .collect();
+        assert_eq!(
+            commented[0],
+            *targets_lines.last().unwrap(),
+            "the comment lands on the directive's LAST wrapped line:\n{out}"
+        );
+        assert!(
+            targets_lines.len() > 1,
+            "the fixture must actually wrap:\n{out}"
+        );
+        // Fixed point, and the reparse still folds to one directive whose
+        // trailing comment survived the round trip.
+        let twice = format_asm_with(&out, caps_all()).unwrap();
+        assert_eq!(twice, out, "not idempotent:\n{out}");
+        let cst = parse_asm_cst_with(&out, caps_all());
+        let targets: Vec<_> = cst
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                AsmItemKind::TableDirective(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(targets.len(), 1, "the fold must still see one directive");
+        assert_eq!(
+            targets[0].trailing.as_ref().map(|tc| tc.text.as_str()),
+            Some("; the dispatch table")
+        );
     }
 
     // -- Task 3: group-wide trailing-comment column -------------------
