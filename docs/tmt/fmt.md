@@ -244,13 +244,18 @@ alphabet bit {
 }
 ```
 
-A `/* … */` comment with no `//` beside it can stay inline instead of
-forcing a break — but only in an `alphabet` body and a `use` path list,
-the two list kinds that already have an inline form for their entries:
+A SAME-LINE `/* … */` comment (trailing an entry, no `//` beside it) can
+stay inline instead of forcing a break — but only in an `alphabet` body
+and a `use` path list, the two list kinds that already have an inline
+form for their entries:
 
 ```
 alphabet bit { '_', /* the blank */ '0', '1' }
 ```
+
+An OWN-LINE block comment still forces the break even in those two list
+kinds — inlining it would lose the distinction between "trails this
+entry" and "precedes the next one".
 
 The bracketed lists — a `routine`/`graph` signature, a
 `call`/`graft`/`bind` argument list, and a `with map` pair list — have no
@@ -269,9 +274,12 @@ routine w(
 }
 ```
 
-**The exception that remains**: a comment inside a pattern, write, or
-move vector — `['0', /* here */ '1']` — still reprints as an own-line
-comment after the enclosing rule instead of in place:
+**The exception that remains**: a LINE comment inside a pattern, write,
+or move vector — `['0', // here` … `'1'] -> stop;` — still reprints as
+an own-line comment after the enclosing rule instead of in place. (A
+`/* … */` comment in that same position reprints as a same-line
+trailing comment on the rule instead — still relocated out of the
+vector, just not onto its own line.)
 
 ```
 alphabet bits { '_', '0', '1' }

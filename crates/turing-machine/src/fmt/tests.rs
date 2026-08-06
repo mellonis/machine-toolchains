@@ -721,9 +721,12 @@ fn a_lex_or_parse_error_is_returned_not_printed() {
 /// fixture can reach this — the parser's own bookkeeping never hands
 /// `bucket` an index past `entry_count` — so it needs a direct unit test,
 /// and only in release: the `debug_assert!` in `bucket` fires first under
-/// `cargo test`'s default debug profile (guarded below accordingly). Run
-/// explicitly: `cargo test -p mtc-turing-machine --release --lib
-/// fmt::tests::an_out_of_range -- --ignored`.
+/// `cargo test`'s default debug profile (guarded below accordingly). The
+/// `#[cfg_attr(debug_assertions, ignore = …)]` below only marks this test
+/// `ignore`d in a DEBUG build; in release `debug_assertions` is off, so the
+/// attribute does not apply and the test is NOT ignored — `--ignored` would
+/// filter it right back OUT. Run it with a plain `cargo test -p
+/// mtc-turing-machine --release --lib fmt::tests::an_out_of_range`.
 #[test]
 #[cfg_attr(
     debug_assertions,

@@ -32,15 +32,20 @@
 //!   precedes: a same-line comment rides the preceding entry's line, an
 //!   own-line comment keeps its own line, and a comment after the last entry
 //!   prints before the closer. A `//` comment forces such a list onto
-//!   multiple lines (nothing can follow it on its physical line); a
-//!   `/* … */` comment forces the same break too, EXCEPT in an `alphabet`
-//!   body and a `use` path list — the two list kinds that already have an
-//!   inline form for their entries, so a lone block comment can stay inline
-//!   there without forcing one. The exception: a comment inside a pattern,
-//!   write, or move vector still reprints as an own-line comment after the
-//!   enclosing rule rather than in place — those vectors are positional and
-//!   walked per row by the compiler, so giving them per-entry trivia is
-//!   tracked separately (docs/tmt/fmt.md (interior comments)).
+//!   multiple lines (nothing can follow it on its physical line), and so
+//!   does any OWN-LINE comment, block or line (inlining an own-line comment
+//!   onto an entry's line would silently flip that flag on the next parse);
+//!   a SAME-LINE `/* … */` comment is the one case that can stay inline
+//!   instead, EXCEPT in an `alphabet` body and a `use` path list — the two
+//!   list kinds that already have an inline form for their entries, so a
+//!   lone same-line block comment can stay inline there without forcing a
+//!   break. The exception: a comment inside a pattern, write, or move
+//!   vector still reprints as an own-line comment after the enclosing rule
+//!   rather than in place (a same-line block comment there instead reprints
+//!   as a same-line trailing comment on the rule) — those vectors are
+//!   positional and walked per row by the compiler, so giving them
+//!   per-entry trivia is tracked separately (docs/tmt/fmt.md (interior
+//!   comments)).
 //!
 //! # Indentation
 //!
@@ -319,7 +324,11 @@ fn bucket(interior: &[(usize, Comment)], entry_count: usize) -> Interior<'_> {
             *index <= entry_count,
             "interior comment index {index} exceeds entry count {entry_count}"
         );
-        if matches!(comment.kind, CommentKind::Line) {
+        // A LINE comment forces a break because nothing can follow `//` on
+        // its physical line; an own-line comment forces one for a different
+        // reason — inlining it onto an entry's line would silently flip its
+        // own `own_line` flag from true to false on the next parse.
+        if matches!(comment.kind, CommentKind::Line) || comment.own_line {
             forces_break = true;
         }
         slots[(*index).min(entry_count)].push(comment);
@@ -931,21 +940,32 @@ fn render_use(u: &UseCst, blank_before: bool, indent: usize) -> Rendered {
         // column right past `use ` (module doc, "Argument lists and the
         // width threshold").
         let cont_pad = " ".repeat(indent + 4);
-        let mut out = interior_lines(&interior.slots[0], indent);
+        let mut out = String::new();
         out.push_str(&pad);
         out.push_str("use");
-        // Slot 0's same-line comments have no preceding entry to trail, so
-        // they ride the `use` keyword's own line instead — printing them
-        // before `use` would reorder the token stream. A LINE comment there
-        // eats the rest of the physical line, so the first path moves to a
-        // fresh continuation line whenever this slot is non-empty (module
-        // doc, "Blank lines and comments").
+        // Slot 0's comments have no preceding entry to trail, so they ride
+        // AFTER the `use` keyword instead of before it — printing them
+        // before `use` would reorder the token stream (mirrors the sibling
+        // crate's `print_use`). A same-line comment rides the `use` line
+        // itself; an own-line comment prints on its own continuation line
+        // below. A LINE comment eats the rest of its physical line, so the
+        // first path moves to a fresh continuation line whenever this slot
+        // is non-empty (module doc, "Blank lines and comments").
         let slot0_trailing = interior_trailing(&interior.slots[0]);
-        if slot0_trailing.is_empty() {
-            out.push(' ');
-        } else {
+        let slot0_lines = interior_lines(&interior.slots[0], indent + 4);
+        if !slot0_trailing.is_empty() {
             out.push_str(&slot0_trailing);
             out.push('\n');
+        } else if slot0_lines.is_empty() {
+            out.push(' ');
+        }
+        if !slot0_lines.is_empty() {
+            if slot0_trailing.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&slot0_lines);
+        }
+        if !slot0_trailing.is_empty() || !slot0_lines.is_empty() {
             out.push_str(&cont_pad);
         }
         for (i, entry) in paths.iter().enumerate() {
@@ -1006,8 +1026,9 @@ fn render_alphabet(a: &AlphabetCst, blank_before: bool, indent: usize) -> Render
     let entries: Vec<String> = a.elems.iter().map(alphabet_elem_text).collect();
     let interior = bucket(&a.interior, a.elems.len());
     let one_line = format!("{head} {{ {} }}", entries.join(", "));
-    // A comment on the `{`, or any LINE comment inside the body, forces the
-    // body onto its own lines whatever the width says.
+    // A comment on the `{`, any LINE comment inside the body, or any
+    // own-line comment inside the body forces the body onto its own lines
+    // whatever the width says (`bucket`'s `forces_break`).
     if a.open_trailing.is_empty() && interior.is_empty() && one_line.chars().count() <= LINE_WIDTH {
         code.push_str(&one_line);
     } else if a.open_trailing.is_empty()
@@ -1036,6 +1057,10 @@ fn render_alphabet(a: &AlphabetCst, blank_before: bool, indent: usize) -> Render
         code.push_str(&head);
         code.push_str(" {");
         code.push_str(&open_trailing_text(&a.open_trailing));
+        // Slot 0's same-line comments precede every entry, so there is no
+        // preceding entry's line for them to trail — they ride the opening
+        // `{` itself (module doc, "Blank lines and comments").
+        code.push_str(&interior_trailing(&interior.slots[0]));
         code.push('\n');
         let entry_pad = " ".repeat(indent + INDENT_UNIT);
         for (i, entry) in entries.iter().enumerate() {

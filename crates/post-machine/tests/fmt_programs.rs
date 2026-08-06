@@ -483,3 +483,36 @@ fn interior_use_tail_slot_same_line_does_not_swallow_the_semicolon() {
     let twice = format(&out).expect("the formatted output must still parse");
     assert_eq!(out, twice, "formatting the output is not idempotent");
 }
+
+/// A comment written AFTER a `use` statement's own `;` must stay outside
+/// that statement — it documents whatever comes NEXT, not the list that
+/// just closed. The sibling crate's parser had a defect where the `Semi`
+/// arm's interior-comment drain ran once the loop had already bumped past
+/// `;`, so it claimed a following comment as if it were the first `use`'s
+/// own tail-slot comment; `print_use` never had that bug (`interior_comments`
+/// here already drains before the terminator is consumed), but the position
+/// is worth pinning permanently so a future refactor can't reintroduce it.
+#[test]
+fn interior_use_trailing_comment_does_not_migrate_into_the_next_use() {
+    let src = "use a::b;\n// the fallback path\nuse c::d;\n\nmain() {\n 1: @b();\n 2: halt;\n}\n";
+    let out = format(src).expect("formats");
+    let first_use = out
+        .lines()
+        .position(|l| l.trim() == "use a::b;")
+        .expect("the first `use` prints unbroken on its own line");
+    let comment_idx = out
+        .lines()
+        .position(|l| l.contains("// the fallback path"))
+        .unwrap_or_else(|| panic!("the comment survives, got:\n{out}"));
+    assert!(
+        comment_idx > first_use,
+        "the comment must not be swallowed into the first `use`, got:\n{out}"
+    );
+    assert_eq!(
+        out.lines().nth(comment_idx + 1).unwrap().trim(),
+        "use c::d;",
+        "the comment must precede the SECOND `use`, got:\n{out}"
+    );
+    let twice = format(&out).expect("the formatted output must still parse");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}

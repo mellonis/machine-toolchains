@@ -1297,6 +1297,13 @@ impl Parser<'_> {
                 TokenKind::Comma => self.bump(),
                 TokenKind::Semi => {
                     semi_line = sep.line;
+                    // Drain interior comments HERE, before bumping past `;`:
+                    // `interior_comments` claims everything at or before
+                    // `self.pos`, so running it once the `;` has been
+                    // consumed would also claim a comment that follows the
+                    // statement — e.g. one documenting the *next* `use`
+                    // (docs/tmt/fmt.md (interior comments)).
+                    self.interior_comments(paths.len(), &mut interior);
                     self.bump();
                     break;
                 }
@@ -1304,12 +1311,7 @@ impl Parser<'_> {
             }
         }
         self.prev_end_line = semi_line;
-        // `take_trailing` runs FIRST: the loop consumed the `;`, so both a
-        // comment after the last path and the statement's own trailing
-        // comment are pending here, and draining interior first would steal
-        // the trailing one (docs/tmt/fmt.md (interior comments)).
         let trailing = self.take_trailing(semi_line);
-        self.interior_comments(paths.len(), &mut interior);
         let span = join(
             paths.first().expect("a use list has a path").span,
             paths.last().expect("a use list has a path").span,

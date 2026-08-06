@@ -981,6 +981,14 @@ impl Parser<'_> {
                         }
                         TokenKind::Semi => {
                             semi_line = sep.line;
+                            // Drain interior comments HERE, before bumping
+                            // past `;`: `interior_comments` claims
+                            // everything at or before `self.pos`, so running
+                            // it once the `;` has been consumed would also
+                            // claim a comment that follows the statement —
+                            // e.g. one documenting the *next* `use`
+                            // (docs/pmt/fmt.md (interior comments)).
+                            self.interior_comments(paths.len(), &mut interior);
                             self.bump();
                             break;
                         }
@@ -991,14 +999,7 @@ impl Parser<'_> {
                     }
                 }
                 // The whole `use` list's trailing comment rides the node.
-                // `take_trailing` runs FIRST: after the loop bumps past
-                // `;`, both a comment after the last path and the
-                // statement's own trailing comment are pending, and
-                // `interior_comments` drains eagerly by position alone —
-                // running it first would steal the trailing comment
-                // (docs/pmt/fmt.md (interior comments)).
                 let trailing = self.take_trailing(semi_line);
-                self.interior_comments(paths.len(), &mut interior);
                 let use_span = Span {
                     start: paths
                         .first()
