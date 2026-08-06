@@ -310,16 +310,16 @@ fn comment_columns(pieces: &[Piece]) -> Vec<usize> {
         let widest = (start..i)
             .map(|k| {
                 let p = &pieces[k];
-                let trailing_width = p
-                    .comment
-                    .is_some()
-                    .then(|| p.code.rsplit('\n').next().unwrap_or("").chars().count())
-                    .unwrap_or(0);
-                let header_width = p
-                    .header_comment
-                    .is_some()
-                    .then(|| p.code.split('\n').next().unwrap_or("").chars().count())
-                    .unwrap_or(0);
+                let trailing_width = if p.comment.is_some() {
+                    p.code.rsplit('\n').next().unwrap_or("").chars().count()
+                } else {
+                    0
+                };
+                let header_width = if p.header_comment.is_some() {
+                    p.code.split('\n').next().unwrap_or("").chars().count()
+                } else {
+                    0
+                };
                 trailing_width.max(header_width)
             })
             .max()
