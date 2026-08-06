@@ -49,7 +49,7 @@ alphabet bytes { 0..126 }
 alphabet levels { ' ', '*' }
 
 machine {
-  tape prog: ops; // brainfuck source + 'H'; the head IS the instruction pointer
+  tape prog: ops;    // brainfuck source + 'H'; the head IS the instruction pointer
   tape data: bytes;  // brainfuck cells; the head IS the data pointer
   tape out:  bytes;  // cells emitted by '.'
   tape cnt:  levels; // unary stack of bracket-nesting levels

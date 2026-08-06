@@ -35,18 +35,18 @@
 .section tables
 
 ; ---- fetch: dispatch on the program symbol under the IP -----------------
-Tfetch: .row    [1,*,*,*]               ; '+'
-        .row    [2,*,*,*]               ; '-'
-        .row    [3,*,*,*]               ; '<'
-        .row    [4,*,*,*]               ; '>'
-        .row    [5,*,*,*]               ; '.'
-        .row    [6,*,*,*]               ; '['
-        .row    [7,*,*,*]               ; ']'
-        .row    [8,*,*,*]               ; 'H'
-                                        ; no catch-all: an unknown program
-                                        ; symbol leaves MR=0 and djmp traps —
-                                        ; the UTM gets an "invalid opcode"
-                                        ; fault for free
+Tfetch: .row    [1,*,*,*]       ; '+'
+        .row    [2,*,*,*]       ; '-'
+        .row    [3,*,*,*]       ; '<'
+        .row    [4,*,*,*]       ; '>'
+        .row    [5,*,*,*]       ; '.'
+        .row    [6,*,*,*]       ; '['
+        .row    [7,*,*,*]       ; ']'
+        .row    [8,*,*,*]       ; 'H'
+                                ; no catch-all: an unknown program
+                                ; symbol leaves MR=0 and djmp traps —
+                                ; the UTM gets an "invalid opcode"
+                                ; fault for free
 Dfetch: .targets L_plus, L_minus, L_left, L_right, L_dot, L_lbr, L_rbr, L_halt
 
 ; ---- '+' / '-' : the 127-way increment/decrement tables ------------------
@@ -75,36 +75,36 @@ Ddot:   .target Ldot{v}
 .endr
 
 ; ---- '[' / ']' : zero-test on the data cell ------------------------------
-Tzero:  .row    [*,0,*,*]               ; MR=1 : data cell is zero
-        .row    [*,*,*,*]               ; MR=2 : anything else (catch-all)
+Tzero:  .row    [*,0,*,*]       ; MR=1 : data cell is zero
+        .row    [*,*,*,*]       ; MR=2 : anything else (catch-all)
 Dlbr:   .targets L_lbr_z, L_lbr_nz
 Drbr:   .targets L_rbr_z, L_rbr_nz
 
 ; ---- skip-forward scanner (after '[' with data==0) ------------------------
-Tsf:    .row    [6,*,*,*]               ; '[' : push a nesting level
-        .row    [7,*,*,*]               ; ']' : pop one
-        .row    [*,*,*,*]               ; anything else: keep scanning
+Tsf:    .row    [6,*,*,*]       ; '[' : push a nesting level
+        .row    [7,*,*,*]       ; ']' : pop one
+        .row    [*,*,*,*]       ; anything else: keep scanning
 Dsf:    .targets L_sf_push, L_sf_pop, L_sf_scan
 
 ; pop-check: did the counter stack just underflow to empty?
-Tcnt:   .row    [*,*,*,0]               ; MR=1 : stack empty (' ')
-        .row    [*,*,*,1]               ; MR=2 : still levels ('*')
-Dsfp:   .targets L_fetch, L_sf          ; empty → resume fetch; else scan on
+Tcnt:   .row    [*,*,*,0]       ; MR=1 : stack empty (' ')
+        .row    [*,*,*,1]       ; MR=2 : still levels ('*')
+Dsfp:   .targets L_fetch, L_sf  ; empty → resume fetch; else scan on
 
 ; ---- skip-backward scanner (after ']' with data!=0), mirror image ---------
-Tsb:    .row    [7,*,*,*]               ; ']' : push
-        .row    [6,*,*,*]               ; '[' : pop
-        .row    [*,*,*,*]               ; scan
+Tsb:    .row    [7,*,*,*]        ; ']' : push
+        .row    [6,*,*,*]        ; '[' : pop
+        .row    [*,*,*,*]        ; scan
 Dsb:    .targets L_sb_push, L_sb_pop, L_sb_scan
-Dsbp:   .targets L_sb_done, L_sb        ; empty → step right, fetch; else scan
+Dsbp:   .targets L_sb_done, L_sb ; empty → step right, fetch; else scan
 
 .section code
-.routine main, tapes=4, alpha=(9,127,127,2)
+.routine main, tapes=4, alpha=(9, 127, 127, 2)
 .func main
 
 ; ==== fetch ================================================================
 L_fetch:
-        rd                              ; strobe all 4 heads into the latch
+        rd                      ; strobe all 4 heads into the latch
         mtc     Tfetch
         djmp    Dfetch
 
@@ -133,9 +133,9 @@ Ldec{v}:
 
 ; ==== '>' / '<' : unconditional — no match needed ==========================
 L_right:
-        mov     [>,>,.,.]               ; IP++, data head right
+        mov     [>,>,.,.]       ; IP++, data head right
         jmp     L_fetch
-L_left: mov     [>,<,.,.]               ; IP++, data head left
+L_left: mov     [>,<,.,.]       ; IP++, data head left
         jmp     L_fetch
 
 ; ==== '.' : copy data cell to output, advance output head ==================
@@ -153,11 +153,11 @@ Ldot{v}:
 L_lbr:  rd
         mtc     Tzero
         djmp    Dlbr
-L_lbr_z:                                ; data==0 : push one level, skip fwd
-        mov     [>,.,.,>]               ; IP++, cnt head right...
-        wr      [-,-,-,1]               ; ...then write '*'  (push = mov;wr)
+L_lbr_z:                        ; data==0 : push one level, skip fwd
+        mov     [>,.,.,>]       ; IP++, cnt head right...
+        wr      [-,-,-,1]       ; ...then write '*'  (push = mov;wr)
         jmp     L_sf
-L_lbr_nz:                               ; data!=0 : enter the loop body
+L_lbr_nz:                       ; data!=0 : enter the loop body
         mov     [>,.,.,.]
         jmp     L_fetch
 
@@ -165,12 +165,12 @@ L_lbr_nz:                               ; data!=0 : enter the loop body
 L_rbr:  rd
         mtc     Tzero
         djmp    Drbr
-L_rbr_z:                                ; data==0 : leave the loop
+L_rbr_z:                        ; data==0 : leave the loop
         mov     [>,.,.,.]
         jmp     L_fetch
-L_rbr_nz:                               ; data!=0 : push level, skip backward
-        mov     [<,.,.,>]               ; IP--, cnt head right...
-        wr      [-,-,-,1]               ; ...write '*'
+L_rbr_nz:                       ; data!=0 : push level, skip backward
+        mov     [<,.,.,>]       ; IP--, cnt head right...
+        wr      [-,-,-,1]       ; ...write '*'
         jmp     L_sb
 
 ; ==== skip-forward =========================================================
@@ -182,11 +182,11 @@ L_sf_push:
         wr      [-,-,-,1]
         jmp     L_sf
 L_sf_pop:
-        wr      [-,-,-,0]               ; pop = wr ' ' then mov left
+        wr      [-,-,-,0]       ; pop = wr ' ' then mov left
         mov     [>,.,.,<]
-        rd                              ; underflow check on the new top
+        rd                      ; underflow check on the new top
         mtc     Tcnt
-        djmp    Dsfp                    ; empty → L_fetch, else → L_sf
+        djmp    Dsfp            ; empty → L_fetch, else → L_sf
 L_sf_scan:
         mov     [>,.,.,.]
         jmp     L_sf
@@ -204,12 +204,12 @@ L_sb_pop:
         mov     [<,.,.,<]
         rd
         mtc     Tcnt
-        djmp    Dsbp                    ; empty → L_sb_done, else → L_sb
+        djmp    Dsbp            ; empty → L_sb_done, else → L_sb
 L_sb_scan:
         mov     [<,.,.,.]
         jmp     L_sb
 L_sb_done:
-        mov     [>,.,.,.]               ; step back onto the '[' for fetch
+        mov     [>,.,.,.]       ; step back onto the '[' for fetch
         jmp     L_fetch
 
 ; ==== 'H' ==================================================================
