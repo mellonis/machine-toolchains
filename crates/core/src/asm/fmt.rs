@@ -60,12 +60,13 @@ pub fn format_asm(source: &str) -> Result<String, AsmError> {
 /// own-line one, which measures with empty `code`), then this loop
 /// emits them, padding each held-back comment to its own target column.
 ///
-/// The target-column scan below chooses a column per piece — [`COMMENT_COL`]
-/// for every trailing comment, [`own_line_comment_col`] for an own-line one
+/// The target-column scan below chooses a column per piece from
+/// [`comment_columns`]'s per-group result — passed straight through for a
+/// trailing comment, or through [`own_line_comment_col`] for an own-line
+/// one, which additionally decides between that group column and column 0
 /// — as a `Vec<usize>` alongside `pieces` rather than folding the choice
-/// into [`render_pieces`] itself: a later pass computes per-GROUP columns
-/// instead of passing the fixed [`COMMENT_COL`] through, and `render_pieces`
-/// (the measure phase) must not know about columns at all.
+/// into [`render_pieces`] itself: `render_pieces` (the measure phase) must
+/// not know about columns at all.
 pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> {
     let cst = parse_asm_cst_with(source, caps);
     if let Some(raw) = cst.items.iter().find_map(|item| match &item.kind {
@@ -79,12 +80,13 @@ pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> 
     }
 
     let pieces = render_pieces(&cst, source);
+    let group_cols = comment_columns(&pieces);
     let comment_cols: Vec<usize> = pieces
         .iter()
         .enumerate()
         .map(|(i, p)| match p.kind {
-            PieceKind::Comment => own_line_comment_col(&pieces, i, COMMENT_COL),
-            _ => COMMENT_COL,
+            PieceKind::Comment => own_line_comment_col(&pieces, i, group_cols[i]),
+            _ => group_cols[i],
         })
         .collect();
 
@@ -147,8 +149,10 @@ enum PieceKind {
 struct Piece {
     code: String,
     comment: Option<String>,
-    /// Tells an own-line comment apart from a code line's trailing one —
-    /// consumed by [`own_line_comment_col`]'s group scan.
+    /// Tells an own-line comment apart from a code line's trailing one,
+    /// a structural directive, and a `.rept` block — consumed by
+    /// [`comment_columns`]'s group scan and, through
+    /// [`continues_a_trailing_comment`], by [`own_line_comment_col`].
     kind: PieceKind,
     blank_before: bool,
 }
@@ -229,6 +233,56 @@ fn own_line_comment_col(pieces: &[Piece], i: usize, group_col: usize) -> usize {
     } else {
         TOP_COL
     }
+}
+
+/// Per-group trailing-comment column (docs/formats.md (assembly text)):
+/// `max(COMMENT_COL, widest code width in the group + 1)`. COMMENT_COL is
+/// a floor, so a group only ever widens — which is what keeps output
+/// unchanged for dialects whose operands all fit before it.
+///
+/// A group ends at a blank line, an own-line comment at column 0, a
+/// structural directive, or a `.rept` block. A `.rept` body prints
+/// verbatim rather than through this grid, so it contributes no width:
+/// aligning a group to a member that never joins it would be incoherent.
+///
+/// The column is NOT capped by any line limit; `line-too-long` reports an
+/// overlong result. The `.tmc` printer makes the same call.
+///
+/// Reuses [`continues_a_trailing_comment`] for the own-line-comment half
+/// of the `ends` test rather than a second predicate: [`own_line_comment_col`]
+/// decides the same question when it picks between a group column and
+/// column 0, so the two must never disagree about where a group ends.
+fn comment_columns(pieces: &[Piece]) -> Vec<usize> {
+    let mut cols = vec![COMMENT_COL; pieces.len()];
+    let mut start = 0;
+    for i in 0..=pieces.len() {
+        let ends = i == pieces.len()
+            || pieces[i].blank_before
+            || matches!(pieces[i].kind, PieceKind::Structural | PieceKind::Rept)
+            || (pieces[i].kind == PieceKind::Comment && !continues_a_trailing_comment(pieces, i));
+        if !ends {
+            continue;
+        }
+        let widest = (start..i)
+            .filter(|&k| pieces[k].comment.is_some() && pieces[k].kind == PieceKind::Line)
+            .map(|k| {
+                pieces[k]
+                    .code
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        let col = COMMENT_COL.max(widest + 1);
+        for c in cols.iter_mut().take(i).skip(start) {
+            *c = col;
+        }
+        start = i;
+    }
+    cols
 }
 
 /// One `label* [word operands] [; comment]` line. Non-last labels
@@ -1156,18 +1210,101 @@ F0:     .frame  tapes=(3, 0)
         assert!(format_asm(".section tables\nT0: .row [1, 2]\n").is_err());
     }
 
+    // -- Task 3: group-wide trailing-comment column (D2) --------------
+
     #[test]
-    fn refactor_preserves_output_on_the_flagship() {
-        // The two-phase split must change nothing. This is a moving
-        // baseline: Task 2 regenerates it, Task 3 deletes it once the
-        // group column deliberately changes output.
-        let src = include_str!("../../../../docs/examples/brainfuck-utm.tma");
-        let before = include_str!("testdata/flagship_before_refactor.tma");
-        let caps = AsmCaps {
-            tables: true,
-            rept: true,
-            vectors: true,
-        };
-        assert_eq!(format_asm_with(src, caps).unwrap(), before);
+    fn a_group_widens_past_the_floor_for_its_widest_member() {
+        // D2: column = max(COMMENT_COL, widest code width in group + 1).
+        // "        .targets aaaaaaaaaaaaaaaaaaaaaaaaa" is 42 chars: 8
+        // (indent) + 8 (".targets", which lands EXACTLY on OPERAND_COL) +
+        // 1 (the boundary-overflow separator `pad_to` gives a field that
+        // lands exactly on a stop — the same rule `overflow_boundary_
+        // mnemonic_exactly_at_operand_col` pins) + 25 (the operand). So
+        // the group aligns at 43 and the narrow line follows it there.
+        let src =
+            ".func f\n        nop     ; short\n        .targets aaaaaaaaaaaaaaaaaaaaaaaaa ; wide\n";
+        let out = format_asm_with(
+            src,
+            AsmCaps {
+                tables: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        let cols: Vec<usize> = out
+            .lines()
+            .filter(|l| l.contains(';'))
+            .map(|l| l.find(';').unwrap())
+            .collect();
+        assert_eq!(cols, vec![43, 43], "both members align at the group column");
+    }
+
+    #[test]
+    fn a_blank_line_starts_a_new_group() {
+        // The `.targets` line's group column is 43, not 42 — see the
+        // width breakdown in `a_group_widens_past_the_floor_for_its_
+        // widest_member` above.
+        let src =
+            ".func f\n        nop     ; a\n\n        .targets aaaaaaaaaaaaaaaaaaaaaaaaa ; b\n";
+        let out = format_asm_with(
+            src,
+            AsmCaps {
+                tables: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        let cols: Vec<usize> = out
+            .lines()
+            .filter(|l| l.contains(';'))
+            .map(|l| l.find(';').unwrap())
+            .collect();
+        assert_eq!(
+            cols,
+            vec![32, 43],
+            "the blank line splits them into two groups"
+        );
+    }
+
+    #[test]
+    fn an_uncommented_line_contributes_no_width() {
+        let src = ".func f\n        nop     ; a\n        .targets aaaaaaaaaaaaaaaaaaaaaaaaa\n        ret     ; b\n";
+        let out = format_asm_with(
+            src,
+            AsmCaps {
+                tables: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        let cols: Vec<usize> = out
+            .lines()
+            .filter(|l| l.contains(';'))
+            .map(|l| l.find(';').unwrap())
+            .collect();
+        assert_eq!(
+            cols,
+            vec![32, 32],
+            "the long uncommented line does not widen the group"
+        );
+    }
+
+    #[test]
+    fn the_group_column_is_never_capped_by_line_width() {
+        // D2: unbounded, matching D4. line-too-long reports the result.
+        let wide = "a".repeat(70);
+        let src = format!(".func f\n        nop     ; a\n        .targets {wide} ; b\n");
+        let out = format_asm_with(
+            &src,
+            AsmCaps {
+                tables: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            out.lines().any(|l| l.len() > 80),
+            "alignment wins over the 80-column limit"
+        );
     }
 }
