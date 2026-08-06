@@ -1307,4 +1307,79 @@ F0:     .frame  tapes=(3, 0)
             "alignment wins over the 80-column limit"
         );
     }
+
+    #[test]
+    fn a_rept_block_ends_a_group_so_width_does_not_leak_across_it() {
+        // Isolation, not just "contributes no width": a `.rept` block
+        // must also stop a WIDE line on its far side from dragging a
+        // NARROW line on its near side into the same group. Reverting
+        // the `PieceKind::Rept` arm from `comment_columns`'s `ends`
+        // match merges all three pieces into one group and widens
+        // "short"'s column to match "wide"'s — this assertion then
+        // fails (verified by hand: reverting that arm changes the
+        // first element of `cols` from 32 to 57).
+        let wide = "a".repeat(40);
+        let src = format!(
+            ".func f\n        nop     ; short\n.rept v, 0, 0\n        nop\n.endr\n        wr      {wide} ; wide\n"
+        );
+        let out = format_asm_with(
+            &src,
+            AsmCaps {
+                rept: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        let cols: Vec<usize> = out
+            .lines()
+            .filter(|l| l.contains(';'))
+            .map(|l| l.find(';').unwrap())
+            .collect();
+        assert_eq!(
+            cols,
+            vec![32, 57],
+            "the .rept block keeps the narrow line at the floor, isolated \
+             from the wide line on its far side"
+        );
+    }
+
+    #[test]
+    fn a_standalone_own_line_comment_ends_a_group_so_width_does_not_leak_across_it() {
+        // Same isolation property as the `.rept` test above, for the
+        // other `ends` boundary: a non-continuing own-line comment (D1's
+        // "structural" case — nothing above it, an uncommented `ret`
+        // here, carries a trailing comment to continue) must stop a wide
+        // line after it from dragging a narrow line before it into the
+        // same group. Reverting the `PieceKind::Comment` arm from
+        // `comment_columns`'s `ends` match merges all three pieces (plus
+        // the uncommented line and the comment itself) into one group
+        // and widens "short"'s column to match "wide"'s — verified by
+        // hand: reverting that arm changes `short_col` from 32 to 57.
+        let wide = "a".repeat(40);
+        let src = format!(
+            ".func f\n        nop     ; short\n        ret\n; standalone\n        wr      {wide} ; wide\n"
+        );
+        let out = format_asm(&src).unwrap();
+        let short_col = out
+            .lines()
+            .find(|l| l.contains("short"))
+            .unwrap()
+            .find(';')
+            .unwrap();
+        let standalone_col = out
+            .lines()
+            .find(|l| l.contains("standalone"))
+            .unwrap()
+            .find(';')
+            .unwrap();
+        let wide_col = out
+            .lines()
+            .find(|l| l.contains("wide"))
+            .unwrap()
+            .find(';')
+            .unwrap();
+        assert_eq!(short_col, 32, "the narrow line stays at the floor");
+        assert_eq!(standalone_col, 0, "a non-continuing comment is structural");
+        assert_eq!(wide_col, 57, "the wide line widens only its own group");
+    }
 }
