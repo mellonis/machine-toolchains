@@ -13,9 +13,9 @@
 //! 32 is the 1-based column 33 a `TrailingComment.col` would report.
 
 use super::cst::{
-    AsmItem, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, LabelCst, LineCst,
-    OperandToken, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst, TableDirectiveKind,
-    TrailingComment, parse_asm_cst_with,
+    AsmCst, AsmItem, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, FuncCst, LabelCst,
+    LineCst, OperandToken, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst,
+    TableDirectiveKind, TrailingComment, parse_asm_cst_with,
 };
 use super::syntax::AsmCaps;
 use super::{AsmError, AsmErrorKind};
@@ -50,10 +50,26 @@ pub fn format_asm(source: &str) -> Result<String, AsmError> {
 ///
 /// The opt-in nodes normalize to the same column grid as ordinary lines,
 /// with ONE exception: a `.rept` block's BODY prints VERBATIM from source
-/// (macros as written) — see [`print_rept`] — because a body item's CST
+/// (macros as written) — see [`render_rept`] — because a body item's CST
 /// shaping is intentionally imperfect for substitution templates
 /// (`Linc{v}: nop` shapes labelless), and grid-printing it would corrupt
 /// its text.
+///
+/// Two phases: [`render_pieces`] measures every item into a [`Piece`]
+/// (code and held-back comment; every comment is held back, including an
+/// own-line one, which measures with empty `code`), then this loop
+/// emits them, padding each held-back comment to its own target column.
+///
+/// The target-column scan below reproduces today's per-item column
+/// choice exactly — [`COMMENT_COL`] for every trailing comment,
+/// [`own_line_comment_col`] for an own-line one — as a `Vec<usize>`
+/// alongside `pieces` rather than folding the choice into
+/// [`render_pieces`] itself: a later pass computes per-GROUP columns
+/// instead of consulting this fixed table, and `render_pieces` (the
+/// measure phase) must not know about columns at all. `seen_func` here
+/// must reflect its value BEFORE the current item, mirroring the
+/// single-pass loop this replaced (which flipped it inside the `Func`
+/// arm as it printed) — flip it after recording `col`, not before.
 pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> {
     let cst = parse_asm_cst_with(source, caps);
     if let Some(raw) = cst.items.iter().find_map(|item| match &item.kind {
@@ -66,50 +82,134 @@ pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> 
         });
     }
 
-    let mut out = String::new();
     let mut seen_func = false;
-    for (i, item) in cst.items.iter().enumerate() {
+    let comment_cols: Vec<usize> = cst
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let col = match &item.kind {
+                AsmItemKind::Comment(_) => own_line_comment_col(&cst.items, i, seen_func),
+                _ => COMMENT_COL,
+            };
+            if matches!(item.kind, AsmItemKind::Func(_)) {
+                seen_func = true;
+            }
+            col
+        })
+        .collect();
+
+    let pieces = render_pieces(&cst, source);
+    let mut out = String::new();
+    for (i, p) in pieces.iter().enumerate() {
         // Blank-line runs already collapsed to one bool by the CST
         // (`blank_before`); item 0 is guaranteed `false` by construction
         // (no leading file blanks), so this also gives "no leading
         // blanks" for free — the `i > 0` guard is defensive, matching
         // the `.pmc` printer's convention.
-        if i > 0 && item.blank_before {
+        if i > 0 && p.blank_before {
             out.push('\n');
         }
-        match &item.kind {
-            AsmItemKind::Comment(c) => {
-                let col = own_line_comment_col(&cst.items, i, seen_func);
-                let mut line = " ".repeat(col);
-                line.push_str(&c.text);
-                out.push_str(line.trim_end());
-                out.push('\n');
+        let mut line = p.code.clone();
+        let mut col = line.rsplit('\n').next().unwrap_or("").chars().count();
+        if let Some(c) = &p.comment {
+            // `pad_to`'s "already at/past the stop → one separating
+            // space" branch is right for a real code line that runs
+            // into its comment column, but wrong for a standalone
+            // own-line comment with no code before it: landing exactly
+            // on column 0 there means zero characters precede the
+            // comment, not one space. Building the indent from scratch
+            // when `line` is empty (which — given no [`render_X`]
+            // producer ever leaves `code` ending in `\n`, so an empty
+            // last-line implies `code` is entirely empty — only ever
+            // happens for that case) sidesteps the ambiguity; for every
+            // non-empty `line` this is byte-identical to `pad_to`.
+            if line.is_empty() {
+                line.push_str(&" ".repeat(comment_cols[i]));
+            } else {
+                pad_to(&mut line, &mut col, comment_cols[i]);
             }
-            AsmItemKind::Func(f) => {
-                seen_func = true;
-                let mut line = String::from(".func ");
-                line.push_str(&f.name);
-                if f.local {
-                    line.push_str(" local");
-                }
-                let mut col = line.chars().count();
-                if let Some(tc) = &f.trailing {
-                    pad_to(&mut line, &mut col, COMMENT_COL);
-                    line.push_str(&tc.text);
-                }
-                out.push_str(line.trim_end());
-                out.push('\n');
-            }
-            AsmItemKind::Line(l) => print_line(&mut out, l),
-            AsmItemKind::Raw(_) => unreachable!("the structural gate above already refused"),
-            AsmItemKind::Section(s) => print_section(&mut out, s),
-            AsmItemKind::TableDirective(d) => print_table_directive(&mut out, d),
-            AsmItemKind::Rept(r) => print_rept(&mut out, r, source),
-            AsmItemKind::RoutineDirective(r) => print_routine(&mut out, r),
-            AsmItemKind::FrameDirective(d) => print_frame_directive(&mut out, d),
+            line.push_str(c);
         }
+        out.push_str(line.trim_end());
+        out.push('\n');
     }
     Ok(out)
+}
+
+/// What a printed item is, for the group scan in [`comment_columns`].
+#[derive(PartialEq)]
+enum PieceKind {
+    /// A code line that may carry a trailing comment.
+    Line,
+    /// An own-line comment.
+    Comment,
+    /// `.section` / `.func` / `.routine` — a structural item.
+    Structural,
+    /// A `.rept` block; its body prints verbatim.
+    Rept,
+}
+
+/// One item's rendered code, with its trailing comment held back so a
+/// later pass can choose the column. An own-line comment holds its text
+/// here too, with empty `code` — there is no code line for it to trail,
+/// but it still goes through the same held-back-comment shape so a
+/// later pass can choose its column the same way it chooses every
+/// other's (today, [`format_asm_with`]'s per-item column scan).
+struct Piece {
+    code: String,
+    comment: Option<String>,
+    /// Unread by this task's emit loop — the group scan a later task
+    /// adds is what consumes it, to tell an own-line comment apart from
+    /// a code line's trailing one.
+    #[allow(dead_code)]
+    kind: PieceKind,
+    blank_before: bool,
+}
+
+/// One Piece per CST item, comments held back for a later column choice.
+/// `blank_before` mirrors the single-pass loop this replaced: items are
+/// walked once, in order, and a blank-line run before item `i` sets it.
+fn render_pieces(cst: &AsmCst, source: &str) -> Vec<Piece> {
+    cst.items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let mut p = match &item.kind {
+                AsmItemKind::Comment(c) => Piece {
+                    code: String::new(),
+                    comment: Some(c.text.clone()),
+                    kind: PieceKind::Comment,
+                    blank_before: false,
+                },
+                AsmItemKind::Func(f) => render_func(f),
+                AsmItemKind::Line(l) => render_line(l),
+                AsmItemKind::Raw(_) => unreachable!("the structural gate already refused"),
+                AsmItemKind::Section(s) => render_section(s),
+                AsmItemKind::TableDirective(d) => render_table_directive(d),
+                AsmItemKind::Rept(r) => render_rept(r, source),
+                AsmItemKind::RoutineDirective(r) => render_routine(r),
+                AsmItemKind::FrameDirective(d) => render_frame_directive(d),
+            };
+            p.blank_before = i > 0 && item.blank_before;
+            p
+        })
+        .collect()
+}
+
+/// `.func name [local] [; comment]` — a column-0 directive.
+fn render_func(f: &FuncCst) -> Piece {
+    let mut line = String::from(".func ");
+    line.push_str(&f.name);
+    if f.local {
+        line.push_str(" local");
+    }
+    Piece {
+        code: line,
+        comment: f.trailing.as_ref().map(|tc| tc.text.clone()),
+        kind: PieceKind::Structural,
+        blank_before: false,
+    }
 }
 
 /// Own-line comment indent (docs/formats.md (assembly text)): column 8
@@ -157,27 +257,30 @@ fn own_line_comment_col(items: &[AsmItem], i: usize, seen_func: bool) -> usize {
 /// point. This only applies when `instr` is `None`: when an
 /// instruction follows, it owns the continuation line and the label
 /// line has nothing else to carry.
-fn print_line(out: &mut String, line: &LineCst) {
+fn render_line(line: &LineCst) -> Piece {
     let instr = line
         .instr
         .as_ref()
         .map(|i| (i.word.as_str(), i.operands.as_slice()));
-    print_fields(out, &line.labels, instr, &line.trailing);
+    render_fields(&line.labels, instr, &line.trailing)
 }
 
 /// The shared `label* [word operands] [; comment]` grid printer, driving
-/// both [`print_line`] and [`print_table_directive`] — a table directive
-/// (`.row`/`.targets`/`.target`) is the same shape with a mandatory
-/// directive word standing in for the mnemonic. `instr` is `None` only
-/// for a label-only Line; a table directive always passes `Some`, so the
-/// long-label-only-line-with-trailing-comment idempotency guard (the
-/// `instr.is_none()` branch below) can never fire for one.
-fn print_fields(
-    out: &mut String,
+/// [`render_line`], [`render_table_directive`], and
+/// [`render_frame_directive`] — a table or frame directive is the same
+/// shape with a mandatory directive word standing in for the mnemonic.
+/// `instr` is `None` only for a label-only Line; a table or frame
+/// directive always passes `Some`, so the long-label-only-line-with-
+/// trailing-comment idempotency guard (the `instr.is_none()` branch
+/// below) can never fire for one. The trailing comment is held back into
+/// `Piece::comment` rather than padded here — [`format_asm_with`]'s emit
+/// loop pads every such piece to its target column.
+fn render_fields(
     labels: &[LabelCst],
     instr: Option<(&str, &[OperandToken])>,
     trailing: &Option<TrailingComment>,
-) {
+) -> Piece {
+    let mut out = String::new();
     let n = labels.len();
     for label in &labels[..n.saturating_sub(1)] {
         out.push_str(&label.name);
@@ -204,21 +307,20 @@ fn print_fields(
 
         let operand_text = join_operands(operands);
         if !operand_text.is_empty() {
+            // `col`'s final value would only feed a trailing-comment pad
+            // — held back into `Piece::comment` now, not computed here —
+            // so this branch's last write to it is intentionally dropped.
             pad_to(&mut cur, &mut col, OPERAND_COL);
             cur.push_str(&operand_text);
-            col += operand_text.chars().count();
         }
     }
 
-    if let Some(tc) = trailing {
-        pad_to(&mut cur, &mut col, COMMENT_COL);
-        cur.push_str(&tc.text);
-    }
-
-    let trimmed = cur.trim_end();
-    if !trimmed.is_empty() {
-        out.push_str(trimmed);
-        out.push('\n');
+    out.push_str(cur.trim_end());
+    Piece {
+        code: out,
+        comment: trailing.as_ref().map(|tc| tc.text.clone()),
+        kind: PieceKind::Line,
+        blank_before: false,
     }
 }
 
@@ -228,35 +330,31 @@ fn print_fields(
 /// the reconstruction changes no token's text; interior spacing
 /// normalizes to the `, ` convention (whitespace-only, per this
 /// printer's contract).
-fn print_routine(out: &mut String, r: &RoutineDirectiveCst) {
+fn render_routine(r: &RoutineDirectiveCst) -> Piece {
     let alpha = r
         .alpha
         .iter()
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    let mut line = format!(".routine {}, tapes={}, alpha=({})", r.name, r.tapes, alpha);
-    let mut col = line.chars().count();
-    if let Some(tc) = &r.trailing {
-        pad_to(&mut line, &mut col, COMMENT_COL);
-        line.push_str(&tc.text);
+    Piece {
+        code: format!(".routine {}, tapes={}, alpha=({})", r.name, r.tapes, alpha),
+        comment: r.trailing.as_ref().map(|tc| tc.text.clone()),
+        kind: PieceKind::Structural,
+        blank_before: false,
     }
-    out.push_str(line.trim_end());
-    out.push('\n');
 }
 
 /// `.section NAME` — a column-0 region marker, printed like `.func`
 /// (single space before the name, trailing comment padded to
 /// [`COMMENT_COL`]).
-fn print_section(out: &mut String, s: &SectionCst) {
-    let mut line = format!(".section {}", s.name);
-    let mut col = line.chars().count();
-    if let Some(tc) = &s.trailing {
-        pad_to(&mut line, &mut col, COMMENT_COL);
-        line.push_str(&tc.text);
+fn render_section(s: &SectionCst) -> Piece {
+    Piece {
+        code: format!(".section {}", s.name),
+        comment: s.trailing.as_ref().map(|tc| tc.text.clone()),
+        kind: PieceKind::Structural,
+        blank_before: false,
     }
-    out.push_str(line.trim_end());
-    out.push('\n');
 }
 
 /// `.row [..]` / `.targets L1, ..` / `.target L` — the same
@@ -265,18 +363,13 @@ fn print_section(out: &mut String, s: &SectionCst) {
 /// their CST tokens (a `.row` keeps its whole bracketed vector as one
 /// token; `.targets` comma-joins its names), so interior spelling
 /// survives.
-fn print_table_directive(out: &mut String, d: &TableDirectiveCst) {
+fn render_table_directive(d: &TableDirectiveCst) -> Piece {
     let word = match d.kind {
         TableDirectiveKind::Row => ".row",
         TableDirectiveKind::Targets => ".targets",
         TableDirectiveKind::Target => ".target",
     };
-    print_fields(
-        out,
-        &d.labels,
-        Some((word, d.operands.as_slice())),
-        &d.trailing,
-    );
+    render_fields(&d.labels, Some((word, d.operands.as_slice())), &d.trailing)
 }
 
 /// `.frame`/`.map`/`.exits` — the frame-descriptor directive family
@@ -284,9 +377,9 @@ fn print_table_directive(out: &mut String, d: &TableDirectiveCst) {
 /// label/word/operands grid as a table directive: `.frame` carries the
 /// descriptor label; `.map`/`.exits` are unlabeled. The operand text is
 /// reconstructed from the parsed fields (canonically spelled, so no token
-/// text changes — mirrors [`print_routine`]); `->`/`=>` survive exactly
+/// text changes — mirrors [`render_routine`]); `->`/`=>` survive exactly
 /// as authored (the CST records the one-way bit).
-fn print_frame_directive(out: &mut String, d: &FrameDirectiveCst) {
+fn render_frame_directive(d: &FrameDirectiveCst) -> Piece {
     match d {
         FrameDirectiveCst::Header(h) => {
             let alpha = h
@@ -299,22 +392,21 @@ fn print_frame_directive(out: &mut String, d: &FrameDirectiveCst) {
                 text: format!("tapes=({alpha})"),
                 span: h.span,
             }];
-            print_fields(
-                out,
+            render_fields(
                 std::slice::from_ref(&h.label),
                 Some((".frame", &operand)),
                 &h.trailing,
-            );
+            )
         }
         FrameDirectiveCst::Map(m) => {
             let operand = [OperandToken {
                 text: frame_map_operand(m),
                 span: m.span,
             }];
-            print_fields(out, &[], Some((".map", &operand)), &m.trailing);
+            render_fields(&[], Some((".map", &operand)), &m.trailing)
         }
         FrameDirectiveCst::Exits(e) => {
-            print_fields(out, &[], Some((".exits", &e.targets)), &e.trailing);
+            render_fields(&[], Some((".exits", &e.targets)), &e.trailing)
         }
     }
 }
@@ -354,7 +446,15 @@ fn frame_pairs_text(pairs: &[FramePairCst]) -> String {
 /// and text. Recovering the body by physical-line range (`endr_span`
 /// bounds it) also preserves body comments and blank lines, which carry
 /// no line number of their own on a Comment item.
-fn print_rept(out: &mut String, r: &ReptCst, source: &str) {
+///
+/// The block has two independently-anchored trailing comments (header
+/// and `.endr`), but a [`Piece`] holds back only one. The header's is
+/// not on the block's last `code` line, so it is baked in directly here
+/// — unchanged from before this split — exactly as
+/// [`render_fields`]'s non-last own-line labels are. Only `.endr`'s,
+/// which IS the last line, is held back into `Piece::comment` for the
+/// emit loop to pad.
+fn render_rept(r: &ReptCst, source: &str) -> Piece {
     // Header: reconstructed from the parsed bounds and normalized.
     let mut header = format!(".rept {}, {}, {}", r.var, r.lo, r.hi);
     let mut col = header.chars().count();
@@ -362,8 +462,9 @@ fn print_rept(out: &mut String, r: &ReptCst, source: &str) {
         pad_to(&mut header, &mut col, COMMENT_COL);
         header.push_str(&tc.text);
     }
-    out.push_str(header.trim_end());
-    out.push('\n');
+    let mut code = String::new();
+    code.push_str(header.trim_end());
+    code.push('\n');
 
     // Body: source lines (1-based) in (header_line, endr_line), verbatim.
     let lines: Vec<&str> = source.lines().collect();
@@ -371,20 +472,20 @@ fn print_rept(out: &mut String, r: &ReptCst, source: &str) {
     let body_end = r.endr_span.start.line as usize;
     for n in body_start..body_end {
         if let Some(text) = lines.get(n - 1) {
-            out.push_str(text.trim_end());
-            out.push('\n');
+            code.push_str(text.trim_end());
+            code.push('\n');
         }
     }
 
-    // Terminator: `.endr` (+ its retained trailing comment).
-    let mut endr = String::from(".endr");
-    let mut col = endr.chars().count();
-    if let Some(tc) = &r.endr_trailing {
-        pad_to(&mut endr, &mut col, COMMENT_COL);
-        endr.push_str(&tc.text);
+    // Terminator: `.endr`; its trailing comment is held back below.
+    code.push_str(".endr");
+
+    Piece {
+        code,
+        comment: r.endr_trailing.as_ref().map(|tc| tc.text.clone()),
+        kind: PieceKind::Rept,
+        blank_before: false,
     }
-    out.push_str(endr.trim_end());
-    out.push('\n');
 }
 
 /// Operand text verbatim from the CST's `OperandToken`s (never
@@ -798,8 +899,8 @@ stp
         // The comment token itself captures everything from `;` to the
         // end of the physical line (lexer.rs), so trailing whitespace
         // AFTER the comment text is part of the comment token's text —
-        // `print_line`'s `cur.trim_end()` is what drops it, not the
-        // lexer failing to capture it.
+        // `format_asm_with`'s final `line.trim_end()` per piece is what
+        // drops it, not the lexer failing to capture it.
         let src = ".func f\n        wr      1 ; c   \n";
         let expected = ".func f\n        wr      1               ; c\n";
         assert_eq!(format_asm(src).unwrap(), expected);
@@ -1021,5 +1122,20 @@ F0:     .frame  tapes=(3, 0)
         // node → the structural gate. This pins that PM-1 fmt is
         // unaffected by the opt-in surface.
         assert!(format_asm(".section tables\nT0: .row [1, 2]\n").is_err());
+    }
+
+    #[test]
+    fn refactor_preserves_output_on_the_flagship() {
+        // The two-phase split must change nothing. This is a moving
+        // baseline: Task 2 regenerates it, Task 3 deletes it once the
+        // group column deliberately changes output.
+        let src = include_str!("../../../../docs/examples/brainfuck-utm.tma");
+        let before = include_str!("testdata/flagship_before_refactor.tma");
+        let caps = AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+        };
+        assert_eq!(format_asm_with(src, caps).unwrap(), before);
     }
 }
