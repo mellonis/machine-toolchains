@@ -20,32 +20,33 @@
 //!   reprints with only the two escapes the lexer accepts, and the bare-name
 //!   `goto` sugar stays bare (`Transition::Goto::explicit` is read, never
 //!   normalized either way).
-//! - **Trivia-preserving, with one narrow exception** — every comment
-//!   reprints somewhere: own-line comments at their block's indent, same-line
-//!   trailing comments riding their line, brace-line comments riding the
-//!   `{`/`}` they were written on. Doc (`?`) and attention (`!`) runs —
-//!   `[deprecated]` included — stay directly above the declaration they
-//!   document, in source order. A comment written INSIDE a comma-separated
-//!   list — an `alphabet` body, a `routine`/`graph` signature parameter list,
-//!   a `call`/`graft`/`bind` binding list, a `with map` pair list, or a `use`
-//!   path list — prints where its author wrote it, keyed to the entry it
-//!   precedes: a same-line comment rides the preceding entry's line, an
-//!   own-line comment keeps its own line, and a comment after the last entry
-//!   prints before the closer. A `//` comment forces such a list onto
-//!   multiple lines (nothing can follow it on its physical line), and so
-//!   does any OWN-LINE comment, block or line (inlining an own-line comment
-//!   onto an entry's line would silently flip that flag on the next parse);
-//!   a SAME-LINE `/* … */` comment is the one case that can stay inline
-//!   instead, EXCEPT in an `alphabet` body and a `use` path list — the two
-//!   list kinds that already have an inline form for their entries, so a
-//!   lone same-line block comment can stay inline there without forcing a
-//!   break. The exception: a comment inside a pattern, write, or move
-//!   vector still reprints as an own-line comment after the enclosing rule
-//!   rather than in place (a same-line block comment there instead reprints
-//!   as a same-line trailing comment on the rule) — those vectors are
-//!   positional and walked per row by the compiler, so giving them
-//!   per-entry trivia is tracked separately (docs/tmt/fmt.md (interior
-//!   comments)).
+//! - **Trivia-preserving** — every comment reprints somewhere: own-line
+//!   comments at their block's indent, same-line trailing comments riding
+//!   their line, brace-line comments riding the `{`/`}` they were written
+//!   on. Doc (`?`) and attention (`!`) runs — `[deprecated]` included —
+//!   stay directly above the declaration they document, in source order. A
+//!   comment written INSIDE a comma-separated list — an `alphabet` body, a
+//!   `routine`/`graph` signature parameter list, a `call`/`graft`/`bind`
+//!   binding list, a `with map` pair list, a `use` path list, or a rule's
+//!   pattern/`write`/`move` vector — prints where its author wrote it, keyed
+//!   to the entry it precedes: a same-line comment rides the preceding
+//!   entry's line, an own-line comment keeps its own line, and a comment
+//!   after the last entry prints before the closer. A `//` comment forces
+//!   such a list onto multiple lines (nothing can follow it on its physical
+//!   line), and so does any OWN-LINE comment, block or line (inlining an
+//!   own-line comment onto an entry's line would silently flip that flag on
+//!   the next parse); a SAME-LINE `/* … */` comment is the one case that can
+//!   stay inline instead, EXCEPT in the bracketed `routine`/`graph`
+//!   signature, `call`/`graft`/`bind`, and `with map` lists, which have no
+//!   inline-with-comments form at all. A pattern/`write`/`move` vector's
+//!   SAME-LINE block comment stays inline like an `alphabet` body's or a
+//!   `use` path list's does; its `//` comment, and any OWN-LINE comment
+//!   (block or line), differ from every other list, because these three
+//!   vectors double as the state-block grid's columns (below) — either kind
+//!   does not just force its own vector onto several lines, it takes the
+//!   WHOLE enclosing rule off the grid, so the rule renders across several
+//!   lines without widening the columns its neighbours share
+//!   (docs/tmt/fmt.md (interior comments)).
 //!
 //! # Indentation
 //!
@@ -78,6 +79,16 @@
 //! The transition itself is NOT column-aligned — it is the row's tail, and
 //! padding it would leave a ragged gap in every table whose rules mix
 //! `write`-only and `write`+`move` actions.
+//!
+//! A rule whose pattern, `write`, or `move` vector carries a `//` comment, or
+//! any OWN-LINE comment (block or line), cannot be a grid row — nothing may
+//! follow `//` on its physical line, and an own-line comment must keep its
+//! own line, so either way the vector (and the rule around it) renders
+//! across several lines instead. Only a SAME-LINE `/* … */` comment stays
+//! inline and leaves the rule on the grid. An off-grid rule is excluded from
+//! the group's width computation in both directions: it does not consume the
+//! group's shared columns, and it does not widen them for its neighbours
+//! (docs/tmt/fmt.md (interior comments)).
 //!
 //! # Single-line states
 //!
@@ -138,9 +149,9 @@ use crate::cst::{
 };
 use crate::lexer::{Comment, CommentKind, LexMode, Token, TokenKind, lex_with};
 use crate::parser::{
-    AlphabetElem, BindingArg, BindingValue, Continuation, MapArrow, MoveDir, MoveVec, Pattern,
-    PatternCell, PatternCellKind, Rule, SigParamKind, Signature, SymLit, SymMap, TermKind,
-    Transition, WriteCellKind, WriteVec, parse_cst,
+    AlphabetElem, BindingArg, BindingValue, Continuation, MapArrow, MoveCell, MoveDir, MoveVec,
+    Pattern, PatternCell, PatternCellKind, SigParamKind, Signature, SymLit, SymMap, TermKind,
+    Transition, WriteCell, WriteCellKind, WriteVec, parse_cst,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -451,9 +462,35 @@ fn alphabet_elem_text(elem: &AlphabetElem) -> String {
     }
 }
 
-fn pattern_text(pattern: &Pattern) -> String {
+/// A pattern vector on the grid (or single-line-inline) path: `interior`
+/// carries only BLOCK comments here — a LINE comment sends the rule down
+/// [`render_rule_off_grid`] before this is ever called.
+fn pattern_text(pattern: &Pattern, interior: &Interior<'_>) -> String {
     let cells: Vec<String> = pattern.cells.iter().map(pattern_cell_text).collect();
-    format!("[{}]", cells.join(", "))
+    format!("[{}]", join_cells_with_interior(&cells, interior))
+}
+
+/// Joins rendered cells with `, `, splicing each slot's BLOCK comments
+/// inline. Slot `i`'s comments precede cell `i`; the tail slot's precede
+/// the closing bracket. Only reached when no LINE comment is present —
+/// the caller has already sent that case down the multi-line path.
+fn join_cells_with_interior(cells: &[String], interior: &Interior<'_>) -> String {
+    let mut out = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        for c in interior.slots[i].iter() {
+            out.push_str(&normalize_comment_text(&c.text));
+            out.push(' ');
+        }
+        out.push_str(cell);
+        if i + 1 < cells.len() {
+            out.push_str(", ");
+        }
+    }
+    for c in interior.slots[cells.len()].iter() {
+        out.push(' ');
+        out.push_str(&normalize_comment_text(&c.text));
+    }
+    out
 }
 
 fn pattern_cell_text(cell: &PatternCell) -> String {
@@ -469,17 +506,23 @@ fn pattern_cell_text(cell: &PatternCell) -> String {
     out
 }
 
-fn write_vec_text(vec: &WriteVec, tokens: &[Token]) -> String {
+fn write_cell_text(cell: &WriteCell, tokens: &[Token]) -> String {
+    match &cell.kind {
+        WriteCellKind::Keep => "-".to_string(),
+        WriteCellKind::Lit(sym) => sym_text(sym),
+        WriteCellKind::Subst { expr } => format!("{{{}}}", subst_body_text(&expr.span, tokens)),
+    }
+}
+
+/// A write vector on the grid (or single-line-inline) path — see
+/// [`pattern_text`]'s note on what `interior` carries here.
+fn write_vec_text(vec: &WriteVec, tokens: &[Token], interior: &Interior<'_>) -> String {
     let cells: Vec<String> = vec
         .cells
         .iter()
-        .map(|cell| match &cell.kind {
-            WriteCellKind::Keep => "-".to_string(),
-            WriteCellKind::Lit(sym) => sym_text(sym),
-            WriteCellKind::Subst { expr } => format!("{{{}}}", subst_body_text(&expr.span, tokens)),
-        })
+        .map(|cell| write_cell_text(cell, tokens))
         .collect();
-    format!("write [{}]", cells.join(", "))
+    format!("write [{}]", join_cells_with_interior(&cells, interior))
 }
 
 /// Reprint a substitution `{…}` from its SOURCE TOKENS, tight (no interior
@@ -519,17 +562,20 @@ fn fold_token_text(kind: &TokenKind) -> &str {
     }
 }
 
-fn move_vec_text(vec: &MoveVec) -> String {
-    let cells: Vec<&str> = vec
-        .cells
-        .iter()
-        .map(|cell| match cell.dir {
-            MoveDir::Left => "<",
-            MoveDir::Right => ">",
-            MoveDir::Stay => ".",
-        })
-        .collect();
-    format!("move [{}]", cells.join(", "))
+fn move_cell_text(cell: &MoveCell) -> String {
+    match cell.dir {
+        MoveDir::Left => "<",
+        MoveDir::Right => ">",
+        MoveDir::Stay => ".",
+    }
+    .to_string()
+}
+
+/// A move vector on the grid (or single-line-inline) path — see
+/// [`pattern_text`]'s note on what `interior` carries here.
+fn move_vec_text(vec: &MoveVec, interior: &Interior<'_>) -> String {
+    let cells: Vec<String> = vec.cells.iter().map(move_cell_text).collect();
+    format!("move [{}]", join_cells_with_interior(&cells, interior))
 }
 
 /// One binding argument, at the column it will print from — needed only to
@@ -745,58 +791,101 @@ struct Grid {
     mov: usize,
 }
 
-fn grid_for(rules: &[&Rule], tokens: &[Token]) -> Grid {
-    let width = |s: &str| s.chars().count();
-    Grid {
-        pattern: rules
+impl RuleCst {
+    /// True when any glyph vector carries a LINE comment or an OWN-LINE
+    /// comment (mirrors `bucket`'s `forces_break`). A LINE comment cannot
+    /// share its physical line; an own-line comment, block or line, would
+    /// silently flip its own `own_line` flag on the next parse if inlined
+    /// onto a cell's line. Either way the rule cannot be a grid row, so it
+    /// renders multi-line and is excluded from the grid's width computation
+    /// (docs/tmt/fmt.md (interior comments)).
+    fn breaks_the_grid(&self) -> bool {
+        [&self.pattern_cells, &self.write_cells, &self.move_cells]
             .iter()
-            .map(|r| width(&pattern_text(&r.pattern)))
+            .any(|v| {
+                v.iter()
+                    .any(|(_, c)| matches!(c.kind, CommentKind::Line) || c.own_line)
+            })
+    }
+}
+
+/// `rules` off the grid (module doc, "The state-block grid") are excluded
+/// from every column: they consume none of the group's width and, since
+/// they render themselves, do not need one.
+fn grid_for(rules: &[&RuleCst], tokens: &[Token]) -> Grid {
+    let width = |s: &str| s.chars().count();
+    let on_grid: Vec<&RuleCst> = rules
+        .iter()
+        .copied()
+        .filter(|rc| !rc.breaks_the_grid())
+        .collect();
+    Grid {
+        pattern: on_grid
+            .iter()
+            .map(|rc| {
+                let interior = bucket(&rc.pattern_cells, rc.rule.pattern.cells.len());
+                width(&pattern_text(&rc.rule.pattern, &interior))
+            })
             .max()
             .unwrap_or(0),
-        debugger: if rules.iter().any(|r| r.debugger) {
+        debugger: if on_grid.iter().any(|rc| rc.rule.debugger) {
             "debugger".len()
         } else {
             0
         },
-        write: rules
+        write: on_grid
             .iter()
-            .filter_map(|r| r.write.as_ref().map(|w| width(&write_vec_text(w, tokens))))
+            .filter_map(|rc| {
+                rc.rule.write.as_ref().map(|w| {
+                    let interior = bucket(&rc.write_cells, w.cells.len());
+                    width(&write_vec_text(w, tokens, &interior))
+                })
+            })
             .max()
             .unwrap_or(0),
-        mov: rules
+        mov: on_grid
             .iter()
-            .filter_map(|r| r.mov.as_ref().map(|m| width(&move_vec_text(m))))
+            .filter_map(|rc| {
+                rc.rule.mov.as_ref().map(|m| {
+                    let interior = bucket(&rc.move_cells, m.cells.len());
+                    width(&move_vec_text(m, &interior))
+                })
+            })
             .max()
             .unwrap_or(0),
     }
 }
 
 /// One rule as a grid row: `indent`, the padded pattern, the arrow, the
-/// action columns, the transition, `;`.
+/// action columns, the transition, `;`. Delegates to
+/// [`render_rule_off_grid`] first when [`RuleCst::breaks_the_grid`] is true
+/// — such a rule ignores `grid` entirely, since it was excluded from the
+/// computation that produced it.
 fn render_rule(rc: &RuleCst, grid: &Grid, indent: usize, tokens: &[Token]) -> String {
+    if rc.breaks_the_grid() {
+        return render_rule_off_grid(rc, indent, tokens);
+    }
     let rule = &rc.rule;
     let mut line = " ".repeat(indent);
-    let pattern = pattern_text(&rule.pattern);
+    let pattern_interior = bucket(&rc.pattern_cells, rule.pattern.cells.len());
+    let pattern = pattern_text(&rule.pattern, &pattern_interior);
     let pattern_width = pattern.chars().count();
     line.push_str(&pattern);
     line.push_str(&" ".repeat(grid.pattern.saturating_sub(pattern_width)));
     line.push_str(" -> ");
 
+    let write_text = match &rule.write {
+        Some(w) => write_vec_text(w, tokens, &bucket(&rc.write_cells, w.cells.len())),
+        None => String::new(),
+    };
+    let move_text = match &rule.mov {
+        Some(m) => move_vec_text(m, &bucket(&rc.move_cells, m.cells.len())),
+        None => String::new(),
+    };
     let segments: [(bool, String, usize); 3] = [
         (rule.debugger, "debugger".to_string(), grid.debugger),
-        (
-            rule.write.is_some(),
-            rule.write
-                .as_ref()
-                .map(|w| write_vec_text(w, tokens))
-                .unwrap_or_default(),
-            grid.write,
-        ),
-        (
-            rule.mov.is_some(),
-            rule.mov.as_ref().map(move_vec_text).unwrap_or_default(),
-            grid.mov,
-        ),
+        (rule.write.is_some(), write_text, grid.write),
+        (rule.mov.is_some(), move_text, grid.mov),
     ];
     // Trailing columns collapse: padding exists only to line up what comes
     // AFTER it, so a rule pads a column it skips (and its own last column is
@@ -837,6 +926,110 @@ fn render_rule(rc: &RuleCst, grid: &Grid, indent: usize, tokens: &[Token]) -> St
     }
     line.push(';');
     line
+}
+
+/// A rule off the grid (module doc, "The state-block grid"): a LINE comment
+/// in one of its glyph vectors forces it there, and the whole rule renders
+/// across several lines instead of padding to the group's shared columns —
+/// every vector it carries breaks, not only the one with the comment, so
+/// the rule reads as one consistent shape rather than a mix of broken and
+/// padded segments.
+fn render_rule_off_grid(rc: &RuleCst, indent: usize, tokens: &[Token]) -> String {
+    let rule = &rc.rule;
+    let mut line = " ".repeat(indent);
+
+    let pattern_cells: Vec<String> = rule.pattern.cells.iter().map(pattern_cell_text).collect();
+    let pattern_interior = bucket(&rc.pattern_cells, pattern_cells.len());
+    line.push_str(&glyph_vec_multiline(
+        "[",
+        &pattern_cells,
+        &pattern_interior,
+        indent,
+    ));
+    line.push_str(" -> ");
+
+    if rule.debugger {
+        line.push_str("debugger ");
+    }
+    if let Some(w) = &rule.write {
+        let cells: Vec<String> = w.cells.iter().map(|c| write_cell_text(c, tokens)).collect();
+        let interior = bucket(&rc.write_cells, cells.len());
+        line.push_str(&glyph_vec_multiline("write [", &cells, &interior, indent));
+        line.push(' ');
+    }
+    if let Some(m) = &rule.mov {
+        let cells: Vec<String> = m.cells.iter().map(move_cell_text).collect();
+        let interior = bucket(&rc.move_cells, cells.len());
+        line.push_str(&glyph_vec_multiline("move [", &cells, &interior, indent));
+        line.push(' ');
+    }
+
+    let col = col_after(&line);
+    let transition = transition_text(&rule.transition, col, &rc.call_args, &rc.map_pairs);
+    if transition.is_empty() {
+        while line.ends_with(' ') {
+            line.pop();
+        }
+    } else {
+        line.push_str(&transition);
+    }
+    line.push(';');
+    line
+}
+
+/// One glyph vector's cells, one per line at `indent + INDENT_UNIT`, closer
+/// on its own line back at `indent` — the off-grid form
+/// [`RuleCst::breaks_the_grid`] sends a rule down. `head` is the vector's
+/// leading text up to and including its opening `[` (`"["` for a pattern,
+/// `"write ["` / `"move ["` for the action vectors). Mirrors `paren_list`'s
+/// multi-line branch and the same indexing rule as every other list: slot
+/// `i`'s own-line comments print above cell `i`; slot `i + 1`'s same-line
+/// comments print at the end of cell `i`'s line (docs/tmt/fmt.md (interior
+/// comments)).
+fn glyph_vec_multiline(
+    head: &str,
+    cells: &[String],
+    interior: &Interior<'_>,
+    indent: usize,
+) -> String {
+    let cell_pad = " ".repeat(indent + INDENT_UNIT);
+    let mut out = String::from(head);
+    // Slot 0's same-line comments precede every cell, so there is no
+    // preceding cell's line for them to trail — they ride the opening `[`
+    // itself (module doc, "Blank lines and comments").
+    out.push_str(&interior_trailing(&interior.slots[0]));
+    out.push('\n');
+    for (i, cell) in cells.iter().enumerate() {
+        out.push_str(&interior_lines(&interior.slots[i], indent + INDENT_UNIT));
+        out.push_str(&cell_pad);
+        out.push_str(cell);
+        if i + 1 < cells.len() {
+            out.push(',');
+        }
+        // The NEXT slot's same-line comments belong to THIS cell's line —
+        // see the indexing rule above (module doc, "Blank lines and
+        // comments").
+        out.push_str(&interior_trailing(&interior.slots[i + 1]));
+        out.push('\n');
+    }
+    out.push_str(&interior_lines(
+        &interior.slots[cells.len()],
+        indent + INDENT_UNIT,
+    ));
+    out.push_str(&" ".repeat(indent));
+    out.push(']');
+    out
+}
+
+/// The column position right after the LAST physical line of `s` — what a
+/// nested list beginning immediately after `s` breaks against, when `s`
+/// itself may already contain embedded newlines (an off-grid rule's broken
+/// glyph vectors, e.g.). Degrades to `s.chars().count()` when `s` has none.
+fn col_after(s: &str) -> usize {
+    match s.rsplit_once('\n') {
+        Some((_, last)) => last.chars().count(),
+        None => s.chars().count(),
+    }
 }
 
 /// A transition, starting at column `col` — the column an argument list
@@ -1195,7 +1388,8 @@ struct InlineShape {
 /// header's own line, no interior comment, no comment on the `{`. A rule
 /// whose `call_args`/`map_pairs` carry a comment is excluded too — that
 /// comment forces its own binding list onto several physical lines, which a
-/// single-line state can't absorb.
+/// single-line state can't absorb; a rule off the grid
+/// ([`RuleCst::breaks_the_grid`]) is excluded for the same reason.
 fn inline_candidate(state: &StateCst) -> bool {
     state.open_trailing.is_empty()
         && state.rules.iter().all(|item| match &item.kind {
@@ -1205,6 +1399,7 @@ fn inline_candidate(state: &StateCst) -> bool {
                     && r.trailing.is_none()
                     && r.call_args.is_empty()
                     && r.map_pairs.is_empty()
+                    && !r.breaks_the_grid()
             }
         })
 }
@@ -1252,11 +1447,11 @@ fn inline_state_runs(
             .map(|s| state_header_text(s).chars().count())
             .max()
             .expect("a run holds at least one state");
-        let rules: Vec<&Rule> = states
+        let rules: Vec<&RuleCst> = states
             .iter()
             .flat_map(|s| s.rules.iter())
             .filter_map(|item| match &item.kind {
-                RuleKind::Rule(r) => Some(&r.rule),
+                RuleKind::Rule(r) => Some(r.as_ref()),
                 RuleKind::Comment(_) => None,
             })
             .collect();
@@ -1327,11 +1522,11 @@ fn render_block_state(
     code.push_str(&format!("{pad}{} {{", state_header_text(state)));
     code.push_str(&open_trailing_text(&state.open_trailing));
     code.push('\n');
-    let rules: Vec<&Rule> = state
+    let rules: Vec<&RuleCst> = state
         .rules
         .iter()
         .filter_map(|item| match &item.kind {
-            RuleKind::Rule(r) => Some(&r.rule),
+            RuleKind::Rule(r) => Some(r.as_ref()),
             RuleKind::Comment(_) => None,
         })
         .collect();

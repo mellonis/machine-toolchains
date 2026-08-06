@@ -767,3 +767,151 @@ fn use_own_line_block_comment_forces_break() {
         "the own-line block comment precedes the following path, got:\n{out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Glyph vectors: pattern, write, move.
+// ---------------------------------------------------------------------------
+
+/// A BLOCK comment inside a pattern vector stays inline, so the state's
+/// grid alignment is untouched.
+#[test]
+fn pattern_block_comment_stays_inline() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   ['0', /* lo */ '1'] -> stop;\n\
+               \x20   [*, *] -> move [>, .] goto s;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    let line = line_with(&out, "/* lo */");
+    assert!(
+        line.contains("['0',") && line.contains("'1']"),
+        "the comment stays inside the vector, got: {line:?}"
+    );
+    assert!(
+        line.contains("->"),
+        "and the rule is still one grid row, got: {line:?}"
+    );
+}
+
+/// A LINE comment inside a pattern vector forces that rule off the grid
+/// onto a multi-line form. The comment must survive.
+#[test]
+fn pattern_line_comment_breaks_the_rule_off_the_grid() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   ['0', // the low bit\n\
+               \x20    '1'] -> stop;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    let line = line_with(&out, "// the low bit");
+    assert!(
+        line.contains("'0'"),
+        "it rides the cell it was written against, got: {line:?}"
+    );
+}
+
+/// An own-line BLOCK comment inside a pattern vector (no LINE comment
+/// anywhere in the rule) must still force the rule off the grid — inlining
+/// it would silently flip its `own_line` flag true→false on reprint, which
+/// [`format_checked`] catches via the idempotence check; pinned explicitly
+/// here too, mirroring every other surface's own-line-forces-break test.
+#[test]
+fn pattern_own_line_block_comment_forces_break() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   [\n\
+               \x20     /* first */\n\
+               \x20     '0', '1'] -> stop;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    let idx = index_of(&out, "/* first */");
+    assert!(
+        out.lines().nth(idx + 1).unwrap().contains("'0'"),
+        "the own-line block comment precedes the cell it was written against, got:\n{out}"
+    );
+}
+
+/// The write vector, same two kinds.
+#[test]
+fn write_vector_comments_print_in_place() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   [*, *] -> write ['1', /* hi */ '0'] stop;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    assert!(line_with(&out, "/* hi */").contains("write ['1',"));
+}
+
+/// The move vector, same.
+#[test]
+fn move_vector_comments_print_in_place() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   [*, *] -> move [>, /* stay */ .] stop;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    assert!(line_with(&out, "/* stay */").contains("move [>,"));
+}
+
+/// Slot 0 — immediately after the opening `[`. This position destroyed
+/// comments on four surfaces in the sibling work; it is covered from the
+/// start here (lesson 2).
+#[test]
+fn pattern_slot0_comment_survives() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   [/* first */ '0', '1'] -> stop;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    assert!(
+        out.contains("/* first */"),
+        "slot-0 comment survives:\n{out}"
+    );
+}
+
+/// The tail slot — immediately before the closing `]`. The other half of
+/// lesson 2.
+#[test]
+fn pattern_tail_slot_comment_survives() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   ['0', '1' /* last */] -> stop;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    assert!(
+        out.contains("/* last */"),
+        "tail-slot comment survives:\n{out}"
+    );
+}
+
+/// A line-commented rule must not inflate the grid for its neighbours, and
+/// its own comment must still survive going off-grid — a regression that
+/// dropped the comment while leaving the neighbour untouched would pass a
+/// placement-only check silently.
+#[test]
+fn a_line_commented_rule_does_not_widen_the_grid() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n  tape a: bits;\n  tape b: bits;\n\
+               \x20 entry state s {\n\
+               \x20   [*, *] -> move [>, .] goto s;\n\
+               \x20   ['0', // note\n\
+               \x20    '1'] -> stop;\n\
+               \x20 }\n}\n";
+    let out = format_checked(src);
+    let neighbour = line_with(&out, "goto s");
+    assert!(
+        neighbour.trim_start().starts_with("[*, *] ->"),
+        "the uncommented rule keeps tight alignment, got: {neighbour:?}"
+    );
+    assert!(
+        out.contains("// note"),
+        "the off-grid rule's own comment must survive too, got:\n{out}"
+    );
+}
