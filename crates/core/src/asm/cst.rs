@@ -111,8 +111,13 @@ pub struct AsmItem {
     ///
     /// This is what keeps the join lossless: `kind` holds the shaped
     /// directive as though it had been written on one line, and these
-    /// entries hold the region exactly as the author typed it, each
-    /// segment's own indentation and the trailing comment included.
+    /// entries hold the region as the author typed it, each segment's own
+    /// indentation and the trailing comment included (see
+    /// [`ContinuedLine::text`] for the one bound on "as written").
+    ///
+    /// The entries are CONTIGUOUS physical lines — the fold refuses to
+    /// cross a blank — which is what lets a segment be found by
+    /// subtracting the first line number.
     pub continuation: Option<Vec<ContinuedLine>>,
 }
 
@@ -126,9 +131,15 @@ pub struct ContinuedLine {
     /// debug line map and the editor services all keep pointing at the
     /// right place.
     pub line_no: u32,
-    /// The line exactly as written, its newline excluded — so joining an
-    /// item's entries with newlines reproduces the source region byte for
-    /// byte.
+    /// The line exactly as written, its line terminator excluded — so
+    /// joining an item's entries with `\n` reproduces the source region,
+    /// down to each segment's own indentation and its comment.
+    ///
+    /// "Exactly as written" is bounded by what the whole CST sees: the
+    /// line-oriented parse reads through `str::lines()`, which strips a
+    /// `\r` along with the `\n`, so a CRLF file rejoins with LF endings.
+    /// That predates this field and applies to every verbatim text the
+    /// CST holds, [`RawCst`] included.
     pub text: String,
 }
 
@@ -520,14 +531,24 @@ fn is_continued_list(kind: &AsmItemKind) -> bool {
 ///
 /// The comma must be the line's LAST token. A comma followed by a comment
 /// does not continue — that keeps the joined token stream's single
-/// trailing comment at the end where every consumer expects it, and keeps
-/// a comment from being silently relocated into the middle of a list.
+/// trailing comment at the end where every consumer expects it.
 ///
-/// Three things end the run: input running out, a blank line (recorded as
-/// the next record's `blank_before` — folding across it would swallow the
-/// blank), and a line that opens a statement of its own. That last guard
-/// is what stops a stray dangling comma from eating the `.section`,
-/// `.func` or labeled line beneath it.
+/// Four things end the run:
+///
+///   * input running out;
+///   * a blank line, recorded as the next record's `blank_before`. This
+///     guard is load-bearing twice over: folding across a blank would
+///     swallow it, AND the folded records must be CONTIGUOUS, because
+///     [`ItemText::line`] indexes its segments by subtracting the first
+///     line number. Let the fold cross a gap and operand text silently
+///     comes back empty;
+///   * an own-line comment. Absorbing one would move it up onto the end
+///     of the directive above — the comment survives, so this is
+///     re-attachment rather than loss, but it is a comment moving on its
+///     own and the formatter's whitespace-only check would not see it;
+///   * a line that opens a statement of its own — which is what stops a
+///     stray dangling comma from eating the `.section`, `.func` or
+///     labeled line beneath it.
 fn continued_len(records: &[LineRecord<'_>], caps: AsmCaps) -> usize {
     if !caps.tables
         || !statement_word(&records[0].tokens).is_some_and(|w| CONTINUABLE_WORDS.contains(&w))
@@ -541,11 +562,18 @@ fn continued_len(records: &[LineRecord<'_>], caps: AsmCaps) -> usize {
             Some(AsmTokenKind::Comma)
         )
         && !records[n].blank_before
+        && !is_own_line_comment(&records[n].tokens)
         && !opens_a_statement(&records[n].tokens, caps)
     {
         n += 1;
     }
     n
+}
+
+/// Is this line nothing but a comment? The lexer emits at most one
+/// Comment token and always last, so a lone Comment is the whole line.
+fn is_own_line_comment(tokens: &[AsmToken]) -> bool {
+    matches!(tokens, [only] if matches!(only.kind, AsmTokenKind::Comment(_)))
 }
 
 /// The directive or mnemonic word a line's statement starts with, past
@@ -2280,6 +2308,24 @@ F0: .frame tapes=(3, 0)
     }
 
     #[test]
+    fn an_own_line_comment_is_never_absorbed_into_a_continuation() {
+        // Absorbing it would re-attach the comment to the end of the
+        // directive above — it would survive, so this is relocation
+        // rather than loss, but a comment must not move on its own, and
+        // the formatter's whitespace-only check cannot see that it did.
+        let src = ".section tables\nD0:     .targets aa,\n; a note\n        bb\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        assert_eq!(cst.items.len(), 4);
+        assert!(cst.items.iter().all(|i| i.continuation.is_none()));
+        // The comment stays its own item, on its own physical line.
+        assert!(matches!(&cst.items[2].kind, AsmItemKind::Comment(c)
+            if c.text == "; a note" && c.col == 1));
+        // ... and the directive above it did not acquire one.
+        let d = table_directives(&cst)[0];
+        assert_eq!(d.trailing, None);
+    }
+
+    #[test]
     fn a_blank_line_ends_a_continuation() {
         let src = ".section tables\nD0:     .targets aa,\n\n        bb\n";
         let cst = parse_asm_cst_with(src, caps_all());
@@ -2326,13 +2372,32 @@ F0: .frame tapes=(3, 0)
         // body line by its number, so a two-line body item would expand to
         // half of itself. Inside a block the trailing comma keeps today's
         // behaviour.
-        let src = ".rept v, 0, 1\nD{v}:   .targets aa,\n        bb\n.endr\n";
-        let cst = parse_asm_cst_with(src, caps_all());
+        //
+        // The label must NOT carry a `{…}` substitution marker: under the
+        // rept cap the braces lex as LBrace/RBrace, so `statement_word`
+        // stops at the un-colonned `D` and the fold declines for that
+        // reason instead of the one under test. `D0:` puts the same body
+        // through the top-level fold's own accept path — proven below by
+        // the sibling assertion, which folds the identical two lines when
+        // they are NOT inside a block.
+        let body = "D0:     .targets aa,\n        bb\n";
+        let src = format!(".rept v, 0, 1\n{body}.endr\n");
+        let cst = parse_asm_cst_with(&src, caps_all());
         let AsmItemKind::Rept(r) = &cst.items[0].kind else {
             panic!("not a rept")
         };
-        assert_eq!(r.body.len(), 2);
+        assert_eq!(
+            r.body.len(),
+            2,
+            "a rept body item must stay one physical line"
+        );
         assert!(r.body.iter().all(|i| i.continuation.is_none()));
+
+        // Same two lines at top level DO fold. Without this the test above
+        // could pass for the wrong reason — a body that never qualified.
+        let cst = parse_asm_cst_with(body, caps_all());
+        assert_eq!(cst.items.len(), 1);
+        assert!(cst.items[0].continuation.is_some());
     }
 
     proptest! {

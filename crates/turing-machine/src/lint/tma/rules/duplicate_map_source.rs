@@ -20,8 +20,11 @@
 //! The finding spans the LATER (winning) pair, and its fix removes the EARLIER
 //! (shadowed) pair together with its trailing comma, so the remaining list
 //! still parses. `FramePairCst` keeps no per-pair span, so the spans are
-//! reconstructed from the source text within the clause's `(..)` group span
-//! (the clause is a single line; pairs split on top-level commas).
+//! reconstructed from the source text within the clause's `(..)` group span,
+//! splitting on top-level commas. That group may span more than one physical
+//! line — a trailing comma continues a `.map` (docs/formats.md (assembly
+//! text)) — so the reconstruction walks the region rather than slicing the
+//! line the group opened on, and each pair's span names the line it is on.
 //!
 //! Top-level `.map` directives only: a `.map` inside a `.rept` body is not
 //! scanned (a completeness-only limit — never a wrong finding). The lint runs
@@ -101,49 +104,92 @@ fn check_clause(
     }
 }
 
+/// One character of the group's interior, carrying the physical position it
+/// was written at. Positions travel with the character rather than being
+/// recomputed from a column offset, which is what lets the group span more
+/// than one line.
+struct Cell {
+    line: u32,
+    col: u32,
+    ch: char,
+}
+
 /// The per-pair source spans of a `.map` clause's `(..)` group, in list order.
-/// The group is on one line; pairs split on top-level commas (a pair never
-/// nests), each span trimmed of surrounding whitespace. Fewer than the pair
-/// count only on a malformed group (which the assemble gate rejects first).
+/// Pairs split on top-level commas (a pair never nests), each span trimmed of
+/// surrounding whitespace. Fewer than the pair count only on a malformed group
+/// (which the assemble gate rejects first).
+///
+/// The group may span SEVERAL physical lines: a trailing comma continues a
+/// `.map` onto the next line (docs/formats.md (assembly text)), which puts the
+/// opening and closing parens on different lines. So the interior is collected
+/// as positioned characters and split over that, never sliced out of the line
+/// the group started on.
 fn pair_spans(source: &str, group: Span) -> Vec<Span> {
-    let line_no = group.start.line;
-    let Some(line) = source.lines().nth(line_no as usize - 1) else {
-        return Vec::new();
-    };
-    let chars: Vec<char> = line.chars().collect();
-    // The group covers `(..)`: `(` at 0-based `start.col - 1`, `)` at
-    // `end.col - 2` (end.col is one past the `)`).
-    let lparen0 = group.start.col as usize - 1;
-    let rparen0 = group.end.col as usize - 2;
-    if rparen0 <= lparen0 || rparen0 > chars.len() {
-        return Vec::new();
-    }
+    let cells = group_cells(source, group);
     let mut spans = Vec::new();
-    let mut seg_lo = lparen0 + 1;
-    for i in (lparen0 + 1)..rparen0 {
-        if chars[i] == ',' {
-            push_trimmed(&mut spans, &chars, line_no, seg_lo, i);
+    let mut seg_lo = 0usize;
+    for i in 0..cells.len() {
+        if cells[i].ch == ',' {
+            push_trimmed(&mut spans, &cells, seg_lo, i);
             seg_lo = i + 1;
         }
     }
-    push_trimmed(&mut spans, &chars, line_no, seg_lo, rparen0);
+    push_trimmed(&mut spans, &cells, seg_lo, cells.len());
     spans
 }
 
-/// Push the trimmed span of the char range `[lo, hi)` (0-based indices into
-/// `chars`) as a single-line span, dropping it if the trim leaves nothing. A
-/// 0-based char index `j` maps to 1-based column `j + 1`.
-fn push_trimmed(spans: &mut Vec<Span>, chars: &[char], line: u32, lo: usize, hi: usize) {
+/// The characters strictly between the group's `(` and `)`, in source order.
+/// `group.start` is the `(`; `group.end` is one past the `)`. Bounds come from
+/// each line's real length, so nothing can index past a line.
+fn group_cells(source: &str, group: Span) -> Vec<Cell> {
+    if (group.end.line, group.end.col) <= (group.start.line, group.start.col) {
+        return Vec::new();
+    }
+    let mut cells = Vec::new();
+    for (offset, text) in source
+        .lines()
+        .skip(group.start.line as usize - 1)
+        .take((group.end.line - group.start.line + 1) as usize)
+        .enumerate()
+    {
+        let line = group.start.line + offset as u32;
+        // Half-open column window `[lo, hi)` of this line's interior: past
+        // the `(` on the first line, up to the `)` on the last.
+        let lo = if line == group.start.line {
+            group.start.col + 1
+        } else {
+            1
+        };
+        let hi = if line == group.end.line {
+            group.end.col - 1
+        } else {
+            u32::MAX
+        };
+        for (j, ch) in text.chars().enumerate() {
+            let col = j as u32 + 1;
+            if col >= lo && col < hi {
+                cells.push(Cell { line, col, ch });
+            }
+        }
+    }
+    cells
+}
+
+/// Push the trimmed span of the cell range `[lo, hi)`, dropping it if the trim
+/// leaves nothing. The line break between two segments contributes no cell at
+/// all, so a wrapped list trims exactly like a flat one.
+fn push_trimmed(spans: &mut Vec<Span>, cells: &[Cell], lo: usize, hi: usize) {
     let mut a = lo;
     let mut b = hi;
-    while a < b && chars[a].is_whitespace() {
+    while a < b && cells[a].ch.is_whitespace() {
         a += 1;
     }
-    while b > a && chars[b - 1].is_whitespace() {
+    while b > a && cells[b - 1].ch.is_whitespace() {
         b -= 1;
     }
     if a < b {
-        spans.push(Span::new(line, (a + 1) as u32, line, (b + 1) as u32));
+        let (first, last) = (&cells[a], &cells[b - 1]);
+        spans.push(Span::new(first.line, first.col, last.line, last.col + 1));
     }
 }
 
@@ -206,6 +252,38 @@ alt:    hlt
         };
         let (start, end) = (byte_of(edit.span.start), byte_of(edit.span.end));
         format!("{}{}{}", &src[..start], edit.replacement, &src[end..])
+    }
+
+    /// A `.map` whose clause is continued by a trailing comma
+    /// (docs/formats.md (assembly text)) puts the group's parens on
+    /// different lines. The rule must keep firing, and must span the
+    /// physical line each pair is really on.
+    #[test]
+    fn a_wrapped_group_still_finds_its_duplicate() {
+        // The duplicate is the pair that WRAPPED onto line 6.
+        let src = program("rmap=(1->2,\n            1->3)");
+        let f = diagnostics(&src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!((f[0].span.start.line, f[0].span.start.col), (6, 13));
+        assert_eq!((f[0].span.end.line, f[0].span.end.col), (6, 17));
+
+        // The sharp case: the duplicate sits entirely on the FIRST line,
+        // and only a later pair wrapped. Slicing the group out of one line
+        // used to silence this one too.
+        let src = program("rmap=(1->2, 1->3,\n            2->3)");
+        let f = diagnostics(&src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!((f[0].span.start.line, f[0].span.start.col), (5, 28));
+        assert_eq!((f[0].span.end.line, f[0].span.end.col), (5, 32));
+    }
+
+    /// The quickfix stays machine-applicable across the line break. Until
+    /// the group could wrap, the `spans.len() != pairs.len()` bail happened
+    /// to swallow this case; now the counts agree, so the edit has to be
+    /// right rather than merely absent.
+    #[test]
+    fn the_fix_removes_a_shadowed_mapping_across_the_line_break() {
+        assert_fix_no_op("rmap=(1->2,\n            1->3)", "rmap=(1->3)");
     }
 
     #[test]
