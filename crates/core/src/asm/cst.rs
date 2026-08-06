@@ -1,11 +1,19 @@
 //! Lossless assembly CST (docs/formats.md (assembly text)). Total:
 //! every text parses — lines that are not assembly-shaped become Raw
 //! nodes. Trivia-complete: comments with columns, blank-line presence,
-//! raw text. Validity checking lives in lower.rs, not here.
+//! raw text, and — for the three list directives a trailing comma may
+//! continue onto the next line — the physical lines the directive was
+//! written across, verbatim. Validity checking lives in lower.rs, not
+//! here.
+//!
+//! An item is normally one physical line. The one exception is that
+//! continuation, and it never renumbers anything: line numbers stay
+//! PHYSICAL throughout, because diagnostics, the debug line map and both
+//! editor services all read them.
 
 use super::lexer::{AsmToken, AsmTokenKind, lex_line};
 use super::syntax::AsmCaps;
-use crate::diagnostics::Span;
+use crate::diagnostics::{Pos, Span};
 
 // ---------------------------------------------------------------------
 // Directive words — the single spelling of every directive the
@@ -40,6 +48,20 @@ pub(crate) const EXITS_WORD: &str = ".exits";
 /// The frame-descriptor directive family, shaped under
 /// [`AsmCaps::tables`] and reported precisely by lower when malformed.
 pub(crate) const FRAME_DIRECTIVE_WORDS: [&str; 3] = [FRAME_WORD, MAP_WORD, EXITS_WORD];
+
+/// The directives whose operand list may continue onto the next physical
+/// line when the line ends in a comma (docs/formats.md (assembly text)).
+/// These three are the grammar's only unbounded lists: a dispatch table's
+/// targets, a frame's exits, and a frame's symbol maps all grow with the
+/// program. Every other comma-separated region is bounded — `.row`,
+/// `alpha=(…)` and `.frame tapes=(…)` by the tape count, `.target` and
+/// `.section` by taking a single operand — so none of them can reach a
+/// width where a line break earns its keep, and a trailing comma stays
+/// the error it has always been there.
+///
+/// All three ride [`AsmCaps::tables`], so a dialect without that
+/// capability never reaches the fold at all.
+const CONTINUABLE_WORDS: [&str; 3] = [TARGETS_WORD, EXITS_WORD, MAP_WORD];
 
 /// Every directive word the assembler framework recognizes under
 /// `caps`, sorted (docs/formats.md (assembly text)). `.func` and
@@ -81,6 +103,33 @@ pub struct AsmCst {
 pub struct AsmItem {
     pub blank_before: bool,
     pub kind: AsmItemKind,
+    /// The physical lines this item was written across, present only when
+    /// a trailing comma continued a `.targets`/`.exits`/`.map` list onto
+    /// the next line (docs/formats.md (assembly text)) — two entries or
+    /// more, in source order. `None` is the ordinary one-line item, which
+    /// is every item a dialect without [`AsmCaps::tables`] can produce.
+    ///
+    /// This is what keeps the join lossless: `kind` holds the shaped
+    /// directive as though it had been written on one line, and these
+    /// entries hold the region exactly as the author typed it, each
+    /// segment's own indentation and the trailing comment included.
+    pub continuation: Option<Vec<ContinuedLine>>,
+}
+
+/// One physical line of an item written across several (see
+/// [`AsmItem::continuation`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuedLine {
+    /// 1-based PHYSICAL line number. Joining lines never renumbers
+    /// anything: every span inside the shaped item, and every entry here,
+    /// still names the line the text actually sits on, so diagnostics, the
+    /// debug line map and the editor services all keep pointing at the
+    /// right place.
+    pub line_no: u32,
+    /// The line exactly as written, its newline excluded — so joining an
+    /// item's entries with newlines reproduces the source region byte for
+    /// byte.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,9 +398,11 @@ pub fn parse_asm_cst(source: &str) -> AsmCst {
 /// surface (vector operands, `{…}` substitution) and the matching
 /// shaping (sections, table directives, `.rept` blocks). With
 /// `AsmCaps::default()` this is byte-identical to [`parse_asm_cst`]:
-/// the block-opening below is gated on `caps.rept`, and `shape_line`'s
-/// section/table branches on `caps.tables`, so every added path is dead
-/// under default caps and the item sequence is unchanged.
+/// the block-opening below is gated on `caps.rept`, `shape_line`'s
+/// section/table branches on `caps.tables`, and the list-continuation
+/// fold on `caps.tables` too, so every added path is dead under default
+/// caps and the item sequence is unchanged — one item per non-blank
+/// physical line.
 pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
     let records = line_records(source, caps);
     let mut items: Vec<AsmItem> = Vec::new();
@@ -382,6 +433,10 @@ pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
                         endr_span,
                         endr_trailing,
                     }),
+                    // A block is many physical lines but not a continued
+                    // list — it carries its own line bounds in `span` and
+                    // `endr_span`, and its body items each stay one line.
+                    continuation: None,
                 });
                 i += 1 + off + 1; // header + body + the closing `.endr`
                 continue;
@@ -391,13 +446,175 @@ pub fn parse_asm_cst_with(source: &str, caps: AsmCaps) -> AsmCst {
             // lines then shape as ordinary top-level items on the
             // following iterations, via the fall-through below.
         }
+        let candidate = continued_len(&records[i..], caps);
+        let (kind, used) = shape_records(&records[i..i + candidate], caps);
         items.push(AsmItem {
             blank_before: rec.blank_before,
-            kind: shape_line(rec.line, &rec.tokens, rec.line_no, caps),
+            kind,
+            continuation: (used > 1).then(|| {
+                records[i..i + used]
+                    .iter()
+                    .map(|r| ContinuedLine {
+                        line_no: r.line_no,
+                        text: r.line.to_string(),
+                    })
+                    .collect()
+            }),
         });
-        i += 1;
+        i += used;
     }
     AsmCst { items }
+}
+
+/// Shapes one item out of `records` — more than one record only when
+/// [`continued_len`] saw a list continued by a trailing comma. The join
+/// is kept ONLY when it produces the continued directive it promised;
+/// if the joined text degrades to anything else (a malformed list, a
+/// plain Line, a Raw), the item re-shapes from the first record alone and
+/// the rest stay separate items. So a trailing comma that does not end up
+/// continuing a well-formed list keeps exactly the error it has today.
+/// Returns the shaped kind and how many records it consumed.
+fn shape_records(records: &[LineRecord<'_>], caps: AsmCaps) -> (AsmItemKind, usize) {
+    if records.len() > 1 {
+        let lines: Vec<&str> = records.iter().map(|r| r.line).collect();
+        // Each segment's tokens already carry their own physical line, so
+        // concatenating the per-line token vectors yields a joined stream
+        // whose spans stay physical with no renumbering. Only the final
+        // segment can hold a Comment (a comma followed by a comment does
+        // not continue), so the joined stream still satisfies the
+        // one-trailing-comment shape `split_trailing` relies on.
+        let tokens: Vec<AsmToken> = records
+            .iter()
+            .flat_map(|r| r.tokens.iter().cloned())
+            .collect();
+        let src = ItemText::new(records[0].line_no, &lines);
+        let kind = shape_line(&src, &tokens, caps);
+        if is_continued_list(&kind) {
+            return (kind, records.len());
+        }
+    }
+    let rec = &records[0];
+    let lines = [rec.line];
+    let src = ItemText::new(rec.line_no, &lines);
+    (shape_line(&src, &rec.tokens, caps), 1)
+}
+
+/// Did a joined region shape into one of the three directives whose list
+/// may be continued? Anything else means the join was not what the
+/// trailing comma promised, and the caller falls back to one line per
+/// item.
+fn is_continued_list(kind: &AsmItemKind) -> bool {
+    match kind {
+        AsmItemKind::TableDirective(d) => matches!(d.kind, TableDirectiveKind::Targets),
+        AsmItemKind::FrameDirective(d) => {
+            matches!(d, FrameDirectiveCst::Map(_) | FrameDirectiveCst::Exits(_))
+        }
+        _ => false,
+    }
+}
+
+/// How many records the item starting at `records[0]` may occupy: 1 for
+/// every ordinary line, more when a `.targets`/`.exits`/`.map` line ends
+/// in a comma and the lines below continue its list (docs/formats.md
+/// (assembly text)).
+///
+/// The comma must be the line's LAST token. A comma followed by a comment
+/// does not continue — that keeps the joined token stream's single
+/// trailing comment at the end where every consumer expects it, and keeps
+/// a comment from being silently relocated into the middle of a list.
+///
+/// Three things end the run: input running out, a blank line (recorded as
+/// the next record's `blank_before` — folding across it would swallow the
+/// blank), and a line that opens a statement of its own. That last guard
+/// is what stops a stray dangling comma from eating the `.section`,
+/// `.func` or labeled line beneath it.
+fn continued_len(records: &[LineRecord<'_>], caps: AsmCaps) -> usize {
+    if !caps.tables
+        || !statement_word(&records[0].tokens).is_some_and(|w| CONTINUABLE_WORDS.contains(&w))
+    {
+        return 1;
+    }
+    let mut n = 1;
+    while n < records.len()
+        && matches!(
+            records[n - 1].tokens.last().map(|t| &t.kind),
+            Some(AsmTokenKind::Comma)
+        )
+        && !records[n].blank_before
+        && !opens_a_statement(&records[n].tokens, caps)
+    {
+        n += 1;
+    }
+    n
+}
+
+/// The directive or mnemonic word a line's statement starts with, past
+/// any leading `Word Colon` labels; `None` when the line is not shaped
+/// `label* word …`.
+fn statement_word(tokens: &[AsmToken]) -> Option<&str> {
+    let mut at = 0;
+    while at + 1 < tokens.len()
+        && matches!(tokens[at].kind, AsmTokenKind::Word(_))
+        && matches!(tokens[at + 1].kind, AsmTokenKind::Colon)
+    {
+        at += 2;
+    }
+    word_text(tokens.get(at)?)
+}
+
+/// Does this line open a statement of its own? A leading label or a
+/// recognized directive word always does, and such a line can therefore
+/// never be read as the continuation of the list above it. The check is
+/// deliberately structural — the CST is arch-agnostic and has no mnemonic
+/// table, so a bare instruction word is not something it can recognize.
+fn opens_a_statement(tokens: &[AsmToken], caps: AsmCaps) -> bool {
+    let labeled = tokens.len() > 1
+        && matches!(tokens[0].kind, AsmTokenKind::Word(_))
+        && matches!(tokens[1].kind, AsmTokenKind::Colon);
+    labeled || word_text(&tokens[0]).is_some_and(|w| recognized_directives(caps).contains(&w))
+}
+
+/// The physical source text one item was read from: one line normally,
+/// several when a trailing comma continued its list. Every lookup names
+/// the PHYSICAL line a token sits on, so operand text is sliced out of
+/// the line it was really written on and the spans built alongside stay
+/// physical.
+struct ItemText<'a> {
+    first_line_no: u32,
+    lines: &'a [&'a str],
+}
+
+impl<'a> ItemText<'a> {
+    fn new(first_line_no: u32, lines: &'a [&'a str]) -> ItemText<'a> {
+        ItemText {
+            first_line_no,
+            lines,
+        }
+    }
+
+    /// The physical line `line_no`, or `""` if it is outside the item.
+    fn line(&self, line_no: u32) -> &'a str {
+        line_no
+            .checked_sub(self.first_line_no)
+            .and_then(|i| self.lines.get(i as usize))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The char range `[start_col, end_col)` of one physical line.
+    /// Columns are char-counted (crate::diagnostics), so slice by chars.
+    fn slice(&self, line_no: u32, start_col: u32, end_col: u32) -> String {
+        self.line(line_no)
+            .chars()
+            .skip(start_col as usize - 1)
+            .take((end_col - start_col) as usize)
+            .collect()
+    }
+
+    /// The whole region as written, physical line breaks included.
+    fn joined(&self) -> String {
+        self.lines.join("\n")
+    }
 }
 
 /// One non-blank physical line, retained with its tokens for shaping.
@@ -439,12 +656,23 @@ fn line_records(source: &str, caps: AsmCaps) -> Vec<LineRecord<'_>> {
 /// a nested `.rept` degrades to a Line here and the block's own `.endr`
 /// — already consumed by the caller as the terminator — never reaches
 /// this slice.
+///
+/// A body item is ALWAYS exactly one physical line: list continuation is
+/// a top-level fold only. Expansion recovers each body line verbatim by
+/// its line number before substituting into it, so a body item spanning
+/// two lines would expand to half of itself; inside a block a trailing
+/// comma therefore keeps the error it has today.
 fn shape_body(records: &[LineRecord<'_>], caps: AsmCaps) -> Vec<AsmItem> {
     records
         .iter()
-        .map(|rec| AsmItem {
-            blank_before: rec.blank_before,
-            kind: shape_line(rec.line, &rec.tokens, rec.line_no, caps),
+        .map(|rec| {
+            let lines = [rec.line];
+            let src = ItemText::new(rec.line_no, &lines);
+            AsmItem {
+                blank_before: rec.blank_before,
+                kind: shape_line(&src, &rec.tokens, caps),
+                continuation: None,
+            }
         })
         .collect()
 }
@@ -472,7 +700,16 @@ fn rept_header(rec: &LineRecord<'_>) -> Option<ReptHeader> {
     if word_text(first) != Some(REPT_WORD) {
         return None;
     }
-    let operands = operand_region(rec.line, rest, rec.line_no, first.col + first.len);
+    let lines = [rec.line];
+    let src = ItemText::new(rec.line_no, &lines);
+    let operands = operand_region(
+        &src,
+        rest,
+        Pos {
+            line: first.line,
+            col: first.col + first.len,
+        },
+    );
     let [var, lo, hi] = operands.as_slice() else {
         return None;
     };
@@ -538,7 +775,12 @@ fn split_trailing(tokens: &[AsmToken]) -> (&[AsmToken], Option<TrailingComment>)
 /// `.rept` is handled by the caller, so this only ever sees the `.rept`
 /// header (and any `.endr`) as an ordinary line, which is exactly the
 /// degradation nested/unterminated blocks rely on.
-fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> AsmItemKind {
+///
+/// `src` is normally one physical line; it holds several only for a list
+/// continued by a trailing comma, and then every span below is still
+/// built from the token's OWN physical line, never from a renumbered
+/// join.
+fn shape_line(src: &ItemText<'_>, tokens: &[AsmToken], caps: AsmCaps) -> AsmItemKind {
     // Own-line comment. The lexer emits at most one Comment token,
     // always last, so a lone Comment is the whole line.
     if let [only] = tokens
@@ -556,14 +798,16 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
         .iter()
         .any(|t| matches!(t.kind, AsmTokenKind::Junk(_)));
     if has_junk || !matches!(tokens[0].kind, AsmTokenKind::Word(_)) {
-        return raw_line(line, tokens, line_no);
+        return raw_line(src, tokens);
     }
 
     // Split off the trailing comment; `body` keeps at least tokens[0].
     let (body, trailing) = split_trailing(tokens);
     let last = body.last().expect("first token is a Word, never Comment");
-    // The item's span: the line's trimmed extent minus the comment.
-    let span = Span::new(line_no, body[0].col, line_no, last.col + last.len);
+    // The item's span: the line's trimmed extent minus the comment. For a
+    // continued list the extent ends on the last physical line the code
+    // reaches, so start and end name different lines.
+    let span = Span::new(body[0].line, body[0].col, last.line, last.col + last.len);
 
     // `.func` special case: structurally exact directives only.
     // Anything else starting `.func` stays a Line so lower.rs can
@@ -611,7 +855,7 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     // before this branch is ever reached.
     if caps.tables
         && word_text(&body[0]) == Some(ROUTINE_WORD)
-        && let Some(directive) = routine_directive(body, line_no, span, &trailing)
+        && let Some(directive) = routine_directive(body, span, &trailing)
     {
         return AsmItemKind::RoutineDirective(directive);
     }
@@ -647,7 +891,11 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     let Some(word) = word_text(word_token) else {
         // `label* <non-word>` — the instruction-word slot holds a
         // token no rule accepts; the line is not assembly-shaped.
-        return raw_line(line, tokens, line_no);
+        return raw_line(src, tokens);
+    };
+    let after_word = Pos {
+        line: word_token.line,
+        col: word_token.col + word_token.len,
     };
 
     // Table directives (caps.tables): `.row`/`.targets`/`.target`,
@@ -660,13 +908,10 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     {
         let region = &body[at + 1..];
         let operands = match dir_kind {
-            TableDirectiveKind::Row => vector_operand(line, region, line_no).map(|op| vec![op]),
-            TableDirectiveKind::Targets | TableDirectiveKind::Target => Some(operand_region(
-                line,
-                region,
-                line_no,
-                word_token.col + word_token.len,
-            )),
+            TableDirectiveKind::Row => vector_operand(src, region).map(|op| vec![op]),
+            TableDirectiveKind::Targets | TableDirectiveKind::Target => {
+                Some(operand_region(src, region, after_word))
+            }
         };
         if let Some(operands) = operands {
             return AsmItemKind::TableDirective(TableDirectiveCst {
@@ -690,12 +935,11 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
         && let Some(directive) = frame_directive(
             word,
             &labels,
-            line,
+            src,
             &body[at + 1..],
-            line_no,
             span,
             &trailing,
-            word_token.col + word_token.len,
+            after_word,
         )
     {
         return AsmItemKind::FrameDirective(directive);
@@ -712,7 +956,6 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
     // default caps `LBracket` tokens never exist, so this is dead and the
     // comma-split below is byte-identical to before.
     let region = &body[at + 1..];
-    let after_word = word_token.col + word_token.len;
     let operands = match caps
         .vectors
         .then(|| {
@@ -722,17 +965,17 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
         })
         .flatten()
     {
-        Some(open) => match vector_operand(line, &region[open..], line_no) {
+        Some(open) => match vector_operand(src, &region[open..]) {
             Some(bracket) => {
-                let mut ops = operand_region(line, &region[..open], line_no, after_word);
+                let mut ops = operand_region(src, &region[..open], after_word);
                 ops.push(bracket);
                 ops
             }
             // A malformed bracket region (no closing `]`) degrades to the
             // plain comma-split; lower reports the mismatch precisely.
-            None => operand_region(line, region, line_no, after_word),
+            None => operand_region(src, region, after_word),
         },
-        None => operand_region(line, region, line_no, after_word),
+        None => operand_region(src, region, after_word),
     };
     AsmItemKind::Line(LineCst {
         labels,
@@ -757,7 +1000,6 @@ fn shape_line(line: &str, tokens: &[AsmToken], line_no: u32, caps: AsmCaps) -> A
 /// Line (mirror `.func`).
 fn routine_directive(
     body: &[AsmToken],
-    line_no: u32,
     span: Span,
     trailing: &Option<TrailingComment>,
 ) -> Option<RoutineDirectiveCst> {
@@ -809,7 +1051,12 @@ fn routine_directive(
         tapes,
         tapes_span,
         alpha,
-        alpha_span: Span::new(line_no, lparen.col, line_no, rparen.col + rparen.len),
+        alpha_span: Span::new(
+            lparen.line,
+            lparen.col,
+            rparen.line,
+            rparen.col + rparen.len,
+        ),
         span,
         trailing: trailing.clone(),
     })
@@ -831,23 +1078,21 @@ pub(super) fn canonical_u32(token: &AsmToken) -> Option<(u32, Span)> {
 /// lower reports precisely. `labels` are the leading labels already
 /// parsed: `.frame` requires exactly one (the descriptor name);
 /// `.map`/`.exits` require none.
-#[allow(clippy::too_many_arguments)]
 fn frame_directive(
     word: &str,
     labels: &[LabelCst],
-    line: &str,
+    src: &ItemText<'_>,
     region: &[AsmToken],
-    line_no: u32,
     span: Span,
     trailing: &Option<TrailingComment>,
-    after_word_col: u32,
+    after_word: Pos,
 ) -> Option<FrameDirectiveCst> {
     match word {
         FRAME_WORD => {
             let [label] = labels else {
                 return None;
             };
-            let (tapes, tapes_span) = parse_frame_tapes(region, line_no)?;
+            let (tapes, tapes_span) = parse_frame_tapes(region)?;
             Some(FrameDirectiveCst::Header(FrameHeaderCst {
                 label: label.clone(),
                 tapes,
@@ -860,13 +1105,13 @@ fn frame_directive(
             if !labels.is_empty() {
                 return None;
             }
-            parse_frame_map(region, line_no, span, trailing).map(FrameDirectiveCst::Map)
+            parse_frame_map(region, span, trailing).map(FrameDirectiveCst::Map)
         }
         EXITS_WORD => {
             if !labels.is_empty() {
                 return None;
             }
-            let targets = operand_region(line, region, line_no, after_word_col);
+            let targets = operand_region(src, region, after_word);
             if targets.is_empty() || targets.iter().any(|t| t.text.is_empty()) {
                 return None;
             }
@@ -883,7 +1128,7 @@ fn frame_directive(
 /// `tapes=(<int>, …)` after the `.frame` word: `Word("tapes") = ( Number
 /// [, Number]* )`, canonically spelled. Returns the phys list and the
 /// `(..)` group span.
-fn parse_frame_tapes(region: &[AsmToken], line_no: u32) -> Option<(Vec<u32>, Span)> {
+fn parse_frame_tapes(region: &[AsmToken]) -> Option<(Vec<u32>, Span)> {
     let is = |t: &AsmToken, k: &AsmTokenKind| &t.kind == k;
     let [tapes_kw, eq, lparen, rest @ ..] = region else {
         return None;
@@ -908,7 +1153,12 @@ fn parse_frame_tapes(region: &[AsmToken], line_no: u32) -> Option<(Vec<u32>, Spa
             return None;
         }
     }
-    let span = Span::new(line_no, lparen.col, line_no, rparen.col + rparen.len);
+    let span = Span::new(
+        lparen.line,
+        lparen.col,
+        rparen.line,
+        rparen.col + rparen.len,
+    );
     Some((tapes, span))
 }
 
@@ -917,7 +1167,6 @@ fn parse_frame_tapes(region: &[AsmToken], line_no: u32) -> Option<(Vec<u32>, Spa
 /// `wmap`; anything else is `None`.
 fn parse_frame_map(
     region: &[AsmToken],
-    line_no: u32,
     span: Span,
     trailing: &Option<TrailingComment>,
 ) -> Option<FrameMapCst> {
@@ -926,14 +1175,14 @@ fn parse_frame_map(
     };
     let (k, k_span) = canonical_u32(k_tok)?;
     let mut rest = rest;
-    let (rmap, rmap_span) = match parse_named_pairs(rest, "rmap", line_no) {
+    let (rmap, rmap_span) = match parse_named_pairs(rest, "rmap") {
         Some((pairs, group_span, after)) => {
             rest = after;
             (Some(pairs), Some(group_span))
         }
         None => (None, None),
     };
-    let (wmap, wmap_span) = match parse_named_pairs(rest, "wmap", line_no) {
+    let (wmap, wmap_span) = match parse_named_pairs(rest, "wmap") {
         Some((pairs, group_span, after)) => {
             rest = after;
             (Some(pairs), Some(group_span))
@@ -961,7 +1210,6 @@ fn parse_frame_map(
 fn parse_named_pairs<'a>(
     rest: &'a [AsmToken],
     name: &str,
-    line_no: u32,
 ) -> Option<(Vec<FramePairCst>, Span, &'a [AsmToken])> {
     let is = |t: &AsmToken, k: &AsmTokenKind| &t.kind == k;
     let [comma, kw, eq, lparen, tail @ ..] = rest else {
@@ -980,7 +1228,12 @@ fn parse_named_pairs<'a>(
         .position(|t| matches!(t.kind, AsmTokenKind::RParen))?;
     let pairs = parse_pairs(&tail[..close])?;
     let rparen = &tail[close];
-    let group_span = Span::new(line_no, lparen.col, line_no, rparen.col + rparen.len);
+    let group_span = Span::new(
+        lparen.line,
+        lparen.col,
+        rparen.line,
+        rparen.col + rparen.len,
+    );
     Some((pairs, group_span, &tail[close + 1..]))
 }
 
@@ -1102,7 +1355,7 @@ fn table_directive_kind(word: &str) -> Option<TableDirectiveKind> {
 /// `None` and the caller degrades the line to a plain Line. The
 /// interior — including commas — is not interpreted here; lower parses
 /// it in a later task.
-fn vector_operand(line: &str, region: &[AsmToken], line_no: u32) -> Option<OperandToken> {
+fn vector_operand(src: &ItemText<'_>, region: &[AsmToken]) -> Option<OperandToken> {
     let [first, .., last] = region else {
         return None;
     };
@@ -1112,26 +1365,24 @@ fn vector_operand(line: &str, region: &[AsmToken], line_no: u32) -> Option<Opera
     }
     let start = first.col;
     let end = last.col + last.len;
-    // Columns are char-counted (crate::diagnostics), so slice by chars.
-    let text: String = line
-        .chars()
-        .skip(start as usize - 1)
-        .take((end - start) as usize)
-        .collect();
+    let text = src.slice(first.line, start, end);
     Some(OperandToken {
         text: text.trim().to_string(),
-        span: Span::new(line_no, start, line_no, end),
+        span: Span::new(first.line, start, last.line, end),
     })
 }
 
 /// The lossless fallback: verbatim line text; span = the line's
-/// trimmed extent (all tokens, including a trailing comment).
-fn raw_line(line: &str, tokens: &[AsmToken], line_no: u32) -> AsmItemKind {
+/// trimmed extent (all tokens, including a trailing comment). A Raw is
+/// never a continued list — [`shape_records`] keeps a join only when it
+/// shapes into one of the three list directives — so the verbatim text
+/// here is always a single physical line.
+fn raw_line(src: &ItemText<'_>, tokens: &[AsmToken]) -> AsmItemKind {
     let first = &tokens[0];
     let last = tokens.last().expect("caller guarantees tokens");
     AsmItemKind::Raw(RawCst {
-        text: line.to_string(),
-        span: Span::new(line_no, first.col, line_no, last.col + last.len),
+        text: src.joined(),
+        span: Span::new(first.line, first.col, last.line, last.col + last.len),
     })
 }
 
@@ -1148,54 +1399,50 @@ fn word_text(token: &AsmToken) -> Option<&str> {
 /// exactly as before); an empty group (doubled / leading / trailing
 /// comma) yields an empty-text token with a zero-width span just past
 /// the preceding delimiter, where the operand would have been.
-fn operand_region(
-    line: &str,
-    region: &[AsmToken],
-    line_no: u32,
-    after_word_col: u32,
-) -> Vec<OperandToken> {
+fn operand_region(src: &ItemText<'_>, region: &[AsmToken], after_word: Pos) -> Vec<OperandToken> {
     if region.is_empty() {
         return Vec::new();
     }
     let mut operands = Vec::new();
     let mut group: Vec<&AsmToken> = Vec::new();
-    let mut empty_group_col = after_word_col;
+    let mut empty_group_at = after_word;
     for token in region {
         if matches!(token.kind, AsmTokenKind::Comma) {
-            operands.push(operand_token(line, &group, line_no, empty_group_col));
+            operands.push(operand_token(src, &group, empty_group_at));
             group.clear();
-            empty_group_col = token.col + token.len;
+            empty_group_at = Pos {
+                line: token.line,
+                col: token.col + token.len,
+            };
         } else {
             group.push(token);
         }
     }
-    operands.push(operand_token(line, &group, line_no, empty_group_col));
+    operands.push(operand_token(src, &group, empty_group_at));
     operands
 }
 
-fn operand_token(
-    line: &str,
-    group: &[&AsmToken],
-    line_no: u32,
-    empty_group_col: u32,
-) -> OperandToken {
+/// One operand group's text and span. A group never straddles a physical
+/// line break: the only place a list continues is straight after a comma,
+/// and a comma is itself a group boundary — so the group's first and last
+/// tokens always sit on the same line, and slicing that one line is
+/// exact.
+fn operand_token(src: &ItemText<'_>, group: &[&AsmToken], empty_group_at: Pos) -> OperandToken {
     let (Some(first), Some(last)) = (group.first(), group.last()) else {
         return OperandToken {
             text: String::new(),
-            span: Span::new(line_no, empty_group_col, line_no, empty_group_col),
+            span: Span {
+                start: empty_group_at,
+                end: empty_group_at,
+            },
         };
     };
     let start = first.col;
     let end = last.col + last.len;
-    // Columns are char-counted (crate::diagnostics), so slice by chars.
-    let text: String = line
-        .chars()
-        .skip(start as usize - 1)
-        .take((end - start) as usize)
-        .collect();
+    let text = src.slice(first.line, start, end);
     OperandToken {
         text: text.trim().to_string(),
-        span: Span::new(line_no, start, line_no, end),
+        span: Span::new(first.line, start, last.line, end),
     }
 }
 
@@ -1869,6 +2116,223 @@ F0: .frame tapes=(3, 0)
         };
         assert!(matches!(&outer.body[0].kind, AsmItemKind::Line(l)
             if l.instr.as_ref().unwrap().word == ".rept"));
+    }
+
+    // -- List continuation: a trailing comma joins the next line --------
+
+    fn table_directives(cst: &AsmCst) -> Vec<&TableDirectiveCst> {
+        cst.items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                AsmItemKind::TableDirective(d) => Some(d),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn operand_slices(operands: &[OperandToken]) -> Vec<&str> {
+        operands.iter().map(|o| o.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_trailing_comma_continues_a_targets_list() {
+        let src = ".section tables\nD0:     .targets aa,\n        bb\n.section code\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        // The two physical lines are ONE logical directive carrying both
+        // labels — not two items, and not a Raw line.
+        let targets = table_directives(&cst);
+        assert_eq!(targets.len(), 1, "one logical directive");
+        assert_eq!(operand_slices(&targets[0].operands), vec!["aa", "bb"]);
+    }
+
+    #[test]
+    fn a_trailing_comma_continues_an_exits_list() {
+        let src = ".section tables\nF0:     .frame tapes=(0)\n        .exits aa,\n        bb\n.section code\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let AsmItemKind::FrameDirective(FrameDirectiveCst::Exits(e)) = &cst.items[2].kind else {
+            panic!("expected a continued .exits, got {:?}", cst.items[2].kind);
+        };
+        assert_eq!(operand_slices(&e.targets), vec!["aa", "bb"]);
+        assert_eq!(cst.items.len(), 4); // two sections, the frame, the exits
+    }
+
+    #[test]
+    fn a_trailing_comma_continues_a_map_clause() {
+        // The comma inside the `rmap=(..)` group continues the line too —
+        // the rule keys on the directive, not on where in it the comma is.
+        let src = ".section tables\nF0:     .frame tapes=(0, 1)\n        .map 0, rmap=(1->2,\n                      3->4)\n.section code\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let AsmItemKind::FrameDirective(FrameDirectiveCst::Map(m)) = &cst.items[2].kind else {
+            panic!("expected a continued .map, got {:?}", cst.items[2].kind);
+        };
+        assert_eq!(
+            m.rmap,
+            Some(vec![
+                FramePairCst {
+                    from: 1,
+                    to: 2,
+                    one_way: false
+                },
+                FramePairCst {
+                    from: 3,
+                    to: 4,
+                    one_way: false
+                },
+            ])
+        );
+        // The `(..)` group opens on line 3 and closes on line 4.
+        assert_eq!(m.rmap_span, Some(Span::new(3, 22, 4, 28)));
+    }
+
+    #[test]
+    fn a_continued_list_round_trips_byte_for_byte() {
+        let src = ".section tables\nD0:     .targets aa,\n                 bb, cc        ; the rest\n.section code\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let lines = cst.items[1]
+            .continuation
+            .as_ref()
+            .expect("the directive spans two physical lines");
+        let source_lines: Vec<&str> = src.lines().collect();
+        // Every retained segment IS its physical source line, indentation
+        // and trailing comment included — so the join reproduces the
+        // region byte for byte, and `line_no` is the physical number.
+        for line in lines {
+            assert_eq!(line.text, source_lines[line.line_no as usize - 1]);
+        }
+        assert_eq!(
+            lines.iter().map(|l| l.line_no).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        let region: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(region.join("\n"), source_lines[1..3].join("\n"));
+        // The comment on the last segment is the directive's own trailing
+        // comment; the shaped directive reads as one line.
+        let d = table_directives(&cst)[0];
+        assert_eq!(operand_slices(&d.operands), vec!["aa", "bb", "cc"]);
+        assert_eq!(trailing_text(&d.trailing), Some("; the rest"));
+    }
+
+    #[test]
+    fn a_continued_list_keeps_physical_line_numbers() {
+        let src = ".section tables\nD0:     .targets aa,\n        bb,\n        cc\n.section code\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let d = table_directives(&cst)[0];
+        // Each operand's span names the line it was really written on, so
+        // a diagnostic about `cc` points at line 4, not at line 2.
+        let operand_lines: Vec<u32> = d.operands.iter().map(|o| o.span.start.line).collect();
+        assert_eq!(operand_lines, vec![2, 3, 4]);
+        assert_eq!(d.operands[2].span, Span::new(4, 9, 4, 11));
+        // The directive's own extent runs from its first line to its last.
+        assert_eq!(d.span, Span::new(2, 1, 4, 11));
+        // And the item after it resumes at the right physical line.
+        assert!(matches!(&cst.items[2].kind, AsmItemKind::Section(s)
+            if s.name == "code" && s.span.start.line == 5));
+    }
+
+    #[test]
+    fn a_trailing_comma_outside_the_three_lists_stays_an_error() {
+        // `.row`, `.target` and an ordinary instruction all keep their
+        // dangling comma — the line below stays a separate item.
+        for src in [
+            ".section tables\nT0:     .row [1],\n        [2]\n",
+            ".section tables\nD0:     .target aa,\n        bb\n",
+            ".func f\n        wr 1,\n        2\n",
+            ".routine main, tapes=1,\n        alpha=(2)\n",
+        ] {
+            let cst = parse_asm_cst_with(src, caps_all());
+            assert!(
+                cst.items.iter().all(|i| i.continuation.is_none()),
+                "{src:?} must not continue"
+            );
+            assert_eq!(cst.items.len(), src.lines().count(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_trailing_comma_never_continues_without_the_tables_cap() {
+        // The three continuable directives all ride `caps.tables`, so a
+        // dialect without it — `.pma`, and the classic grammar — cannot
+        // reach the fold at all.
+        let src = ".section tables\nD0:     .targets aa,\n        bb\n";
+        for caps in [
+            AsmCaps::default(),
+            AsmCaps {
+                tables: false,
+                rept: true,
+                vectors: true,
+            },
+        ] {
+            let cst = parse_asm_cst_with(src, caps);
+            assert_eq!(cst.items.len(), 3);
+            assert!(cst.items.iter().all(|i| i.continuation.is_none()));
+        }
+    }
+
+    #[test]
+    fn a_comma_followed_by_a_comment_does_not_continue() {
+        // The comma must be the line's LAST token. Otherwise the comment
+        // would land in the middle of the joined list, where no consumer
+        // expects one — so this keeps the error it has today.
+        let src = ".section tables\nD0:     .targets aa,  ; more below\n        bb\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        assert_eq!(cst.items.len(), 3);
+        assert!(cst.items.iter().all(|i| i.continuation.is_none()));
+    }
+
+    #[test]
+    fn a_blank_line_ends_a_continuation() {
+        let src = ".section tables\nD0:     .targets aa,\n\n        bb\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        assert_eq!(cst.items.len(), 3);
+        assert!(cst.items.iter().all(|i| i.continuation.is_none()));
+        assert!(cst.items[2].blank_before, "the blank line survives");
+    }
+
+    #[test]
+    fn a_continuation_never_swallows_a_line_that_opens_a_statement() {
+        // A stray dangling comma must not eat the directive, labeled line
+        // or block below it.
+        for (src, items) in [
+            (".section tables\nD0:     .targets aa,\n.section code\n", 3),
+            (".section tables\nD0:     .targets aa,\nbb:     nop\n", 3),
+            (
+                ".section tables\nD0:     .targets aa,\n.rept v, 0, 1\n.endr\n",
+                3,
+            ),
+        ] {
+            let cst = parse_asm_cst_with(src, caps_all());
+            assert_eq!(cst.items.len(), items, "{src:?}");
+            assert!(
+                cst.items.iter().all(|i| i.continuation.is_none()),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_join_that_does_not_shape_into_a_list_falls_back_to_one_item_per_line() {
+        // `.map` with junk after the continuation degrades — the joined
+        // text is not a well-formed `.map`, so the fold is abandoned and
+        // both lines shape exactly as they do today.
+        let src = ".section tables\n        .map 0,\n        nonsense=(1)\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        assert_eq!(cst.items.len(), 3);
+        assert!(cst.items.iter().all(|i| i.continuation.is_none()));
+    }
+
+    #[test]
+    fn a_rept_body_item_is_always_one_physical_line() {
+        // Continuation is a top-level fold only: expansion recovers each
+        // body line by its number, so a two-line body item would expand to
+        // half of itself. Inside a block the trailing comma keeps today's
+        // behaviour.
+        let src = ".rept v, 0, 1\nD{v}:   .targets aa,\n        bb\n.endr\n";
+        let cst = parse_asm_cst_with(src, caps_all());
+        let AsmItemKind::Rept(r) = &cst.items[0].kind else {
+            panic!("not a rept")
+        };
+        assert_eq!(r.body.len(), 2);
+        assert!(r.body.iter().all(|i| i.continuation.is_none()));
     }
 
     proptest! {

@@ -1639,6 +1639,75 @@ A:  stp
     }
 
     #[test]
+    fn a_list_wrapped_over_a_trailing_comma_assembles_identically() {
+        // A trailing comma continues `.targets`, `.exits` and `.map` onto
+        // the next line (docs/formats.md (assembly text)). Wrapping is a
+        // matter of layout only: the object must come out byte-identical
+        // to the same program written on single lines.
+        let one_line = "\
+.section tables
+T0: .row [1]
+    .row [*]
+D0: .targets A, B
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1->2, 3->4)
+    .exits A, B
+.section code
+.func main
+    tmatch T0
+    tdispatch D0
+    fcall helper, F0
+A:  stp
+B:  stp
+.func helper
+    stp
+";
+        let wrapped = "\
+.section tables
+T0: .row [1]
+    .row [*]
+D0: .targets A,
+             B
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1->2,
+                  3->4)
+    .exits A,
+           B
+.section code
+.func main
+    tmatch T0
+    tdispatch D0
+    fcall helper, F0
+A:  stp
+B:  stp
+.func helper
+    stp
+";
+        assert_eq!(asm_fake(wrapped).unwrap(), asm_fake(one_line).unwrap());
+    }
+
+    #[test]
+    fn a_bad_target_on_a_wrapped_lines_second_line_reports_that_line() {
+        // Line numbers stay PHYSICAL across a continuation: the offending
+        // operand is on line 5, and that is the line the diagnostic names.
+        let src = "\
+.section tables
+T0: .row [1]
+    .row [*]
+D0: .targets A,
+             1bad
+.section code
+.func main
+    tmatch T0
+    tdispatch D0
+A:  stp
+";
+        let e = asm_fake(src).unwrap_err();
+        assert!(matches!(e.kind, AsmErrorKind::BadTable(_)), "{e}");
+        assert_eq!(e.span.start.line, 5, "{e}");
+    }
+
+    #[test]
     fn rept_expanded_same_label_rows_continue_one_table() {
         // The UTM pattern: a `.rept` around a LABELED row emits the same
         // label every iteration — the run continues instead of clashing.
