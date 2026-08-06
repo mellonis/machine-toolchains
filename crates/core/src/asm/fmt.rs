@@ -105,6 +105,22 @@ pub fn format_asm_with(source: &str, caps: AsmCaps) -> Result<String, AsmError> 
             out.push('\n');
         }
         let mut line = p.code.clone();
+        if let Some(hc) = &p.header_comment {
+            // Only a `.rept` piece ever sets this, and its header line
+            // is always followed by at least the `.endr` line, so `code`
+            // always has an interior `\n` here. The final `line.trim_end()`
+            // below only reaches the LAST physical line, so this interior
+            // one is trimmed explicitly after the comment is appended —
+            // the same reason [`render_rept`] used to trim it inline.
+            let split_at = line
+                .find('\n')
+                .expect("a piece with a header_comment always has a header line above its body");
+            let mut header_line = line[..split_at].to_string();
+            let mut hcol = header_line.chars().count();
+            pad_to(&mut header_line, &mut hcol, comment_cols[i]);
+            header_line.push_str(hc);
+            line = format!("{}\n{}", header_line.trim_end(), &line[split_at + 1..]);
+        }
         let mut col = line.rsplit('\n').next().unwrap_or("").chars().count();
         if let Some(c) = &p.comment {
             // `pad_to`'s "already at/past the stop → one separating
@@ -153,6 +169,14 @@ enum PieceKind {
 struct Piece {
     code: String,
     comment: Option<String>,
+    /// A SECOND held-back trailing comment, anchored to `code`'s FIRST
+    /// line rather than its last. Only [`render_rept`] ever sets this —
+    /// a `.rept` block's header carries its own trailing comment on a
+    /// physical line that is not the piece's last, so it cannot share
+    /// `comment`'s slot — but it still goes through the same per-group
+    /// column [`comment`] does ([`comment_columns`] does not
+    /// distinguish the two), rather than a fixed column of its own.
+    header_comment: Option<String>,
     /// Tells an own-line comment apart from a code line's trailing one,
     /// a structural directive, and a `.rept` block — consumed by
     /// [`comment_columns`]'s group scan and, through
@@ -173,6 +197,7 @@ fn render_pieces(cst: &AsmCst, source: &str) -> Vec<Piece> {
                 AsmItemKind::Comment(c) => Piece {
                     code: String::new(),
                     comment: Some(c.text.clone()),
+                    header_comment: None,
                     kind: PieceKind::Comment,
                     blank_before: false,
                 },
@@ -201,6 +226,7 @@ fn render_func(f: &FuncCst) -> Piece {
     Piece {
         code: line,
         comment: f.trailing.as_ref().map(|tc| tc.text.clone()),
+        header_comment: None,
         kind: PieceKind::Structural,
         blank_before: false,
     }
@@ -249,6 +275,20 @@ fn own_line_comment_col(pieces: &[Piece], i: usize, group_col: usize) -> usize {
 /// verbatim rather than through this grid, so it contributes no width:
 /// aligning a group to a member that never joins it would be incoherent.
 ///
+/// Width comes from carrying a comment, not from a piece's kind: any
+/// piece with one — an instruction line, but equally a commented
+/// `.section`/`.func`/`.routine`/`.rept` — contributes the width of the
+/// code IT trails. Excluding a kind here would let it be padded out to
+/// a column its own width never justified, stranding it ragged against
+/// the rest of its group — the exact defect group alignment exists to
+/// remove. A piece with no comment contributes no width regardless of
+/// kind. A `.rept` piece can contribute width from TWO lines at once —
+/// its header line, if [`Piece::header_comment`] holds one, and its
+/// last line (`.endr`), if [`Piece::comment`] holds one — since the two
+/// are independently-anchored comments that still land at this one
+/// group column together; whichever line is wider is what the group
+/// must be at least that wide to hold cleanly.
+///
 /// The column is NOT capped by any line limit; `line-too-long` reports an
 /// overlong result. The `.tmc` printer makes the same call.
 ///
@@ -268,15 +308,19 @@ fn comment_columns(pieces: &[Piece]) -> Vec<usize> {
             continue;
         }
         let widest = (start..i)
-            .filter(|&k| pieces[k].comment.is_some() && pieces[k].kind == PieceKind::Line)
             .map(|k| {
-                pieces[k]
-                    .code
-                    .rsplit('\n')
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .count()
+                let p = &pieces[k];
+                let trailing_width = p
+                    .comment
+                    .is_some()
+                    .then(|| p.code.rsplit('\n').next().unwrap_or("").chars().count())
+                    .unwrap_or(0);
+                let header_width = p
+                    .header_comment
+                    .is_some()
+                    .then(|| p.code.split('\n').next().unwrap_or("").chars().count())
+                    .unwrap_or(0);
+                trailing_width.max(header_width)
             })
             .max()
             .unwrap_or(0);
@@ -377,6 +421,7 @@ fn render_fields(
     Piece {
         code: out,
         comment: trailing.as_ref().map(|tc| tc.text.clone()),
+        header_comment: None,
         kind: PieceKind::Line,
         blank_before: false,
     }
@@ -398,6 +443,7 @@ fn render_routine(r: &RoutineDirectiveCst) -> Piece {
     Piece {
         code: format!(".routine {}, tapes={}, alpha=({})", r.name, r.tapes, alpha),
         comment: r.trailing.as_ref().map(|tc| tc.text.clone()),
+        header_comment: None,
         kind: PieceKind::Structural,
         blank_before: false,
     }
@@ -411,6 +457,7 @@ fn render_section(s: &SectionCst) -> Piece {
     Piece {
         code: format!(".section {}", s.name),
         comment: s.trailing.as_ref().map(|tc| tc.text.clone()),
+        header_comment: None,
         kind: PieceKind::Structural,
         blank_before: false,
     }
@@ -507,20 +554,21 @@ fn frame_pairs_text(pairs: &[FramePairCst]) -> String {
 /// no line number of their own on a Comment item.
 ///
 /// The block has two independently-anchored trailing comments (header
-/// and `.endr`), but a [`Piece`] holds back only one. The header's is
-/// not on the block's last `code` line, so it is baked in directly here
-/// — unchanged from before this split — exactly as
-/// [`render_fields`]'s non-last own-line labels are. Only `.endr`'s,
-/// which IS the last line, is held back into `Piece::comment` for the
-/// emit loop to pad.
+/// and `.endr`), and both are held back for the emit loop to pad — the
+/// header's into [`Piece::header_comment`] (it is not on `code`'s last
+/// line, so it cannot share [`Piece::comment`]'s slot), `.endr`'s into
+/// [`Piece::comment`] like every other piece's. Both are padded to the
+/// SAME per-group column [`comment_columns`] computes for this piece —
+/// a `.rept` block is one group member, not two — and that computation
+/// checks BOTH lines' own widths (not just `.endr`'s, the piece's last
+/// line) precisely so the shared column is wide enough to hold each of
+/// them without either overflowing it: the header is no longer pinned
+/// to a fixed column of its own, and it is bounded by its own width
+/// like everything else that carries a comment.
 fn render_rept(r: &ReptCst, source: &str) -> Piece {
-    // Header: reconstructed from the parsed bounds and normalized.
-    let mut header = format!(".rept {}, {}, {}", r.var, r.lo, r.hi);
-    let mut col = header.chars().count();
-    if let Some(tc) = &r.trailing {
-        pad_to(&mut header, &mut col, COMMENT_COL);
-        header.push_str(&tc.text);
-    }
+    // Header: reconstructed from the parsed bounds and normalized; its
+    // trailing comment is held back rather than padded here.
+    let header = format!(".rept {}, {}, {}", r.var, r.lo, r.hi);
     let mut code = String::new();
     code.push_str(header.trim_end());
     code.push('\n');
@@ -542,6 +590,7 @@ fn render_rept(r: &ReptCst, source: &str) -> Piece {
     Piece {
         code,
         comment: r.endr_trailing.as_ref().map(|tc| tc.text.clone()),
+        header_comment: r.trailing.as_ref().map(|tc| tc.text.clone()),
         kind: PieceKind::Rept,
         blank_before: false,
     }
@@ -1299,7 +1348,13 @@ F0:     .frame  tapes=(3, 0)
     fn the_group_column_is_never_capped_by_line_width() {
         // Unbounded — a group's column is never capped by the 80-column
         // limit. `line-too-long` (the arch-agnostic assembly rule) is
-        // what reports an overlong result here.
+        // what reports an overlong result here. Asserting merely that
+        // SOME line in the output exceeds 80 columns pins nothing: this
+        // fixture's `.targets` line is already 87 characters of CODE
+        // before any comment, so that would hold even under a fixed
+        // COMMENT_COL. The real claim is that the NARROW `nop` line's
+        // comment column follows the group past 80 rather than staying
+        // at the 32-column floor — checked directly below.
         let wide = "a".repeat(70);
         let src = format!(".func f\n        nop     ; a\n        .targets {wide} ; b\n");
         let out = format_asm_with(
@@ -1310,9 +1365,16 @@ F0:     .frame  tapes=(3, 0)
             },
         )
         .unwrap();
-        assert!(
-            out.lines().any(|l| l.len() > 80),
-            "alignment wins over the 80-column limit"
+        let narrow_col = out
+            .lines()
+            .find(|l| l.contains("nop"))
+            .unwrap()
+            .find(';')
+            .unwrap();
+        assert_eq!(
+            narrow_col, 88,
+            "the narrow line's comment column is pulled past the 80-column \
+             limit by its wide group-mate, rather than capping at the floor"
         );
     }
 
@@ -1389,5 +1451,128 @@ F0:     .frame  tapes=(3, 0)
         assert_eq!(short_col, 32, "the narrow line stays at the floor");
         assert_eq!(standalone_col, 0, "a non-continuing comment is structural");
         assert_eq!(wide_col, 57, "the wide line widens only its own group");
+    }
+
+    // -- Whole-branch review corrections (I1, I2) ----------------------
+
+    #[test]
+    fn a_commented_structural_directive_widens_its_group() {
+        // I2: a `.section`/`.func`/`.routine` line that carries a
+        // trailing comment must count toward its group's width like any
+        // other commented piece, or it strands itself ragged against its
+        // own group's narrower members.
+        let src = ".func aFunctionWithAnExtremelyLongNameHere ; what it does\n        rd      ; read\n        stp     ; done\n";
+        let out = format_asm(src).unwrap();
+        let cols: Vec<usize> = out
+            .lines()
+            .filter(|l| l.contains(';'))
+            .map(|l| l.find(';').unwrap())
+            .collect();
+        assert!(
+            cols.windows(2).all(|w| w[0] == w[1]),
+            "all three share one column, got {cols:?}"
+        );
+    }
+
+    #[test]
+    fn a_rept_header_comment_shares_its_group_column() {
+        // I1: the `.rept` header's trailing comment must go through the
+        // same group-column mechanism as `.endr`'s and every other
+        // comment, not a fixed column of its own. A wide line sharing
+        // the block's group forces that group past the floor; the
+        // header, the `.endr`, and the wide line must all land together.
+        let wide = "a".repeat(40);
+        let src = format!(
+            ".rept v, 0, 0 ; header\n        nop\n.endr ; footer\n        wr      {wide} ; wide\n"
+        );
+        let out = format_asm_with(
+            &src,
+            AsmCaps {
+                rept: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        let cols: Vec<usize> = out
+            .lines()
+            .filter(|l| l.contains(';'))
+            .map(|l| l.find(';').unwrap())
+            .collect();
+        assert!(
+            cols.windows(2).all(|w| w[0] == w[1]),
+            "header, footer, and the wide line share one column, got {cols:?}"
+        );
+    }
+
+    #[test]
+    fn a_rept_header_alone_widens_its_group() {
+        // I1 (round 2): the header's OWN code width must feed the
+        // group's column even with no other wide member in the group —
+        // `comment_columns` samples a piece's LAST line by default,
+        // which for a `.rept` piece is always `.endr`; without also
+        // checking the header line, a long header would get a target
+        // column too narrow for its own code and fall back to a single
+        // overflow space, landing past the column the SHORT `stp` line
+        // shares the group with — misaligned even though both are
+        // nominally at "the group's comment column".
+        let long_var = "aVeryLongVariableNameThatIsQuiteWide";
+        let src = format!(
+            ".rept {long_var}, 0, 0 ; header\n        nop\n.endr ; footer\n        stp     ; short\n"
+        );
+        let out = format_asm_with(
+            &src,
+            AsmCaps {
+                rept: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        let cols: Vec<usize> = out
+            .lines()
+            .filter(|l| l.contains(';'))
+            .map(|l| l.find(';').unwrap())
+            .collect();
+        assert!(
+            cols.windows(2).all(|w| w[0] == w[1]),
+            "header, footer, and the short line all share one column, got {cols:?}"
+        );
+    }
+
+    #[test]
+    fn a_rept_header_alone_widens_its_group_when_endr_has_no_comment() {
+        // Same property as the test above, with `.endr` carrying no
+        // comment of its own: before this fix a `.rept` piece with
+        // `comment == None` was excluded from the width scan entirely
+        // (the scan only ever looked at `Piece::comment`), so nothing
+        // bounded the header even though `header_comment` carries one.
+        let long_var = "aVeryLongVariableNameThatIsQuiteWide";
+        let src = format!(
+            ".rept {long_var}, 0, 0 ; header\n        nop\n.endr\n        stp     ; short\n"
+        );
+        let out = format_asm_with(
+            &src,
+            AsmCaps {
+                rept: true,
+                ..AsmCaps::default()
+            },
+        )
+        .unwrap();
+        let header_col = out
+            .lines()
+            .find(|l| l.contains("header"))
+            .unwrap()
+            .find(';')
+            .unwrap();
+        let short_col = out
+            .lines()
+            .find(|l| l.contains("short"))
+            .unwrap()
+            .find(';')
+            .unwrap();
+        assert_eq!(
+            header_col, short_col,
+            "the short line must widen to match the header's own width, \
+             got header={header_col} short={short_col}"
+        );
     }
 }
