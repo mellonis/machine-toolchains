@@ -245,9 +245,12 @@ fn own_line_comment_col(pieces: &[Piece], i: usize, group_col: usize) -> usize {
 /// own line (padded to [`COMMENT_COL`], or one space past the field
 /// when the field itself runs past that stop) rather than moving to a
 /// bare continuation line. A bare continuation reparses as an OWN-LINE
-/// comment (no label on that physical line), which the printer would
-/// then re-indent to [`MNEMONIC_COL`] on a second pass — an
-/// idempotence violation (`format(format(x)) != format(x)`). Keeping
+/// comment (no label on that physical line) whose own-line predicate
+/// (`continues_a_trailing_comment`) would then find the label's `Line`
+/// piece above it carrying no trailing comment of its own — the
+/// comment having moved off onto its own line — so the printer would
+/// re-indent it to [`TOP_COL`] on a second pass — an idempotence
+/// violation (`format(format(x)) != format(x)`). Keeping
 /// the comment on the label's line reparses to the identical
 /// label-with-trailing-comment shape, so pass 1 is already a fixed
 /// point. This only applies when `instr` is `None`: when an
@@ -704,7 +707,8 @@ stp
         // LABEL's own line (padded from the field's end to col 32),
         // not on a bare continuation line. A bare continuation would
         // reparse as an own-line comment (no label on that physical
-        // line) and get re-indented to MNEMONIC_COL on a second pass —
+        // line, and no trailing comment left on the label's own line to
+        // continue) and get re-indented to TOP_COL on a second pass —
         // an idempotence violation. See `case5_idempotent_over_every_fixture`'s
         // `"verylongname: ; note\n"` fixture for the pinned round-trip.
         let src_c = ".func f\nverylongname: ; note\n";
@@ -904,11 +908,13 @@ stp
         assert_eq!(format_asm(src).unwrap(), expected);
     }
 
-    // -- Comment-only file (item 5): no `.func` anywhere, so every
-    // own-line comment is TOP_COL regardless of its original indentation
-    // (`own_line_comment_col`'s `!seen_func` branch) — pinned separately
-    // from the function-body/preamble comment-placement tests above,
-    // none of which cover a file with zero functions.
+    // -- Comment-only file (item 5): no `Line` piece anywhere, so no
+    // comment can continue a trailing comment above it — every own-line
+    // comment is TOP_COL regardless of its original indentation
+    // (`continues_a_trailing_comment` never finds a `Line` to return
+    // true from) — pinned separately from the function-body/preamble
+    // comment-placement tests above, none of which cover a file with
+    // zero functions.
 
     #[test]
     fn comment_only_file_prints_every_comment_at_top_level_col_0() {
