@@ -815,6 +815,21 @@ type InteriorComments = Vec<(usize, Comment)>;
 /// (docs/tmt/fmt.md (interior comments)).
 type MapInteriorComments = Vec<(usize, usize, Comment)>;
 
+/// `Parser::rule`'s return shape: the rule itself, its transition's
+/// interior comments (a `call`'s own binding list, then every `with map`
+/// pair list nested inside it — both empty for a non-`call` transition),
+/// then its pattern/write/move vectors' own interior comments, in that
+/// order — see [`RuleCst`]'s matching side-car fields (docs/tmt/fmt.md
+/// (interior comments)).
+type RuleParse = (
+    Rule,
+    InteriorComments,
+    MapInteriorComments,
+    InteriorComments,
+    InteriorComments,
+    InteriorComments,
+);
+
 fn join(a: Span, b: Span) -> Span {
     Span {
         start: a.start,
@@ -1706,7 +1721,8 @@ impl Parser<'_> {
             }
             let saved = self.prev_end_line;
             let rule_line = t.line;
-            let (rule, call_args, map_pairs) = self.rule()?;
+            let (rule, call_args, map_pairs, pattern_cells, write_cells, move_cells) =
+                self.rule()?;
             let trailing = self.take_trailing(self.prev_end_line);
             let blank_before = rule_line > saved + 1;
             rules.push(RuleItem {
@@ -1716,6 +1732,9 @@ impl Parser<'_> {
                     trailing,
                     call_args,
                     map_pairs,
+                    pattern_cells,
+                    write_cells,
+                    move_cells,
                 })),
             });
         }
@@ -1723,12 +1742,12 @@ impl Parser<'_> {
 
     // ---- rules ------------------------------------------------------------
 
-    /// Parses one rule; also returns its transition's interior comments
-    /// (empty for a non-`call` transition) — [`Rule`] is handed to the AST
-    /// verbatim, so `state_rules` stores these on [`RuleCst`]'s side-car
-    /// fields instead (docs/tmt/fmt.md (interior comments)).
-    fn rule(&mut self) -> Result<(Rule, InteriorComments, MapInteriorComments), CompileError> {
-        let pattern = self.pattern()?;
+    /// Parses one rule; also returns the transition's interior comments and
+    /// each glyph vector's own — [`Rule`] is handed to the AST verbatim, so
+    /// `state_rules` stores these on [`RuleCst`]'s side-car fields instead
+    /// (docs/tmt/fmt.md (interior comments)).
+    fn rule(&mut self) -> Result<RuleParse, CompileError> {
+        let (pattern, pattern_cells) = self.pattern()?;
         self.expect(&TokenKind::Arrow, "`->` after the pattern")?;
         let debugger = if self.at_kw("debugger") {
             self.bump();
@@ -1736,17 +1755,19 @@ impl Parser<'_> {
         } else {
             false
         };
-        let write = if self.at_kw("write") {
+        let (write, write_cells) = if self.at_kw("write") {
             self.bump();
-            Some(self.write_vec()?)
+            let (w, cells) = self.write_vec()?;
+            (Some(w), cells)
         } else {
-            None
+            (None, InteriorComments::new())
         };
-        let mov = if self.at_kw("move") {
+        let (mov, move_cells) = if self.at_kw("move") {
             self.bump();
-            Some(self.move_vec()?)
+            let (m, cells) = self.move_vec()?;
+            (Some(m), cells)
         } else {
-            None
+            (None, InteriorComments::new())
         };
         // The transition may be omitted (`stay in the current state`) only
         // when the rule already carries an action — write, move, or a leading
@@ -1782,6 +1803,9 @@ impl Parser<'_> {
             },
             call_args,
             map_pairs,
+            pattern_cells,
+            write_cells,
+            move_cells,
         ))
     }
 
@@ -1833,10 +1857,16 @@ impl Parser<'_> {
         }
     }
 
-    fn pattern(&mut self) -> Result<Pattern, CompileError> {
+    /// Parses a bracketed pattern; also returns its interior comments — a
+    /// [`Pattern`] is handed to the AST verbatim, so `rule` stores these on
+    /// [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
+    /// comments)).
+    fn pattern(&mut self) -> Result<(Pattern, InteriorComments), CompileError> {
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the pattern")?;
         let mut cells: Vec<PatternCell> = Vec::new();
+        let mut interior: InteriorComments = Vec::new();
         loop {
+            self.interior_comments(cells.len(), &mut interior);
             cells.push(self.pattern_cell()?);
             match self.peek().kind {
                 TokenKind::Comma => self.bump(),
@@ -1844,11 +1874,19 @@ impl Parser<'_> {
                 _ => return Err(Self::expected(self.peek(), "`,` or `]`")),
             }
         }
+        // Drain HERE, before consuming `]`: `interior_comments` claims
+        // everything at or before `self.pos`, so running it after the `]`
+        // has been consumed would also claim whatever comes next
+        // (docs/tmt/fmt.md (interior comments)).
+        self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the pattern")?;
-        Ok(Pattern {
-            cells,
-            span: join(lb.span(), rb.span()),
-        })
+        Ok((
+            Pattern {
+                cells,
+                span: join(lb.span(), rb.span()),
+            },
+            interior,
+        ))
     }
 
     fn pattern_cell(&mut self) -> Result<PatternCell, CompileError> {
@@ -1936,10 +1974,16 @@ impl Parser<'_> {
         }
     }
 
-    fn write_vec(&mut self) -> Result<WriteVec, CompileError> {
+    /// Parses a bracketed write vector; also returns its interior comments —
+    /// a [`WriteVec`] is handed to the AST verbatim, so `rule` stores these
+    /// on [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
+    /// comments)).
+    fn write_vec(&mut self) -> Result<(WriteVec, InteriorComments), CompileError> {
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the write vector")?;
         let mut cells: Vec<WriteCell> = Vec::new();
+        let mut interior: InteriorComments = Vec::new();
         loop {
+            self.interior_comments(cells.len(), &mut interior);
             cells.push(self.write_cell()?);
             match self.peek().kind {
                 TokenKind::Comma => self.bump(),
@@ -1947,11 +1991,16 @@ impl Parser<'_> {
                 _ => return Err(Self::expected(self.peek(), "`,` or `]`")),
             }
         }
+        // Drain HERE, before consuming `]` — see `pattern`'s identical note.
+        self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the write vector")?;
-        Ok(WriteVec {
-            cells,
-            span: join(lb.span(), rb.span()),
-        })
+        Ok((
+            WriteVec {
+                cells,
+                span: join(lb.span(), rb.span()),
+            },
+            interior,
+        ))
     }
 
     fn write_cell(&mut self) -> Result<WriteCell, CompileError> {
@@ -2077,10 +2126,16 @@ impl Parser<'_> {
         }
     }
 
-    fn move_vec(&mut self) -> Result<MoveVec, CompileError> {
+    /// Parses a bracketed move vector; also returns its interior comments —
+    /// a [`MoveVec`] is handed to the AST verbatim, so `rule` stores these
+    /// on [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
+    /// comments)).
+    fn move_vec(&mut self) -> Result<(MoveVec, InteriorComments), CompileError> {
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the move vector")?;
         let mut cells: Vec<MoveCell> = Vec::new();
+        let mut interior: InteriorComments = Vec::new();
         loop {
+            self.interior_comments(cells.len(), &mut interior);
             cells.push(self.move_cell()?);
             match self.peek().kind {
                 TokenKind::Comma => self.bump(),
@@ -2088,11 +2143,16 @@ impl Parser<'_> {
                 _ => return Err(Self::expected(self.peek(), "`,` or `]`")),
             }
         }
+        // Drain HERE, before consuming `]` — see `pattern`'s identical note.
+        self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the move vector")?;
-        Ok(MoveVec {
-            cells,
-            span: join(lb.span(), rb.span()),
-        })
+        Ok((
+            MoveVec {
+                cells,
+                span: join(lb.span(), rb.span()),
+            },
+            interior,
+        ))
     }
 
     fn move_cell(&mut self) -> Result<MoveCell, CompileError> {

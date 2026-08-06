@@ -36,12 +36,14 @@
 //!   inside a comma-separated list is stored against the index of the entry
 //!   it precedes, with the entry count meaning "before the closer". The
 //!   entry types stay trivia-free, so `lower_cst` hands them to the AST
-//!   unchanged. Two lists nest inside an AST type handed to the AST
-//!   verbatim rather than sitting directly on a CST node — a `call`
-//!   transition's binding list (inside [`RuleCst`]'s embedded [`Rule`]) and
-//!   any `with map` pair list (inside a [`BindingArg`], which [`RuleCst`],
-//!   [`GraftCst`], and [`BindCst`] all embed unchanged). Those get a
-//!   second-level side-car ([`RuleCst::call_args`]/[`RuleCst::map_pairs`],
+//!   unchanged. Several lists sit inside an AST type handed to the AST
+//!   verbatim rather than directly on a CST node: a rule's pattern,
+//!   `write`, and `move` vectors and a `call` transition's binding list
+//!   (all inside [`RuleCst`]'s embedded [`Rule`]), and any `with map` pair
+//!   list (inside a [`BindingArg`], which [`RuleCst`], [`GraftCst`], and
+//!   [`BindCst`] all embed unchanged). Those get a second-level side-car
+//!   ([`RuleCst::pattern_cells`], [`RuleCst::write_cells`],
+//!   [`RuleCst::move_cells`], [`RuleCst::call_args`]/[`RuleCst::map_pairs`],
 //!   [`GraftCst::map_pairs`], [`BindCst::map_pairs`]) instead.
 //!
 //! Container nodes deliberately do NOT carry the AST's computed fields (no
@@ -301,6 +303,18 @@ pub struct RuleCst {
     /// for any binding argument whose value carries no map, or whose map
     /// carries no interior comment.
     pub map_pairs: Vec<(usize, usize, Comment)>,
+    /// Interior comments of the rule's pattern vector, keyed by the index
+    /// of the cell each precedes, with the cell count meaning "before the
+    /// closing `]`". A SIDE-CAR for the same reason [`Self::call_args`] is:
+    /// the vector types are handed to the AST verbatim
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub pattern_cells: Vec<(usize, Comment)>,
+    /// Interior comments of the rule's `write` vector, keyed as
+    /// [`Self::pattern_cells`] is. Empty when the rule has no write vector.
+    pub write_cells: Vec<(usize, Comment)>,
+    /// Interior comments of the rule's `move` vector, keyed as
+    /// [`Self::pattern_cells`] is. Empty when the rule has no move vector.
+    pub move_cells: Vec<(usize, Comment)>,
 }
 
 /// A `[entry] graft TARGET(args) [as NAME];` declaration.
@@ -460,6 +474,9 @@ mod tests {
                         }),
                         call_args: vec![],
                         map_pairs: vec![],
+                        pattern_cells: vec![],
+                        write_cells: vec![],
+                        move_cells: vec![],
                     })),
                 },
             ],
