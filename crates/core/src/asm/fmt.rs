@@ -443,7 +443,8 @@ fn render_fields(
             // so this branch's last write to it is intentionally dropped.
             pad_to(&mut cur, &mut col, OPERAND_COL);
             if wrap && col + operand_text.chars().count() > LINE_WIDTH_LIMIT {
-                cur.push_str(&wrap_operand_list(operands, col));
+                let texts: Vec<&str> = operands.iter().map(|o| o.text.as_str()).collect();
+                cur.push_str(&wrap_operand_list(&texts, col));
             } else {
                 cur.push_str(&operand_text);
             }
@@ -681,7 +682,7 @@ fn join_operands(operands: &[OperandToken]) -> String {
         .join(", ")
 }
 
-/// Packs `operands`' texts onto as few physical lines as fit within
+/// Packs `texts` onto as few physical lines as fit within
 /// [`LINE_WIDTH_LIMIT`] (docs/formats.md (assembly text)) — the
 /// `.targets`/`.exits`/`.map` wrapping [`render_fields`] falls into once
 /// the plain [`join_operands`] line would run past the budget. `start_col`
@@ -705,18 +706,26 @@ fn join_operands(operands: &[OperandToken]) -> String {
 /// bare continuation line holding nothing but a comma or leave a stray
 /// trailing space before the line's own trim. Skipping it here still
 /// gives the preceding real operand its comma, because the separator
-/// decision below keys on this element's INDEX in `operands`, not on
+/// decision below keys on this element's INDEX in `texts`, not on
 /// whether it prints anything.
-fn wrap_operand_list(operands: &[OperandToken], start_col: usize) -> String {
+///
+/// Takes plain strings rather than the CST's `OperandToken`s so
+/// `disassembler.rs` — a sibling module with no CST and no source
+/// positions to attach — can wrap its own emitted lists through this
+/// exact packing instead of a second implementation of it. A `Span`
+/// asserts where text came from in a source file; synthesized
+/// disassembly has no such position, so fabricating one to reach this
+/// function would be a lie in the type.
+pub(super) fn wrap_operand_list(texts: &[&str], start_col: usize) -> String {
     let mut out = String::new();
     let mut col = start_col;
-    for (i, operand) in operands.iter().enumerate() {
-        let is_last = i + 1 == operands.len();
-        if operand.text.is_empty() && is_last {
+    for (i, text) in texts.iter().enumerate() {
+        let is_last = i + 1 == texts.len();
+        if text.is_empty() && is_last {
             continue;
         }
         let sep = if is_last { "" } else { "," };
-        let piece_len = operand.text.chars().count() + sep.len();
+        let piece_len = text.chars().count() + sep.len();
         if out.is_empty() {
             // The very first element lands right where the caller's
             // line already stands — no separator, no wrap decision.
@@ -728,7 +737,7 @@ fn wrap_operand_list(operands: &[OperandToken], start_col: usize) -> String {
             out.push(' ');
             col += 1;
         }
-        out.push_str(&operand.text);
+        out.push_str(text);
         out.push_str(sep);
         col += piece_len;
     }
