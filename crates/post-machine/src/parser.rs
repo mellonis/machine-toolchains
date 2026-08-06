@@ -557,6 +557,18 @@ impl Parser<'_> {
         self.drain_pending().into_iter().map(|(c, _)| c).collect()
     }
 
+    /// Drain every pending comment written before entry `index` of the list
+    /// being parsed, tagging each with that index. Called at the top of each
+    /// list-loop iteration and once more before the closer with
+    /// `index = entries.len()`, which is how a comment after the last entry
+    /// gets a home (docs/pmt/fmt.md (interior comments)).
+    fn interior_comments(&mut self, index: usize, out: &mut Vec<(usize, Comment)>) {
+        while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
+            out.push((index, self.comments[self.cpos].comment.clone()));
+            self.cpos += 1;
+        }
+    }
+
     /// Take the one same-line trailing comment after a `;` (the pending
     /// comment that follows code on `end_line`), if any. Carries the
     /// comment's source column (brief §A) alongside it.
@@ -906,8 +918,10 @@ impl Parser<'_> {
                 let use_line = t.line;
                 self.bump();
                 let mut paths: Vec<UsePath> = Vec::new();
+                let mut interior: Vec<(usize, Comment)> = Vec::new();
                 let semi_line;
                 loop {
+                    self.interior_comments(paths.len(), &mut interior);
                     // path := IDENT (`::` IDENT)*  [ `as` IDENT ]
                     let t = self.peek().clone();
                     let TokenKind::Ident(name) = &t.kind else {
@@ -967,6 +981,14 @@ impl Parser<'_> {
                         }
                         TokenKind::Semi => {
                             semi_line = sep.line;
+                            // Drain interior comments HERE, before bumping
+                            // past `;`: `interior_comments` claims
+                            // everything at or before `self.pos`, so running
+                            // it once the `;` has been consumed would also
+                            // claim a comment that follows the statement —
+                            // e.g. one documenting the *next* `use`
+                            // (docs/pmt/fmt.md (interior comments)).
+                            self.interior_comments(paths.len(), &mut interior);
                             self.bump();
                             break;
                         }
@@ -1003,6 +1025,7 @@ impl Parser<'_> {
                         line: use_line,
                         span: use_span,
                         trailing,
+                        interior,
                     }),
                 });
                 continue;

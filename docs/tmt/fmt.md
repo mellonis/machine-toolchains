@@ -23,9 +23,10 @@ exercises against every fixture in the repository.
 
 **Canonical.** Output depends on the token stream and on the few layout
 choices the CST deliberately records — whether a blank line was present,
-and whether a state was written on one line. It never depends on the
-author's spacing. Two files differing only in horizontal whitespace
-format identically:
+whether a state was written on one line, and, for a comment written
+inside a comma-separated list, whether the author put it on its own line
+or trailing an entry. It never depends on the author's spacing. Two files
+differing only in horizontal whitespace format identically:
 
 ```
 alphabet   bit{'_','0'}
@@ -134,11 +135,22 @@ to that token's column:
        ) then fin;
 ```
 
-A single binding argument is never broken further — a `with map { … }`
-stays inline, so one very long binding may still exceed the limit. That
-is deliberate: breaking a map across lines buys little and costs the map
-its at-a-glance readability. Such a line stays reported by
-`line-too-long`.
+A signature, a `call`/`graft`/`bind` argument list, and a `with map`
+pair list also break on a second, width-independent trigger: an interior
+comment written inside them, however short, forces the break regardless
+of whether the resulting line would have fit
+([Comments inside a list](#comments-inside-a-list), below). An
+`alphabet` body does not share that trigger for a lone `/* … */`
+comment — only a `//` comment forces a break there, and it does so in
+any list, not just because of width.
+
+A single binding argument is never broken further on width alone — a
+`with map { … }` with no interior comment of its own stays inline, so one
+very long binding may still exceed the limit. That is deliberate:
+breaking a map across lines buys little and costs the map its
+at-a-glance readability. Such a line stays reported by `line-too-long`.
+An interior comment inside that same map does break it, since the map is
+itself one of the bracketed lists above.
 
 ## Blank lines
 
@@ -191,32 +203,99 @@ horizontal position in the input can change its output — which is both
 simpler to predict and one less way for a second pass to disagree with
 the first.
 
-### The trivia exception
+### Comments inside a list
 
-A comment written INSIDE a `call`/`graft` binding list, a
-`routine`/`graph` signature parameter list, or an `alphabet` body has
-nowhere in the tree to stay attached to its own entry. Those three lists
-hold entries, not entries-with-trivia, so such a comment reprints as an
-own-line comment after the enclosing item instead of in place:
+A comment written inside a comma-separated list — an `alphabet` body, a
+`routine`/`graph` signature, a `call`/`graft`/`bind` argument list, a
+`with map` pair list, or a `use` path list — prints where it was written,
+attached to the entry it sits against.
 
-```
-alphabet bit { '_', // the blank
- '0', '1' }
-```
-
-becomes
+Placement follows what the author did. A comment that trails an entry
+stays on that entry's line; a `//` comment always forces the list onto
+multiple lines, because nothing can follow it on its physical line:
 
 ```
-alphabet bit { '_', '0', '1' }
-// the blank
+alphabet bit {
+  '_', // the blank
+  '0',
+  '1'
+}
 ```
 
-and a comment inside a signature's parameter list moves to the head of
-the routine body, while one inside a call's binding list moves below the
-rule that carries the call. Nothing is lost, and the output is still
-idempotent — but the comment now reads as attached to whatever follows
-rather than to the entry it was written next to, so a comment meant for
-one binding is worth moving out of the list yourself.
+An own-line comment keeps its own line, above the entry it precedes:
+
+```
+alphabet bit {
+  '_',
+  // the blank
+  '0',
+  '1'
+}
+```
+
+A comment after the last entry prints before the closing delimiter,
+still inside the list:
+
+```
+alphabet bit {
+  '_',
+  '0',
+  '1' // trailing last
+}
+```
+
+A SAME-LINE `/* … */` comment (trailing an entry, no `//` beside it) can
+stay inline instead of forcing a break — but only in an `alphabet` body
+and a `use` path list, the two list kinds that already have an inline
+form for their entries:
+
+```
+alphabet bit { '_', /* the blank */ '0', '1' }
+```
+
+An OWN-LINE block comment still forces the break even in those two list
+kinds — inlining it would lose the distinction between "trails this
+entry" and "precedes the next one".
+
+The bracketed lists — a `routine`/`graph` signature, a
+`call`/`graft`/`bind` argument list, and a `with map` pair list — have no
+inline-with-comments form: any interior comment there, block or line,
+breaks the list across lines, still riding the entry it was written
+against:
+
+```
+alphabet bits { '_', '0', '1' }
+
+routine w(
+  tape t: bits, /* x */
+  state d
+) {
+  entry state s { [*] -> stop; }
+}
+```
+
+**The exception that remains**: a LINE comment inside a pattern, write,
+or move vector — `['0', // here` … `'1'] -> stop;` — still reprints as
+an own-line comment after the enclosing rule instead of in place. (A
+`/* … */` comment in that same position reprints as a same-line
+trailing comment on the rule instead — still relocated out of the
+vector, just not onto its own line.)
+
+```
+alphabet bits { '_', '0', '1' }
+
+machine {
+  tape a: bits;
+  tape b: bits;
+  entry state s {
+    ['0', '1'] -> stop;
+    // first tape
+  }
+}
+```
+
+Those vectors are positional and are walked per row by the compiler, so
+giving them per-entry trivia is tracked separately.
 
 ## `.tma` formatting
 

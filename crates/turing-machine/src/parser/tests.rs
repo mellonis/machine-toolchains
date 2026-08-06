@@ -969,3 +969,61 @@ fn fold_expr_parenthesized_lone_glyph_binding_stays_passthrough() {
             if matches!(&expr.kind, FoldExprKind::Var(name) if name == "c")
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Interior list comments: a comment inside a comma-separated list is
+// captured on the enclosing CST node, keyed by the index of the entry it
+// precedes.
+// ---------------------------------------------------------------------------
+
+/// A comment inside a comma-separated list is captured on the enclosing
+/// CST node, keyed by the index of the entry it precedes. An index equal
+/// to the entry count means "after the last entry, before the closer"
+/// (docs/tmt/fmt.md (interior comments)).
+#[test]
+fn interior_comments_are_captured_with_their_entry_index() {
+    let src = "alphabet bits { '_', // the blank\n  '0', '1' }\n\n\
+               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+    let cst = parse_cst(&tokens).expect("parses");
+    let TopKind::Alphabet(a) = &cst.items[0].kind else {
+        panic!("expected an alphabet item");
+    };
+    assert_eq!(a.elems.len(), 3, "the three glyphs still parse");
+    assert_eq!(a.interior.len(), 1, "the comment is captured");
+    let (index, comment) = &a.interior[0];
+    assert_eq!(*index, 1, "it precedes entry 1 (`'0'`)");
+    assert_eq!(comment.text.trim_end(), "// the blank");
+    assert!(!comment.own_line, "it trails `'_',` on the same line");
+}
+
+/// The tail slot: a comment after the last entry has no following entry,
+/// so it is keyed by the entry count itself.
+#[test]
+fn a_comment_after_the_last_entry_is_keyed_by_the_entry_count() {
+    let src = "alphabet bits { '_', '0', '1' // the last\n}\n\n\
+               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+    let cst = parse_cst(&tokens).expect("parses");
+    let TopKind::Alphabet(a) = &cst.items[0].kind else {
+        panic!("expected an alphabet item");
+    };
+    assert_eq!(a.interior.len(), 1);
+    assert_eq!(a.interior[0].0, 3, "keyed by the entry count, not an index");
+}
+
+/// An own-line comment before the first entry keys to index 0, and keeps
+/// `own_line` so the printer can put it back on its own line.
+#[test]
+fn a_comment_before_the_first_entry_keys_to_zero() {
+    let src = "alphabet bits {\n  // leading note\n  '_', '0', '1' }\n\n\
+               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+    let cst = parse_cst(&tokens).expect("parses");
+    let TopKind::Alphabet(a) = &cst.items[0].kind else {
+        panic!("expected an alphabet item");
+    };
+    assert_eq!(a.interior.len(), 1);
+    assert_eq!(a.interior[0].0, 0);
+    assert!(a.interior[0].1.own_line, "it sits on its own line");
+}

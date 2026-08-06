@@ -1513,13 +1513,12 @@ fn the_service_declares_the_tmc_language_and_its_watched_config() {
 }
 
 #[test]
-fn formatting_relocates_a_comment_out_of_a_binding_list() {
-    // The formatter's one documented exception: a comment inside a binding
-    // list, a signature parameter list, or an alphabet body cannot stay
-    // where it was written and becomes an own-line comment after the
-    // enclosing item. The service inherits that verbatim — it is worth
-    // pinning here so the behaviour is visibly the formatter's contract
-    // and not a surprise introduced by the LSP path.
+fn formatting_prints_a_comment_in_place_inside_a_binding_list() {
+    // A comment inside a binding list, a signature parameter list, or an
+    // alphabet body prints where it was written rather than relocating
+    // below the enclosing item. The service inherits that verbatim — it is
+    // worth pinning here so the behaviour is visibly the formatter's
+    // contract and not a surprise introduced by the LSP path.
     let src = "\
 alphabet bits { '_', '1' }
 
@@ -1533,9 +1532,8 @@ machine {
 ";
     let (mut service, uri) = opened(src);
     let formatted = service.format(&uri).expect("formatted");
-    assert!(formatted.contains("/* why */"), "{formatted}");
-    assert!(!formatted.contains("ctl /* why */"), "{formatted}");
-    // Still idempotent through the service after the relocation.
+    assert!(formatted.contains("ctl /* why */"), "{formatted}");
+    // Still idempotent through the service.
     service.did_update(&uri, &formatted);
     assert_eq!(service.format(&uri).as_deref(), Some(formatted.as_str()));
 }

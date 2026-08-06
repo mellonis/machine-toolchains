@@ -208,11 +208,110 @@ fn print_namespace(out: &mut String, ns: &NamespaceCst, indent: usize) {
 /// this task (the design doc's context-sensitive alignment rule targets
 /// function-body statement runs — [`compute_trailing_spacing`] — and
 /// names no equivalent rule for imports).
+///
+/// A comment written INSIDE the path list (`u.interior`) prints in place
+/// instead of being relocated below the statement — the same indexing
+/// rule as the mid-comma-group case: a comment trailing entry `i` is
+/// drained before entry `i+1` parses, so it keys to the FOLLOWING index
+/// (docs/pmt/fmt.md (interior comments)). Honouring `Comment::own_line`
+/// here — an own-line comment keeps its own line — is deliberate and
+/// differs from the statement comma-group printer ([`layout_leading`]
+/// and friends, out of scope for this list), which is shipped and
+/// documented behaviour this does not change.
 fn print_use(out: &mut String, u: &UseCst, indent: usize) {
-    out.push_str(&" ".repeat(indent));
-    out.push_str("use ");
     let rendered: Vec<String> = u.paths.iter().map(render_use_path).collect();
-    out.push_str(&rendered.join(", "));
+    let has_line = u
+        .interior
+        .iter()
+        .any(|(_, c)| matches!(c.kind, CommentKind::Line));
+    out.push_str(&" ".repeat(indent));
+    out.push_str("use");
+    if u.interior.is_empty() {
+        out.push(' ');
+        out.push_str(&rendered.join(", "));
+    } else {
+        // Continuation lines align under the first path, clearing `use `.
+        let cont = " ".repeat(indent + 4);
+        let slot = |ix: usize, own_line: bool| -> Vec<&Comment> {
+            u.interior
+                .iter()
+                .filter(move |(i, c)| *i == ix && c.own_line == own_line)
+                .map(|(_, c)| c)
+                .collect()
+        };
+        // A same-line comment directly after the `use` keyword, before the
+        // first path (index 0's OWN slot — distinct from index 1's, which
+        // the loop below reads as "the following index"). It rides the
+        // `use` line itself; since it may be a LINE comment eating the
+        // rest of that line, the first path always moves to its own line
+        // when this slot is non-empty.
+        let use_line_trailing = slot(0, false);
+        if !use_line_trailing.is_empty() {
+            out.push(' ');
+            for c in &use_line_trailing {
+                out.push_str(&normalize_comment_text(&c.text));
+            }
+        } else if slot(0, true).is_empty() {
+            // No comment rides the `use` line at all — the first path
+            // follows the usual one space, same as the no-interior case.
+            out.push(' ');
+        }
+        // Else: an own-line comment leads the first path (`slot(0, true)`
+        // below); `use` itself takes no trailing space, since nothing
+        // shares its line — the loop's own-line branch opens with the
+        // newline that comment needs.
+        for (i, path) in rendered.iter().enumerate() {
+            for c in slot(i, true) {
+                out.push('\n');
+                out.push_str(&cont);
+                out.push_str(&normalize_comment_text(&c.text));
+                out.push('\n');
+                out.push_str(&cont);
+            }
+            if (i > 0 || !use_line_trailing.is_empty()) && slot(i, true).is_empty() {
+                out.push('\n');
+                out.push_str(&cont);
+            }
+            out.push_str(path);
+            if i + 1 < rendered.len() {
+                out.push(',');
+            }
+            // The NEXT slot's same-line comments belong to THIS line: a
+            // comment after `a,` is drained before `b` parses, so it keys
+            // to the following index — this reads even on the LAST entry,
+            // whose "next" slot (`rendered.len()`) is the tail: a comment
+            // between the last path and the `;` that stayed on the path's
+            // own line (docs/pmt/fmt.md (interior comments)).
+            for c in slot(i + 1, false) {
+                out.push(' ');
+                out.push_str(&normalize_comment_text(&c.text));
+            }
+        }
+        // A tail-slot own-line comment sits on its own line before the `;`.
+        let tail_own_line = slot(rendered.len(), true);
+        for c in &tail_own_line {
+            out.push('\n');
+            out.push_str(&cont);
+            out.push_str(&normalize_comment_text(&c.text));
+        }
+        // Either tail kind can be a LINE comment, which eats the rest of
+        // its physical line — the `;` can never follow directly on that
+        // line, so once ANY tail comment printed, it moves the `;` onto
+        // its own continuation line instead of letting it ride the last
+        // one (this is what the sibling crate's closer-swallowing fix
+        // covers too, generalized here to the same-line tail case, which
+        // that crate's `use` list does not have).
+        if !tail_own_line.is_empty() || !slot(rendered.len(), false).is_empty() {
+            out.push('\n');
+            out.push_str(&cont);
+        }
+        debug_assert!(
+            has_line
+                || u.interior
+                    .iter()
+                    .all(|(_, c)| !matches!(c.kind, CommentKind::Line))
+        );
+    }
     out.push(';');
     if let Some(tc) = &u.trailing {
         out.push(' ');

@@ -32,6 +32,17 @@
 //!   [`AlphabetCst::doc_run`]).
 //! - **Blank-line presence is a bool** (`blank_before`): the printer collapses
 //!   any run of blank lines to at most one, so a count is never needed.
+//! - **Interior list comments are index-keyed** (`interior`): a comment
+//!   inside a comma-separated list is stored against the index of the entry
+//!   it precedes, with the entry count meaning "before the closer". The
+//!   entry types stay trivia-free, so `lower_cst` hands them to the AST
+//!   unchanged. Two lists nest inside an AST type handed to the AST
+//!   verbatim rather than sitting directly on a CST node — a `call`
+//!   transition's binding list (inside [`RuleCst`]'s embedded [`Rule`]) and
+//!   any `with map` pair list (inside a [`BindingArg`], which [`RuleCst`],
+//!   [`GraftCst`], and [`BindCst`] all embed unchanged). Those get a
+//!   second-level side-car ([`RuleCst::call_args`]/[`RuleCst::map_pairs`],
+//!   [`GraftCst::map_pairs`], [`BindCst::map_pairs`]) instead.
 //!
 //! Container nodes deliberately do NOT carry the AST's computed fields (no
 //! `ns` tag, no reduced `doc`, no tapes/behavior split) — a future `lower_cst`
@@ -89,6 +100,14 @@ pub struct UsePath {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseCst {
     pub paths: Vec<UsePath>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
     /// Line of the `use` keyword.
     pub line: u32,
     /// First path's start → last path's end.
@@ -110,6 +129,14 @@ pub struct AlphabetCst {
     pub exported: bool,
     /// Elements in source order.
     pub elems: Vec<AlphabetElem>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
     /// Header first token → closing `}` end.
     pub span: Span,
     /// The `?`/`!` run bound to this declaration, in source order; empty when
@@ -143,6 +170,10 @@ pub struct ReuseCst {
     pub col: u32,
     pub exported: bool,
     pub sig: Signature,
+    /// Interior comments of the SIGNATURE's parameter list, keyed as
+    /// [`AlphabetCst::interior`] is. Named apart from a plain `interior`
+    /// because this node's list is `sig.params`, not a field of its own.
+    pub sig_interior: Vec<(usize, Comment)>,
     /// World-body items in source order (states, grafts, binds, comments).
     pub items: Vec<WorldItem>,
     /// Header first token → closing `}` end.
@@ -257,6 +288,19 @@ pub enum RuleKind {
 pub struct RuleCst {
     pub rule: Rule,
     pub trailing: Option<Comment>,
+    /// Interior comments of a `call` transition's own binding list, keyed as
+    /// [`AlphabetCst::interior`] is. A SIDE-CAR rather than a field on the
+    /// embedded [`Rule`]: that type is handed to the AST verbatim, and the
+    /// AST is contractually comment-independent. Empty for any rule whose
+    /// transition is not a call (docs/tmt/fmt.md (interior comments)).
+    pub call_args: Vec<(usize, Comment)>,
+    /// Interior comments of every `with map` pair list nested inside the
+    /// `call`'s binding list, keyed by `(binding-arg index, pair index)` —
+    /// a map nests one level inside a binding argument, so its own comments
+    /// need a second index alongside the one [`Self::call_args`] uses. Empty
+    /// for any binding argument whose value carries no map, or whose map
+    /// carries no interior comment.
+    pub map_pairs: Vec<(usize, usize, Comment)>,
 }
 
 /// A `[entry] graft TARGET(args) [as NAME];` declaration.
@@ -265,6 +309,21 @@ pub struct GraftCst {
     pub entry: bool,
     pub target: QualName,
     pub args: Vec<BindingArg>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
+    /// Interior comments of every `with map` pair list nested inside this
+    /// binding list, keyed by `(binding-arg index, pair index)` — mirrors
+    /// [`RuleCst::map_pairs`]; a SIDE-CAR rather than a field on
+    /// [`BindingArg`] for the same reason. Empty for any binding argument
+    /// whose value carries no map, or whose map carries no interior
+    /// comment.
+    pub map_pairs: Vec<(usize, usize, Comment)>,
     /// `as NAME` instance name (name, span); required unless `entry`.
     pub as_name: Option<(String, Span)>,
     pub line: u32,
@@ -279,6 +338,21 @@ pub struct GraftCst {
 pub struct BindCst {
     pub target: QualName,
     pub args: Vec<BindingArg>,
+    /// Comments written INSIDE the list, in source order, each keyed by the
+    /// index of the entry it precedes. An index equal to the entry count
+    /// means "after the last entry, before the closer".
+    ///
+    /// Sparse and index-keyed rather than a per-entry wrapper, so the entry
+    /// types are untouched and no AST-facing type carries trivia
+    /// (docs/tmt/fmt.md (interior comments)).
+    pub interior: Vec<(usize, Comment)>,
+    /// Interior comments of every `with map` pair list nested inside this
+    /// binding list, keyed by `(binding-arg index, pair index)` — mirrors
+    /// [`RuleCst::map_pairs`]; a SIDE-CAR rather than a field on
+    /// [`BindingArg`] for the same reason. Empty for any binding argument
+    /// whose value carries no map, or whose map carries no interior
+    /// comment.
+    pub map_pairs: Vec<(usize, usize, Comment)>,
     /// `as NAME` — always present for a bind.
     pub as_name: (String, Span),
     pub line: u32,
@@ -384,6 +458,8 @@ mod tests {
                             kind: CommentKind::Line,
                             own_line: false,
                         }),
+                        call_args: vec![],
+                        map_pairs: vec![],
                     })),
                 },
             ],
