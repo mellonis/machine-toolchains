@@ -209,8 +209,9 @@ the first.
 
 A comment written inside a comma-separated list — an `alphabet` body, a
 `routine`/`graph` signature, a `call`/`graft`/`bind` argument list, a
-`with map` pair list, or a `use` path list — prints where it was written,
-attached to the entry it sits against.
+`with map` pair list, a `use` path list, or a rule's pattern / `write` /
+`move` vector — prints where it was written, attached to the entry it
+sits against.
 
 Placement follows what the author did. A comment that trails an entry
 stays on that entry's line; a `//` comment always forces the list onto
@@ -247,9 +248,12 @@ alphabet bit {
 ```
 
 A SAME-LINE `/* … */` comment (trailing an entry, no `//` beside it) can
-stay inline instead of forcing a break — but only in an `alphabet` body
-and a `use` path list, the two list kinds that already have an inline
-form for their entries:
+stay inline instead of forcing a break, in the list kinds that already
+have an inline form for their entries: an `alphabet` body, a `use` path
+list, and a rule's pattern / `write` / `move` vector (whose own grid
+consequences are described below). The bracketed lists — a signature, a
+`call`/`graft`/`bind` argument list, a `with map` pair list — have no
+inline-with-comments form, so any interior comment breaks them:
 
 ```
 alphabet bit { '_', /* the blank */ '0', '1' }
