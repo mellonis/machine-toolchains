@@ -1,11 +1,20 @@
-alphabet bits { '_', // the blank
-                '0', '1' }
+alphabet bits {
+  '_', // the blank
+  '0',
+  '1'
+}
 alphabet wide {
   // shared by every routine that stores a raw byte
-  '_', 'a', 'b', '0', '1' }
+  '_',
+  'a',
+  'b',
+  '0',
+  '1'
+}
 
 namespace mylib {
-  export routine plusOne(tape num: bits // the number under the head
+  export routine plusOne(
+    tape num: bits // the number under the head
   ) {
     entry state inc {
       ['1'] -> write ['0'] move [<] goto inc;
@@ -16,7 +25,7 @@ namespace mylib {
 
 use mylib::plusOne
     // the only import
-    ;
+;
 
 machine {
   tape ctl:  bits;
@@ -24,9 +33,12 @@ machine {
 
   entry state main {
     ['1', *] -> call plusOne(
-                              // bridges the byte and control alphabets
-                              num = data with map { '0'->'0', // low
-                                                     '1'->'1' }) then done;
+                  // bridges the byte and control alphabets
+                  num = data with map {
+                               '0' -> '0', // low
+                               '1' -> '1'
+                             }
+                ) then done;
     [*, *]   -> move [>, .] goto main;
   }
 

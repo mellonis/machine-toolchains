@@ -7,7 +7,7 @@ machine {
 
   entry state scan {
     ['b'] -> write ['a'] move [>] goto scan;
-    ['a'] ->            move [>] goto scan;
+    ['a'] ->             move [>] goto scan;
     ['_'] -> stop;
   }
 }

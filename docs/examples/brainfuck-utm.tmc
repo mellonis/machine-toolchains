@@ -49,10 +49,10 @@ alphabet bytes { 0..126 }
 alphabet levels { ' ', '*' }
 
 machine {
-  tape prog: ops;      // brainfuck source + 'H'; the head IS the instruction pointer
-  tape data: bytes;    // brainfuck cells; the head IS the data pointer
-  tape out:  bytes;    // cells emitted by '.'
-  tape cnt:  levels;   // unary stack of bracket-nesting levels
+  tape prog: ops; // brainfuck source + 'H'; the head IS the instruction pointer
+  tape data: bytes;  // brainfuck cells; the head IS the data pointer
+  tape out:  bytes;  // cells emitted by '.'
+  tape cnt:  levels; // unary stack of bracket-nesting levels
 
   // -------------------------------------------------------------------------
   // fetch — dispatch on the instruction under the program head
@@ -117,10 +117,14 @@ machine {
   // -------------------------------------------------------------------------
 
   ? Step the data head right; advance the instruction pointer.
-  state right { [*, *, *, *] -> move [>, >, ., .] goto fetch; }
+  state right {
+    [*, *, *, *] -> move [>, >, ., .] goto fetch;
+  }
 
   ? Step the data head left; advance the instruction pointer.
-  state left  { [*, *, *, *] -> move [>, <, ., .] goto fetch; }
+  state left {
+    [*, *, *, *] -> move [>, <, ., .] goto fetch;
+  }
 
   // -------------------------------------------------------------------------
   // '.' — emit the current cell
@@ -151,15 +155,15 @@ machine {
   ? '[': on a zero cell, push a nesting level and skip forward past the
   ? matching ']'; otherwise fall into the loop body.
   state lbr {
-    [*, 0, *, *] -> goto skipFwdPush;              // zero: skip the loop body
-    [*, *, *, *] -> move [>, ., ., .] goto fetch;  // non-zero: enter the body
+    [*, 0, *, *] -> goto skipFwdPush;             // zero: skip the loop body
+    [*, *, *, *] -> move [>, ., ., .] goto fetch; // non-zero: enter the body
   }
 
   ? ']': on a zero cell, leave the loop; otherwise push a level and skip
   ? backward to the matching '['.
   state rbr {
-    [*, 0, *, *] -> move [>, ., ., .] goto fetch;  // zero: leave the loop
-    [*, *, *, *] -> goto skipBackPush;             // non-zero: jump back
+    [*, 0, *, *] -> move [>, ., ., .] goto fetch; // zero: leave the loop
+    [*, *, *, *] -> goto skipBackPush;            // non-zero: jump back
   }
 
   // -------------------------------------------------------------------------
@@ -182,16 +186,20 @@ machine {
 
   ? Push a nesting level for the forward scan: step the instruction pointer
   ? right and the counter head onto a fresh cell.
-  state skipFwdPush { [*, *, *, *] -> move [>, ., ., >] goto skipFwdMark; }
+  state skipFwdPush {
+    [*, *, *, *] -> move [>, ., ., >] goto skipFwdMark;
+  }
 
   ? Mark the freshly pushed counter cell, then resume scanning.
-  state skipFwdMark { [*, *, *, *] -> write [-, -, -, '*'] goto skipFwd; }
+  state skipFwdMark {
+    [*, *, *, *] -> write [-, -, -, '*'] goto skipFwd;
+  }
 
   ? Scan right for the matching ']', tracking nesting on the counter tape.
   state skipFwd {
     ['[', *, *, *] -> goto skipFwdPush;               // deeper: push a level
     [']', *, *, *] -> goto skipFwdPop;                // shallower: pop one
-    [*,   *, *, *] -> move [>, ., ., .] goto skipFwd; // anything else: keep going
+    [*, *, *, *]   -> move [>, ., ., .] goto skipFwd; // anything else: keep going
   }
 
   ? Pop a level: blank the top counter cell, then step the instruction pointer
@@ -213,16 +221,20 @@ machine {
 
   ? Push a nesting level for the backward scan: step the instruction pointer
   ? left and the counter head onto a fresh cell.
-  state skipBackPush { [*, *, *, *] -> move [<, ., ., >] goto skipBackMark; }
+  state skipBackPush {
+    [*, *, *, *] -> move [<, ., ., >] goto skipBackMark;
+  }
 
   ? Mark the freshly pushed counter cell, then resume scanning.
-  state skipBackMark { [*, *, *, *] -> write [-, -, -, '*'] goto skipBack; }
+  state skipBackMark {
+    [*, *, *, *] -> write [-, -, -, '*'] goto skipBack;
+  }
 
   ? Scan left for the matching '[', tracking nesting on the counter tape.
   state skipBack {
     [']', *, *, *] -> goto skipBackPush;
     ['[', *, *, *] -> goto skipBackPop;
-    [*,   *, *, *] -> move [<, ., ., .] goto skipBack;
+    [*, *, *, *]   -> move [<, ., ., .] goto skipBack;
   }
 
   ? Pop a level: blank the top counter cell, then step the instruction pointer
@@ -240,5 +252,7 @@ machine {
 
   ? The backward scan stopped one cell left of the matching '['; step back
   ? onto it so `fetch` re-reads the bracket and re-tests the loop condition.
-  state skipBackDone { [*, *, *, *] -> move [>, ., ., .] goto fetch; }
+  state skipBackDone {
+    [*, *, *, *] -> move [>, ., ., .] goto fetch;
+  }
 }
