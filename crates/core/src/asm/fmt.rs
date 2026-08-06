@@ -942,7 +942,7 @@ stp
         // `case1_doc_example_is_a_fixed_point`'s fixtures, but every
         // physical line — the `.func` header, a plain instruction line,
         // and an own-line comment — carries trailing spaces or a tab.
-        // D1: `abcdef: nop` above carries no trailing comment, so the
+        // `abcdef: nop` above carries no trailing comment, so the
         // own-line comment is structural — column 0, not MNEMONIC_COL.
         let src = ".func f  \nabcdef: nop\t\n        ; note   \n        stop  \n";
         let expected = ".func f\nabcdef: nop\n; note\n        stop\n";
@@ -998,7 +998,7 @@ stp
 
     #[test]
     fn comment_inside_a_function_body_is_col_0() {
-        // D1: `nop` above carries no trailing comment, so this own-line
+        // `nop` above carries no trailing comment, so this own-line
         // comment is structural, not a continuation — column 0.
         let src = ".func f\n        nop\n        ; note\n        ret\n";
         let expected = ".func f\n        nop\n; note\n        ret\n";
@@ -1013,7 +1013,7 @@ stp
 
     #[test]
     fn trailing_comment_after_the_last_function_is_col_0() {
-        // D1: no upcoming `.func`, but that no longer matters — `nop`
+        // No upcoming `.func`, but that no longer matters — `nop`
         // above carries no trailing comment for this one to continue, so
         // it is structural, not attached to the body above it.
         let src = ".func f\n        nop\n        ; done\n";
@@ -1023,7 +1023,7 @@ stp
 
     #[test]
     fn a_body_comment_prints_at_column_zero() {
-        // D1: MNEMONIC_COL leaves comment placement. A comment on its own
+        // MNEMONIC_COL leaves comment placement. A comment on its own
         // line inside a .func body is structural, not attached, because the
         // line above it carries no trailing comment to continue.
         let src = ".func f\n        nop\n        ; note\n        ret\n";
@@ -1033,8 +1033,8 @@ stp
 
     #[test]
     fn a_comment_run_continues_the_line_above_it() {
-        // D1 rule 1: the line above carries a trailing comment, so the run
-        // is a continuation and prints at that group's comment column.
+        // The line above carries a trailing comment, so the run is a
+        // continuation and prints at that group's comment column.
         let src = ".func f\n        nop     ; first\n; continued\n        ret\n";
         let expected = format!(
             ".func f\n        nop{pad}; first\n{cont}; continued\n        ret\n",
@@ -1216,11 +1216,11 @@ F0:     .frame  tapes=(3, 0)
         assert!(format_asm(".section tables\nT0: .row [1, 2]\n").is_err());
     }
 
-    // -- Task 3: group-wide trailing-comment column (D2) --------------
+    // -- Task 3: group-wide trailing-comment column -------------------
 
     #[test]
     fn a_group_widens_past_the_floor_for_its_widest_member() {
-        // D2: column = max(COMMENT_COL, widest code width in group + 1).
+        // column = max(COMMENT_COL, widest code width in group + 1).
         // "        .targets aaaaaaaaaaaaaaaaaaaaaaaaa" is 42 chars: 8
         // (indent) + 8 (".targets", which lands EXACTLY on OPERAND_COL) +
         // 1 (the boundary-overflow separator `pad_to` gives a field that
@@ -1297,7 +1297,9 @@ F0:     .frame  tapes=(3, 0)
 
     #[test]
     fn the_group_column_is_never_capped_by_line_width() {
-        // D2: unbounded, matching D4. line-too-long reports the result.
+        // Unbounded — a group's column is never capped by the 80-column
+        // limit. `line-too-long` (the arch-agnostic assembly rule) is
+        // what reports an overlong result here.
         let wide = "a".repeat(70);
         let src = format!(".func f\n        nop     ; a\n        .targets {wide} ; b\n");
         let out = format_asm_with(
@@ -1352,7 +1354,7 @@ F0:     .frame  tapes=(3, 0)
     #[test]
     fn a_standalone_own_line_comment_ends_a_group_so_width_does_not_leak_across_it() {
         // Same isolation property as the `.rept` test above, for the
-        // other `ends` boundary: a non-continuing own-line comment (D1's
+        // other `ends` boundary: a non-continuing own-line comment (the
         // "structural" case — nothing above it, an uncommented `ret`
         // here, carries a trailing comment to continue) must stop a wide
         // line after it from dragging a narrow line before it into the

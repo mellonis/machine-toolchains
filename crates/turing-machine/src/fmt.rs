@@ -103,8 +103,13 @@
 //!
 //! # Argument lists and the width threshold
 //!
-//! The threshold is the **80-column line limit** (the same one `line-too-long`
-//! lints). A parenthesized list — a `call`'s bindings, a `graft`/`bind`'s
+//! The threshold is the **80-column line limit** — the same width
+//! `line-too-long` (docs/core.md (assembly lint)) enforces on the two
+//! assembly dialects; `.tmc` has no line-length lint of its own, so
+//! fmt's active wrapping below is what keeps most lines under it (see
+//! "Blank lines and comments", below, for the one mechanism that isn't
+//! wrapping — comment alignment — and why it carries no diagnostic
+//! cost here). A parenthesized list — a `call`'s bindings, a `graft`/`bind`'s
 //! bindings, a `routine`/`graph` signature, an `alphabet` body — renders on
 //! one line while the resulting line fits; past that it breaks one entry per
 //! line, indented two columns past the construct's FIRST token, with the
