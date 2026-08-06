@@ -365,20 +365,46 @@ L1:     rgt
 
 One instruction per line, `;` line comments. The **canonical column
 grid** — labels at column 0, mnemonics at column 8, operands at column
-16, trailing comments at column 32, trailing spaces trimmed — is what
-`pmt fmt` (`docs/pmt/cli.md`) enforces on hand-written `.pma` source, and
-what `pmt compile -S` and `pmt dis` emit directly; the assembler's parser
-itself accepts any whitespace on input. The two producers differ on one
-point, the long-label rule: `pmt dis`'s grid (`grid_line`) keeps a short
-label field — 7 characters or fewer, the name plus its `:` — inline with
-its instruction, and moves only a field of 8 characters or more to its
-own line, so a long label never pushes the mnemonic column out of
-alignment; `pmt compile -S` puts every label on its own line
-unconditionally, regardless of length. `pmt fmt` treats both shapes as
-already canonical, so reformatting the output of either `pmt compile -S`
-or `pmt dis` is always a no-op. `pmt dis` output is always valid
-assembler input — round-tripping through `asm` reproduces the original
-bytes exactly.
+16, trailing spaces trimmed — is what `pmt fmt` (`docs/pmt/cli.md`)
+enforces on hand-written `.pma` source, and what `pmt compile -S` and
+`pmt dis` emit directly; the assembler's parser itself accepts any
+whitespace on input.
+
+A trailing comment's column is not fixed at 32; it aligns per **group**
+at `max(32, widest code width in the group + 1)`, where a line's code
+width is its character count up to the comment, trailing whitespace
+trimmed. 32 is a floor, so a group only ever widens past it, never below
+it — which is what keeps output unchanged for a group whose members all
+fit under it already. A group is the maximal run of lines that share one
+comment column; it ends at a blank line, an own-line comment printed at
+column 0 (below), a `.section`/`.func`/`.routine` directive, or a
+`.rept` block. A line with no trailing comment still belongs to its
+group but contributes no width to it, and a `.rept` block's body prints
+verbatim rather than through this grid at all, so it contributes no
+width either. The column is not capped by the 80-column limit: a group
+can widen a member past it, and the result is reported like any other
+overlong line (`line-too-long`, `docs/core.md (assembly lint)`).
+
+An own-line comment — one with no code on its own physical line — prints
+in one of two columns. If it continues a run started by a trailing
+comment on the line directly above it, with no blank line between, it
+prints at that group's comment column, staying visually part of the same
+comment block. Everything else — a preamble comment, one between
+functions, one opening a body, or any comment that does not continue a
+trailing one — prints at column 0. Column 8, the mnemonic column, is
+never a comment position: it is where statements live, and a comment is
+not a statement.
+
+The two producers differ on one point, the long-label rule: `pmt dis`'s
+grid (`grid_line`) keeps a short label field — 7 characters or fewer,
+the name plus its `:` — inline with its instruction, and moves only a
+field of 8 characters or more to its own line, so a long label never
+pushes the mnemonic column out of alignment; `pmt compile -S` puts every
+label on its own line unconditionally, regardless of length. `pmt fmt`
+treats both shapes as already canonical, so reformatting the output of
+either `pmt compile -S` or `pmt dis` is always a no-op. `pmt dis` output
+is always valid assembler input — round-tripping through `asm`
+reproduces the original bytes exactly.
 
 `pmt dis` accepts either binary. From a `.pmo`: real names come from the
 symbol table, code is shown per function, and call sites are named from
@@ -444,24 +470,26 @@ instruction). Its full version history is at the end of this section.
 
 ```asm
 .section tables
-Tfetch: .row    [1, *, *, *]            ; match tape 0 == 1, others any
+Tfetch: .row    [1, *, *, *]    ; match tape 0 == 1, others any
         .row    [8, *, *, *]
-Dfetch: .targets L_step, L_halt         ; MR = 1 → L_step, MR = 2 → L_halt
+Dfetch: .targets L_step, L_halt ; MR = 1 → L_step, MR = 2 → L_halt
 
 .section code
 .routine main, tapes=4, alpha=(9, 127, 127, 2)
 .func main
-L_step: rd                              ; latch every head into its slot
-        mtc     Tfetch                  ; walk the table, set the match reg
-        djmp    Dfetch                  ; dispatch on the match reg
+L_step: rd                      ; latch every head into its slot
+        mtc     Tfetch          ; walk the table, set the match reg
+        djmp    Dfetch          ; dispatch on the match reg
 L_halt: stp
 ```
 
 One instruction (or one table directive) per line, `;` line comments, the
 same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
-8, operands at 16, comments at 32); the parser accepts any whitespace on
-input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis` output is always
-valid assembler input and round-trips to the original bytes.
+8, operands at 16, trailing comments aligned per group at or past 32 —
+see "assembly text", above, for the exact rule); the parser accepts any
+whitespace on input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis`
+output is always valid assembler input and round-trips to the original
+bytes.
 
 ### Sections and the routine signature
 

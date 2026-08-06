@@ -1,16 +1,20 @@
 //! Canonical-grid printer for assembly text (docs/formats.md (assembly
-//! text)): label col 0, mnemonic col 8, operand col 16, trailing
-//! comment col 32. Zero token changes — whitespace/newlines only.
+//! text)): label col 0, mnemonic col 8, operand col 16 are fixed;
+//! trailing comment col 32 is a FLOOR, not fixed — it aligns per group
+//! at `max(32, widest code width in the group + 1)` (see
+//! [`comment_columns`]). Zero token changes — whitespace/newlines only.
 //!
 //! Pure CST walk (mirrors the `.pmc` printer's discipline, `crates/
 //! post-machine/src/fmt/mod.rs`, but is far simpler: assembly text is
 //! already line-oriented, so there is no comma-group wrapping, no
 //! indentation nesting, no line-width budget — every field lands on a
-//! fixed column or, failing that, one space past wherever the previous
-//! field ended). Columns below are 0-based (tab-stop convention,
-//! matching `disassembler.rs`'s `grid_line` and docs/formats.md); the
-//! CST's `Span`/`Pos::col` fields are 1-based, so a 0-based target of
-//! 32 is the 1-based column 33 a `TrailingComment.col` would report.
+//! fixed column, or on its group's comment column, or, failing that,
+//! one space past wherever the previous field ended). Columns below are
+//! 0-based (tab-stop convention, matching `disassembler.rs`'s
+//! `grid_line` and docs/formats.md); the CST's `Span`/`Pos::col` fields
+//! are 1-based, so a 0-based target of 32 is the 1-based column 33 a
+//! `TrailingComment.col` would report at the floor (a wider group's
+//! column shifts that report accordingly).
 
 use super::cst::{
     AsmCst, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, FuncCst, LabelCst, LineCst,
@@ -296,9 +300,10 @@ fn comment_columns(pieces: &[Piece]) -> Vec<usize> {
 /// A long label with NO instruction (a label-only line) is the one
 /// case where "own line" must NOT split the physical line further: if
 /// it carries a trailing comment, that comment stays on the label's
-/// own line (padded to [`COMMENT_COL`], or one space past the field
-/// when the field itself runs past that stop) rather than moving to a
-/// bare continuation line. A bare continuation reparses as an OWN-LINE
+/// own line (padded to its group's comment column — [`COMMENT_COL`] as
+/// a floor — or one space past the field when the field itself runs
+/// past that stop) rather than moving to a bare continuation line. A
+/// bare continuation reparses as an OWN-LINE
 /// comment (no label on that physical line) whose own-line predicate
 /// (`continues_a_trailing_comment`) would then find the label's `Line`
 /// piece above it carrying no trailing comment of its own — the
@@ -399,8 +404,9 @@ fn render_routine(r: &RoutineDirectiveCst) -> Piece {
 }
 
 /// `.section NAME` — a column-0 region marker, printed like `.func`
-/// (single space before the name, trailing comment padded to
-/// [`COMMENT_COL`]).
+/// (single space before the name, trailing comment held back for
+/// [`format_asm_with`]'s emit loop to pad to its group's comment column,
+/// [`COMMENT_COL`] as a floor — like any other piece's).
 fn render_section(s: &SectionCst) -> Piece {
     Piece {
         code: format!(".section {}", s.name),

@@ -135,10 +135,13 @@
 //! code by default; in a run of two or more adjacent single-line entries that
 //! all carry one, the comments align one column past the run's widest line —
 //! every member aligns, even one whose aligned comment then crosses 80
-//! columns; an overlong result stays reported by `line-too-long`. Unlike
-//! `.pmc`'s rule, this does not consult the author's source columns: a run
-//! either aligns or it does not, which is both simpler and one less way for
-//! a second pass to disagree with the first.
+//! columns. No lint rule flags that: `.tmc` has no line-length rule of its
+//! own, and `line-too-long` (docs/core.md (assembly lint)) covers only the
+//! two assembly dialects, `.pma` and `.tma`, never `.tmc` — so alignment
+//! here carries no diagnostic cost. Unlike `.pmc`'s rule, this does not
+//! consult the author's source columns: a run either aligns or it does not,
+//! which is both simpler and one less way for a second pass to disagree
+//! with the first.
 
 use mtc_core::diagnostics::Span;
 
@@ -233,8 +236,10 @@ fn flush(items: &[Rendered]) -> String {
 /// adjacent single-line entries that all carry a trailing comment, enough to
 /// align them one column past the run's widest code line — every member of
 /// the run aligns, even one whose aligned comment then crosses the line
-/// limit; an overlong result is left for `line-too-long` to report
-/// (docs/tmt/lint.md (line-too-long)).
+/// limit. No lint rule catches that: `line-too-long` (docs/core.md
+/// (assembly lint)) is arch-agnostic ASSEMBLY lint, so it fires on `.pma`
+/// and `.tma` but never on `.tmc` — an over-80 `.tmc` line goes unreported
+/// by any rule, so alignment here carries no diagnostic cost.
 fn trailing_spacing(items: &[Rendered]) -> Vec<usize> {
     let mut spacing = vec![1usize; items.len()];
     let eligible = |r: &Rendered| r.trailing.is_some() && !r.code.contains('\n');
