@@ -48,9 +48,21 @@ Spec: `docs/superpowers/specs/2026-08-04-fmt-list-interior-comments-design.md`.
 
 ---
 
-### Task 1: The TM interior-comment representation and parser plumbing
+### Task 1: The TM interior-comment representation, capture, and printing
 
-Give the five CST-owned TM list nodes their `interior` field and populate it. No printer change yet, so behaviour is unchanged and every existing test must still pass.
+Give the five CST-owned TM list nodes their `interior` field, populate it, AND
+teach the printer to consume it — in ONE commit.
+
+**Why these are not separable.** Once the parser drains a comment into
+`interior`, the old relocation path never sees it. A commit that captures
+without printing therefore does not relocate the comment, it DROPS it — turning
+the defect this plan fixes into outright data loss. Verified on a built binary
+during execution: with capture wired and no printer reading it, an interior
+comment vanishes from formatted output entirely. The repository's own guard
+cannot catch that, because no corpus fixture carries an interior comment yet.
+
+So Task 1 covers both halves, and the task is done only when a comment written
+inside a list still appears in the formatted output, in place.
 
 **Files:**
 - Modify: `crates/turing-machine/src/cst.rs`
@@ -243,7 +255,7 @@ Expected: the three tests PASS.
     }
 ```
 
-Update both `signature()` call sites to destructure the pair; the one building `ReuseCst` stores the vector in `sig_interior`.
+`signature()` has exactly ONE call site (`parser.rs:1409`, building `ReuseCst`). Destructure the pair there and store the vector in `sig_interior`.
 
 `binding_args` — serves graft, bind, AND call, so it returns its interior list and each caller decides where it lands:
 
@@ -312,9 +324,12 @@ unchanged."
 
 ---
 
-### Task 2: The TM printer honours interior comments
+### Task 1b: The TM printer half (SAME COMMIT as Task 1)
 
-Make the four CST-owned surfaces print interior comments in place. This is the task where behaviour changes.
+Make the four CST-owned surfaces print interior comments in place. **This is not
+a separate commit** — it lands together with the capture above, for the
+data-loss reason stated there. Its steps are listed apart only so the TDD order
+stays readable.
 
 **Files:**
 - Modify: `crates/turing-machine/src/fmt.rs`
@@ -1346,9 +1361,15 @@ alphabet bit { '_', // the blank
 ```
 
 A comment on its own line keeps its own line, above the entry it
-precedes. Either way a `//` comment forces the list onto multiple lines,
-because nothing can follow it on its physical line; a `/* … */` comment
-with no `//` beside it stays inline and forces nothing.
+precedes. A `//` comment always forces the list onto multiple lines,
+because nothing can follow it on its physical line.
+
+A `/* … */` comment with no `//` beside it stays inline in an `alphabet`
+body and a `use` list, which can print their entries inline around it.
+The bracketed lists — a signature, a `call`/`graft`/`bind` argument list,
+and a `with map` pair list — have no inline-with-comments form, so any
+interior comment there breaks the list across lines. The comment still
+rides the entry it was written against either way.
 
 A comment after the last entry prints before the closing delimiter, still
 inside the list.
