@@ -1268,7 +1268,7 @@ fn a_dropped_functions_bound_call_is_not_lowered() {
 //
 // Mono lowers each bound site to a plain call into a stamped copy on the
 // BASE profile; hybrid classifies per site. Stamps are map-visible synthetic
-// functions named `<callee>$<digest8>`.
+// functions named `<callee>.<digest8>`.
 
 fn mono_opts() -> LinkOptions {
     LinkOptions {
@@ -1284,12 +1284,24 @@ fn hybrid_opts() -> LinkOptions {
     }
 }
 
-/// The map functions whose name marks them a mono stamp (`<callee>$<hex>`).
+/// True when `name` ends in a stamp's `.<digest8>` suffix: a period
+/// followed by exactly 8 lowercase hex digits. A plain `.contains('.')`
+/// would also catch an ordinary dotted routine name (the optimizer's
+/// `outline` pass mints `<name>.outline<N>`, for instance), so the check
+/// matches the digest's exact shape rather than merely the separator.
+fn is_stamp_name(name: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((_, tail)) => tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => false,
+    }
+}
+
+/// The map functions whose name marks them a mono stamp (`<callee>.<hex>`).
 fn stamp_names(out: &LinkOutput) -> Vec<String> {
     out.map
         .functions
         .iter()
-        .filter(|f| f.name.contains('$'))
+        .filter(|f| is_stamp_name(&f.name))
         .map(|f| f.name.clone())
         .collect()
 }
@@ -1321,10 +1333,66 @@ fn a_mono_bound_call_stamps_a_base_profile_copy() {
         out.map
     );
     assert!(
-        stamp_names(&out)[0].starts_with("sub$"),
+        stamp_names(&out)[0].starts_with("sub."),
         "stamp named after the callee: {:?}",
         stamp_names(&out)
     );
+}
+
+/// A hand-written routine that occupies the exact name a mono stamp would
+/// mint is a link error, not a silent identity collision — the production
+/// path, not just `intern`'s unit tests, must seed its collision guard from
+/// every routine already reached. Two-phase and digest-free by
+/// construction: phase one links the plain fixture to learn the REAL stamp
+/// name the linker would mint (so nothing here hardcodes a digest that a
+/// `canonical_key` change could silently invalidate); phase two re-links
+/// the identical binding with an extra routine already sitting on that
+/// exact name and asserts the refusal. The decoy is reached through a
+/// PLAIN call from `sub`'s own body rather than from `main` — reachability
+/// resolves every relocation before any bound call
+/// (docs/core.md (name resolution)), so a decoy called from `main` would be
+/// discovered ahead of `sub` and shift `sub`'s resolved index (and so its
+/// digest), invalidating the very name phase one learned; calling it from
+/// inside `sub` keeps `sub`'s index — and therefore its digest — identical
+/// across both links.
+#[test]
+fn a_stamp_name_colliding_with_a_hand_written_routine_is_a_link_error() {
+    let base = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        wr [1, -]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(base, false)], &[], mono_opts()).expect("links");
+    let names = stamp_names(&out);
+    assert_eq!(names.len(), 1, "exactly one stamp: {:?}", out.map);
+    let stamp = names.into_iter().next().unwrap();
+
+    let clash = format!(
+        "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.routine {stamp}, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{{1->2, 2->1}}, 1]
+        stp
+.func sub
+        wr [1, -]
+        call    {stamp}
+        ret
+.func {stamp}
+        ret
+"
+    );
+    let err = link(&fake_syntax(), &[asm(&clash, false)], &[], mono_opts())
+        .expect_err("the reserved name is already taken by a hand-written routine");
+    assert_eq!(err, LinkError::StampNameCollision(stamp));
 }
 
 /// Two sites binding the same callee the same way stamp ONE deduped copy.
@@ -1419,7 +1487,7 @@ C:      wr [2]
         stamp_names(&out)
     );
     assert!(
-        stamp_names(&out)[0].starts_with("sub$"),
+        stamp_names(&out)[0].starts_with("sub."),
         "stamp named after the callee: {:?}",
         stamp_names(&out)
     );
@@ -1569,7 +1637,7 @@ C:      wr [2]
         .map
         .functions
         .iter()
-        .find(|f| f.name.starts_with("sub$"))
+        .find(|f| f.name.starts_with("sub."))
         .expect("one stamp of sub");
     let code = &exe.code;
     let (mut match_off, mut disp_off, mut wr_a) = (None, None, None);
@@ -1871,7 +1939,7 @@ fn hybrid_mixes_a_stamp_and_a_frames_site() {
         stamp_names(&out)
     );
     assert!(
-        stamp_names(&out)[0].starts_with("swap$"),
+        stamp_names(&out)[0].starts_with("swap."),
         "the swap site (a bijection) is the stamp: {:?}",
         stamp_names(&out)
     );

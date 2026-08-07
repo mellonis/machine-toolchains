@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mtc_core::asm::{AsmErrorKind, format_asm_with};
+use mtc_core::asm::format_asm_with;
 use mtc_core::linker::{CallMech, LinkOptions};
 use mtc_turing_machine::asm::{
     assemble, disassemble_executable_with_map, disassemble_object, link, tm1_syntax,
@@ -168,18 +168,6 @@ fn table_label_count(section: &str) -> usize {
 /// be an object-only gate before the executable path's naming, wrapping,
 /// signature, and blank-line defects were fixed; both renderers are
 /// covered with no scoping note now that they are.
-///
-/// One documented exception, asserted rather than silently excluded: a
-/// `--call-mech=mono` link names a stamped specialized routine copy with
-/// a digest suffix (`name$<hex>`, `docs/tmt/isa.md (call mechanisms)`),
-/// which is not a legal `.tma` identifier — the disassembled name does
-/// not re-lex, so reassembly fails regardless of anything the disassembler
-/// prints. `a5_call_across_alphabets` is the only fixture in this corpus
-/// whose binding is holey enough to force a mono stamp, so it is the only
-/// combination this gate expects to fail reassembly — and it asserts
-/// that specific failure (the offending `$`-suffixed name appears in the
-/// error) rather than skipping the case: if a future fix makes it
-/// reassemble, this assertion goes red and the exception must be removed.
 #[test]
 fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
     for &fixture in CORPUS {
@@ -220,35 +208,7 @@ fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
                 )
                 .unwrap_or_else(|e| panic!("{fixture} (-g={debug}, {mech}): link failed: {e}"));
                 let exe_dis = disassemble_executable_with_map(&out.executable, &out.map);
-                let reassembled = assemble(&exe_dis, false);
-
-                if fixture == "a5_call_across_alphabets" && mech == CallMech::Mono {
-                    let e = reassembled.expect_err(
-                        "a5_call_across_alphabets under mono should still hit the digest-name \
-                         exception documented above — remove this exception if it now \
-                         reassembles",
-                    );
-                    assert!(
-                        matches!(e.kind, AsmErrorKind::RawLine),
-                        "unexpected failure shape for the digest-name exception: {e}\n{exe_dis}"
-                    );
-                    // `AsmError`'s Display carries position + kind, not the
-                    // offending text, so the check reads the SOURCE line the
-                    // span points at (1-indexed) — the failure must be the
-                    // documented digest-suffixed name, not some other
-                    // unparseable line absorbed by matching on kind alone.
-                    let offending_line = exe_dis
-                        .lines()
-                        .nth(e.span.start.line as usize - 1)
-                        .unwrap_or_default();
-                    assert!(
-                        offending_line.contains('$'),
-                        "the failure should be on the digest-suffixed symbol's line, not some \
-                         other unparseable one: {e}\noffending line: {offending_line:?}\n{exe_dis}"
-                    );
-                    continue;
-                }
-                reassembled.unwrap_or_else(|e| {
+                assemble(&exe_dis, false).unwrap_or_else(|e| {
                     panic!(
                         "{fixture} (-g={debug}, {mech}) executable dis does not reassemble: \
                          {e}\n{exe_dis}"

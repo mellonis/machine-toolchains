@@ -367,7 +367,7 @@ F0:     .frame  tapes=(0)
 
 — note that the one-way pairs appear in the read map and *not* in the
 write map, which is the one-way rule made concrete. The **mono** image
-instead shows a digest-named copy (`bare$513e6968`) whose match-table
+instead shows a digest-named copy (`bare.513e6968`) whose match-table
 rows have been rewritten through the read map's preimage: the callee's
 single blank row expands into one row per caller symbol that reads as
 blank, which is where the `expanded_rows` counter comes from. Where a

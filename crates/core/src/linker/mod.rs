@@ -90,6 +90,17 @@ pub enum LinkError {
     /// recommends `frames` outright. Carries the callee's name (docs/core.md
     /// (the composition engine)).
     MonoHoleyMatchBranch(String),
+    /// A freshly minted mono-stamp name (`<routine>.<digest8>`) already
+    /// names another routine in this link, or an earlier stamp — a checked
+    /// refusal, not a silent rename, because the `.`-separated suffix is
+    /// legal in a hand-written identifier and cannot rule out a collision by
+    /// character choice alone the way the reserved-and-unlexable `$`
+    /// separator it replaced could (docs/core.md (the composition engine)).
+    /// Carries the colliding name. Astronomically unlikely in practice: it
+    /// needs either a hand-written routine that happens to spell exactly
+    /// `<routine>.<digest8>`, or two distinct composites whose 32-bit
+    /// digests collide.
+    StampNameCollision(String),
 }
 
 impl std::fmt::Display for LinkError {
@@ -140,6 +151,12 @@ impl std::fmt::Display for LinkError {
                  dispatch jumps, but `{symbol}` reads a match result through a \
                  conditional branch; the synthesized unmapped-read trap rows \
                  would misroute — build with --call-mech=frames"
+            ),
+            Self::StampNameCollision(name) => write!(
+                f,
+                "a mono-stamped routine copy would be named `{name}`, which \
+                 already names another routine or an earlier stamp in this \
+                 link"
             ),
         }
     }

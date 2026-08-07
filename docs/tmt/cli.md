@@ -485,9 +485,7 @@ error.
 
 **`--listing` vs canonical `dis`:** the default output is the canonical
 `.tma` grid — valid, reassembleable assembler input, complete with the
-`.routine` signature and table sections (the one exception, a
-`--call-mech=mono` stamp's digest-suffixed name, is `docs/formats.md`
-(assembly text)). `--listing` instead prints the
+`.routine` signature and table sections. `--listing` instead prints the
 debugger code view: one line per instruction with its address and raw hex
 bytes, every byte in the image accounted for including bytes no control-flow
 path reaches, and branch/call targets resolved to `function` /

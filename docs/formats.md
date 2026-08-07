@@ -488,20 +488,19 @@ same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
 8, operands at 16, trailing comments aligned per group at or past 32 —
 see "assembly text", above, for the exact rule); the parser accepts any
 whitespace on input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis`
-output is valid assembler input, with one exception: a
-`--call-mech=mono` linked image names a stamped specialized routine
-copy with a digest suffix (`bare$513e6968`, see `docs/tmt/isa.md
-(call mechanisms)`), and that suffix is not a legal `.tma` identifier,
-so disassembling an image with a mono stamp and reassembling the
-result fails. Reassembling an **object's** disassembly reproduces the
-original bytes exactly. Reassembling and re-linking a **linked
-image's** disassembly reproduces an equivalent image — same code, same
-table content — but not always the same bytes: a frame that
-originated from a declarative binding always disassembles to raw
-`.frame`/`call.m` syntax (there is no way to reconstruct the
-declarative form), and relinking that syntax does not necessarily lay
-out the tables section the way the original declarative-binding link
-did.
+output is valid assembler input — including a `--call-mech=mono` linked
+image, whose stamped specialized routine copy is named with a
+`.`-separated digest suffix (`bare.513e6968`, see `docs/tmt/isa.md
+(call mechanisms)`) drawn from the same character set an ordinary
+identifier already accepts, so the name re-lexes like any other.
+Reassembling an **object's** disassembly reproduces the original bytes
+exactly. Reassembling and re-linking a **linked image's** disassembly
+reproduces an equivalent image — same code, same table content — but not
+always the same bytes: a frame that originated from a declarative binding
+always disassembles to raw `.frame`/`call.m` syntax (there is no way to
+reconstruct the declarative form), and relinking that syntax does not
+necessarily lay out the tables section the way the original
+declarative-binding link did.
 
 ### Sections and the routine signature
 

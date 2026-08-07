@@ -1,15 +1,12 @@
 //! Binary → canonical `.pma` text (docs/formats.md (assembly text)).
 //! Output is valid assembler input, object or linked image, with or
-//! without a debug/map sidecar — except a `--call-mech=mono` linked
-//! image, whose stamped specialized routine copy carries a digest
-//! suffix that is not a legal identifier (docs/formats.md (assembly
-//! text)). An object's round trip is byte-exact; a linked image's
-//! reassemble-and-relink reproduces an equivalent image, not always
-//! the same bytes — a frame that originated from a declarative
-//! binding always disassembles to raw `.frame`/`call.m` syntax, and
-//! relinking that does not necessarily reorder the tables section the
-//! way the original composition did (docs/formats.md (assembly
-//! text)).
+//! without a debug/map sidecar. An object's round trip is byte-exact; a
+//! linked image's reassemble-and-relink reproduces an equivalent image,
+//! not always the same bytes — a frame that originated from a
+//! declarative binding always disassembles to raw `.frame`/`call.m`
+//! syntax, and relinking that does not necessarily reorder the tables
+//! section the way the original composition did (docs/formats.md
+//! (assembly text)).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

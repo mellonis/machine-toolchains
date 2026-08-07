@@ -587,7 +587,7 @@ pub(crate) fn canonical_key(c: &Composite) -> Vec<u8> {
 /// A 32-bit content address for a composite: CRC-32 of its
 /// [`canonical_key`] (the container checksum algorithm — docs/formats.md
 /// (bound calls)). Stable across builds and across pair-insertion order.
-// Names each stamped copy (`<routine>$<digest8>`); stamp dedup itself
+// Names each stamped copy (`<routine>.<digest8>`); stamp dedup itself
 // keys on the full `canonical_key`, not the digest.
 pub(crate) fn digest(c: &Composite) -> u32 {
     crc32(&canonical_key(c))
