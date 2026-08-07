@@ -5,6 +5,13 @@
 //! reachable functions are linked in — dead functions are dropped and may
 //! reference anything, even names that don't exist. Reachability follows
 //! both relocation call sites and declarative bound-call sites.
+//!
+//! This BFS runs once, before the composition engine lowers any bound
+//! call. Under `mono`/`hybrid` stamping, a routine reached here can still
+//! end up with no caller once every site is retargeted to a specialized
+//! copy; the stamping pass re-walks the (by then retargeted) call graph
+//! afterward so that promise still holds over the final image
+//! (docs/core.md (linking)).
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, VecDeque};

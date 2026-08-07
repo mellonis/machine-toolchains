@@ -1342,6 +1342,170 @@ fn a_mono_bound_call_stamps_a_base_profile_copy() {
     );
 }
 
+/// `sub`'s only caller is the projecting bound call above, and mono
+/// retargets that site to the stamp — nothing calls the generic `sub`
+/// anymore. The reachability promise (docs/core.md (linking)) applies after
+/// stamping exactly as it does before it, so the generic must not ship.
+/// Checks the exact name (not a prefix — `sub.<digest8>` the stamp itself
+/// starts with `sub.` and would make a `starts_with` check pass vacuously),
+/// pairs the absence with a positive control (`main` present, exactly one
+/// stamp present) so a fixture that silently failed to link or to stamp
+/// couldn't pass this by accident, and closes with the strongest cheap pin:
+/// nothing but `main` and stamps survives at all.
+#[test]
+fn a_generic_orphaned_by_stamping_is_not_shipped() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        wr [1, -]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"main"),
+        "the entry always survives: {names:?}"
+    );
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the positive control: exactly one stamp of sub: {names:?}"
+    );
+    assert!(
+        !names.contains(&"sub"),
+        "the orphaned generic must not be in the map: {names:?}"
+    );
+    assert!(
+        out.map
+            .functions
+            .iter()
+            .all(|f| f.name == "main" || is_stamp_name(&f.name)),
+        "nothing but main and stamps survives when every site to sub is stamped: {names:?}"
+    );
+    assert_eq!(
+        out.report.dropped,
+        vec!["sub".to_string()],
+        "the orphan is accounted for in the report, not just silently missing from the map: {:?}",
+        out.report.dropped
+    );
+}
+
+/// The same shape, but `sub` is a LOCAL symbol (bound directly within its
+/// own object, never through the namespace). `resolve::Resolved::dropped`
+/// deliberately omits locals — a pre-lowering drop is name-level and
+/// namespace-based, and a local was never a namespace candidate — but a
+/// stamping orphan is a different kind of drop: it names an actual `FuncRef`
+/// that WAS linked in, independent of whether that name was ever exported.
+/// The merged `dropped` list is therefore slightly MORE inclusive than the
+/// resolve-time-only wording once suggested: a local generic CAN appear
+/// here if stamping orphans it. `dead` is the actual contrast case: a LOCAL
+/// the reachability BFS never reaches at all (called by nothing, not even
+/// transitively) — `resolve::Resolved::dropped` silently omits it by
+/// design, and this asserts it stays omitted from the merged list too, so
+/// the fixture exercises both halves of the asymmetry the doc comment
+/// claims, not just the orphan half.
+#[test]
+fn a_local_generic_orphaned_by_stamping_is_reported_dropped() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.routine dead, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub local
+        wr [1, -]
+        ret
+.func dead local
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the positive control: exactly one stamp of sub: {:?}",
+        out.map
+    );
+    assert_eq!(
+        out.report.dropped,
+        vec!["sub".to_string()],
+        "a local orphan is reported, but an unreached local (dead) stays silently omitted \
+         exactly as resolve documents: {:?}",
+        out.report.dropped
+    );
+}
+
+/// Two SEPARATE objects, each defining its own private `helper` reached only
+/// through a projecting bound call (so mono stamps and orphans it, same as
+/// the single-object tests above) — but this time both locals share the
+/// exact name `helper`. Locals never enter the shared namespace (per-object
+/// visibility), so the assembler happily accepts the same name twice across
+/// objects; before the merged `dropped` list existed this was moot, but
+/// `resolved.dropped ∪ orphaned` combining two SORTED, UNIQUE-by-construction
+/// lists does not itself produce a unique result — `resolved.dropped` came
+/// from a `BTreeSet` (pre-branch, always unique), but `orphaned` is built by
+/// filtering `order`, which CAN hold two distinct `FuncRef`s sharing a name
+/// (`resolve.rs`'s `locals_bind_directly_and_may_repeat_across_objects`
+/// pins exactly this). Without `.dedup()` after the sort this prints
+/// `dropped [helper, helper]` — a duplicate that never occurred before this
+/// branch, since the pre-branch field was `resolved.dropped` verbatim.
+/// Object B's binding differs from A's (`1->3, 3->1` vs `1->2, 2->1`) so the
+/// two composites — and so the two minted stamp names — stay distinct;
+/// otherwise `intern`'s collision guard would refuse the link before the
+/// duplicate-name question is even reached.
+#[test]
+fn dropped_deduplicates_two_same_named_locals_orphaned_in_different_objects() {
+    let object_a = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine helper, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    helper [0{1->2, 2->1}, 1]
+        call    apiB
+        stp
+.func helper local
+        wr [1, -]
+        ret
+";
+    let object_b = "\
+.routine apiB, tapes=2, alpha=(4, 4)
+.routine helper, tapes=2, alpha=(4, 4)
+.section code
+.func apiB
+        call    helper [0{1->3, 3->1}, 1]
+        ret
+.func helper local
+        wr [1, -]
+        ret
+";
+    let out = link(
+        &fake_syntax(),
+        &[asm(object_a, false), asm(object_b, false)],
+        &[],
+        mono_opts(),
+    )
+    .expect("links");
+    assert_eq!(
+        stamp_names(&out).len(),
+        2,
+        "the positive control: one stamp per object's helper: {:?}",
+        out.map
+    );
+    assert_eq!(
+        out.report.dropped,
+        vec!["helper".to_string()],
+        "two distinct orphans sharing one name collapse to a single report entry, not \
+         [helper, helper]: {:?}",
+        out.report.dropped
+    );
+}
+
 /// A hand-written routine that occupies the exact name a mono stamp would
 /// mint is a link error, not a silent identity collision — the production
 /// path, not just `intern`'s unit tests, must seed its collision guard from
@@ -1423,7 +1587,16 @@ fn mono_dedups_equal_composites() {
 }
 
 /// A full-arity identity binding collapses to a plain call into the ORIGINAL
-/// routine — no stamp, no frames.
+/// routine — no stamp, no frames. `sub` stays main's only callee, so
+/// `prune_unreachable` finds everything already reached and takes its
+/// documented fast path: the input `Vec` comes back untouched, not a
+/// filtered copy that merely happens to contain the same functions. That
+/// claim isn't exercised by the frames/hybrid byte-identity checks, which
+/// never call the prune at all — this is the one mono fixture where the
+/// prune runs AND must find nothing to drop, so it pins both the fast path
+/// and the not-too-aggressive direction: `sub` present in the map, and the
+/// report's `dropped` list empty (an over-eager prune would show up here
+/// first, since `sub` is the collapse target, not a stamp).
 #[test]
 fn an_identity_binding_under_mono_calls_the_original() {
     let src = "\
@@ -1444,6 +1617,16 @@ fn an_identity_binding_under_mono_calls_the_original() {
     );
     assert_ne!(out.executable.profile, PROFILE_FRAMES);
     assert!(!out.executable.code.contains(&0x14), "no framed call");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"sub"),
+        "the collapse target survives; the prune must find nothing to drop: {names:?}"
+    );
+    assert!(
+        out.report.dropped.is_empty(),
+        "nothing is orphaned here — an over-aggressive prune would show up in this list: {:?}",
+        out.report.dropped
+    );
 }
 
 /// An EMPTY binding into a NARROWER callee does NOT collapse under mono
@@ -1945,6 +2128,60 @@ fn hybrid_mixes_a_stamp_and_a_frames_site() {
         stamp_names(&out)[0].starts_with("swap."),
         "the swap site (a bijection) is the stamp: {:?}",
         stamp_names(&out)
+    );
+}
+
+/// The same mixed fixture, checked from the map side: `swap`'s only site is
+/// the bijection that mono promotes to a stamp, so the generic `swap` must
+/// not ship — but `narrow`'s only site stays a framed call (holey), which
+/// keeps the generic `narrow` reachable and it must still ship as itself.
+/// The hybrid mixed path runs its own `prune_unreachable` call, separate
+/// from `lower_mono`'s (`lower_hybrid` inlines the mono retarget rather than
+/// calling `lower_mono` when both a stamp and a frames site are present), so
+/// this exercises that call specifically rather than relying on the pure
+/// mono test to stand in for it.
+#[test]
+fn hybrid_mixed_drops_an_orphaned_mono_generic_but_keeps_a_frames_generic() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine swap, tapes=1, alpha=(4)
+.routine narrow, tapes=1, alpha=(2)
+.section code
+.func main
+        call    swap [0{1->2, 2->1}]
+        call    narrow [0{1=>0}]
+        stp
+.func swap
+        wr [1]
+        ret
+.func narrow
+        wr [1]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).expect("links");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"main"),
+        "the entry always survives: {names:?}"
+    );
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the positive control: exactly one stamp of swap: {names:?}"
+    );
+    assert!(
+        names.contains(&"narrow"),
+        "narrow's only site stays framed, so its generic stays reachable: {names:?}"
+    );
+    assert!(
+        !names.contains(&"swap"),
+        "swap's only site was promoted to a stamp; the orphaned generic must not ship: {names:?}"
+    );
+    assert_eq!(
+        out.report.dropped,
+        vec!["swap".to_string()],
+        "narrow survives and must not appear here; only the orphan does: {:?}",
+        out.report.dropped
     );
 }
 

@@ -40,7 +40,7 @@ use super::compose::{
     is_full_passthrough,
 };
 use super::engine::{
-    EngineStats, FramesPlan, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
+    EngineStats, LoweredOrder, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
 };
 use super::resolve::FuncRef;
 use crate::asm::decode::{self, Body, DecodedOperand};
@@ -110,13 +110,15 @@ enum DispEntry {
 /// Lower every reachable declarative bound call under MONO: stamp a
 /// specialized copy per (routine, composite) and retarget each site to a
 /// plain call into it. The image stays on the base profile, so no
-/// `FramesPlan` is produced.
+/// `FramesPlan` is produced. The last element is the sorted names
+/// `prune_unreachable` dropped — folded into the link report's `dropped`
+/// list by the caller (docs/core.md (the link report)).
 pub(super) fn lower_mono<'a>(
     syntax: &ArchSyntax,
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
+) -> Result<LoweredOrder<'a>, LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -156,12 +158,20 @@ pub(super) fn lower_mono<'a>(
     }
 
     let (stamps, seed_target, stats) = mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
-    let engine_stats = EngineStats {
-        instantiations: u32::try_from(stamps.len()).unwrap_or(u32::MAX),
-        dedup_savings: stats.dedup_savings,
-        synthesized_trap_rows: stats.synthesized_trap_rows,
-        expanded_rows: stats.expanded_rows,
-    };
+    // `dedup_savings`, `synthesized_trap_rows`, and `expanded_rows` are
+    // summed over every stamp `mono_stamps` builds, before the prune below
+    // runs. That is sound because `mono_stamps` closes "mono all the way
+    // down" from a seed already known reachable (`id_world`) — every stamp
+    // it mints keeps at least the caller that seeded or called it, so
+    // nothing built here is ever orphaned by the prune (the `debug_assert!`
+    // near the prune call checks exactly this, in debug builds). Unlike
+    // `instantiations` below, re-deriving these three from the post-prune
+    // survivors would need `mono_stamps` to attribute each count to a
+    // specific stamp rather than fold it into one running total as it
+    // builds — `dedup_savings` in particular is a per-call-site event, not
+    // a per-stamp one, so there is no single survivor to attribute a saving
+    // to. Not worth the restructuring for counters this diagnostic.
+    let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
     // Retarget every original's bound sites to a plain call. Reachable sites
     // hit the stamp (or the original, for a collapse); a bound site in a
@@ -190,7 +200,38 @@ pub(super) fn lower_mono<'a>(
         out.push(f);
     }
     out.extend(stamps);
-    Ok((out, None, engine_stats))
+
+    // Every site that used to call a now-orphaned generic was just
+    // retargeted above (docs/core.md (the composition engine)) — restore the
+    // resolve-time reachability guarantee over the retargeted graph.
+    let (out, orphaned) = prune_unreachable(out);
+
+    // `instantiations` — unlike the three counters above — is cheap to make
+    // immune to a future closure-invariant break: count the minted names
+    // actually still present in `out`, not `stamps.len()` from before the
+    // prune ran. Under the invariant this equals `stamp_names.len()`
+    // exactly, so the `debug_assert!` below stays a meaningful check in
+    // debug builds; a violation would silently under-report here in EVERY
+    // build, release included, rather than just tripping the assert.
+    let instantiations = u32::try_from(
+        out.iter()
+            .filter(|f| stamp_names.contains(f.name.as_ref()))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let engine_stats = EngineStats {
+        instantiations,
+        dedup_savings: stats.dedup_savings,
+        synthesized_trap_rows: stats.synthesized_trap_rows,
+        expanded_rows: stats.expanded_rows,
+    };
+    debug_assert!(
+        stamp_names
+            .iter()
+            .all(|name| out.iter().any(|f| f.name == *name)),
+        "mono stamping must never orphan a stamp it just minted"
+    );
+    Ok((out, None, engine_stats, orphaned))
 }
 
 // -- HYBRID ------------------------------------------------------------------
@@ -198,13 +239,15 @@ pub(super) fn lower_mono<'a>(
 /// Lower under HYBRID: mono-stamp the completed-bijection sites, hand the
 /// rest to the frames path. If every non-collapse site is a bijection this
 /// is pure mono; if none is, pure frames; otherwise both, and the image is
-/// FRAMES.
+/// FRAMES. The last element is the sorted names pruned along the way (empty
+/// on the pure-frames branch, which never stamps and so never orphans
+/// anything) — see `lower_mono`.
 pub(super) fn lower_hybrid<'a>(
     syntax: &ArchSyntax,
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
+) -> Result<LoweredOrder<'a>, LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -239,7 +282,8 @@ pub(super) fn lower_hybrid<'a>(
 
     // The two degenerate cases route straight to a single mechanism.
     if seeds.is_empty() {
-        return lower_frames(syntax, order, sites, machine_sig);
+        let (order, plan, stats) = lower_frames(syntax, order, sites, machine_sig)?;
+        return Ok((order, plan, stats, Vec::new()));
     }
     if !any_frames {
         return lower_mono(syntax, order, sites, machine_sig);
@@ -247,10 +291,13 @@ pub(super) fn lower_hybrid<'a>(
 
     // Mixed: build the mono stamps, promote the bijection bound sites to
     // plain calls into them (dropping those bound records), then let the
-    // frames path lower whatever bound records remain.
+    // frames path lower whatever bound records remain. `dedup_savings`,
+    // `synthesized_trap_rows`, and `expanded_rows` are summed before the
+    // prune below runs, for the same closure-invariant reason `lower_mono`
+    // documents at its own `mono_stamps` call.
     let (stamps, seed_target, mono_stats) =
         mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
-    let instantiations = u32::try_from(stamps.len()).unwrap_or(u32::MAX);
+    let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
     let mut new_order: Vec<FuncRef> = Vec::with_capacity(n + stamps.len());
     for (fi, mut f) in order.into_iter().enumerate() {
@@ -265,6 +312,29 @@ pub(super) fn lower_hybrid<'a>(
         new_order.push(f);
     }
     new_order.extend(stamps);
+
+    // Same reachability re-check as pure mono, run BEFORE the frames path
+    // re-scans below — so any orphaned generic is gone from the graph
+    // `lower_frames` builds its directory and compose-column order over,
+    // never needing a post-hoc index remap (docs/core.md (the composition
+    // engine)).
+    let (new_order, orphaned) = prune_unreachable(new_order);
+
+    // Same immunity as `lower_mono`: count survivors, not `stamps.len()`
+    // from before the prune ran.
+    let instantiations = u32::try_from(
+        new_order
+            .iter()
+            .filter(|f| stamp_names.contains(f.name.as_ref()))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    debug_assert!(
+        stamp_names
+            .iter()
+            .all(|name| new_order.iter().any(|f| f.name == *name)),
+        "mono stamping must never orphan a stamp it just minted"
+    );
 
     // The frames path re-scans the mono-rewritten order; the stamps carry no
     // bound calls, so they flow through as ordinary functions.
@@ -281,7 +351,7 @@ pub(super) fn lower_hybrid<'a>(
         synthesized_trap_rows: mono_stats.synthesized_trap_rows,
         expanded_rows: mono_stats.expanded_rows,
     };
-    Ok((order, plan, stats))
+    Ok((order, plan, stats, orphaned))
 }
 
 /// A completed bijection (mono-eligible): every bound tape equal-size (so
@@ -345,6 +415,78 @@ fn identity_world(sites: &[Vec<SiteKind>], n: usize) -> Vec<bool> {
         }
     }
     in_world
+}
+
+/// Re-check reachability after stamping retargets every bound-call site to
+/// its specialized copy: a generic routine that lost its last caller this
+/// way is unreachable, and the linker's promise that unreachable functions
+/// never ship applies to it exactly as it does before lowering (docs/core.md
+/// (linking)). Walks the same BFS as name resolution, now over the
+/// (already-retargeted) `calls` and any still-pending `bound` edges, and
+/// reindexes the survivors' targets so the result is layout-ready. When
+/// nothing is orphaned the input `Vec` comes back untouched — not merely
+/// equivalent — so a link with no orphan hands layout the identical order it
+/// always did. The second return is the pruned names, sorted, for folding
+/// into the link report's `dropped` list alongside `resolve`'s pre-lowering
+/// ones (docs/core.md (the link report)) — the two are mutually exclusive by
+/// construction, since a name `resolve` already dropped never entered
+/// `order` and so cannot be found here.
+fn prune_unreachable(order: Vec<FuncRef>) -> (Vec<FuncRef>, Vec<String>) {
+    let n = order.len();
+    if n == 0 {
+        return (order, Vec::new());
+    }
+    let mut reached = vec![false; n];
+    reached[0] = true;
+    let mut queue: VecDeque<usize> = VecDeque::from([0usize]);
+    while let Some(fi) = queue.pop_front() {
+        let edges = order[fi]
+            .calls
+            .iter()
+            .map(|&(_, c)| c)
+            .chain(order[fi].bound.iter().map(|&(_, c, _)| c));
+        for c in edges {
+            if !reached[c] {
+                reached[c] = true;
+                queue.push_back(c);
+            }
+        }
+    }
+    if reached.iter().all(|&r| r) {
+        return (order, Vec::new());
+    }
+
+    let mut orphaned: Vec<String> = order
+        .iter()
+        .zip(&reached)
+        .filter(|&(_, &r)| !r)
+        .map(|(f, _)| f.name.to_string())
+        .collect();
+    orphaned.sort();
+
+    let mut new_index = vec![usize::MAX; n];
+    let mut next = 0usize;
+    for (i, &r) in reached.iter().enumerate() {
+        if r {
+            new_index[i] = next;
+            next += 1;
+        }
+    }
+    let pruned = order
+        .into_iter()
+        .zip(reached)
+        .filter(|(_, r)| *r)
+        .map(|(mut f, _)| {
+            for (_, c) in &mut f.calls {
+                *c = new_index[*c];
+            }
+            for (_, c, _) in &mut f.bound {
+                *c = new_index[*c];
+            }
+            f
+        })
+        .collect();
+    (pruned, orphaned)
 }
 
 /// Build the mono stamp set reachable from `seeds` (machine-frame bound

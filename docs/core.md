@@ -456,16 +456,25 @@ Objects in, one executable image out, in two phases.
   error carrying the name that was looked up. Functions the walk never
   reaches are **dropped**, and a dropped function may reference anything
   at all: unresolved references only matter for what survives.
+- Under `mono`/`hybrid` this promise is re-checked after the composition
+  engine (below) runs: stamping retargets every lowered site to its
+  specialized copy, so a generic routine reached before lowering but left
+  with no remaining caller afterward is dropped too, exactly as if the
+  first BFS had never reached it.
 
 **Name resolution** is also exposed on its own, without layout: a query
 answers which symbols the reachability walk reaches — in BFS order,
 each paired with which input supplied its winning definition (a user
 object or a library, and which one) — and which winning definitions
 never got reached. It runs the exact namespace-building and BFS code
-path linking does, just stopped short of layout and relaxation, so a
-consumer comparing itself against "what the linker actually resolves"
-(an editor overlay reasoning about cross-file symbols, say) gets an
-answer that can never drift from a real link.
+path linking does, stopped short of the composition engine, layout,
+and relaxation — so its answer is resolution order and reachability
+**as of the resolve phase**, before any call-mechanism lowering. Under
+`mono`/`hybrid`, a later prune (above) can remove a function this
+query reports as reached: it takes no `call_mech` and never runs
+stamping, by design — it backs an editor overlay reasoning about
+cross-file, exported-symbol visibility, a question the resolve phase
+alone answers, not final image membership.
 
 ### Relaxation
 
@@ -544,7 +553,10 @@ produce different images from the same objects:
   routine name too, so the linker checks every freshly minted stamp name
   against every routine and stamp name already in play for this link and
   refuses with a typed error on a collision, rather than relying on the
-  character choice alone to rule one out. Mono emits no frames region.
+  character choice alone to rule one out. A generic routine left with no
+  remaining caller once every site retargets to its stamp does not ship
+  (the reachability promise above applies after lowering too). Mono
+  emits no frames region.
 - **frames** compiles for the frames profile: one generic copy of each
   routine, every binding site a framed call, composites resolved through
   the frames region's directory and compose table at run time. A crossed

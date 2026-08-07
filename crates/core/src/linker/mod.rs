@@ -294,9 +294,14 @@ impl MapFile {
 /// deferred until a consumer needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkReport {
-    /// Defined but unreachable, sorted (see `resolve::Resolved::dropped`).
-    /// Name-level and namespace-based: local symbols never appear here —
-    /// unreached locals are silently omitted.
+    /// Defined but unreachable, sorted: the union of two drop reasons. Names
+    /// the pre-lowering BFS never reached (see `resolve::Resolved::dropped`)
+    /// — name-level and namespace-based, so an unreached LOCAL is silently
+    /// omitted, since a local was never a namespace candidate to begin with.
+    /// And, under `mono`/`hybrid`, generic routines the composition engine
+    /// left with no caller once every site was retargeted to a specialized
+    /// copy (docs/core.md (linking)) — this second reason names an actual
+    /// linked-in function, so unlike the first, a LOCAL orphan does appear.
     pub dropped: Vec<String>,
     /// Count of symbol sites (calls and tail jumps) relaxed to their short form.
     pub relaxed_calls: u32,
@@ -371,9 +376,14 @@ pub fn link(
     // calls and computes the runtime compose table (docs/core.md (the
     // composition engine)). It is a no-op for bindingless links, keeping
     // them on the byte-identical bindingless path.
-    let (order, frames_plan, stats) = match entry_sig {
+    let (order, frames_plan, stats, orphaned) = match entry_sig {
         Some(sig) => engine::lower(syntax, resolved.order, sig, options.call_mech)?,
-        None => (resolved.order, None, engine::EngineStats::default()),
+        None => (
+            resolved.order,
+            None,
+            engine::EngineStats::default(),
+            Vec::new(),
+        ),
     };
 
     let built = layout::build(syntax, &order, options.relax, frames_plan.as_ref())?;
@@ -427,6 +437,24 @@ pub fn link(
         Executable::code_only(arch, 0, built.code)
     };
 
+    // `dropped` covers both reasons a name doesn't ship: `resolved.dropped`
+    // (never reached by the pre-lowering BFS) and `orphaned` (reached then,
+    // but left with no caller once mono/hybrid stamping retargeted every
+    // site — docs/core.md (linking)). The two lists are disjoint as SITES —
+    // a namespace site in `resolved.dropped` never entered `order`, so it
+    // cannot also be a stamping orphan — but that is not a disjointness of
+    // NAME STRINGS: `order` can (and does, per `resolve.rs`'s
+    // `locals_bind_directly_and_may_repeat_across_objects`) hold two
+    // distinct `FuncRef`s sharing one name, e.g. two objects each defining
+    // their own private `helper`. Both arrive pre-sorted, so `dedup` after
+    // one concatenated sort is enough — no merge, and no risk of dropping a
+    // genuine duplicate, since `dedup` only collapses ADJACENT equal
+    // strings, which a sort already guarantees are adjacent.
+    let mut dropped = resolved.dropped;
+    dropped.extend(orphaned);
+    dropped.sort();
+    dropped.dedup();
+
     Ok(LinkOutput {
         executable,
         map: MapFile {
@@ -435,7 +463,7 @@ pub fn link(
             bindings,
         },
         report: LinkReport {
-            dropped: resolved.dropped,
+            dropped,
             relaxed_calls: built.relaxed_calls,
             far_calls: built.far_calls,
             instantiations: stats.instantiations,
