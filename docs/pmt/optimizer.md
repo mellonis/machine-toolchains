@@ -159,7 +159,7 @@ $ cat stripped.pma
 ```
 
 That is what makes a stray `debugger` worth reporting as source hygiene
-(`docs/pmt/lint.md (leftover-debugger)`) rather than harmless.
+(`docs/pmt/lint.md (leftover-debugger, .pmc side)`) rather than harmless.
 
 **`tail-call` runs before `tail-merge`.** The order of the two is
 load-bearing, not a preference. `tail-merge`'s return-chaining rewrites
