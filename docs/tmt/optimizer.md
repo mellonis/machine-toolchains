@@ -59,7 +59,7 @@ is `opt: 0 round(s)` and nothing follows it.
 
 ## Contracts
 
-Six properties bind the pipeline. They are contracts, not preferences —
+Seven properties bind the pipeline. They are contracts, not preferences —
 where a pass cannot honour one, the pass does not fire.
 
 **`-O0` is an off switch, not a setting.** At `-O0` the optimizer
@@ -1046,6 +1046,12 @@ dispatch jump gives, which a fall-through cannot express. A state whose
 `dead-rows` will drop, leaving a single row that codegen lowers
 straight-line — not a branch either. And the `machine`-world restriction
 is the mono-linkability contract stated above.
+
+The pass does not special-case a `debugger` row: since neither row is
+ever deleted or merged, a row carrying one keeps it in both lowerings,
+and only its code offset moves between the dispatch-table and branch
+forms — the same layout-not-meaning distinction the equivalence contract
+draws for trap offsets above.
 
 The same `dead-rows` program is the input; `--fno-dispatch-select`
 isolates the difference.
