@@ -365,20 +365,46 @@ L1:     rgt
 
 One instruction per line, `;` line comments. The **canonical column
 grid** — labels at column 0, mnemonics at column 8, operands at column
-16, trailing comments at column 32, trailing spaces trimmed — is what
-`pmt fmt` (`docs/pmt/cli.md`) enforces on hand-written `.pma` source, and
-what `pmt compile -S` and `pmt dis` emit directly; the assembler's parser
-itself accepts any whitespace on input. The two producers differ on one
-point, the long-label rule: `pmt dis`'s grid (`grid_line`) keeps a short
-label field — 7 characters or fewer, the name plus its `:` — inline with
-its instruction, and moves only a field of 8 characters or more to its
-own line, so a long label never pushes the mnemonic column out of
-alignment; `pmt compile -S` puts every label on its own line
-unconditionally, regardless of length. `pmt fmt` treats both shapes as
-already canonical, so reformatting the output of either `pmt compile -S`
-or `pmt dis` is always a no-op. `pmt dis` output is always valid
-assembler input — round-tripping through `asm` reproduces the original
-bytes exactly.
+16, trailing spaces trimmed — is what `pmt fmt` (`docs/pmt/cli.md`)
+enforces on hand-written `.pma` source, and what `pmt compile -S` and
+`pmt dis` emit directly; the assembler's parser itself accepts any
+whitespace on input.
+
+A trailing comment's column is not fixed at 32; it aligns per **group**
+at `max(32, widest code width in the group + 1)`, where a line's code
+width is its character count up to the comment, trailing whitespace
+trimmed. 32 is a floor, so a group only ever widens past it, never below
+it — which is what keeps output unchanged for a group whose members all
+fit under it already. A group is the maximal run of lines that share one
+comment column; it ends at a blank line, an own-line comment printed at
+column 0 (below), a `.section`/`.func`/`.routine` directive, or a
+`.rept` block. A line with no trailing comment still belongs to its
+group but contributes no width to it, and a `.rept` block's body prints
+verbatim rather than through this grid at all, so it contributes no
+width either. The column is not capped by the 80-column limit: a group
+can widen a member past it, and the result is reported like any other
+overlong line (`line-too-long`, `docs/core.md (assembly lint)`).
+
+An own-line comment — one with no code on its own physical line — prints
+in one of two columns. If it continues a run started by a trailing
+comment on the line directly above it, with no blank line between, it
+prints at that group's comment column, staying visually part of the same
+comment block. Everything else — a preamble comment, one between
+functions, one opening a body, or any comment that does not continue a
+trailing one — prints at column 0. Column 8, the mnemonic column, is
+never a comment position: it is where statements live, and a comment is
+not a statement.
+
+The two producers differ on one point, the long-label rule: `pmt dis`'s
+grid (`grid_line`) keeps a short label field — 7 characters or fewer,
+the name plus its `:` — inline with its instruction, and moves only a
+field of 8 characters or more to its own line, so a long label never
+pushes the mnemonic column out of alignment; `pmt compile -S` puts every
+label on its own line unconditionally, regardless of length. `pmt fmt`
+treats both shapes as already canonical, so reformatting the output of
+either `pmt compile -S` or `pmt dis` is always a no-op. `pmt dis` output
+is always valid assembler input — round-tripping through `asm`
+reproduces the original bytes exactly.
 
 `pmt dis` accepts either binary. From a `.pmo`: real names come from the
 symbol table, code is shown per function, and call sites are named from
@@ -444,24 +470,37 @@ instruction). Its full version history is at the end of this section.
 
 ```asm
 .section tables
-Tfetch: .row    [1, *, *, *]            ; match tape 0 == 1, others any
+Tfetch: .row    [1, *, *, *]    ; match tape 0 == 1, others any
         .row    [8, *, *, *]
-Dfetch: .targets L_step, L_halt         ; MR = 1 → L_step, MR = 2 → L_halt
+Dfetch: .targets L_step, L_halt ; MR = 1 → L_step, MR = 2 → L_halt
 
 .section code
 .routine main, tapes=4, alpha=(9, 127, 127, 2)
 .func main
-L_step: rd                              ; latch every head into its slot
-        mtc     Tfetch                  ; walk the table, set the match reg
-        djmp    Dfetch                  ; dispatch on the match reg
+L_step: rd                      ; latch every head into its slot
+        mtc     Tfetch          ; walk the table, set the match reg
+        djmp    Dfetch          ; dispatch on the match reg
 L_halt: stp
 ```
 
 One instruction (or one table directive) per line, `;` line comments, the
 same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
-8, operands at 16, comments at 32); the parser accepts any whitespace on
-input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis` output is always
-valid assembler input and round-trips to the original bytes.
+8, operands at 16, trailing comments aligned per group at or past 32 —
+see "assembly text", above, for the exact rule); the parser accepts any
+whitespace on input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis`
+output is valid assembler input — including a `--call-mech=mono` linked
+image, whose stamped specialized routine copy is named with a
+`.`-separated digest suffix (`bare.513e6968`, see `docs/tmt/isa.md
+(call mechanisms)`) drawn from the same character set an ordinary
+identifier already accepts, so the name re-lexes like any other.
+Reassembling an **object's** disassembly reproduces the original bytes
+exactly. Reassembling and re-linking a **linked image's** disassembly
+reproduces an equivalent image — same code, same table content — but not
+always the same bytes: a frame that originated from a declarative binding
+always disassembles to raw `.frame`/`call.m` syntax (there is no way to
+reconstruct the declarative form), and relinking that syntax does not
+necessarily lay out the tables section the way the original
+declarative-binding link did.
 
 ### Sections and the routine signature
 
@@ -479,6 +518,14 @@ equals `tapes`). The directive must **precede** the `.func` it names, any
 distance in the same file; it attaches when the function is defined. The
 entry routine's signature fixes the executable image's tape count and
 per-tape alphabets, which a run validates its tape band against.
+
+Disassembling a linked image recovers a non-entry callee's signature
+only when it is reached through a `.frame` descriptor: `tapes` comes
+from the descriptor's own virtual tape count, but the routine's true
+per-tape alphabet is consumed by the composition engine at link time
+and does not survive into the image, so `alpha` there is the
+**physical** tape each virtual one projects onto instead — a
+`; derived` trailing comment marks the line to say so.
 
 ### The mnemonic set
 
@@ -534,7 +581,28 @@ A **dispatch table** is a labeled run of `.targets`/`.target` directives:
 `L1`, and so on), and `.target L` contributes a single target.
 Consecutive directives under the **same label** accrue into one table, so
 a wide dispatch table can be built one entry at a time — the idiom a
-`.rept` uses to emit a value-indexed table.
+`.rept` uses to emit a value-indexed table. That is a *directive*-level
+continuation (several `.targets`/`.target` lines under one label); a
+single directive's own operand list has a separate, *list*-level one,
+described next.
+
+`.targets`, `.exits` (below), and `.map` (below) are the dialect's three
+unbounded lists: a `.targets`/`.exits`/`.map` line ending in a bare
+trailing comma — nothing after it but whitespace, no comment — continues
+that directive's list onto the next physical line, so a wide table can be
+authored (or emitted) across several lines instead of one long one. A
+comma followed by a comment does not continue (only the list's *last*
+physical line may carry a trailing comment); a trailing comma on any
+other directive stays the syntax error it has always been. `tmt fmt` /
+`tmt dis` wrap the other direction — a list whose single-line form would
+cross the 80-column line limit is broken after a comma, with
+continuation lines aligned under the list's first element
+(`docs/tmt/fmt.md`) — and the two meet: a wrapped line always ends in the
+trailing comma the continuation grammar reads back into one logical
+directive, so reformatting a wide table is idempotent. Every other
+list-shaped operand — a `.row`/`wr`/`mov`/`wrmv` vector, a `.frame
+tapes=(…)` list — is bounded by the tape count (`1..=16`) and never
+continues or wraps; only the three lists above can grow past one line.
 
 Match tables carry a **row discipline** the assembler checks, reporting a
 violation as a fatal error under the code `table-discipline`. The rules
@@ -601,6 +669,16 @@ Fh: .frame  tapes=(2, 0)                 ; arity = list length; virtual k → ph
 - `.exits <label>, …` (at most once) lists the exit vector — the
   caller-side labels `retx #k` returns to, in the function that names the
   frame via `call.m`.
+
+`.map`'s wrapping is coarser than `.targets`/`.exits`: the break falls
+**between** a group's `.map` clauses (`<k>`, `rmap=(…)`, `wmap=(…)`), not
+inside a clause's own `->`/`=>` pair list. Unlike a tape-count-bounded
+list, a single `rmap=(…)` or `wmap=(…)` clause scales with its tape's
+alphabet cardinality (up to 127 compact symbols) rather than with the
+tape count — so a clause wider than the line limit on its own is an
+unsplittable atom and still prints as one over-80 line; wrapping gets the
+group under budget only when the width comes from having many clauses,
+not from one very wide one.
 
 **Arrows.** `->` is an ordinary map entry; `=>` marks the pair **one-way**
 — read-direction only. `=>` is legal in `rmap` (the read side) and
@@ -703,6 +781,16 @@ call mechanism stays a link-time decision independent of the source.
   the write vector then the move vector in one instruction (all writes
   precede all moves). It is the `-O0` codegen canon for a rule's action;
   no earlier program changes meaning.
+
+0.3 also gained the trailing-comma list continuation on `.targets`,
+`.exits`, and `.map` ("Match and dispatch tables" and "Frame
+descriptors" above) without becoming 0.4, even though the stated
+acceptance contract is that `N` bumps on *any* grammar change: no
+released build has ever fixed 0.3 as a contract to preserve, so there is
+nothing yet for an additive grammar surface to break. The version stays
+free to absorb changes like this one until a release actually ships it —
+at that point 0.3 becomes a real acceptance floor and the next grammar
+change bumps to 0.4 in the ordinary way.
 
 ## `.pmx.map` / `.tmx.map` — link-time sidecar
 

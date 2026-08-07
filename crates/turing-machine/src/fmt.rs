@@ -103,8 +103,13 @@
 //!
 //! # Argument lists and the width threshold
 //!
-//! The threshold is the **80-column line limit** (the same one `line-too-long`
-//! lints). A parenthesized list — a `call`'s bindings, a `graft`/`bind`'s
+//! The threshold is the **80-column line limit** — the same width
+//! `line-too-long` (docs/core.md (assembly lint)) enforces on the two
+//! assembly dialects; `.tmc` has no line-length lint of its own, so
+//! fmt's active wrapping below is what keeps most lines under it (see
+//! "Blank lines and comments", below, for the one mechanism that isn't
+//! wrapping — comment alignment — and why it carries no diagnostic
+//! cost here). A parenthesized list — a `call`'s bindings, a `graft`/`bind`'s
 //! bindings, a `routine`/`graph` signature, an `alphabet` body — renders on
 //! one line while the resulting line fits; past that it breaks one entry per
 //! line, indented two columns past the construct's FIRST token, with the
@@ -134,10 +139,14 @@
 //! content and is left verbatim). A trailing comment sits one space after the
 //! code by default; in a run of two or more adjacent single-line entries that
 //! all carry one, the comments align one column past the run's widest line —
-//! and any member that would then cross 80 columns falls back to a single
-//! space on its own. Unlike `.pmc`'s rule, this does not consult the author's
-//! source columns: a run either aligns or it does not, which is both simpler
-//! and one less way for a second pass to disagree with the first.
+//! every member aligns, even one whose aligned comment then crosses 80
+//! columns. No lint rule flags that: `.tmc` has no line-length rule of its
+//! own, and `line-too-long` (docs/core.md (assembly lint)) covers only the
+//! two assembly dialects, `.pma` and `.tma`, never `.tmc` — so alignment
+//! here carries no diagnostic cost. Unlike `.pmc`'s rule, this does not
+//! consult the author's source columns: a run either aligns or it does not,
+//! which is both simpler and one less way for a second pass to disagree
+//! with the first.
 
 use mtc_core::diagnostics::Span;
 
@@ -230,8 +239,12 @@ fn flush(items: &[Rendered]) -> String {
 /// Spaces between an item's code and its trailing comment (module doc,
 /// "Blank lines and comments"): one by default; in a run of two or more
 /// adjacent single-line entries that all carry a trailing comment, enough to
-/// align them one column past the run's widest code line — except for a
-/// member that would then cross the line limit, which keeps its single space.
+/// align them one column past the run's widest code line — every member of
+/// the run aligns, even one whose aligned comment then crosses the line
+/// limit. No lint rule catches that: `line-too-long` (docs/core.md
+/// (assembly lint)) is arch-agnostic ASSEMBLY lint, so it fires on `.pma`
+/// and `.tma` but never on `.tmc` — an over-80 `.tmc` line goes unreported
+/// by any rule, so alignment here carries no diagnostic cost.
 fn trailing_spacing(items: &[Rendered]) -> Vec<usize> {
     let mut spacing = vec![1usize; items.len()];
     let eligible = |r: &Rendered| r.trailing.is_some() && !r.code.contains('\n');
@@ -254,20 +267,7 @@ fn trailing_spacing(items: &[Rendered]) -> Vec<usize> {
                 + 1;
             for k in start..end {
                 let width = items[k].code.chars().count();
-                let comment = normalize_comment_text(
-                    &items[k]
-                        .trailing
-                        .as_ref()
-                        .expect("eligible entries carry a trailing comment")
-                        .text,
-                )
-                .chars()
-                .count();
-                spacing[k] = if align_col + comment <= LINE_WIDTH {
-                    align_col - width
-                } else {
-                    1
-                };
+                spacing[k] = align_col - width;
             }
         }
         i = end;

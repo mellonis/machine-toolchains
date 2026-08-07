@@ -331,3 +331,48 @@ fn routine_vectors_and_rept_are_accepted_together() {
     let obj2 = assemble(&text, false).expect("re-assembles");
     assert_eq!(obj.to_bytes(), obj2.to_bytes());
 }
+
+#[test]
+fn a_trailing_comma_wraps_a_list_onto_the_next_line() {
+    // A trailing comma continues `.targets`, `.exits` and `.map` onto the
+    // next physical line (docs/formats.md (assembly text)). Wrapping is
+    // layout only — the object must be byte-identical to the same program
+    // written on single lines.
+    let wrapped = "\
+.routine main, tapes=2, alpha=(2, 2)
+.routine helper, tapes=2, alpha=(2, 2)
+.section tables
+T0: .row [1, 1]
+    .row [*, *]
+D0: .targets hit,
+             miss
+F0: .frame tapes=(1, 0)
+    .map 0, rmap=(1->1,
+                  3=>1)
+    .exits done,
+           other
+.section code
+.func main
+        rd
+        mtc     T0
+        djmp    D0
+hit:    call.m  helper, F0
+done:   stp
+other:  hlt
+miss:   hlt
+.func helper
+        wr      [1, -]
+        retx    #1
+";
+    let one_line = wrapped
+        .replace(".targets hit,\n             miss", ".targets hit, miss")
+        .replace("rmap=(1->1,\n                  3=>1)", "rmap=(1->1, 3=>1)")
+        .replace(".exits done,\n           other", ".exits done, other");
+    assert!(
+        !one_line.contains(",\n"),
+        "the two fixtures must differ only in wrapping"
+    );
+    let obj = assemble(wrapped, false).expect("the wrapped source assembles");
+    let flat = assemble(&one_line, false).expect("the one-line source assembles");
+    assert_eq!(obj.to_bytes(), flat.to_bytes());
+}

@@ -367,6 +367,11 @@ fn mono_stamps<'a>(
     let mut worklist: VecDeque<usize> = VecDeque::new();
     let mut seed_target: HashMap<(usize, u32), usize> = HashMap::new();
     let mut stats = StampStats::default();
+    // Every name already in play — every hand-written routine `order`
+    // carries, then every stamp minted as the closure below runs — so
+    // `intern` can refuse a freshly computed name that collides with either
+    // (docs/core.md (the composition engine)).
+    let mut used_names: HashSet<String> = order.iter().map(|f| f.name.to_string()).collect();
 
     // Seed: compose each site's binding at the machine identity.
     for &(fi, addr, callee, record) in seeds {
@@ -383,10 +388,11 @@ fn mono_stamps<'a>(
             &mut nodes,
             &mut key_to_slot,
             &mut worklist,
+            &mut used_names,
             order,
             callee,
             child,
-        );
+        )?;
         if dup {
             stats.dedup_savings += 1;
         }
@@ -414,10 +420,11 @@ fn mono_stamps<'a>(
                         &mut nodes,
                         &mut key_to_slot,
                         &mut worklist,
+                        &mut used_names,
                         order,
                         *callee,
                         child,
-                    );
+                    )?;
                     if dup {
                         stats.dedup_savings += 1;
                     }
@@ -451,10 +458,11 @@ fn mono_stamps<'a>(
                             &mut nodes,
                             &mut key_to_slot,
                             &mut worklist,
+                            &mut used_names,
                             order,
                             *callee,
                             child,
-                        );
+                        )?;
                         if dup {
                             stats.dedup_savings += 1;
                         }
@@ -505,21 +513,38 @@ fn mono_stamps<'a>(
 /// Intern a (routine, composite) into the stamp set, deduped by canonical
 /// key. Returns its ORDER index (`order.len() + slot`) and whether it
 /// resolved to an ALREADY-built stamp (a stamp the dedup avoided).
+///
+/// The map-visible name is `<routine>.<digest8>` — a period, not the `$`
+/// an earlier scheme used, because `.tma` identifiers cannot contain `$` at
+/// all (docs/formats.md (assembly text)) and a disassembled stamp must
+/// re-lex. A period IS legal in a hand-written routine name, so unlike the
+/// `$` scheme this one cannot rule out a collision by character choice
+/// alone; `used_names` is what makes collision-freedom a checked guarantee
+/// instead of an assumption — a freshly minted name is rejected with a
+/// typed [`LinkError`] if it already names another routine or an earlier
+/// stamp (astronomically unlikely: it needs either a hand-written name that
+/// happens to match `<routine>.<digest8>` exactly, or two distinct
+/// composites whose 32-bit digests collide — docs/core.md (the composition
+/// engine)).
 fn intern(
     nodes: &mut Vec<StampNode>,
     key_to_slot: &mut HashMap<Vec<u8>, usize>,
     worklist: &mut VecDeque<usize>,
+    used_names: &mut HashSet<String>,
     order: &[FuncRef],
     routine: usize,
     mut composite: Composite,
-) -> (usize, bool) {
+) -> Result<(usize, bool), LinkError> {
     composite.routine = routine;
     let key = canonical_key(&composite);
     if let Some(&slot) = key_to_slot.get(&key) {
-        return (order.len() + slot, true);
+        return Ok((order.len() + slot, true));
     }
     let slot = nodes.len();
-    let name = format!("{}${:08x}", order[routine].name, digest(&composite));
+    let name = format!("{}.{:08x}", order[routine].name, digest(&composite));
+    if !used_names.insert(name.clone()) {
+        return Err(LinkError::StampNameCollision(name));
+    }
     nodes.push(StampNode {
         routine,
         composite,
@@ -527,7 +552,7 @@ fn intern(
     });
     key_to_slot.insert(key, slot);
     worklist.push_back(slot);
-    (order.len() + slot, false)
+    Ok((order.len() + slot, false))
 }
 
 // -- one stamp body ----------------------------------------------------------
@@ -1093,4 +1118,97 @@ fn read_dispatch(table: &[u8], d_off: u32, name: &str) -> Result<Vec<u32>, LinkE
         out.push(u32::from_le_bytes(table[at..at + 4].try_into().unwrap()));
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn func_ref(name: &str) -> FuncRef<'static> {
+        FuncRef {
+            name: Cow::Owned(name.to_string()),
+            blob: Cow::Owned(Vec::new()),
+            debug: None,
+            calls: Vec::new(),
+            bound: Vec::new(),
+            table: Cow::Owned(Vec::new()),
+            table_fixups: Vec::new(),
+            signature: None,
+            origin: 0,
+        }
+    }
+
+    /// A fresh, non-colliding stamp mints as `<routine>.<digest8>` — the
+    /// period separator, never the reserved-and-unlexable `$` the earlier
+    /// scheme used. Pinning this at the unit level means a regression back
+    /// to `$` (or to any other separator) fails here even if every
+    /// higher-level fixture happened not to exercise mono stamping that day.
+    #[test]
+    fn a_fresh_stamp_name_is_dot_separated() {
+        let order = vec![func_ref("main"), func_ref("sub")];
+        let mut used_names: HashSet<String> = order.iter().map(|f| f.name.to_string()).collect();
+        let mut nodes = Vec::new();
+        let mut key_to_slot = HashMap::new();
+        let mut worklist = VecDeque::new();
+
+        let (idx, dup) = intern(
+            &mut nodes,
+            &mut key_to_slot,
+            &mut worklist,
+            &mut used_names,
+            &order,
+            1,
+            identity_composite(1, 1),
+        )
+        .expect("a fresh name mints cleanly");
+        assert!(!dup);
+        assert_eq!(idx, order.len(), "the stamp lands right past order");
+        assert_eq!(nodes.len(), 1);
+        assert!(
+            nodes[0].name.starts_with("sub."),
+            "stamp name should be `sub.<digest>`: {}",
+            nodes[0].name
+        );
+        assert!(
+            !nodes[0].name.contains('$'),
+            "must not regress to the unlexable `$` separator: {}",
+            nodes[0].name
+        );
+    }
+
+    /// A hand-written routine that happens to occupy the exact name a stamp
+    /// would mint refuses the stamp instead of silently colliding two
+    /// distinct identities under one name. `expected_name` is computed with
+    /// the SAME `digest`/format call `intern` makes internally, so this
+    /// exercises a real, deterministic collision rather than a name chosen
+    /// to merely look plausible — a test that skipped that step could pass
+    /// against a version of `intern` that checked the wrong string.
+    #[test]
+    fn a_name_matching_an_existing_routine_is_refused() {
+        let mut keyed = identity_composite(1, 1);
+        keyed.routine = 1;
+        let expected_name = format!("sub.{:08x}", digest(&keyed));
+
+        let order = vec![func_ref("main"), func_ref("sub"), func_ref(&expected_name)];
+        let mut used_names: HashSet<String> = order.iter().map(|f| f.name.to_string()).collect();
+        let mut nodes = Vec::new();
+        let mut key_to_slot = HashMap::new();
+        let mut worklist = VecDeque::new();
+
+        let err = intern(
+            &mut nodes,
+            &mut key_to_slot,
+            &mut worklist,
+            &mut used_names,
+            &order,
+            1,
+            identity_composite(1, 1),
+        )
+        .expect_err("the reserved name is already taken by a hand-written routine");
+        assert_eq!(err, LinkError::StampNameCollision(expected_name));
+        assert!(
+            nodes.is_empty(),
+            "a refused intern must not leave a partial node behind"
+        );
+    }
 }

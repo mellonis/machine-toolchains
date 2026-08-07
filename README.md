@@ -193,17 +193,18 @@ $ target/release/tmt dis replace.tmx
 T0:     .row    [0]
         .row    [1]
         .row    [2]
-T1:     .targets 0x001c, 0x0014, 0x000c ; unresolved dispatch targets (no map labels)
+
+T1:     .targets L001C, L0014, L000C
 .section code
 .func main
 L0001:  rd
         mtc     T0
         djmp    T1
-        wrmv    [1], [>]
+L000C:  wrmv    [1], [>]
         jmp     L0001
-        wrmv    [-], [>]
+L0014:  wrmv    [-], [>]
         jmp     L0001
-        stp
+L001C:  stp
 ```
 
 The run rewrites `1221` (`abba`) to `1111` (`aaaa`) and halts on the

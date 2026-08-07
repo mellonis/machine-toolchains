@@ -539,7 +539,12 @@ produce different images from the same objects:
   known hole keeps the trap taxonomy — an unmapped-read symbol becomes a
   first-match trap row prepended to every match table, and a write with
   no physical image becomes a trap stub. Identical stamps dedup behind a
-  digest-suffixed name. Mono emits no frames region.
+  digest-suffixed name, `<routine>.<digest8>` — a period, so the name
+  re-lexes as ordinary assembly text. A period is legal in a hand-written
+  routine name too, so the linker checks every freshly minted stamp name
+  against every routine and stamp name already in play for this link and
+  refuses with a typed error on a collision, rather than relying on the
+  character choice alone to rule one out. Mono emits no frames region.
 - **frames** compiles for the frames profile: one generic copy of each
   routine, every binding site a framed call, composites resolved through
   the frames region's directory and compose table at run time. A crossed

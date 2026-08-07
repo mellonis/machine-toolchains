@@ -11,8 +11,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mtc_core::asm::format_asm_with;
-use mtc_turing_machine::asm::{assemble, tm1_syntax};
+use mtc_core::linker::{CallMech, LinkOptions};
+use mtc_turing_machine::asm::{
+    assemble, disassemble_executable_with_map, disassemble_object, link, tm1_syntax,
+};
 use mtc_turing_machine::cli::execute;
+use mtc_turing_machine::compiler::{CompileOptions, compile};
+use mtc_turing_machine::stdlib;
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -93,6 +98,167 @@ fn brainfuck_fixture_fmt_is_idempotent_and_lossless() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma");
     let src = fs::read_to_string(&path).expect("read brainfuck-utm.tma");
     assert_idempotent_and_lossless(&src, "brainfuck");
+}
+
+/// The `.tma` dogfood lock, mirroring `fmt_tmc.rs`'s
+/// `every_tmc_source_is_already_fmt_clean`: every `.tma` source the
+/// repository ships must already be in canonical form, so formatting it
+/// is a byte-for-byte no-op. Any future printer change that would
+/// reformat a shipped source fails here first.
+#[test]
+fn every_tma_source_is_already_fmt_clean() {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma");
+    let src = fs::read_to_string(&path).expect("read brainfuck-utm.tma");
+    assert_eq!(fmt_tma(&src), src, "brainfuck-utm.tma is not fmt-clean");
+}
+
+/// The Appendix A + nested-graft `.tmc` fixtures `tmc_golden.rs` runs
+/// derivation-first goldens over — read fresh here (per-file-helper
+/// convention: this file's sweep over every debug mode and call
+/// mechanism is its own concern, not that file's run assertions).
+const CORPUS: &[&str] = &[
+    "a1_replace_b",
+    "a2_binary_plus_one",
+    "a3_two_tape_copy",
+    "a4_byte_increment",
+    "a5_call_across_alphabets",
+    "a6_graph_graft_multi_exit",
+    "nested_graft",
+];
+
+fn golden_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
+}
+
+/// Number of top-level table labels (`T<n>:`/`F<n>:`, always at column
+/// 0 — a continuation line of a wrapped list, or a `.row`/`.map`/`.exits`
+/// line, is always indented) in a `.section tables` body. Independent of
+/// blank-line placement, so it is safe to derive from the very output
+/// the blank-line assertion below checks: it counts a structural feature
+/// (how many tables rendered), not the whitespace between them.
+fn table_label_count(section: &str) -> usize {
+    section
+        .lines()
+        .filter(|l| {
+            let mut chars = l.chars();
+            matches!(chars.next(), Some('T' | 'F'))
+                && chars.next().is_some_and(|c| c.is_ascii_digit())
+                && l.contains(':')
+        })
+        .count()
+}
+
+/// `tmt dis`'s permanent dogfood gate over the golden corpus — the PM-1
+/// sibling this mirrors (`fmt_pma.rs`'s `dis_output_is_already_canonical`)
+/// asserts format identity alone, because a `.pma` object never carries
+/// tables and so never has an assemblability defect to catch; a `.tma`
+/// one can. For every fixture, every debug mode, and (for the linked
+/// half) every call mechanism, both `disassemble_object`'s and
+/// `disassemble_executable`'s output must (1) already be fmt-canonical,
+/// (2) separate multiple tables with exactly one blank line each (never
+/// none, never more), and (3) reassemble.
+///
+/// (1) and (3) alone do NOT cover (2): deleting the blank-line insertion
+/// entirely still formats as the identity (`format_asm_with` preserves
+/// whatever blank lines are already there, it does not require them) and
+/// still reassembles (a blank line is not significant to the parser) —
+/// mutation-checked by temporarily deleting it and confirming this test
+/// alone catches it. This gate is the widened form of what was meant to
+/// be an object-only gate before the executable path's naming, wrapping,
+/// signature, and blank-line defects were fixed; both renderers are
+/// covered with no scoping note now that they are.
+#[test]
+fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
+    for &fixture in CORPUS {
+        let src = fs::read_to_string(golden_dir().join(format!("{fixture}.tmc")))
+            .unwrap_or_else(|e| panic!("{fixture}: read fixture: {e}"));
+        for debug in [false, true] {
+            let obj = compile(
+                &src,
+                CompileOptions {
+                    debug_info: debug,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{fixture} (-g={debug}): compile failed: {e}"))
+            .object;
+
+            // Object disassembly: no executable-only naming/signature
+            // surface to exercise (that's the executable half, below).
+            let obj_dis = disassemble_object(&obj);
+            assert_eq!(
+                fmt_tma(&obj_dis),
+                obj_dis,
+                "{fixture} (-g={debug}) object dis is not fmt-clean:\n{obj_dis}"
+            );
+            assert_blank_lines_separate_tables(&obj_dis, &format!("{fixture} (-g={debug}) object"));
+            assemble(&obj_dis, false).unwrap_or_else(|e| {
+                panic!("{fixture} (-g={debug}) object dis does not reassemble: {e}\n{obj_dis}")
+            });
+
+            for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+                let out = link(
+                    std::slice::from_ref(&obj),
+                    std::slice::from_ref(stdlib::object()),
+                    LinkOptions {
+                        call_mech: mech,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{fixture} (-g={debug}, {mech}): link failed: {e}"));
+                let exe_dis = disassemble_executable_with_map(&out.executable, &out.map);
+                assemble(&exe_dis, false).unwrap_or_else(|e| {
+                    panic!(
+                        "{fixture} (-g={debug}, {mech}) executable dis does not reassemble: \
+                         {e}\n{exe_dis}"
+                    )
+                });
+                assert_eq!(
+                    fmt_tma(&exe_dis),
+                    exe_dis,
+                    "{fixture} (-g={debug}, {mech}) executable dis is not fmt-clean:\n{exe_dis}"
+                );
+                assert_blank_lines_separate_tables(
+                    &exe_dis,
+                    &format!("{fixture} (-g={debug}, {mech}) executable"),
+                );
+            }
+        }
+    }
+}
+
+/// Structural half of defect 2 that format identity cannot see
+/// (`format_asm_with` preserves existing blank lines rather than
+/// requiring them, so a printer that dropped the separator entirely
+/// would still format as its own identity): a `.section tables` body
+/// with `n` tables has exactly `n - 1` blank-line boundaries, never a
+/// run of two. `.section tables` is searched for rather than required
+/// as a prefix — an executable's disassembly opens with the entry's
+/// `.routine` line ahead of it, an object's does not, and this must
+/// find the section either way, not silently no-op on the executable
+/// half.
+fn assert_blank_lines_separate_tables(dis: &str, label: &str) {
+    let Some((before_code, _)) = dis.split_once("\n.section code\n") else {
+        return; // no tables section at all — nothing to check
+    };
+    let Some((_, section)) = before_code.split_once(".section tables\n") else {
+        return; // code-only text — nothing to check
+    };
+    let n = table_label_count(section);
+    if n == 0 {
+        return;
+    }
+    assert!(
+        !section.contains("\n\n\n"),
+        "{label}: a table boundary carries more than one blank line:\n{dis}"
+    );
+    assert_eq!(
+        section.matches("\n\n").count(),
+        n - 1,
+        "{label}: expected {} blank-line boundaries for {n} tables:\n{dis}",
+        n - 1
+    );
 }
 
 #[test]

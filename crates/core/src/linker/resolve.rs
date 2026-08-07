@@ -16,7 +16,7 @@ use crate::formats::object::{BlobDebug, BoundCall, ObjectFile, RoutineSig, Symbo
 pub(crate) struct FuncRef<'a> {
     /// The function's name. `Borrowed` from the object for a resolved
     /// function; `Owned` for a composition-engine synthetic (a mono stamp
-    /// `<callee>$<digest8>`), which has no backing symbol.
+    /// `<callee>.<digest8>`), which has no backing symbol.
     pub name: Cow<'a, str>,
     /// The function's code blob. `Borrowed` straight from the object as
     /// resolved; the composition engine replaces it with an `Owned`

@@ -121,8 +121,10 @@ no longer written on one line.
 
 ## Argument lists and the width threshold
 
-The threshold is the **80-column line limit** — the same one
-`line-too-long` lints (`docs/tmt/lint.md`). A parenthesized list — a
+The threshold is the **80-column line limit** — the same width
+`line-too-long` enforces on the two assembly dialects (`docs/tmt/lint.md`);
+`.tmc` has no line-length lint of its own, so fmt's active wrapping below
+is what keeps most `.tmc` lines under it. A parenthesized list — a
 `call`'s bindings, a `graft`/`bind`'s bindings, a `routine`/`graph`
 signature, an `alphabet` body — renders on one line while the resulting
 line fits. Past that it breaks one entry per line, indented two columns
@@ -150,9 +152,10 @@ A single binding argument is never broken further on width alone — a
 `with map { … }` with no interior comment of its own stays inline, so one
 very long binding may still exceed the limit. That is deliberate:
 breaking a map across lines buys little and costs the map its
-at-a-glance readability. Such a line stays reported by `line-too-long`.
-An interior comment inside that same map does break it, since the map is
-itself one of the bracketed lists above.
+at-a-glance readability. As noted above, no lint catches the result — a
+line this long goes unreported, unlike an unwrappable `.pmc` line, which
+`line-too-long` does flag. An interior comment inside that same map does
+break it, since the map is itself one of the bracketed lists above.
 
 ## Blank lines
 
@@ -173,9 +176,10 @@ they document, in source order.
 
 A trailing comment sits one space after the code by default. In a run of
 two or more adjacent single-line entries that all carry one, the
-comments align one column past the run's widest code line. A member that
-would then cross 80 columns keeps its single space instead, while the
-rest of the run stays aligned.
+comments align one column past the run's widest code line — every member
+of the run aligns, even one whose own code was short enough that its
+comment now lands past column 80. Nothing reports that: `.tmc` has no
+line-length lint, unlike `.pmc` (`docs/pmt/lint.md`).
 
 Alignment does not consult the author's source columns. A run either
 aligns or it does not, decided purely from the reformatted widths — so
@@ -331,5 +335,18 @@ F0:     .frame  tapes=(1, 0)
 ```
 
 The grid is whitespace-only and idempotent on the same terms as the
-`.tmc` printer. Rewrapping an overlong line is not part of it, so a line
-over 80 characters stays reported by `line-too-long` after formatting.
+`.tmc` printer. Rewrapping an overlong line is not part of it for most
+lines — an ordinary instruction, or an over-80 `.frame`/`.routine` line,
+stays that way after formatting. The three unbounded lists are the
+exception: `.targets`, `.exits`, and `.map`, whose single-line form
+crossing the 80-column limit wraps onto further physical lines instead,
+breaking after a comma with continuation lines aligned under the list's
+first element (`docs/formats.md`, "match and dispatch tables" and "frame
+descriptors"). Alignment can also *create* an overlong line that was not
+one before: a trailing comment's column is not fixed — it aligns per
+group at whichever is wider, 32 or one past the group's widest code
+(`docs/formats.md`, "assembly text") — so a short line sharing a group
+with a much wider one can have its comment pushed well past column 80 by
+the alignment alone. Either way, `line-too-long` reports the result after
+formatting; the grid is never capped by the line limit to keep a group's
+column from moving.
