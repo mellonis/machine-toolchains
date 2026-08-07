@@ -1959,11 +1959,11 @@ F0: .frame tapes=(0, 1)
         assert_eq!(wide_col, 57, "the wide line widens only its own group");
     }
 
-    // -- Whole-branch review corrections (I1, I2) ----------------------
+    // -- Whole-branch review corrections ----------------------
 
     #[test]
     fn a_commented_structural_directive_widens_its_group() {
-        // I2: a `.section`/`.func`/`.routine` line that carries a
+        // A `.section`/`.func`/`.routine` line that carries a
         // trailing comment must count toward its group's width like any
         // other commented piece, or it strands itself ragged against its
         // own group's narrower members.
@@ -1982,7 +1982,7 @@ F0: .frame tapes=(0, 1)
 
     #[test]
     fn a_rept_header_comment_shares_its_group_column() {
-        // I1: the `.rept` header's trailing comment must go through the
+        // The `.rept` header's trailing comment must go through the
         // same group-column mechanism as `.endr`'s and every other
         // comment, not a fixed column of its own. A wide line sharing
         // the block's group forces that group past the floor; the
@@ -2012,7 +2012,7 @@ F0: .frame tapes=(0, 1)
 
     #[test]
     fn a_rept_header_alone_widens_its_group() {
-        // I1 (round 2): the header's OWN code width must feed the
+        // The header's OWN code width must feed the
         // group's column even with no other wide member in the group —
         // `comment_columns` samples a piece's LAST line by default,
         // which for a `.rept` piece is always `.endr`; without also
