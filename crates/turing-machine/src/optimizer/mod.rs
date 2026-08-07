@@ -140,8 +140,9 @@ type PassFn = fn(&mut IrWorld) -> u32;
 
 /// Per-world passes, in per-round application order; each pass registers itself
 /// here as it ships. The order carries a load-bearing constraint — `tail-call`
-/// must precede `tail-merge` (return-chaining would otherwise destroy
-/// tail-call's precondition before it can apply).
+/// must precede `tail-merge` (tail-merge's whole-state dedup would otherwise
+/// rewrite the `call … then return` shape tail-call keys on; the inline note
+/// below has the detail).
 const PIPELINE: &[(&str, PassFn)] = &[
     ("jump-threading", jump_threading::run),
     // `tail-call` MUST precede `tail-merge`: tail-merge's whole-state dedup can

@@ -8,10 +8,13 @@
 //! least one tape instruction, `MF == (cell_at_head == 1)` — and this
 //! survives jumps, `ent`, `brk`, and whole `call`s (a callee either
 //! re-establishes it with its own tape ops or disturbs neither MF nor
-//! head). BEFORE any tape instruction executes, MF is the reset value 0,
-//! DECOUPLED from the tape: a `check` on such a path branches on 0, not
-//! on the cell. The lattice therefore tracks coupledness explicitly, and
-//! check-edge refinement applies only on provably coupled paths.
+//! head). BEFORE the current function's first tape instruction the
+//! analysis assumes nothing: entry MF is whatever the caller — or, for
+//! `main`, the tact-free loading latch from the initial cell
+//! (docs/core.md (loading)) — left in it, so no cell value is proven and
+//! no `check` edge refines (docs/pmt/optimizer.md (MF-coupling)). The
+//! lattice therefore tracks coupledness explicitly, and check-edge
+//! refinement applies only on provably coupled paths.
 
 use std::collections::HashMap;
 
@@ -19,8 +22,9 @@ use crate::ir::{IrFunction, IrOp, IrTerm};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fact {
-    /// Some path may reach here with no tape instruction executed yet:
-    /// MF may still be the reset value. No cell knowledge, no folding.
+    /// Some path may reach here with no tape instruction executed yet in
+    /// this function: MF is whatever entry left in it. No cell knowledge,
+    /// no folding.
     Uncoupled,
     /// The coupling invariant holds; the symbol under the head, if known.
     Coupled(Option<u32>),
