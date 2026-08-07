@@ -1626,3 +1626,359 @@ fn tape_set_shape_pipeline_matches_the_documented_example() {
     assert!(block.tapes[1].cells.is_empty()); // N: fresh
     assert_eq!(block.tapes[2].cells, vec![1]); // A: untouched "a"
 }
+
+// --- tape-block set: --from name binding + the shape-edit error matrix ----
+
+/// A minimal two-tape source for the --from name-binding tests: tapes
+/// named `main` and `aux`, in that declaration order, each with a 2-glyph
+/// alphabet so a `--alphabet "0=' ','a'" --alphabet "1=' ','b'"` base block
+/// binds cleanly.
+const TWO_TAPE_TMC: &str = "\
+alphabet mainAlpha { ' ', 'a' }
+alphabet auxAlpha { ' ', 'b' }
+
+machine {
+  tape main: mainAlpha;
+  tape aux:  auxAlpha;
+
+  entry state s { ['a', *] -> stop; }
+}
+";
+
+/// A minimal two-tape source whose first declared tape is named `scratch`
+/// — for the removed-name-reuse test, which needs a real declared name to
+/// remove and then re-key against.
+const SCRATCH_TAPE_TMC: &str = "\
+alphabet scratchAlpha { ' ', 'a' }
+alphabet keepAlpha { ' ', 'b' }
+
+machine {
+  tape scratch: scratchAlpha;
+  tape keep:    keepAlpha;
+
+  entry state s { ['a', *] -> stop; }
+}
+";
+
+/// A minimal one-tape source — paired with `three_band_block` (3 bands) to
+/// drive the count-mismatch guard through each shape-edit phase in turn.
+const ONE_TAPE_TMC: &str = "\
+alphabet mainAlpha { ' ', 'a' }
+
+machine {
+  tape main: mainAlpha;
+
+  entry state s { ['a'] -> stop; }
+}
+";
+
+#[test]
+fn tape_set_from_count_mismatch_is_an_error_not_a_panic() {
+    let dir = scratch("shape_from_mismatch");
+    // One-band block, two-tape source: binding must fail up front.
+    let base = dir.join("one.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "-o",
+        base.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let src = dir.join("two.tmc");
+    fs::write(&src, TWO_TAPE_TMC).unwrap();
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--from",
+        src.to_str().unwrap(),
+        "--cells",
+        "second='a'",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("declares 2 tape(s)"), "{err}");
+    assert!(err.contains("has 1"), "{err}");
+}
+
+#[test]
+fn tape_set_from_count_mismatch_guards_every_shape_edit_phase() {
+    // The confirmed pre-fix panic repro: a 3-band block with a 1-tape
+    // source, driven through the remove, add, and reorder phases in turn.
+    // Before the --from count guard existed, --remove-tape 2 here panicked
+    // in the remove phase (`names.remove`, out of bounds against a
+    // 1-element `names`); this proves the guard closes all three phases,
+    // not just the no-shape-edit case above.
+    let dir = scratch("shape_from_mismatch_shape_edits");
+    let base = three_band_block(&dir);
+    let src = dir.join("one.tmc");
+    fs::write(&src, ONE_TAPE_TMC).unwrap();
+
+    let remove_err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--from",
+        src.to_str().unwrap(),
+        "--remove-tape",
+        "2",
+        "-o",
+        dir.join("remove_out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(remove_err.contains("declares 1 tape(s)"), "{remove_err}");
+    assert!(remove_err.contains("has 3"), "{remove_err}");
+
+    let add_err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--from",
+        src.to_str().unwrap(),
+        "--add-tape",
+        "9=' ','x'",
+        "-o",
+        dir.join("add_out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(add_err.contains("declares 1 tape(s)"), "{add_err}");
+    assert!(add_err.contains("has 3"), "{add_err}");
+
+    let reorder_err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--from",
+        src.to_str().unwrap(),
+        "--reorder",
+        "0,1,2",
+        "-o",
+        dir.join("reorder_out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(reorder_err.contains("declares 1 tape(s)"), "{reorder_err}");
+    assert!(reorder_err.contains("has 3"), "{reorder_err}");
+}
+
+#[test]
+fn tape_set_shape_error_remove_bad_key() {
+    let dir = scratch("shape_error_remove_bad_key");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--remove-tape",
+        "7",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("out of range"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_remove_twice() {
+    let dir = scratch("shape_error_remove_twice");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--remove-tape",
+        "1",
+        "--remove-tape",
+        "1",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("removed twice"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_add_name_key() {
+    let dir = scratch("shape_error_add_name_key");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--add-tape",
+        "main=' ','x'",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("a name names a band, not a gap"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_add_position_oob() {
+    let dir = scratch("shape_error_add_position_oob");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--add-tape",
+        "9=' ','x'",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("position 9 out of range"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_reorder_incomplete() {
+    let dir = scratch("shape_error_reorder_incomplete");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--reorder",
+        "0,1",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("lists 2 tape(s), the block has 3"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_reorder_duplicate() {
+    let dir = scratch("shape_error_reorder_duplicate");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--reorder",
+        "0,0,1",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("listed twice"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_two_reorders() {
+    let dir = scratch("shape_error_two_reorders");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--reorder",
+        "0,1,2",
+        "--reorder",
+        "2,1,0",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("at most one per invocation"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_zero_bands() {
+    let dir = scratch("shape_error_zero_bands");
+    let base = three_band_block(&dir);
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--remove-tape",
+        "0",
+        "--remove-tape",
+        "1",
+        "--remove-tape",
+        "2",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("would have no tapes"), "{err}");
+}
+
+#[test]
+fn tape_set_shape_error_removed_name_reuse() {
+    let dir = scratch("shape_error_removed_name_reuse");
+    let base = dir.join("two.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "--alphabet",
+        "1=' ','b'",
+        "-o",
+        base.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let src = dir.join("scratch.tmc");
+    fs::write(&src, SCRATCH_TAPE_TMC).unwrap();
+    let err = execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--from",
+        src.to_str().unwrap(),
+        "--remove-tape",
+        "scratch",
+        "--cells",
+        "scratch='a'",
+        "-o",
+        dir.join("out.tmt").to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("removed by --remove-tape"), "{err}");
+}
+
+#[test]
+fn tape_set_names_follow_their_bands_through_reorder() {
+    // --from names a two-tape block (main=band 0, aux=band 1), --reorder
+    // swaps the bands, and a --cells edit by NAME lands on the band
+    // wherever it ended up: after `--reorder 1,0`, `main` is at index 1.
+    let dir = scratch("shape_names_ride");
+    let base = dir.join("two.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "--alphabet",
+        "1=' ','b'",
+        "-o",
+        base.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let src = dir.join("two.tmc");
+    fs::write(&src, TWO_TAPE_TMC).unwrap();
+    let out = dir.join("out.tmt");
+    execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--from",
+        src.to_str().unwrap(),
+        "--reorder",
+        "1,0",
+        "--cells",
+        "main='a'",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let block = TapeBlockFile::from_bytes(&fs::read(&out).unwrap()).unwrap();
+    // Band order is now [aux, main]; the by-name edit hit index 1, and
+    // 'a' is index 1 in main's ' ','a' table.
+    assert!(block.tapes[0].cells.is_empty());
+    assert_eq!(block.tapes[1].cells, vec![1]);
+}

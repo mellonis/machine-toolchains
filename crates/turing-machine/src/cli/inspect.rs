@@ -587,7 +587,8 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     let bytes = fs::read(input).map_err(|e| format!("cannot read {input}: {e}"))?;
     let mut block = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{input}: {e}"))?;
 
-    let mut names: Vec<Option<String>> = match from.as_deref() {
+    let from_path = from.as_deref();
+    let mut names: Vec<Option<String>> = match from_path {
         Some(path) => from_source_or_image(path)?
             .1
             .into_iter()
@@ -595,6 +596,22 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
             .collect(),
         None => Vec::new(),
     };
+
+    // `.tmc` sources carry names; a `.tmx` image does not (an image's names
+    // stay empty, which is the legitimate index-only mode every consumer
+    // below already handles). Whenever a source DID supply names, they must
+    // already align one-to-one with the block's bands — `resolve_key`'s
+    // name arm and every `reshape` phase index into `names` on that
+    // assumption, so this is the one place that establishes it before any
+    // of them run (docs/tmt/cli.md (tape-block)).
+    if !names.is_empty() && names.len() != block.tapes.len() {
+        return Err(format!(
+            "--from {}: declares {} tape(s), but {input} has {}",
+            from_path.unwrap_or_default(),
+            names.len(),
+            block.tapes.len()
+        ));
+    }
 
     let mut removed_names: Vec<String> = Vec::new();
     reshape(&mut block, &shape, &mut names, &mut removed_names)?;
