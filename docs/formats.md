@@ -581,7 +581,28 @@ A **dispatch table** is a labeled run of `.targets`/`.target` directives:
 `L1`, and so on), and `.target L` contributes a single target.
 Consecutive directives under the **same label** accrue into one table, so
 a wide dispatch table can be built one entry at a time — the idiom a
-`.rept` uses to emit a value-indexed table.
+`.rept` uses to emit a value-indexed table. That is a *directive*-level
+continuation (several `.targets`/`.target` lines under one label); a
+single directive's own operand list has a separate, *list*-level one,
+described next.
+
+`.targets`, `.exits` (below), and `.map` (below) are the dialect's three
+unbounded lists: a `.targets`/`.exits`/`.map` line ending in a bare
+trailing comma — nothing after it but whitespace, no comment — continues
+that directive's list onto the next physical line, so a wide table can be
+authored (or emitted) across several lines instead of one long one. A
+comma followed by a comment does not continue (only the list's *last*
+physical line may carry a trailing comment); a trailing comma on any
+other directive stays the syntax error it has always been. `tmt fmt` /
+`tmt dis` wrap the other direction — a list whose single-line form would
+cross the 80-column line limit is broken after a comma, with
+continuation lines aligned under the list's first element
+(`docs/tmt/fmt.md`) — and the two meet: a wrapped line always ends in the
+trailing comma the continuation grammar reads back into one logical
+directive, so reformatting a wide table is idempotent. Every other
+list-shaped operand — a `.row`/`wr`/`mov`/`wrmv` vector, a `.frame
+tapes=(…)` list — is bounded by the tape count (`1..=16`) and never
+continues or wraps; only the three lists above can grow past one line.
 
 Match tables carry a **row discipline** the assembler checks, reporting a
 violation as a fatal error under the code `table-discipline`. The rules
@@ -648,6 +669,16 @@ Fh: .frame  tapes=(2, 0)                 ; arity = list length; virtual k → ph
 - `.exits <label>, …` (at most once) lists the exit vector — the
   caller-side labels `retx #k` returns to, in the function that names the
   frame via `call.m`.
+
+`.map`'s wrapping is coarser than `.targets`/`.exits`: the break falls
+**between** a group's `.map` clauses (`<k>`, `rmap=(…)`, `wmap=(…)`), not
+inside a clause's own `->`/`=>` pair list. Unlike a tape-count-bounded
+list, a single `rmap=(…)` or `wmap=(…)` clause scales with its tape's
+alphabet cardinality (up to 127 compact symbols) rather than with the
+tape count — so a clause wider than the line limit on its own is an
+unsplittable atom and still prints as one over-80 line; wrapping gets the
+group under budget only when the width comes from having many clauses,
+not from one very wide one.
 
 **Arrows.** `->` is an ordinary map entry; `=>` marks the pair **one-way**
 — read-direction only. `=>` is legal in `rmap` (the read side) and
@@ -750,6 +781,16 @@ call mechanism stays a link-time decision independent of the source.
   the write vector then the move vector in one instruction (all writes
   precede all moves). It is the `-O0` codegen canon for a rule's action;
   no earlier program changes meaning.
+
+0.3 also gained the trailing-comma list continuation on `.targets`,
+`.exits`, and `.map` ("Match and dispatch tables" and "Frame
+descriptors" above) without becoming 0.4, even though the stated
+acceptance contract is that `N` bumps on *any* grammar change: no
+released build has ever fixed 0.3 as a contract to preserve, so there is
+nothing yet for an additive grammar surface to break. The version stays
+free to absorb changes like this one until a release actually ships it —
+at that point 0.3 becomes a real acceptance floor and the next grammar
+change bumps to 0.4 in the ordinary way.
 
 ## `.pmx.map` / `.tmx.map` — link-time sidecar
 

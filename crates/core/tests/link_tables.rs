@@ -1285,10 +1285,13 @@ fn hybrid_opts() -> LinkOptions {
 }
 
 /// True when `name` ends in a stamp's `.<digest8>` suffix: a period
-/// followed by exactly 8 lowercase hex digits. A plain `.contains('.')`
-/// would also catch an ordinary dotted routine name (the optimizer's
-/// `outline` pass mints `<name>.outline<N>`, for instance), so the check
-/// matches the digest's exact shape rather than merely the separator.
+/// followed by exactly 8 hex digits (`is_ascii_hexdigit`, so either case
+/// matches — a minted stamp is always lowercase since `intern` formats
+/// the digest via `{:08x}`, but the check itself doesn't require that). A
+/// plain `.contains('.')` would also catch an ordinary dotted routine name
+/// (the optimizer's `outline` pass mints `<name>.outline<N>`, for
+/// instance), so the check matches the digest's exact shape rather than
+/// merely the separator.
 fn is_stamp_name(name: &str) -> bool {
     match name.rsplit_once('.') {
         Some((_, tail)) => tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_hexdigit()),

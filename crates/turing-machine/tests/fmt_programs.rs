@@ -185,7 +185,7 @@ fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
             .object;
 
             // Object disassembly: no executable-only naming/signature
-            // surface, so no exception applies here.
+            // surface to exercise (that's the executable half, below).
             let obj_dis = disassemble_object(&obj);
             assert_eq!(
                 fmt_tma(&obj_dis),

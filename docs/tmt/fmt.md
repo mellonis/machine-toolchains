@@ -335,12 +335,18 @@ F0:     .frame  tapes=(1, 0)
 ```
 
 The grid is whitespace-only and idempotent on the same terms as the
-`.tmc` printer. Rewrapping an overlong line is not part of it, so a line
-already over 80 characters stays that way after formatting. Alignment can
-also *create* an overlong line that was not one before: a trailing
-comment's column is not fixed — it aligns per group at whichever is
-wider, 32 or one past the group's widest code (`docs/formats.md`,
-"assembly text") — so a short line sharing a group with a much wider one
-can have its comment pushed well past column 80 by the alignment alone.
-Either way, `line-too-long` reports the result after formatting; the grid
-is never capped by the line limit to keep a group's column from moving.
+`.tmc` printer. Rewrapping an overlong line is not part of it for most
+lines — an ordinary instruction, or an over-80 `.frame`/`.routine` line,
+stays that way after formatting. The three unbounded lists are the
+exception: `.targets`, `.exits`, and `.map`, whose single-line form
+crossing the 80-column limit wraps onto further physical lines instead,
+breaking after a comma with continuation lines aligned under the list's
+first element (`docs/formats.md`, "match and dispatch tables" and "frame
+descriptors"). Alignment can also *create* an overlong line that was not
+one before: a trailing comment's column is not fixed — it aligns per
+group at whichever is wider, 32 or one past the group's widest code
+(`docs/formats.md`, "assembly text") — so a short line sharing a group
+with a much wider one can have its comment pushed well past column 80 by
+the alignment alone. Either way, `line-too-long` reports the result after
+formatting; the grid is never capped by the line limit to keep a group's
+column from moving.

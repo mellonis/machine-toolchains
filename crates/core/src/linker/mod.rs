@@ -99,7 +99,9 @@ pub enum LinkError {
     /// Carries the colliding name. Astronomically unlikely in practice: it
     /// needs either a hand-written routine that happens to spell exactly
     /// `<routine>.<digest8>`, or two distinct composites whose 32-bit
-    /// digests collide.
+    /// digests collide. `frames` is always a valid escape, the same as the
+    /// two mono refusals above — it mints no stamp names, so it cannot
+    /// collide.
     StampNameCollision(String),
 }
 
@@ -156,7 +158,7 @@ impl std::fmt::Display for LinkError {
                 f,
                 "a mono-stamped routine copy would be named `{name}`, which \
                  already names another routine or an earlier stamp in this \
-                 link"
+                 link; build with --call-mech=frames"
             ),
         }
     }
