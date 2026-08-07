@@ -1470,3 +1470,159 @@ fn run_rejects_a_block_whose_cardinality_disagrees_with_the_image() {
     assert!(err.contains("2 glyph(s)"), "got: {err}");
     assert!(err.contains("expects 5"), "got: {err}");
 }
+
+// --- tape-block set: shape edits (add/remove/reorder bands) ----------------
+
+/// A 3-band block with distinct alphabets/cardinalities: band 0 = ' ','a'
+/// (2 glyphs), band 1 = ' ','b','c' (3), band 2 = ' ','d' (2). Cells mark
+/// each band so identity survives reordering: band0 "a", band1 "bc",
+/// band2 "dd".
+fn three_band_block(dir: &Path) -> PathBuf {
+    let path = dir.join("base.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "--alphabet",
+        "1=' ','b','c'",
+        "--alphabet",
+        "2=' ','d'",
+        "--cells",
+        "0='a'",
+        "--cells",
+        "1='b','c'",
+        "--cells",
+        "2='d','d'",
+        "-o",
+        path.to_str().unwrap(),
+    ]))
+    .unwrap();
+    path
+}
+
+#[test]
+fn tape_set_add_tape_appends_and_inserts() {
+    let dir = scratch("shape_add");
+    let base = three_band_block(&dir);
+    let out = dir.join("out.tmt");
+    // Append: new band 3, alphabet ' ','x', empty cells, head 0, origin 0.
+    execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--add-tape",
+        "' ','x'",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let block = TapeBlockFile::from_bytes(&fs::read(&out).unwrap()).unwrap();
+    assert_eq!(block.tapes.len(), 4);
+    let added = &block.tapes[3];
+    assert_eq!(
+        added.alphabet.as_deref(),
+        Some(&[" ".to_string(), "x".to_string()][..])
+    );
+    assert!(added.cells.is_empty());
+    assert_eq!((added.head, added.origin), (0, 0));
+    // Insert at 0: the marked band 0 ("a") shifts to index 1.
+    execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--add-tape",
+        "0=' ','x'",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let block = TapeBlockFile::from_bytes(&fs::read(&out).unwrap()).unwrap();
+    assert_eq!(block.tapes.len(), 4);
+    assert!(block.tapes[0].cells.is_empty());
+    assert_eq!(block.tapes[1].cells, vec![1]); // 'a' = index 1 in its table
+}
+
+#[test]
+fn tape_set_remove_tape_drops_the_input_band() {
+    let dir = scratch("shape_remove");
+    let base = three_band_block(&dir);
+    let out = dir.join("out.tmt");
+    execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--remove-tape",
+        "1",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let block = TapeBlockFile::from_bytes(&fs::read(&out).unwrap()).unwrap();
+    assert_eq!(block.tapes.len(), 2);
+    // Band 1 (the 3-glyph "bc" band) is gone; 0 and 2 survive in order.
+    assert_eq!(block.tapes[0].cells, vec![1]);
+    assert_eq!(block.tapes[1].cells, vec![1, 1]);
+}
+
+#[test]
+fn tape_set_reorder_permutes_bands_with_their_payloads() {
+    let dir = scratch("shape_reorder");
+    let base = three_band_block(&dir);
+    let out = dir.join("out.tmt");
+    execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--reorder",
+        "2,0,1",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let block = TapeBlockFile::from_bytes(&fs::read(&out).unwrap()).unwrap();
+    let cards: Vec<usize> = block
+        .tapes
+        .iter()
+        .map(|t| {
+            t.alphabet
+                .as_deref()
+                .map_or(block.alphabet.len(), <[String]>::len)
+        })
+        .collect();
+    assert_eq!(cards, vec![2, 2, 3]); // was [2, 3, 2]
+    assert_eq!(block.tapes[2].cells, vec![1, 2]); // "bc" band ended at 2
+}
+
+#[test]
+fn tape_set_shape_pipeline_matches_the_documented_example() {
+    // The docs/tmt/cli.md worked example: remove 1, add at 0, reorder 2,0,1,
+    // then --cells addresses the FINAL shape. Derived expectation built
+    // band-by-band, then byte-compared.
+    let dir = scratch("shape_pipeline");
+    let base = three_band_block(&dir);
+    let out = dir.join("out.tmt");
+    execute(&args(&[
+        "tape-block",
+        "set",
+        base.to_str().unwrap(),
+        "--remove-tape",
+        "1",
+        "--add-tape",
+        "0=' ','x'",
+        "--reorder",
+        "2,0,1",
+        "--cells",
+        "0='d'",
+        "-o",
+        out.to_str().unwrap(),
+    ]))
+    .unwrap();
+    // input [A B C] -> remove 1 -> [A C] -> add at 0 -> [N A C]
+    // -> reorder 2,0,1 -> [C N A] -> cells 0 edits C.
+    let block = TapeBlockFile::from_bytes(&fs::read(&out).unwrap()).unwrap();
+    assert_eq!(block.tapes.len(), 3);
+    assert_eq!(block.tapes[0].cells, vec![1]); // C: now 'd' (was "dd")
+    assert!(block.tapes[1].cells.is_empty()); // N: fresh
+    assert_eq!(block.tapes[2].cells, vec![1]); // A: untouched "a"
+}

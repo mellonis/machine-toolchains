@@ -105,8 +105,15 @@ fn load_map(exe_path: &Path, explicit: Option<String>) -> Result<Option<MapFile>
 const TAPE_USAGE: &str = "\
 USAGE: tmt tape-block new [--from APP.tmx | --from APP.tmc] [-o OUT.tmt] [EDITS]
        tmt tape-block set IN.tmt (-o OUT.tmt | --in-place)
-                    [--from APP.tmc] [EDITS]
+                    [--from APP.tmc] [SHAPE] [EDITS]
        tmt tape-block show FILE.tmt [--dense | --separated]
+
+SHAPE (set only; applied remove -> add -> reorder, before EDITS; flag
+order never matters — remove keys name the INPUT block, add positions
+count after removals, --reorder and EDITS address the result):
+  --add-tape [KEY=]ALPHABET   insert a band at position KEY, or append
+  --remove-tape KEY           drop a band
+  --reorder K1,K2,...         permute bands (every band exactly once)
 
 EDITS (repeatable; KEY is a tape index, or a tape name with --from a .tmc):
   --alphabet KEY=GLYPHS   repin tape KEY's glyphs (relabels; same cardinality)
@@ -135,12 +142,87 @@ pub(super) fn collect_edits(args: &mut Args) -> Result<Edits, String> {
     })
 }
 
-/// Resolve a tape key to its band index. A key is an index, or — when `names`
-/// is non-empty, i.e. a `.tmc` source supplied them — a declared tape name
+/// The shape edits one `set` invocation carries. Phase order is fixed —
+/// removals (keys name INPUT bands), then adds in flag order, then the
+/// permutation; the content `Edits` address the result. Flag position on
+/// the command line never matters (docs/tmt/cli.md (tape-block)).
+pub(super) struct ShapeEdits {
+    pub removes: Vec<String>,
+    pub adds: Vec<(Option<usize>, Vec<String>)>,
+    pub reorder: Option<Vec<String>>,
+}
+
+pub(super) fn collect_shape_edits(args: &mut Args) -> Result<ShapeEdits, String> {
+    let removes = args.values("--remove-tape")?;
+    let adds = args
+        .values("--add-tape")?
+        .iter()
+        .map(|text| parse_add(text))
+        .collect::<Result<Vec<_>, String>>()?;
+    let reorders = args.values("--reorder")?;
+    if reorders.len() > 1 {
+        return Err(
+            "--reorder: at most one per invocation — two permutations have no \
+             composition order a reader can see"
+                .to_string(),
+        );
+    }
+    let reorder = reorders
+        .into_iter()
+        .next()
+        .map(|text| text.split(',').map(|k| k.trim().to_string()).collect());
+    Ok(ShapeEdits {
+        removes,
+        adds,
+        reorder,
+    })
+}
+
+/// `--add-tape [KEY=]ALPHABET`. Keyed iff the text before the first `=` is
+/// all digits — a glyph list may itself contain `=` (`'='`), so the split
+/// is by prefix shape, not by `=` presence. A tape NAME in the key slot is
+/// a dedicated error: a name names a band, not a gap.
+fn parse_add(text: &str) -> Result<(Option<usize>, Vec<String>), String> {
+    if let Some((prefix, rest)) = text.split_once('=') {
+        if !prefix.is_empty() && prefix.bytes().all(|b| b.is_ascii_digit()) {
+            let pos: usize = prefix
+                .parse()
+                .map_err(|_| format!("--add-tape `{text}`: bad position `{prefix}`"))?;
+            let glyphs = parse_glyph_list(rest).map_err(|e| format!("--add-tape `{text}`: {e}"))?;
+            return Ok((Some(pos), glyphs));
+        }
+        if !prefix.is_empty()
+            && prefix.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && !prefix.starts_with(|c: char| c.is_ascii_digit())
+        {
+            return Err(format!(
+                "--add-tape `{prefix}`: a name names a band, not a gap — \
+                 insert positions are numeric"
+            ));
+        }
+    }
+    let glyphs = parse_glyph_list(text).map_err(|e| format!("--add-tape `{text}`: {e}"))?;
+    Ok((None, glyphs))
+}
+
+/// Resolve a tape key to its band index. A key is an index, or — when
+/// `names` is non-empty, i.e. a `.tmc` source supplied them — a declared
+/// tape name. A name whose band was dropped earlier in this invocation
+/// gets a dedicated error instead of "no such tape"
 /// (docs/tmt/cli.md (tape-block)).
-fn resolve_key(key: &str, names: &[String], tape_count: usize) -> Result<usize, String> {
-    if let Some(i) = names.iter().position(|n| n == key) {
+fn resolve_key(
+    key: &str,
+    names: &[Option<String>],
+    removed: &[String],
+    tape_count: usize,
+) -> Result<usize, String> {
+    if let Some(i) = names.iter().position(|n| n.as_deref() == Some(key)) {
         return Ok(i);
+    }
+    if removed.iter().any(|n| n == key) {
+        return Err(format!(
+            "tape `{key}` was removed by --remove-tape in this invocation"
+        ));
     }
     let Ok(index) = key.parse::<usize>() else {
         return if names.is_empty() {
@@ -148,9 +230,10 @@ fn resolve_key(key: &str, names: &[String], tape_count: usize) -> Result<usize, 
                 "tape key `{key}`: expected an index — tape names need `--from` a .tmc source"
             ))
         } else {
+            let declared: Vec<&str> = names.iter().flatten().map(String::as_str).collect();
             Err(format!(
                 "tape key `{key}`: no such tape (declared: {})",
-                names.join(", ")
+                declared.join(", ")
             ))
         };
     };
@@ -172,13 +255,14 @@ fn resolve_key(key: &str, names: &[String], tape_count: usize) -> Result<usize, 
 pub(super) fn apply_edits(
     block: &mut TapeBlockFile,
     edits: &Edits,
-    names: &[String],
+    names: &[Option<String>],
+    removed: &[String],
     pm_block_alphabet: bool,
 ) -> Result<(), String> {
     let tape_count = block.tapes.len();
 
     for (key, text) in &edits.alphabets {
-        let index = resolve_key(key, names, tape_count)?;
+        let index = resolve_key(key, names, removed, tape_count)?;
         let glyphs = parse_glyph_list(text).map_err(|e| format!("--alphabet `{key}`: {e}"))?;
         // A repin relabels; it never resizes. Measured against the TAPE's
         // effective width, which on a multi-band block differs from the block
@@ -204,7 +288,7 @@ pub(super) fn apply_edits(
     }
 
     for (key, text) in &edits.cells {
-        let index = resolve_key(key, names, tape_count)?;
+        let index = resolve_key(key, names, removed, tape_count)?;
         let effective: Vec<String> = block.tapes[index]
             .alphabet
             .clone()
@@ -230,19 +314,109 @@ pub(super) fn apply_edits(
     }
 
     for (key, text) in &edits.heads {
-        let index = resolve_key(key, names, tape_count)?;
+        let index = resolve_key(key, names, removed, tape_count)?;
         block.tapes[index].head = text
             .parse()
             .map_err(|_| format!("--head `{key}`: bad value `{text}`"))?;
     }
 
     for (key, text) in &edits.origins {
-        let index = resolve_key(key, names, tape_count)?;
+        let index = resolve_key(key, names, removed, tape_count)?;
         block.tapes[index].origin = text
             .parse()
             .map_err(|_| format!("--origin `{key}`: bad value `{text}`"))?;
     }
 
+    Ok(())
+}
+
+/// Apply the shape phases, keeping `names` aligned with the bands: a
+/// removed band's name is dropped and remembered in `removed_names`, an
+/// added band is unnamed, reorder moves names with their bands
+/// (docs/tmt/cli.md (tape-block)).
+fn reshape(
+    block: &mut TapeBlockFile,
+    shape: &ShapeEdits,
+    names: &mut Vec<Option<String>>,
+    removed_names: &mut Vec<String>,
+) -> Result<(), String> {
+    // Phase 1: removals — every key resolves against the INPUT block.
+    let mut drop: Vec<usize> = Vec::new();
+    for key in &shape.removes {
+        let index = resolve_key(key, names, &[], block.tapes.len())
+            .map_err(|e| format!("--remove-tape: {e}"))?;
+        if drop.contains(&index) {
+            return Err(format!("--remove-tape `{key}`: tape {index} removed twice"));
+        }
+        drop.push(index);
+    }
+    drop.sort_unstable();
+    for &index in drop.iter().rev() {
+        block.tapes.remove(index);
+        if !names.is_empty() {
+            if let Some(name) = names.remove(index) {
+                removed_names.push(name);
+            }
+        }
+    }
+
+    // Phase 2: adds, in flag order; positions are in the block as the
+    // previous phases left it.
+    for (pos, glyphs) in &shape.adds {
+        let at = pos.unwrap_or(block.tapes.len());
+        if at > block.tapes.len() {
+            return Err(format!(
+                "--add-tape: position {at} out of range (block has {} tape(s) at this point)",
+                block.tapes.len()
+            ));
+        }
+        block.tapes.insert(
+            at,
+            TapeSnapshot {
+                origin: 0,
+                cells: Vec::new(),
+                head: 0,
+                alphabet: Some(glyphs.clone()),
+            },
+        );
+        if !names.is_empty() {
+            names.insert(at, None);
+        }
+    }
+
+    // Phase 3: the permutation — complete, over the post-add block.
+    if let Some(order) = &shape.reorder {
+        let count = block.tapes.len();
+        if order.len() != count {
+            return Err(format!(
+                "--reorder lists {} tape(s), the block has {count}",
+                order.len()
+            ));
+        }
+        let mut seen = vec![false; count];
+        let mut new_tapes = Vec::with_capacity(count);
+        let mut new_names = Vec::with_capacity(count);
+        for key in order {
+            let index = resolve_key(key, names, removed_names, count)
+                .map_err(|e| format!("--reorder: {e}"))?;
+            if seen[index] {
+                return Err(format!("--reorder `{key}`: tape {index} listed twice"));
+            }
+            seen[index] = true;
+            new_tapes.push(block.tapes[index].clone());
+            if !names.is_empty() {
+                new_names.push(names[index].clone());
+            }
+        }
+        block.tapes = new_tapes;
+        if !names.is_empty() {
+            *names = new_names;
+        }
+    }
+
+    if block.tapes.is_empty() {
+        return Err("tape-block would have no tapes".to_string());
+    }
     Ok(())
 }
 
@@ -361,7 +535,8 @@ fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
             .collect(),
     };
 
-    apply_edits(&mut block, &edits, &names, false)?;
+    let names: Vec<Option<String>> = names.into_iter().map(Some).collect();
+    apply_edits(&mut block, &edits, &names, &[], false)?;
 
     let bytes = block.to_bytes().map_err(|e| format!("{out}: {e}"))?;
     fs::write(&out, bytes).map_err(|e| format!("cannot write {out}: {e}"))?;
@@ -369,19 +544,21 @@ fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
 }
 
 /// `tmt tape-block set IN.tmt (-o OUT.tmt | --in-place) [--from APP.tmc]
-/// [EDITS]` — clone semantics: read `IN.tmt`, apply this invocation's edits,
-/// and write the result out. The source is never mutated; the output goes to
-/// `-o` or, with `--in-place`, back over the input. Any subset of edits may
-/// be given; none is a plain copy.
+/// [SHAPE] [EDITS]` — clone semantics: read `IN.tmt`, apply this
+/// invocation's shape edits then its content edits, and write the result
+/// out. The source is never mutated; the output goes to `-o` or, with
+/// `--in-place`, back over the input. Any subset of edits may be given;
+/// none is a plain copy.
 ///
-/// `--from APP.tmc` supplies tape NAMES only, so an edit may be keyed by name
-/// instead of index; it never reshapes the block
-/// (docs/tmt/cli.md (tape-block)).
+/// `--from APP.tmc` supplies tape NAMES; a SHAPE edit that drops or adds a
+/// band keeps `names` aligned so a later EDITS key can still resolve by
+/// name (docs/tmt/cli.md (tape-block)).
 fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     let out = args.value("-o")?;
     let in_place = args.flag("--in-place");
     let from = args.value("--from")?;
+    let shape = collect_shape_edits(&mut args)?;
     let edits = collect_edits(&mut args)?;
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
@@ -410,12 +587,18 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     let bytes = fs::read(input).map_err(|e| format!("cannot read {input}: {e}"))?;
     let mut block = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{input}: {e}"))?;
 
-    let names: Vec<String> = match from.as_deref() {
-        Some(path) => from_source_or_image(path)?.1,
+    let mut names: Vec<Option<String>> = match from.as_deref() {
+        Some(path) => from_source_or_image(path)?
+            .1
+            .into_iter()
+            .map(Some)
+            .collect(),
         None => Vec::new(),
     };
 
-    apply_edits(&mut block, &edits, &names, false)?;
+    let mut removed_names: Vec<String> = Vec::new();
+    reshape(&mut block, &shape, &mut names, &mut removed_names)?;
+    apply_edits(&mut block, &edits, &names, &removed_names, false)?;
 
     let bytes = block.to_bytes().map_err(|e| format!("{dest}: {e}"))?;
     fs::write(&dest, bytes).map_err(|e| format!("cannot write {dest}: {e}"))?;
