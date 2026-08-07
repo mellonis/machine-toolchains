@@ -76,7 +76,14 @@ writes `<output base>.ir.json` — see
 flag: a stage label captured in several optimizer rounds (e.g.
 `after:inline`) resolves to the last captured snapshot, while the
 `--emit-ir` flag itself may appear only once per command line —
-repeating it is an unknown-flag error.
+repeating it is an unknown-flag error. A pass that never changed
+anything captured no snapshot at all, so `--emit-ir=after:<pass>` for it
+is an error rather than a silent fall-back.
+
+The pass names `--fno-<pass>` and `--emit-ir=after:<pass>` accept, what
+each pass does, and the contracts the whole pipeline holds to are
+`docs/pmt/optimizer.md (passes)`; that page also works each pass through
+a before/after IR example built with these two flags.
 
 ### Compile errors
 
@@ -448,6 +455,11 @@ leftmost character is cell 0. GLYPHS is alphabet notation: ' ','*'.
 Four subcommands author and inspect `.pmt` tape-block snapshots without
 hand-editing bytes. The unit is the **block**; PM-1 is a one-tape-device
 architecture, so a PM block holds a single band and a single alphabet.
+
+Because PM-1 is single-tape, `pmt tape-block set` has no shape edits —
+there is only ever one band to add, remove, or reorder; reshaping
+multi-band blocks lives in `tmt tape-block set` (`docs/tmt/cli.md (tmt
+tape-block)`).
 
 ### Edit flags
 

@@ -41,5 +41,7 @@
                 factoryClass="ru.mellonis.tmc.TmtLanguageServerFactory"/>
         <fileTypeMapping fileType="TMC" serverId="tmtLsp" languageId="tmc"/>
         <fileTypeMapping fileType="TMA" serverId="tmtLsp" languageId="tma"/>
+        <semanticTokensColorsProvider serverId="tmtLsp"
+                class="ru.mellonis.tmc.TmtSemanticTokensColorsProvider"/>
     </extensions>
 </idea-plugin>

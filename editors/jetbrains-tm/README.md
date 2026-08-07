@@ -263,6 +263,8 @@ machine {
       grammar alone can give — state names and call targets should read
       distinctly from bare identifiers, which a regex grammar cannot
       resolve.
+- [ ] **Semantic colors**: in a `.tmc` file, state and routine names render
+      colored (not underline-only) under both light and dark themes.
 - [ ] **Structure view**: open the Structure tool window. Confirm it lists
       `marks`, `markSpot`, `unusedHelper`, and `machine`.
 - [ ] **Settings-driven allow-list, live**: put `leftover-debugger` in the

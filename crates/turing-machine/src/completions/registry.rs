@@ -549,6 +549,17 @@ fn tape_set_spec() -> CommandSpec {
                 ".tmc source supplying tape names for the edit keys",
                 ValueHint::File(ext(&["tmc"])),
             ),
+            FlagSpec::value(
+                "--add-tape",
+                "insert a band at position KEY, or append ([KEY=]ALPHABET)",
+                ValueHint::Text,
+            ),
+            FlagSpec::value("--remove-tape", "drop a band (KEY)", ValueHint::Text),
+            FlagSpec::value(
+                "--reorder",
+                "permute bands into the given order (K1,K2,...)",
+                ValueHint::Text,
+            ),
         ]
         .into_iter()
         .chain(edit_flags())

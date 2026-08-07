@@ -43,5 +43,7 @@
                 factoryClass="ru.mellonis.pmc.PmtLanguageServerFactory"/>
         <fileTypeMapping fileType="PMC" serverId="pmtLsp" languageId="pmc"/>
         <fileTypeMapping fileType="PMA" serverId="pmtLsp" languageId="pma"/>
+        <semanticTokensColorsProvider serverId="pmtLsp"
+                class="ru.mellonis.pmc.PmtSemanticTokensColorsProvider"/>
     </extensions>
 </idea-plugin>
