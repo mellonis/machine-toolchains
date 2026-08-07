@@ -44,12 +44,14 @@ PM-1's tape is the two-symbol case of the core's device model:
 mark/unmark concept, only `wr` and the MF latch it triggers.
 
 The default device is `InfiniteTape` — unbounded in both directions,
-paged sparse storage. `pmt run --strict-cells` (and `pmt compile
---strict-cells`) instead wraps the tape in `StrictTape`, making it a
-fault to mark an already-marked cell or unmark an already-blank one.
-Default semantics are idempotent, which is what the cell-state optimizer
-pass depends on (`docs/pmt/language.md (optimization)`), so the strict
-flag disables that pass in the same breath.
+paged sparse storage. `pmt run --strict-cells` instead wraps the tape in
+`StrictTape`, making it a fault to mark an already-marked cell or unmark
+an already-blank one. Default semantics are idempotent, and removing
+writes that are idempotent is exactly the cell-state optimizer pass's
+job, so the two interact: a `-O1` build can stop where the same program
+at `-O0` faults, because the pass removed the re-mark the strict device
+would have refused. Build with `--fno-cell-state` when strict-cell
+faults are the point (`docs/pmt/optimizer.md (cell-state)`).
 
 ### Loading
 

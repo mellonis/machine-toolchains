@@ -304,9 +304,10 @@ has its lineage).
 
 `pmt compile` accepts `-O0` (default, no optimization) or `-O1` (the full
 pass pipeline: check-fold, jump-threading, cell-state, branch-fold,
-tail-call, tail-merge, dce, plus the program-level inline pass — see
-`docs/pmt/isa.md` for none of these; they are compiler internals with no ISA
-surface). Individual passes can be turned off with `--fno-<pass>` (e.g.
+tail-call, tail-merge, dce, fuse-tape-ops, plus the program-level inline
+pass — see `docs/pmt/isa.md` for none of these; they are compiler internals
+with no ISA surface, and `docs/pmt/optimizer.md (passes)` is their
+reference). Individual passes can be turned off with `--fno-<pass>` (e.g.
 `--fno-inline`), repeatable.
 
 **The observable-equivalence guarantee:** whatever `-O1` does, a program's
