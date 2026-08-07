@@ -226,6 +226,10 @@ CFG right after that pass last changed something, and render both with
 which passes fired and how often, which is how one can tell that a
 fragment shows what it claims to show.
 
+Every mermaid-fenced block on this page is the verbatim output of the
+`pmt ir graph` command shown immediately above it, fenced as mermaid so
+it renders as the diagram it describes rather than as text.
+
 An `after:<pass>` snapshot exists only if the pass actually changed
 something. Asking for one that never fired is an error, not a silent
 fall-back to the final CFG:
@@ -287,11 +291,20 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo inline.pmc
 opt: 2 round(s)
   inline (module): 1 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["call @step<br/>wr 1<br/>ret"]
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:inline -o inlined.pmo inline.pmc
 $ pmt ir graph inlined.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["(empty)"]
@@ -347,14 +360,23 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo check-fold.pmc
 opt: 2 round(s)
   check-fold main: 1 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["rgt"]
     B1["5:<br/>wr 1<br/>ret"]
     B0 -->|MF| B1
     B0 -->|!MF| B1
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:check-fold -o folded.pmo check-fold.pmc
 $ pmt ir graph folded.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["rgt"]
@@ -405,6 +427,9 @@ opt: 2 round(s)
   jump-threading main: 2 change(s)
   dce main: 2 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["rgt"]
@@ -416,8 +441,14 @@ flowchart TD
     B0 -->|!MF| B2
     B1 -->|goto| B3
     B2 -->|goto| B4
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:jump-threading -o threaded.pmo jump-threading.pmc
 $ pmt ir graph threaded.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["rgt"]
@@ -438,6 +469,9 @@ passes. By the end of the round `dce` has removed them:
 ```
 $ pmt compile -O1 --emit-ir=final -o final.pmo jump-threading.pmc
 $ pmt ir graph final.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["rgt"]
@@ -501,11 +535,20 @@ opt: 2 round(s)
   cell-state main: 2 change(s)
   fuse-tape-ops main: 1 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["wr 1<br/>wr 1<br/>rgt<br/>wr 1<br/>wr 0<br/>ret"]
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:cell-state -o cells.pmo cell-state.pmc
 $ pmt ir graph cells.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["wr 1<br/>rgt<br/>wr 0<br/>ret"]
@@ -548,6 +591,9 @@ opt: 2 round(s)
   branch-fold main: 1 change(s)
   dce main: 1 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["wr 1"]
@@ -555,16 +601,28 @@ flowchart TD
     B2["2:<br/>rgt<br/>ret"]
     B0 -->|MF| B1
     B0 -->|!MF| B2
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:branch-fold -o branched.pmo branch-fold.pmc
 $ pmt ir graph branched.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["wr 1"]
     B1["1:<br/>wr 0<br/>ret"]
     B2["2:<br/>rgt<br/>ret"]
     B0 -->|goto| B1
+```
+
+```
 $ pmt compile -O1 --emit-ir=final -o final.pmo branch-fold.pmc
 $ pmt ir graph final.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["wr 1"]
@@ -613,11 +671,20 @@ $ pmt compile -O1 -v --fno-inline --emit-ir=lowered -o lowered.pmo tail-call.pmc
 opt: 2 round(s)
   tail-call outer: 1 change(s)
 $ pmt ir graph lowered.ir.json --function outer
+```
+
+```mermaid
 %% outer
 flowchart TD
     B0["rgt<br/>call @inner<br/>ret"]
+```
+
+```
 $ pmt compile -O1 --fno-inline --emit-ir=after:tail-call -o tailed.pmo tail-call.pmc
 $ pmt ir graph tailed.ir.json --function outer
+```
+
+```mermaid
 %% outer
 flowchart TD
     B0["rgt<br/>jmp @inner"]
@@ -629,6 +696,9 @@ too, and stays a call:
 
 ```
 $ pmt ir graph tailed.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["call @outer<br/>ret"]
@@ -664,6 +734,9 @@ opt: 3 round(s)
   fuse-tape-ops main: 1 change(s)
   check-fold main: 1 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["1:"]
@@ -671,8 +744,14 @@ flowchart TD
     B2["3:<br/>wr 1<br/>rgt<br/>ret"]
     B0 -->|MF| B1
     B0 -->|!MF| B2
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:tail-merge -o merged.pmo tail-merge.pmc
 $ pmt ir graph merged.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["1:"]
@@ -688,6 +767,9 @@ by which point `fuse-tape-ops` has also fused the write and the move.
 ```
 $ pmt compile -O1 --emit-ir=final -o final.pmo tail-merge.pmc
 $ pmt ir graph final.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["1:"]
@@ -712,6 +794,9 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo return-chain.pmc
 opt: 2 round(s)
   tail-merge main: 1 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["1:"]
@@ -719,8 +804,14 @@ flowchart TD
     B2["ret"]
     B0 -->|MF| B2
     B0 -->|!MF| B1
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:tail-merge -o chained.pmo return-chain.pmc
 $ pmt ir graph chained.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["1:"]
@@ -770,6 +861,9 @@ dce.pmc:3:5: warning: unreachable code in `main`
 opt: 2 round(s)
   dce main: 1 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["(empty)"]
@@ -777,9 +871,15 @@ flowchart TD
     B2["1:<br/>lft<br/>ret"]
     B0 -->|goto| B2
     B1 --> B2
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:dce -o alive.pmo dce.pmc
 dce.pmc:3:5: warning: unreachable code in `main`
 $ pmt ir graph alive.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["(empty)"]
@@ -836,11 +936,20 @@ $ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo fuse-tape-ops.pmc
 opt: 2 round(s)
   fuse-tape-ops main: 2 change(s)
 $ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["wr 1<br/>rgt<br/>wr 0<br/>lft<br/>ret"]
+```
+
+```
 $ pmt compile -O1 --emit-ir=after:fuse-tape-ops -o fused.pmo fuse-tape-ops.pmc
 $ pmt ir graph fused.ir.json --function main
+```
+
+```mermaid
 %% main
 flowchart TD
     B0["wrr 1<br/>wrl 0<br/>ret"]
