@@ -76,7 +76,14 @@ writes `<output base>.ir.json` — see
 flag: a stage label captured in several optimizer rounds (e.g.
 `after:inline`) resolves to the last captured snapshot, while the
 `--emit-ir` flag itself may appear only once per command line —
-repeating it is an unknown-flag error.
+repeating it is an unknown-flag error. A pass that never changed
+anything captured no snapshot at all, so `--emit-ir=after:<pass>` for it
+is an error rather than a silent fall-back.
+
+The pass names `--fno-<pass>` and `--emit-ir=after:<pass>` accept, what
+each pass does, and the contracts the whole pipeline holds to are
+`docs/pmt/optimizer.md (passes)`; that page also works each pass through
+a before/after IR example built with these two flags.
 
 ### Compile errors
 
