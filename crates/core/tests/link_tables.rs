@@ -1342,6 +1342,53 @@ fn a_mono_bound_call_stamps_a_base_profile_copy() {
     );
 }
 
+/// `sub`'s only caller is the projecting bound call above, and mono
+/// retargets that site to the stamp — nothing calls the generic `sub`
+/// anymore. The reachability promise (docs/core.md (linking)) applies after
+/// stamping exactly as it does before it, so the generic must not ship.
+/// Checks the exact name (not a prefix — `sub.<digest8>` the stamp itself
+/// starts with `sub.` and would make a `starts_with` check pass vacuously),
+/// pairs the absence with a positive control (`main` present, exactly one
+/// stamp present) so a fixture that silently failed to link or to stamp
+/// couldn't pass this by accident, and closes with the strongest cheap pin:
+/// nothing but `main` and stamps survives at all.
+#[test]
+fn a_generic_orphaned_by_stamping_is_not_shipped() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub
+        wr [1, -]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"main"),
+        "the entry always survives: {names:?}"
+    );
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the positive control: exactly one stamp of sub: {names:?}"
+    );
+    assert!(
+        !names.contains(&"sub"),
+        "the orphaned generic must not be in the map: {names:?}"
+    );
+    assert!(
+        out.map
+            .functions
+            .iter()
+            .all(|f| f.name == "main" || is_stamp_name(&f.name)),
+        "nothing but main and stamps survives when every site to sub is stamped: {names:?}"
+    );
+}
+
 /// A hand-written routine that occupies the exact name a mono stamp would
 /// mint is a link error, not a silent identity collision — the production
 /// path, not just `intern`'s unit tests, must seed its collision guard from
@@ -1945,6 +1992,54 @@ fn hybrid_mixes_a_stamp_and_a_frames_site() {
         stamp_names(&out)[0].starts_with("swap."),
         "the swap site (a bijection) is the stamp: {:?}",
         stamp_names(&out)
+    );
+}
+
+/// The same mixed fixture, checked from the map side: `swap`'s only site is
+/// the bijection that mono promotes to a stamp, so the generic `swap` must
+/// not ship — but `narrow`'s only site stays a framed call (holey), which
+/// keeps the generic `narrow` reachable and it must still ship as itself.
+/// The hybrid mixed path runs its own `prune_unreachable` call, separate
+/// from `lower_mono`'s (`lower_hybrid` inlines the mono retarget rather than
+/// calling `lower_mono` when both a stamp and a frames site are present), so
+/// this exercises that call specifically rather than relying on the pure
+/// mono test to stand in for it.
+#[test]
+fn hybrid_mixed_drops_an_orphaned_mono_generic_but_keeps_a_frames_generic() {
+    let src = "\
+.routine main, tapes=1, alpha=(4)
+.routine swap, tapes=1, alpha=(4)
+.routine narrow, tapes=1, alpha=(2)
+.section code
+.func main
+        call    swap [0{1->2, 2->1}]
+        call    narrow [0{1=>0}]
+        stp
+.func swap
+        wr [1]
+        ret
+.func narrow
+        wr [1]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], hybrid_opts()).expect("links");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"main"),
+        "the entry always survives: {names:?}"
+    );
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the positive control: exactly one stamp of swap: {names:?}"
+    );
+    assert!(
+        names.contains(&"narrow"),
+        "narrow's only site stays framed, so its generic stays reachable: {names:?}"
+    );
+    assert!(
+        !names.contains(&"swap"),
+        "swap's only site was promoted to a stamp; the orphaned generic must not ship: {names:?}"
     );
 }
 

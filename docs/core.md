@@ -456,6 +456,11 @@ Objects in, one executable image out, in two phases.
   error carrying the name that was looked up. Functions the walk never
   reaches are **dropped**, and a dropped function may reference anything
   at all: unresolved references only matter for what survives.
+- Under `mono`/`hybrid` this promise is re-checked after the composition
+  engine (below) runs: stamping retargets every lowered site to its
+  specialized copy, so a generic routine reached before lowering but left
+  with no remaining caller afterward is dropped too, exactly as if the
+  first BFS had never reached it.
 
 **Name resolution** is also exposed on its own, without layout: a query
 answers which symbols the reachability walk reaches — in BFS order,

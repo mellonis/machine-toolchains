@@ -162,6 +162,7 @@ pub(super) fn lower_mono<'a>(
         synthesized_trap_rows: stats.synthesized_trap_rows,
         expanded_rows: stats.expanded_rows,
     };
+    let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
     // Retarget every original's bound sites to a plain call. Reachable sites
     // hit the stamp (or the original, for a collapse); a bound site in a
@@ -190,6 +191,17 @@ pub(super) fn lower_mono<'a>(
         out.push(f);
     }
     out.extend(stamps);
+
+    // Every site that used to call a now-orphaned generic was just
+    // retargeted above (docs/core.md (the composition engine)) — restore the
+    // resolve-time reachability guarantee over the retargeted graph.
+    let out = prune_unreachable(out);
+    debug_assert!(
+        stamp_names
+            .iter()
+            .all(|name| out.iter().any(|f| f.name == *name)),
+        "mono stamping must never orphan a stamp it just minted"
+    );
     Ok((out, None, engine_stats))
 }
 
@@ -251,6 +263,7 @@ pub(super) fn lower_hybrid<'a>(
     let (stamps, seed_target, mono_stats) =
         mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
     let instantiations = u32::try_from(stamps.len()).unwrap_or(u32::MAX);
+    let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
     let mut new_order: Vec<FuncRef> = Vec::with_capacity(n + stamps.len());
     for (fi, mut f) in order.into_iter().enumerate() {
@@ -265,6 +278,19 @@ pub(super) fn lower_hybrid<'a>(
         new_order.push(f);
     }
     new_order.extend(stamps);
+
+    // Same reachability re-check as pure mono, run BEFORE the frames path
+    // re-scans below — so any orphaned generic is gone from the graph
+    // `lower_frames` builds its directory and compose-column order over,
+    // never needing a post-hoc index remap (docs/core.md (the composition
+    // engine)).
+    let new_order = prune_unreachable(new_order);
+    debug_assert!(
+        stamp_names
+            .iter()
+            .all(|name| new_order.iter().any(|f| f.name == *name)),
+        "mono stamping must never orphan a stamp it just minted"
+    );
 
     // The frames path re-scans the mono-rewritten order; the stamps carry no
     // bound calls, so they flow through as ordinary functions.
@@ -345,6 +371,65 @@ fn identity_world(sites: &[Vec<SiteKind>], n: usize) -> Vec<bool> {
         }
     }
     in_world
+}
+
+/// Re-check reachability after stamping retargets every bound-call site to
+/// its specialized copy: a generic routine that lost its last caller this
+/// way is unreachable, and the linker's promise that unreachable functions
+/// never ship applies to it exactly as it does before lowering (docs/core.md
+/// (linking)). Walks the same BFS as name resolution, now over the
+/// (already-retargeted) `calls` and any still-pending `bound` edges, and
+/// reindexes the survivors' targets so the result is layout-ready. When
+/// nothing is orphaned the input `Vec` comes back untouched — not merely
+/// equivalent — so a link with no orphan hands layout the identical order it
+/// always did.
+fn prune_unreachable(order: Vec<FuncRef>) -> Vec<FuncRef> {
+    let n = order.len();
+    if n == 0 {
+        return order;
+    }
+    let mut reached = vec![false; n];
+    reached[0] = true;
+    let mut queue: VecDeque<usize> = VecDeque::from([0usize]);
+    while let Some(fi) = queue.pop_front() {
+        let edges = order[fi]
+            .calls
+            .iter()
+            .map(|&(_, c)| c)
+            .chain(order[fi].bound.iter().map(|&(_, c, _)| c));
+        for c in edges {
+            if !reached[c] {
+                reached[c] = true;
+                queue.push_back(c);
+            }
+        }
+    }
+    if reached.iter().all(|&r| r) {
+        return order;
+    }
+
+    let mut new_index = vec![usize::MAX; n];
+    let mut next = 0usize;
+    for (i, &r) in reached.iter().enumerate() {
+        if r {
+            new_index[i] = next;
+            next += 1;
+        }
+    }
+    order
+        .into_iter()
+        .zip(reached)
+        .filter(|(_, r)| *r)
+        .map(|(mut f, _)| {
+            for (_, c) in &mut f.calls {
+                *c = new_index[*c];
+            }
+            for (_, c, _) in &mut f.bound {
+                *c = new_index[*c];
+            }
+            f
+        })
+        .collect()
 }
 
 /// Build the mono stamp set reachable from `seeds` (machine-frame bound
