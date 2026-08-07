@@ -467,10 +467,14 @@ answers which symbols the reachability walk reaches — in BFS order,
 each paired with which input supplied its winning definition (a user
 object or a library, and which one) — and which winning definitions
 never got reached. It runs the exact namespace-building and BFS code
-path linking does, just stopped short of layout and relaxation, so a
-consumer comparing itself against "what the linker actually resolves"
-(an editor overlay reasoning about cross-file symbols, say) gets an
-answer that can never drift from a real link.
+path linking does, stopped short of the composition engine, layout,
+and relaxation — so its answer is resolution order and reachability
+**as of the resolve phase**, before any call-mechanism lowering. Under
+`mono`/`hybrid`, a later prune (above) can remove a function this
+query reports as reached: it takes no `call_mech` and never runs
+stamping, by design — it backs an editor overlay reasoning about
+cross-file, exported-symbol visibility, a question the resolve phase
+alone answers, not final image membership.
 
 ### Relaxation
 
