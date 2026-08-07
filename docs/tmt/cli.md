@@ -578,8 +578,15 @@ machine level.
 ```
 USAGE: tmt tape-block new [--from APP.tmx | --from APP.tmc] [-o OUT.tmt] [EDITS]
        tmt tape-block set IN.tmt (-o OUT.tmt | --in-place)
-                    [--from APP.tmc] [EDITS]
+                    [--from APP.tmc] [SHAPE] [EDITS]
        tmt tape-block show FILE.tmt [--dense | --separated]
+
+SHAPE (set only; applied remove -> add -> reorder, before EDITS; flag
+order never matters — remove keys name the INPUT block, add positions
+count after removals, --reorder and EDITS address the result):
+  --add-tape [KEY=]ALPHABET   insert a band at position KEY, or append
+  --remove-tape KEY           drop a band
+  --reorder K1,K2,...         permute bands (every band exactly once)
 
 EDITS (repeatable; KEY is a tape index, or a tape name with --from a .tmc):
   --alphabet KEY=GLYPHS   repin tape KEY's glyphs (relabels; same cardinality)
@@ -626,6 +633,75 @@ for a given tape, so cells resolve against the glyphs just pinned. One
 difference between the two: an alphabet is a set (glyphs unique, at most 127)
 while cells are a sequence, so `--cells "0='1','1','1'"` is an ordinary run.
 
+### Shape flags
+
+`set` (only — `new` has no input block to reshape) accepts three shape flags
+that change the block's **band set and their order**, ahead of the content
+edits above:
+
+```
+--add-tape [KEY=]ALPHABET   insert a band at position KEY, or append
+--remove-tape KEY           drop a band
+--reorder K1,K2,...         permute bands (every band exactly once)
+```
+
+Shape edits run in a **fixed phase order — remove, then add, then
+reorder** — regardless of where the flags sit on the command line; flag
+position never matters. Each phase addresses a different shape: a
+`--remove-tape` key names a band in the **input** block, exactly as it
+was before this invocation touched it. An `--add-tape` position (when
+given; a bare `ALPHABET` with no `KEY=` appends) counts against the block
+**after** removals, so a removed band never makes a later position
+ambiguous. `--reorder` is a complete permutation — every surviving band
+exactly once — of the block **after** removals and adds. The content
+edit flags (`--alphabet`, `--cells`, `--head`, `--origin`) always address
+the final shape, after all three phases have run.
+
+A worked example: a three-band block `[A B C]`, each band with its own
+alphabet and cells so identity survives the reshape:
+
+```
+$ tmt tape-block new --alphabet "0=' ','a'" --alphabet "1=' ','b','c'" --alphabet "2=' ','d'" --cells "0='a'" --cells "1='b','c'" --cells "2='d','d'" -o base.tmt
+$ tmt tape-block set base.tmt --remove-tape 1 --add-tape "0=' ','x'" --reorder 2,0,1 --cells "0='d'" -o out.tmt
+$ tmt tape-block show out.tmt
+tape 0: origin 0, head 0 reads 'd', alphabet [" ", "d"]
+|d|
+tape 1: origin 0, head 0 reads ' ', alphabet [" ", "x"]
+||
+tape 2: origin 0, head 0 reads 'a', alphabet [" ", "a"]
+|a|
+```
+
+Reading the phases: remove 1 drops `B`, leaving `[A C]`; add at 0 inserts
+a fresh band `N`, giving `[N A C]`; reorder `2,0,1` picks index 2 then
+index 0 then index 1, landing `[C N A]`; `--cells 0='d'` then addresses
+that final index 0, which is `C` — overwriting its old `"dd"` with `"d"`.
+`N` stays empty and unlabeled except for the alphabet `--add-tape` gave it;
+`A` is untouched.
+
+When the invocation also passes `--from` a `.tmc` source, its declared
+tape names ride along through every shape phase rather than staying
+pinned to their original index: a name whose band `--remove-tape` drops
+is retired from this invocation, and a later flag naming it gets a
+dedicated error explaining it was removed by `--remove-tape` in this same
+invocation, instead of the generic "no such tape"; a band `--add-tape`
+inserts is always unnamed, since the flag supplies a position and an
+alphabet, never a name; and `--reorder` carries each surviving name along
+with its band to wherever the permutation puts it, so a `--cells
+NAME=...` edit later in the same call still resolves against the right
+band. None of this persists in the `.tmt` container — names are resolved
+to indices at parse time only, exactly like the un-shaped edit flags.
+
+Reordering has a foot-gun: which band sits at index 0 (and 1, and so on)
+is exactly what a compiled program's tape 0 (tape 1, …) binds to at load
+time, so a reorder that moves a different band into a slot changes what
+the program reads and writes — silently, from the program's point of
+view. `tmt run` catches the failure modes it can see: it refuses a block
+whose band count, or any individual band's cardinality, disagrees with
+the executable's header. It cannot catch a reorder among bands that all
+happen to share a cardinality — a block shaped that way loads cleanly and
+is, by construction, indistinguishable from intent.
+
 ### `tape-block new`
 
 `new` mints a block and applies this invocation's edits to it. It has two
@@ -667,10 +743,15 @@ silently oversized block.
 the result out. Exactly one output destination is required — `-o OUT.tmt` or
 `--in-place` — and the two are mutually exclusive; supplying neither is an
 error, which is what keeps `set` from silently clobbering its input. Any
-subset of the edit flags may be given, and with none `set` is a plain copy.
+subset of the shape and edit flags may be given, and with none of either
+`set` is a plain copy.
 
-`--from APP.tmc` on `set` supplies tape **names only**, so edits can be keyed
-by name; it never reshapes the block.
+`--from APP.tmc` on `set` supplies tape **names only** — the flag itself
+never reshapes the block; `--add-tape`/`--remove-tape`/`--reorder` do that.
+Once supplied, though, the names are not just labels for content edits: the
+shape phases consume them too, checking the declared count against the
+block up front and carrying each name along as its band moves through
+remove, add, and reorder (the names paragraph above).
 
 `--alphabet` **relabels, it never re-maps**. Cell indices are untouched; only
 the glyph table they are read through is replaced. That is what makes an

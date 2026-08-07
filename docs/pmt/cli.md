@@ -449,6 +449,11 @@ Four subcommands author and inspect `.pmt` tape-block snapshots without
 hand-editing bytes. The unit is the **block**; PM-1 is a one-tape-device
 architecture, so a PM block holds a single band and a single alphabet.
 
+Because PM-1 is single-tape, `pmt tape-block set` has no shape edits —
+there is only ever one band to add, remove, or reorder; reshaping
+multi-band blocks lives in `tmt tape-block set` (`docs/tmt/cli.md (tmt
+tape-block)`).
+
 ### Edit flags
 
 `new` and `set` take four **keyed, repeatable** edit flags, so one invocation

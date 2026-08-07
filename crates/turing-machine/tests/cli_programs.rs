@@ -1982,3 +1982,69 @@ fn tape_set_names_follow_their_bands_through_reorder() {
     assert!(block.tapes[0].cells.is_empty());
     assert_eq!(block.tapes[1].cells, vec![1]);
 }
+
+#[test]
+fn reshaped_block_still_loads_under_run_and_mismatch_still_fires() {
+    // A reshaped block that MATCHES the image's shape runs; one that
+    // does not is refused with the per-tape cardinality message.
+    let dir = scratch("shape_run");
+    let exe = asm_and_link(&dir, "prog", &one_tape_program("stp"));
+
+    // `one_tape_program`'s own setup declares `alpha=(2)` — tape 0 is
+    // 2 glyphs wide. Author a two-band block: band 0 with 2 glyphs
+    // (matches), band 1 with 3 (does not).
+    let block2 = dir.join("two.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--alphabet",
+        "0=' ','a'",
+        "--alphabet",
+        "1=' ','a','b'",
+        "-o",
+        block2.to_str().unwrap(),
+    ]))
+    .unwrap();
+    // Shape it down to match: drop the extra band -> run succeeds.
+    let ok = dir.join("ok.tmt");
+    execute(&args(&[
+        "tape-block",
+        "set",
+        block2.to_str().unwrap(),
+        "--remove-tape",
+        "1",
+        "-o",
+        ok.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let out = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape-block",
+        ok.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_ne!(out.code, 1, "reshaped block must load:\n{}", out.stdout);
+    // Shape it wrong: put the off-cardinality band FIRST -> run refuses
+    // with the per-tape cardinality message (and it is a tool error).
+    let bad = dir.join("bad.tmt");
+    execute(&args(&[
+        "tape-block",
+        "set",
+        block2.to_str().unwrap(),
+        "--remove-tape",
+        "0",
+        "-o",
+        bad.to_str().unwrap(),
+    ]))
+    .unwrap();
+    let err = execute(&args(&[
+        "run",
+        exe.to_str().unwrap(),
+        "--tape-block",
+        bad.to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("glyph(s)"), "{err}");
+    assert!(err.contains("expects"), "{err}");
+}
