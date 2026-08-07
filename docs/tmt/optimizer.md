@@ -169,7 +169,7 @@ done:
 ```
 
 That is what makes a stray `debugger` worth reporting as source hygiene
-(`docs/tmt/lint.md`) rather than harmless.
+(`docs/tmt/lint.md (leftover-debugger)`) rather than harmless.
 
 **`tail-call` runs before `tail-merge`.** The order of the two is
 load-bearing, not a preference. `tail-merge`'s whole-state dedup can
@@ -547,12 +547,23 @@ collapse them on its own. On that program `--foutline` makes the image
 *larger*:
 
 ```
+$ tmt compile -O1 -v -o nc-off.tmo nocycle.tmc
+opt: 2 round(s)
+  jump-threading main: 2 change(s)
+  tail-merge main: 7 change(s)
+  dce main: 1 change(s)
+  dispatch-select main: 1 change(s)
+$ tmt compile -O1 --foutline -o nc-on.tmo nocycle.tmc
 $ tmt link nc-off.tmo -o nc-off.tmx && tmt link nc-on.tmo -o nc-on.tmx
 $ wc -c nc-off.tmx nc-on.tmx
-      95 nc-off.tmx
-      99 nc-on.tmx
-     194 total
+     115 nc-off.tmx
+     131 nc-on.tmx
+     246 total
 ```
+
+The seven `tail-merge` changes in that first report are the sharing
+happening without any help; paying for a call and a return on top of it
+costs sixteen bytes.
 
 The pass also converts straight-line control flow into calls, which
 changes frame-stack depth and so moves a program's resource-limit
