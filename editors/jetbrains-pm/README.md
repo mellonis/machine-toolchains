@@ -22,7 +22,7 @@ see the `.pma` checklist below for its own manual walkthrough.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.2. It has been tested against `pmt` 0.2.0; on
+- This plugin is version 0.1.3. It has been tested against `pmt` 0.2.0; on
   startup it runs `pmt --version` and shows a warning notification (not a
   hard failure) if the binary reports something older, or an error
   notification if the binary can't be found at all. The plugin's own
@@ -87,11 +87,11 @@ which JDK `JAVA_HOME` points at — Gradle auto-provisions JDK 17 via the
 building under a JetBrains-bundled JBR newer than 17 (JBR 25); other
 JDKs as `JAVA_HOME` are untested.
 
-`buildPlugin` produces `build/distributions/pmc-0.1.2.zip`. Install it:
+`buildPlugin` produces `build/distributions/pmc-0.1.3.zip`. Install it:
 
 1. Settings → Plugins → the ⚙ (gear) icon in the top-right of the
    Plugins page → **Install Plugin from Disk…**
-2. Pick `build/distributions/pmc-0.1.2.zip`.
+2. Pick `build/distributions/pmc-0.1.3.zip`.
 3. Restart the IDE when prompted.
 
 This works on Community editions — the plugin is built against the
@@ -238,6 +238,8 @@ main() {
       that the `@old();` call site itself renders struck through (the
       `deprecated-call` lint finding's tag). Undo both edits to restore
       the base scratch file before continuing.
+- [ ] **Semantic colors**: in a `.pmc` file, function names render colored
+      (not underline-only) under both light and dark themes.
 - [x] **Quickfix**: on the `debugger;` squiggle, open the intention menu
       (Alt+Enter / ⌥Enter) and apply the fix. This one is gated
       (equivalent to `pmt lint --fix --force`), so it may show as a
