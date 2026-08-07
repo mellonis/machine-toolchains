@@ -353,10 +353,10 @@ fn reshape(
     drop.sort_unstable();
     for &index in drop.iter().rev() {
         block.tapes.remove(index);
-        if !names.is_empty() {
-            if let Some(name) = names.remove(index) {
-                removed_names.push(name);
-            }
+        if !names.is_empty()
+            && let Some(name) = names.remove(index)
+        {
+            removed_names.push(name);
         }
     }
 
