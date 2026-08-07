@@ -488,8 +488,12 @@ same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
 8, operands at 16, trailing comments aligned per group at or past 32 —
 see "assembly text", above, for the exact rule); the parser accepts any
 whitespace on input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis`
-output is always valid assembler input and round-trips to the original
-bytes.
+output is valid assembler input and round-trips to the original bytes,
+with one exception: a `--call-mech=mono` linked image names a stamped
+specialized routine copy with a digest suffix (`bare$513e6968`, see
+`docs/tmt/isa.md (call mechanisms)`), and that suffix is not a legal
+`.tma` identifier, so disassembling an image with a mono stamp and
+reassembling the result fails.
 
 ### Sections and the routine signature
 

@@ -1,6 +1,9 @@
 //! Binary → canonical `.pma` text (docs/formats.md (assembly text)).
-//! Output is valid assembler input; object round-trips are exact — a
-//! linked image without map labels does not reassemble.
+//! Output is valid assembler input and round-trips exactly, object or
+//! linked image, with or without a debug/map sidecar — with one
+//! exception: a `--call-mech=mono` linked image names a stamped
+//! specialized routine copy with a digest suffix, which is not a legal
+//! identifier (docs/formats.md (assembly text)).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -11,12 +14,6 @@ use crate::formats::executable::Executable;
 use crate::formats::object::{BoundCall, ObjectFile, SymbolDef, TapeBinding};
 use crate::linker::MapFile;
 use crate::vm::OperandKind;
-
-/// Canonical `.pma` trailing-comment column (docs/formats.md (assembly
-/// text)), the same stop `fmt.rs` uses — needed only to place the
-/// linked-image path's defensive comment on a dispatch table whose
-/// targets no map names, so the rendered line still lands on the grid.
-const COMMENT_COL: usize = 32;
 
 /// Canonical `.pma` mnemonic column (docs/formats.md (assembly text)),
 /// the same stop `fmt.rs` uses.
@@ -337,7 +334,11 @@ type TableLabels = HashMap<(u32, u32), String>;
 
 /// `(blob index, blob-local CODE offset) -> the one label that names that
 /// position`: what the tables section prints for a dispatch entry or a
-/// frame exit, and what the code section defines at the address.
+/// frame exit, and what the code section defines at the address. An
+/// executable has one logical blob (index 0, absolute addresses standing
+/// in for blob-local offsets), so [`disassemble_object`] and
+/// [`disassemble_executable`] share this type and the
+/// [`table_code_labels`] walk that fills it.
 type CodeLabels = HashMap<(u32, u32), String>;
 
 /// The synthesized name for a code position with no debug label — the
@@ -347,18 +348,14 @@ fn synthesized_label(addr: u32) -> String {
     format!("L{addr:04X}")
 }
 
-/// The label naming a blob-local code position: the blob's own `-g`
-/// debug label for that offset when the object carries one, else the
-/// synthesized [`synthesized_label`] name. One rule for both sections,
-/// so a `.targets`/`.exits` operand and the code line it points at
-/// always agree.
-fn code_label(obj: &ObjectFile, blob: u32, offset: u32) -> String {
-    obj.debug
-        .as_ref()
-        .and_then(|d| d.get(blob as usize))
-        .and_then(|bd| bd.labels.iter().find(|(_, o)| *o == offset))
-        .map(|(n, _)| n.clone())
-        .unwrap_or_else(|| synthesized_label(offset))
+/// The label naming a code position: `known` when the caller already has
+/// one on file — an object's own `-g` debug label, or a linked image's
+/// map-sidecar function label — else the synthesized
+/// [`synthesized_label`] name. One rule for both renderers and both
+/// sections, so a `.targets`/`.exits` operand and the code line it
+/// points at always agree.
+fn code_label(known: Option<String>, offset: u32) -> String {
+    known.unwrap_or_else(|| synthesized_label(offset))
 }
 
 /// Every code position the tables section will name — a dispatch table's
@@ -368,17 +365,26 @@ fn code_label(obj: &ObjectFile, blob: u32, offset: u32) -> String {
 /// reassemble if each name it prints is also defined at that address;
 /// choosing every name here, once, is what makes the two sections meet.
 ///
+/// `known(blob, offset)` supplies the debug/map label already on file at
+/// a position — an object's per-blob `-g` labels for
+/// [`disassemble_object`], a linked image's map-sidecar function labels
+/// (one flat address space, blob always 0) for
+/// [`disassemble_executable`] — and [`code_label`] falls back to a
+/// synthesized name where it returns `None`. The walk over table kinds
+/// and table bytes is identical for both callers; only the label source
+/// differs, which is why it lives here once instead of being forked per
+/// renderer.
+///
 /// The names a position can carry are exactly the ones an assembler
-/// could have written: at every position listed here, a `-g` object's
-/// own source label is replayed, and a stripped one gets an address.
-/// Every position listed here is an instruction start in an
-/// assembler-produced object (a source label can land nowhere else),
-/// which is what guarantees the code section reaches it and defines the
-/// label.
+/// could have written: at every position listed here, a label already on
+/// file is replayed, and an unlabeled one gets an address. Every
+/// position listed here is an instruction start in an assembler- or
+/// linker-produced image (a source label can land nowhere else), which
+/// is what guarantees the code section reaches it and defines the label.
 fn table_code_labels(
-    obj: &ObjectFile,
     table_blobs: &[Vec<u8>],
     per_blob: &[BTreeMap<u32, TableKind>],
+    known: impl Fn(u32, u32) -> Option<String>,
 ) -> CodeLabels {
     let mut labels = CodeLabels::new();
     for (blob, starts) in per_blob.iter().enumerate() {
@@ -398,7 +404,7 @@ fn table_code_labels(
             for offset in offsets {
                 labels
                     .entry((blob as u32, offset))
-                    .or_insert_with(|| code_label(obj, blob as u32, offset));
+                    .or_insert_with(|| code_label(known(blob as u32, offset), offset));
             }
         }
     }
@@ -481,7 +487,13 @@ fn render_tables_section(
 
     // Every code position the section is about to name, resolved once so
     // both sections agree on it.
-    let code_labels = table_code_labels(obj, table_blobs, &per_blob);
+    let code_labels = table_code_labels(table_blobs, &per_blob, |blob, offset| {
+        obj.debug
+            .as_ref()
+            .and_then(|d| d.get(blob as usize))
+            .and_then(|bd| bd.labels.iter().find(|(_, o)| *o == offset))
+            .map(|(n, _)| n.clone())
+    });
 
     // Frame descriptors get synthesized `F<n>` labels, match/dispatch
     // tables `T<n>` — the code section references each by its kind's
@@ -586,11 +598,12 @@ fn render_match_table(out: &mut String, name: &str, tb: &[u8], start: u32, end: 
 }
 
 /// One dispatch table (vm/table.rs layout: `entry_count u16 LE`, then
-/// `entry_count × u32 LE` blob-relative code offsets) as a `.targets`
-/// line. `named` turns each entry offset into the label that names it —
-/// the object's own `-g` label, or a synthesized one — and the code
-/// section defines every one of them at its address, so the rendered
-/// text reassembles. The list wraps at the printer's width budget.
+/// `entry_count × u32 LE` code offsets — blob-relative in an object,
+/// absolute in a linked image) as a `.targets` line. `named` turns each
+/// entry offset into the label that names it — a debug/map label already
+/// on file, or a synthesized one — and the code section defines every one
+/// of them at its address, so the rendered text reassembles. Shared by
+/// both renderers; the list wraps at the printer's width budget.
 fn render_dispatch_table(
     out: &mut String,
     name: &str,
@@ -651,49 +664,6 @@ fn dispatch_entries_within(tables: &[u8], start: u32, end: u32) -> Vec<u32> {
         pos += 4;
     }
     entries
-}
-
-/// One dispatch table of a LINKED image as a `.targets` line: entries
-/// are absolute code addresses, resolved through the map-derived label
-/// names in `labels`. An unresolved entry renders as raw hex, flagged
-/// by a comment at the grid comment column — a mapless rendering is
-/// read-only, since only label names make the text reassembleable.
-fn render_linked_dispatch_table(
-    out: &mut String,
-    name: &str,
-    tables: &[u8],
-    start: u32,
-    labels: &BTreeMap<u32, String>,
-) {
-    let entries = dispatch_entries(tables, start);
-    if entries.is_empty() {
-        return;
-    }
-    let mut names = Vec::with_capacity(entries.len());
-    let mut any_raw = false;
-    for target in entries {
-        match labels.get(&target) {
-            Some(n) => names.push(n.clone()),
-            None => {
-                any_raw = true;
-                names.push(format!("{target:#06x}"));
-            }
-        }
-    }
-    let line = grid_line(Some(name), ".targets", &names.join(", "));
-    out.push_str(&line);
-    if any_raw {
-        // grid_line emits no comment: pad the last physical line to the
-        // comment column by hand so the flag still lands on the grid.
-        let last_len = line.rsplit('\n').next().unwrap_or(&line).chars().count();
-        if last_len < COMMENT_COL {
-            out.push_str(&" ".repeat(COMMENT_COL - last_len));
-        } else {
-            out.push(' ');
-        }
-        out.push_str("; unresolved dispatch targets (no map labels)");
-    }
-    out.push('\n');
 }
 
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
@@ -1086,9 +1056,12 @@ pub fn disassemble_executable(
     let mut roots: BTreeSet<u32> = BTreeSet::from([exe.entry]);
     let mut work: Vec<u32> = vec![exe.entry];
     // Table starts discovered from TableRef operands (each names one
-    // table in `exe.tables`), and every dispatch table's entry addresses.
+    // table in `exe.tables`); dispatch entries and frame exits join the
+    // work list directly below as label candidates (never as roots) — no
+    // separate set of their addresses is kept, since [`table_code_labels`]
+    // re-derives the same entries from `table_kinds` when the tables
+    // section is rendered.
     let mut table_kinds: BTreeMap<u32, TableKind> = BTreeMap::new();
-    let mut dispatch_targets: BTreeSet<u32> = BTreeSet::new();
     // Each discovered `call.m` site's callee address — a `call.m` always calls
     // the same callee, whatever composite its column selects, so this names the
     // routine of every composite reachable through the site (the map-less
@@ -1123,7 +1096,6 @@ pub fn disassemble_executable(
             table_kinds.insert(*t, kind);
             if matches!(kind, TableKind::Dispatch) {
                 for target in dispatch_entries(&exe.tables, *t) {
-                    dispatch_targets.insert(target);
                     work.push(target);
                 }
             }
@@ -1146,7 +1118,6 @@ pub fn disassemble_executable(
                 slot.insert(TableKind::Frame);
                 if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
                     for &exit in &frame.exits {
-                        dispatch_targets.insert(exit);
                         work.push(exit);
                     }
                 }
@@ -1178,19 +1149,16 @@ pub fn disassemble_executable(
 
     // Every directory descriptor is inspectable, whether or not any constant
     // site named it during the walk (a context-dependent site resolves to no
-    // single descriptor). Register the whole directory as frame tables so all
-    // get an `F<n>` label + render, and add their exits as label candidates
+    // single descriptor). Register the whole directory as frame tables so
+    // all get an `F<n>` label + render — their exits become label
+    // candidates automatically when [`table_code_labels`] walks
+    // `table_kinds` below, without a separate candidate set
     // (docs/formats.md (image-inspectability principle)).
     let region = parse_frames_region(exe);
     if let Some(region) = &region {
         for &desc_off in &region.directory {
             if let std::collections::btree_map::Entry::Vacant(slot) = table_kinds.entry(desc_off) {
                 slot.insert(TableKind::Frame);
-                if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
-                    for &exit in &frame.exits {
-                        dispatch_targets.insert(exit);
-                    }
-                }
             }
         }
     }
@@ -1229,21 +1197,32 @@ pub fn disassemble_executable(
         entry.mnemonic
     };
 
-    // Map-resolved names for dispatch targets: the label at that
-    // absolute address when the map carries one. Unresolved targets
-    // render as raw hex and get no code label — that rendering is
-    // read-only, since only label names make the text reassembleable.
-    let dispatch_label: BTreeMap<u32, String> = dispatch_targets
-        .iter()
-        .filter_map(|&addr| {
-            map?.functions.iter().find_map(|f| {
-                f.labels
-                    .iter()
-                    .find(|(_, a)| *a == addr)
-                    .map(|(n, _)| (addr, n.clone()))
+    // Every code position the tables section is about to name — a
+    // dispatch table's entries, a frame descriptor's exits — resolved
+    // once so the tables section and the code section agree on it,
+    // exactly as `render_tables_section` does for an object
+    // ([`table_code_labels`]'s doc). An executable is one flat address
+    // space, so it plays the per-blob shape with a single blob (index 0)
+    // and looks up a name in the map-sidecar function labels rather than
+    // an object's per-blob debug labels; a position the map carries no
+    // name for still gets [`synthesized_label`]'s fallback, which is the
+    // fix for the DEFAULT case — `tmt link` on a non-`-g` object writes
+    // an empty `labels` list, so a map with no `-g` data behind it named
+    // nothing before this, and `--map` could not help.
+    let code_labels = table_code_labels(
+        std::slice::from_ref(&exe.tables),
+        std::slice::from_ref(&table_kinds),
+        |_blob, offset| {
+            map.and_then(|m| {
+                m.functions.iter().find_map(|f| {
+                    f.labels
+                        .iter()
+                        .find(|(_, a)| *a == offset)
+                        .map(|(n, _)| n.clone())
+                })
             })
-        })
-        .collect();
+        },
+    );
 
     let mut out = String::new();
     // Each `call.m` site's operand text: a constant column names its one
@@ -1272,8 +1251,21 @@ pub fn disassemble_executable(
     // section-offset order; the code section's operands reference them by
     // name below.
     let mut table_labels: HashMap<u32, String> = HashMap::new();
+    // A callee reached through a `.frame` descriptor: its virtual tape
+    // count and a per-tape cardinality, filled below and read by the
+    // `.routine` line the code loop prints ahead of that callee's
+    // `.func` (see that step's doc for what these numbers are and are
+    // not).
+    let mut callee_signature: HashMap<u32, (u8, Vec<u32>)> = HashMap::new();
     if !table_kinds.is_empty() {
         out.push_str(".section tables\n");
+        // Each table renders into its own scratch buffer; a non-empty one
+        // joins `body` with a blank line ahead of it once `body` is
+        // already non-empty, matching `disassemble_object`'s section — one
+        // blank line between tables, none before the first
+        // (docs/formats.md (assembly text): a blank line ends a
+        // trailing-comment group).
+        let mut body = String::new();
         let bounds: Vec<u32> = table_kinds.keys().copied().collect();
         let mut next_t = 0u32;
         let mut next_f = 0u32;
@@ -1292,27 +1284,37 @@ pub fn disassemble_executable(
                 .get(idx + 1)
                 .copied()
                 .unwrap_or(exe.tables.len() as u32);
+            // The rendered name comes only from `code_labels`, computed
+            // above by the same `table_code_labels` walk this loop is
+            // driving — see that function's doc for why a miss here is an
+            // invariant break, not a data case.
+            let named = |offset: u32| -> String {
+                code_labels
+                    .get(&(0, offset))
+                    .cloned()
+                    .expect("table_code_labels named every entry the tables section renders")
+            };
+            let mut table = String::new();
             match kind {
-                TableKind::Match => render_match_table(&mut out, &name, &exe.tables, start, end),
-                TableKind::Dispatch => render_linked_dispatch_table(
-                    &mut out,
-                    &name,
-                    &exe.tables,
-                    start,
-                    &dispatch_label,
-                ),
+                TableKind::Match => render_match_table(&mut table, &name, &exe.tables, start, end),
+                TableKind::Dispatch => {
+                    render_dispatch_table(&mut table, &name, &exe.tables, start, end, &named)
+                }
                 TableKind::Frame => {
                     if let Some(frame) = parse_frame_descriptor(&exe.tables, start) {
-                        render_frame_table(&mut out, &name, &frame, |offset| {
-                            dispatch_label
-                                .get(&offset)
-                                .cloned()
-                                .unwrap_or_else(|| format!("{offset:#06x}"))
-                        });
+                        render_frame_table(&mut table, &name, &frame, named);
                     }
                 }
             }
+            if table.is_empty() {
+                continue;
+            }
+            if !body.is_empty() {
+                body.push('\n');
+            }
+            body.push_str(&table);
         }
+        out.push_str(&body);
         // The frames legend (docs/formats.md (frames region)): resolve each
         // `call.m` site's operand text, then a comment block naming every
         // directory composite and summarizing each context-dependent site.
@@ -1332,18 +1334,76 @@ pub fn disassemble_executable(
                 };
                 site_operand.insert(site as u32, text);
             }
+            // Every callee reached through a frame descriptor: the
+            // descriptor's own `tapes` length is its virtual tape count
+            // (it MUST agree with the `.frame tapes=(…)` line already
+            // rendered for it, above), and a per-tape cardinality is the
+            // PHYSICAL tape that virtual tape projects onto — the
+            // callee's own alphabet is consumed by the composition engine
+            // at link time and does not survive into the linked image, so
+            // this is a documented stand-in for it, not the original
+            // value (docs/formats.md (frame descriptors)). A `call.m`
+            // site always calls the same callee regardless of which
+            // composite its column selects, so the first descriptor found
+            // for a target is as good as any other.
+            for (&site, &target) in &site_target {
+                if callee_signature.contains_key(&target) {
+                    continue;
+                }
+                let composites = region.site_composites(site as usize);
+                let Some(&composite) = composites.first() else {
+                    continue;
+                };
+                let Some(&desc_off) = region.directory.get(usize::from(composite) - 1) else {
+                    continue;
+                };
+                let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) else {
+                    continue;
+                };
+                let alpha = frame
+                    .tapes
+                    .iter()
+                    .map(|&phys| {
+                        exe.alphabet_cardinalities
+                            .get(phys as usize)
+                            .copied()
+                            .unwrap_or(2)
+                    })
+                    .collect();
+                callee_signature.insert(target, (frame.tapes.len() as u8, alpha));
+            }
             out.push_str(&frames_legend(region, map, &site_target, &func_name, exe));
         }
         out.push_str(".section code\n");
     }
     for (i, &root) in roots.iter().enumerate() {
         let end = region_end(i);
+        // Every function needs a `.routine` line once the image is
+        // sectioned: reassembling the disassembled text treats the whole
+        // thing as ONE source file, and the assembler's all-or-none rule
+        // — the entry already got a line, above — then demands every
+        // function in it carry one too, even a callee whose own object
+        // never signed it (a linked image drops that distinction; see
+        // `docs/formats.md (assembly text)`, the `.routine` directive). A
+        // callee reached through a frame descriptor gets
+        // [`callee_signature`]'s derived values; anything else — a plain
+        // call, or a mono-stamped specialized copy — runs directly
+        // against the machine's own tape space with no separate virtual
+        // alphabet, so the entry's own signature is exact for it, not
+        // merely a placeholder.
+        if sectioned && root != exe.entry {
+            let (tapes, alpha) = callee_signature
+                .get(&root)
+                .cloned()
+                .unwrap_or_else(|| (exe.tape_count, exe.alphabet_cardinalities.clone()));
+            out.push_str(&routine_line(&func_name(root), tapes, &alpha));
+        }
         out.push_str(&format!(".func {}\n", func_name(root)));
 
         // Label names within this region: jump targets synthesize
-        // `LXXXX`; a map-resolved dispatch target keeps its map name so
-        // the `.targets` line above and the code line agree (a shared
-        // address takes the dispatch name).
+        // `LXXXX`; a table-code label (map or synthesized) keeps its own
+        // name so the `.targets`/`.exits` line above and the code line
+        // agree (a shared address takes the tables-section name).
         let mut labels_at: BTreeMap<u32, String> = BTreeMap::new();
         for (_, d) in instrs.range(root..end) {
             if let Body::Instr {
@@ -1358,8 +1418,10 @@ pub fn disassemble_executable(
                 }
             }
         }
-        for (&addr, name) in dispatch_label.range(root + 1..end) {
-            labels_at.insert(addr, name.clone());
+        for (&(_, addr), name) in &code_labels {
+            if addr > root && addr < end {
+                labels_at.insert(addr, name.clone());
+            }
         }
 
         let mut addr = root;

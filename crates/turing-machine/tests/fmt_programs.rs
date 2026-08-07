@@ -10,9 +10,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mtc_core::asm::format_asm_with;
-use mtc_turing_machine::asm::{assemble, tm1_syntax};
+use mtc_core::asm::{AsmErrorKind, format_asm_with};
+use mtc_core::linker::{CallMech, LinkOptions};
+use mtc_turing_machine::asm::{
+    assemble, disassemble_executable_with_map, disassemble_object, link, tm1_syntax,
+};
 use mtc_turing_machine::cli::execute;
+use mtc_turing_machine::compiler::{CompileOptions, compile};
+use mtc_turing_machine::stdlib;
 
 fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -106,6 +111,116 @@ fn every_tma_source_is_already_fmt_clean() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma");
     let src = fs::read_to_string(&path).expect("read brainfuck-utm.tma");
     assert_eq!(fmt_tma(&src), src, "brainfuck-utm.tma is not fmt-clean");
+}
+
+/// The Appendix A + nested-graft `.tmc` fixtures `tmc_golden.rs` runs
+/// derivation-first goldens over — read fresh here (per-file-helper
+/// convention: this file's sweep over every debug mode and call
+/// mechanism is its own concern, not that file's run assertions).
+const CORPUS: &[&str] = &[
+    "a1_replace_b",
+    "a2_binary_plus_one",
+    "a3_two_tape_copy",
+    "a4_byte_increment",
+    "a5_call_across_alphabets",
+    "a6_graph_graft_multi_exit",
+    "nested_graft",
+];
+
+fn golden_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
+}
+
+/// `tmt dis`'s permanent dogfood gate over the golden corpus — the PM-1
+/// sibling this mirrors (`fmt_pma.rs`'s `dis_output_is_already_canonical`)
+/// asserts format identity alone, because a `.pma` object never carries
+/// tables and so never has an assemblability defect to catch; a `.tma`
+/// one can. For every fixture, every debug mode, and (for the linked
+/// half) every call mechanism, both `disassemble_object`'s and
+/// `disassemble_executable`'s output must (1) already be fmt-canonical
+/// and (2) reassemble — the pair Task 5's plan scoped to objects only,
+/// because the executable path's naming, wrapping, and signature defects
+/// were known at the time; both are fixed now, so this gate covers both
+/// renderers with no scoping note.
+///
+/// One documented exception, asserted rather than silently excluded: a
+/// `--call-mech=mono` link names a stamped specialized routine copy with
+/// a digest suffix (`name$<hex>`, `docs/tmt/isa.md (call mechanisms)`),
+/// which is not a legal `.tma` identifier — the disassembled name does
+/// not re-lex, so reassembly fails regardless of anything the disassembler
+/// prints. `a5_call_across_alphabets` is the only fixture in this corpus
+/// whose binding is holey enough to force a mono stamp, so it is the only
+/// combination this gate expects to fail reassembly — and it asserts
+/// that specific failure rather than skipping the case: if a future fix
+/// makes it reassemble, this assertion goes red and the exception must
+/// be removed.
+#[test]
+fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
+    for &fixture in CORPUS {
+        let src = fs::read_to_string(golden_dir().join(format!("{fixture}.tmc")))
+            .unwrap_or_else(|e| panic!("{fixture}: read fixture: {e}"));
+        for debug in [false, true] {
+            let obj = compile(
+                &src,
+                CompileOptions {
+                    debug_info: debug,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{fixture} (-g={debug}): compile failed: {e}"))
+            .object;
+
+            // Object disassembly: no executable-only naming/signature
+            // surface, so no exception applies here.
+            let obj_dis = disassemble_object(&obj);
+            assert_eq!(
+                fmt_tma(&obj_dis),
+                obj_dis,
+                "{fixture} (-g={debug}) object dis is not fmt-clean:\n{obj_dis}"
+            );
+            assemble(&obj_dis, false).unwrap_or_else(|e| {
+                panic!("{fixture} (-g={debug}) object dis does not reassemble: {e}\n{obj_dis}")
+            });
+
+            for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+                let out = link(
+                    std::slice::from_ref(&obj),
+                    std::slice::from_ref(stdlib::object()),
+                    LinkOptions {
+                        call_mech: mech,
+                        ..Default::default()
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{fixture} (-g={debug}, {mech}): link failed: {e}"));
+                let exe_dis = disassemble_executable_with_map(&out.executable, &out.map);
+                let reassembled = assemble(&exe_dis, false);
+
+                if fixture == "a5_call_across_alphabets" && mech == CallMech::Mono {
+                    let e = reassembled.expect_err(
+                        "a5_call_across_alphabets under mono should still hit the digest-name \
+                         exception documented above — remove this exception if it now \
+                         reassembles",
+                    );
+                    assert!(
+                        matches!(e.kind, AsmErrorKind::RawLine),
+                        "unexpected failure shape for the digest-name exception: {e}\n{exe_dis}"
+                    );
+                    continue;
+                }
+                reassembled.unwrap_or_else(|e| {
+                    panic!(
+                        "{fixture} (-g={debug}, {mech}) executable dis does not reassemble: \
+                         {e}\n{exe_dis}"
+                    )
+                });
+                assert_eq!(
+                    fmt_tma(&exe_dis),
+                    exe_dis,
+                    "{fixture} (-g={debug}, {mech}) executable dis is not fmt-clean:\n{exe_dis}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

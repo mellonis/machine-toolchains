@@ -513,6 +513,7 @@ fn executable_dis_renders_routine_and_tables_with_map_labels() {
 .section tables
 T0:     .row    [1, 2]
         .row    [1, *]
+
 T1:     .targets A, B
 .section code
 .func main
@@ -524,8 +525,17 @@ B:      stp
     assert_eq!(text, expected, "sectioned disassembly:\n{text}");
 }
 
+/// The old, deliberately-left defect: without a map, an unresolved
+/// dispatch target rendered as raw hex plus a defensive comment, which
+/// `.targets` refuses on reassembly — 24 of the round's 42 acceptance
+/// combinations failed `dispatch targets are label names [bad-table]`
+/// for exactly this reason, since `tmt link` on a non-`-g` object writes
+/// an empty map `labels` list, so passing `--map` did not help either.
+/// Every dispatch target now gets [`synthesized_label`]'s `L<addr>` name
+/// instead — defined in the code section right below it — so the text
+/// reassembles with no map at all.
 #[test]
-fn executable_dis_without_map_renders_raw_hex_targets() {
+fn dis_of_a_linked_image_without_map_labels_assembles() {
     let syntax = fake_syntax();
     let out = link_one(asm(SINGLE, false));
     let text = disassemble_executable(&syntax, &out.executable, None);
@@ -534,16 +544,25 @@ fn executable_dis_without_map_renders_raw_hex_targets() {
         "{text}"
     );
     assert!(
-        text.contains(".targets 0x000b, 0x000c"),
-        "raw hex without a map:\n{text}"
+        text.contains(".targets L000B, L000C"),
+        "synthesized names, not raw hex, without a map:\n{text}"
     );
     assert!(
-        text.contains("; unresolved dispatch targets"),
-        "defensive comment flags the raw form:\n{text}"
+        !text.contains("0x000b") && !text.contains("unresolved"),
+        "no raw-hex/defensive-comment fallback survives:\n{text}"
     );
-    // The dispatch-reachable code is still discovered as instructions.
-    assert!(text.contains("nop"), "{text}");
+    // The dispatch-reachable code is still discovered as instructions,
+    // each labeled with the exact name `.targets` printed for it.
+    assert!(text.contains("L000B:  nop"), "{text}");
+    assert!(text.contains("L000C:  stp"), "{text}");
     assert!(!text.contains(".byte"), "{text}");
+    let obj2 = assemble(&syntax, ARCH, &text, false).expect("rendered text re-assembles");
+    let out2 = link(&syntax, &[obj2], &[], LinkOptions::default()).expect("re-links");
+    assert_eq!(
+        out2.executable.to_bytes(),
+        out.executable.to_bytes(),
+        "a mapless dis ∘ link must still reproduce the image byte-for-byte"
+    );
 }
 
 /// The strong round trip: link, disassemble WITH the map, re-assemble
@@ -573,6 +592,225 @@ fn code_only_dis_is_byte_compatible() {
     let text = disassemble_executable(&syntax, &out.executable, Some(&out.map));
     assert!(!text.contains(".routine"), "{text}");
     assert!(!text.contains(".section"), "{text}");
+}
+
+/// Every operand name printed by a `.targets` or `.exits` line in `text`,
+/// continuation lines included — a wrapped list's lines all end in `,`
+/// except its last. Local copy of `disassembler.rs`'s test helper of the
+/// same shape (per-file-helper convention: this file needs `link`, which
+/// that module's test helper does not).
+fn listed_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut continuing = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let payload = if continuing {
+            trimmed
+        } else if let Some((_, rest)) = trimmed.split_once(".targets ") {
+            rest
+        } else if let Some((_, rest)) = trimmed.split_once(".exits ") {
+            rest
+        } else {
+            continue;
+        };
+        continuing = payload.ends_with(',');
+        names.extend(
+            payload
+                .split(',')
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string),
+        );
+    }
+    names
+}
+
+/// Every name a `.targets`/`.exits` line prints is defined as a label in
+/// the CODE section of the same text — independent of how the name was
+/// chosen, so it catches a name with no definition, a raw offset, and a
+/// position the code walk never reaches.
+fn assert_listed_names_are_defined(dis: &str) {
+    let (_, code) = dis
+        .split_once("\n.section code\n")
+        .unwrap_or_else(|| panic!("table-bearing disassembly has a code section:\n{dis}"));
+    let listed = listed_names(dis);
+    assert!(!listed.is_empty(), "fixture lists no names at all:\n{dis}");
+    for name in listed {
+        let def = format!("{name}:");
+        assert!(
+            code.lines().any(|l| l.starts_with(&def)),
+            "`{name}` is printed by a list directive but defined nowhere \
+             in the code section:\n{dis}"
+        );
+    }
+}
+
+/// A wide table section: a match table (so blank-line separation between
+/// TWO tables is observable), a dispatch table wide enough to force
+/// `.targets` to wrap, and a frame descriptor whose `.map`/`.exits` are
+/// wide enough to force those too — assembled `-g` so the printed names
+/// are real (long) source labels, not short synthesized ones, since a
+/// short name would defeat the wrap. `fcall main, F0` calls `main`
+/// itself (the `TWO_SITES`/`FRAMES` self-referential pattern elsewhere in
+/// this file): the frame's exits are labels inside `main`'s own body, so
+/// nothing here depends on a second function. It comes FIRST in the
+/// body, reached by `ent`'s fall-through — `tdispatch` is a Stop-flow
+/// mnemonic in this dialect, so anything placed after it is unreachable
+/// dead code the recursive-descent walk would never decode.
+fn wide_linked_fixture() -> String {
+    let exits: Vec<String> = (0..14).map(|i| format!("Elongname{i}")).collect();
+    let pairs: Vec<String> = (1..9).map(|i| format!("{i}->{}", i + 1)).collect();
+    let body: String = exits
+        .iter()
+        .map(|e| format!("{e}: stp\n"))
+        .collect::<Vec<_>>()
+        .concat();
+    format!(
+        ".routine main, tapes=2, alpha=(4, 4)\n\
+         .section tables\n\
+         T0: .row [1, 2]\n\
+         D0: .targets {}\n\
+         F0: .frame tapes=(1, 0)\n    \
+             .map 0, rmap=({}), wmap=({})\n    \
+             .exits {}\n\
+         .section code\n\
+         .func main\n    \
+             fcall   main, F0\n    \
+             tmatch  T0\n    \
+             tdispatch D0\n\
+         {body}    stp\n",
+        exits.join(", "),
+        pairs.join(", "),
+        pairs.join(", "),
+        exits.join(", "),
+    )
+}
+
+/// Defect 2: even WITH `-g` throughout, the executable table loop
+/// neither wrapped a long list nor separated tables with a blank line —
+/// a 1048-char `.targets` line and no blank between tables, so `tmt fmt
+/// --check` failed. Deleting the raw-hex fallback (defect 1) also
+/// deletes the section's only trailing comment, so `fmt --check` passing
+/// is NOT by itself evidence the blank line is there — a section with
+/// zero trailing comments never widens `comment_columns` regardless of
+/// blank lines (the same caveat Task 4 recorded). This test asserts the
+/// blank-line and wrap structure directly, then checks `fmt --check`
+/// (`format_asm_with` is the identity) as a second, non-discriminating
+/// confirmation.
+#[test]
+fn dis_of_a_linked_image_is_fmt_clean() {
+    use mtc_core::asm::{AsmCaps, format_asm_with};
+    let syntax = fake_syntax();
+    let src = wide_linked_fixture();
+    let out = link_one(asm(&src, true));
+    let dis = disassemble_executable(&syntax, &out.executable, Some(&out.map));
+
+    // Blank-line separation: three tables, no blank before the first,
+    // exactly one before each of the other two, none wider. Table names
+    // are synthesized in OUTPUT order (match/dispatch share one `T<n>`
+    // counter, frame its own `F<n>`), not the source labels — the
+    // dispatch table (source `D0`) renders as `T1`, right after match
+    // table `T0`.
+    assert!(
+        dis.contains(".section tables\nT0:"),
+        "no blank line before the first table:\n{dis}"
+    );
+    assert!(dis.contains("\n\nT1:"), "blank line before T1 (D0):\n{dis}");
+    assert!(dis.contains("\n\nF0:"), "blank line before F0:\n{dis}");
+    let section = dis.split_once("\n.section code\n").unwrap().0;
+    assert_eq!(
+        section.matches("\n\n").count(),
+        2,
+        "one blank line per boundary, no others:\n{dis}"
+    );
+    assert!(
+        !section.contains("\n\n\n"),
+        "no boundary carries more than one blank line:\n{dis}"
+    );
+
+    // Wrapping: each of `.targets`/`.exits`/`.map` actually wrapped, at
+    // the same continuation column the printer would compute.
+    for (word, col) in [(".targets", 17), (".exits", 16), (".map", 16)] {
+        let line = dis
+            .lines()
+            .position(|l| l.contains(word))
+            .unwrap_or_else(|| panic!("no {word} line in:\n{dis}"));
+        let next = dis.lines().nth(line + 1).unwrap_or("");
+        assert!(
+            dis.lines().nth(line).unwrap().ends_with(','),
+            "{word} should have wrapped:\n{dis}"
+        );
+        assert_eq!(
+            next.len() - next.trim_start().len(),
+            col,
+            "{word}'s continuation lines indent under its first element:\n{dis}"
+        );
+    }
+    for l in dis.lines() {
+        assert!(l.chars().count() <= 80, "over-budget line `{l}`:\n{dis}");
+    }
+
+    let caps = AsmCaps {
+        tables: true,
+        rept: true,
+        vectors: true,
+    };
+    assert_eq!(
+        format_asm_with(&dis, caps).unwrap(),
+        dis,
+        "fmt --check clean"
+    );
+    assert_listed_names_are_defined(&dis);
+    let obj2 = assemble(&syntax, ARCH, &dis, false).expect("rendered text re-assembles");
+    let out2 = link(&syntax, &[obj2], &[], LinkOptions::default()).expect("re-links");
+    assert_eq!(out2.executable.to_bytes(), out.executable.to_bytes());
+}
+
+/// Defect 3: `a5_call_across_alphabets` failed `bad-signature` even with
+/// `-g`, because the executable path emitted `.routine` for the entry
+/// only — but reassembling the disassembled text treats it as one
+/// source file, and the assembler's all-or-none rule then demands every
+/// function in it carry a signature once any one does. `helper`'s frame
+/// projects a SMALLER arity (1 virtual tape) than `main`'s own (2), so a
+/// fix that just replayed the entry's signature for every function would
+/// print `tapes=2` for `helper` too — disagreeing with the `.frame
+/// tapes=(1)` line already rendered for it, and this test would still
+/// pass under that wrong fix if it only checked "some `.routine` line
+/// exists". Asserting the exact `tapes=1` value is what rules that out.
+#[test]
+fn dis_of_a_linked_image_emits_routine_signatures() {
+    let syntax = fake_syntax();
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine helper, tapes=1, alpha=(3)
+.section tables
+F0: .frame tapes=(1)
+    .exits after
+.section code
+.func main
+        fcall   helper, F0
+after:  stp
+.func helper
+        ret
+";
+    let out = link_one(asm(src, true));
+    let dis = disassemble_executable(&syntax, &out.executable, Some(&out.map));
+    assert!(dis.contains(".frame  tapes=(1)"), "{dis}");
+    assert!(
+        dis.contains(".routine helper, tapes=1, alpha=("),
+        "the callee gets its OWN arity from the frame, not the entry's tapes=2:\n{dis}"
+    );
+    assert!(
+        !dis.contains(".routine helper, tapes=2"),
+        "must not just replay the entry's signature:\n{dis}"
+    );
+    let obj2 = assemble(&syntax, ARCH, &dis, false).expect("rendered text re-assembles");
+    let out2 = link(&syntax, &[obj2], &[], LinkOptions::default()).expect("re-links");
+    assert_eq!(
+        out2.executable.to_bytes(),
+        out.executable.to_bytes(),
+        "dis ∘ link must reproduce the image byte-for-byte"
+    );
 }
 
 // --- Entry selection and declarative bound-call reachability ---
