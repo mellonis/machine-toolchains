@@ -111,6 +111,18 @@ pub(super) struct FramesPlan {
     pub routines: Vec<String>,
 }
 
+/// The composition engine's lowering result, shared by every entry point
+/// (`lower`, `lower_mono`, `lower_hybrid`): the (possibly rewritten) order,
+/// an optional `FramesPlan`, engine counters, and the sorted names any
+/// stamping pass pruned as newly-orphaned generics (docs/core.md (the link
+/// report)).
+pub(super) type LoweredOrder<'a> = (
+    Vec<FuncRef<'a>>,
+    Option<FramesPlan>,
+    EngineStats,
+    Vec<String>,
+);
+
 /// One control-transfer site in a routine's original blob, in offset order.
 pub(super) enum SiteKind<'a> {
     /// A relocated plain call or tail jump: the callee inherits the active
@@ -131,17 +143,18 @@ pub(super) enum SiteKind<'a> {
     RawCallM { frame_hole: u32 },
 }
 
-/// Run the composition engine. Returns the (possibly rewritten) order and a
-/// `FramesPlan` when any reachable routine carries a bound call; returns
-/// `None` (order untouched) otherwise, so bindingless links stay on the
-/// byte-identical 5a/T2 path. Only `CallMech::Frames` is implemented;
-/// `Mono`/`Hybrid` error until the stamping engine lands.
+/// Run the composition engine. Returns the (possibly rewritten) order, a
+/// `FramesPlan` when any reachable routine carries a bound call (`None` —
+/// order untouched — otherwise, so bindingless links stay on the
+/// byte-identical 5a/T2 path), engine counters, and the sorted names mono or
+/// hybrid stamping pruned as newly-orphaned generics (always empty under
+/// `Frames`, which never stamps — docs/core.md (the link report)).
 pub(super) fn lower<'a>(
     syntax: &ArchSyntax,
     order: Vec<FuncRef<'a>>,
     machine_sig: &RoutineSig,
     call_mech: CallMech,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
+) -> Result<LoweredOrder<'a>, LinkError> {
     // Scan every reached routine for its control sites. Bindingless links
     // (no bound call anywhere) skip the engine entirely.
     let sites: Vec<Vec<SiteKind>> = order
@@ -152,7 +165,7 @@ pub(super) fn lower<'a>(
         .iter()
         .any(|s| s.iter().any(|k| matches!(k, SiteKind::Bound { .. })));
     if !has_bound {
-        return Ok((order, None, EngineStats::default()));
+        return Ok((order, None, EngineStats::default(), Vec::new()));
     }
 
     // Mono stamps rewritten copies; hybrid classifies per site. FRAMES keeps
@@ -160,7 +173,10 @@ pub(super) fn lower<'a>(
     match call_mech {
         CallMech::Mono => super::stamp::lower_mono(syntax, order, &sites, machine_sig),
         CallMech::Hybrid => super::stamp::lower_hybrid(syntax, order, &sites, machine_sig),
-        CallMech::Frames => lower_frames(syntax, order, &sites, machine_sig),
+        CallMech::Frames => {
+            let (order, plan, stats) = lower_frames(syntax, order, &sites, machine_sig)?;
+            Ok((order, plan, stats, Vec::new()))
+        }
     }
 }
 

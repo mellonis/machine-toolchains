@@ -1387,6 +1387,49 @@ fn a_generic_orphaned_by_stamping_is_not_shipped() {
             .all(|f| f.name == "main" || is_stamp_name(&f.name)),
         "nothing but main and stamps survives when every site to sub is stamped: {names:?}"
     );
+    assert_eq!(
+        out.report.dropped,
+        vec!["sub".to_string()],
+        "the orphan is accounted for in the report, not just silently missing from the map: {:?}",
+        out.report.dropped
+    );
+}
+
+/// The same shape, but `sub` is a LOCAL symbol (bound directly within its
+/// own object, never through the namespace). `resolve::Resolved::dropped`
+/// deliberately omits locals — a pre-lowering drop is name-level and
+/// namespace-based, and a local was never a namespace candidate — but a
+/// stamping orphan is a different kind of drop: it names an actual `FuncRef`
+/// that WAS linked in, independent of whether that name was ever exported.
+/// The merged `dropped` list is therefore slightly MORE inclusive than the
+/// resolve-time-only wording once suggested: a local generic CAN appear
+/// here if stamping orphans it.
+#[test]
+fn a_local_generic_orphaned_by_stamping_is_reported_dropped() {
+    let src = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine sub, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    sub [0{1->2, 2->1}, 1]
+        stp
+.func sub local
+        wr [1, -]
+        ret
+";
+    let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
+    assert_eq!(
+        stamp_names(&out).len(),
+        1,
+        "the positive control: exactly one stamp of sub: {:?}",
+        out.map
+    );
+    assert_eq!(
+        out.report.dropped,
+        vec!["sub".to_string()],
+        "a local orphan is still reported, unlike a local that resolve never reached: {:?}",
+        out.report.dropped
+    );
 }
 
 /// A hand-written routine that occupies the exact name a mono stamp would
@@ -1470,7 +1513,16 @@ fn mono_dedups_equal_composites() {
 }
 
 /// A full-arity identity binding collapses to a plain call into the ORIGINAL
-/// routine — no stamp, no frames.
+/// routine — no stamp, no frames. `sub` stays main's only callee, so
+/// `prune_unreachable` finds everything already reached and takes its
+/// documented fast path: the input `Vec` comes back untouched, not a
+/// filtered copy that merely happens to contain the same functions. That
+/// claim isn't exercised by the frames/hybrid byte-identity checks, which
+/// never call the prune at all — this is the one mono fixture where the
+/// prune runs AND must find nothing to drop, so it pins both the fast path
+/// and the not-too-aggressive direction: `sub` present in the map, and the
+/// report's `dropped` list empty (an over-eager prune would show up here
+/// first, since `sub` is the collapse target, not a stamp).
 #[test]
 fn an_identity_binding_under_mono_calls_the_original() {
     let src = "\
@@ -1491,6 +1543,16 @@ fn an_identity_binding_under_mono_calls_the_original() {
     );
     assert_ne!(out.executable.profile, PROFILE_FRAMES);
     assert!(!out.executable.code.contains(&0x14), "no framed call");
+    let names: Vec<&str> = out.map.functions.iter().map(|f| f.name.as_str()).collect();
+    assert!(
+        names.contains(&"sub"),
+        "the collapse target survives; the prune must find nothing to drop: {names:?}"
+    );
+    assert!(
+        out.report.dropped.is_empty(),
+        "nothing is orphaned here — an over-aggressive prune would show up in this list: {:?}",
+        out.report.dropped
+    );
 }
 
 /// An EMPTY binding into a NARROWER callee does NOT collapse under mono
@@ -2040,6 +2102,12 @@ fn hybrid_mixed_drops_an_orphaned_mono_generic_but_keeps_a_frames_generic() {
     assert!(
         !names.contains(&"swap"),
         "swap's only site was promoted to a stamp; the orphaned generic must not ship: {names:?}"
+    );
+    assert_eq!(
+        out.report.dropped,
+        vec!["swap".to_string()],
+        "narrow survives and must not appear here; only the orphan does: {:?}",
+        out.report.dropped
     );
 }
 

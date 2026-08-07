@@ -40,7 +40,7 @@ use super::compose::{
     is_full_passthrough,
 };
 use super::engine::{
-    EngineStats, FramesPlan, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
+    EngineStats, LoweredOrder, SiteKind, bad_binding, lower_frames, routine_sig, scan_sites,
 };
 use super::resolve::FuncRef;
 use crate::asm::decode::{self, Body, DecodedOperand};
@@ -110,13 +110,15 @@ enum DispEntry {
 /// Lower every reachable declarative bound call under MONO: stamp a
 /// specialized copy per (routine, composite) and retarget each site to a
 /// plain call into it. The image stays on the base profile, so no
-/// `FramesPlan` is produced.
+/// `FramesPlan` is produced. The last element is the sorted names
+/// `prune_unreachable` dropped — folded into the link report's `dropped`
+/// list by the caller (docs/core.md (the link report)).
 pub(super) fn lower_mono<'a>(
     syntax: &ArchSyntax,
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
+) -> Result<LoweredOrder<'a>, LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -195,14 +197,14 @@ pub(super) fn lower_mono<'a>(
     // Every site that used to call a now-orphaned generic was just
     // retargeted above (docs/core.md (the composition engine)) — restore the
     // resolve-time reachability guarantee over the retargeted graph.
-    let out = prune_unreachable(out);
+    let (out, orphaned) = prune_unreachable(out);
     debug_assert!(
         stamp_names
             .iter()
             .all(|name| out.iter().any(|f| f.name == *name)),
         "mono stamping must never orphan a stamp it just minted"
     );
-    Ok((out, None, engine_stats))
+    Ok((out, None, engine_stats, orphaned))
 }
 
 // -- HYBRID ------------------------------------------------------------------
@@ -210,13 +212,15 @@ pub(super) fn lower_mono<'a>(
 /// Lower under HYBRID: mono-stamp the completed-bijection sites, hand the
 /// rest to the frames path. If every non-collapse site is a bijection this
 /// is pure mono; if none is, pure frames; otherwise both, and the image is
-/// FRAMES.
+/// FRAMES. The last element is the sorted names pruned along the way (empty
+/// on the pure-frames branch, which never stamps and so never orphans
+/// anything) — see `lower_mono`.
 pub(super) fn lower_hybrid<'a>(
     syntax: &ArchSyntax,
     order: Vec<FuncRef<'a>>,
     sites: &[Vec<SiteKind<'a>>],
     machine_sig: &RoutineSig,
-) -> Result<(Vec<FuncRef<'a>>, Option<FramesPlan>, EngineStats), LinkError> {
+) -> Result<LoweredOrder<'a>, LinkError> {
     let n = order.len();
     let id_world = identity_world(sites, n);
 
@@ -251,7 +255,8 @@ pub(super) fn lower_hybrid<'a>(
 
     // The two degenerate cases route straight to a single mechanism.
     if seeds.is_empty() {
-        return lower_frames(syntax, order, sites, machine_sig);
+        let (order, plan, stats) = lower_frames(syntax, order, sites, machine_sig)?;
+        return Ok((order, plan, stats, Vec::new()));
     }
     if !any_frames {
         return lower_mono(syntax, order, sites, machine_sig);
@@ -284,7 +289,7 @@ pub(super) fn lower_hybrid<'a>(
     // `lower_frames` builds its directory and compose-column order over,
     // never needing a post-hoc index remap (docs/core.md (the composition
     // engine)).
-    let new_order = prune_unreachable(new_order);
+    let (new_order, orphaned) = prune_unreachable(new_order);
     debug_assert!(
         stamp_names
             .iter()
@@ -307,7 +312,7 @@ pub(super) fn lower_hybrid<'a>(
         synthesized_trap_rows: mono_stats.synthesized_trap_rows,
         expanded_rows: mono_stats.expanded_rows,
     };
-    Ok((order, plan, stats))
+    Ok((order, plan, stats, orphaned))
 }
 
 /// A completed bijection (mono-eligible): every bound tape equal-size (so
@@ -382,11 +387,15 @@ fn identity_world(sites: &[Vec<SiteKind>], n: usize) -> Vec<bool> {
 /// reindexes the survivors' targets so the result is layout-ready. When
 /// nothing is orphaned the input `Vec` comes back untouched — not merely
 /// equivalent — so a link with no orphan hands layout the identical order it
-/// always did.
-fn prune_unreachable(order: Vec<FuncRef>) -> Vec<FuncRef> {
+/// always did. The second return is the pruned names, sorted, for folding
+/// into the link report's `dropped` list alongside `resolve`'s pre-lowering
+/// ones (docs/core.md (the link report)) — the two are mutually exclusive by
+/// construction, since a name `resolve` already dropped never entered
+/// `order` and so cannot be found here.
+fn prune_unreachable(order: Vec<FuncRef>) -> (Vec<FuncRef>, Vec<String>) {
     let n = order.len();
     if n == 0 {
-        return order;
+        return (order, Vec::new());
     }
     let mut reached = vec![false; n];
     reached[0] = true;
@@ -405,8 +414,16 @@ fn prune_unreachable(order: Vec<FuncRef>) -> Vec<FuncRef> {
         }
     }
     if reached.iter().all(|&r| r) {
-        return order;
+        return (order, Vec::new());
     }
+
+    let mut orphaned: Vec<String> = order
+        .iter()
+        .zip(&reached)
+        .filter(|&(_, &r)| !r)
+        .map(|(f, _)| f.name.to_string())
+        .collect();
+    orphaned.sort();
 
     let mut new_index = vec![usize::MAX; n];
     let mut next = 0usize;
@@ -416,7 +433,7 @@ fn prune_unreachable(order: Vec<FuncRef>) -> Vec<FuncRef> {
             next += 1;
         }
     }
-    order
+    let pruned = order
         .into_iter()
         .zip(reached)
         .filter(|(_, r)| *r)
@@ -429,7 +446,8 @@ fn prune_unreachable(order: Vec<FuncRef>) -> Vec<FuncRef> {
             }
             f
         })
-        .collect()
+        .collect();
+    (pruned, orphaned)
 }
 
 /// Build the mono stamp set reachable from `seeds` (machine-frame bound
