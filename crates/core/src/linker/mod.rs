@@ -440,13 +440,20 @@ pub fn link(
     // `dropped` covers both reasons a name doesn't ship: `resolved.dropped`
     // (never reached by the pre-lowering BFS) and `orphaned` (reached then,
     // but left with no caller once mono/hybrid stamping retargeted every
-    // site — docs/core.md (linking)). The two are mutually exclusive by
-    // construction — a name in `resolved.dropped` never entered `order`, so
-    // it cannot also appear in `orphaned` — and both arrive pre-sorted, so a
-    // plain concatenation only needs one final sort, not a merge.
+    // site — docs/core.md (linking)). The two lists are disjoint as SITES —
+    // a namespace site in `resolved.dropped` never entered `order`, so it
+    // cannot also be a stamping orphan — but that is not a disjointness of
+    // NAME STRINGS: `order` can (and does, per `resolve.rs`'s
+    // `locals_bind_directly_and_may_repeat_across_objects`) hold two
+    // distinct `FuncRef`s sharing one name, e.g. two objects each defining
+    // their own private `helper`. Both arrive pre-sorted, so `dedup` after
+    // one concatenated sort is enough — no merge, and no risk of dropping a
+    // genuine duplicate, since `dedup` only collapses ADJACENT equal
+    // strings, which a sort already guarantees are adjacent.
     let mut dropped = resolved.dropped;
     dropped.extend(orphaned);
     dropped.sort();
+    dropped.dedup();
 
     Ok(LinkOutput {
         executable,

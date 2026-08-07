@@ -553,7 +553,10 @@ produce different images from the same objects:
   routine name too, so the linker checks every freshly minted stamp name
   against every routine and stamp name already in play for this link and
   refuses with a typed error on a collision, rather than relying on the
-  character choice alone to rule one out. Mono emits no frames region.
+  character choice alone to rule one out. A generic routine left with no
+  remaining caller once every site retargets to its stamp does not ship
+  (the reachability promise above applies after lowering too). Mono
+  emits no frames region.
 - **frames** compiles for the frames profile: one generic copy of each
   routine, every binding site a framed call, composites resolved through
   the frames region's directory and compose table at run time. A crossed

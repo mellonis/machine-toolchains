@@ -158,12 +158,19 @@ pub(super) fn lower_mono<'a>(
     }
 
     let (stamps, seed_target, stats) = mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
-    let engine_stats = EngineStats {
-        instantiations: u32::try_from(stamps.len()).unwrap_or(u32::MAX),
-        dedup_savings: stats.dedup_savings,
-        synthesized_trap_rows: stats.synthesized_trap_rows,
-        expanded_rows: stats.expanded_rows,
-    };
+    // `dedup_savings`, `synthesized_trap_rows`, and `expanded_rows` are
+    // summed over every stamp `mono_stamps` builds, before the prune below
+    // runs. That is sound because `mono_stamps` closes "mono all the way
+    // down" from a seed already known reachable (`id_world`) — every stamp
+    // it mints keeps at least the caller that seeded or called it, so
+    // nothing built here is ever orphaned by the prune (the `debug_assert!`
+    // near the prune call checks exactly this, in debug builds). Unlike
+    // `instantiations` below, re-deriving these three from the post-prune
+    // survivors would need `mono_stamps` to attribute each count to a
+    // specific stamp rather than fold it into one running total as it
+    // builds — `dedup_savings` in particular is a per-call-site event, not
+    // a per-stamp one, so there is no single survivor to attribute a saving
+    // to. Not worth the restructuring for counters this diagnostic.
     let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
     // Retarget every original's bound sites to a plain call. Reachable sites
@@ -198,6 +205,26 @@ pub(super) fn lower_mono<'a>(
     // retargeted above (docs/core.md (the composition engine)) — restore the
     // resolve-time reachability guarantee over the retargeted graph.
     let (out, orphaned) = prune_unreachable(out);
+
+    // `instantiations` — unlike the three counters above — is cheap to make
+    // immune to a future closure-invariant break: count the minted names
+    // actually still present in `out`, not `stamps.len()` from before the
+    // prune ran. Under the invariant this equals `stamp_names.len()`
+    // exactly, so the `debug_assert!` below stays a meaningful check in
+    // debug builds; a violation would silently under-report here in EVERY
+    // build, release included, rather than just tripping the assert.
+    let instantiations = u32::try_from(
+        out.iter()
+            .filter(|f| stamp_names.contains(f.name.as_ref()))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let engine_stats = EngineStats {
+        instantiations,
+        dedup_savings: stats.dedup_savings,
+        synthesized_trap_rows: stats.synthesized_trap_rows,
+        expanded_rows: stats.expanded_rows,
+    };
     debug_assert!(
         stamp_names
             .iter()
@@ -264,10 +291,12 @@ pub(super) fn lower_hybrid<'a>(
 
     // Mixed: build the mono stamps, promote the bijection bound sites to
     // plain calls into them (dropping those bound records), then let the
-    // frames path lower whatever bound records remain.
+    // frames path lower whatever bound records remain. `dedup_savings`,
+    // `synthesized_trap_rows`, and `expanded_rows` are summed before the
+    // prune below runs, for the same closure-invariant reason `lower_mono`
+    // documents at its own `mono_stamps` call.
     let (stamps, seed_target, mono_stats) =
         mono_stamps(syntax, &order, sites, machine_sig, &seeds)?;
-    let instantiations = u32::try_from(stamps.len()).unwrap_or(u32::MAX);
     let stamp_names: HashSet<String> = stamps.iter().map(|f| f.name.to_string()).collect();
 
     let mut new_order: Vec<FuncRef> = Vec::with_capacity(n + stamps.len());
@@ -290,6 +319,16 @@ pub(super) fn lower_hybrid<'a>(
     // never needing a post-hoc index remap (docs/core.md (the composition
     // engine)).
     let (new_order, orphaned) = prune_unreachable(new_order);
+
+    // Same immunity as `lower_mono`: count survivors, not `stamps.len()`
+    // from before the prune ran.
+    let instantiations = u32::try_from(
+        new_order
+            .iter()
+            .filter(|f| stamp_names.contains(f.name.as_ref()))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
     debug_assert!(
         stamp_names
             .iter()

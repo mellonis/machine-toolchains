@@ -1403,18 +1403,26 @@ fn a_generic_orphaned_by_stamping_is_not_shipped() {
 /// that WAS linked in, independent of whether that name was ever exported.
 /// The merged `dropped` list is therefore slightly MORE inclusive than the
 /// resolve-time-only wording once suggested: a local generic CAN appear
-/// here if stamping orphans it.
+/// here if stamping orphans it. `dead` is the actual contrast case: a LOCAL
+/// the reachability BFS never reaches at all (called by nothing, not even
+/// transitively) — `resolve::Resolved::dropped` silently omits it by
+/// design, and this asserts it stays omitted from the merged list too, so
+/// the fixture exercises both halves of the asymmetry the doc comment
+/// claims, not just the orphan half.
 #[test]
 fn a_local_generic_orphaned_by_stamping_is_reported_dropped() {
     let src = "\
 .routine main, tapes=2, alpha=(4, 4)
 .routine sub, tapes=2, alpha=(4, 4)
+.routine dead, tapes=2, alpha=(4, 4)
 .section code
 .func main
         call    sub [0{1->2, 2->1}, 1]
         stp
 .func sub local
         wr [1, -]
+        ret
+.func dead local
         ret
 ";
     let out = link(&fake_syntax(), &[asm(src, false)], &[], mono_opts()).expect("links");
@@ -1427,7 +1435,73 @@ fn a_local_generic_orphaned_by_stamping_is_reported_dropped() {
     assert_eq!(
         out.report.dropped,
         vec!["sub".to_string()],
-        "a local orphan is still reported, unlike a local that resolve never reached: {:?}",
+        "a local orphan is reported, but an unreached local (dead) stays silently omitted \
+         exactly as resolve documents: {:?}",
+        out.report.dropped
+    );
+}
+
+/// Two SEPARATE objects, each defining its own private `helper` reached only
+/// through a projecting bound call (so mono stamps and orphans it, same as
+/// the single-object tests above) — but this time both locals share the
+/// exact name `helper`. Locals never enter the shared namespace (per-object
+/// visibility), so the assembler happily accepts the same name twice across
+/// objects; before the merged `dropped` list existed this was moot, but
+/// `resolved.dropped ∪ orphaned` combining two SORTED, UNIQUE-by-construction
+/// lists does not itself produce a unique result — `resolved.dropped` came
+/// from a `BTreeSet` (pre-branch, always unique), but `orphaned` is built by
+/// filtering `order`, which CAN hold two distinct `FuncRef`s sharing a name
+/// (`resolve.rs`'s `locals_bind_directly_and_may_repeat_across_objects`
+/// pins exactly this). Without `.dedup()` after the sort this prints
+/// `dropped [helper, helper]` — a duplicate that never occurred before this
+/// branch, since the pre-branch field was `resolved.dropped` verbatim.
+/// Object B's binding differs from A's (`1->3, 3->1` vs `1->2, 2->1`) so the
+/// two composites — and so the two minted stamp names — stay distinct;
+/// otherwise `intern`'s collision guard would refuse the link before the
+/// duplicate-name question is even reached.
+#[test]
+fn dropped_deduplicates_two_same_named_locals_orphaned_in_different_objects() {
+    let object_a = "\
+.routine main, tapes=2, alpha=(4, 4)
+.routine helper, tapes=2, alpha=(4, 4)
+.section code
+.func main
+        call    helper [0{1->2, 2->1}, 1]
+        call    apiB
+        stp
+.func helper local
+        wr [1, -]
+        ret
+";
+    let object_b = "\
+.routine apiB, tapes=2, alpha=(4, 4)
+.routine helper, tapes=2, alpha=(4, 4)
+.section code
+.func apiB
+        call    helper [0{1->3, 3->1}, 1]
+        ret
+.func helper local
+        wr [1, -]
+        ret
+";
+    let out = link(
+        &fake_syntax(),
+        &[asm(object_a, false), asm(object_b, false)],
+        &[],
+        mono_opts(),
+    )
+    .expect("links");
+    assert_eq!(
+        stamp_names(&out).len(),
+        2,
+        "the positive control: one stamp per object's helper: {:?}",
+        out.map
+    );
+    assert_eq!(
+        out.report.dropped,
+        vec!["helper".to_string()],
+        "two distinct orphans sharing one name collapse to a single report entry, not \
+         [helper, helper]: {:?}",
         out.report.dropped
     );
 }
