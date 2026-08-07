@@ -488,12 +488,20 @@ same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
 8, operands at 16, trailing comments aligned per group at or past 32 —
 see "assembly text", above, for the exact rule); the parser accepts any
 whitespace on input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis`
-output is valid assembler input and round-trips to the original bytes,
-with one exception: a `--call-mech=mono` linked image names a stamped
-specialized routine copy with a digest suffix (`bare$513e6968`, see
-`docs/tmt/isa.md (call mechanisms)`), and that suffix is not a legal
-`.tma` identifier, so disassembling an image with a mono stamp and
-reassembling the result fails.
+output is valid assembler input, with one exception: a
+`--call-mech=mono` linked image names a stamped specialized routine
+copy with a digest suffix (`bare$513e6968`, see `docs/tmt/isa.md
+(call mechanisms)`), and that suffix is not a legal `.tma` identifier,
+so disassembling an image with a mono stamp and reassembling the
+result fails. Reassembling an **object's** disassembly reproduces the
+original bytes exactly. Reassembling and re-linking a **linked
+image's** disassembly reproduces an equivalent image — same code, same
+table content — but not always the same bytes: a frame that
+originated from a declarative binding always disassembles to raw
+`.frame`/`call.m` syntax (there is no way to reconstruct the
+declarative form), and relinking that syntax does not necessarily lay
+out the tables section the way the original declarative-binding link
+did.
 
 ### Sections and the routine signature
 
@@ -511,6 +519,14 @@ equals `tapes`). The directive must **precede** the `.func` it names, any
 distance in the same file; it attaches when the function is defined. The
 entry routine's signature fixes the executable image's tape count and
 per-tape alphabets, which a run validates its tape band against.
+
+Disassembling a linked image recovers a non-entry callee's signature
+only when it is reached through a `.frame` descriptor: `tapes` comes
+from the descriptor's own virtual tape count, but the routine's true
+per-tape alphabet is consumed by the composition engine at link time
+and does not survive into the image, so `alpha` there is the
+**physical** tape each virtual one projects onto instead — a
+`; derived` trailing comment marks the line to say so.
 
 ### The mnemonic set
 

@@ -131,17 +131,43 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
 
+/// Number of top-level table labels (`T<n>:`/`F<n>:`, always at column
+/// 0 — a continuation line of a wrapped list, or a `.row`/`.map`/`.exits`
+/// line, is always indented) in a `.section tables` body. Independent of
+/// blank-line placement, so it is safe to derive from the very output
+/// the blank-line assertion below checks: it counts a structural feature
+/// (how many tables rendered), not the whitespace between them.
+fn table_label_count(section: &str) -> usize {
+    section
+        .lines()
+        .filter(|l| {
+            let mut chars = l.chars();
+            matches!(chars.next(), Some('T' | 'F'))
+                && chars.next().is_some_and(|c| c.is_ascii_digit())
+                && l.contains(':')
+        })
+        .count()
+}
+
 /// `tmt dis`'s permanent dogfood gate over the golden corpus — the PM-1
 /// sibling this mirrors (`fmt_pma.rs`'s `dis_output_is_already_canonical`)
 /// asserts format identity alone, because a `.pma` object never carries
 /// tables and so never has an assemblability defect to catch; a `.tma`
 /// one can. For every fixture, every debug mode, and (for the linked
 /// half) every call mechanism, both `disassemble_object`'s and
-/// `disassemble_executable`'s output must (1) already be fmt-canonical
-/// and (2) reassemble — the pair Task 5's plan scoped to objects only,
-/// because the executable path's naming, wrapping, and signature defects
-/// were known at the time; both are fixed now, so this gate covers both
-/// renderers with no scoping note.
+/// `disassemble_executable`'s output must (1) already be fmt-canonical,
+/// (2) separate multiple tables with exactly one blank line each (never
+/// none, never more), and (3) reassemble.
+///
+/// (1) and (3) alone do NOT cover (2): deleting the blank-line insertion
+/// entirely still formats as the identity (`format_asm_with` preserves
+/// whatever blank lines are already there, it does not require them) and
+/// still reassembles (a blank line is not significant to the parser) —
+/// mutation-checked by temporarily deleting it and confirming this test
+/// alone catches it. This gate is the widened form of what was meant to
+/// be an object-only gate before the executable path's naming, wrapping,
+/// signature, and blank-line defects were fixed; both renderers are
+/// covered with no scoping note now that they are.
 ///
 /// One documented exception, asserted rather than silently excluded: a
 /// `--call-mech=mono` link names a stamped specialized routine copy with
@@ -151,9 +177,9 @@ fn golden_dir() -> PathBuf {
 /// prints. `a5_call_across_alphabets` is the only fixture in this corpus
 /// whose binding is holey enough to force a mono stamp, so it is the only
 /// combination this gate expects to fail reassembly — and it asserts
-/// that specific failure rather than skipping the case: if a future fix
-/// makes it reassemble, this assertion goes red and the exception must
-/// be removed.
+/// that specific failure (the offending `$`-suffixed name appears in the
+/// error) rather than skipping the case: if a future fix makes it
+/// reassemble, this assertion goes red and the exception must be removed.
 #[test]
 fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
     for &fixture in CORPUS {
@@ -178,6 +204,7 @@ fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
                 obj_dis,
                 "{fixture} (-g={debug}) object dis is not fmt-clean:\n{obj_dis}"
             );
+            assert_blank_lines_separate_tables(&obj_dis, &format!("{fixture} (-g={debug}) object"));
             assemble(&obj_dis, false).unwrap_or_else(|e| {
                 panic!("{fixture} (-g={debug}) object dis does not reassemble: {e}\n{obj_dis}")
             });
@@ -205,6 +232,20 @@ fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
                         matches!(e.kind, AsmErrorKind::RawLine),
                         "unexpected failure shape for the digest-name exception: {e}\n{exe_dis}"
                     );
+                    // `AsmError`'s Display carries position + kind, not the
+                    // offending text, so the check reads the SOURCE line the
+                    // span points at (1-indexed) — the failure must be the
+                    // documented digest-suffixed name, not some other
+                    // unparseable line absorbed by matching on kind alone.
+                    let offending_line = exe_dis
+                        .lines()
+                        .nth(e.span.start.line as usize - 1)
+                        .unwrap_or_default();
+                    assert!(
+                        offending_line.contains('$'),
+                        "the failure should be on the digest-suffixed symbol's line, not some \
+                         other unparseable one: {e}\noffending line: {offending_line:?}\n{exe_dis}"
+                    );
                     continue;
                 }
                 reassembled.unwrap_or_else(|e| {
@@ -218,9 +259,46 @@ fn dis_output_of_the_golden_corpus_assembles_and_is_fmt_clean() {
                     exe_dis,
                     "{fixture} (-g={debug}, {mech}) executable dis is not fmt-clean:\n{exe_dis}"
                 );
+                assert_blank_lines_separate_tables(
+                    &exe_dis,
+                    &format!("{fixture} (-g={debug}, {mech}) executable"),
+                );
             }
         }
     }
+}
+
+/// Structural half of defect 2 that format identity cannot see
+/// (`format_asm_with` preserves existing blank lines rather than
+/// requiring them, so a printer that dropped the separator entirely
+/// would still format as its own identity): a `.section tables` body
+/// with `n` tables has exactly `n - 1` blank-line boundaries, never a
+/// run of two. `.section tables` is searched for rather than required
+/// as a prefix — an executable's disassembly opens with the entry's
+/// `.routine` line ahead of it, an object's does not, and this must
+/// find the section either way, not silently no-op on the executable
+/// half.
+fn assert_blank_lines_separate_tables(dis: &str, label: &str) {
+    let Some((before_code, _)) = dis.split_once("\n.section code\n") else {
+        return; // no tables section at all — nothing to check
+    };
+    let Some((_, section)) = before_code.split_once(".section tables\n") else {
+        return; // code-only text — nothing to check
+    };
+    let n = table_label_count(section);
+    if n == 0 {
+        return;
+    }
+    assert!(
+        !section.contains("\n\n\n"),
+        "{label}: a table boundary carries more than one blank line:\n{dis}"
+    );
+    assert_eq!(
+        section.matches("\n\n").count(),
+        n - 1,
+        "{label}: expected {} blank-line boundaries for {n} tables:\n{dis}",
+        n - 1
+    );
 }
 
 #[test]

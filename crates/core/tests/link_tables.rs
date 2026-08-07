@@ -796,13 +796,27 @@ after:  stp
     let out = link_one(asm(src, true));
     let dis = disassemble_executable(&syntax, &out.executable, Some(&out.map));
     assert!(dis.contains(".frame  tapes=(1)"), "{dis}");
+    // `helper`'s frame projects onto PHYSICAL tape 1, whose cardinality
+    // (from `main`'s own `alpha=(4, 4)`) is 4 — the physical tape's
+    // cardinality, not `helper`'s true one (3, declared in `src` above
+    // and gone once linked): closed to the exact value, not left
+    // open-ended, so a fix that emitted the entry's `tapes=2` alongside
+    // SOME plausible-looking `alpha=(N)` could not slip past this. The
+    // trailing `; derived` marks the line as not the routine's true
+    // signature (docs/formats.md (assembly text)).
     assert!(
-        dis.contains(".routine helper, tapes=1, alpha=("),
-        "the callee gets its OWN arity from the frame, not the entry's tapes=2:\n{dis}"
+        dis.contains(".routine helper, tapes=1, alpha=(4) ; derived"),
+        "the callee's arity comes from the frame, its alpha from the physical \
+         tape, and the line is flagged `; derived`:\n{dis}"
     );
     assert!(
         !dis.contains(".routine helper, tapes=2"),
         "must not just replay the entry's signature:\n{dis}"
+    );
+    // The entry's OWN `.routine` line is exact — no `; derived` marker.
+    assert!(
+        dis.contains(".routine main, tapes=2, alpha=(4, 4)\n"),
+        "the entry's signature carries no derived marker:\n{dis}"
     );
     let obj2 = assemble(&syntax, ARCH, &dis, false).expect("rendered text re-assembles");
     let out2 = link(&syntax, &[obj2], &[], LinkOptions::default()).expect("re-links");

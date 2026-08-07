@@ -1,9 +1,15 @@
 //! Binary → canonical `.pma` text (docs/formats.md (assembly text)).
-//! Output is valid assembler input and round-trips exactly, object or
-//! linked image, with or without a debug/map sidecar — with one
-//! exception: a `--call-mech=mono` linked image names a stamped
-//! specialized routine copy with a digest suffix, which is not a legal
-//! identifier (docs/formats.md (assembly text)).
+//! Output is valid assembler input, object or linked image, with or
+//! without a debug/map sidecar — except a `--call-mech=mono` linked
+//! image, whose stamped specialized routine copy carries a digest
+//! suffix that is not a legal identifier (docs/formats.md (assembly
+//! text)). An object's round trip is byte-exact; a linked image's
+//! reassemble-and-relink reproduces an equivalent image, not always
+//! the same bytes — a frame that originated from a declarative
+//! binding always disassembles to raw `.frame`/`call.m` syntax, and
+//! relinking that does not necessarily reorder the tables section the
+//! way the original composition did (docs/formats.md (assembly
+//! text)).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -14,6 +20,12 @@ use crate::formats::executable::Executable;
 use crate::formats::object::{BoundCall, ObjectFile, SymbolDef, TapeBinding};
 use crate::linker::MapFile;
 use crate::vm::OperandKind;
+
+/// Canonical `.pma` trailing-comment column floor (docs/formats.md
+/// (assembly text)), the same stop `fmt.rs` uses — needed only to place
+/// [`routine_line`]'s `; derived` marker on a synthesized callee
+/// signature, so the rendered line still lands on the grid.
+const COMMENT_COL: usize = 32;
 
 /// Canonical `.pma` mnemonic column (docs/formats.md (assembly text)),
 /// the same stop `fmt.rs` uses.
@@ -495,9 +507,30 @@ fn render_tables_section(
             .map(|(n, _)| n.clone())
     });
 
-    // Frame descriptors get synthesized `F<n>` labels, match/dispatch
-    // tables `T<n>` — the code section references each by its kind's
-    // operand (a `call.m` names an `F`, an `mtc`/`djmp` a `T`).
+    let (body, labels) = render_tables(table_blobs, &per_blob, &code_labels);
+    Some((body, labels, code_labels))
+}
+
+/// Renders every table `table_blobs`/`per_blob` describe into one
+/// `.section tables` body — the walk both [`disassemble_object`] and
+/// [`disassemble_executable`] drive, extracted here rather than kept as
+/// two near-identical copies (a second copy is exactly how the
+/// executable path's naming/wrapping/blank-line defects happened the
+/// first time). `code_labels` supplies every name a `.targets`/`.exits`
+/// entry needs ([`table_code_labels`]'s doc); a miss there is an
+/// invariant break for either caller, not a data case. Returns the body
+/// text (no leading or trailing `.section` line — callers own those) and
+/// the `(blob, table-offset) -> synthesized label` map the code section
+/// needs for a `TableAddr`/`FramedCall` operand.
+///
+/// Frame descriptors get synthesized `F<n>` labels, match/dispatch
+/// tables `T<n>` — the code section references each by its kind's
+/// operand (a `call.m` names an `F`, an `mtc`/`djmp` a `T`).
+fn render_tables(
+    table_blobs: &[Vec<u8>],
+    per_blob: &[BTreeMap<u32, TableKind>],
+    code_labels: &CodeLabels,
+) -> (String, TableLabels) {
     let mut labels: TableLabels = HashMap::new();
     let mut body = String::new();
     let mut next_t = 0u32;
@@ -558,7 +591,7 @@ fn render_tables_section(
             body.push_str(&table);
         }
     }
-    Some((body, labels, code_labels))
+    (body, labels)
 }
 
 /// One match table (vm/table.rs layout: `width u8`, `row_count u16 LE`,
@@ -624,14 +657,34 @@ fn render_dispatch_table(
 }
 
 /// One canonical `.routine` line (newline included), the exact grid
-/// `fmt.rs`'s printer normalizes to.
-fn routine_line(name: &str, tapes: u8, cardinalities: &[u32]) -> String {
+/// `fmt.rs`'s printer normalizes to. `comment`, when given, is a
+/// trailing `; <text>` marker padded to the group's comment column — a
+/// `.routine` line is always its own single-member group (it and the
+/// `.func` line right after it are both `fmt.rs`'s `Structural` pieces,
+/// and a structural piece ends the group it starts —
+/// `comment_columns`'s doc), so the column is `max(COMMENT_COL, code
+/// width + 1)` with no other line's width to account for.
+fn routine_line(name: &str, tapes: u8, cardinalities: &[u32], comment: Option<&str>) -> String {
     let alpha = cardinalities
         .iter()
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    format!(".routine {name}, tapes={tapes}, alpha=({alpha})\n")
+    let code = format!(".routine {name}, tapes={tapes}, alpha=({alpha})");
+    let Some(comment) = comment else {
+        return format!("{code}\n");
+    };
+    let len = code.chars().count();
+    let mut line = code;
+    if len < COMMENT_COL {
+        line.push_str(&" ".repeat(COMMENT_COL - len));
+    } else {
+        line.push(' ');
+    }
+    line.push_str("; ");
+    line.push_str(comment);
+    line.push('\n');
+    line
 }
 
 /// The entries of the dispatch table at `start` in a LINKED table
@@ -712,7 +765,12 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
         // all-or-none per object, parallel to blobs — docs/formats.md
         // (.pmo)).
         if let Some(sig) = obj.signatures.as_ref().and_then(|s| s.get(blob as usize)) {
-            out.push_str(&routine_line(&symbol.name, sig.arity, &sig.cardinalities));
+            out.push_str(&routine_line(
+                &symbol.name,
+                sig.arity,
+                &sig.cardinalities,
+                None,
+            ));
         }
         out.push_str(&format!(
             ".func {}{}\n",
@@ -1244,13 +1302,18 @@ pub fn disassemble_executable(
             &func_name(exe.entry),
             exe.tape_count,
             &exe.alphabet_cardinalities,
+            None,
         ));
     }
     // Discovered tables render next in their own section, `T<n>`
     // (match/dispatch) and `F<n>` (frame) labels synthesized in ascending
     // section-offset order; the code section's operands reference them by
-    // name below.
-    let mut table_labels: HashMap<u32, String> = HashMap::new();
+    // name below. An executable is one flat address space, so it plays
+    // the object path's per-blob shape with a single blob (index 0) and
+    // reads back through `(0, offset)` keys — the same [`render_tables`]
+    // walk `render_tables_section` drives for an object, not a second
+    // copy of it.
+    let mut table_labels: TableLabels = HashMap::new();
     // A callee reached through a `.frame` descriptor: its virtual tape
     // count and a per-tape cardinality, filled below and read by the
     // `.routine` line the code loop prints ahead of that callee's
@@ -1259,61 +1322,12 @@ pub fn disassemble_executable(
     let mut callee_signature: HashMap<u32, (u8, Vec<u32>)> = HashMap::new();
     if !table_kinds.is_empty() {
         out.push_str(".section tables\n");
-        // Each table renders into its own scratch buffer; a non-empty one
-        // joins `body` with a blank line ahead of it once `body` is
-        // already non-empty, matching `disassemble_object`'s section — one
-        // blank line between tables, none before the first
-        // (docs/formats.md (assembly text): a blank line ends a
-        // trailing-comment group).
-        let mut body = String::new();
-        let bounds: Vec<u32> = table_kinds.keys().copied().collect();
-        let mut next_t = 0u32;
-        let mut next_f = 0u32;
-        for (idx, (&start, &kind)) in table_kinds.iter().enumerate() {
-            let name = if kind == TableKind::Frame {
-                let n = format!("F{next_f}");
-                next_f += 1;
-                n
-            } else {
-                let n = format!("T{next_t}");
-                next_t += 1;
-                n
-            };
-            table_labels.insert(start, name.clone());
-            let end = bounds
-                .get(idx + 1)
-                .copied()
-                .unwrap_or(exe.tables.len() as u32);
-            // The rendered name comes only from `code_labels`, computed
-            // above by the same `table_code_labels` walk this loop is
-            // driving — see that function's doc for why a miss here is an
-            // invariant break, not a data case.
-            let named = |offset: u32| -> String {
-                code_labels
-                    .get(&(0, offset))
-                    .cloned()
-                    .expect("table_code_labels named every entry the tables section renders")
-            };
-            let mut table = String::new();
-            match kind {
-                TableKind::Match => render_match_table(&mut table, &name, &exe.tables, start, end),
-                TableKind::Dispatch => {
-                    render_dispatch_table(&mut table, &name, &exe.tables, start, end, &named)
-                }
-                TableKind::Frame => {
-                    if let Some(frame) = parse_frame_descriptor(&exe.tables, start) {
-                        render_frame_table(&mut table, &name, &frame, named);
-                    }
-                }
-            }
-            if table.is_empty() {
-                continue;
-            }
-            if !body.is_empty() {
-                body.push('\n');
-            }
-            body.push_str(&table);
-        }
+        let (body, labels) = render_tables(
+            std::slice::from_ref(&exe.tables),
+            std::slice::from_ref(&table_kinds),
+            &code_labels,
+        );
+        table_labels = labels;
         out.push_str(&body);
         // The frames legend (docs/formats.md (frames region)): resolve each
         // `call.m` site's operand text, then a comment block naming every
@@ -1327,7 +1341,7 @@ pub fn disassemble_executable(
                     Some(c) => region
                         .directory
                         .get(usize::from(c) - 1)
-                        .and_then(|off| table_labels.get(off))
+                        .and_then(|&off| table_labels.get(&(0, off)))
                         .cloned()
                         .unwrap_or_else(|| format!("@site{site}")),
                     None => format!("@site{site}"),
@@ -1381,22 +1395,24 @@ pub fn disassemble_executable(
         // Every function needs a `.routine` line once the image is
         // sectioned: reassembling the disassembled text treats the whole
         // thing as ONE source file, and the assembler's all-or-none rule
-        // — the entry already got a line, above — then demands every
-        // function in it carry one too, even a callee whose own object
-        // never signed it (a linked image drops that distinction; see
-        // `docs/formats.md (assembly text)`, the `.routine` directive). A
-        // callee reached through a frame descriptor gets
-        // [`callee_signature`]'s derived values; anything else — a plain
-        // call, or a mono-stamped specialized copy — runs directly
-        // against the machine's own tape space with no separate virtual
-        // alphabet, so the entry's own signature is exact for it, not
-        // merely a placeholder.
+        // (`bad-signature`, docs/core.md (error codes)) — the entry
+        // already got a line, above — then demands every function in it
+        // carry one too, even a callee whose own object never signed it
+        // (a linked image drops that distinction). A callee reached
+        // through a frame descriptor gets [`callee_signature`]'s derived
+        // values, flagged `; derived` since the alpha is the physical
+        // tape's cardinality, not the routine's own (the doc above that
+        // map's fill-in explains why); anything else — a plain call, or
+        // a mono-stamped specialized copy — runs directly against the
+        // machine's own tape space with no separate virtual alphabet, so
+        // the entry's own signature is exact for it, not a placeholder,
+        // and gets no comment.
         if sectioned && root != exe.entry {
-            let (tapes, alpha) = callee_signature
-                .get(&root)
-                .cloned()
-                .unwrap_or_else(|| (exe.tape_count, exe.alphabet_cardinalities.clone()));
-            out.push_str(&routine_line(&func_name(root), tapes, &alpha));
+            let (tapes, alpha, comment) = match callee_signature.get(&root) {
+                Some((tapes, alpha)) => (*tapes, alpha.clone(), Some("derived")),
+                None => (exe.tape_count, exe.alphabet_cardinalities.clone(), None),
+            };
+            out.push_str(&routine_line(&func_name(root), tapes, &alpha, comment));
         }
         out.push_str(&format!(".func {}\n", func_name(root)));
 
@@ -1462,7 +1478,7 @@ pub fn disassemble_executable(
                         DecodedOperand::TableAddr(t) => Some((
                             entry.mnemonic,
                             table_labels
-                                .get(t)
+                                .get(&(0, *t))
                                 .cloned()
                                 .unwrap_or_else(|| t.to_string()),
                         )),
