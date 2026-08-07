@@ -1,5 +1,6 @@
 //! Binary → canonical `.pma` text (docs/formats.md (assembly text)).
-//! Output is valid assembler input; object round-trips are exact.
+//! Output is valid assembler input; object round-trips are exact — a
+//! linked image without map labels does not reassemble.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -368,11 +369,12 @@ fn code_label(obj: &ObjectFile, blob: u32, offset: u32) -> String {
 /// choosing every name here, once, is what makes the two sections meet.
 ///
 /// The names a position can carry are exactly the ones an assembler
-/// could have written: a `-g` object replays its own source labels, and
-/// a stripped one gets addresses. Every position listed here is an
-/// instruction start in an assembler-produced object (a source label can
-/// land nowhere else), which is what guarantees the code section reaches
-/// it and defines the label.
+/// could have written: at every position listed here, a `-g` object's
+/// own source label is replayed, and a stripped one gets an address.
+/// Every position listed here is an instruction start in an
+/// assembler-produced object (a source label can land nowhere else),
+/// which is what guarantees the code section reaches it and defines the
+/// label.
 fn table_code_labels(
     obj: &ObjectFile,
     table_blobs: &[Vec<u8>],
@@ -503,11 +505,18 @@ fn render_tables_section(
             };
             labels.insert((blob as u32, start), name.clone());
             let end = bounds.get(idx + 1).copied().unwrap_or(tb.len() as u32);
+            // The rendered name comes only from the map the code section
+            // will define labels from. A name minted here instead would
+            // be absent from that map, so the code section would never
+            // define it and the text would silently stop reassembling —
+            // exactly the defect the one-map rule removes. Both passes
+            // walk the same tables through the same readers, so a miss is
+            // a broken invariant, not a data case.
             let named = |offset: u32| -> String {
                 code_labels
                     .get(&(blob as u32, offset))
                     .cloned()
-                    .unwrap_or_else(|| code_label(obj, blob as u32, offset))
+                    .expect("table_code_labels named every entry the tables section renders")
             };
             let mut table = String::new();
             match kind {
@@ -1931,11 +1940,19 @@ B:  stp
         assert!(dis.contains("\n\nT1:"), "blank line before T1:\n{dis}");
         assert!(dis.contains("\n\nT2:"), "blank line before T2:\n{dis}");
         // …and nowhere else in the section: three tables, two boundaries.
+        // `str::matches` is non-overlapping, so a run of two blank lines
+        // ("\n\n\n") still counts as one "\n\n" match — the count alone
+        // can't tell one blank line from two. The `contains` check below
+        // rules out that wider run directly.
         let section = dis.split_once("\n.section code\n").unwrap().0;
         assert_eq!(
             section.matches("\n\n").count(),
             2,
             "one blank line per boundary, no others:\n{dis}"
+        );
+        assert!(
+            !section.contains("\n\n\n"),
+            "no boundary carries more than one blank line:\n{dis}"
         );
     }
 
