@@ -237,6 +237,8 @@ that cover what they hold in common.
 - `docs/pmt/isa.md` — the PM-1 processor: registers, the opcode table,
   timing, and execution.
 - `docs/pmt/cli.md` — every `pmt` subcommand and flag.
+- `docs/pmt/optimizer.md` — the `-O1` pipeline: the nine passes, the
+  contracts binding them, and a worked before/after IR example per pass.
 - `docs/pmt/project.md` — the `pmt.json` project manifest: schema,
   per-section discovery, targets, profiles, and run settings, and how
   `pmt build` consumes it.
@@ -257,6 +259,9 @@ that cover what they hold in common.
   calls, traps, and the three call mechanisms.
 - `docs/tmt/cli.md` — every `tmt` subcommand and flag, and the `tmt.json`
   file's `lint` section.
+- `docs/tmt/optimizer.md` — the `-O1` pipeline: the eight passes, the
+  contracts binding them, and a worked before/after graph example per
+  pass.
 - `docs/tmt/project.md` — the `tmt.json` project manifest: schema,
   per-section discovery, targets, profiles, the bound-call lowering, and
   run settings, and how `tmt build` consumes it.

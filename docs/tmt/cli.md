@@ -139,6 +139,12 @@ the family renders because `outline` is a registered pass like any other —
 keeps it off. `--foutline` takes effect only at `-O1`, because that is the
 only level at which the optimizer runs.
 
+The pass names both flag families accept, what each pass does, and the
+contracts the whole pipeline holds to are
+`docs/tmt/optimizer.md (passes)` — including the case for and against
+turning `outline` on, which is a judgement about a program's shape
+rather than a rule that holds generally.
+
 ### `--emit-ir`
 
 `--emit-ir` writes the world-graph IR as JSON next to the output, at
@@ -162,6 +168,10 @@ the same flag naming a stage whose pass did fire succeeds. A stage label
 captured in several optimizer rounds resolves to the last snapshot
 captured under it. The flag itself may appear only once per command line;
 repeating it is an unknown-flag error.
+
+`docs/tmt/optimizer.md (passes)` works every pass through a before/after
+graph example built with this flag, and `tmt ir graph` renders the
+documents it writes.
 
 ### Compile errors
 
