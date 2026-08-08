@@ -146,6 +146,7 @@ fn sig_tapes(sig: &Signature) -> Vec<(&str, Span, &str, Span)> {
             SigParamKind::Tape {
                 alphabet,
                 alphabet_span,
+                ..
             } => Some((
                 p.name.as_str(),
                 p.name_span,

@@ -150,6 +150,7 @@ pub enum SigParamKind {
     Tape {
         alphabet: String,
         alphabet_span: Span,
+        volatile: bool,
     },
     State,
 }
@@ -1515,6 +1516,18 @@ impl Parser<'_> {
 
     fn sig_param(&mut self) -> Result<SigParam, CompileError> {
         let t = self.peek().clone();
+        let volatile = if self.at_kw("volatile") {
+            self.bump();
+            if !self.at_kw("tape") {
+                return Err(Self::expected(
+                    self.peek(),
+                    "`tape` after `volatile` (only tape parameters can be volatile)",
+                ));
+            }
+            true
+        } else {
+            false
+        };
         if self.at_kw("tape") {
             self.bump();
             let (name, name_span) = self.name("a tape parameter name")?;
@@ -1524,6 +1537,7 @@ impl Parser<'_> {
                 kind: SigParamKind::Tape {
                     alphabet,
                     alphabet_span,
+                    volatile,
                 },
                 name,
                 name_span,
