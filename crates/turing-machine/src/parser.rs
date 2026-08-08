@@ -212,6 +212,9 @@ pub struct TapeDecl {
     pub name_span: Span,
     pub alphabet: String,
     pub alphabet_span: Span,
+    /// `volatile tape …` — the band is a device (docs/tmt/language.md
+    /// (volatile tapes)).
+    pub volatile: bool,
     pub line: u32,
     pub span: Span,
 }
@@ -630,6 +633,7 @@ fn lower_world_body(items: &[WorldItem]) -> (Vec<TapeDecl>, Vec<State>, Vec<Graf
                 name_span: t.name_span,
                 alphabet: t.alphabet.clone(),
                 alphabet_span: t.alphabet_span,
+                volatile: t.volatile,
                 line: t.line,
                 span: t.span,
             }),

@@ -370,6 +370,7 @@ machine {
             name: "t".into(),
             alphabet: "ab".into(),
             cardinality: 2,
+            volatile: false,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -468,11 +469,13 @@ machine {
             name: "t".into(),
             alphabet: "ab".into(),
             cardinality: 2,
+            volatile: false,
         }];
         let callee_tapes = vec![IrTape {
             name: "t".into(),
             alphabet: "abc".into(),
             cardinality: 3,
+            volatile: false,
         }];
         let machine = IrWorld {
             name: "main".into(),
@@ -623,6 +626,7 @@ machine {
             name: "t".into(),
             alphabet: "ab".into(),
             cardinality: 2,
+            volatile: false,
         }];
         let stop_state = |id: u32, name: &str| IrState {
             id,

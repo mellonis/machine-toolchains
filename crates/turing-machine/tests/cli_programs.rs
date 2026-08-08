@@ -775,6 +775,42 @@ fn compile_emit_ir_writes_a_version_2_sidecar() {
 }
 
 #[test]
+fn compile_emit_ir_marks_a_volatile_tape_in_the_sidecar() {
+    let dir = scratch("tmc_emit_ir_volatile");
+    let src = "\
+alphabet bits { '_', '1' }
+machine {
+  volatile tape sensor: bits;
+  tape scratch: bits;
+  entry state go { [*, *] -> stop; }
+}
+";
+    let srcpath = dir.join("volatile.tmc");
+    fs::write(&srcpath, src).unwrap();
+    let obj = dir.join("volatile.tmo");
+    execute(&args(&[
+        "compile",
+        srcpath.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+        "--emit-ir",
+    ]))
+    .unwrap();
+    let ir_path = dir.join("volatile.ir.json");
+    let text = fs::read_to_string(&ir_path).unwrap();
+    let program = IrProgram::from_json(&text).expect("the sidecar parses as IR JSON");
+    let main = program
+        .worlds
+        .iter()
+        .find(|w| w.name == "main")
+        .expect("the machine world");
+    assert!(main.tapes[0].volatile, "sensor is volatile");
+    assert!(!main.tapes[1].volatile, "scratch is plain");
+    // The wire tag itself, not just the round-tripped struct.
+    assert!(text.contains("\"volatile\": true"), "{text}");
+}
+
+#[test]
 fn compile_emit_ir_after_a_real_pass_writes_a_version_2_snapshot() {
     let dir = scratch("tmc_emit_ir_after");
     // A forwarder program: `scan` hops to the empty forwarder `hop`, which
