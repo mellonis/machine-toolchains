@@ -925,4 +925,50 @@ mod tests {
         };
         assert_eq!(pumped.outcome, Outcome::Stopped);
     }
+
+    /// The async mirror of `run_tapes_runs_a_frames_profile_image_end_to_end`:
+    /// proves `AsyncSession`'s `FrameRead` arm (session.rs, priced at
+    /// `frame_load_cost`) actually activates the frame and drives a framed
+    /// call to completion through `retx`, not just that the sync driver's
+    /// does. Compares the full `RunResult` (outcome + stats + ip + stack)
+    /// against the sync run on the identical image, so a pricing drift in
+    /// the async arm's `frame_load_cost` accounting fails this test even
+    /// though the outcome alone would still read `Stopped`.
+    #[test]
+    fn async_session_tapes_runs_a_frames_profile_image() {
+        let registry = test_registry();
+        let exe = frames_image(PROFILE_FRAMES);
+        // Non-vacuity: the image genuinely carries a nonempty frames region
+        // for the FrameRead arm to serve out of (see `frames_image`'s
+        // layout comment — descriptor + composite region past
+        // `frames_offset`), so this test cannot pass by skipping the arm
+        // entirely.
+        assert!(exe.frames_offset > 0);
+        assert!((exe.frames_offset as usize) < exe.tables.len());
+
+        let machine = Machine::from_executable(&exe, &registry).unwrap();
+
+        let mut s0 = InfiniteTape::new();
+        let mut s1 = InfiniteTape::new();
+        let mut sync_devs: [&mut dyn Tape; 2] = [&mut s0, &mut s1];
+        let sync = machine
+            .run_tapes(&mut sync_devs, RunOptions::default())
+            .unwrap();
+        // Baseline pin: the frames image genuinely executes (entry, framed
+        // call, read-all, retx, stp), not a same-step trap.
+        assert_eq!(sync.outcome, Outcome::Stopped);
+        assert!(sync.stats.steps > 0);
+
+        let mut session = machine.async_session_tapes(RunOptions::default());
+        let mut a0 = SyncAsAsync::new(InfiniteTape::new());
+        let mut a1 = SyncAsAsync::new(InfiniteTape::new());
+        let pumped = loop {
+            match session.pump(&mut [&mut a0, &mut a1], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => continue,
+                other => panic!("unexpected event on an always-ready device: {other:?}"),
+            }
+        };
+        assert_eq!(pumped, sync);
+    }
 }

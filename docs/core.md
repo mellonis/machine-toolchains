@@ -426,7 +426,9 @@ instruction pointer landing on a registered breakpoint address reports
 by the next check the address has already moved on; only once none of
 the three apply does the budget get decremented, so an instruction that
 exhausts a budget while also matching a higher-priority cause reports
-that cause instead, and the budget is left untouched for the next call.
+that cause instead, and that call simply doesn't spend any of the
+`budget` it was passed. `budget` is a per-call argument, not state the
+session carries forward — the next `pump` call supplies its own.
 Unlike `DebugSession`, where a `run_steps` budget running out itself
 reports as `Paused(Manual)`, `AsyncSession` keeps the two separate — a
 spent budget is always its own `BudgetSpent` event, and
