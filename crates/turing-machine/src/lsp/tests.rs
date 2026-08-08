@@ -1266,6 +1266,57 @@ machine {
 }
 
 #[test]
+fn hovering_a_volatile_machine_tapes_own_name_prefixes_it() {
+    let src = "\
+alphabet bits { '_', '1' }
+
+machine {
+  volatile tape a: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "tape a", 5))
+        .expect("a hover");
+    assert!(
+        hover.text.contains("volatile tape a: bits"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn hovering_a_volatile_signature_tapes_own_name_prefixes_it() {
+    let src = "\
+alphabet bits { '_', '1' }
+
+routine r(volatile tape sensor: bits) {
+  entry state s { [*] -> return; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "tape sensor", 5))
+        .expect("a hover");
+    assert!(
+        hover.text.contains("volatile tape sensor: bits"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn hovering_a_non_volatile_tapes_own_name_omits_the_word_volatile() {
+    let (mut service, uri) = opened(CROSS_WORLD);
+    let hover = service
+        .hover(&uri, pos_after(CROSS_WORLD, "tape ctl", 5))
+        .expect("a hover");
+    assert!(hover.text.contains("tape ctl: bits"), "{}", hover.text);
+    assert!(!hover.text.contains("volatile"), "{}", hover.text);
+}
+
+#[test]
 fn hovering_a_graph_shows_its_state_parameters_too() {
     let (mut service, uri) = opened(CROSS_WORLD);
     let hover = service

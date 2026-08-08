@@ -74,8 +74,8 @@ struct WorldView<'a> {
     ns: &'a [String],
     kind: WorldKind,
     name_span: Span,
-    /// `(name, name span, alphabet as written, alphabet span)`.
-    tapes: Vec<(&'a str, Span, &'a str, Span)>,
+    /// `(name, name span, alphabet as written, alphabet span, volatile)`.
+    tapes: Vec<(&'a str, Span, &'a str, Span, bool)>,
     sig: Option<&'a Signature>,
     states: &'a [State],
     grafts: &'a [Graft],
@@ -101,6 +101,7 @@ fn world_views(program: &Program) -> Vec<WorldView<'_>> {
                         t.name_span,
                         t.alphabet.as_str(),
                         t.alphabet_span,
+                        t.volatile,
                     )
                 })
                 .collect(),
@@ -139,19 +140,21 @@ fn world_views(program: &Program) -> Vec<WorldView<'_>> {
     out
 }
 
-fn sig_tapes(sig: &Signature) -> Vec<(&str, Span, &str, Span)> {
+fn sig_tapes(sig: &Signature) -> Vec<(&str, Span, &str, Span, bool)> {
     sig.params
         .iter()
         .filter_map(|p| match &p.kind {
             SigParamKind::Tape {
                 alphabet,
                 alphabet_span,
+                volatile,
                 ..
             } => Some((
                 p.name.as_str(),
                 p.name_span,
                 alphabet.as_str(),
                 *alphabet_span,
+                *volatile,
             )),
             SigParamKind::State => None,
         })
@@ -267,7 +270,7 @@ fn reference_in_world(
     }
     // Tape declarations and signature tape parameters: the name declares a
     // tape, the alphabet references one.
-    for (name, name_span, alphabet, alphabet_span) in &world.tapes {
+    for (name, name_span, alphabet, alphabet_span, _) in &world.tapes {
         if span_touches(*name_span, pos) {
             return Some((
                 Target::Tape {
@@ -673,8 +676,10 @@ fn render(program: &Program, state: &DocState, target: &Target) -> Option<String
             let view = world_views(program)
                 .into_iter()
                 .find(|w| w.mangled == *world)?;
-            let (_, _, alphabet, _) = view.tapes.iter().find(|(tape, ..)| tape == name)?;
-            (format!("tape {name}: {alphabet}"), None)
+            let (_, _, alphabet, _, volatile) =
+                view.tapes.iter().find(|(tape, ..)| tape == name)?;
+            let prefix = if *volatile { "volatile " } else { "" };
+            (format!("{prefix}tape {name}: {alphabet}"), None)
         }
         Target::Bind { world, name } => (bind_head(resolved, world, name)?, None),
         Target::Graft { world, instance } => {
