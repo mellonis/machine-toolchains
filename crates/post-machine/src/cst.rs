@@ -218,13 +218,25 @@ pub struct FunctionCst {
     pub line: u32,
     /// Column of the name token.
     pub col: u32,
-    /// Extent: the header's first token → the closing `}`'s end — the
-    /// `export` keyword's start when present (`export name() {` is one
-    /// header form),
-    /// otherwise the name token's start. A nested function is never
-    /// exported, so its extent always starts at its name token. For
-    /// hit-testing and document-symbol ranges.
+    /// Extent: the header's first token → the closing `}`'s end —
+    /// `volatile`'s start when present (`volatile name() {` is one header
+    /// form), else the `export` keyword's start when present
+    /// (`export name() {` is another), otherwise the name token's start.
+    /// Fixed order: `volatile` always precedes `export` when both are
+    /// written. A nested function is never exported, so an
+    /// un-volatile-prefixed nested extent always starts at its name token
+    /// (a volatile-prefixed one — always rejected downstream,
+    /// `VolatileNotOnMain` — still starts at `volatile` while this node
+    /// briefly exists). For hit-testing and document-symbol ranges.
     pub span: Span,
+    /// Whether the literal `volatile` keyword was WRITTEN in source.
+    /// Unlike `has_export`, nothing folds into a separate lowered flag —
+    /// [`crate::parser::lower_cst`] copies this straight onto the AST's
+    /// `Function::volatile`, since the modifier has no auto-applied
+    /// counterpart the way top-level `main` auto-exports. The printer
+    /// reads this to decide whether to emit the token, exactly as it
+    /// reads `has_export`.
+    pub has_volatile: bool,
     /// `export` (contextual keyword) or `main` at top level. A nested
     /// function is never exported.
     pub exported: bool,
@@ -438,6 +450,7 @@ mod tests {
                 line: 4,
                 col: 5,
                 span: dummy_span,
+                has_volatile: false,
                 exported: false,
                 has_export: false,
                 body: vec![],
@@ -461,6 +474,7 @@ mod tests {
             line: 2,
             col: 5,
             span: dummy_span,
+            has_volatile: false,
             exported: true,
             has_export: true,
             body: vec![leading, labeled_statement, nested_fn, standalone],

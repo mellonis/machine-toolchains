@@ -121,6 +121,7 @@ integrations.
 | `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block — interleaved, or the whole run written `!`-then-`?`. |
 | `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
 | `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
+| `volatile-not-on-main` | `volatile` on a definition other than the un-namespaced top-level `main`. |
 
 ## `pmt asm`
 

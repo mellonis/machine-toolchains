@@ -37,7 +37,7 @@ fn version_reports_the_language_version() {
         "pmc language {}",
         mtc_post_machine::PMC_LANG_VERSION
     )));
-    assert_eq!(mtc_post_machine::PMC_LANG_VERSION, "0.3");
+    assert_eq!(mtc_post_machine::PMC_LANG_VERSION, "0.4");
 }
 
 #[test]

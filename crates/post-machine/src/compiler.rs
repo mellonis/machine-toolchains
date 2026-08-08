@@ -95,6 +95,9 @@ pub enum CompileErrorKind {
     UnknownAttribute(String),
     /// A second `[deprecated]` attribute inside one run.
     DuplicateAttribute,
+    /// `volatile` on a definition other than the un-namespaced top-level
+    /// `main` — the offending definition's name.
+    VolatileNotOnMain(String),
 }
 
 /// Binds each [`CompileErrorKind`] variant to its stable code exactly
@@ -150,6 +153,7 @@ impl CompileErrorKind {
         CompileErrorKind::DocLineOrder => "doc-line-order",
         CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
         CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
+        CompileErrorKind::VolatileNotOnMain(_) => "volatile-not-on-main",
     }
 }
 
@@ -265,6 +269,12 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::DuplicateAttribute => {
                 write!(f, "duplicate `[deprecated]` attribute in the same run")
+            }
+            CompileErrorKind::VolatileNotOnMain(name) => {
+                write!(
+                    f,
+                    "`volatile` is only allowed on the top-level `main` — remove it from `{name}`"
+                )
             }
         }
     }
@@ -991,7 +1001,7 @@ mod tests {
 
     #[test]
     fn error_codes_are_pairwise_distinct() {
-        // One representative kind per variant (all 23), in declaration
+        // One representative kind per variant (all 24), in declaration
         // order. The `code_registry!` expansion already ties every
         // variant to a `CODES` row structurally (one list feeds both
         // the match and the table); this witness list additionally
@@ -1030,6 +1040,7 @@ mod tests {
             CompileErrorKind::DocLineOrder,
             CompileErrorKind::UnknownAttribute("x".into()),
             CompileErrorKind::DuplicateAttribute,
+            CompileErrorKind::VolatileNotOnMain("x".into()),
         ];
         let witnessed: Vec<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(
