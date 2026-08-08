@@ -620,8 +620,9 @@ mod tests {
     /// Device-reported cost overrides the model price. A LatencyTape with
     /// write_cost=7 and zero polls per operation. The program has exactly
     /// 1 write transaction (opcode 0x07, 0x81); sync run has stall_tacts=4
-    /// (2 device ops each costing 1). The pumped run pays device-reported
-    /// cost (7 tacts per write), yielding stall_tacts = sync.stall_tacts + 6.
+    /// (4 device transactions: write + its latch-read, move + its latch-read,
+    /// each costing 1). The pumped run pays device-reported cost (7 per write),
+    /// yielding stall_tacts = sync.stall_tacts + 6.
     #[test]
     fn device_reported_cost_replaces_the_model_price() {
         let code = WRITE_MOVE_STOP;
@@ -665,20 +666,18 @@ mod tests {
 
     /// Tact limit crossing on a resumed device transaction. The sync path
     /// never exercises the over_tacts check in the Waiting::Exec resume arm
-    /// (line 201), since sync blocks on device transactions. This test
-    /// verifies the async path catches tact-limit crossing during a device
-    /// completion on resume.
+    /// (line 201), since sync blocks on device transactions. This test proves
+    /// the async path catches tact-limit crossing during a device completion
+    /// on resume — discriminated by exact stats at trap time.
     ///
-    /// Arithmetic for WRITE_MOVE_STOP:
-    /// Sync run: steps=2, core_tacts=6 (CodeReads for fetch, then Step per
-    /// instruction), stall_tacts=4 (1 per device op: write, write's latch-read,
-    /// move, move's latch-read), total=10.
-    /// First pump: write instruction executes and suspends on device poll
-    /// (stats: steps=1, core_tacts=4, stall_tacts=0).
-    /// Second pump: device poll completes and settles, adding stall_tacts.
-    /// At resume-arm check (line 201): total_tacts would become 4+4+1=9.
-    /// Set max_tacts = total - 2 = 8 to trip exactly at resume-arm when
-    /// stall_tact is added, making total 8 >= limit 8.
+    /// Sync stats for WRITE_MOVE_STOP: steps=2, core_tacts=6, stall_tacts=4,
+    /// total=10. Set max_tacts = 8 (total - 2). When a device transaction
+    /// resumes and settles (adding 1 stall tact), the stats at the resume-arm
+    /// check become: { steps: 1, core_tacts: 4, stall_tacts: 4, total: 8 },
+    /// which equals the limit and triggers over_tacts(). If the resume-arm
+    /// check were skipped, the trap would fire later at the step-boundary
+    /// check with { steps: 2, core_tacts: 5, stall_tacts: 4, total: 9 } —
+    /// exact-stats equality proves the trap fired at line 201, not downstream.
     #[test]
     fn tact_limit_fires_when_a_resumed_transaction_crosses_the_budget() {
         let code = WRITE_MOVE_STOP;
@@ -706,28 +705,36 @@ mod tests {
             write_cost: 1,
         };
         let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
-        // Pump until we see a wait (first pump) or completion.
+        // Pump until first DeviceWait, assert suspension, then continue to completion.
         let mut saw_wait = false;
         let result = loop {
             match session.pump(&mut [&mut tape], None) {
                 PumpEvent::DeviceWait => {
                     saw_wait = true;
+                    // Verify test premise: the session is suspended mid-transaction.
+                    assert!(
+                        matches!(session.waiting, Waiting::Exec(_)),
+                        "premise: the session must be suspended mid-transaction"
+                    );
                     continue;
                 }
                 PumpEvent::Finished(result) => break result,
                 other => panic!("unexpected event: {other:?}"),
             }
         };
-        // Verify test premise: the session was suspended mid-transaction.
-        assert!(
-            saw_wait,
-            "premise failed: session must suspend on device wait"
+        // Premise: the session did suspend at some point.
+        assert!(saw_wait, "premise failed: no device wait occurred");
+        // Discriminator: the trap fired at the resume-arm check with these exact stats.
+        assert_eq!(
+            result.stats,
+            RunStats {
+                steps: 1,
+                core_tacts: 4,
+                stall_tacts: 4
+            },
+            "exact stats prove the trap fired at the resume-arm check (line 201)"
         );
-        // Verify the trap fired at the resume-arm check (line 201).
-        assert!(
-            matches!(result.outcome, Outcome::Trapped(Trap::TactLimit)),
-            "expected TactLimit at resume-arm check, got {:?}",
-            result.outcome
-        );
+        // Verify the outcome is TactLimit (redundant once stats match, but explicit).
+        assert!(matches!(result.outcome, Outcome::Trapped(Trap::TactLimit)));
     }
 }
