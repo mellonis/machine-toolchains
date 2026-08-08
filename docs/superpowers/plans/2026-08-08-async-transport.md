@@ -485,7 +485,7 @@ mod tests {
     // (Copy the smallest complete program driver.rs uses: write-move-stop.)
 
     fn sync_result(code: &[u8]) -> crate::vm::RunResult {
-        let arch = test_arch();
+        let arch = test_arch::TestArch; // module with a unit struct, not a function
         let mut core = Core::new(&arch, 0);
         let mut stack = ReturnStack::new(16);
         let mut tape = InfiniteTape::new();
@@ -501,7 +501,7 @@ mod tests {
     }
 
     fn pumped_result(code: &[u8], budget: Option<u64>) -> (crate::vm::RunResult, u32) {
-        let arch = test_arch();
+        let arch = test_arch::TestArch; // module with a unit struct, not a function
         let core = Core::new(&arch, 0);
         let mut session = AsyncSession::new(
             core,
@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn zero_budget_returns_budget_spent_without_advancing() {
         let code = /* same program */;
-        let arch = test_arch();
+        let arch = test_arch::TestArch; // module with a unit struct, not a function
         let mut session = AsyncSession::new(
             Core::new(&arch, 0),
             code.to_vec(),
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn missing_device_faults_instead_of_panicking() {
         let code = /* the write-move-stop program */;
-        let arch = test_arch();
+        let arch = test_arch::TestArch; // module with a unit struct, not a function
         let mut session = AsyncSession::new(
             Core::new(&arch, 0),
             code.to_vec(),
@@ -733,23 +733,23 @@ impl<'a> AsyncSession<'a> {
     }
 
     /// Begin (or, for `already_issued`, re-sample) a device transaction.
-    /// `Ok(response)` completes it; `Err(())` means READY is low.
+    /// `Some(response)` completes it; `None` means READY is low.
     fn poll_device(
         &mut self,
         request: BusRequest,
         devices: &mut [&mut dyn AsyncTapeDevice],
         already_issued: bool,
-    ) -> Result<BusResponse, ()> {
+    ) -> Option<BusResponse> {
         let (dev, cmd, model_cost) = self.device_parts(request);
         let Some(device) = devices.get_mut(dev as usize) else {
-            return Ok(BusResponse::Fault(DeviceFault::NoSuchDevice { dev }));
+            return Some(BusResponse::Fault(DeviceFault::NoSuchDevice { dev }));
         };
         if !already_issued {
             device.issue(cmd);
         }
         match device.poll() {
-            DevicePoll::Pending => Err(()),
-            DevicePoll::Ready { reply, cost } => Ok(self.settle_device(model_cost, reply, cost)),
+            DevicePoll::Pending => None,
+            DevicePoll::Ready { reply, cost } => Some(self.settle_device(model_cost, reply, cost)),
         }
     }
 
@@ -761,6 +761,12 @@ impl<'a> AsyncSession<'a> {
         if let Some(result) = &self.finished {
             return PumpEvent::Finished(result.clone());
         }
+        // A zero budget spends immediately — checked BEFORE the waiting
+        // match, or the resume path would retire an instruction and
+        // underflow the u64 decrement (plan fix after Task 3 review).
+        if budget == Some(0) {
+            return PumpEvent::BudgetSpent;
+        }
         // Loading step (docs/core.md (loading)): on the async path the
         // initial-mark latch is a real device-0 transaction — still
         // unaccounted, and itself subject to WAIT. Implemented in Task 6;
@@ -771,8 +777,8 @@ impl<'a> AsyncSession<'a> {
             Waiting::None => None,
             Waiting::Latch => return self.pump_latch(devices, budget), // Task 6
             Waiting::Exec(request) => match self.poll_device(request, devices, true) {
-                Err(()) => return PumpEvent::DeviceWait,
-                Ok(response) => {
+                None => return PumpEvent::DeviceWait,
+                Some(response) => {
                     self.waiting = Waiting::None;
                     if self.over_tacts() {
                         return self.finish(Outcome::Trapped(Trap::TactLimit));
@@ -784,9 +790,6 @@ impl<'a> AsyncSession<'a> {
         loop {
             // Instruction boundary (only when nothing is mid-flight).
             if event.is_none() {
-                if let Some(0) = remaining {
-                    return PumpEvent::BudgetSpent;
-                }
                 if self.latch_initial_mark {
                     return self.pump_latch(devices, budget); // Task 6
                 }
@@ -841,14 +844,18 @@ impl<'a> AsyncSession<'a> {
                                 }
                                 None => BusResponse::OutOfTable,
                             },
-                            device_request => match self.poll_device(device_request, devices, false)
-                            {
-                                Err(()) => {
-                                    self.waiting = Waiting::Exec(device_request);
-                                    return PumpEvent::DeviceWait;
+                            device_request @ (BusRequest::DeviceMoveLeft { .. }
+                            | BusRequest::DeviceMoveRight { .. }
+                            | BusRequest::DeviceRead { .. }
+                            | BusRequest::DeviceWrite { .. }) => {
+                                match self.poll_device(device_request, devices, false) {
+                                    None => {
+                                        self.waiting = Waiting::Exec(device_request);
+                                        return PumpEvent::DeviceWait;
+                                    }
+                                    Some(response) => response,
                                 }
-                                Ok(response) => response,
-                            },
+                            }
                         };
                         if self.over_tacts() {
                             return self.finish(Outcome::Trapped(Trap::TactLimit));
@@ -934,7 +941,7 @@ fn latency_device_suspends_and_resumes_mid_instruction() {
     // one READY sample per pump — then the same final result.
     let code = /* write-move-stop program bytes */;
     let sync = sync_result(&code);
-    let arch = test_arch();
+    let arch = test_arch::TestArch; // module with a unit struct, not a function
     let mut session = AsyncSession::new(
         Core::new(&arch, 0),
         code.to_vec(),
