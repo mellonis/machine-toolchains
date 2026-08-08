@@ -88,6 +88,49 @@ impl<'a> AsyncSession<'a> {
         self
     }
 
+    pub fn add_breakpoint(&mut self, addr: u32) {
+        self.breakpoints.insert(addr);
+    }
+
+    pub fn remove_breakpoint(&mut self, addr: u32) {
+        self.breakpoints.remove(&addr);
+    }
+
+    /// Request a pause; the session honors it at the next instruction
+    /// boundary (`Paused(Manual)`). The RUN/HALT line of the software tier.
+    pub fn pause(&mut self) {
+        self.pause_requested = true;
+    }
+
+    /// Finalize: consume the session, keep the accounting.
+    pub fn stop(self) -> RunStats {
+        self.stats
+    }
+
+    pub fn ip(&self) -> u32 {
+        self.core.ip()
+    }
+
+    pub fn mf(&self) -> bool {
+        self.core.mf()
+    }
+
+    pub fn depth(&self) -> usize {
+        self.stack.depth()
+    }
+
+    pub fn stack(&self) -> &[u32] {
+        self.stack.entries()
+    }
+
+    pub fn stats(&self) -> RunStats {
+        self.stats
+    }
+
+    pub fn finished(&self) -> Option<&RunResult> {
+        self.finished.as_ref()
+    }
+
     fn over_tacts(&self) -> bool {
         self.limits
             .max_tacts
@@ -477,7 +520,7 @@ mod tests {
             session.pump(&mut [&mut tape], Some(0)),
             PumpEvent::BudgetSpent
         ));
-        assert_eq!(session.stats.steps, 0); // read the field directly (stats() lands later)
+        assert_eq!(session.stats().steps, 0);
     }
 
     /// Regression: the zero-budget guard must also cover the resume path
@@ -662,6 +705,115 @@ mod tests {
             sync.stats.stall_tacts + (7 - 1) * writes
         );
         assert_eq!(result.outcome, sync.outcome);
+    }
+
+    /// The 2nd instruction's address, computed from `WRITE_MOVE_STOP`'s byte
+    /// layout: `[0x07 write, 0x81 operand, 0x06 move, 0x02 stop]` — write
+    /// is a 2-byte instruction (opcode + operand), so instructions start at
+    /// addresses 0 (write), 2 (move), 3 (stop). A breakpoint on 2 pauses
+    /// after the write retires and before the move executes.
+    #[test]
+    fn breakpoint_pauses_at_the_boundary_before_the_instruction() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        session.add_breakpoint(2);
+        let mut tape = SyncAsAsync::new(InfiniteTape::new());
+        assert_eq!(
+            session.pump(&mut [&mut tape], None),
+            PumpEvent::Paused(PauseCause::Breakpoint(2))
+        );
+        assert_eq!(session.ip(), 2);
+        assert_eq!(session.stats().steps, 1); // only the write retired
+        // Resuming past the breakpoint runs the remaining two instructions
+        // to completion in one pump (always-ready device, unlimited budget).
+        let PumpEvent::Finished(pumped) = session.pump(&mut [&mut tape], None) else {
+            panic!("expected the remainder of the program to finish in one pump");
+        };
+        // The pause must not perturb accounting: sync-identical result.
+        assert_eq!(pumped, sync);
+    }
+
+    #[test]
+    fn manual_pause_fires_once_at_the_next_boundary() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        session.pause();
+        let mut tape = SyncAsAsync::new(InfiniteTape::new());
+        assert_eq!(
+            session.pump(&mut [&mut tape], None),
+            PumpEvent::Paused(PauseCause::Manual)
+        );
+        assert_eq!(session.stats().steps, 1);
+        // The request does not re-fire: the remaining two instructions run
+        // to completion in one pump, with no further Manual pause.
+        let PumpEvent::Finished(pumped) = session.pump(&mut [&mut tape], None) else {
+            panic!("expected the remainder of the program to finish in one pump");
+        };
+        assert_eq!(pumped, sync);
+    }
+
+    #[test]
+    fn stop_returns_the_accounting_snapshot() {
+        let code = WRITE_MOVE_STOP;
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        let mut tape = SyncAsAsync::new(InfiniteTape::new());
+        assert_eq!(
+            session.pump(&mut [&mut tape], Some(1)),
+            PumpEvent::BudgetSpent
+        );
+        let stats = session.stop();
+        assert_eq!(stats.steps, 1);
+    }
+
+    #[test]
+    fn finished_session_repeats_its_result() {
+        let code = WRITE_MOVE_STOP;
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        let mut tape = SyncAsAsync::new(InfiniteTape::new());
+        let first = loop {
+            match session.pump(&mut [&mut tape], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::BudgetSpent => continue,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        };
+        let second = session.pump(&mut [&mut tape], None);
+        assert_eq!(second, PumpEvent::Finished(first.clone()));
+        assert_eq!(session.finished(), Some(&first));
     }
 
     /// Tact limit crossing on a resumed device transaction. The sync path
