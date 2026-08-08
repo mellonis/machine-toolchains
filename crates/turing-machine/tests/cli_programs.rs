@@ -923,13 +923,15 @@ fn compile_dash_s_emits_reassemblable_tma() {
 /// end: `fmt` keeps it (and is idempotent on its own output), the `-O0`
 /// IR sidecar carries the wire tag, an `-O1` optimize still carries it on
 /// the `main` world's tape (found by name — worlds may renumber), and the
-/// `-S` assembly text never spells the word at all, because the modifier
-/// never reaches the assembler (`docs/tmt/optimizer.md (volatile
-/// barrier)`). Tape and state names are chosen free of the substring
-/// `volatile` so the final negative assertion means what it says.
+/// `-S` assembly text never spells the word at all — `volatile` is a
+/// compile-time-only property that lives in the IR and is dropped at
+/// codegen (`docs/tmt/language.md (volatile tapes)`). Tape and state
+/// names, and the scratch file's own basename, are chosen free of the
+/// substring `volatile` so the final negative assertion means what it
+/// says.
 #[test]
 fn volatile_survives_the_whole_pipeline() {
-    let dir = scratch("tmc_volatile_e2e");
+    let dir = scratch("tmc_vlt_e2e");
     let src = "\
 alphabet bits { '_', '1' }
 
@@ -947,11 +949,11 @@ machine {
     let twice = mtc_turing_machine::fmt::format(&once).expect("fmt succeeds again");
     assert_eq!(once, twice, "fmt is not idempotent on its own output");
 
-    let srcpath = dir.join("volatile_e2e.tmc");
+    let srcpath = dir.join("vlt_e2e.tmc");
     fs::write(&srcpath, &once).unwrap();
 
     // -O0 compile: the IR sidecar's wire tag carries the flag.
-    let obj = dir.join("volatile_e2e.tmo");
+    let obj = dir.join("vlt_e2e.tmo");
     execute(&args(&[
         "compile",
         srcpath.to_str().unwrap(),
@@ -960,12 +962,12 @@ machine {
         "--emit-ir",
     ]))
     .unwrap();
-    let ir_json = fs::read_to_string(dir.join("volatile_e2e.ir.json")).unwrap();
+    let ir_json = fs::read_to_string(dir.join("vlt_e2e.ir.json")).unwrap();
     assert!(ir_json.contains("\"volatile\": true"), "{ir_json}");
 
     // -O1: still carried on the machine world's tape, located by name since
     // optimization may renumber worlds.
-    let obj_o1 = dir.join("volatile_e2e_o1.tmo");
+    let obj_o1 = dir.join("vlt_e2e_o1.tmo");
     execute(&args(&[
         "compile",
         srcpath.to_str().unwrap(),
@@ -975,7 +977,7 @@ machine {
         "--emit-ir",
     ]))
     .unwrap();
-    let ir_o1_text = fs::read_to_string(dir.join("volatile_e2e_o1.ir.json")).unwrap();
+    let ir_o1_text = fs::read_to_string(dir.join("vlt_e2e_o1.ir.json")).unwrap();
     let program = IrProgram::from_json(&ir_o1_text).expect("the -O1 sidecar parses as IR JSON");
     let main = program
         .worlds
@@ -987,7 +989,7 @@ machine {
 
     // -S: the assembled text never spells the word — volatility never
     // reaches the assembler.
-    let tma = dir.join("volatile_e2e.tma");
+    let tma = dir.join("vlt_e2e.tma");
     execute(&args(&[
         "compile",
         srcpath.to_str().unwrap(),

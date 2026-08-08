@@ -236,26 +236,40 @@ observable, and the external world may change its cells between
 accesses. The toolchain preserves the band's exact access sequence — no
 access is ever dropped, reordered, or fused away — and each read is a
 fresh observation, never a value assumed to persist from an earlier one
-(`docs/tmt/optimizer.md (volatile barrier)`).
+(`docs/tmt/optimizer.md (volatile barrier)`). The modifier itself is a
+compile-time-only property: it lives on the intermediate representation
+and is dropped at codegen, so the generated assembly carries no trace of
+it at all — only the source, or an `--emit-ir` snapshot, says which
+bands are volatile.
 
-`volatile tape T: ALPHABET` on a `routine` or `graph` signature
-parameter fixes how *that world's own body* is compiled — every access
-inside it to the bound parameter gets the volatile guarantee, regardless
-of what a caller later binds there. Two asymmetries follow from how the
-three reuse constructs work (see "Reuse: `call`, `graft`, and `bind`"
-below), and both are worth knowing before relying on the modifier. A
-`graft` splices its graph's rows onto the host's own tapes before the
-optimizer ever runs, so a spliced row always lives on whichever band the
-*host* declared — a graph's own `volatile` parameter is accepted and
-inert, which is correct, since the host's declaration is what the
-spliced code actually runs against. A `call` or a `bind`, by contrast,
-targets a routine whose body was compiled once, independently of any
-call site — in this compilation unit or another, it makes no
-difference — and nothing revisits that compiled form afterward: binding
-a volatile machine tape into a routine that was compiled without
-`volatile` on the matching parameter is not diagnosed. The author is
-responsible for calling the routine variant compiled for the right kind
-of band.
+`volatile tape T: ALPHABET` on a `routine` signature parameter fixes how
+that routine's own body is compiled — every access inside it to the
+bound parameter gets the volatile guarantee. That holds for any call
+that keeps its own frame: one carrying a symbol map, a permuted
+binding, or one crossing a compilation-unit boundary. At `-O1`, though,
+`inline`'s splice-eligible forms — a bindless call, an equal-arity
+full-pass-through bound call, or an arity-reducing identity
+projection, always in-unit with identity tape placement and no map
+pairs — dissolve the call itself: the callee's rows are spliced onto
+the *caller's* own band and inherit the caller's volatility instead,
+exactly like a graft (`docs/tmt/optimizer.md (volatile barrier)`).
+
+Two asymmetries follow from how the three reuse constructs work (see
+"Reuse: `call`, `graft`, and `bind`" below), and both are worth knowing
+before relying on the modifier. A `graft` splices its graph's rows onto
+the host's own tapes before the optimizer ever runs, so a spliced row
+always lives on whichever band the *host* declared — a graph's own
+`volatile` parameter is accepted and inert, which is correct, since the
+host's declaration is what the spliced code actually runs against. A
+`call` or a `bind` that inline does not dissolve, by contrast, targets a
+routine whose body was compiled once, independently of any call site —
+in this compilation unit or another, it makes no difference — and
+nothing revisits that compiled form afterward: binding a volatile
+machine tape into a routine that was compiled without `volatile` on the
+matching parameter is not diagnosed. The author is responsible for
+calling the routine variant compiled for the right kind of band, and —
+for an inline-eligible call — for remembering that an optimized build
+may fold it into a graft-like splice regardless.
 
 ## Rules
 
