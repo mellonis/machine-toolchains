@@ -452,11 +452,17 @@ priced at nothing, since it is loading rather than execution, but
 genuinely subject to WAIT, so a slow device 0 delays the first
 instruction instead of blocking the embedder's thread. A reply that is
 not a symbol — a fault, or a plain acknowledgement — is swallowed and
-MF keeps its default; a missing device 0 is likewise treated as
-unmarked and execution simply proceeds, the same panic-free choice
-`Machine::run` makes for a mismatched device set. The multi-tape shape
-(`async_session_tapes`) never latches, mirroring `debug_tapes`: MR
-starts at 0 and head symbols enter only through explicit reads.
+MF keeps its default; a missing device 0 is treated as unmarked and
+execution simply proceeds — the loading latch's own panic-free
+fallback, not a mirror of anything synchronous: `run`'s device argument
+is a single required `&mut dyn Tape` and can index device 0 directly,
+while `pump`'s device slice carries no such guarantee, so its loading
+step checks first. A device missing *mid*-execution, by contrast, does
+take the same path on both sides — the `Option`-based lookup that turns
+absence into the `Device` trap above rather than a panic; only the
+loading step's fallback is unique to the async surface. The multi-tape
+shape (`async_session_tapes`) never latches, mirroring `debug_tapes`:
+MR starts at 0 and head symbols enter only through explicit reads.
 
 Two things this surface deliberately does not do. It does not extend
 the bus protocol: the device leg gains a poll shape, but the requests
@@ -474,11 +480,11 @@ The `vm` module — `Machine`, `Core`, `DebugSession`, `AsyncSession`, the
 devices, the bus types — builds without the standard library: the
 crate's `std` feature is default-on but optional, and everything that
 needs it (the container codecs, the linker, the assembler and
-disassembler frameworks, the language-server framework) stays behind
-it. What remains without `std` is exactly the processor VM this section
-describes, including the raw-code `Machine::with_arch` constructor that
-needs no container parsing — the shape a firmware target embeds
-against.
+disassembler frameworks, the shared diagnostic primitives, and the
+language-server framework) stays behind it. What remains without `std`
+is exactly the processor VM this section describes, including the
+raw-code `Machine::with_arch` constructor that needs no container
+parsing — the shape a firmware target embeds against.
 
 ## The assembler framework
 
