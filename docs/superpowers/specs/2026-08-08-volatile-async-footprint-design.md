@@ -356,6 +356,25 @@ Every `.pmc` compilation emits **two builds of every function**: *normal*
   round's one format change, riding unreleased MO v3; older `pmt` cannot
   read the new objects, declared at the cut.
 
+**Text form (ruled 2026-08-09; supersedes the "nothing reaches the
+assembler" clause for PM only):** the `.pma` dialect gains a
+presence-form **`.volatile`** directive, riding the already-unreleased
+dialect 0.3 amended in place (v0.2.0 released 0.2; the `wrl`/`wrr` round
+moved master to 0.3). Inside a `.func` block, `.volatile` tags that blob
+as the volatile column; absence = normal; `duplicate-function` becomes
+variant-aware — a same-name pair is legal iff exactly one member carries
+`.volatile`. Before the first `.func`, `.volatile` sets the object's
+program bit. `Both` has no directive: dis prints a deduped function
+twice (bare + `.volatile`) and the assembler dedups a byte-identical
+same-name pair back to one Both-tagged blob — the compiler's dedup
+mirrored. Result: `pmt dis` output of any PM object is assemblable and
+byte-round-trips, tags and program bit included; hand-written `.pma` can
+author a volatile column (a directive-free file stays a normal-only
+legacy object). The directive is PM-dialect-only: `.tma` does not
+recognize it — `.func` is a core directive shared by both dialects, but
+TM volatility is per tape parameter, not per routine, so a routine-level
+tag has no TM meaning.
+
 **Why two variants differ materially** (worked probe, kept for the docs):
 an 11-op pulse routine at `-O1` compiles to 4 fused instructions
 (`wrr/wrl` — idempotent second `mark` dropped, `mark;unmark;mark` dead-store
@@ -508,8 +527,10 @@ reserved word + modifier is a grammar change; accepted 2026-08-08).
 Everything else stays, per the pre-cut sequencing ruling: `TMC_LANG_VERSION`
 0.1 and `TM_IR_VERSION` 2 (unreleased — shapes amended in place),
 MX v2 untouched, MO v3 amended in place (variant tags), MT v2 untouched,
-`.pma` 0.2 / `.tma` 0.3 untouched (volatility and contracts are
-compile-time notions; nothing reaches the assembler), PM IR untouched
+`.pma` 0.3 (unreleased — v0.2.0 shipped 0.2) amended in place with the
+`.volatile` directive (ruled 2026-08-09, §4.5 text form; the constant
+stays "0.3"), `.tma` 0.3 untouched (TM volatility stays a compile-time
+notion; the directive is PM-dialect-only), PM IR untouched
 (variants are two optimizer runs over one shape), both project-manifest
 schemas untouched. Editor plugins: TM pair unreleased (grammar rides
 without a bump); the PM pair's grammar addition rides the already-pending

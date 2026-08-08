@@ -17,6 +17,7 @@
 - **`crates/core` stays arch-agnostic**: variant records and column selection are container/linker features expressed without PM-1 knowledge; core tests use the crate-private fake arch.
 - **PMC_LANG_VERSION `"0.3"` → `"0.4"`** (`crates/post-machine/src/parser.rs:30`) — the round's ONE released-space move. TM version spaces, MX v2, MT v2, `.pma` 0.2 dialect: untouched.
 - **MO v3 is amended in place** (`OBJECT_FORMAT_VERSION_V3` stays 3 — v3 is unreleased).
+- **`.pma` dialect 0.3 is amended in place** with the `.volatile` directive (ruled 2026-08-09; v0.2.0 released 0.2, master's 0.3 is unreleased — `PM1_PMA_DIALECT_VERSION` stays `"0.3"`, its doc comment gains the clause). **`.tma` is untouched and must NOT recognize the directive** — `.func` is a core directive shared by both dialects, so the PM-only gating needs a negative test on the TM side.
 - **Fixed modifier order**: `volatile main()` / `volatile export main()` — `volatile` first.
 - **Drift guards must stay green after every task that touches their domain**: error-code registry + docs inventory set-compares, completions registry (`completions_registry.rs` incl. `EXPECTED_TOP_LEVEL` and flag probing), editor grammars (`editor_grammar.rs`), `cli_docs.rs` USAGE quotes.
 - **Published docs are forge-agnostic** (no issue/PR numbers, no `spec §N`, no `docs/superpowers/` citations in code or docs); code comments cite durable pages as `docs/<page>.md (keyword)`.
@@ -209,7 +210,7 @@ pub enum VariantColumns { Both, NormalOnly, VolatileOnly }   // CompileOptions.c
   - `pmt compile -o` emits a both-columns object (read it back: a fusing function has the `{Normal, Volatile}` pair); `pmt build --keep-objects` same.
   - In-memory `pmt build` of a **volatile** program: resulting `.pmx` byte-identical to the on-disk path (`compile -o` each unit, then `link`); repeat for a **normal** program (both directions of the needed-column rule). This is the spec's gate.
   - `-v` link output renders the fallback count (and names) when a volatile program links a legacy object; silent at zero (match `LinkReport` rendering style — thin-renderer rule: the count comes from the report, the CLI only formats).
-  - `pmt dis` on a two-column object annotates each `.func` header with its variant as a trailing `;` comment (`; variant: normal` / `; variant: volatile` / `; variant: both`), and prints one leading `; program: volatile` line when the object's program bit is set; a tag-free object renders exactly as today (no annotations — byte-identical dis for legacy objects is the pin). Test both by dis-ing a Task 5 merged object and a legacy one.
+  - `pmt dis` on a variant-tagged object is Task 10's surface (the `.volatile` directive) — this task leaves dis untouched.
   - Stdlib: a `volatile main()` calling a tape-touching `std::` routine links with `variant_fallbacks` empty (stdlib carries real volatile columns).
 - [ ] **Step 2: Confirm failures** (foreground).
 - [ ] **Step 3: Implement.** `ir`: select `ir` vs `ir_volatile` (compile with `columns: Both` for inspection — inspection is not the in-memory-build path). Disk rule: `compile -o`/`--keep-objects` force `columns: Both`. In-memory rule: the driver pre-scans its `.pmc` sources with a PARSE-ONLY pass to find top-level `main`'s volatile flag (disk `.pmo` inputs contribute their header bit instead); compiles every in-memory unit with the single needed column; no main found → normal. Stdlib: `stdlib::object()` builds with `columns: Both` (one `OnceLock` object serves both program kinds in-process; dedup keeps it small — note this in the OnceLock site comment, citing `docs/pmt/stdlib.md` only if that page gains the fact in Task 9, else plain prose).
@@ -232,7 +233,9 @@ pub enum VariantColumns { Both, NormalOnly, VolatileOnly }   // CompileOptions.c
   - `normal_and_volatile_columns_agree_on_observables` — for each of ≥4 programs (reuse/adapt the `opt_equivalence` corpus shapes: straight-line writes, branching on checks, a subroutine call chain, a loop): run the normal-column `.pmx` and the volatile-column `.pmx` (link the same source once with the bit off, once with `volatile main`) on the same tapes; assert same final tape and termination kind; assert the volatile run's tact count ≥ the normal run's on at least one fixture (the gated column pays for its transactions — a weak inequality pin that catches column-swap bugs).
   - `volatile_keeps_the_strict_cell_fault` — the Task 3 strict-cell program end-to-end through `pmt`-level plumbing: normal `-O1` run on a `StrictTape` completes (the double write was folded); volatile `-O1` run faults. (The honest `docs/pmt/isa.md` link, proven.)
   - `in_memory_and_on_disk_paths_agree` — already covered per-direction in Task 7; here add the mixed case: one unit as a disk `.pmo` (both columns) + one in-memory source, volatile program — `.pmx` equals the all-disk build.
-  - `legacy_object_end_to_end` — assemble a hand-written `.pma` routine (`pmt asm` path → tag-free object), link into a volatile program: runs correctly, report counts one fallback.
+  - `legacy_object_end_to_end` — assemble a hand-written DIRECTIVE-FREE `.pma` routine (`pmt asm` path → tag-free normal-only object), link into a volatile program: runs correctly, report counts one fallback.
+  - `handwritten_volatile_column_links_without_fallback` — a hand-written `.pma` with a same-name pair (bare + `.volatile` bodies, Task 10's directive): a volatile program links the `.volatile` body (assert by image bytes), `variant_fallbacks` empty.
+  - `dis_roundtrips_a_two_column_object` — `pmt dis` a Task 5 merged object (with the program bit set), assemble the printed text: the re-assembled object is byte-identical, tags and program bit included (Task 10's round-trip contract, proven end-to-end here).
   - `O0_matrix` — the first corpus fixture at `-O0` both columns: byte-identical `.pmx` to each other and to today's `-O0` build (the `-O0` bit-identity floor extended to the volatile world).
 - [ ] **Step 2: Run the file; every test must pass against Tasks 1-7's implementation** — any failure here is a real integration defect, fix it in the owning module (with the owning task's test updated if its pin was wrong) before this task completes.
 - [ ] **Step 3: Run the full gate set**: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build -p mtc-core --no-default-features` (foreground).
@@ -256,6 +259,37 @@ pub enum VariantColumns { Both, NormalOnly, VolatileOnly }   // CompileOptions.c
 - [ ] **Step 6: Verify every quoted transcript by running it**; grep the touched pages for leftover pre-round claims (`0.3` language version, "one build per function" phrasings). Grep the whole `docs/` tree for `volatile` to catch pages that now under-claim (formats.md's dis paragraph, lint pages listing error codes).
 - [ ] **Step 7: Run** `cargo test -p mtc-post-machine --test cli_docs` (USAGE quote guard) + `cargo test --workspace` (foreground).
 - [ ] **Step 8: Commit** `docs(pmt): volatile programs — language, optimizer, formats, cli, linking`.
+
+---
+
+### Task 10: the `.pma` `.volatile` directive (dis round-trip)
+
+Sequencing: execute AFTER Task 5 (needs `ObjectFile.variants` and merged two-column objects) and BEFORE Task 8 (whose corpus proves the round trip end-to-end). Ruled 2026-08-09 — the spec's §4.5 "Text form" paragraph is the authority.
+
+**Files:**
+- Modify: `crates/core/src/asm/` (directive recognition mechanism — survey; `.func` lives in core's CST as `FUNC_WORD`, cst.rs:35), `crates/post-machine/src/asm/mod.rs` (the PM dialect: directive semantics, variant-aware `duplicate-function`, asm-side dedup, `PM1_PMA_DIALECT_VERSION` doc clause), the PM disassembler (emit `.volatile` per tag; Both printed twice; program-bit position), `editors/grammars/pma.tmLanguage.json` (directive pattern)
+- Test: PM asm/dis unit tests, `crates/post-machine/tests/editor_grammar.rs` (pma leg), a TM-side negative test (in the TM crate's `.tma` dialect tests), the directive drift guard (`recognized_directives` inventory)
+
+**Interfaces:**
+- Consumes: `BlobVariant`/`variants`/`program_volatile` (Task 4), merged objects (Task 5).
+- Produces: the assemblable dis surface Task 8's `dis_roundtrips_a_two_column_object` and `handwritten_volatile_column_links_without_fallback` prove.
+
+**Semantics (pinned by the ruling):**
+1. Inside a `.func` block, a `.volatile` line tags that blob `Volatile`; absence = `Normal`.
+2. Before the first `.func`, `.volatile` sets `program_volatile`.
+3. `duplicate-function` becomes variant-aware: a same-name `.func` pair is legal iff exactly one member carries `.volatile`; two bare or two `.volatile` same-name blocks keep today's error.
+4. Asm-side dedup mirrors the compiler's: a legal same-name pair whose assembled records come out byte-identical collapses to ONE blob tagged `Both`. (dis prints a `Both` function twice — bare + `.volatile` — so dis→asm restores the exact object.)
+5. A directive-free file assembles exactly as today — byte-identical object, `variants: None` (legacy). This is the PM byte-identity gate for this task.
+6. PM-dialect-only: `.tma` must NOT recognize `.volatile` (negative test — a `.tma` file with the directive fails with the dialect's standard unknown-directive error). Mechanism: implementer's choice between an arch-syntax-contributed directive table or a caps field only `pm1_syntax()` enables — whichever keeps `crates/core` arch-agnostic and the existing caps semantics intact; state the choice and its rationale in the report. Update the `recognized_directives` inventory + its bidirectional drift guard for whichever mechanism.
+
+**Steps:**
+
+- [ ] **Step 1: Survey** core's directive path (`FUNC_WORD`, `shape_line`, lower.rs's malformed-directive reporting, `recognized_directives(caps)` + drift guard) and the PM disassembler's `.func` emission. Pick the gating mechanism per pin 6.
+- [ ] **Step 2: Write failing tests**: directive tags a blob (assemble → `variants` reflects it); file-level position sets the program bit; mid-file `.volatile` outside any `.func`... pin: after the first `.func` but outside a block — standard directive-position error, test it; variant-aware duplicate rules (legal pair; two-bare error; two-volatile error); asm dedup of an identical pair → one `Both` blob; directive-free byte-identity (capture today's object bytes first); dis emission of a merged object (directive per tag, Both twice, program bit line first); the TM negative; grammar drift guard.
+- [ ] **Step 3: Confirm failures** (foreground).
+- [ ] **Step 4: Implement** per the pins; extend the pma TextMate grammar (same tier as other directives) and the drift guard.
+- [ ] **Step 5: Run** PM asm/dis suites, the TM dialect suite (negative), `editor_grammar.rs`, the directive drift guard, `cargo test --workspace` (foreground).
+- [ ] **Step 6: Commit** `feat(post-machine): the .pma .volatile directive — assemblable variant columns`.
 
 ---
 
