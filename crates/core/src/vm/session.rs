@@ -612,15 +612,16 @@ mod tests {
         };
         // Identical result and stats: pending polls don't tick.
         assert_eq!(result, sync);
-        // Multi-poll device generates multiple waits.
-        assert!(waits > 0);
+        // Each instruction has 2 device transactions (op + latch-read), 2 polls each.
+        // 2 instructions × 2 transactions × 2 polls = 8 device waits.
+        assert_eq!(waits, 8);
     }
 
     /// Device-reported cost overrides the model price. A LatencyTape with
     /// write_cost=7 and zero polls per operation. The program has exactly
-    /// 1 write transaction (opcode 0x07, 0x81), and the sync run pays 1
-    /// tact per write. The pumped run must pay the device-reported cost
-    /// (7 tacts per write), yielding stall_tacts = sync.stall_tacts + 6.
+    /// 1 write transaction (opcode 0x07, 0x81); sync run has stall_tacts=4
+    /// (2 device ops each costing 1). The pumped run pays device-reported
+    /// cost (7 tacts per write), yielding stall_tacts = sync.stall_tacts + 6.
     #[test]
     fn device_reported_cost_replaces_the_model_price() {
         let code = WRITE_MOVE_STOP;
@@ -668,17 +669,21 @@ mod tests {
     /// verifies the async path catches tact-limit crossing during a device
     /// completion on resume.
     ///
-    /// Strategy: run with max_tacts set to 1 less than the sync run's
-    /// total_tacts. The first pump will suspend on a device wait (before
-    /// stepping, so core_tacts stays 0). The second pump resumes and the
-    /// device completes, adding stall_tacts and tripping the limit.
+    /// Arithmetic for WRITE_MOVE_STOP:
+    /// Sync run: steps=2, core_tacts=6 (CodeReads for fetch, then Step per
+    /// instruction), stall_tacts=4 (1 per device op: write, write's latch-read,
+    /// move, move's latch-read), total=10.
+    /// First pump: write instruction executes and suspends on device poll
+    /// (stats: steps=1, core_tacts=4, stall_tacts=0).
+    /// Second pump: device poll completes and settles, adding stall_tacts.
+    /// At resume-arm check (line 201): total_tacts would become 4+4+1=9.
+    /// Set max_tacts = total - 2 = 8 to trip exactly at resume-arm when
+    /// stall_tact is added, making total 8 >= limit 8.
     #[test]
     fn tact_limit_fires_when_a_resumed_transaction_crosses_the_budget() {
         let code = WRITE_MOVE_STOP;
         let sync = sync_result(&code);
-        // Sync run total for WRITE_MOVE_STOP: steps=2, core=2, stall=2, total=4.
-        // Set max_tacts to 3, leaving room for one stall tact before exceeding.
-        let limit = sync.stats.total_tacts() - 1;
+        let limit = sync.stats.total_tacts() - 2;
         let arch = TestArch;
         let mut session = AsyncSession::new(
             Core::new(&arch, 0),
@@ -701,8 +706,7 @@ mod tests {
             write_cost: 1,
         };
         let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
-        // Loop until we see either a trap or completion. With max_tacts low
-        // and a latency device that suspends, we expect a trap.
+        // Pump until we see a wait (first pump) or completion.
         let mut saw_wait = false;
         let result = loop {
             match session.pump(&mut [&mut tape], None) {
@@ -714,12 +718,16 @@ mod tests {
                 other => panic!("unexpected event: {other:?}"),
             }
         };
-        // The resume path (line 201) should have caught the limit crossing.
+        // Verify test premise: the session was suspended mid-transaction.
+        assert!(
+            saw_wait,
+            "premise failed: session must suspend on device wait"
+        );
+        // Verify the trap fired at the resume-arm check (line 201).
         assert!(
             matches!(result.outcome, Outcome::Trapped(Trap::TactLimit)),
-            "expected TactLimit, got {:?}; saw_wait={}",
-            result.outcome,
-            saw_wait
+            "expected TactLimit at resume-arm check, got {:?}",
+            result.outcome
         );
     }
 }
