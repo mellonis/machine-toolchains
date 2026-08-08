@@ -230,7 +230,8 @@ pub struct WorldItem {
 pub enum WorldKind {
     /// An own-line comment inside a world body.
     Comment(Comment),
-    /// `tape NAME: ALPHABET;` — grammatical only in a `machine` block.
+    /// `[volatile] tape NAME: ALPHABET;` — grammatical only in a `machine`
+    /// block.
     Tape(TapeCst),
     State(StateCst),
     Graft(GraftCst),
@@ -244,8 +245,11 @@ pub struct TapeCst {
     pub name_span: Span,
     pub alphabet: String,
     pub alphabet_span: Span,
+    /// `volatile tape …` — the band is a device (docs/tmt/language.md
+    /// (volatile tapes)).
+    pub volatile: bool,
     pub line: u32,
-    /// `tape` keyword start → `;` end.
+    /// First token (`volatile` or `tape`) start → `;` end.
     pub span: Span,
     pub trailing: Option<Comment>,
 }

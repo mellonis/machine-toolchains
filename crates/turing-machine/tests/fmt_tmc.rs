@@ -364,3 +364,60 @@ fn a_trailing_line_comment_on_the_last_use_path_does_not_swallow_the_semicolon()
     let twice = format(&out).expect("the formatted output must still parse");
     assert_eq!(out, twice, "formatting the output is not idempotent");
 }
+
+/// `volatile tape …` prints its modifier back — the formatter must not
+/// silently drop it. Mixed run: name padding stays name-based, so the
+/// `volatile ` prefix does not enter the width calculation and a volatile
+/// line does not column-align across the modifier with its plain neighbor.
+#[test]
+fn volatile_tape_declarations_format_canonically() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               machine {\n\
+               \x20 volatile   tape  sensor:bits;\n\
+               \x20 tape scratch : bits;\n\
+               \x20 entry state s { [*] -> stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sensor_line = out
+        .lines()
+        .find(|l| l.contains("sensor"))
+        .expect("the sensor declaration survives");
+    assert!(
+        sensor_line
+            .trim_start()
+            .starts_with("volatile tape sensor:"),
+        "the volatile modifier prints ahead of the declaration, got: {sensor_line:?}"
+    );
+    let scratch_line = out
+        .lines()
+        .find(|l| l.contains("scratch"))
+        .expect("the scratch declaration survives");
+    assert!(
+        scratch_line.trim_start().starts_with("tape scratch:"),
+        "the plain declaration carries no modifier, got: {scratch_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// The same modifier in a signature parameter position.
+#[test]
+fn volatile_signature_params_format_canonically() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               routine w(volatile   tape  t:bits) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(volatile tape t: bits) {",
+        "the volatile modifier prints in the signature parameter, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}

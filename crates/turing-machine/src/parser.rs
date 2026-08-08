@@ -6,7 +6,7 @@
 //! [`Program`] the rest of the front end consumes. Every fatal is raised by
 //! `parse_cst`; `lower_cst` never fails.
 //!
-//! The 24 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
+//! The 25 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
 //! expected. `deprecated` is contextual (an attribute word) and is not in that
 //! set.
@@ -27,6 +27,7 @@ use crate::lexer::{Comment, RESERVED, Token, TokenKind};
 /// There is no patch digit — spec-text corrections are errata and
 /// implementation-conformance fixes never move it. This is the language's
 /// first cut, so `0.1` (mirrors PM-1's `PMC_LANG_VERSION` discipline).
+/// (An unreleased version amends in place; the bump discipline binds from the first release.)
 pub const TMC_LANG_VERSION: &str = "0.1";
 
 // ---------------------------------------------------------------------------
@@ -149,6 +150,7 @@ pub enum SigParamKind {
     Tape {
         alphabet: String,
         alphabet_span: Span,
+        volatile: bool,
     },
     State,
 }
@@ -210,6 +212,9 @@ pub struct TapeDecl {
     pub name_span: Span,
     pub alphabet: String,
     pub alphabet_span: Span,
+    /// `volatile tape …` — the band is a device (docs/tmt/language.md
+    /// (volatile tapes)).
+    pub volatile: bool,
     pub line: u32,
     pub span: Span,
 }
@@ -628,6 +633,7 @@ fn lower_world_body(items: &[WorldItem]) -> (Vec<TapeDecl>, Vec<State>, Vec<Graf
                 name_span: t.name_span,
                 alphabet: t.alphabet.clone(),
                 alphabet_span: t.alphabet_span,
+                volatile: t.volatile,
                 line: t.line,
                 span: t.span,
             }),
@@ -1514,6 +1520,18 @@ impl Parser<'_> {
 
     fn sig_param(&mut self) -> Result<SigParam, CompileError> {
         let t = self.peek().clone();
+        let volatile = if self.at_kw("volatile") {
+            self.bump();
+            if !self.at_kw("tape") {
+                return Err(Self::expected(
+                    self.peek(),
+                    "`tape` after `volatile` (only tape parameters can be volatile)",
+                ));
+            }
+            true
+        } else {
+            false
+        };
         if self.at_kw("tape") {
             self.bump();
             let (name, name_span) = self.name("a tape parameter name")?;
@@ -1523,6 +1541,7 @@ impl Parser<'_> {
                 kind: SigParamKind::Tape {
                     alphabet,
                     alphabet_span,
+                    volatile,
                 },
                 name,
                 name_span,
@@ -1614,9 +1633,21 @@ impl Parser<'_> {
                 WorldKind::Graft(self.parse_graft(false, None, doc_run)?)
             } else if self.at_kw("bind") {
                 WorldKind::Bind(self.parse_bind(doc_run)?)
+            } else if self.at_kw("volatile") {
+                let lead = self.peek().clone();
+                self.bump(); // `volatile`
+                if !self.at_kw("tape") {
+                    return Err(Self::expected(self.peek(), "`tape` after `volatile`"));
+                }
+                if in_machine {
+                    WorldKind::Tape(self.parse_tape(true, lead)?)
+                } else {
+                    return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
+                }
             } else if self.at_kw("tape") {
                 if in_machine {
-                    WorldKind::Tape(self.parse_tape()?)
+                    let lead = self.peek().clone();
+                    WorldKind::Tape(self.parse_tape(false, lead)?)
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
                 }
@@ -1631,8 +1662,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_tape(&mut self) -> Result<TapeCst, CompileError> {
-        let tape_tok = self.peek().clone();
+    fn parse_tape(&mut self, volatile: bool, lead_tok: Token) -> Result<TapeCst, CompileError> {
         self.bump(); // `tape`
         let (name, name_span) = self.name("a tape name")?;
         self.expect(&TokenKind::Colon, "`:` after the tape name")?;
@@ -1645,8 +1675,9 @@ impl Parser<'_> {
             name_span,
             alphabet,
             alphabet_span,
-            line: tape_tok.line,
-            span: join(tape_tok.span(), semi.span()),
+            volatile,
+            line: lead_tok.line,
+            span: join(lead_tok.span(), semi.span()),
             trailing,
         })
     }

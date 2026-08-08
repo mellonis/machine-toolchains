@@ -715,8 +715,11 @@ fn signature_params(sig: &Signature) -> Vec<String> {
     sig.params
         .iter()
         .map(|param| match &param.kind {
-            SigParamKind::Tape { alphabet, .. } => {
-                format!("tape {}: {alphabet}", param.name)
+            SigParamKind::Tape {
+                alphabet, volatile, ..
+            } => {
+                let prefix = if *volatile { "volatile " } else { "" };
+                format!("{prefix}tape {}: {alphabet}", param.name)
             }
             SigParamKind::State => format!("state {}", param.name),
         })
@@ -1583,9 +1586,13 @@ fn tape_name_widths(items: &[WorldItem]) -> Vec<usize> {
 }
 
 fn render_tape(t: &TapeCst, name_width: usize, blank_before: bool, indent: usize) -> Rendered {
+    // `name_width` is name-length-only (see `tape_name_widths`): the
+    // `volatile ` prefix does not enter the run's column alignment, so a
+    // mixed volatile/plain run aligns names but not the modifier.
     let code = format!(
-        "{}tape {}:{} {};",
+        "{}{}tape {}:{} {};",
         " ".repeat(indent),
+        if t.volatile { "volatile " } else { "" },
         t.name,
         " ".repeat(name_width.saturating_sub(t.name.chars().count())),
         t.alphabet

@@ -1039,6 +1039,7 @@ machine {
     ));
     assert!(inside.contains(&"state".to_string()), "{inside:?}");
     assert!(inside.contains(&"tape".to_string()), "{inside:?}");
+    assert!(inside.contains(&"volatile".to_string()), "{inside:?}");
     assert!(!inside.contains(&"machine".to_string()), "{inside:?}");
 }
 
@@ -1055,6 +1056,30 @@ routine r(tape t: bits) {
     ));
     assert!(got.contains(&"state".to_string()), "{got:?}");
     assert!(!got.contains(&"tape".to_string()), "{got:?}");
+    assert!(!got.contains(&"volatile".to_string()), "{got:?}");
+}
+
+#[test]
+fn after_volatile_the_item_boundary_completion_offers_nothing_yet() {
+    // `volatile` is the first two-token item-boundary keyword: after it, the
+    // cursor is no longer AT a boundary (the previous token is an `Ident`,
+    // not `;` / `{` / `}`), so `classify_context`'s `at_boundary` check
+    // returns `None` rather than re-offering `tape`. This is an accepted
+    // gap, not a fix owed here: the follow-on keyword is a single word the
+    // language reference already spells out in full
+    // (docs/tmt/language.md (volatile tapes)), and closing it needs a
+    // widened boundary check that must NOT also re-offer `bind`/`entry`/
+    // `graft`/`state` after `volatile` — a small feature of its own.
+    let head = "\
+alphabet bits { '_', '1' }
+
+machine {
+  volatile ";
+    let got = labels(&complete_between(
+        head,
+        "tape sensor: bits;\n  entry state s { [*] -> stop; }\n}\n",
+    ));
+    assert!(got.is_empty(), "{got:?}");
 }
 
 #[test]
@@ -1209,6 +1234,86 @@ fn hovering_a_routine_shows_its_signature_with_tape_alphabets_and_its_doc() {
         "{}",
         hover.text
     );
+}
+
+#[test]
+fn hovering_a_routine_prefixes_its_volatile_signature_parameters() {
+    let src = "\
+alphabet bits { '_', '1' }
+
+routine r(volatile tape sensor: bits, tape scratch: bits) {
+  entry state s { [*, *] -> return; }
+}
+
+machine {
+  tape a: bits;
+  tape b: bits;
+  entry state main { [*, *] -> call r(sensor = a, scratch = b) then done; }
+  state done { [*, *] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "call r", 5))
+        .expect("a hover");
+    assert!(
+        hover
+            .text
+            .contains("routine r(volatile tape sensor: bits, tape scratch: bits)"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn hovering_a_volatile_machine_tapes_own_name_prefixes_it() {
+    let src = "\
+alphabet bits { '_', '1' }
+
+machine {
+  volatile tape a: bits;
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "tape a", 5))
+        .expect("a hover");
+    assert!(
+        hover.text.contains("volatile tape a: bits"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn hovering_a_volatile_signature_tapes_own_name_prefixes_it() {
+    let src = "\
+alphabet bits { '_', '1' }
+
+routine r(volatile tape sensor: bits) {
+  entry state s { [*] -> return; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "tape sensor", 5))
+        .expect("a hover");
+    assert!(
+        hover.text.contains("volatile tape sensor: bits"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn hovering_a_non_volatile_tapes_own_name_omits_the_word_volatile() {
+    let (mut service, uri) = opened(CROSS_WORLD);
+    let hover = service
+        .hover(&uri, pos_after(CROSS_WORLD, "tape ctl", 5))
+        .expect("a hover");
+    assert!(hover.text.contains("tape ctl: bits"), "{}", hover.text);
+    assert!(!hover.text.contains("volatile"), "{}", hover.text);
 }
 
 #[test]

@@ -83,6 +83,7 @@ pub(crate) struct ExpandedTape {
     pub name: String,
     pub alphabet: String,
     pub cardinality: usize,
+    pub volatile: bool,
 }
 
 /// A concrete state: a name plus its concrete rules, in priority (row) order.
@@ -1603,6 +1604,7 @@ pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
                     name: t.name.clone(),
                     alphabet: t.alphabet.clone(),
                     cardinality: t.cardinality,
+                    volatile: t.volatile,
                 })
                 .collect(),
             state_params: world.state_params.clone(),

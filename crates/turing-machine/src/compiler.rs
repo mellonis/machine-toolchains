@@ -846,6 +846,7 @@ pub(crate) struct ResolvedTape {
     pub alphabet: String,
     pub cardinality: usize,
     pub span: Span,
+    pub volatile: bool,
 }
 
 /// A resolved graft declaration: the mangled graph target plus the raw
@@ -1517,7 +1518,9 @@ fn resolve_world(
     let mut state_params: Vec<String> = Vec::new();
     for p in &sig.params {
         match &p.kind {
-            SigParamKind::Tape { alphabet, .. } => {
+            SigParamKind::Tape {
+                alphabet, volatile, ..
+            } => {
                 let (full, card) =
                     resolve_tape_alphabet(alphabet, p.name_span, ns, scopes, alphabets)?;
                 tapes.push(ResolvedTape {
@@ -1526,6 +1529,7 @@ fn resolve_world(
                     alphabet: full,
                     cardinality: card,
                     span: p.span,
+                    volatile: *volatile,
                 });
             }
             SigParamKind::State => state_params.push(p.name.clone()),
@@ -1612,6 +1616,7 @@ fn resolve_machine_world(
             alphabet: full,
             cardinality: card,
             span: t.span,
+            volatile: t.volatile,
         });
     }
     let (grafts, binds, entry) = resolve_world_reuse(&m.grafts, &m.binds, &m.states, &[], scopes)?;

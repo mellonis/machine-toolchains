@@ -59,7 +59,7 @@ is `opt: 0 round(s)` and nothing follows it.
 
 ## Contracts
 
-Seven properties bind the pipeline. They are contracts, not preferences —
+Eight properties bind the pipeline. They are contracts, not preferences —
 where a pass cannot honour one, the pass does not fire.
 
 **`-O0` is an off switch, not a setting.** At `-O0` the optimizer
@@ -170,6 +170,25 @@ done:
 
 That is what makes a stray `debugger` worth reporting as source hygiene
 (`docs/tmt/lint.md (leftover-debugger)`) rather than harmless.
+
+**The volatile barrier.** A `volatile` tape
+(`docs/tmt/language.md (volatile tapes)`) generalizes the `brk` barrier
+from a point to a standing, per-band rule: every access to a volatile
+band is externally observable, and the external world may change the
+band's cells between accesses. No pass may assume a value read from or
+written to a volatile band persists, and no pass may change the band's
+access sequence — no dropping idempotent or dead writes, no fusing or
+splitting write+move shapes, no value propagation through its reads.
+Every pass in the pipeline today already preserves per-band access
+sequences (`dead-rows` removes only rows that never fire, so the
+dynamic sequence a run takes is unchanged), so nothing currently gates
+on the flag; any future pass that reasons about values or motion must
+consult it. The two program-level passes carry it for free: `inline`
+splices a callee's rows onto the caller's own tapes rather than
+building a second tapes list, and `outline`'s synthesized routines
+mirror the host's tape declarations, volatility included, when hoisting
+a repeated subgraph out. The flag therefore survives both passes
+unchanged.
 
 **`tail-call` runs before `tail-merge`.** The order of the two is
 load-bearing, not a preference. `tail-merge`'s whole-state dedup can

@@ -110,6 +110,10 @@ pub struct IrTape {
     pub name: String,
     pub alphabet: String,
     pub cardinality: u32,
+    /// `true` for a `volatile tape` — the band is a device, not addressable
+    /// memory (docs/tmt/language.md (volatile tapes)).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub volatile: bool,
 }
 
 /// One state: an id, its source name (synthetic for graft-instance internals),
@@ -526,6 +530,7 @@ fn lower_world(
                 name: t.name.clone(),
                 alphabet: t.alphabet.clone(),
                 cardinality: t.cardinality as u32,
+                volatile: t.volatile,
             })
             .collect(),
         entry,
@@ -1135,11 +1140,13 @@ machine {
                             name: "a".into(),
                             alphabet: "al".into(),
                             cardinality: 3,
+                            volatile: false,
                         },
                         IrTape {
                             name: "b".into(),
                             alphabet: "al".into(),
                             cardinality: 3,
+                            volatile: false,
                         },
                     ],
                     entry: 0,
@@ -1192,6 +1199,7 @@ machine {
                         name: "t".into(),
                         alphabet: "al".into(),
                         cardinality: 3,
+                        volatile: false,
                     }],
                     entry: 0,
                     states: vec![IrState {
@@ -1260,6 +1268,69 @@ machine {
         // present (the machine state is `table`, the routine state `branch`).
         assert!(json.contains("\"dispatch\": \"table\""), "{json}");
         assert!(json.contains("\"dispatch\": \"branch\""), "{json}");
+    }
+
+    #[test]
+    fn volatile_tape_serializes_only_when_set() {
+        let mut tape = IrTape {
+            name: "t".into(),
+            alphabet: "al".into(),
+            cardinality: 3,
+            volatile: false,
+        };
+        let json = serde_json::to_string(&tape).unwrap();
+        assert!(!json.contains("volatile"), "false is omitted: {json}");
+        tape.volatile = true;
+        let json = serde_json::to_string(&tape).unwrap();
+        assert!(json.contains("\"volatile\":true"), "{json}");
+        // absent field deserializes to false
+        let back: IrTape =
+            serde_json::from_str(r#"{"name":"t","alphabet":"al","cardinality":3}"#).unwrap();
+        assert!(!back.volatile);
+    }
+
+    #[test]
+    fn machine_tape_volatility_reaches_the_ir() {
+        // machine with one volatile and one plain tape; the routine takes a
+        // volatile param → its world's tape is flagged.
+        let src = "\
+alphabet bits { '_', '1' }
+export routine probe(volatile tape s: bits) {
+  entry state p { [*] -> return; }
+}
+machine {
+  volatile tape sensor: bits;
+  tape scratch: bits;
+  entry state go { [*, *] -> call probe(s = sensor) then stop; }
+}";
+        let (ir, _) = lower_of(src);
+        let main = world(&ir, "main");
+        assert!(main.tapes[0].volatile && !main.tapes[1].volatile);
+        let probe = ir
+            .worlds
+            .iter()
+            .find(|w| w.name.ends_with("probe"))
+            .expect("the probe world");
+        assert!(probe.tapes[0].volatile);
+    }
+
+    #[test]
+    fn graft_drops_the_graph_params_volatility_host_governs() {
+        // A graph declares its param volatile; grafted onto a PLAIN host tape,
+        // the host world's tape stays non-volatile (grafts dissolve pre-IR;
+        // the host's declaration describes the real band).
+        let src = "\
+alphabet bits { '_', '1' }
+graph g(volatile tape t: bits, state done) {
+  entry state w { [*] -> done; }
+}
+machine {
+  tape plain: bits;
+  entry graft g(t = plain, done = stop);
+}";
+        let (ir, _) = lower_of(src);
+        let main = world(&ir, "main");
+        assert!(!main.tapes[0].volatile);
     }
 
     #[test]
