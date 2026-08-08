@@ -63,7 +63,7 @@ fn volatile_is_reserved_as_a_name() {
 - [ ] **Step 6: Gates + commit**
 
 ```bash
-git add crates/turing-machine/src/lexer.rs crates/turing-machine/src/parser.rs editors/grammars/tmc.tmLanguage.json docs/tmt/language.md
+git add crates/turing-machine/src/lexer.rs crates/turing-machine/src/parser.rs crates/turing-machine/src/parser/tests.rs editors/grammars/tmc.tmLanguage.json docs/tmt/language.md
 git commit -m "feat(turing-machine): reserve volatile — the 25th .tmc keyword"
 ```
 
