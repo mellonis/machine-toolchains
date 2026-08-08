@@ -772,7 +772,8 @@ tape, state, world, namespace, alias, binding, or graft-instance name:
 ```
 alphabet  machine  tape    state   entry   routine  graph   namespace
 export    use      graft   bind    as      map      with    write
-move      goto     call    then    return  stop     halt    debugger  volatile
+move      goto     call    then    return  stop     halt    debugger
+volatile
 ```
 
 Reservation is enforced wherever a name is expected: `tape state: ab;` is

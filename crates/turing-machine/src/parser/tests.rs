@@ -485,6 +485,15 @@ fn reserved_keywords_cannot_name_things() {
     assert!(parse_src("alphabet deprecated { '_' }").is_ok());
 }
 
+#[test]
+fn volatile_is_reserved_as_a_name() {
+    // A tape may not be NAMED volatile — the word is reserved.
+    assert_eq!(
+        err_code("machine { tape volatile: bits; }"),
+        "reserved-name"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Binding grammar (the shared call/graft/bind algebra).
 // ---------------------------------------------------------------------------
