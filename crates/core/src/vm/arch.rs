@@ -2,6 +2,9 @@
 //! (README (workspace layout): core is arch-agnostic by contract, and
 //! this trait is where PM-1-specific knowledge is supplied from outside).
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::trap::{RaisedTrapKind, Trap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

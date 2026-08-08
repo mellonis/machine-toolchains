@@ -13,6 +13,7 @@ cargo build --release                                   # produces target/releas
 cargo test --workspace                                  # everything: unit + integration + property tests
 cargo clippy --workspace --all-targets -- -D warnings   # quality gate
 cargo fmt --check                                       # quality gate
+cargo build -p mtc-core --no-default-features        # no_std vm gate (docs/core.md (async session))
 ```
 
 Single test file / single test:

@@ -4,7 +4,8 @@
 //! (depth is just SP). Sync v1: external pause/run-interval throttle is
 //! modelled by `run_steps` chunking.
 
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 use super::Outcome;
 use super::core::Core;
@@ -20,8 +21,11 @@ pub enum PauseCause {
     Breakpoint(u32),
     /// A `brk` instruction retired.
     Brk,
-    /// A `run_steps` budget was exhausted (the sync analog of external
-    /// `pause()` / the run-interval throttle).
+    /// On `DebugSession`: a `run_steps` budget was exhausted (the sync
+    /// analog of external `pause()` / the run-interval throttle). On
+    /// `AsyncSession`, which reuses this enum, `Manual` reports only an
+    /// external `pause()` call — there, budget exhaustion is its own
+    /// `PumpEvent::BudgetSpent` event, not a `Manual` pause.
     Manual,
     /// Trapped — paused ON the fault with state inspectable; any further
     /// stepping reports `Finished(Trapped)`.

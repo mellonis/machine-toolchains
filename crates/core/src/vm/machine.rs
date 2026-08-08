@@ -1,14 +1,34 @@
 //! Loader + facade: Executable → validated Machine → runs (docs/core.md
 //! (loading)).
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use crate::formats::executable::Executable;
-use crate::formats::{PROFILE_BASE, PROFILE_FRAMES};
 
 use super::arch::Arch;
 use super::core::{Core, FramesMeta};
 use super::debug::DebugSession;
 use super::devices::Tape;
 use super::driver::{ReturnStack, RunLimits, RunResult, TactProfile, run};
+use super::session::AsyncSession;
+
+/// Execution-profile ids (docs/formats.md (executable image)), mirrored
+/// byte-for-byte from `formats::{PROFILE_BASE, PROFILE_FRAMES}`: the
+/// loader's unconditional paths (`with_arch`, `build_core`) run without the
+/// `std`-gated `formats` module, so they carry their own copy rather than
+/// importing it.
+const PROFILE_BASE: u8 = 0;
+const PROFILE_FRAMES: u8 = 1;
+
+// Drift guard: fails to compile if the formats-module source of truth ever
+// moves away from this mirror.
+#[cfg(feature = "std")]
+const _: () = {
+    assert!(PROFILE_BASE == crate::formats::PROFILE_BASE);
+    assert!(PROFILE_FRAMES == crate::formats::PROFILE_FRAMES);
+};
 
 #[derive(Default)]
 pub struct ArchRegistry {
@@ -45,8 +65,8 @@ pub enum LoadError {
     },
 }
 
-impl std::fmt::Display for LoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UnknownArch(id) => write!(f, "unknown architecture {id:#04x}"),
             Self::EntryNotEntryMarker { at } => {
@@ -59,7 +79,7 @@ impl std::fmt::Display for LoadError {
     }
 }
 
-impl std::error::Error for LoadError {}
+impl core::error::Error for LoadError {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RunOptions {
@@ -89,8 +109,8 @@ pub enum RunSetupError {
     AlphabetMismatch { tape: u8, expected: u32, got: u32 },
 }
 
-impl std::fmt::Display for RunSetupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RunSetupError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::DeviceCount { expected, got } => {
                 write!(f, "image expects {expected} tape device(s), got {got}")
@@ -107,7 +127,7 @@ impl std::fmt::Display for RunSetupError {
     }
 }
 
-impl std::error::Error for RunSetupError {}
+impl core::error::Error for RunSetupError {}
 
 pub struct Machine<'a> {
     arch: &'a dyn Arch,
@@ -129,8 +149,8 @@ pub struct Machine<'a> {
     frames_offset: u32,
 }
 
-impl<'a> std::fmt::Debug for Machine<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a> core::fmt::Debug for Machine<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Machine")
             .field("code", &self.code)
             .field("entry", &self.entry)
@@ -163,6 +183,7 @@ impl<'a> Machine<'a> {
         }
     }
 
+    #[cfg(feature = "std")]
     pub fn from_executable(
         exe: &Executable,
         registry: &'a ArchRegistry,
@@ -338,6 +359,29 @@ impl<'a> Machine<'a> {
         )
         .with_tables(self.tables.clone())
     }
+
+    /// A pumped async session over this machine's image (docs/core.md
+    /// (async session)): the embedder drives it by calling `pump` instead
+    /// of blocking on `run`. Legacy single-tape shape: preloads the mark as
+    /// a real device-0 read transaction (a tact-free loading step, subject
+    /// to WAIT like any other transaction), no table ROM — mirrors
+    /// `run`/`debug`.
+    pub fn async_session(&self, opts: RunOptions) -> AsyncSession<'a> {
+        AsyncSession::new(
+            self.build_core(),
+            self.code.clone(),
+            ReturnStack::new(opts.stack_depth),
+            opts.profile,
+            opts.limits,
+        )
+    }
+
+    /// A multi-tape pumped async session (docs/formats.md (executable
+    /// image)): carries the table ROM and does not preload the mark,
+    /// mirroring `run_tapes`/`debug_tapes`.
+    pub fn async_session_tapes(&self, opts: RunOptions) -> AsyncSession<'a> {
+        self.async_session(opts).with_tables(self.tables.clone())
+    }
 }
 
 #[cfg(test)]
@@ -347,9 +391,10 @@ mod tests {
     use crate::formats::{PROFILE_BASE, PROFILE_FRAMES};
     use crate::vm::arch::test_arch::TestArch;
     use crate::vm::debug::{DebugEvent, PauseCause};
-    use crate::vm::devices::InfiniteTape;
+    use crate::vm::devices::{InfiniteTape, LatencyProfile, LatencyTape, SyncAsAsync};
     use crate::vm::driver::Outcome;
     use crate::vm::frame::test_support::{descriptor_bytes, region_bytes};
+    use crate::vm::session::PumpEvent;
     use crate::vm::trap::Trap;
 
     // TestArch entry marker: 0x0E
@@ -741,5 +786,189 @@ mod tests {
             session.step_in_tapes(&mut devs),
             DebugEvent::Finished(Outcome::Stopped)
         );
+    }
+
+    /// Pump an always-ready device to completion, mirroring session.rs's
+    /// own `pumped_result` test helper.
+    fn pumped_async_result(machine: &Machine, tape: InfiniteTape) -> RunResult {
+        let mut session = machine.async_session(RunOptions::default());
+        let mut device = SyncAsAsync::new(tape);
+        loop {
+            match session.pump(&mut [&mut device], None) {
+                PumpEvent::Finished(result) => return result,
+                PumpEvent::DeviceWait => continue,
+                other => panic!("unexpected event on an always-ready device: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn async_session_latches_the_initial_mark_like_run() {
+        // Same jm probe image as initial_mf_is_latched_from_device_tact_free:
+        // jm rel32 +1 is taken only if the initial mark was latched true.
+        let arch = TestArch;
+        let code = vec![0x0E, 0x09, 0x01, 0x00, 0x00, 0x00, 0x03, 0x02];
+        let machine = Machine::with_arch(&arch, code, 0).unwrap();
+
+        // Marked start cell: run() latches MF true and takes the jump.
+        let mut sync_marked = InfiniteTape::from_cells([true], 0, 0);
+        let sync_marked_result = machine.run(&mut sync_marked, RunOptions::default());
+        assert_eq!(sync_marked_result.outcome, Outcome::Stopped);
+        let pumped_marked = pumped_async_result(&machine, InfiniteTape::from_cells([true], 0, 0));
+        assert_eq!(pumped_marked, sync_marked_result);
+
+        // Blank start cell: run() latches MF false and falls into halt.
+        let mut sync_blank = InfiniteTape::new();
+        let sync_blank_result = machine.run(&mut sync_blank, RunOptions::default());
+        assert_eq!(sync_blank_result.outcome, Outcome::Halted);
+        let pumped_blank = pumped_async_result(&machine, InfiniteTape::new());
+        assert_eq!(pumped_blank, sync_blank_result);
+    }
+
+    #[test]
+    fn async_session_latch_waits_on_a_slow_device_and_stays_unaccounted() {
+        // entry, write index 1 (+ latch-read), move right (+ latch-read), stop.
+        let arch = TestArch;
+        let code = vec![0x0E, 0x07, 0x81, 0x06, 0x02];
+        let machine = Machine::with_arch(&arch, code, 0).unwrap();
+        let mut sync_tape = InfiniteTape::new();
+        let sync = machine.run(&mut sync_tape, RunOptions::default());
+
+        let mut session = machine.async_session(RunOptions::default());
+        let profile = LatencyProfile {
+            move_polls: 0,
+            read_polls: 3,
+            write_polls: 0,
+            move_cost: 1,
+            read_cost: 1,
+            write_cost: 1,
+        };
+        let mut device = LatencyTape::new(InfiniteTape::new(), profile);
+        let mut waits_before_first_step = 0;
+        let pumped = loop {
+            match session.pump(&mut [&mut device], None) {
+                PumpEvent::DeviceWait => {
+                    if session.stats().steps == 0 {
+                        waits_before_first_step += 1;
+                    }
+                    continue;
+                }
+                PumpEvent::Finished(result) => break result,
+                other => panic!("unexpected event on a latency device: {other:?}"),
+            }
+        };
+        // The loading latch waits like any transaction (read_polls: 3), but
+        // retires no instruction and touches no stats — all 3 waits land
+        // before the entry instruction's own Step retires. Later in-run
+        // latch-reads on the same device wait too, but only after steps has
+        // already advanced past 0, so they don't inflate this count.
+        assert_eq!(waits_before_first_step, 3);
+        // Unaccounted: the pumped run's final stats match the sync run's
+        // exactly, even though the loading latch itself waited on the slow
+        // device and the sync path never does.
+        assert_eq!(pumped, sync);
+    }
+
+    #[test]
+    fn async_session_tapes_does_not_latch() {
+        // Same MF-latch probe as run_tapes_does_not_preload_mf, but through
+        // async_session_tapes: no loading-step preload, so a marked start
+        // cell does NOT make the leading jm taken — it falls into halt,
+        // matching run_tapes rather than run.
+        let registry = test_registry();
+        let code = vec![0x0E, 0x09, 0x01, 0x00, 0x00, 0x00, 0x03, 0x02];
+        let exe = Executable::sectioned(0x7F, 0, code, Vec::new(), 1, PROFILE_BASE, Vec::new());
+        let machine = Machine::from_executable(&exe, &registry).unwrap();
+
+        let mut marked = InfiniteTape::from_cells([true], 0, 0);
+        let mut devs: [&mut dyn Tape; 1] = [&mut marked];
+        let run_tapes_result = machine.run_tapes(&mut devs, RunOptions::default()).unwrap();
+        assert_eq!(run_tapes_result.outcome, Outcome::Halted);
+
+        let mut session = machine.async_session_tapes(RunOptions::default());
+        let mut device = SyncAsAsync::new(InfiniteTape::from_cells([true], 0, 0));
+        let pumped = loop {
+            match session.pump(&mut [&mut device], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => continue,
+                other => panic!("unexpected event on an always-ready device: {other:?}"),
+            }
+        };
+        assert_eq!(pumped, run_tapes_result);
+
+        // Not run(): run() would latch the mark and take the jm, Stopping
+        // rather than Halting.
+        let mut marked_for_run = InfiniteTape::from_cells([true], 0, 0);
+        let run_result = machine.run(&mut marked_for_run, RunOptions::default());
+        assert_eq!(run_result.outcome, Outcome::Stopped);
+        assert_ne!(pumped.outcome, run_result.outcome);
+    }
+
+    /// The async mirror of `debug_tapes_steps_two_devices_through_a_table_with_a_breakpoint`:
+    /// proves `async_session_tapes` carries the table ROM, not just that it
+    /// skips the mark preload. An empty ROM would trap the `mtc` walk
+    /// instead of reaching the terminating `stp`.
+    #[test]
+    fn async_session_tapes_carries_the_table_rom() {
+        let registry = test_registry();
+        let machine =
+            Machine::from_executable(&two_device_table_exe(vec![2, 2]), &registry).unwrap();
+        let mut session = machine.async_session_tapes(RunOptions::default());
+        let mut t0 = SyncAsAsync::new(InfiniteTape::from_cells([true], 0, 0));
+        let mut t1 = SyncAsAsync::new(InfiniteTape::from_cells([true], 0, 0));
+        let pumped = loop {
+            match session.pump(&mut [&mut t0, &mut t1], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => continue,
+                other => panic!("unexpected event on an always-ready device: {other:?}"),
+            }
+        };
+        assert_eq!(pumped.outcome, Outcome::Stopped);
+    }
+
+    /// The async mirror of `run_tapes_runs_a_frames_profile_image_end_to_end`:
+    /// proves `AsyncSession`'s `FrameRead` arm (session.rs, priced at
+    /// `frame_load_cost`) actually activates the frame and drives a framed
+    /// call to completion through `retx`, not just that the sync driver's
+    /// does. Compares the full `RunResult` (outcome + stats + ip + stack)
+    /// against the sync run on the identical image, so a pricing drift in
+    /// the async arm's `frame_load_cost` accounting fails this test even
+    /// though the outcome alone would still read `Stopped`.
+    #[test]
+    fn async_session_tapes_runs_a_frames_profile_image() {
+        let registry = test_registry();
+        let exe = frames_image(PROFILE_FRAMES);
+        // Non-vacuity: the image genuinely carries a nonempty frames region
+        // for the FrameRead arm to serve out of (see `frames_image`'s
+        // layout comment — descriptor + composite region past
+        // `frames_offset`), so this test cannot pass by skipping the arm
+        // entirely.
+        assert!(exe.frames_offset > 0);
+        assert!((exe.frames_offset as usize) < exe.tables.len());
+
+        let machine = Machine::from_executable(&exe, &registry).unwrap();
+
+        let mut s0 = InfiniteTape::new();
+        let mut s1 = InfiniteTape::new();
+        let mut sync_devs: [&mut dyn Tape; 2] = [&mut s0, &mut s1];
+        let sync = machine
+            .run_tapes(&mut sync_devs, RunOptions::default())
+            .unwrap();
+        // Baseline pin: the frames image genuinely executes (entry, framed
+        // call, read-all, retx, stp), not a same-step trap.
+        assert_eq!(sync.outcome, Outcome::Stopped);
+        assert!(sync.stats.steps > 0);
+
+        let mut session = machine.async_session_tapes(RunOptions::default());
+        let mut a0 = SyncAsAsync::new(InfiniteTape::new());
+        let mut a1 = SyncAsAsync::new(InfiniteTape::new());
+        let pumped = loop {
+            match session.pump(&mut [&mut a0, &mut a1], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => continue,
+                other => panic!("unexpected event on an always-ready device: {other:?}"),
+            }
+        };
+        assert_eq!(pumped, sync);
     }
 }
