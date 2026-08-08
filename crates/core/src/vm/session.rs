@@ -30,10 +30,8 @@ pub enum PumpEvent {
 enum Waiting {
     /// Nothing in flight; next `pump` continues at an instruction boundary.
     None,
-    /// The initial-mark loading read on device 0 (docs/core.md (loading));
-    /// the type is declared complete now so `pump`'s dispatch is total.
-    // constructed once the initial-mark latch lands
-    #[allow(dead_code)]
+    /// The initial-mark loading read on device 0 (docs/core.md (loading)):
+    /// set while `pump_latch`'s read is in flight, cleared once it settles.
     Latch,
     /// A mid-instruction device transaction: the unresumed bus request.
     Exec(BusRequest),
@@ -107,12 +105,22 @@ impl<'a> AsyncSession<'a> {
         self.stats
     }
 
+    /// Next instruction's address. Unlike `DebugSession::ip`, this needs no
+    /// trapped-instruction special case: `CoreEvent::Trapped` goes straight
+    /// to `finish`, which already stores `instr_start()` in `RunResult.ip`.
     pub fn ip(&self) -> u32 {
         self.core.ip()
     }
 
     pub fn mf(&self) -> bool {
         self.core.mf()
+    }
+
+    /// The frame register (0 = the identity composite; non-zero = the
+    /// active composite index inside a framed call) — the frames profile's
+    /// counterpart to `mf()`, mirroring `DebugSession::fr()`.
+    pub fn fr(&self) -> u32 {
+        self.core.fr()
     }
 
     pub fn depth(&self) -> usize {
@@ -227,15 +235,17 @@ impl<'a> AsyncSession<'a> {
             return PumpEvent::BudgetSpent;
         }
         // Loading step (docs/core.md (loading)): on the async path the
-        // initial-mark latch is a real device-0 transaction — still
-        // unaccounted, and itself subject to WAIT. Not yet implemented;
-        // `latch_initial_mark` is always false here (every session in this
-        // module is built via `with_tables`).
+        // initial-mark latch is a real device-0 transaction (`pump_latch`)
+        // — unaccounted like the sync path's direct read, and itself
+        // subject to WAIT. The zero-budget guard above fires first, so a
+        // fresh session pumped with `Some(0)` reports `BudgetSpent` before
+        // ever latching; the latch runs on the first pump that carries
+        // budget.
         let mut remaining = budget;
         // Resume a suspended mid-instruction transaction, if any.
         let mut event: Option<CoreEvent> = match self.waiting {
             Waiting::None => None,
-            // The initial-mark latch is not yet implemented.
+            // Re-poll the same in-flight latch transaction.
             Waiting::Latch => return self.pump_latch(devices, budget),
             Waiting::Exec(request) => match self.poll_device(request, devices, true) {
                 None => return PumpEvent::DeviceWait,
@@ -252,7 +262,7 @@ impl<'a> AsyncSession<'a> {
             // Instruction boundary (only when nothing is mid-flight).
             if event.is_none() {
                 if self.latch_initial_mark {
-                    // The initial-mark latch is not yet implemented.
+                    // First pump: latch the initial mark before starting.
                     return self.pump_latch(devices, budget);
                 }
                 event = Some(if self.started {
@@ -368,15 +378,42 @@ impl<'a> AsyncSession<'a> {
         }
     }
 
+    /// The loading-step latch as a real transaction (docs/core.md
+    /// (loading)): read device 0 and match it against the mark index 1 to
+    /// set MF — priced at nothing (loading, not execution: neither the
+    /// reported cost nor the pending polls reach `stats`), but subject to
+    /// WAIT like any other transaction. Mirrors the sync path's direct
+    /// `devices[0].read()`, routed through `issue`/`poll` instead so a slow
+    /// device genuinely delays loading rather than blocking the thread.
     fn pump_latch(
         &mut self,
-        _devices: &mut [&mut dyn AsyncTapeDevice],
-        _budget: Option<u64>,
+        devices: &mut [&mut dyn AsyncTapeDevice],
+        budget: Option<u64>,
     ) -> PumpEvent {
-        // The initial-mark latch is not yet implemented; this stub is
-        // unreachable from this module's tests — every session here is
-        // constructed via `with_tables`, which clears `latch_initial_mark`.
-        unimplemented!("initial-mark latch not yet implemented")
+        let issued = matches!(self.waiting, Waiting::Latch);
+        let Some(device) = devices.get_mut(0) else {
+            // No device to latch from: mirror the sync path's panic-free
+            // choice for a mismatched device set — treat the mark as
+            // unmarked and continue, rather than indexing and panicking.
+            self.latch_initial_mark = false;
+            self.waiting = Waiting::None;
+            return self.pump(devices, budget);
+        };
+        if !issued {
+            device.issue(DeviceCmd::Read);
+            self.waiting = Waiting::Latch;
+        }
+        match device.poll() {
+            DevicePoll::Pending => PumpEvent::DeviceWait,
+            DevicePoll::Ready { reply, .. } => {
+                if let DeviceReply::Symbol(symbol) = reply {
+                    self.core.set_mf(symbol == 1);
+                }
+                self.latch_initial_mark = false;
+                self.waiting = Waiting::None;
+                self.pump(devices, budget)
+            }
+        }
     }
 }
 
@@ -605,6 +642,47 @@ mod tests {
         .with_tables(Vec::new());
         // No devices at all: the first device request must resolve to a
         // Device trap (Fault(NoSuchDevice) through the core), not a panic.
+        let pumped = loop {
+            match session.pump(&mut [], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::BudgetSpent => continue,
+                other => panic!("unexpected: {other:?}"),
+            }
+        };
+        assert_eq!(pumped, sync);
+    }
+
+    /// The latch's own no-device branch (`devices.get_mut(0)` returning
+    /// `None`): `Machine::run` would panic indexing `devices[0]` here, but
+    /// `pump_latch` mirrors this module's other missing-device handling —
+    /// treat the mark as unmarked and continue, so the session still faults
+    /// (not panics) at the first real device request, identical to a
+    /// session built via `with_tables` that skips the latch entirely.
+    #[test]
+    fn latch_with_no_device_treats_the_mark_as_unmarked_and_continues() {
+        let code = WRITE_MOVE_STOP;
+        let arch = TestArch;
+        let mut sync_core = Core::new(&arch, 0);
+        let mut sync_stack = ReturnStack::new(16);
+        let sync = driver::run(
+            &mut sync_core,
+            &code,
+            &mut sync_stack,
+            &mut [],
+            &[],
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        );
+        assert!(matches!(sync.outcome, Outcome::Trapped(_)));
+        // No `.with_tables(...)`: `latch_initial_mark` stays true, so the
+        // first pump reaches `pump_latch` with an empty device slice.
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        );
         let pumped = loop {
             match session.pump(&mut [], None) {
                 PumpEvent::Finished(result) => break result,
