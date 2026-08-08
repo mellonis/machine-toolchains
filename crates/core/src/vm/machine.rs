@@ -883,4 +883,26 @@ mod tests {
         assert_eq!(run_result.outcome, Outcome::Stopped);
         assert_ne!(pumped.outcome, run_result.outcome);
     }
+
+    /// The async mirror of `debug_tapes_steps_two_devices_through_a_table_with_a_breakpoint`:
+    /// proves `async_session_tapes` carries the table ROM, not just that it
+    /// skips the mark preload. An empty ROM would trap the `mtc` walk
+    /// instead of reaching the terminating `stp`.
+    #[test]
+    fn async_session_tapes_carries_the_table_rom() {
+        let registry = test_registry();
+        let machine =
+            Machine::from_executable(&two_device_table_exe(vec![2, 2]), &registry).unwrap();
+        let mut session = machine.async_session_tapes(RunOptions::default());
+        let mut t0 = SyncAsAsync::new(InfiniteTape::from_cells([true], 0, 0));
+        let mut t1 = SyncAsAsync::new(InfiniteTape::from_cells([true], 0, 0));
+        let pumped = loop {
+            match session.pump(&mut [&mut t0, &mut t1], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => continue,
+                other => panic!("unexpected event on an always-ready device: {other:?}"),
+            }
+        };
+        assert_eq!(pumped.outcome, Outcome::Stopped);
+    }
 }

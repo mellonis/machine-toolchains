@@ -118,7 +118,13 @@ impl<'a> AsyncSession<'a> {
 
     /// The frame register (0 = the identity composite; non-zero = the
     /// active composite index inside a framed call) — the frames profile's
-    /// counterpart to `mf()`, mirroring `DebugSession::fr()`.
+    /// counterpart to `mf()`, mirroring `DebugSession::fr()`. On a
+    /// base-profile session it stays 0. If a trap freezes execution
+    /// mid frame-load, `fr()` reports the resolved-but-not-yet-loaded
+    /// composite index — harmless, simply the FR at trap time. Resolving
+    /// that composite index to its per-tape binding maps or canonical
+    /// label is a debugger-tooling concern layered on the `.pmx.map`
+    /// sidecar, not a VM accessor.
     pub fn fr(&self) -> u32 {
         self.core.fr()
     }
@@ -384,7 +390,10 @@ impl<'a> AsyncSession<'a> {
     /// reported cost nor the pending polls reach `stats`), but subject to
     /// WAIT like any other transaction. Mirrors the sync path's direct
     /// `devices[0].read()`, routed through `issue`/`poll` instead so a slow
-    /// device genuinely delays loading rather than blocking the thread.
+    /// device genuinely delays loading rather than blocking the thread. A
+    /// non-`Symbol` reply (`Ok` or `Fault`) is swallowed: MF keeps its
+    /// default and execution proceeds, consistent with the no-device choice
+    /// below.
     fn pump_latch(
         &mut self,
         devices: &mut [&mut dyn AsyncTapeDevice],
@@ -654,13 +663,18 @@ mod tests {
 
     /// The latch's own no-device branch (`devices.get_mut(0)` returning
     /// `None`): `Machine::run` would panic indexing `devices[0]` here, but
-    /// `pump_latch` mirrors this module's other missing-device handling —
-    /// treat the mark as unmarked and continue, so the session still faults
-    /// (not panics) at the first real device request, identical to a
-    /// session built via `with_tables` that skips the latch entirely.
+    /// `pump_latch` treats the mark as unmarked and continues. Same jm
+    /// probe image as `machine.rs`'s `async_session_latches_the_initial_mark_like_run`
+    /// / `initial_mf_is_latched_from_device_tact_free` — jm rel32 +1 is
+    /// taken only if MF was latched true. None of nop/jm/halt/stop ever
+    /// issues a device micro-op, so an empty device slice never faults;
+    /// this isolates the latch's own fallback. `driver::run` has no loading
+    /// step of its own, so the sync baseline also starts and stays MF
+    /// false against the same empty device slice — an unmarked latch
+    /// changes nothing, so `pumped` must equal `sync` exactly, MF and all.
     #[test]
     fn latch_with_no_device_treats_the_mark_as_unmarked_and_continues() {
-        let code = WRITE_MOVE_STOP;
+        let code = vec![0x0E, 0x09, 0x01, 0x00, 0x00, 0x00, 0x03, 0x02];
         let arch = TestArch;
         let mut sync_core = Core::new(&arch, 0);
         let mut sync_stack = ReturnStack::new(16);
@@ -673,12 +687,13 @@ mod tests {
             TactProfile::ELECTRONIC,
             RunLimits::default(),
         );
-        assert!(matches!(sync.outcome, Outcome::Trapped(_)));
+        // Pin the baseline: MF false falls into halt (the jm is not taken).
+        assert_eq!(sync.outcome, Outcome::Halted);
         // No `.with_tables(...)`: `latch_initial_mark` stays true, so the
         // first pump reaches `pump_latch` with an empty device slice.
         let mut session = AsyncSession::new(
             Core::new(&arch, 0),
-            code.to_vec(),
+            code,
             ReturnStack::new(16),
             TactProfile::ELECTRONIC,
             RunLimits::default(),
@@ -895,8 +910,8 @@ mod tests {
     }
 
     /// Tact limit crossing on a resumed device transaction. The sync path
-    /// never exercises the over_tacts check in the Waiting::Exec resume arm
-    /// (line 201), since sync blocks on device transactions. This test proves
+    /// never exercises the over_tacts check in the `Waiting::Exec` resume-arm
+    /// check, since sync blocks on device transactions. This test proves
     /// the async path catches tact-limit crossing during a device completion
     /// on resume — discriminated by exact stats at trap time.
     ///
@@ -907,7 +922,8 @@ mod tests {
     /// which equals the limit and triggers over_tacts(). If the resume-arm
     /// check were skipped, the trap would fire later at the step-boundary
     /// check with { steps: 2, core_tacts: 5, stall_tacts: 4, total: 9 } —
-    /// exact-stats equality proves the trap fired at line 201, not downstream.
+    /// exact-stats equality proves the trap fired at the `Waiting::Exec`
+    /// resume-arm check, not downstream.
     #[test]
     fn tact_limit_fires_when_a_resumed_transaction_crosses_the_budget() {
         let code = WRITE_MOVE_STOP;
@@ -962,7 +978,7 @@ mod tests {
                 core_tacts: 4,
                 stall_tacts: 4
             },
-            "exact stats prove the trap fired at the resume-arm check (line 201)"
+            "exact stats prove the trap fired at the Waiting::Exec resume-arm check"
         );
         // Verify the outcome is TactLimit (redundant once stats match, but explicit).
         assert!(matches!(result.outcome, Outcome::Trapped(Trap::TactLimit)));
