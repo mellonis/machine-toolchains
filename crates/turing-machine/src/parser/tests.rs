@@ -453,6 +453,57 @@ fn tape_declaration_outside_a_machine_is_rejected() {
 }
 
 #[test]
+fn volatile_tape_parses_in_a_machine_block() {
+    let src = "machine { volatile tape sensor: bits; tape scratch: bits; }";
+    let tokens = lex(src).unwrap();
+    let cst = parse_cst(&tokens).expect("parses");
+    let TopKind::Machine(m) = &cst.items[0].kind else {
+        panic!("expected a machine block");
+    };
+    let tapes: Vec<&TapeCst> = m
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            WorldKind::Tape(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tapes.len(), 2);
+    let (sensor, scratch) = (tapes[0], tapes[1]);
+    assert!(sensor.volatile);
+    assert_eq!(sensor.name, "sensor");
+    assert!(!scratch.volatile);
+    assert_eq!(scratch.name, "scratch");
+
+    // The tape's span starts at the `volatile` token, not at `tape`.
+    let volatile_tok = tokens
+        .iter()
+        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "volatile"))
+        .expect("a `volatile` token in the stream");
+    assert_eq!(sensor.span.start, volatile_tok.span().start);
+}
+
+#[test]
+fn volatile_must_be_followed_by_tape_in_a_world_body() {
+    let err = parse_src("machine { volatile state s { [*] -> stop; } }").unwrap_err();
+    assert_eq!(err.kind.code(), "unexpected-token");
+    assert!(
+        matches!(&err.kind, CompileErrorKind::Expected { what, .. } if *what == "`tape` after `volatile`"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn volatile_tape_outside_a_machine_is_tape_not_in_machine() {
+    assert_eq!(
+        err_code(
+            "routine r(tape t: bits) { volatile tape x: bits; entry state s { [*] -> stop; } }"
+        ),
+        "tape-not-in-machine"
+    );
+}
+
+#[test]
 fn non_entry_graft_needs_a_name() {
     assert_eq!(
         err_code("machine { graft findX(t = work); }"),

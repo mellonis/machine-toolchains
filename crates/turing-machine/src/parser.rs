@@ -1615,9 +1615,21 @@ impl Parser<'_> {
                 WorldKind::Graft(self.parse_graft(false, None, doc_run)?)
             } else if self.at_kw("bind") {
                 WorldKind::Bind(self.parse_bind(doc_run)?)
+            } else if self.at_kw("volatile") {
+                let lead = self.peek().clone();
+                self.bump(); // `volatile`
+                if !self.at_kw("tape") {
+                    return Err(Self::expected(self.peek(), "`tape` after `volatile`"));
+                }
+                if in_machine {
+                    WorldKind::Tape(self.parse_tape(true, lead)?)
+                } else {
+                    return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
+                }
             } else if self.at_kw("tape") {
                 if in_machine {
-                    WorldKind::Tape(self.parse_tape()?)
+                    let lead = self.peek().clone();
+                    WorldKind::Tape(self.parse_tape(false, lead)?)
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
                 }
@@ -1632,8 +1644,7 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_tape(&mut self) -> Result<TapeCst, CompileError> {
-        let tape_tok = self.peek().clone();
+    fn parse_tape(&mut self, volatile: bool, lead_tok: Token) -> Result<TapeCst, CompileError> {
         self.bump(); // `tape`
         let (name, name_span) = self.name("a tape name")?;
         self.expect(&TokenKind::Colon, "`:` after the tape name")?;
@@ -1646,8 +1657,9 @@ impl Parser<'_> {
             name_span,
             alphabet,
             alphabet_span,
-            line: tape_tok.line,
-            span: join(tape_tok.span(), semi.span()),
+            volatile,
+            line: lead_tok.line,
+            span: join(lead_tok.span(), semi.span()),
             trailing,
         })
     }
