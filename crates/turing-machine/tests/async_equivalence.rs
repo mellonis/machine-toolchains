@@ -1,8 +1,11 @@
 //! sync ≡ pump equivalence over real TM-1 images (docs/core.md (async
 //! session)): a pumped run through always-ready adapters must match
 //! `Machine::run_tapes` bit-exactly — outcome, stats, ip, stack, AND every
-//! band's final tape — at -O0 and -O1, on a single-tape program and a
-//! two-tape program. Mirrors the PM-1 corpus check
+//! band's final tape — at -O0 and -O1, on a single-tape program, a
+//! two-tape program, and a third program whose -O0/-O1 builds are pinned
+//! to emit genuinely different code (the `dispatch_select` shape), so the
+//! pump is exercised against optimizer-transformed output too, not only
+//! optimizer-invariant output. Mirrors the PM-1 corpus check
 //! (`crates/post-machine/tests/async_equivalence.rs`), carried over to the
 //! multi-tape shape (`async_session_tapes` — the table-ROM-carrying,
 //! no-initial-latch mirror of `run_tapes`).
@@ -173,6 +176,27 @@ machine {
 }
 ";
 
+/// Single-tape, machine-world scanner with the `dispatch_select` shape
+/// (`crates/turing-machine/src/optimizer/dispatch_select.rs`): a state with
+/// exactly two rows where the LAST row is the all-wildcard catch-all `[*]`.
+/// -O1 flips this from `mtc`/`djmp` (a real per-band match+dispatch table)
+/// to `mtc`/`jm` (match table only, no dispatch table) — the shape
+/// `opt_equivalence.rs::BRANCH_SCAN` uses to pin the same pass. Walks right
+/// turning `a` into `b`; on anything else (including a pre-existing `b`)
+/// it stops without moving.
+const DISPATCH_SCAN: &str = "\
+alphabet ab { '_', 'a', 'b' }
+
+machine {
+  tape t: ab;
+
+  entry state scan {
+    ['a'] -> write ['b'] move [>] goto scan;
+    [*]   -> stop;
+  }
+}
+";
+
 #[test]
 fn pumped_tm_runs_match_run_tapes() {
     // `BIT_FLIPPER` is single-tape, one band, cardinality 3 (bits: '_' '0'
@@ -242,6 +266,47 @@ fn pumped_tm_runs_match_run_tapes() {
         assert_eq!(
             pumped_snaps, sync_snaps,
             "mark_copier at {opt:?}: final tapes"
+        );
+    }
+
+    // `DISPATCH_SCAN`: neither `BIT_FLIPPER` nor `MARK_COPIER` gives the
+    // optimizer anything to change (no calls, no dead states, no
+    // wildcard-catch-all-last shape), so their -O0/-O1 builds are
+    // byte-identical and the opt-level loop above never actually exercises
+    // the pump against optimizer-transformed code. This program's state
+    // has the `dispatch_select` shape, so its -O1 build genuinely differs.
+    let exe_o0 = build(DISPATCH_SCAN, OptLevel::O0);
+    let exe_o1 = build(DISPATCH_SCAN, OptLevel::O1);
+    // Non-vacuity pin for the whole opt-level axis: if a future change made
+    // this corpus optimization-invariant too, this fails loudly instead of
+    // the sync≡pump comparisons below silently proving nothing extra.
+    assert_ne!(
+        exe_o0.code, exe_o1.code,
+        "dispatch_scan: -O0 and -O1 must emit different code (dispatch_select must fire)"
+    );
+    for (opt, exe) in [(OptLevel::O0, &exe_o0), (OptLevel::O1, &exe_o1)] {
+        let registry = registry_for(exe);
+        let seeds: [&[u32]; 1] = [&[1, 1, 2]]; // "aab"
+        let (sync, sync_snaps) = run_tapes_to_end(exe, &registry, &seeds);
+        assert_eq!(
+            sync.outcome,
+            Outcome::Stopped,
+            "dispatch_scan at {opt:?} baseline"
+        );
+        assert!(sync.stats.steps > 0, "dispatch_scan at {opt:?} baseline");
+        // Both rows genuinely fired: the two 'a's flipped to 'b' (the
+        // selective row), then the pre-existing 'b' hit the wildcard
+        // catch-all (the last row) and stopped without moving.
+        assert_eq!(
+            sync_snaps[0].cells,
+            vec![2, 2, 2],
+            "dispatch_scan at {opt:?} baseline: both rows must have fired"
+        );
+        let (pumped, pumped_snaps) = pump_tapes_to_end(exe, &registry, &seeds);
+        assert_eq!(pumped, sync, "dispatch_scan at {opt:?}: RunResult");
+        assert_eq!(
+            pumped_snaps, sync_snaps,
+            "dispatch_scan at {opt:?}: final tape"
         );
     }
 }
