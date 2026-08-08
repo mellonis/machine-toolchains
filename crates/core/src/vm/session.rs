@@ -30,9 +30,9 @@ pub enum PumpEvent {
 enum Waiting {
     /// Nothing in flight; next `pump` continues at an instruction boundary.
     None,
-    /// The initial-mark loading read on device 0 (docs/core.md (loading)).
-    /// Constructed by the loading-latch task's `pump_latch`; the type is
-    /// declared complete now so `pump`'s dispatch is total.
+    /// The initial-mark loading read on device 0 (docs/core.md (loading));
+    /// the type is declared complete now so `pump`'s dispatch is total.
+    // constructed once the initial-mark latch lands
     #[allow(dead_code)]
     Latch,
     /// A mid-instruction device transaction: the unresumed bus request.
@@ -147,23 +147,23 @@ impl<'a> AsyncSession<'a> {
     }
 
     /// Begin (or, for `already_issued`, re-sample) a device transaction.
-    /// `Ok(response)` completes it; `Err(())` means READY is low.
+    /// `Some(response)` completes it; `None` means READY is low.
     fn poll_device(
         &mut self,
         request: BusRequest,
         devices: &mut [&mut dyn AsyncTapeDevice],
         already_issued: bool,
-    ) -> Result<BusResponse, ()> {
+    ) -> Option<BusResponse> {
         let (dev, cmd, model_cost) = self.device_parts(request);
         let Some(device) = devices.get_mut(dev as usize) else {
-            return Ok(BusResponse::Fault(DeviceFault::NoSuchDevice { dev }));
+            return Some(BusResponse::Fault(DeviceFault::NoSuchDevice { dev }));
         };
         if !already_issued {
             device.issue(cmd);
         }
         match device.poll() {
-            DevicePoll::Pending => Err(()),
-            DevicePoll::Ready { reply, cost } => Ok(self.settle_device(model_cost, reply, cost)),
+            DevicePoll::Pending => None,
+            DevicePoll::Ready { reply, cost } => Some(self.settle_device(model_cost, reply, cost)),
         }
     }
 
@@ -175,21 +175,28 @@ impl<'a> AsyncSession<'a> {
         if let Some(result) = &self.finished {
             return PumpEvent::Finished(result.clone());
         }
+        // A zero budget spends immediately — checked BEFORE the waiting
+        // match, or the resume path (waiting == Waiting::Exec, device now
+        // Ready) would retire an instruction and underflow the u64
+        // decrement below (debug: panic; release: wraps to u64::MAX, so a
+        // zero budget silently becomes unlimited).
+        if budget == Some(0) {
+            return PumpEvent::BudgetSpent;
+        }
         // Loading step (docs/core.md (loading)): on the async path the
         // initial-mark latch is a real device-0 transaction — still
-        // unaccounted, and itself subject to WAIT. Implemented below, in
-        // the loading-latch task; until then `latch_initial_mark` is
-        // always false here (every session in this module is built via
-        // `with_tables`).
+        // unaccounted, and itself subject to WAIT. Not yet implemented;
+        // `latch_initial_mark` is always false here (every session in this
+        // module is built via `with_tables`).
         let mut remaining = budget;
         // Resume a suspended mid-instruction transaction, if any.
         let mut event: Option<CoreEvent> = match self.waiting {
             Waiting::None => None,
-            // implemented by the loading-latch task
+            // The initial-mark latch is not yet implemented.
             Waiting::Latch => return self.pump_latch(devices, budget),
             Waiting::Exec(request) => match self.poll_device(request, devices, true) {
-                Err(()) => return PumpEvent::DeviceWait,
-                Ok(response) => {
+                None => return PumpEvent::DeviceWait,
+                Some(response) => {
                     self.waiting = Waiting::None;
                     if self.over_tacts() {
                         return self.finish(Outcome::Trapped(Trap::TactLimit));
@@ -201,11 +208,8 @@ impl<'a> AsyncSession<'a> {
         loop {
             // Instruction boundary (only when nothing is mid-flight).
             if event.is_none() {
-                if let Some(0) = remaining {
-                    return PumpEvent::BudgetSpent;
-                }
                 if self.latch_initial_mark {
-                    // implemented by the loading-latch task
+                    // The initial-mark latch is not yet implemented.
                     return self.pump_latch(devices, budget);
                 }
                 event = Some(if self.started {
@@ -263,13 +267,16 @@ impl<'a> AsyncSession<'a> {
                                     None => BusResponse::OutOfTable,
                                 }
                             }
-                            device_request => {
+                            device_request @ (BusRequest::DeviceMoveLeft { .. }
+                            | BusRequest::DeviceMoveRight { .. }
+                            | BusRequest::DeviceRead { .. }
+                            | BusRequest::DeviceWrite { .. }) => {
                                 match self.poll_device(device_request, devices, false) {
-                                    Err(()) => {
+                                    None => {
                                         self.waiting = Waiting::Exec(device_request);
                                         return PumpEvent::DeviceWait;
                                     }
-                                    Ok(response) => response,
+                                    Some(response) => response,
                                 }
                             }
                         };
@@ -323,10 +330,10 @@ impl<'a> AsyncSession<'a> {
         _devices: &mut [&mut dyn AsyncTapeDevice],
         _budget: Option<u64>,
     ) -> PumpEvent {
-        // implemented by the loading-latch task: replaces this stub.
-        // Unreachable from this module's tests — every session here is
+        // The initial-mark latch is not yet implemented; this stub is
+        // unreachable from this module's tests — every session here is
         // constructed via `with_tables`, which clears `latch_initial_mark`.
-        unimplemented!("later task")
+        unimplemented!("initial-mark latch not yet implemented")
     }
 }
 
@@ -447,7 +454,10 @@ mod tests {
         let sync = sync_result(&code);
         let (pumped, pumps) = pumped_result(&code, Some(1));
         assert_eq!(pumped, sync);
-        assert!(pumps as u64 >= sync.stats.steps); // one instruction per pump
+        // Exactly one instruction per pump on an always-ready device, plus
+        // one final call to fetch and retire the terminal `stp` (which
+        // itself retires no `Step`, so it isn't counted in `sync.stats.steps`).
+        assert_eq!(pumps as u64, sync.stats.steps + 1);
     }
 
     #[test]
@@ -470,10 +480,78 @@ mod tests {
         assert_eq!(session.stats.steps, 0); // read the field directly (stats() lands later)
     }
 
+    /// Regression: the zero-budget guard must also cover the resume path
+    /// (`waiting == Waiting::Exec`), not just a fresh instruction boundary.
+    /// Before the fix, a zero budget on a resumed-and-now-ready device let
+    /// the instruction retire and then underflowed the `u64` decrement.
+    #[test]
+    fn zero_budget_on_a_resume_does_not_advance_or_underflow() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        // One poll of WAIT on the first device transaction, so the second
+        // `pump` call re-enters through `Waiting::Exec` with the device now
+        // Ready — the resume path the zero-budget guard must also cover.
+        let profile = LatencyProfile {
+            move_polls: 1,
+            read_polls: 1,
+            write_polls: 1,
+            move_cost: 1,
+            read_cost: 1,
+            write_cost: 1,
+        };
+        let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
+        assert_eq!(session.pump(&mut [&mut tape], None), PumpEvent::DeviceWait);
+        let stats_before = session.stats;
+        assert_eq!(
+            session.pump(&mut [&mut tape], Some(0)),
+            PumpEvent::BudgetSpent
+        );
+        // Nothing advanced: stats unchanged, still suspended on the same
+        // transaction (not reset, not retired).
+        assert_eq!(session.stats, stats_before);
+        assert!(
+            matches!(session.waiting, Waiting::Exec(_)),
+            "must still be suspended on the same transaction"
+        );
+        // A later unlimited pump completes normally with the sync-identical
+        // result — the suspension left no trace on the outcome.
+        let pumped = loop {
+            match session.pump(&mut [&mut tape], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => continue,
+                other => panic!("unexpected event on a latency device: {other:?}"),
+            }
+        };
+        assert_eq!(pumped, sync);
+    }
+
     #[test]
     fn missing_device_faults_instead_of_panicking() {
         let code = WRITE_MOVE_STOP;
         let arch = TestArch;
+        // Parity baseline: the sync driver over the same code and an empty
+        // device slice must reach the identical Device trap.
+        let mut sync_core = Core::new(&arch, 0);
+        let mut sync_stack = ReturnStack::new(16);
+        let sync = driver::run(
+            &mut sync_core,
+            &code,
+            &mut sync_stack,
+            &mut [],
+            &[],
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        );
+        assert!(matches!(sync.outcome, Outcome::Trapped(_)));
         let mut session = AsyncSession::new(
             Core::new(&arch, 0),
             code.to_vec(),
@@ -484,13 +562,13 @@ mod tests {
         .with_tables(Vec::new());
         // No devices at all: the first device request must resolve to a
         // Device trap (Fault(NoSuchDevice) through the core), not a panic.
-        let outcome = loop {
+        let pumped = loop {
             match session.pump(&mut [], None) {
-                PumpEvent::Finished(result) => break result.outcome,
+                PumpEvent::Finished(result) => break result,
                 PumpEvent::BudgetSpent => continue,
                 other => panic!("unexpected: {other:?}"),
             }
         };
-        assert!(matches!(outcome, Outcome::Trapped(_)));
+        assert_eq!(pumped, sync);
     }
 }
