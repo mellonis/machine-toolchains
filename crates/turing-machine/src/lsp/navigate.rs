@@ -747,7 +747,12 @@ fn world_head(view: &WorldView<'_>) -> String {
         .params
         .iter()
         .map(|p| match &p.kind {
-            SigParamKind::Tape { alphabet, .. } => format!("tape {}: {alphabet}", p.name),
+            SigParamKind::Tape {
+                alphabet, volatile, ..
+            } => {
+                let prefix = if *volatile { "volatile " } else { "" };
+                format!("{prefix}tape {}: {alphabet}", p.name)
+            }
             SigParamKind::State => format!("state {}", p.name),
         })
         .collect();

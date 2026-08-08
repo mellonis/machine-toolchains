@@ -55,8 +55,14 @@ fn candidates(cursor: &Cursor, roster: Option<&Roster>, state: &DocState) -> Vec
         ),
         Context::WorldItem { machine } => {
             let mut words = vec!["bind", "entry", "graft", "state"];
+            // `volatile` prefixes a `tape` declaration (docs/tmt/language.md
+            // (volatile tapes)) and, like `tape` itself, is grammatical only
+            // in a `machine` body — a routine or graph body declares its
+            // tapes as signature parameters instead, so both keywords share
+            // this one gate.
             if *machine {
                 words.push("tape");
+                words.push("volatile");
             }
             words.sort_unstable();
             keywords(&words, span)

@@ -216,6 +216,47 @@ Signature parameters come in two kinds, `tape NAME: ALPHABET` and `state
 NAME`; the latter are exit parameters, covered under "`graft`". Parameter
 names must be unique within a signature.
 
+### Volatile tapes
+
+Either declaration position accepts a `volatile` modifier immediately
+before `tape`:
+
+```
+machine {
+  volatile tape sensor: bits;
+  tape buffer: bits;
+  …
+}
+
+routine poll(volatile tape sensor: bits) { … }
+```
+
+A volatile tape is a **device band**: every access to it is externally
+observable, and the external world may change its cells between
+accesses. The toolchain preserves the band's exact access sequence — no
+access is ever dropped, reordered, or fused away — and each read is a
+fresh observation, never a value assumed to persist from an earlier one
+(`docs/tmt/optimizer.md (volatile barrier)`).
+
+`volatile tape T: ALPHABET` on a `routine` or `graph` signature
+parameter fixes how *that world's own body* is compiled — every access
+inside it to the bound parameter gets the volatile guarantee, regardless
+of what a caller later binds there. Two asymmetries follow from how the
+three reuse constructs work (see "Reuse: `call`, `graft`, and `bind`"
+below), and both are worth knowing before relying on the modifier. A
+`graft` splices its graph's rows onto the host's own tapes before the
+optimizer ever runs, so a spliced row always lives on whichever band the
+*host* declared — a graph's own `volatile` parameter is accepted and
+inert, which is correct, since the host's declaration is what the
+spliced code actually runs against. A `call` or a `bind`, by contrast,
+targets a routine whose body was compiled once, independently of any
+call site — in this compilation unit or another, it makes no
+difference — and nothing revisits that compiled form afterward: binding
+a volatile machine tape into a routine that was compiled without
+`volatile` on the matching parameter is not diagnosed. The author is
+responsible for calling the routine variant compiled for the right kind
+of band.
+
 ## Rules
 
 ### The rule triple
