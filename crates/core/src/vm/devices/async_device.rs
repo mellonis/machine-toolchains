@@ -41,7 +41,9 @@ pub enum DevicePoll {
 
 /// A tape device the machine can genuinely wait on. Contract: one command
 /// in flight per device — `issue` while a command is pending is a caller
-/// bug; `poll` with nothing in flight reports `Pending`.
+/// bug; `poll` with nothing in flight reports `Pending`. The accessor methods
+/// `head()` and `alphabet_size()` report the device's settled state — the state
+/// as of the last completed transaction; they do not reflect an in-flight command.
 pub trait AsyncTapeDevice {
     fn alphabet_size(&self) -> u32;
     fn head(&self) -> i64;
@@ -172,5 +174,13 @@ mod tests {
     fn poll_without_issue_is_pending() {
         let mut dev = SyncAsAsync::new(InfiniteTape::new());
         assert_eq!(dev.poll(), DevicePoll::Pending);
+    }
+
+    #[test]
+    #[should_panic(expected = "one command in flight")]
+    fn issue_while_in_flight_panics() {
+        let mut dev = SyncAsAsync::new(InfiniteTape::new());
+        dev.issue(DeviceCmd::Write { index: 1 });
+        dev.issue(DeviceCmd::Read);
     }
 }

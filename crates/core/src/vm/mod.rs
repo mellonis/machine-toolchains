@@ -16,8 +16,8 @@ pub use bus::{BusRequest, BusResponse, CoreEvent};
 pub use core::{Core, FramesMeta};
 pub use debug::{DebugEvent, DebugSession, PauseCause};
 pub use devices::{
-    AsyncTapeDevice, DeviceCmd, DevicePoll, DeviceReply, InfiniteTape, StrictTape, SyncAsAsync,
-    Tape, WideTape,
+    AsyncTapeDevice, DeviceCmd, DevicePoll, DeviceReply, InfiniteTape, LatencyProfile, LatencyTape,
+    StrictTape, SyncAsAsync, Tape, WideTape,
 };
 pub use driver::{Outcome, ReturnStack, RunLimits, RunResult, RunStats, TactProfile, run};
 pub use machine::{ArchRegistry, LoadError, Machine, RunOptions};

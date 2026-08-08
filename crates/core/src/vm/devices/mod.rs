@@ -5,12 +5,14 @@
 mod annular_tape;
 mod async_device;
 mod infinite_tape;
+mod latency_tape;
 mod strict_tape;
 mod wide_tape;
 
 pub use annular_tape::AnnularTape;
 pub use async_device::{AsyncTapeDevice, DeviceCmd, DevicePoll, DeviceReply, SyncAsAsync};
 pub use infinite_tape::InfiniteTape;
+pub use latency_tape::{LatencyProfile, LatencyTape};
 pub use strict_tape::StrictTape;
 pub use wide_tape::WideTape;
 
