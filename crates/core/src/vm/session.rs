@@ -571,4 +571,155 @@ mod tests {
         };
         assert_eq!(pumped, sync);
     }
+
+    /// Multi-poll device: LatencyTape with 2 polls per operation. This
+    /// strengthens the existing suspends test to multi-poll — each device
+    /// transaction fires multiple DeviceWait events before the device
+    /// becomes READY. The final result is bit-identical to the sync run
+    /// (pending polls are not counted in stats).
+    #[test]
+    fn latency_device_suspends_and_resumes_mid_instruction() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        let profile = LatencyProfile {
+            move_polls: 2,
+            read_polls: 2,
+            write_polls: 2,
+            move_cost: 1,
+            read_cost: 1,
+            write_cost: 1,
+        };
+        let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
+        let mut waits = 0;
+        let result = loop {
+            match session.pump(&mut [&mut tape], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => {
+                    waits += 1;
+                    continue;
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        };
+        // Identical result and stats: pending polls don't tick.
+        assert_eq!(result, sync);
+        // Multi-poll device generates multiple waits.
+        assert!(waits > 0);
+    }
+
+    /// Device-reported cost overrides the model price. A LatencyTape with
+    /// write_cost=7 and zero polls per operation. The program has exactly
+    /// 1 write transaction (opcode 0x07, 0x81), and the sync run pays 1
+    /// tact per write. The pumped run must pay the device-reported cost
+    /// (7 tacts per write), yielding stall_tacts = sync.stall_tacts + 6.
+    #[test]
+    fn device_reported_cost_replaces_the_model_price() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        let profile = LatencyProfile {
+            move_polls: 0,
+            read_polls: 0,
+            write_polls: 0,
+            move_cost: 1,
+            read_cost: 1,
+            write_cost: 7,
+        };
+        let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
+        let result = loop {
+            match session.pump(&mut [&mut tape], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::BudgetSpent => continue,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        };
+        // Program has exactly 1 write transaction (opcode 0x07, 0x81).
+        // Sync pays 1 tact per write (model price).
+        // Device reports 7 tacts per write.
+        // Difference: (7 - 1) per write = 6 tacts per write.
+        let writes = 1;
+        assert_eq!(
+            result.stats.stall_tacts,
+            sync.stats.stall_tacts + (7 - 1) * writes
+        );
+        assert_eq!(result.outcome, sync.outcome);
+    }
+
+    /// Tact limit crossing on a resumed device transaction. The sync path
+    /// never exercises the over_tacts check in the Waiting::Exec resume arm
+    /// (line 201), since sync blocks on device transactions. This test
+    /// verifies the async path catches tact-limit crossing during a device
+    /// completion on resume.
+    ///
+    /// Strategy: run with max_tacts set to 1 less than the sync run's
+    /// total_tacts. The first pump will suspend on a device wait (before
+    /// stepping, so core_tacts stays 0). The second pump resumes and the
+    /// device completes, adding stall_tacts and tripping the limit.
+    #[test]
+    fn tact_limit_fires_when_a_resumed_transaction_crosses_the_budget() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        // Sync run total for WRITE_MOVE_STOP: steps=2, core=2, stall=2, total=4.
+        // Set max_tacts to 3, leaving room for one stall tact before exceeding.
+        let limit = sync.stats.total_tacts() - 1;
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits {
+                max_tacts: Some(limit),
+                max_steps: None,
+            },
+        )
+        .with_tables(Vec::new());
+        // LatencyTape with 1 poll per operation so the write suspends.
+        let profile = LatencyProfile {
+            move_polls: 1,
+            read_polls: 1,
+            write_polls: 1,
+            move_cost: 1,
+            read_cost: 1,
+            write_cost: 1,
+        };
+        let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
+        // Loop until we see either a trap or completion. With max_tacts low
+        // and a latency device that suspends, we expect a trap.
+        let mut saw_wait = false;
+        let result = loop {
+            match session.pump(&mut [&mut tape], None) {
+                PumpEvent::DeviceWait => {
+                    saw_wait = true;
+                    continue;
+                }
+                PumpEvent::Finished(result) => break result,
+                other => panic!("unexpected event: {other:?}"),
+            }
+        };
+        // The resume path (line 201) should have caught the limit crossing.
+        assert!(
+            matches!(result.outcome, Outcome::Trapped(Trap::TactLimit)),
+            "expected TactLimit, got {:?}; saw_wait={}",
+            result.outcome,
+            saw_wait
+        );
+    }
 }
