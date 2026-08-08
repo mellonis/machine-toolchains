@@ -3,10 +3,10 @@
 //! stats, ip, stack — at -O0 and -O1; a latency device must change
 //! nothing but the number of pump calls.
 
-use mtc_core::linker::LinkOptions;
+use mtc_core::linker::{LinkOptions, LinkOutput};
 use mtc_core::vm::{
-    ArchRegistry, InfiniteTape, LatencyProfile, LatencyTape, Machine, PumpEvent, RunOptions,
-    RunResult, SyncAsAsync,
+    ArchRegistry, InfiniteTape, LatencyProfile, LatencyTape, Machine, Outcome, PumpEvent,
+    RunOptions, RunResult, SyncAsAsync,
 };
 use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::asm::link;
@@ -21,7 +21,7 @@ is always offered as a link library (golden_programs.rs's own pattern):
 unreferenced by most corpus entries, reachability drops it for them, and
 `stdlib_user` below is the one entry that actually pulls it in. */
 
-fn build(src: &str, opt: OptLevel) -> mtc_core::formats::executable::Executable {
+fn link_output(src: &str, opt: OptLevel) -> LinkOutput {
     let out = compile(
         src,
         CompileOptions {
@@ -36,7 +36,10 @@ fn build(src: &str, opt: OptLevel) -> mtc_core::formats::executable::Executable 
         LinkOptions::default(),
     )
     .expect("links")
-    .executable
+}
+
+fn build(src: &str, opt: OptLevel) -> mtc_core::formats::executable::Executable {
+    link_output(src, opt).executable
 }
 
 fn machine<'a>(
@@ -96,9 +99,36 @@ fn pumped_runs_match_sync_runs_across_the_corpus() {
             let m = machine(&exe, &registry);
             let mut sync_tape = InfiniteTape::new();
             let sync = m.run(&mut sync_tape, RunOptions::default());
+            // Baseline pin (mirrors session.rs's own equivalence tests): a
+            // program that traps before doing anything would make the
+            // pumped/sync equality below pass vacuously.
+            assert_eq!(sync.outcome, Outcome::Stopped, "{name} at {opt:?} baseline");
+            assert!(sync.stats.steps > 0, "{name} at {opt:?} baseline");
             let pumped = pump_to_end(&m, RunOptions::default());
             assert_eq!(pumped, sync, "{name} at {opt:?}");
         }
+    }
+
+    // `stdlib_user` must genuinely LINK the embedded stdlib, not merely
+    // compile against qualified names that could vanish silently: the
+    // linker's reachability pass has to pull in at least one
+    // `std::`-namespaced routine from the library object.
+    let (_, stdlib_user_source) = CORPUS
+        .iter()
+        .find(|(n, _)| *n == "stdlib_user")
+        .expect("stdlib_user is in the corpus");
+    for opt in [OptLevel::O0, OptLevel::O1] {
+        let linked = link_output(stdlib_user_source, opt);
+        let names: Vec<&str> = linked
+            .map
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("std::")),
+            "{opt:?}: expected a linked std:: routine, got {names:?}"
+        );
     }
 }
 
@@ -130,6 +160,9 @@ fn latency_changes_nothing_but_the_pump_count() {
 
         let mut sync_tape = InfiniteTape::new();
         let sync = m.run(&mut sync_tape, RunOptions::default());
+        // Baseline pin, same reasoning as the corpus-equivalence test.
+        assert_eq!(sync.outcome, Outcome::Stopped, "{name} at {opt:?} baseline");
+        assert!(sync.stats.steps > 0, "{name} at {opt:?} baseline");
 
         let mut session = m.async_session(RunOptions::default());
         let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
