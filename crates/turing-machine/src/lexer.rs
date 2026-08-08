@@ -6,21 +6,21 @@
 //!
 //! What is new for TM-1: single-quoted glyph literals (`'a'`), the range
 //! `..` token, the rule arrow `->` and the map arrow `=>`, and the pattern /
-//! vector punctuation `* - < > . [ ]`. The 24 reserved keywords are NOT
+//! vector punctuation `* - < > . [ ]`. The 25 reserved keywords are NOT
 //! recognized here — they lex as plain [`TokenKind::Ident`] and reservation
 //! is enforced once, at parse time; see [`RESERVED`].
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use mtc_core::diagnostics::Span;
 
-/// The 24 fully-reserved `.tmc` keywords. Canonical home: they are ordinary
+/// The 25 fully-reserved `.tmc` keywords. Canonical home: they are ordinary
 /// identifiers to the lexer (this list only pins the "keywords lex as
 /// `Ident`" contract in the test battery below), and the parser is the ONE
 /// place that rejects them where a name is expected — one place of truth,
 /// so this array is `pub` for the parser to consume rather than redefine.
 /// (`deprecated` is contextual — an attribute word, not a keyword — and is
 /// deliberately absent.)
-pub const RESERVED: [&str; 24] = [
+pub const RESERVED: [&str; 25] = [
     "alphabet",
     "machine",
     "tape",
@@ -45,6 +45,7 @@ pub const RESERVED: [&str; 24] = [
     "stop",
     "halt",
     "debugger",
+    "volatile",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -630,12 +631,12 @@ mod tests {
         );
     }
 
-    /// The 24 reserved keywords are lexer-transparent: each is a plain
+    /// The 25 reserved keywords are lexer-transparent: each is a plain
     /// `Ident`. Reservation is a parse-time concern (the parser consumes
     /// [`RESERVED`]); the lexer must never special-case them.
     #[test]
     fn every_reserved_keyword_lexes_as_a_plain_ident() {
-        assert_eq!(RESERVED.len(), 24);
+        assert_eq!(RESERVED.len(), 25);
         for kw in RESERVED {
             assert_eq!(
                 kinds(kw),

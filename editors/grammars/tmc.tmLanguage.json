@@ -50,7 +50,7 @@
     },
     "keywordsModifier": {
       "name": "keyword.control.tmc",
-      "match": "\\b(export|entry)\\b"
+      "match": "\\b(export|entry|volatile)\\b"
     },
     "keywordsImport": {
       "name": "keyword.control.tmc",

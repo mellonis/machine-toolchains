@@ -27,6 +27,7 @@ use crate::lexer::{Comment, RESERVED, Token, TokenKind};
 /// There is no patch digit — spec-text corrections are errata and
 /// implementation-conformance fixes never move it. This is the language's
 /// first cut, so `0.1` (mirrors PM-1's `PMC_LANG_VERSION` discipline).
+/// (An unreleased version amends in place; the bump discipline binds from the first release.)
 pub const TMC_LANG_VERSION: &str = "0.1";
 
 // ---------------------------------------------------------------------------
