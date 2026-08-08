@@ -29,6 +29,19 @@
 //! honest state there. The optimizer runs BEFORE codegen strips `brk`, so
 //! the barrier always holds when a debugger is attached.
 //!
+//! A volatile band (docs/tmt/language.md (volatile tapes)) generalizes the
+//! `brk` barrier from a point to a standing, per-band rule: every access to
+//! a volatile band is externally observable, and the external world may
+//! change the band's cells between accesses. No pass may assume a value
+//! read from or written to a volatile band persists, and no pass may change
+//! the band's access sequence — no dropping idempotent or dead writes, no
+//! fusing or splitting write+move shapes, no value propagation through its
+//! reads. Today every pass in this pipeline preserves per-band access
+//! sequences (`dead-rows` removes only rows that never fire, so the dynamic
+//! sequence is unchanged), so nothing gates on the flag; any future pass
+//! that reasons about values or motion must consult `IrTape::volatile`
+//! (docs/tmt/optimizer.md (volatile barrier)).
+//!
 //! # Invariant re-check
 //!
 //! Codegen relies on the world invariants (dense ids `id == index`, in-bounds

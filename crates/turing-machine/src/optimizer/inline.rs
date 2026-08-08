@@ -689,4 +689,101 @@ machine {
         assert_eq!(run(&mut ir), 0, "the entry world is not spliced");
         assert!(any_callthen(world(&ir, "r")), "the call to main survives");
     }
+
+    #[test]
+    fn inline_keeps_the_callers_tape_volatility() {
+        // Same bindless-call fixture as `a_bindless_call_is_inlined`, with the
+        // caller's tape marked volatile. `splice` only appends copied callee
+        // states into `caller.states`; `caller.tapes` is never read back or
+        // rebuilt, so the flag must survive untouched.
+        let machine = IrWorld {
+            name: "main".into(),
+            kind: IrWorldKind::Machine,
+            arity: 1,
+            tapes: vec![IrTape {
+                name: "t".into(),
+                alphabet: "ab".into(),
+                cardinality: 2,
+                volatile: true,
+            }],
+            entry: 0,
+            states: vec![
+                IrState {
+                    id: 0,
+                    name: "m".into(),
+                    line: 0,
+                    rules: vec![IrRule {
+                        pattern: vec![IrCell::Wildcard],
+                        write: None,
+                        moves: None,
+                        debugger: false,
+                        transition: IrTransition::CallThen {
+                            target: "r".into(),
+                            binding: vec![],
+                            then: IrThen::Goto { state: 1 },
+                        },
+                        synthesized: false,
+                        line: 0,
+                    }],
+                    dispatch: IrDispatch::Table,
+                },
+                IrState {
+                    id: 1,
+                    name: "done".into(),
+                    line: 0,
+                    rules: vec![IrRule {
+                        pattern: vec![IrCell::Wildcard],
+                        write: None,
+                        moves: None,
+                        debugger: false,
+                        transition: IrTransition::Stop,
+                        synthesized: false,
+                        line: 0,
+                    }],
+                    dispatch: IrDispatch::Table,
+                },
+            ],
+            local: false,
+            line: 0,
+        };
+        let routine = IrWorld {
+            name: "r".into(),
+            kind: IrWorldKind::Routine,
+            arity: 1,
+            tapes: vec![IrTape {
+                name: "t".into(),
+                alphabet: "ab".into(),
+                cardinality: 2,
+                volatile: false,
+            }],
+            entry: 0,
+            states: vec![IrState {
+                id: 0,
+                name: "s".into(),
+                line: 0,
+                rules: vec![IrRule {
+                    pattern: vec![IrCell::Wildcard],
+                    write: Some(vec![IrWrite::Index { index: 1 }]),
+                    moves: None,
+                    debugger: false,
+                    transition: IrTransition::Return,
+                    synthesized: false,
+                    line: 0,
+                }],
+                dispatch: IrDispatch::Table,
+            }],
+            local: true,
+            line: 0,
+        };
+        let mut ir = IrProgram {
+            version: crate::ir::TM_IR_VERSION,
+            worlds: vec![machine, routine],
+            entry_world: Some(0),
+        };
+        let changed = run(&mut ir);
+        assert!(changed > 0, "premise: inline must fire on this fixture");
+        let main = world(&ir, "main");
+        assert!(!any_callthen(main), "the call was spliced away");
+        assert!(main.tapes[0].volatile, "the caller's tape stays volatile");
+    }
 }

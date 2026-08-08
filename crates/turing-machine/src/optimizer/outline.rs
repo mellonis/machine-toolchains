@@ -605,4 +605,27 @@ mod tests {
             "the brk row survives"
         );
     }
+
+    #[test]
+    fn outlined_worlds_inherit_the_hosts_tape_volatility() {
+        // Same twin-chain fixture as `two_identical_regions_fold_into_one_shared_routine`,
+        // with the host's tape marked volatile. `build_routine` mirrors the
+        // host's tapes verbatim into the synthesized routine, so the flag must
+        // survive the fold.
+        let mut program = ir_of(&two_chain_program(7, "mid", "mid"));
+        let main = program
+            .worlds
+            .iter_mut()
+            .find(|w| w.name == "main")
+            .unwrap();
+        main.tapes[0].volatile = true;
+        let changed = run(&mut program);
+        assert!(changed > 0, "premise: outline must fire on this fixture");
+        let synthesized = program
+            .worlds
+            .iter()
+            .find(|w| w.name.contains(".outline"))
+            .unwrap();
+        assert!(synthesized.tapes[0].volatile);
+    }
 }
