@@ -1,0 +1,496 @@
+//! The pumped execution session (docs/core.md (async session)): the sync
+//! driver's serving loop, re-hosted so a device that is not READY suspends
+//! the session between `pump` calls instead of blocking the thread. The
+//! embedder owns the loop — in hardware the clock generator pumps the
+//! processor; here the embedder's `pump` calls play the clock edges.
+
+use std::collections::BTreeSet;
+
+use super::bus::{BusRequest, BusResponse, CoreEvent};
+use super::core::Core;
+use super::debug::PauseCause;
+use super::devices::{AsyncTapeDevice, DeviceCmd, DevicePoll, DeviceReply};
+use super::driver::{Outcome, ReturnStack, RunLimits, RunResult, RunStats, TactProfile};
+use super::trap::{DeviceFault, Trap};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PumpEvent {
+    /// A device held READY low; nothing advanced past it. Pump again later.
+    DeviceWait,
+    /// The per-call instruction budget was spent.
+    BudgetSpent,
+    /// Instruction-boundary pause: breakpoint, `brk`, or external `pause()`.
+    Paused(PauseCause),
+    /// Terminal: the program stopped, halted, or trapped.
+    Finished(RunResult),
+}
+
+/// What the session is waiting on between `pump` calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Waiting {
+    /// Nothing in flight; next `pump` continues at an instruction boundary.
+    None,
+    /// The initial-mark loading read on device 0 (docs/core.md (loading)).
+    /// Constructed by the loading-latch task's `pump_latch`; the type is
+    /// declared complete now so `pump`'s dispatch is total.
+    #[allow(dead_code)]
+    Latch,
+    /// A mid-instruction device transaction: the unresumed bus request.
+    Exec(BusRequest),
+}
+
+pub struct AsyncSession<'a> {
+    core: Core<'a>,
+    code: Vec<u8>,
+    stack: ReturnStack,
+    tables: Vec<u8>,
+    stats: RunStats,
+    profile: TactProfile,
+    limits: RunLimits,
+    breakpoints: BTreeSet<u32>,
+    started: bool,
+    latch_initial_mark: bool,
+    pause_requested: bool,
+    waiting: Waiting,
+    finished: Option<RunResult>,
+}
+
+impl<'a> AsyncSession<'a> {
+    pub fn new(
+        core: Core<'a>,
+        code: Vec<u8>,
+        stack: ReturnStack,
+        profile: TactProfile,
+        limits: RunLimits,
+    ) -> Self {
+        Self {
+            core,
+            code,
+            stack,
+            tables: Vec::new(),
+            stats: RunStats::default(),
+            profile,
+            limits,
+            breakpoints: BTreeSet::new(),
+            started: false,
+            latch_initial_mark: true,
+            pause_requested: false,
+            waiting: Waiting::None,
+            finished: None,
+        }
+    }
+
+    /// Multi-tape shape: carries the table ROM and does not preload the
+    /// mark, mirroring `DebugSession::with_tables`.
+    pub fn with_tables(mut self, tables: Vec<u8>) -> Self {
+        self.tables = tables;
+        self.latch_initial_mark = false;
+        self
+    }
+
+    fn over_tacts(&self) -> bool {
+        self.limits
+            .max_tacts
+            .is_some_and(|max| self.stats.total_tacts() >= max)
+    }
+
+    fn finish(&mut self, outcome: Outcome) -> PumpEvent {
+        let result = RunResult {
+            outcome,
+            stats: self.stats,
+            ip: self.core.instr_start(),
+            stack: self.stack.entries().to_vec(),
+        };
+        self.finished = Some(result.clone());
+        PumpEvent::Finished(result)
+    }
+
+    /// Map a device-side bus request to a command + model price. Only the
+    /// four device variants reach this.
+    fn device_parts(&self, request: BusRequest) -> (u8, DeviceCmd, u32) {
+        match request {
+            BusRequest::DeviceMoveLeft { dev } => {
+                (dev, DeviceCmd::MoveLeft, self.profile.move_cost)
+            }
+            BusRequest::DeviceMoveRight { dev } => {
+                (dev, DeviceCmd::MoveRight, self.profile.move_cost)
+            }
+            BusRequest::DeviceRead { dev } => (dev, DeviceCmd::Read, self.profile.read_cost),
+            BusRequest::DeviceWrite { dev, index } => {
+                (dev, DeviceCmd::Write { index }, self.profile.write_cost)
+            }
+            _ => unreachable!("device_parts is called for device requests only"),
+        }
+    }
+
+    /// Account a completed transaction and translate the reply for the
+    /// core. Mirrors the sync driver's pricing: successful transactions
+    /// pay `cost` (device-reported, else the model price); faulted ones
+    /// pay nothing (the sync write-fault arm adds no stall tacts).
+    fn settle_device(
+        &mut self,
+        model_cost: u32,
+        reply: DeviceReply,
+        cost: Option<u32>,
+    ) -> BusResponse {
+        match reply {
+            DeviceReply::Ok => {
+                self.stats.stall_tacts += u64::from(cost.unwrap_or(model_cost));
+                BusResponse::Ok
+            }
+            DeviceReply::Symbol(symbol) => {
+                self.stats.stall_tacts += u64::from(cost.unwrap_or(model_cost));
+                BusResponse::Symbol(symbol)
+            }
+            DeviceReply::Fault(fault) => BusResponse::Fault(fault),
+        }
+    }
+
+    /// Begin (or, for `already_issued`, re-sample) a device transaction.
+    /// `Ok(response)` completes it; `Err(())` means READY is low.
+    fn poll_device(
+        &mut self,
+        request: BusRequest,
+        devices: &mut [&mut dyn AsyncTapeDevice],
+        already_issued: bool,
+    ) -> Result<BusResponse, ()> {
+        let (dev, cmd, model_cost) = self.device_parts(request);
+        let Some(device) = devices.get_mut(dev as usize) else {
+            return Ok(BusResponse::Fault(DeviceFault::NoSuchDevice { dev }));
+        };
+        if !already_issued {
+            device.issue(cmd);
+        }
+        match device.poll() {
+            DevicePoll::Pending => Err(()),
+            DevicePoll::Ready { reply, cost } => Ok(self.settle_device(model_cost, reply, cost)),
+        }
+    }
+
+    pub fn pump(
+        &mut self,
+        devices: &mut [&mut dyn AsyncTapeDevice],
+        budget: Option<u64>,
+    ) -> PumpEvent {
+        if let Some(result) = &self.finished {
+            return PumpEvent::Finished(result.clone());
+        }
+        // Loading step (docs/core.md (loading)): on the async path the
+        // initial-mark latch is a real device-0 transaction — still
+        // unaccounted, and itself subject to WAIT. Implemented below, in
+        // the loading-latch task; until then `latch_initial_mark` is
+        // always false here (every session in this module is built via
+        // `with_tables`).
+        let mut remaining = budget;
+        // Resume a suspended mid-instruction transaction, if any.
+        let mut event: Option<CoreEvent> = match self.waiting {
+            Waiting::None => None,
+            // implemented by the loading-latch task
+            Waiting::Latch => return self.pump_latch(devices, budget),
+            Waiting::Exec(request) => match self.poll_device(request, devices, true) {
+                Err(()) => return PumpEvent::DeviceWait,
+                Ok(response) => {
+                    self.waiting = Waiting::None;
+                    if self.over_tacts() {
+                        return self.finish(Outcome::Trapped(Trap::TactLimit));
+                    }
+                    Some(self.core.resume(response))
+                }
+            },
+        };
+        loop {
+            // Instruction boundary (only when nothing is mid-flight).
+            if event.is_none() {
+                if let Some(0) = remaining {
+                    return PumpEvent::BudgetSpent;
+                }
+                if self.latch_initial_mark {
+                    // implemented by the loading-latch task
+                    return self.pump_latch(devices, budget);
+                }
+                event = Some(if self.started {
+                    self.core.resume(BusResponse::Ok) // ack the StepAck phase
+                } else {
+                    self.started = true;
+                    self.core.start()
+                });
+            }
+            // Serve until the next boundary — the sync driver's loop
+            // (driver.rs (step_instruction)), device arms re-routed.
+            let boundary_is_break = loop {
+                match event.take().expect("event is set in this arm") {
+                    CoreEvent::Request(request) => {
+                        let response = match request {
+                            BusRequest::CodeRead { addr } => match self.code.get(addr as usize) {
+                                Some(&byte) => {
+                                    self.stats.core_tacts += 1;
+                                    BusResponse::Byte(byte)
+                                }
+                                None => BusResponse::OutOfCode,
+                            },
+                            BusRequest::StackPush { value } => {
+                                if self.stack.push(value) {
+                                    self.stats.core_tacts += 1;
+                                    BusResponse::Ok
+                                } else {
+                                    BusResponse::StackFull
+                                }
+                            }
+                            BusRequest::StackPop => match self.stack.pop() {
+                                Some(value) => {
+                                    self.stats.core_tacts += 1;
+                                    BusResponse::Value(value)
+                                }
+                                None => BusResponse::StackEmpty,
+                            },
+                            BusRequest::TableRead { addr } => {
+                                match self.tables.get(addr as usize) {
+                                    Some(&byte) => {
+                                        self.stats.stall_tacts +=
+                                            u64::from(self.profile.table_read_cost);
+                                        BusResponse::Byte(byte)
+                                    }
+                                    None => BusResponse::OutOfTable,
+                                }
+                            }
+                            BusRequest::FrameRead { addr } => {
+                                match self.tables.get(addr as usize) {
+                                    Some(&byte) => {
+                                        self.stats.stall_tacts +=
+                                            u64::from(self.profile.frame_load_cost);
+                                        BusResponse::Byte(byte)
+                                    }
+                                    None => BusResponse::OutOfTable,
+                                }
+                            }
+                            device_request => {
+                                match self.poll_device(device_request, devices, false) {
+                                    Err(()) => {
+                                        self.waiting = Waiting::Exec(device_request);
+                                        return PumpEvent::DeviceWait;
+                                    }
+                                    Ok(response) => response,
+                                }
+                            }
+                        };
+                        if self.over_tacts() {
+                            return self.finish(Outcome::Trapped(Trap::TactLimit));
+                        }
+                        event = Some(self.core.resume(response));
+                    }
+                    boundary @ (CoreEvent::Step | CoreEvent::Break) => {
+                        self.stats.steps += 1;
+                        self.stats.core_tacts += 1; // execute base (docs/core.md (timing model))
+                        if self
+                            .limits
+                            .max_steps
+                            .is_some_and(|max| self.stats.steps >= max)
+                        {
+                            return self.finish(Outcome::Trapped(Trap::StepLimit));
+                        }
+                        if self.over_tacts() {
+                            return self.finish(Outcome::Trapped(Trap::TactLimit));
+                        }
+                        break matches!(boundary, CoreEvent::Break);
+                    }
+                    CoreEvent::Stopped => return self.finish(Outcome::Stopped),
+                    CoreEvent::Halted => return self.finish(Outcome::Halted),
+                    CoreEvent::Trapped(trap) => return self.finish(Outcome::Trapped(trap)),
+                }
+            };
+            // Instruction retired.
+            if boundary_is_break {
+                return PumpEvent::Paused(PauseCause::Brk);
+            }
+            if self.pause_requested {
+                self.pause_requested = false;
+                return PumpEvent::Paused(PauseCause::Manual);
+            }
+            if self.breakpoints.contains(&self.core.ip()) {
+                return PumpEvent::Paused(PauseCause::Breakpoint(self.core.ip()));
+            }
+            if let Some(budget_left) = &mut remaining {
+                *budget_left -= 1;
+                if *budget_left == 0 {
+                    return PumpEvent::BudgetSpent;
+                }
+            }
+        }
+    }
+
+    fn pump_latch(
+        &mut self,
+        _devices: &mut [&mut dyn AsyncTapeDevice],
+        _budget: Option<u64>,
+    ) -> PumpEvent {
+        // implemented by the loading-latch task: replaces this stub.
+        // Unreachable from this module's tests — every session here is
+        // constructed via `with_tables`, which clears `latch_initial_mark`.
+        unimplemented!("later task")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::arch::test_arch::TestArch;
+    use crate::vm::devices::{InfiniteTape, LatencyProfile, LatencyTape, SyncAsAsync};
+    use crate::vm::{Core, ReturnStack, driver};
+
+    // Mirror driver.rs's test program builder: the fake arch's opcodes are
+    // documented at vm/arch.rs::test_arch. Reuse the same byte sequences
+    // driver.rs tests run, so sync and pumped runs execute identical images.
+    // write-move-stop, assembled from the exact opcode/operand bytes
+    // driver.rs's own tests use: 0x07,0x81 (write index 1 —
+    // `write_pays_write_then_latch_read`), 0x06 (move right —
+    // `tape_instruction_splits_core_and_stall`), 0x02 (stop, ubiquitous).
+    const WRITE_MOVE_STOP: [u8; 4] = [0x07, 0x81, 0x06, 0x02];
+
+    fn sync_result(code: &[u8]) -> crate::vm::RunResult {
+        let arch = TestArch;
+        let mut core = Core::new(&arch, 0);
+        let mut stack = ReturnStack::new(16);
+        let mut tape = InfiniteTape::new();
+        driver::run(
+            &mut core,
+            code,
+            &mut stack,
+            &mut [&mut tape],
+            &[],
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+    }
+
+    fn pumped_result(code: &[u8], budget: Option<u64>) -> (crate::vm::RunResult, u32) {
+        let arch = TestArch;
+        let core = Core::new(&arch, 0);
+        let mut session = AsyncSession::new(
+            core,
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new()); // multi-tape shape: no initial latch
+        let mut tape = SyncAsAsync::new(InfiniteTape::new());
+        let mut pumps = 0;
+        loop {
+            pumps += 1;
+            match session.pump(&mut [&mut tape], budget) {
+                PumpEvent::Finished(result) => return (result, pumps),
+                PumpEvent::BudgetSpent => continue,
+                other => panic!("unexpected event on an always-ready device: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn pumped_run_matches_sync_run_bit_exactly() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        // Pin the baseline itself, so a program that traps before doing
+        // anything can't make the equality below pass vacuously.
+        assert_eq!(sync.outcome, Outcome::Stopped);
+        assert_eq!(sync.stats.steps, 2); // write, move; stp retires no Step
+        let (pumped, _) = pumped_result(&code, None);
+        assert_eq!(pumped, sync); // outcome, stats, ip, stack — all of it
+    }
+
+    /// The one divergence from `step_instruction`: a device that answers
+    /// WAIT suspends the session (`PumpEvent::DeviceWait`) instead of
+    /// blocking, and the next `pump` call resumes the same transaction —
+    /// through `Waiting::Exec` — without re-issuing it. `LatencyTape`'s
+    /// per-op cost is pinned to `TactProfile::ELECTRONIC`'s unit costs so
+    /// suspending changes nothing about the final `RunResult`; only the
+    /// poll counts differ from the always-ready adapter.
+    #[test]
+    fn suspends_on_a_not_ready_device_then_matches_the_sync_run() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        let profile = LatencyProfile {
+            move_polls: 1,
+            read_polls: 1,
+            write_polls: 1,
+            move_cost: 1,
+            read_cost: 1,
+            write_cost: 1,
+        };
+        let mut tape = LatencyTape::new(InfiniteTape::new(), profile);
+        let mut waits = 0;
+        let pumped = loop {
+            match session.pump(&mut [&mut tape], None) {
+                PumpEvent::Finished(result) => break result,
+                PumpEvent::DeviceWait => {
+                    waits += 1;
+                    continue;
+                }
+                other => panic!("unexpected event on a latency device: {other:?}"),
+            }
+        };
+        assert!(waits > 0, "a not-ready device must suspend at least once");
+        assert_eq!(pumped, sync);
+    }
+
+    #[test]
+    fn budget_chunks_execution_without_changing_the_result() {
+        let code = WRITE_MOVE_STOP;
+        let sync = sync_result(&code);
+        let (pumped, pumps) = pumped_result(&code, Some(1));
+        assert_eq!(pumped, sync);
+        assert!(pumps as u64 >= sync.stats.steps); // one instruction per pump
+    }
+
+    #[test]
+    fn zero_budget_returns_budget_spent_without_advancing() {
+        let code = WRITE_MOVE_STOP;
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        let mut tape = SyncAsAsync::new(InfiniteTape::new());
+        assert!(matches!(
+            session.pump(&mut [&mut tape], Some(0)),
+            PumpEvent::BudgetSpent
+        ));
+        assert_eq!(session.stats.steps, 0); // read the field directly (stats() lands later)
+    }
+
+    #[test]
+    fn missing_device_faults_instead_of_panicking() {
+        let code = WRITE_MOVE_STOP;
+        let arch = TestArch;
+        let mut session = AsyncSession::new(
+            Core::new(&arch, 0),
+            code.to_vec(),
+            ReturnStack::new(16),
+            TactProfile::ELECTRONIC,
+            RunLimits::default(),
+        )
+        .with_tables(Vec::new());
+        // No devices at all: the first device request must resolve to a
+        // Device trap (Fault(NoSuchDevice) through the core), not a panic.
+        let outcome = loop {
+            match session.pump(&mut [], None) {
+                PumpEvent::Finished(result) => break result.outcome,
+                PumpEvent::BudgetSpent => continue,
+                other => panic!("unexpected: {other:?}"),
+            }
+        };
+        assert!(matches!(outcome, Outcome::Trapped(_)));
+    }
+}

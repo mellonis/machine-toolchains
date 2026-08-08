@@ -8,6 +8,7 @@ pub mod devices;
 pub mod driver;
 pub(crate) mod frame;
 pub mod machine;
+pub mod session;
 pub(crate) mod table;
 pub mod trap;
 
@@ -21,4 +22,5 @@ pub use devices::{
 };
 pub use driver::{Outcome, ReturnStack, RunLimits, RunResult, RunStats, TactProfile, run};
 pub use machine::{ArchRegistry, LoadError, Machine, RunOptions};
+pub use session::{AsyncSession, PumpEvent};
 pub use trap::{DeviceFault, RaisedTrapKind, Trap};
