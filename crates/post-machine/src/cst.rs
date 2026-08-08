@@ -220,14 +220,18 @@ pub struct FunctionCst {
     pub col: u32,
     /// Extent: the header's first token → the closing `}`'s end —
     /// `volatile`'s start when present (`volatile name() {` is one header
-    /// form), else the `export` keyword's start when present
-    /// (`export name() {` is another), otherwise the name token's start.
-    /// Fixed order: `volatile` always precedes `export` when both are
-    /// written. A nested function is never exported, so an
-    /// un-volatile-prefixed nested extent always starts at its name token
-    /// (a volatile-prefixed one — always rejected downstream,
-    /// `VolatileNotOnMain` — still starts at `volatile` while this node
-    /// briefly exists). For hit-testing and document-symbol ranges.
+    /// form — including the invalid top-level case, a volatile-prefixed
+    /// non-`main` function: the parser builds this node before checking
+    /// legality, so the extent still starts at `volatile` while the node
+    /// briefly exists, then the caller rejects it with
+    /// `VolatileNotOnMain`), else the `export` keyword's start when
+    /// present (`export name() {` is another), otherwise the name
+    /// token's start. Fixed order: `volatile` always precedes `export`
+    /// when both are written. A nested function is never exported, so
+    /// its extent always starts at its name token — a leading `volatile`
+    /// on a nested definition is rejected before any `FunctionCst` for
+    /// it is constructed, so no volatile-prefixed nested extent ever
+    /// exists. For hit-testing and document-symbol ranges.
     pub span: Span,
     /// Whether the literal `volatile` keyword was WRITTEN in source.
     /// Unlike `has_export`, nothing folds into a separate lowered flag —

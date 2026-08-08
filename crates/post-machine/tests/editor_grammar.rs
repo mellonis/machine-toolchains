@@ -14,9 +14,26 @@ fn textmate_grammar_is_valid_and_covers_the_reserved_words() {
     for word in mtc_post_machine::parser::RESERVED {
         assert!(text.contains(word), "grammar misses reserved word `{word}`");
     }
-    for word in ["use", "namespace", "export", "as"] {
+    for word in ["use", "namespace", "export", "as", "volatile"] {
         assert!(text.contains(word), "grammar misses keyword `{word}`");
     }
+    // A bare `contains` can't tell `keyword.control.pmc` from some other
+    // scope (or a mention in prose) — `volatile` must land in the SAME
+    // scope tier as `export` (`keyword.control.pmc`, the tier settled
+    // for JetBrains rendering), so this walks the `keywords` repository
+    // pattern that actually carries the word and reads its scope name
+    // directly.
+    let keyword_patterns = json["repository"]["keywords"]["patterns"]
+        .as_array()
+        .expect("grammar keeps a `keywords` repository pattern array");
+    let volatile_pattern = keyword_patterns
+        .iter()
+        .find(|p| p["match"].as_str().is_some_and(|m| m.contains("volatile")))
+        .expect("a `keywords` pattern matches `volatile`");
+    assert_eq!(
+        volatile_pattern["name"], "keyword.control.pmc",
+        "`volatile` must share `export`'s scope tier: {volatile_pattern:?}"
+    );
 }
 
 /// Mirrors the `.pmc` guard above for the `.pma` assembly grammar: the

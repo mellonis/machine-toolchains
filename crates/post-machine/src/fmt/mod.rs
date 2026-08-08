@@ -20,8 +20,9 @@
 //! never force, see [`top_wants_blank_before`] / [`body_wants_blank_before`]),
 //! doc/attention runs printed at their bound declaration's own indent, one
 //! canonical space after the sigil (see [`print_doc_run`]), grouped `use`
-//! lists (see [`print_use`]), the verbatim `export` keyword
-//! (see [`FunctionCst::has_export`]), and — Task 8b's own contribution —
+//! lists (see [`print_use`]), the verbatim `export` and `volatile`
+//! keywords (see [`FunctionCst::has_export`] / [`FunctionCst::has_volatile`]),
+//! and — Task 8b's own contribution —
 //! the spacing-table/spaced-form/hygiene/edge-case tests in this module's
 //! own `tests` submodule. That last part needed no renderer change for
 //! most shapes: `parse_cst` hands the printer the parsed VALUE (a path's
@@ -367,7 +368,7 @@ fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
 /// Header + body + closing brace (spec "Headers and braces"). Used for
 /// both top-level and nested functions — a nested [`FunctionCst`] has the
 /// same shape, just one indent level deeper and (per the grammar) never
-/// `has_export`.
+/// `has_export` or `has_volatile`.
 ///
 /// **Export keyword, verbatim**: `f.has_export` records
 /// whether the author literally wrote `export`, independent of
@@ -376,6 +377,13 @@ fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
 /// && f.name == "main")`). Printing `has_export` directly means
 /// `export main() { … }` keeps its (legal but redundant) `export`, and
 /// bare `main() { … }` stays bare — both compile identically either way.
+///
+/// **Volatile keyword, verbatim, fixed order**: `f.has_volatile` has no
+/// lowered counterpart the way `has_export`/`exported` diverge — the
+/// parser rejects every carrier except the un-namespaced top-level
+/// `main`, so a `true` here can only be that one legal case (see
+/// [`FunctionCst::has_volatile`]). It prints before `has_export`,
+/// matching the order the grammar requires on input.
 ///
 /// **c-brace** (`cst.rs`'s "Comment placement"): `f.open_trailing`
 /// prints right after `{` on the header line — space-joined when there's
@@ -405,6 +413,11 @@ fn print_function(out: &mut String, f: &FunctionCst, indent: usize, blank_before
     }
     let pad = " ".repeat(indent);
     out.push_str(&pad);
+    // Fixed order — `volatile` precedes `export` when both are written
+    // (see `FunctionCst::span`'s own doc).
+    if f.has_volatile {
+        out.push_str("volatile ");
+    }
     if f.has_export {
         out.push_str("export ");
     }
@@ -1102,6 +1115,22 @@ mod tests {
     }
 
     #[test]
+    fn volatile_function_header() {
+        assert_eq!(
+            format("volatile main() { right; }").unwrap(),
+            "volatile main() {\n    right;\n}\n"
+        );
+    }
+
+    #[test]
+    fn volatile_export_function_header_keeps_fixed_order() {
+        assert_eq!(
+            format("volatile export main() { right; }").unwrap(),
+            "volatile export main() {\n    right;\n}\n"
+        );
+    }
+
+    #[test]
     fn comma_group_joins_on_one_line() {
         assert_eq!(
             format("f() { left, right; }").unwrap(),
@@ -1143,6 +1172,8 @@ mod tests {
             "main() { right; }",
             "f() { right; @g(); } g() { left; }",
             "f() { left, right, mark; }",
+            "volatile main() { right; }",
+            "volatile export main() { right; }",
         ] {
             let once = format(src).unwrap();
             let twice = format(&once).unwrap();
