@@ -4,7 +4,8 @@
 //! (depth is just SP). Sync v1: external pause/run-interval throttle is
 //! modelled by `run_steps` chunking.
 
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 use super::Outcome;
 use super::core::Core;

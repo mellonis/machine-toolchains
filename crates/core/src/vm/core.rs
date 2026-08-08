@@ -2,6 +2,9 @@
 //! from bus responses to bus requests. Owns registers and the in-flight
 //! instruction; performs no I/O; knows no opcodes (that's the Arch).
 
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+
 use super::arch::{Arch, MicroOp, Operand, OperandKind};
 use super::bus::{BusRequest, BusResponse, CoreEvent};
 use super::frame::{FrameDescriptor, FrameStep, FrameWalk};
@@ -16,7 +19,7 @@ enum Phase {
         buf: Vec<u8>,
     },
     Execute {
-        ops: std::collections::VecDeque<MicroOp>,
+        ops: VecDeque<MicroOp>,
         pending: Pending,
     },
     StepAck,
@@ -235,7 +238,7 @@ impl<'a> Core<'a> {
     }
 
     pub fn resume(&mut self, resp: BusResponse) -> CoreEvent {
-        match std::mem::replace(&mut self.phase, Phase::Done) {
+        match core::mem::replace(&mut self.phase, Phase::Done) {
             Phase::FetchOpcode => self.on_opcode(resp),
             Phase::FetchOperand { opcode, kind, buf } => {
                 self.on_operand_byte(opcode, kind, buf, resp)
@@ -358,7 +361,7 @@ impl<'a> Core<'a> {
     }
 
     fn step_execute(&mut self, resp: BusResponse) -> CoreEvent {
-        let Phase::Execute { mut ops, pending } = std::mem::replace(&mut self.phase, Phase::Done)
+        let Phase::Execute { mut ops, pending } = core::mem::replace(&mut self.phase, Phase::Done)
         else {
             unreachable!("step_execute outside Execute phase");
         };
@@ -808,7 +811,7 @@ impl<'a> Core<'a> {
 
         // 3. Instruction retired.
         self.phase = Phase::StepAck;
-        if std::mem::take(&mut self.brk_pending) {
+        if core::mem::take(&mut self.brk_pending) {
             CoreEvent::Break
         } else {
             CoreEvent::Step
@@ -888,12 +891,7 @@ impl<'a> Core<'a> {
     /// (2 bytes LE) at `base + 4 + K*4 + (FR*S + site)*2` (docs/formats.md
     /// (frames region)). FR is still the caller's active index. A site
     /// past the column count is a malformed operand.
-    fn start_compose_read(
-        &mut self,
-        ops: std::collections::VecDeque<MicroOp>,
-        then_ip: u32,
-        site: u32,
-    ) -> CoreEvent {
+    fn start_compose_read(&mut self, ops: VecDeque<MicroOp>, then_ip: u32, site: u32) -> CoreEvent {
         let meta = self.frames.expect("frames profile active on a framed call");
         let s = u32::from(meta.sites);
         if site >= s {
@@ -931,11 +929,7 @@ impl<'a> Core<'a> {
     /// Begin the directory lookup: read `directory[FR-1]` (4 bytes LE) at
     /// `base + 4 + (FR-1)*4` (docs/formats.md (frames region)). FR already
     /// holds the resolved composite index; the descriptor load follows.
-    fn start_directory_read(
-        &mut self,
-        ops: std::collections::VecDeque<MicroOp>,
-        then_ip: u32,
-    ) -> CoreEvent {
+    fn start_directory_read(&mut self, ops: VecDeque<MicroOp>, then_ip: u32) -> CoreEvent {
         let meta = self
             .frames
             .expect("frames profile active on a directory read");
@@ -962,12 +956,7 @@ impl<'a> Core<'a> {
 
     /// Begin a descriptor load: FR is already set; the walk fills the
     /// cache and execution continues at `then_ip` once it completes.
-    fn start_frame_load(
-        &mut self,
-        ops: std::collections::VecDeque<MicroOp>,
-        offset: u32,
-        then_ip: u32,
-    ) -> CoreEvent {
+    fn start_frame_load(&mut self, ops: VecDeque<MicroOp>, offset: u32, then_ip: u32) -> CoreEvent {
         let mut walk = FrameWalk::new(offset);
         let FrameStep::NeedByte(addr) = walk.feed(None) else {
             unreachable!("a fresh frame walk always needs its first byte");

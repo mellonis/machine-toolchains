@@ -1,6 +1,9 @@
 //! Ring-shaped bounded tape — the historical `TBelt` (docs/core.md (the
 //! tape and device bus); docs/history.md).
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use super::Tape;
 use crate::vm::trap::DeviceFault;
 

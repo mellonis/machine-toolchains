@@ -2,7 +2,8 @@
 //! tape and device bus)): `TBelt`'s packed bit array, generalized to an
 //! infinite tape.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use super::Tape;
 use crate::vm::trap::DeviceFault;
@@ -11,7 +12,7 @@ const PAGE_BITS: i64 = 64;
 
 #[derive(Debug, Default)]
 pub struct InfiniteTape {
-    pages: HashMap<i64, u64>,
+    pages: BTreeMap<i64, u64>,
     head: i64,
 }
 
@@ -26,7 +27,7 @@ impl InfiniteTape {
         head: i64,
     ) -> Self {
         let mut tape = Self {
-            pages: HashMap::new(),
+            pages: BTreeMap::new(),
             head,
         };
         for (i, marked) in cells.into_iter().enumerate() {
@@ -81,6 +82,7 @@ impl InfiniteTape {
 
     /// Build from a `TapeSnapshot` (docs/formats.md). Cells must be 0/1 —
     /// a wider index is the snapshot's problem, not this tape's.
+    #[cfg(feature = "std")]
     pub fn from_snapshot(s: &crate::formats::tapeblock::TapeSnapshot) -> Result<Self, DeviceFault> {
         if let Some(&bad) = s.cells.iter().find(|&&c| c > 1) {
             return Err(DeviceFault::IndexOutsideAlphabet {
@@ -96,6 +98,7 @@ impl InfiniteTape {
 
     /// Dense snapshot spanning marked cells ∪ head (blank tape → one
     /// blank cell at the head).
+    #[cfg(feature = "std")]
     pub fn to_snapshot(&self) -> crate::formats::tapeblock::TapeSnapshot {
         let marks = self.marked_cells();
         let lo = marks.first().copied().unwrap_or(self.head).min(self.head);

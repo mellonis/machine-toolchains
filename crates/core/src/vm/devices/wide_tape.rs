@@ -5,14 +5,15 @@
 //! two. Blank cells (index 0) are never stored, so memory stays O(non-blank
 //! cells); the layout mirrors `InfiniteTape`'s so their snapshots agree.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 use super::Tape;
 use crate::vm::trap::DeviceFault;
 
 #[derive(Debug)]
 pub struct WideTape {
-    cells: HashMap<i64, u32>,
+    cells: BTreeMap<i64, u32>,
     width: u32,
     head: i64,
 }
@@ -30,7 +31,7 @@ impl WideTape {
             "wide tape alphabet exceeds 256 symbols (snapshot cells are u8)"
         );
         Self {
-            cells: HashMap::new(),
+            cells: BTreeMap::new(),
             width,
             head: 0,
         }
@@ -40,7 +41,10 @@ impl WideTape {
         self.head
     }
 
-    /// Sorted coordinates of the non-blank cells (index != 0).
+    /// Sorted coordinates of the non-blank cells (index != 0). Only
+    /// `to_snapshot` calls this outside tests, so it is legitimately dead
+    /// code (not a `std::` leak) under `--no-default-features`.
+    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     fn nonblank_cells(&self) -> Vec<i64> {
         let mut out: Vec<i64> = self.cells.keys().copied().collect();
         out.sort_unstable();
@@ -64,6 +68,7 @@ impl WideTape {
     /// (mirrors `InfiniteTape::from_snapshot`, which rejects cells `> 1`).
     /// `width` shares `new`'s `1..=256` bound — an out-of-range `width`
     /// panics there.
+    #[cfg(feature = "std")]
     pub fn from_snapshot(
         s: &crate::formats::tapeblock::TapeSnapshot,
         width: u32,
@@ -94,6 +99,7 @@ impl WideTape {
     /// here. The `expect` is a hard invariant check — matching the
     /// `u8`-narrowing serialization asserts in the `.pmt` codec — rather than
     /// a silent truncation.
+    #[cfg(feature = "std")]
     pub fn to_snapshot(&self) -> crate::formats::tapeblock::TapeSnapshot {
         let marks = self.nonblank_cells();
         let lo = marks.first().copied().unwrap_or(self.head).min(self.head);

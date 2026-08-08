@@ -2,6 +2,8 @@
 //! in-memory components and does all tact accounting (docs/core.md
 //! (timing model)).
 
+use alloc::vec::Vec;
+
 use super::bus::{BusRequest, BusResponse, CoreEvent};
 use super::core::Core;
 use super::devices::Tape;

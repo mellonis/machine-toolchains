@@ -57,8 +57,8 @@ pub enum Trap {
     },
 }
 
-impl std::fmt::Display for Trap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for Trap {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidOpcode { opcode, at } => {
                 write!(f, "invalid opcode {opcode:#04x} at {at:#010x}")

@@ -1,8 +1,11 @@
 //! Loader + facade: Executable → validated Machine → runs (docs/core.md
 //! (loading)).
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+#[cfg(feature = "std")]
 use crate::formats::executable::Executable;
-use crate::formats::{PROFILE_BASE, PROFILE_FRAMES};
 
 use super::arch::Arch;
 use super::core::{Core, FramesMeta};
@@ -10,6 +13,22 @@ use super::debug::DebugSession;
 use super::devices::Tape;
 use super::driver::{ReturnStack, RunLimits, RunResult, TactProfile, run};
 use super::session::AsyncSession;
+
+/// Execution-profile ids (docs/formats.md (executable image)), mirrored
+/// byte-for-byte from `formats::{PROFILE_BASE, PROFILE_FRAMES}`: the
+/// loader's unconditional paths (`with_arch`, `build_core`) run without the
+/// `std`-gated `formats` module, so they carry their own copy rather than
+/// importing it.
+const PROFILE_BASE: u8 = 0;
+const PROFILE_FRAMES: u8 = 1;
+
+// Drift guard: fails to compile if the formats-module source of truth ever
+// moves away from this mirror.
+#[cfg(feature = "std")]
+const _: () = {
+    assert!(PROFILE_BASE == crate::formats::PROFILE_BASE);
+    assert!(PROFILE_FRAMES == crate::formats::PROFILE_FRAMES);
+};
 
 #[derive(Default)]
 pub struct ArchRegistry {
@@ -46,8 +65,8 @@ pub enum LoadError {
     },
 }
 
-impl std::fmt::Display for LoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UnknownArch(id) => write!(f, "unknown architecture {id:#04x}"),
             Self::EntryNotEntryMarker { at } => {
@@ -60,7 +79,7 @@ impl std::fmt::Display for LoadError {
     }
 }
 
-impl std::error::Error for LoadError {}
+impl core::error::Error for LoadError {}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RunOptions {
@@ -90,8 +109,8 @@ pub enum RunSetupError {
     AlphabetMismatch { tape: u8, expected: u32, got: u32 },
 }
 
-impl std::fmt::Display for RunSetupError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for RunSetupError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::DeviceCount { expected, got } => {
                 write!(f, "image expects {expected} tape device(s), got {got}")
@@ -108,7 +127,7 @@ impl std::fmt::Display for RunSetupError {
     }
 }
 
-impl std::error::Error for RunSetupError {}
+impl core::error::Error for RunSetupError {}
 
 pub struct Machine<'a> {
     arch: &'a dyn Arch,
@@ -130,8 +149,8 @@ pub struct Machine<'a> {
     frames_offset: u32,
 }
 
-impl<'a> std::fmt::Debug for Machine<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a> core::fmt::Debug for Machine<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Machine")
             .field("code", &self.code)
             .field("entry", &self.entry)
@@ -164,6 +183,7 @@ impl<'a> Machine<'a> {
         }
     }
 
+    #[cfg(feature = "std")]
     pub fn from_executable(
         exe: &Executable,
         registry: &'a ArchRegistry,

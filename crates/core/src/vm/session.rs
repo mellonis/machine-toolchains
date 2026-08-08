@@ -4,7 +4,8 @@
 //! embedder owns the loop — in hardware the clock generator pumps the
 //! processor; here the embedder's `pump` calls play the clock edges.
 
-use std::collections::BTreeSet;
+use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 use super::bus::{BusRequest, BusResponse, CoreEvent};
 use super::core::Core;

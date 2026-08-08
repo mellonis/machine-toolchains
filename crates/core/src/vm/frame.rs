@@ -22,6 +22,9 @@
 //! A map entry of `0xFFFF` is a hole (crossing it traps); a `*_len` of 0
 //! is the identity map.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 /// One virtual tape of a frame: its physical target and symbol maps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FrameEntry {
@@ -126,8 +129,8 @@ impl FrameWalk {
 
     fn done(&mut self) -> FrameStep {
         FrameStep::Done(FrameDescriptor {
-            entries: std::mem::take(&mut self.entries),
-            exits: std::mem::take(&mut self.exits),
+            entries: core::mem::take(&mut self.entries),
+            exits: core::mem::take(&mut self.exits),
         })
     }
 
@@ -145,7 +148,7 @@ impl FrameWalk {
         if self.pending.len() < self.field.width() {
             return self.need_next();
         }
-        let raw = std::mem::take(&mut self.pending);
+        let raw = core::mem::take(&mut self.pending);
         let u16_of = |raw: &[u8]| u16::from_le_bytes([raw[0], raw[1]]);
         match self.field {
             Field::Arity => {
@@ -229,7 +232,10 @@ impl FrameWalk {
 /// blob-relative code offsets (empty for a composition-engine descriptor,
 /// which has no `retx` exits). The composition engine materializes each
 /// synthesized composite through this (docs/formats.md (frame
-/// descriptors)); the frame/core/driver test modules share it too.
+/// descriptors)); the frame/core/driver test modules share it too. The only
+/// non-test caller is the `std`-gated linker composition engine, so this is
+/// legitimately dead code (not a `std::` leak) under `--no-default-features`.
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) fn descriptor_bytes(entries: &[(u8, &[u16], &[u16])], exits: &[u32]) -> Vec<u8> {
     let mut out = vec![entries.len() as u8];
     out.extend((exits.len() as u16).to_le_bytes());
