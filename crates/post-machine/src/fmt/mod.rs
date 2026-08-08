@@ -395,8 +395,7 @@ fn print_comment(out: &mut String, comment: &Comment, indent: usize) {
 /// is no "stays inline" case here. `f.close_trailing` rides the closing
 /// `}` the same way a statement's `trailing` rides its `;`.
 ///
-/// **Doc/attention run** (design doc
-/// `2026-07-12-pmc-doc-lines-attributes-design.md`, "fmt"): `f.doc_run`
+/// **Doc/attention run** (`docs/pmt/fmt.md (doc and attention runs)`): `f.doc_run`
 /// prints first, at THIS call's own `indent` (col 0 top level, body
 /// indent when nested — the same `indent` the header itself prints at,
 /// so a run always sits directly above its bound declaration). `blank_
