@@ -147,6 +147,49 @@ trait Tape {
 A single-tape architecture is just the one-device case, and a two-symbol
 tape just the `alphabet_size() == 2` case.
 
+The async device surface is a poll-shaped mirror of the same contract,
+for a caller that cannot afford to block a thread on a slow or
+physically remote tape — an embedder drives it as described under
+[AsyncSession](#asyncsession):
+
+```rust
+trait AsyncTapeDevice {
+    fn alphabet_size(&self) -> u32;
+    fn head(&self) -> i64;
+    fn issue(&mut self, cmd: DeviceCmd);
+    fn poll(&mut self) -> DevicePoll;
+}
+```
+
+`issue` puts one command on the bus — move left, move right, read, or
+write, the same four operations `BusRequest`'s device variants already
+carry — and each following `poll` samples the READY line on a clock
+edge: `Pending` while the device is still working, `Ready` once it
+settles, carrying the reply and the transaction's cost. The contract is
+**one command in flight per device**: issuing a second command before
+the first settles is a caller bug, and polling a device with nothing in
+flight simply reports `Pending`. `head()` and `alphabet_size()` report
+the device's *settled* state — as of the last completed transaction,
+never an in-flight one. One further obligation falls on the caller
+rather than the device: **device-set stability** — the same device set
+is supplied across every `pump` call, and a device holding an in-flight
+command must not be swapped out or dropped mid-transaction, because the
+session re-polls the *same* device on resume, not whatever now occupies
+that slot.
+
+Two implementations ship. **`SyncAsAsync`** wraps any `Tape` and is
+`Ready` on the very next poll, priced at the model cost (`cost: None`)
+— the adapter that makes a pumped run of an in-memory program
+bit-identical to a synchronous one. **`LatencyTape`** is the shipped
+waiting device: it wraps a `Tape` behind a `LatencyProfile` naming, per
+operation kind, how many polls to hold READY low and what cost to
+report once the operation lands. It is the reference implementation of
+the async contract, the test vehicle the pumped session's own suite
+runs against, and the transport counterpart of a mechanical
+`TactProfile` — where the tact profile prices a device's operations for
+the timing model below, `LatencyProfile` prices how long the transport
+itself takes to answer.
+
 Shipped tape implementations:
 
 - **InfiniteTape** — unbounded in both directions, two symbols, paged
@@ -259,6 +302,14 @@ table ROM); both are reported in run stats (`RunStats`, also available
 mid-run via `DebugSession::stats()`), which sum through
 `total_tacts()`.
 
+Under the async device surface the same accounting holds with one
+refinement: a device may *report* its transaction's cost in tacts — a
+real device's wait is real machine time, and in hardware the counter
+ticks through a WAIT stall — while a device that reports nothing is
+priced at the profile's model cost instead. READY sampling itself is
+free: a pending poll never ticks the counter, so stats stay
+deterministic no matter how often the embedder pumps.
+
 Each architecture's page works the model through its own opcodes, where
 relaxation showing up as a real speed win and not just a size win
 becomes visible.
@@ -331,6 +382,103 @@ an un-stripped break is an observability barrier no optimizer motion may
 cross, and the `leftover-debugger` lint below flags one left in shipped
 source. An architecture that declares no break opcode simply never
 raises this cause and never fires that rule.
+
+### AsyncSession
+
+`Machine::async_session` opens a pumped `AsyncSession` over the same
+code image (`async_session_tapes` for the multi-tape shape, which
+carries the table ROM). Where `DebugSession`'s stepping commands block
+the calling thread until a device transaction resolves, `AsyncSession`
+never blocks: the embedder owns the loop, driving execution by calling
+`pump(devices, budget)` repeatedly, and a device that is not yet READY
+simply suspends the session between calls instead of the thread.
+
+One `pump` call retires instructions until one of four things happens,
+reported as a `PumpEvent`: a device holds READY low (`DeviceWait` —
+nothing advanced past it; call `pump` again once it might have
+settled); the per-call instruction budget runs out (`BudgetSpent`); a
+pause condition fires at an instruction boundary (`Paused(cause)`); or
+the program stops, halts, or traps (`Finished(result)`, carrying the
+same `RunResult` shape `Machine::run`/`run_tapes` return — a pumped run
+over `SyncAsAsync`-wrapped devices reaches the identical result, tact
+for tact, as a synchronous run over the same devices). A `budget` of
+`None` runs to the next pause or termination in a single call; `Some(0)`
+spends immediately and reports `BudgetSpent` without retiring
+anything — even when the call would otherwise resume a transaction
+that has just turned READY. A device suspension never touches the
+budget: `DeviceWait` reports before the budget is even consulted.
+
+This is the session's clock correspondence: in hardware a clock
+generator pumps the processor one edge at a time, and a `pump` call is
+that edge. The sans-I/O core underneath is a per-tact
+`BusRequest`/`BusResponse` state machine no matter which driver serves
+it, so the same Rust core doubles as a golden model for a hardware
+implementation — clock it the same way and its request/response trace
+is what real silicon should produce.
+
+At an instruction boundary the pause checks run in a fixed
+priority — **break, then pause, then breakpoint, then budget**. A
+retired debug-break instruction reports `Paused(Brk)` before anything
+else is even checked; a pending `pause()` request reports
+`Paused(Manual)` next and does not re-fire on a later boundary; an
+instruction pointer landing on a registered breakpoint address reports
+`Paused(Breakpoint(addr))` — resuming past it does not re-pause, since
+by the next check the address has already moved on; only once none of
+the three apply does the budget get decremented, so an instruction that
+exhausts a budget while also matching a higher-priority cause reports
+that cause instead, and the budget is left untouched for the next call.
+Unlike `DebugSession`, where a `run_steps` budget running out itself
+reports as `Paused(Manual)`, `AsyncSession` keeps the two separate — a
+spent budget is always its own `BudgetSpent` event, and
+`Paused(Manual)` fires only for a genuine external `pause()` call.
+
+`add_breakpoint`/`remove_breakpoint` register and clear breakpoint
+addresses; `pause()` requests a pause at the next boundary without
+stopping anything itself; `stop()` consumes the session and returns its
+final `RunStats`. Between calls the session exposes the same window
+`DebugSession` does — `ip()`, `mf()`, `fr()`, `depth()`, `stack()`,
+`stats()` — plus `finished()`, which, once a result exists, holds the
+full terminal `RunResult` (not just the `Outcome` `DebugSession`'s own
+`finished()` reports) and repeats it on every further `pump` call. A
+trap is never a pause cause here: it folds straight into a terminal
+`Finished`, with the faulting instruction's address in `RunResult.ip`
+exactly as the run-results conventions above describe.
+
+The loading step (see [Loading](#loading)) is itself a transaction on
+the async path rather than the sync path's direct blocking read: a
+single-tape session's first `pump` call issues a real, waitable read on
+device 0 and matches it against the mark index before starting —
+priced at nothing, since it is loading rather than execution, but
+genuinely subject to WAIT, so a slow device 0 delays the first
+instruction instead of blocking the embedder's thread. A reply that is
+not a symbol — a fault, or a plain acknowledgement — is swallowed and
+MF keeps its default; a missing device 0 is likewise treated as
+unmarked and execution simply proceeds, the same panic-free choice
+`Machine::run` makes for a mismatched device set. The multi-tape shape
+(`async_session_tapes`) never latches, mirroring `debug_tapes`: MR
+starts at 0 and head symbols enter only through explicit reads.
+
+Two things this surface deliberately does not do. It does not extend
+the bus protocol: the device leg gains a poll shape, but the requests
+and responses crossing it are the same device commands the synchronous
+driver already serves. And a multi-tape read still serializes — an
+architecture's `ReadAll` micro-op expands into one `Read` per device in
+device order, each issued and settled before the next is issued, never
+concurrently, on the async path exactly as on the sync one. Nor does
+the session enforce a device timeout: a device that never reports READY
+leaves `pump` returning `DeviceWait` forever, and judging that as
+"never coming back" — and choosing to stop pumping and drop the
+session — is the embedder's call, not the core's.
+
+The `vm` module — `Machine`, `Core`, `DebugSession`, `AsyncSession`, the
+devices, the bus types — builds without the standard library: the
+crate's `std` feature is default-on but optional, and everything that
+needs it (the container codecs, the linker, the assembler and
+disassembler frameworks, the language-server framework) stays behind
+it. What remains without `std` is exactly the processor VM this section
+describes, including the raw-code `Machine::with_arch` constructor that
+needs no container parsing — the shape a firmware target embeds
+against.
 
 ## The assembler framework
 
