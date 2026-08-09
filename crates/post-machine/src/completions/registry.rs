@@ -568,12 +568,24 @@ fn run_spec() -> CommandSpec {
 fn ir_graph_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["ir", "graph"]),
-        positional: Positional::One(PositionalHint::File(ext(&["ir.json"]))),
-        flags: vec![FlagSpec::value(
-            "--function",
-            "restrict output to one function",
-            ValueHint::Text,
-        )],
+        // A `.pmc` source is compiled in memory and rendered directly;
+        // `.ir.json` stays the rendered-artifact input.
+        positional: Positional::One(PositionalHint::File(ext(&["ir.json", "pmc"]))),
+        flags: vec![
+            FlagSpec::value(
+                "--function",
+                "restrict output to one function",
+                ValueHint::Text,
+            ),
+            FlagSpec::value(
+                "--variant",
+                "build column to render from a .pmc input (default normal)",
+                ValueHint::Choices(strings(&["normal", "volatile"])),
+            ),
+            FlagSpec::boolean("-O0", "optimization level O0 (default)").exclusive("opt-level"),
+            FlagSpec::boolean("-O1", "optimization level O1 (full pass pipeline)")
+                .exclusive("opt-level"),
+        ],
     }
 }
 

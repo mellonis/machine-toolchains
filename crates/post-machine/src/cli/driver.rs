@@ -5,7 +5,6 @@
 //! memory unless --keep-objects.
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,8 +17,8 @@ use crate::optimizer::OptLevel;
 use crate::stdlib;
 
 use super::build::{
-    find_library, out_path, read_object, render_opt_report, render_warnings, sidecar_path,
-    take_disabled_passes,
+    find_library, out_path, read_object, render_link_report, render_opt_report, render_warnings,
+    sidecar_path, take_disabled_passes,
 };
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
@@ -226,8 +225,8 @@ fn build_one_target(
         opt_level: profile.opt_level,
         disabled_passes: flags.disabled_passes.clone(),
         capture_ir: false,
-        // The in-memory build's needed-column rule lands with the CLI's
-        // volatile surface; until then every unit builds both columns.
+        // Settled below, once the inputs have been scanned for the
+        // program's volatile bit.
         columns: VariantColumns::Both,
     };
     if flags.o0 {
@@ -245,17 +244,20 @@ fn build_one_target(
     let read_err_prefix = format!("target `{name}`: ");
     let mut objects: Vec<ObjectFile> = Vec::new();
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
-    for raw in manifest.effective_sources(target) {
-        let path = resolve(&raw)?;
-        load_one_source(
-            &path,
-            &options,
-            flags.keep_objects,
-            &read_err_prefix,
-            &mut objects,
-            &mut reports,
-        )?;
-    }
+    let paths: Vec<PathBuf> = manifest
+        .effective_sources(target)
+        .iter()
+        .map(|raw| resolve(raw))
+        .collect::<Result<_, _>>()?;
+    let units = load_units(&paths, &options, flags.keep_objects, &read_err_prefix)?;
+    options.columns = columns_for(program_is_volatile(&units), flags.keep_objects);
+    compile_units(
+        units,
+        &options,
+        flags.keep_objects,
+        &mut objects,
+        &mut reports,
+    )?;
 
     let libs = manifest.effective_libraries(target);
     let dirs: Vec<String> = libs
@@ -312,14 +314,7 @@ fn build_one_target(
         .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
     if flags.verbose {
-        let r = &linked.report;
-        let _ = writeln!(
-            stderr,
-            "{name}: link: dropped [{}]; {} site(s) relaxed short, {} far",
-            r.dropped.join(", "),
-            r.relaxed_calls,
-            r.far_calls
-        );
+        render_link_report(&mut stderr, &format!("{name}: "), &linked.report);
     }
     Ok((output, stderr))
 }
@@ -387,8 +382,7 @@ fn argv_compile_options(flags: &Flags) -> CompileOptions {
         },
         disabled_passes: flags.disabled_passes.clone(),
         capture_ir: false,
-        // The in-memory build's needed-column rule lands with the CLI's
-        // volatile surface; until then every unit builds both columns.
+        // Settled by `columns_for` once the inputs have been scanned.
         columns: VariantColumns::Both,
     };
     if flags.o0 {
@@ -406,21 +400,20 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
             "--run and --list-targets are manifest-mode flags\n\n{BUILD_USAGE}"
         ));
     }
-    let options = argv_compile_options(flags);
+    let mut options = argv_compile_options(flags);
 
     let mut objects: Vec<ObjectFile> = Vec::new();
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
-    for file in files {
-        let path = Path::new(file);
-        load_one_source(
-            path,
-            &options,
-            flags.keep_objects,
-            "",
-            &mut objects,
-            &mut reports,
-        )?;
-    }
+    let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+    let units = load_units(&paths, &options, flags.keep_objects, "")?;
+    options.columns = columns_for(program_is_volatile(&units), flags.keep_objects);
+    compile_units(
+        units,
+        &options,
+        flags.keep_objects,
+        &mut objects,
+        &mut reports,
+    )?;
 
     let mut libraries = Vec::new();
     for name in &flags.lib_names {
@@ -467,72 +460,139 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
         .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
     if flags.verbose {
-        let r = &linked.report;
-        let _ = writeln!(
-            stderr,
-            "link: dropped [{}]; {} site(s) relaxed short, {} far",
-            r.dropped.join(", "),
-            r.relaxed_calls,
-            r.far_calls
-        );
+        render_link_report(&mut stderr, "", &linked.report);
     }
     Ok(CliOutput::ok(String::new(), stderr))
 }
 
-/// Loads one already-resolved source path per its extension
-/// (docs/pmt/cli.md (build)): `.pmc` compiles, `.pma` assembles,
-/// anything else loads as a `.pmo` object — the one dispatch shared by
-/// argv mode and manifest mode's per-target loop, so a fix (like
-/// `--keep-objects` covering `.pma`) lands once instead of drifting
-/// between two copies. `read_err_prefix` lets a caller name context a
-/// bare `cannot read` message can't (manifest mode passes
-/// `` target `NAME`:  ``; argv mode passes `""`); everything past the
-/// read — compile/assemble, `render_fatal` on failure, the
-/// `--keep-objects` write, and appending to `objects`/`reports` — is
-/// identical between callers.
-fn load_one_source(
-    path: &Path,
+/// One build input, carried as far as the build-column decision allows.
+/// `.pma` and `.pmo` inputs are already objects and their build column
+/// is settled; a `.pmc` source still has to be compiled, and cannot be
+/// until the program's kind is known.
+enum Unit {
+    Source { path: PathBuf, text: String },
+    Object(ObjectFile),
+}
+
+/// Phase one of the load (docs/pmt/cli.md (build)): every input in argv
+/// order, doing the work that does not depend on the build column —
+/// `.pma` assembles, anything that is not `.pmc`/`.pma` loads as a
+/// `.pmo` object, `.pmc` is only read. `read_err_prefix` lets a caller
+/// name context a bare `cannot read` message can't (manifest mode passes
+/// `` target `NAME`:  ``; argv mode passes `""`).
+///
+/// One dispatch shared by argv mode and manifest mode's per-target loop,
+/// so a fix (like `--keep-objects` covering `.pma`) lands once instead of
+/// drifting between two copies.
+fn load_units(
+    paths: &[PathBuf],
     options: &CompileOptions,
     keep_objects: bool,
     read_err_prefix: &str,
+) -> Result<Vec<Unit>, String> {
+    let mut units = Vec::new();
+    for path in paths {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("pmc") => {
+                let text = fs::read_to_string(path)
+                    .map_err(|e| format!("{read_err_prefix}cannot read {}: {e}", path.display()))?;
+                units.push(Unit::Source {
+                    path: path.clone(),
+                    text,
+                });
+            }
+            Some("pma") => {
+                let source = fs::read_to_string(path)
+                    .map_err(|e| format!("{read_err_prefix}cannot read {}: {e}", path.display()))?;
+                let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
+                })?;
+                if keep_objects {
+                    write_object(path, &object)?;
+                }
+                units.push(Unit::Object(object));
+            }
+            _ => units.push(Unit::Object(read_object(path)?)),
+        }
+    }
+    Ok(units)
+}
+
+/// Phase two: compile every `.pmc` unit with the settled column and
+/// collect the objects IN INPUT ORDER — the linker's namespace is
+/// first-wins, so the order an input was written in is part of the
+/// build's meaning and survives the two-phase split.
+fn compile_units(
+    units: Vec<Unit>,
+    options: &CompileOptions,
+    keep_objects: bool,
     objects: &mut Vec<ObjectFile>,
     reports: &mut Vec<(PathBuf, CompileReport)>,
 ) -> Result<(), String> {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("pmc") => {
-            let source = fs::read_to_string(path)
-                .map_err(|e| format!("{read_err_prefix}cannot read {}: {e}", path.display()))?;
-            let out = compile_source(&source, options.clone()).map_err(|e| {
-                let mut stderr = String::new();
-                render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
-                stderr.trim_end().to_string()
-            })?;
-            if keep_objects {
-                let pmo = path.with_extension("pmo");
-                fs::write(&pmo, out.object.to_bytes())
-                    .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
+    for unit in units {
+        match unit {
+            Unit::Object(object) => objects.push(object),
+            Unit::Source { path, text } => {
+                let out = compile_source(&text, options.clone()).map_err(|e| {
+                    let mut stderr = String::new();
+                    render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
+                    stderr.trim_end().to_string()
+                })?;
+                if keep_objects {
+                    write_object(&path, &out.object)?;
+                }
+                reports.push((path, out.report));
+                objects.push(out.object);
             }
-            reports.push((path.to_path_buf(), out.report));
-            objects.push(out.object);
         }
-        Some("pma") => {
-            let source = fs::read_to_string(path)
-                .map_err(|e| format!("{read_err_prefix}cannot read {}: {e}", path.display()))?;
-            let object = crate::asm::assemble(&source, options.debug_info).map_err(|e| {
-                let mut stderr = String::new();
-                render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
-                stderr.trim_end().to_string()
-            })?;
-            if keep_objects {
-                let pmo = path.with_extension("pmo");
-                fs::write(&pmo, object.to_bytes())
-                    .map_err(|e| format!("cannot write {}: {e}", pmo.display()))?;
-            }
-            objects.push(object);
-        }
-        _ => objects.push(read_object(path)?),
     }
     Ok(())
+}
+
+fn write_object(source: &Path, object: &ObjectFile) -> Result<(), String> {
+    let pmo = source.with_extension("pmo");
+    fs::write(&pmo, object.to_bytes()).map_err(|e| format!("cannot write {}: {e}", pmo.display()))
+}
+
+/// The program's volatile bit as the driver can know it BEFORE compiling
+/// anything (docs/pmt/cli.md (build)). A `.pmc` source contributes its
+/// top-level `volatile main` through a parse-only pass — no compile, no
+/// optimizer, no codegen; a source that does not even parse contributes
+/// nothing and gets its real diagnostic when it is compiled a moment
+/// later. An already-loaded `.pma`/`.pmo` object contributes its header
+/// bit instead, which is how a hand-written volatile program declares
+/// itself. `main` may live in either kind of input, so the scan is a
+/// union over all of them; no `main` anywhere means a normal program,
+/// which is also what the linker assumes.
+fn program_is_volatile(units: &[Unit]) -> bool {
+    units.iter().any(|unit| match unit {
+        Unit::Source { text, .. } => declares_volatile_main(text),
+        Unit::Object(object) => object.program_volatile,
+    })
+}
+
+fn declares_volatile_main(text: &str) -> bool {
+    crate::lexer::lex(text)
+        .ok()
+        .and_then(|tokens| crate::parser::parse(&tokens).ok())
+        .is_some_and(|program| program.functions.iter().any(|f| f.volatile))
+}
+
+/// The column rule (docs/pmt/cli.md (build)). An in-memory object dies
+/// inside a link whose program kind is already known, so only the needed
+/// column is built and the other one is provably dead. Anything that
+/// lands on disk carries both, because a `.pmo` outlives the invocation
+/// that made it: `--keep-objects` therefore switches the whole build back
+/// to two columns rather than writing out a half object. Either way the
+/// linker selects one column, so the executable is the same bytes.
+fn columns_for(volatile: bool, keep_objects: bool) -> VariantColumns {
+    match (keep_objects, volatile) {
+        (true, _) => VariantColumns::Both,
+        (false, true) => VariantColumns::VolatileOnly,
+        (false, false) => VariantColumns::NormalOnly,
+    }
 }
 
 /// Every symbol name the declared set defines FOR CROSS-OBJECT

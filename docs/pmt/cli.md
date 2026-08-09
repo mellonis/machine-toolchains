@@ -605,9 +605,14 @@ outcome).
 ## `pmt ir`
 
 ```
-USAGE: pmt ir graph FILE.ir.json [--function NAME]
+USAGE: pmt ir graph FILE.ir.json|FILE.pmc [--function NAME]
+                    [--variant normal|volatile] [-O0|-O1]
 
-Renders --emit-ir output as a Mermaid flowchart (one per function).
+Renders --emit-ir output as a Mermaid flowchart (one per function). A
+.pmc input is compiled in memory first: --variant picks which build
+column's CFG is rendered (default normal) and -O0/-O1 the optimization
+level (default -O0, as in `pmt compile`). Both flags need a .pmc input —
+a .ir.json file already holds exactly one column.
 ```
 
 Reads a `--emit-ir` JSON file (`docs/formats.md (IR JSON)`) and renders

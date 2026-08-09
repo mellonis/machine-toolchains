@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use mtc_core::formats::ARCH_TM1;
 use mtc_core::formats::executable::Executable;
-use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::object::{BlobVariant, ObjectFile, SymbolDef};
 use mtc_post_machine::cli::execute;
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::optimizer::OptLevel;
@@ -1783,4 +1783,138 @@ fn pm_tape_block_new_bare_is_a_single_empty_band() {
     let shown = execute(&args(&["tape-block", "show", path.to_str().unwrap()])).unwrap();
     assert!(shown.stdout.contains("tape 0"), "got:\n{}", shown.stdout);
     assert!(!shown.stdout.contains("tape 1"), "got:\n{}", shown.stdout);
+}
+
+/// `mark; right;` fuses to one `wrr` in the normal column and stays two
+/// transactions in the gated one — the smallest source whose two IR
+/// columns diverge. Unlabelled deliberately: a `.pmc` label starts a new
+/// block and `fuse-tape-ops` only fuses within one, so a labelled twin
+/// would render identically in both columns and prove nothing.
+const FUSING: &str = "main() {\n    mark;\n    right;\n}\n";
+
+#[test]
+fn ir_graph_renders_a_pmc_source_and_selects_the_variant_column() {
+    let dir = scratch("ir_variant_source");
+    let src = dir.join("fuse.pmc");
+    fs::write(&src, FUSING).unwrap();
+    let path = src.to_str().unwrap();
+
+    let default = execute(&args(&["ir", "graph", path, "-O1"])).unwrap();
+    let normal = execute(&args(&["ir", "graph", path, "-O1", "--variant", "normal"])).unwrap();
+    let volatile = execute(&args(&[
+        "ir",
+        "graph",
+        path,
+        "-O1",
+        "--variant",
+        "volatile",
+    ]))
+    .unwrap();
+    let equals_form = execute(&args(&["ir", "graph", path, "-O1", "--variant=volatile"])).unwrap();
+
+    assert_eq!(
+        default.stdout, normal.stdout,
+        "`--variant normal` is exactly the default rendering"
+    );
+    assert_eq!(
+        volatile.stdout, equals_form.stdout,
+        "`--variant V` and `--variant=V` are the same flag (space-or-equals shape)"
+    );
+    assert_ne!(
+        default.stdout, volatile.stdout,
+        "the gated column keeps the write and the move apart"
+    );
+    assert!(
+        default.stdout.contains("wrr"),
+        "the normal column fuses write+move, got:\n{}",
+        default.stdout
+    );
+    assert!(
+        !volatile.stdout.contains("wrr") && volatile.stdout.contains("rgt"),
+        "the volatile column keeps both transactions, got:\n{}",
+        volatile.stdout
+    );
+}
+
+#[test]
+fn ir_graph_still_renders_an_emitted_ir_json() {
+    let dir = scratch("ir_json_unchanged");
+    let src = dir.join("fuse.pmc");
+    fs::write(&src, FUSING).unwrap();
+    execute(&args(&[
+        "compile",
+        src.to_str().unwrap(),
+        "-O1",
+        "--emit-ir",
+    ]))
+    .unwrap();
+    let json = dir.join("fuse.ir.json");
+    let out = execute(&args(&["ir", "graph", json.to_str().unwrap()])).unwrap();
+    assert!(
+        out.stdout.starts_with("%% main\nflowchart TD\n"),
+        "got:\n{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn ir_graph_rejects_an_unknown_variant() {
+    let err = execute(&args(&["ir", "graph", "--variant", "bogus"])).unwrap_err();
+    assert!(err.contains("unknown variant `bogus`"), "got: {err}");
+    assert!(err.contains("normal | volatile"), "got: {err}");
+}
+
+#[test]
+fn ir_graph_rejects_column_selection_on_a_rendered_ir_json() {
+    let dir = scratch("ir_variant_on_json");
+    let src = dir.join("fuse.pmc");
+    fs::write(&src, FUSING).unwrap();
+    execute(&args(&[
+        "compile",
+        src.to_str().unwrap(),
+        "-O1",
+        "--emit-ir",
+    ]))
+    .unwrap();
+    let json = dir.join("fuse.ir.json");
+    let err = execute(&args(&[
+        "ir",
+        "graph",
+        json.to_str().unwrap(),
+        "--variant",
+        "volatile",
+    ]))
+    .unwrap_err();
+    assert!(err.contains(".pmc"), "got: {err}");
+}
+
+#[test]
+fn compile_writes_both_variant_columns_to_disk() {
+    let dir = scratch("compile_two_columns");
+    let src = dir.join("fuse.pmc");
+    fs::write(&src, FUSING).unwrap();
+    execute(&args(&["compile", src.to_str().unwrap(), "-O1"])).unwrap();
+
+    let bytes = fs::read(dir.join("fuse.pmo")).unwrap();
+    let obj = ObjectFile::from_bytes(&bytes).expect("reads back");
+    let variants = obj
+        .variants
+        .as_deref()
+        .expect("a compiled object is tagged");
+    let mains: Vec<BlobVariant> = obj
+        .symbols
+        .iter()
+        .filter(|s| s.name == "main")
+        .filter_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } => {
+                Some(variants[blob as usize])
+            }
+            SymbolDef::External => None,
+        })
+        .collect();
+    assert_eq!(
+        mains,
+        vec![BlobVariant::Normal, BlobVariant::Volatile],
+        "a standalone object outlives its invocation, so it carries both columns"
+    );
 }

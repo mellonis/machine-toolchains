@@ -465,7 +465,7 @@ mod tests {
         assert!(script.contains("_files -g \"*.pmx.map\""), "{script}"); // dis --map
         assert!(script.contains("_files -g \"*.pmt\""), "{script}"); // tape-block show / run --tape-block
         assert!(script.contains("_files -g \"*.pmx\""), "{script}"); // run
-        assert!(script.contains("_files -g \"*.ir.json\""), "{script}"); // ir graph
+        assert!(script.contains("_files -g \"*.(ir.json|pmc)\""), "{script}"); // ir graph
     }
 
     #[test]

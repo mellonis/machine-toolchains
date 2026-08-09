@@ -441,9 +441,14 @@ fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
 }
 
 const IR_USAGE: &str = "\
-USAGE: pmt ir graph FILE.ir.json [--function NAME]
+USAGE: pmt ir graph FILE.ir.json|FILE.pmc [--function NAME]
+                    [--variant normal|volatile] [-O0|-O1]
 
-Renders --emit-ir output as a Mermaid flowchart (one per function).
+Renders --emit-ir output as a Mermaid flowchart (one per function). A
+.pmc input is compiled in memory first: --variant picks which build
+column's CFG is rendered (default normal) and -O0/-O1 the optimization
+level (default -O0, as in `pmt compile`). Both flags need a .pmc input —
+a .ir.json file already holds exactly one column.
 ";
 
 pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
@@ -453,15 +458,98 @@ pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
     }
 }
 
+/// Which build column `pmt ir graph` renders from a `.pmc` input
+/// (docs/pmt/cli.md (pmt ir)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IrColumn {
+    Normal,
+    Volatile,
+}
+
+/// `--variant normal|volatile`, validated where it is read rather than
+/// where it is used: a misspelled column then reports itself before a
+/// missing input or an unreadable file can shadow it.
+fn take_variant(args: &mut Args) -> Result<Option<IrColumn>, String> {
+    let Some(raw) = args.value("--variant")? else {
+        return Ok(None);
+    };
+    match raw.as_str() {
+        "normal" => Ok(Some(IrColumn::Normal)),
+        "volatile" => Ok(Some(IrColumn::Volatile)),
+        other => Err(format!("unknown variant `{other}` (normal | volatile)")),
+    }
+}
+
+/// Compiles a `.pmc` input for inspection and hands back the requested
+/// column's CFG. Inspection is not the in-memory build path — nothing
+/// here is linked, so there is no program bit to narrow the work with
+/// and BOTH columns are built, whichever one is asked for
+/// (docs/pmt/cli.md (pmt ir)).
+fn compile_for_inspection(
+    path: &Path,
+    column: IrColumn,
+    opt_level: crate::optimizer::OptLevel,
+) -> Result<IrProgram, String> {
+    let source =
+        fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let out = crate::compiler::compile(
+        &source,
+        crate::compiler::CompileOptions {
+            opt_level,
+            columns: crate::compiler::VariantColumns::Both,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| {
+        let mut stderr = String::new();
+        super::lint::render_fatal(&mut stderr, path, e.span, &e.kind, e.kind.code());
+        stderr.trim_end().to_string()
+    })?;
+    Ok(match column {
+        IrColumn::Normal => out.ir,
+        IrColumn::Volatile => out
+            .ir_volatile
+            .expect("a both-columns compile builds the volatile column"),
+    })
+}
+
 fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     let filter = args.value("--function")?;
+    let variant = take_variant(&mut args)?;
+    // -O0 then -O1, exactly as `pmt compile` resolves them: the later
+    // check wins when both are written.
+    let o0 = args.flag("-O0");
+    let o1 = args.flag("-O1");
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
         return Err(format!("ir graph takes exactly one file\n\n{IR_USAGE}"));
     };
-    let text = fs::read_to_string(input).map_err(|e| format!("cannot read {input}: {e}"))?;
-    let program = IrProgram::from_json(&text).map_err(|e| format!("{input}: {e}"))?;
+    let program = if input.ends_with(".pmc") {
+        let mut opt_level = crate::optimizer::OptLevel::O0;
+        if o0 {
+            opt_level = crate::optimizer::OptLevel::O0;
+        }
+        if o1 {
+            opt_level = crate::optimizer::OptLevel::O1;
+        }
+        compile_for_inspection(
+            Path::new(input),
+            variant.unwrap_or(IrColumn::Normal),
+            opt_level,
+        )?
+    } else {
+        // A rendered artifact carries one column at one optimization
+        // level already; silently ignoring a flag that cannot apply
+        // would be worse than saying so.
+        if variant.is_some() || o0 || o1 {
+            return Err(format!(
+                "--variant and -O0/-O1 apply to a .pmc input; {input} already holds one column\n\n{IR_USAGE}"
+            ));
+        }
+        let text = fs::read_to_string(input).map_err(|e| format!("cannot read {input}: {e}"))?;
+        IrProgram::from_json(&text).map_err(|e| format!("{input}: {e}"))?
+    };
     let mut out = String::new();
     for function in &program.functions {
         if filter.as_deref().is_some_and(|f| f != function.name) {

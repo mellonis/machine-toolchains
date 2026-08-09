@@ -1,3 +1,4 @@
+use mtc_core::formats::object::{BlobVariant, SymbolDef};
 use mtc_core::linker::LinkOptions;
 use mtc_core::vm::{ArchRegistry, InfiniteTape, Machine, Outcome, RunLimits, RunOptions};
 use mtc_post_machine::arch::Pm1;
@@ -210,4 +211,51 @@ fn user_namespace_injection_overrides_a_std_routine() {
         1,
     );
     assert_eq!((marks, head), (vec![0, 1, 2], 0)); // the override: one left
+}
+
+/// The embedded stdlib is compiled once per process and serves BOTH
+/// program kinds, so it must carry real volatile columns: a volatile
+/// program calling a tape-touching std routine links the gated body with
+/// nothing falling back to the normal column.
+#[test]
+fn a_volatile_program_links_the_stdlibs_volatile_column() {
+    let variants = stdlib::object()
+        .variants
+        .as_deref()
+        .expect("the embedded stdlib is a compiled, tagged object");
+    let columns: Vec<BlobVariant> = stdlib::object()
+        .symbols
+        .iter()
+        .filter(|s| s.name == "std::eraseSection")
+        .filter_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } => {
+                Some(variants[blob as usize])
+            }
+            SymbolDef::External => None,
+        })
+        .collect();
+    assert_eq!(
+        columns,
+        vec![BlobVariant::Normal, BlobVariant::Volatile],
+        "the callee this test picks must genuinely split, or the fallback \
+         assertion below is vacuous"
+    );
+
+    let out = compile(
+        "use std::eraseSection; volatile main() { @eraseSection(!); }",
+        CompileOptions::default(),
+    )
+    .expect("compiles");
+    assert!(out.object.program_volatile);
+    let linked = link(
+        &[out.object],
+        std::slice::from_ref(stdlib::object()),
+        LinkOptions::default(),
+    )
+    .expect("links");
+    assert!(
+        linked.report.variant_fallbacks.is_empty(),
+        "the stdlib offers both columns, so nothing may fall back: {:?}",
+        linked.report.variant_fallbacks
+    );
 }

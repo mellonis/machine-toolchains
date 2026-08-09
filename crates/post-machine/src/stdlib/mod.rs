@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
 
-use crate::compiler::{CompileOptions, analyze_staged, compile};
+use crate::compiler::{CompileOptions, VariantColumns, analyze_staged, compile};
 use crate::cst::TopKind;
 use crate::lexer::lex;
 use crate::optimizer::OptLevel;
@@ -33,6 +33,15 @@ use crate::parser::{FnDoc, parse_cst};
 
 pub const SOURCE: &str = include_str!("std.pmc");
 
+/// The compiled stdlib, built ONCE per process and handed to every link
+/// in it — so unlike a per-invocation in-memory object it cannot know
+/// whether the program linking it is volatile, and carries both build
+/// columns. A library is exactly the case the two-column object exists
+/// for: a normal program takes the fused bodies, a volatile one takes the
+/// gated bodies, and neither pays a fallback. The cost is small because
+/// the compiler's dedup collapses every routine whose two columns come
+/// out byte-identical into one shared blob; only the routines that
+/// genuinely differ are stored twice.
 pub fn object() -> &'static ObjectFile {
     static OBJECT: OnceLock<ObjectFile> = OnceLock::new();
     OBJECT.get_or_init(|| {
@@ -41,6 +50,7 @@ pub fn object() -> &'static ObjectFile {
             CompileOptions {
                 opt_level: OptLevel::O1,
                 strip_debugger: true,
+                columns: VariantColumns::Both,
                 ..Default::default()
             },
         )
