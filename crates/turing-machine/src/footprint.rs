@@ -18,6 +18,20 @@
 //! clamped to its own tape's cardinality — `set ⊆ SymSet::full(cardinality)`
 //! holds for every entry — so a consumer may use any member as an index into
 //! that tape's glyph table.
+//!
+//! # Two walks, one relation
+//!
+//! The same footprint is inferred at two stages, and they do not agree
+//! exactly: on every world both compute, `infer_resolved ⊇ infer_ir`. The
+//! source walk sees a world before expansion, so it is coarser in four ways —
+//! a `{expr}` write cell answers with the whole alphabet where expansion folds
+//! it to concrete symbols per row; a graft's writes are projected rather than
+//! spliced, and the splice drops rules whose pattern no host symbol reads as
+//! and turns a write with no host image into a trap; a bound call on a callee
+//! outside the compilation unit answers conservatively where lowering rejects
+//! the program outright; and rules a later catch-all shadows are still present.
+//! Consumers that see only source form (the lint layer) get the coarser
+//! answer, which is the safe one.
 
 // Nothing in the crate reads the table at this point in the build-out, and
 // `SymSet` deliberately ships as a whole set primitive rather than trimmed to
@@ -28,7 +42,10 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::compiler::{Resolved, ResolvedCallTarget, ResolvedWorld};
 use crate::ir::{IrMapPair, IrProgram, IrTapeBinding, IrTransition, IrWorld, IrWrite};
+use crate::lint::patterns::glyph_label;
+use crate::parser::{BindingArg, BindingValue, MapArrow, SymLit, SymMap, WriteCellKind};
 
 /// One past the highest symbol index a [`SymSet`] can hold. The alphabet
 /// ceiling is 127 glyphs (docs/tmt/language.md (alphabets)), so this bound is
@@ -355,9 +372,333 @@ pub(crate) fn infer_ir(program: &IrProgram) -> FootprintTable {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The source-level walk. Same rules, one stage earlier: worlds are still in
+// SOURCE form — patterns unexpanded, grafts unspliced, `{expr}` writes
+// unfolded — and every symbol is a GLYPH in its own world's alphabet frame
+// rather than an index the lowering already resolved.
+// ---------------------------------------------------------------------------
+
+/// The whole alphabet of every one of a source world's tapes.
+fn full_alphabets_src(host: &ResolvedWorld) -> Vec<SymSet> {
+    host.tapes
+        .iter()
+        .map(|t| SymSet::full(t.cardinality as u32))
+        .collect()
+}
+
+/// A symbol literal's position in a glyph vector — the source-frame analog of
+/// an already-lowered symbol index. `None` when the alphabet does not carry
+/// the glyph, which resolution rejects downstream.
+fn glyph_index(glyphs: &[String], lit: &SymLit) -> Option<u32> {
+    let label = glyph_label(lit);
+    glyphs.iter().position(|g| *g == label).map(|i| i as u32)
+}
+
+/// Resolve a source `with map` into the same sparse pair list the IR lowering
+/// records: `src` glyphs against the HOST alphabet, `dst` glyphs against the
+/// callee's or grafted graph's, and `=>` marking the read-only direction.
+/// `None` when a glyph is outside the alphabet it is resolved against — the
+/// caller then declines to project that tape.
+fn source_pairs(
+    map: &SymMap,
+    host_glyphs: &[String],
+    callee_glyphs: &[String],
+) -> Option<Vec<IrMapPair>> {
+    map.pairs
+        .iter()
+        .map(|p| {
+            Some(IrMapPair {
+                src: glyph_index(host_glyphs, &p.src)?,
+                dst: glyph_index(callee_glyphs, &p.dst)?,
+                one_way: p.arrow == MapArrow::ReadOnly,
+            })
+        })
+        .collect()
+}
+
+/// What one binding site — a `call`, a bind-call, or a `graft` — contributes
+/// to its host, per host tape.
+///
+/// Calls and grafts share this one projection because they share one algebra:
+/// `ir.rs`'s call lowering and `expand.rs`'s graft composite resolve `src`
+/// against the host alphabet and `dst` against the callee's, then hand the
+/// result to the same completion rule (docs/tmt/language.md (symbol maps)).
+/// The two differ only in strictness about an OMITTED map — a graft demands
+/// glyph-for-glyph equal alphabets where a call binds by index — and that
+/// difference rejects programs rather than changing what a legal one writes.
+fn binding_contribution(
+    resolved: &Resolved,
+    host: &ResolvedWorld,
+    callee: &ResolvedWorld,
+    callee_sets: &[SymSet],
+    args: &[BindingArg],
+) -> Vec<SymSet> {
+    // A bare name is a tape target or a state continuation; only the callee's
+    // tape signature tells them apart, so the named args are filtered by it
+    // below. A site with no named args at all carries no binding: it rides the
+    // identity placement, callee tape `k` onto host tape `k`.
+    let named: Vec<&BindingArg> = args
+        .iter()
+        .filter(|a| matches!(a.value, BindingValue::Named { .. }))
+        .collect();
+    if named.is_empty() {
+        if callee.tapes.len() > host.tapes.len() {
+            return full_alphabets_src(host);
+        }
+        let mut out = vec![SymSet::empty(); host.tapes.len()];
+        for (k, s) in callee_sets.iter().enumerate() {
+            out[k].union_with(*s);
+        }
+        return out;
+    }
+
+    let mut out = vec![SymSet::empty(); host.tapes.len()];
+    for (k, ct) in callee.tapes.iter().enumerate() {
+        // Every callee tape is bound and every target resolves, or the program
+        // does not compile; answering full beats projecting half a binding.
+        let Some(arg) = named.iter().find(|a| a.name == ct.name) else {
+            return full_alphabets_src(host);
+        };
+        let BindingValue::Named {
+            target: host_name,
+            map,
+            ..
+        } = &arg.value
+        else {
+            unreachable!("the named args are Named by construction");
+        };
+        let Some(phys) = host.tapes.iter().position(|t| t.name == *host_name) else {
+            return full_alphabets_src(host);
+        };
+        let host_tape = &host.tapes[phys];
+        let host_card = host_tape.cardinality as u32;
+        let Some(callee_set) = callee_sets.get(k) else {
+            return full_alphabets_src(host);
+        };
+
+        let pairs = match map {
+            // An omitted map is no pairs at all: the completion rule below
+            // decides the whole projection from the two cardinalities.
+            None => Vec::new(),
+            Some(m) => {
+                let glyphs = resolved
+                    .alphabets
+                    .get(&host_tape.alphabet)
+                    .zip(resolved.alphabets.get(&ct.alphabet));
+                match glyphs.and_then(|(h, c)| source_pairs(m, &h.glyphs, &c.glyphs)) {
+                    Some(pairs) => pairs,
+                    // A glyph outside its alphabet, or an alphabet resolution
+                    // never produced: the map cannot be read, so nothing about
+                    // this tape can be ruled out.
+                    None => {
+                        out[phys].union_with(SymSet::full(host_card));
+                        continue;
+                    }
+                }
+            }
+        };
+        out[phys].union_with(project_write_back(
+            *callee_set,
+            &pairs,
+            host_card,
+            ct.cardinality as u32,
+        ));
+    }
+    out
+}
+
+/// The host tapes an unresolvable callee may write: the ones its named args
+/// bind, or — when it carries no named args and therefore rides the identity
+/// placement — all of them.
+///
+/// A named arg naming no host tape is either a state continuation or an
+/// unresolvable tape target; the first writes nothing and the second stops the
+/// compile, so skipping it stays on the safe side of the contract.
+fn unresolved_contribution(host: &ResolvedWorld, args: &[BindingArg]) -> Vec<SymSet> {
+    let named: Vec<&BindingArg> = args
+        .iter()
+        .filter(|a| matches!(a.value, BindingValue::Named { .. }))
+        .collect();
+    if named.is_empty() {
+        return full_alphabets_src(host);
+    }
+    let mut out = vec![SymSet::empty(); host.tapes.len()];
+    for arg in named {
+        let BindingValue::Named { target, .. } = &arg.value else {
+            continue;
+        };
+        if let Some(phys) = host.tapes.iter().position(|t| t.name == *target) {
+            out[phys] = SymSet::full(host.tapes[phys].cardinality as u32);
+        }
+    }
+    out
+}
+
+/// One reuse edge out of a world: the callee's mangled name (`None` when this
+/// module cannot see its body) and the source-form binding args.
+struct Edge<'a> {
+    target: Option<&'a str>,
+    args: &'a [BindingArg],
+}
+
+/// Every edge a world reaches another world through: its `call` transitions
+/// (direct or through a world-local `bind`) and its `graft` declarations.
+fn edges_of(world: &ResolvedWorld) -> Vec<Edge<'_>> {
+    let mut edges = Vec::new();
+    for call in &world.calls {
+        match &call.target {
+            ResolvedCallTarget::Routine {
+                name,
+                external,
+                args,
+            } => edges.push(Edge {
+                target: (!external).then_some(name.as_str()),
+                args,
+            }),
+            // A bind-call's binding lives on the `bind` declaration, shared by
+            // every call of that instance.
+            ResolvedCallTarget::Bind { name } => {
+                match world.binds.iter().find(|b| b.name == *name) {
+                    Some(b) => edges.push(Edge {
+                        target: (!b.external).then_some(b.target.as_str()),
+                        args: &b.args,
+                    }),
+                    // A bind name with no declaration cannot happen (the call
+                    // resolved AS a bind by matching one); answer full anyway.
+                    None => edges.push(Edge {
+                        target: None,
+                        args: &[],
+                    }),
+                }
+            }
+        }
+    }
+    // A graft target is always a locally defined graph — resolution rejects an
+    // external one, because splicing needs the graph's source.
+    for graft in &world.grafts {
+        edges.push(Edge {
+            target: Some(graft.target.as_str()),
+            args: &graft.args,
+        });
+    }
+    edges
+}
+
+/// Infer every world's write footprint from the resolved SOURCE module.
+///
+/// The table covers GRAPHS as well as routines and the machine — a graph is a
+/// world with its own tape frame, and it is where a grafted body's writes are
+/// stated. Graphs take part in the same fixpoint: a graph may graft another
+/// graph even though it may never call a routine.
+pub(crate) fn infer_resolved(resolved: &Resolved) -> FootprintTable {
+    let by_name: HashMap<&str, usize> = resolved
+        .worlds
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.name.as_str(), i))
+        .collect();
+    let caps: Vec<Vec<SymSet>> = resolved
+        .worlds
+        .iter()
+        .map(|w| {
+            w.tapes
+                .iter()
+                .map(|t| SymSet::full(t.cardinality as u32))
+                .collect()
+        })
+        .collect();
+    let mut sets: Vec<Vec<SymSet>> = caps
+        .iter()
+        .map(|world| vec![SymSet::empty(); world.len()])
+        .collect();
+
+    // Seed with the rows' own write cells, resolved in the world's own frame.
+    // A `-` keeps; a literal outside the tape's alphabet and a `{expr}` fold
+    // both answer with the whole alphabet — the fold's value is decided per
+    // expanded row from the symbols the pattern matched, and this walk does
+    // not expand (docs/tmt/language.md (substitution)).
+    for (wi, world) in resolved.worlds.iter().enumerate() {
+        for state in &world.states {
+            for rule in &state.rules {
+                let Some(write) = &rule.write else { continue };
+                for (tape, cell) in write.cells.iter().enumerate() {
+                    let (Some(rt), Some(cap)) = (world.tapes.get(tape), caps[wi].get(tape)) else {
+                        continue;
+                    };
+                    let add = match &cell.kind {
+                        WriteCellKind::Keep => continue,
+                        WriteCellKind::Subst { .. } => *cap,
+                        WriteCellKind::Lit(lit) => {
+                            let index = resolved
+                                .alphabets
+                                .get(&rt.alphabet)
+                                .and_then(|a| glyph_index(&a.glyphs, lit));
+                            match index {
+                                Some(index) => {
+                                    let mut one = SymSet::empty();
+                                    one.insert(index);
+                                    one
+                                }
+                                None => *cap,
+                            }
+                        }
+                    };
+                    if let Some(slot) = sets[wi].get_mut(tape) {
+                        slot.union_with(add.intersect(*cap));
+                    }
+                }
+            }
+        }
+    }
+
+    // Then close over the reuse edges. Uncapped for the same reason the IR
+    // walk's loop is: sets only grow and are bounded by their alphabets, so it
+    // terminates by monotonicity, and a cap would under-approximate. The
+    // rounds are load-bearing here — the resolved world order puts routines
+    // before the graphs they graft, so a graft edge points forward.
+    loop {
+        let mut grew = false;
+        for (wi, world) in resolved.worlds.iter().enumerate() {
+            for edge in edges_of(world) {
+                let contribution = match edge.target.and_then(|t| by_name.get(t)) {
+                    Some(&callee_ix) => binding_contribution(
+                        resolved,
+                        world,
+                        &resolved.worlds[callee_ix],
+                        &sets[callee_ix],
+                        edge.args,
+                    ),
+                    // A callee outside this compilation unit: its body is not
+                    // here to walk, so it may write anything it can reach.
+                    None => unresolved_contribution(world, edge.args),
+                };
+                for (tape, add) in contribution.into_iter().enumerate() {
+                    if let (Some(slot), Some(cap)) = (sets[wi].get_mut(tape), caps[wi].get(tape)) {
+                        grew |= slot.union_with(add.intersect(*cap));
+                    }
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    FootprintTable {
+        worlds: resolved
+            .worlds
+            .iter()
+            .zip(sets)
+            .map(|(w, tapes)| (w.name.clone(), WorldFootprint { tapes }))
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiler::{CompileOptions, analyze, compile};
     use crate::ir::{
         IrCell, IrDispatch, IrMapPair, IrProgram, IrRule, IrState, IrTape, IrTapeBinding, IrThen,
         IrTransition, IrWorld, IrWorldKind, IrWrite, TM_IR_VERSION,
@@ -861,6 +1202,305 @@ mod tests {
         let caller = tapes_of(&table, "caller");
         assert_eq!(caller.len(), 1);
         assert_eq!(caller[0], SymSet::full(3));
+    }
+
+    // -- the source-level walk --------------------------------------------
+
+    /// The resolved module of a `.tmc` source, or the analysis error.
+    fn resolve(source: &str) -> Resolved {
+        analyze(source)
+            .unwrap_or_else(|e| panic!("the fixture analyzes: {:?} at {:?}", e.kind, e.span))
+            .resolved
+    }
+
+    /// The glyph position of `glyph` in a world's tape `k` — the frame every
+    /// assertion below is written in.
+    fn index_of(resolved: &Resolved, world: &str, tape: usize, glyph: &str) -> u32 {
+        let w = resolved
+            .worlds
+            .iter()
+            .find(|w| w.name == world)
+            .expect("the world is in the module");
+        let al = &resolved.alphabets[&w.tapes[tape].alphabet];
+        al.glyphs
+            .iter()
+            .position(|g| g == glyph)
+            .unwrap_or_else(|| panic!("{glyph} is in {}", al.name)) as u32
+    }
+
+    /// A two-routine call chain: `main` calls `twice` across alphabets under
+    /// an explicit map, and `twice` calls `flip` within one alphabet under an
+    /// omitted (identity) map.
+    const CALL_CHAIN_SRC: &str = "\
+alphabet wide { '_', 'a', 'b', '0', '1' }
+alphabet bits { '_', '0', '1' }
+
+routine flip(tape num: bits) {
+  entry state s {
+    ['0'] -> write ['1'] return;
+    ['1'] -> write ['0'] return;
+    ['_'] -> return;
+  }
+}
+
+routine twice(tape num: bits) {
+  entry state a { [*] -> call flip(num = num) then b; }
+  state b { [*] -> call flip(num = num) then return; }
+}
+
+machine {
+  tape ctl: bits;
+  tape data: wide;
+  entry state s {
+    [*, *] -> call twice(num = data with map { '0' -> '0', '1' -> '1' }) then stop;
+  }
+}
+";
+
+    #[test]
+    fn source_walk_matches_the_ir_walk_on_a_call_chain() {
+        let resolved = resolve(CALL_CHAIN_SRC);
+        let source = infer_resolved(&resolved);
+
+        // The IR side is compiled at `-O0`, so `TailCall` — an optimizer
+        // product — never appears: the comparison exercises the `CallThen`
+        // arm only, which is the one a source `call` lowers to.
+        let out = compile(CALL_CHAIN_SRC, CompileOptions::default()).expect("the fixture compiles");
+        let ir = infer_ir(&out.ir);
+
+        assert!(!ir.worlds.is_empty());
+        for (name, iw) in &ir.worlds {
+            let sw = source
+                .worlds
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is in the source table too"));
+            assert_eq!(
+                sw.tapes, iw.tapes,
+                "the two walks disagree on {name}: source {:?} vs ir {:?}",
+                sw.tapes, iw.tapes
+            );
+        }
+
+        // And the value both agree on, spelled out in the source frame.
+        let main = &source.worlds["main"].tapes;
+        assert_eq!(main[0], SymSet::empty(), "ctl is unbound at the call");
+        assert_eq!(
+            main[1],
+            set(&[
+                index_of(&resolved, "main", 1, "0"),
+                index_of(&resolved, "main", 1, "1"),
+            ]),
+            "the callee's digits write back onto the wide tape"
+        );
+        assert_eq!(source.worlds["twice"].tapes[0], set(&[1, 2]));
+    }
+
+    #[test]
+    fn a_graph_footprint_is_direct_and_in_its_own_frame() {
+        // A graft-free graph's footprint is its own rows' writes: no call may
+        // appear in a graph that is ever grafted, and this one grafts nothing
+        // either. (Graphs are NOT fixpoint-free in general — a graph may graft
+        // another graph, which `a_graft_chain_propagates_across_rounds`
+        // covers.)
+        let src = "\
+alphabet tri { '_', '0', '1' }
+
+export graph flipOnes(tape v: tri, state done) {
+  entry state s {
+    ['0'] -> write ['1'] move [>] goto s;
+    [*] -> done;
+  }
+}
+";
+        let resolved = resolve(src);
+        let table = infer_resolved(&resolved);
+        assert_eq!(
+            table.worlds["flipOnes"].tapes[0],
+            set(&[index_of(&resolved, "flipOnes", 0, "1")]),
+            "the graph writes '1' and nothing else, in its OWN alphabet frame"
+        );
+        assert_eq!(index_of(&resolved, "flipOnes", 0, "1"), 2);
+    }
+
+    #[test]
+    fn a_graft_projects_into_the_host_frame() {
+        // The graph writes its blank and its '0'. The host binds '^' one-way
+        // onto the graph's blank and '0' two-way onto the graph's '0', across
+        // differently-sized alphabets (5 vs 3), so the map is CLOSED.
+        let src = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+alphabet bare3 { '_', '0', '1' }
+
+export graph zeroing(tape v: bare3, state done) {
+  entry state s {
+    ['0'] -> write ['0'] move [>] goto s;
+    ['1'] -> write ['_'] done;
+    ['_'] -> done;
+  }
+}
+
+export routine hosted(tape t: host5) {
+  entry graft zeroing(v = t with map { '^' => '_', '0' -> '0' }, done = return) as z;
+}
+";
+        let resolved = resolve(src);
+        let table = infer_resolved(&resolved);
+        let ix = |g: &str| index_of(&resolved, "hosted", 0, g);
+
+        assert_eq!(
+            table.worlds["zeroing"].tapes[0],
+            set(&[0, 1]),
+            "the graph writes its own blank and its own '0'"
+        );
+
+        let host = table.worlds["hosted"].tapes[0];
+        assert!(
+            host.contains(ix("0")),
+            "the two-way pair writes the graph's '0' back as the host's"
+        );
+        assert!(
+            host.contains(ix("_")),
+            "the blank is pinned both ways, so a graph blank lands as a host blank"
+        );
+        assert!(
+            !host.contains(ix("^")),
+            "the '^' pair is ONE-WAY: it never writes back, so the graph's \
+             blank must not land as '^'"
+        );
+        assert!(
+            !host.contains(ix("$")),
+            "'$' is unlisted across unequal alphabets — a closed map holes it"
+        );
+        assert!(
+            !host.contains(ix("1")),
+            "the graph never writes the symbol '1' maps from"
+        );
+        assert_eq!(host, set(&[ix("_"), ix("0")]));
+    }
+
+    #[test]
+    fn a_graft_chain_propagates_across_rounds() {
+        // routine -> graph -> graph, and the resolved world order is routines
+        // first, then graphs: every graft edge points FORWARD, so one pass
+        // carries `inner`'s write only as far as `mid`. `outer` seeing it is
+        // what proves the source walk iterates to a fixpoint.
+        let src = "\
+alphabet tri { '_', '0', '1' }
+
+export graph inner(tape v: tri, state done) {
+  entry state s { [*] -> write ['1'] done; }
+}
+
+export graph mid(tape v: tri, state done) {
+  entry state s { [*] -> goto i; }
+  graft inner(v = v, done = done) as i;
+}
+
+export routine outer(tape v: tri) {
+  entry graft mid(v = v, done = return) as m;
+}
+";
+        let resolved = resolve(src);
+        let table = infer_resolved(&resolved);
+        let one = set(&[index_of(&resolved, "inner", 0, "1")]);
+        assert_eq!(table.worlds["inner"].tapes[0], one);
+        assert_eq!(table.worlds["mid"].tapes[0], one, "one graft hop");
+        assert_eq!(table.worlds["outer"].tapes[0], one, "two graft hops");
+    }
+
+    #[test]
+    fn a_substitution_write_is_conservatively_full() {
+        // A `{expr}` write cell's value is decided per expanded row from the
+        // symbols the pattern matched; the source walk does not expand, so it
+        // answers with the tape's whole alphabet.
+        let src = "\
+alphabet tri { '_', '0', '1' }
+
+export routine echoIt(tape v: tri) {
+  entry state s { ['0'..'1' as c] -> write [{c}] return; }
+}
+";
+        let resolved = resolve(src);
+        let table = infer_resolved(&resolved);
+        assert_eq!(table.worlds["echoIt"].tapes[0], SymSet::full(3));
+    }
+
+    #[test]
+    fn an_unresolved_call_is_full_on_the_bound_tape_only() {
+        let src = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+machine {
+  tape a: bits;
+  tape b: wide;
+  entry state s { [*, *] -> call other::helper(num = a) then stop; }
+}
+";
+        let resolved = resolve(src);
+        let table = infer_resolved(&resolved);
+        let main = &table.worlds["main"].tapes;
+        assert_eq!(
+            main[0],
+            SymSet::full(3),
+            "a callee outside this unit may write anything on the tape it binds"
+        );
+        assert_eq!(main[1], SymSet::empty(), "tape b is not bound at the site");
+    }
+
+    // -- the standard library ---------------------------------------------
+
+    /// The spec's load-bearing stdlib claim, in the source the claim is
+    /// written on: `std.tmc`'s delimited `invertNumber` collapses its markers
+    /// one-way onto the bare callee's blank and says they "survive the call
+    /// because bare invert never writes a blank".
+    #[test]
+    fn bare_invert_never_writes_a_blank() {
+        let resolved = resolve(crate::stdlib::SOURCE);
+        let table = infer_resolved(&resolved);
+        const BARE: &str = "std::binaryNumbersBare::invertNumber";
+
+        let tapes = &table
+            .worlds
+            .get(BARE)
+            .unwrap_or_else(|| panic!("{BARE} is in the table"))
+            .tapes;
+        let ix = |g: &str| index_of(&resolved, BARE, 0, g);
+        assert_eq!(
+            tapes[0],
+            set(&[ix("0"), ix("1")]),
+            "bare invert writes exactly the two digits"
+        );
+        assert!(
+            !tapes[0].contains(0),
+            "the claim the delimited caller relies on: no blank is ever written"
+        );
+    }
+
+    /// The relation between the two walks, over the largest real program the
+    /// crate carries: source ⊇ IR on every world both compute.
+    #[test]
+    fn the_stdlib_source_walk_covers_the_ir_walk() {
+        let resolved = resolve(crate::stdlib::SOURCE);
+        let source = infer_resolved(&resolved);
+        let out =
+            compile(crate::stdlib::SOURCE, CompileOptions::default()).expect("the stdlib compiles");
+        let ir = infer_ir(&out.ir);
+
+        assert!(ir.worlds.len() >= 10, "the stdlib has many worlds");
+        for (name, iw) in &ir.worlds {
+            let sw = source
+                .worlds
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is in the source table too"));
+            assert_eq!(sw.tapes.len(), iw.tapes.len(), "{name} arity");
+            for (k, (s, i)) in sw.tapes.iter().zip(&iw.tapes).enumerate() {
+                assert!(
+                    s.is_superset(*i),
+                    "{name} tape {k}: source {s:?} does not cover ir {i:?}"
+                );
+            }
+        }
     }
 
     #[test]
