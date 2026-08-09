@@ -1,6 +1,7 @@
 use mtc_core::formats::executable::Executable;
 use mtc_core::formats::object::{
-    BoundCall, MapPair, ObjectFile, Relocation, RoutineSig, Symbol, SymbolDef, TapeBinding,
+    BlobVariant, BoundCall, MapPair, ObjectFile, Relocation, RoutineSig, Symbol, SymbolDef,
+    TapeBinding,
 };
 use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use proptest::prelude::*;
@@ -100,6 +101,38 @@ proptest! {
                     pairs: vec![MapPair { src, dst, one_way }],
                 }],
             }],
+            variants: None,
+            program_volatile: false,
+        };
+        prop_assert_eq!(ObjectFile::from_bytes(&obj.to_bytes()).unwrap(), obj);
+    }
+
+    /// A variants-only v3 object (no signatures/tables — the PM-1 shape)
+    /// with an arbitrary per-blob tag vector and program-volatile bit
+    /// round-trips.
+    #[test]
+    fn mo_v3_variants_round_trip(
+        per_blob in proptest::collection::vec((5usize..16, 0u8..3), 1..6),
+        program_volatile in any::<bool>(),
+    ) {
+        let blobs: Vec<Vec<u8>> = per_blob.iter().map(|&(len, _)| vec![0xAAu8; len]).collect();
+        let variants: Vec<BlobVariant> = per_blob.iter().map(|&(_, tag)| match tag {
+            0 => BlobVariant::Normal,
+            1 => BlobVariant::Volatile,
+            _ => BlobVariant::Both,
+        }).collect();
+        let obj = ObjectFile {
+            arch: 1,
+            symbols: vec![Symbol { name: "f".into(), def: SymbolDef::Defined { blob: 0 } }],
+            blobs,
+            relocations: vec![],
+            debug: None,
+            signatures: None,
+            table_blobs: None,
+            table_fixups: vec![],
+            bound_calls: vec![],
+            variants: Some(variants),
+            program_volatile,
         };
         prop_assert_eq!(ObjectFile::from_bytes(&obj.to_bytes()).unwrap(), obj);
     }
