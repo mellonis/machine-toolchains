@@ -253,13 +253,18 @@ USAGE: tmt asm INPUT.tma [-o OUT.tmo] [-g]
 
 Assembles hand-written or disassembled `.tma` text into a `.tmo` object;
 `-g` records the label/line debug section. The TM-1 `.tma` dialect enables
-the assembler's full capability set — sections, match and dispatch tables,
-`.rept` macros, vector operands, `.routine` signatures, and frame
-descriptors (`docs/formats.md (assembly text)`, `docs/tmt/isa.md`). A fatal
-assembly error renders in the same `FILE:LINE:COL: error: MESSAGE [CODE]`
-shape as a compile error, with the assembler's own stable codes — the
-shared catalog in `docs/core.md (error codes)`; TM-1 enables the full
-capability set, so every row of that catalog can fire from `tmt asm`.
+every capability the assembler has that carries a diagnostic of its own —
+sections, match and dispatch tables, `.rept` macros, vector operands,
+`.routine` signatures, and frame descriptors
+(`docs/formats.md (assembly text)`, `docs/tmt/isa.md`). It opts out of just
+one, `volatile`: build columns are a PM-1 notion, since TM-1 volatility is
+a property of a tape parameter rather than of a routine
+(`docs/tmt/language.md (volatile tapes)`), and that capability adds a
+directive rather than an error code. A fatal assembly error renders in the
+same `FILE:LINE:COL: error: MESSAGE [CODE]` shape as a compile error, with
+the assembler's own stable codes — the shared catalog in
+`docs/core.md (error codes)`; every row of that catalog can fire from
+`tmt asm`.
 
 ## `tmt link`
 

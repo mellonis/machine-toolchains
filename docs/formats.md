@@ -232,13 +232,13 @@ table fixups, and bound calls — and then, for volatile builds, a fifth:
 the per-blob variant tags, alongside a program-volatile header bit. An
 object carrying any of them serializes as version 3; an object with none
 present still serializes byte-for-byte as version 2. In practice
-`tmt compile`/`tmt asm` emit version 3, since every TM-1 object carries
-at least a routine signature, and so does `pmt compile`, since every
-`.pmc` compilation records build columns — even a program whose two
-columns are identical throughout tags each blob `both`. `pmt asm` is the
-one producer that still emits version 2: a `.pma` file with no
-`.volatile` directive in it assembles to the byte-for-byte legacy shape,
-and only a file carrying the directive moves to version 3. A reader
+`tmt compile` emits version 3, since every routine it generates carries a
+signature, and so does `pmt compile`, since every `.pmc` compilation
+records build columns — even a program whose two columns are identical
+throughout tags each blob `both`. The version-2 shape is what an
+assembler still produces from text that asks for none of the version-3
+records: a `.pma` file with no `.volatile` directive, or a `.tma` file
+with no `.routine` signature, table section, or bound call. A reader
 accepts 1..=3 and rejects a pre-version-3 object that sets any
 version-3 flag bit. The signature, table-blob, and variant-tag
 sections are gated by flags bits 1, 2, and 3; the table-fixup and
