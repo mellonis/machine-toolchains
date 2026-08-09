@@ -118,6 +118,15 @@ impl ColumnPair {
 /// A library stays LENIENT, which is today's behaviour: a name it defines
 /// twice silently keeps the first definition, exactly as `first-wins`
 /// already silently shadows a second library's copy.
+///
+/// Lenient means first-RECORD-wins, not first-slot-wins: [`ColumnPair::fill`]
+/// refuses before claiming anything, so a rejected definition is dropped
+/// whole, including any claim it had on a slot nobody was contesting. A
+/// library listing `f` as `Normal` and then as `Both` therefore offers one
+/// column, not two, and a volatile program takes a fallback it need not
+/// have. Consistent with first-wins, and unreachable from compiler output —
+/// the two-column compiler emits `{Normal, Volatile}` or a lone `Both` for
+/// a name, never a mix — so it is recorded here rather than special-cased.
 fn object_columns(
     object: &ObjectFile,
     oi: usize,
@@ -882,6 +891,82 @@ mod tests {
                 "{tags:?} is not a legal column pair"
             );
         }
+    }
+
+    #[test]
+    fn a_shadowing_normal_only_pair_forces_a_counted_fallback() {
+        // Rules 2 and 3 compose. A name's pair is filled from ONE input,
+        // and shadowing takes that input's pair WHOLE — so a user object
+        // offering only `f`'s normal column shadows a library shipping the
+        // complete pair, and a volatile program falls back on `f` and
+        // counts it although a volatile column WAS on the link line. This
+        // pins that pairs are never completed across inputs: a refactor
+        // borrowing the library's volatile column to fill the user's empty
+        // slot would violate rule 2 with every other test still green.
+        let mut user = variant_obj(
+            0x7E,
+            &[
+                ("main", BlobVariant::Normal, &["f"][..]),
+                ("main", BlobVariant::Volatile, &["f"][..]),
+                ("f", BlobVariant::Normal, &[][..]),
+            ],
+        );
+        user.program_volatile = true;
+        let lib = variant_obj(
+            0x7E,
+            &[
+                ("f", BlobVariant::Normal, &[][..]),
+                ("f", BlobVariant::Volatile, &[][..]),
+            ],
+        );
+        let r = resolve(
+            std::slice::from_ref(&user),
+            std::slice::from_ref(&lib),
+            "main",
+        )
+        .unwrap();
+        assert_eq!(r.variant_fallbacks, vec!["f".to_string()]);
+        let f = r
+            .order
+            .iter()
+            .find(|func| func.name == "f")
+            .expect("f is reached");
+        // Provenance is the discriminator: the two normal bodies are
+        // byte-identical, so only the origin index tells them apart.
+        assert_eq!(
+            f.origin, 0,
+            "the user object's column won, not the library's"
+        );
+        assert_eq!(
+            f.blob.as_ref(),
+            user.blobs[2].as_slice(),
+            "the shadowing normal body linked, not the library's volatile column"
+        );
+
+        // The same rule between two libraries: first-wins keeps the
+        // earlier library's one-column pair whole.
+        let mut caller = variant_obj(0x7E, &[("main", BlobVariant::Volatile, &["g"][..])]);
+        caller.program_volatile = true;
+        let first = variant_obj(0x7E, &[("g", BlobVariant::Normal, &[][..])]);
+        let second = variant_obj(
+            0x7E,
+            &[
+                ("g", BlobVariant::Normal, &[][..]),
+                ("g", BlobVariant::Volatile, &[][..]),
+            ],
+        );
+        let libs = [first, second];
+        let r = resolve(std::slice::from_ref(&caller), &libs, "main").unwrap();
+        assert_eq!(r.variant_fallbacks, vec!["g".to_string()]);
+        let g = r
+            .order
+            .iter()
+            .find(|func| func.name == "g")
+            .expect("g is reached");
+        assert_eq!(
+            g.origin, 1,
+            "the FIRST library won (origin = objects.len() + 0)"
+        );
     }
 
     #[test]

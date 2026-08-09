@@ -331,8 +331,15 @@ pub struct LinkReport {
     /// Sorted names that linked the build column NOT matching the
     /// program's volatile bit, because the wanted one was absent
     /// (docs/core.md (linking)). Every name here IS in the image — the
-    /// counter reports what shipped, not what the namespace held. Empty
-    /// for any link without variant records.
+    /// counter reports what shipped, not what the namespace held.
+    ///
+    /// Empty for any link whose program bit is clear, and for any bit-set
+    /// link where every reached name offers the volatile column. Note the
+    /// bit is independent of variant records: an object may set it while
+    /// carrying no tags at all (docs/formats.md (MO)), which is what a
+    /// hand-assembled volatile program looks like — every name then offers
+    /// only the normal column, so EVERY reached name is counted. That is
+    /// the intended signal, not a degenerate case.
     pub variant_fallbacks: Vec<String>,
 }
 
