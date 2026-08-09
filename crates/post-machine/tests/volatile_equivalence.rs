@@ -48,8 +48,11 @@ fn source(fixture: &str, volatile: bool) -> String {
     fixture.replace("{V}", if volatile { "volatile " } else { "" })
 }
 
-/// Compile both columns (the on-disk default) and link — the full path a
-/// `.pmo` takes to an image.
+/// Compile both columns (the on-disk default) and link against the
+/// embedded stdlib — the full path a `.pmo` takes to an image, and the
+/// same library set `pmt link` supplies. Unreached `std::` routines are
+/// dropped by the reachability pass, so offering the library costs the
+/// fixtures that ignore it nothing.
 fn build(src: &str, level: OptLevel) -> LinkOutput {
     let out = compile(
         src,
@@ -59,7 +62,18 @@ fn build(src: &str, level: OptLevel) -> LinkOutput {
         },
     )
     .expect("compiles");
-    link(&[out.object], &[], LinkOptions::default()).expect("links")
+    link_object(out.object)
+}
+
+/// Link one object against the embedded stdlib — the library set
+/// `pmt link` supplies.
+fn link_object(object: ObjectFile) -> LinkOutput {
+    link(
+        &[object],
+        std::slice::from_ref(mtc_post_machine::stdlib::object()),
+        LinkOptions::default(),
+    )
+    .expect("links")
 }
 
 /// What a program can observe about a run: how it ended, and the tape it
@@ -205,12 +219,31 @@ stopper() {
 }
 ";
 
+/// The only fixture that reaches outside its own object. Three of the
+/// embedded stdlib's eleven routines ship two genuinely different columns
+/// (`eraseSection`, `removeFirstMark`, `removeLastMark`); the rest touch
+/// no tape and dedup to one `Both` blob. A gated program calling one of
+/// the three must resolve a LIBRARY name to its gated body — a different
+/// resolution path from an intra-object call, which binds a blob
+/// directly. `removeFirstMark` walks left off the marked run and steps
+/// back onto its first cell, so it terminates on every tape below.
+const STDLIB: &str = "\
+use std::removeFirstMark;
+
+{V}main() {
+    mark;
+    right;
+    @removeFirstMark();
+}
+";
+
 const CORPUS: &[(&str, &str)] = &[
     ("pulse", PULSE),
     ("branching", BRANCHING),
     ("call-chain", CALL_CHAIN),
     ("loop", LOOP),
     ("halting", HALTING),
+    ("stdlib", STDLIB),
 ];
 
 /// The `opt_equivalence` tape set: blank, marked, runs, and an off-zero
@@ -318,6 +351,11 @@ fn the_pulse_example_costs_what_the_page_reports() {
         (Outcome::Stopped, &[0i64][..], 1)
     );
     assert_eq!(normal_run, volatile_run);
+    // Derivation, so a move here is re-derived and not regenerated. The
+    // normal column fuses the source's eleven commands into four
+    // instructions (`wrr 1 / wrl 1 / wrr 1 / wr 0`) plus `stp`: 5 steps,
+    // 15 core + 11 stall = 26. The gated column keeps every transaction —
+    // eleven instructions plus `stp`: 12 steps, 33 core + 22 stall = 55.
     assert_eq!(
         (normal_tacts, volatile_tacts),
         (26, 55),
@@ -330,9 +368,12 @@ fn the_pulse_example_costs_what_the_page_reports() {
 /// faults when a write does not change the cell — the optimized column
 /// completes precisely BECAUSE the second `mark` was folded away, and the
 /// gated column performs it and traps. Unlike `gated_passes.rs`'s
-/// pass-level twin, this one goes through `volatile main`, the build
-/// driver and `pmt run`: what it pins is the keyword → program bit →
-/// built column → exit code chain, not the pass gate itself.
+/// pass-level twin, this one goes through `volatile main` and `pmt run`,
+/// by BOTH routes to an image: the driver's in-memory build, which picks
+/// the column before the linker ever sees it, and a two-column `.pmo` on
+/// disk, where the linker's own choice is what decides. Either route
+/// alone would leave half the chain — keyword → program bit → column →
+/// exit code — unpinned.
 #[test]
 fn volatile_keeps_the_strict_cell_fault() {
     const BODY: &str = "{V}main() {\n    mark;\n    mark;\n}\n";
@@ -342,25 +383,53 @@ fn volatile_keeps_the_strict_cell_fault() {
         ("volatile", true, 3, "StrictCellViolation"),
     ] {
         let src = dir.join(format!("{kind}.pmc"));
-        let image = dir.join(format!("{kind}.pmx"));
         fs::write(&src, source(BODY, volatile)).unwrap();
+
+        // Route 1: the in-memory driver — one column, never on disk.
+        let built = dir.join(format!("{kind}-built.pmx"));
         execute(&args(&[
             "build",
             "-O1",
             src.to_str().unwrap(),
             "-o",
-            image.to_str().unwrap(),
+            built.to_str().unwrap(),
         ]))
         .unwrap_or_else(|e| panic!("{kind}: build failed: {e}"));
 
-        let out = execute(&args(&["run", "--strict-cells", image.to_str().unwrap()]))
-            .unwrap_or_else(|e| panic!("{kind}: run failed: {e}"));
-        assert_eq!(out.code, code, "{kind}: exit code\n{}", out.stdout);
-        assert!(
-            out.stdout.contains(outcome),
-            "{kind}: wanted `{outcome}` in:\n{}",
-            out.stdout
+        // Route 2: a two-column object the linker then selects from.
+        let object = dir.join(format!("{kind}.pmo"));
+        let linked = dir.join(format!("{kind}-linked.pmx"));
+        execute(&args(&[
+            "compile",
+            "-O1",
+            src.to_str().unwrap(),
+            "-o",
+            object.to_str().unwrap(),
+        ]))
+        .unwrap_or_else(|e| panic!("{kind}: compile failed: {e}"));
+        assert_eq!(
+            columns_of(&read_object(&object), "main"),
+            vec![BlobVariant::Normal, BlobVariant::Volatile],
+            "{kind}: the object must offer the linker a real choice"
         );
+        execute(&args(&[
+            "link",
+            object.to_str().unwrap(),
+            "-o",
+            linked.to_str().unwrap(),
+        ]))
+        .unwrap_or_else(|e| panic!("{kind}: link failed: {e}"));
+
+        for (route, image) in [("built", &built), ("linked", &linked)] {
+            let out = execute(&args(&["run", "--strict-cells", image.to_str().unwrap()]))
+                .unwrap_or_else(|e| panic!("{kind}/{route}: run failed: {e}"));
+            assert_eq!(out.code, code, "{kind}/{route}: exit code\n{}", out.stdout);
+            assert!(
+                out.stdout.contains(outcome),
+                "{kind}/{route}: wanted `{outcome}` in:\n{}",
+                out.stdout
+            );
+        }
     }
 }
 
@@ -648,9 +717,18 @@ volatile main() {
 
 /// The `-O0` bit-identity floor, extended to the volatile world: with the
 /// optimizer off there is nothing for the gate to withhold, so every
-/// function dedups to one `Both` blob and all three routes to an image —
-/// gated program, plain program, and the single-column pipeline that
-/// predates the columns — emit the same bytes.
+/// function the compiler emits dedups to one `Both` blob and all three
+/// routes to an image — gated program, plain program, and the
+/// single-column pipeline that predates the columns — emit the same
+/// bytes.
+///
+/// The floor is a property of the COMPILER'S OUTPUT for the unit it
+/// compiles, not of the whole image. The embedded stdlib is compiled once
+/// at `-O1` whatever level the user asks for, so its split routines carry
+/// two real columns even into a `-O0` link, and a gated program links the
+/// gated body there. The `stdlib` fixture pins that difference rather
+/// than being excused from the test: `-O0` narrows what the compiler
+/// withholds, it does not switch the linker's column selection off.
 #[test]
 fn o0_matrix() {
     for (name, fixture) in CORPUS {
@@ -680,8 +758,8 @@ fn o0_matrix() {
         )
         .expect("compiles");
 
-        // WHY the images coincide: at -O0 the two columns are identical
-        // by construction, so nothing is left to choose between.
+        // WHY the compiler's own columns coincide at -O0: they are
+        // identical by construction, so nothing is left to choose between.
         for (kind, out) in [("volatile", &volatile), ("normal", &normal)] {
             assert!(
                 out.object
@@ -698,17 +776,21 @@ fn o0_matrix() {
 
         let images: Vec<Vec<u8>> = [volatile, normal, single_column]
             .into_iter()
-            .map(|out| {
-                link(&[out.object], &[], LinkOptions::default())
-                    .expect("links")
-                    .executable
-                    .to_bytes()
-            })
+            .map(|out| link_object(out.object).executable.to_bytes())
             .collect();
-        assert_eq!(
-            images[0], images[1],
-            "{name}: -O0 images must not depend on the program bit"
-        );
+        if *name == "stdlib" {
+            assert_ne!(
+                images[0], images[1],
+                "the linked library's columns are real at -O0 too — a gated program \
+                 must still take the gated stdlib body"
+            );
+        } else {
+            assert_eq!(
+                images[0], images[1],
+                "{name}: with nothing but -O0 code in the link, the image cannot \
+                 depend on the program bit"
+            );
+        }
         assert_eq!(
             images[1], images[2],
             "{name}: -O0 must stay byte-identical to the single-column build"
