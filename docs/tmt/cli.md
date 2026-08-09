@@ -841,6 +841,59 @@ Mermaid `flowchart TD`. `--function NAME` restricts output to one world;
 naming a world the file does not contain is an error. As with `tape`, the
 `graph` child takes no `--help` — run `tmt ir` bare for the usage above.
 
+### `tmt ir footprints`
+
+Reads the same `--emit-ir` JSON and renders each world's **inferred write
+footprint**: for every signature tape, the set of symbol indices the
+world's body — and everything it calls, grafts, or binds within the file
+the IR was compiled from — may ever write to it. One block per world:
+
+```
+$ tmt ir footprints tally.ir.json
+world helper
+  tape 0 (v): writes {2} of 3
+
+world main
+  tape 0 (t): writes {2} of 3
+  tape 1 (scratch): writes {} of 3
+```
+
+`tape K (NAME): writes {…} of CARD` names the tape by its signature
+position and its own name, lists the write set as ascending indices, and
+states the tape's cardinality alongside it — `of 3` is the tape's own
+alphabet size, not a count of anything in the set, which can be smaller
+(`writes {2} of 3`) or empty (`writes {} of 3`, never omitted: an empty set
+is real information, not a missing line). Worlds render in the IR's own
+program order — the same order `--emit-ir` wrote them in — never a
+sorted or hashed order, so a report is byte-stable across runs on the same
+input. `--function NAME` restricts output to one world, and an unknown
+name is an error in the same shape as `ir graph`'s:
+
+```
+$ tmt ir footprints tally.ir.json --function nope
+tmt: no world `nope` in tally.ir.json
+```
+
+**The report is index-only, like the IR itself.** An `.ir.json` carries a
+tape's cardinality but never its glyphs — they live only in the `.tmc`
+source the IR was compiled from — so `writes {2}` names a *position*, not
+a character; recovering what glyph sits at that position means reading the
+tape's alphabet declaration back in the source, where a symbol's index is
+its position in the declared order (`docs/tmt/language.md (alphabets)`).
+`ir graph`'s Mermaid output carries the same limitation — its row labels
+are indices too — so neither `ir` child is a glyph-space view; the source
+is.
+
+A hand-edited or corrupted `.ir.json` can name two worlds identically,
+which a compiler-emitted file never does (`--emit-ir` names are mangled
+unique); `ir footprints` rejects that file outright rather than rendering
+one world's write sets under the other's tape list:
+
+```
+$ tmt ir footprints dup.ir.json
+tmt: duplicate world `main` in dup.ir.json
+```
+
 ## `tmt lint`
 
 ```
@@ -915,8 +968,11 @@ arguments — because there the manifest's declared source set is the input
 itself, so skipping discovery would leave nothing to lint. Alongside
 explicit paths it behaves exactly as described above.
 
-There is no `--fix` on `tmt lint`: no `.tmc` or `.tma` rule emits a
-machine-applicable fix, so there is nothing for it to apply.
+There is no `--fix` on `tmt lint` (`--fix` is an unknown flag): nothing it
+reports is applied for you on the command line. Several rules do attach a
+fix — `docs/tmt/lint.md` says which ones and what each one does — and
+where a fix exists it surfaces through the editor's code actions
+(`docs/lsp.md (code actions)`) instead.
 
 ## `tmt fmt`
 

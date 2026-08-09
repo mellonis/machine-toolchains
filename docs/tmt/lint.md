@@ -359,6 +359,73 @@ whose body is unseen, is skipped.
 `fix: None` — the right repair (drop the `=>`, rewrite the map, or move the
 write) depends on what the author meant, which the tool cannot guess.
 
+### dead-map-pair
+
+A bidirectional (`->`) pair in a `call`'s, `graft`'s, or `bind`'s symbol map
+whose write-back half can never fire: the callee — as far as this
+compilation unit can see into it — provably never writes the callee-side
+glyph the pair names. A two-way pair says two things at once: read the
+caller glyph as the callee glyph, and write a callee write of that glyph
+back as the caller glyph (`docs/formats.md (bound calls)`). When the second
+half never fires, the pair means exactly what a one-way `src => dst`
+spelling means, minus the ceremony.
+
+**Write-half only.** The rule decides the write direction and nothing else.
+Whether a caller glyph the pair names ever reaches the callee at all depends
+on the caller's own writes and on the tape's initial content, neither of
+which is a compile-time fact, so the read direction is never judged. A
+one-way (`=>`) pair carries no write half to begin with and is never
+reported.
+
+**Silent on the unresolvable.** A `call`, `graft`, or `bind` whose target
+sits outside this compilation unit tells the rule nothing about what the
+callee writes, so it says nothing rather than guessing; the same silence
+covers a `dst` glyph that does not resolve in the callee's own alphabet.
+
+The finding is anchored on the whole pair, matching the two sibling
+map-pair rules above; when a fix is offered, its edit lands on the `->`
+token alone.
+
+**The fix demotes, it never deletes** — rewriting `->` to `=>` drops the one
+write-map entry nothing reads. That is behaviour-preserving by
+construction: the pair still maps the caller glyph to the callee glyph on
+read, and the write-back half it drops was never taken.
+
+Demotion is not always OFFERED, though, because it can change whether the
+program is still ACCEPTED, and that question does not always have the same
+answer. Across an EQUAL-sized pair of alphabets, a `with map`'s
+bidirectional pairs must complete to a bijection (`docs/formats.md (bound
+calls)`); a map already satisfying that is a permutation, and dropping any
+entry that is not a fixed point leaves the identity completion colliding
+with the entry that used to produce that image. That constraint is ONE
+requirement holding across every site kind — it merely bites at a different
+stage: a graft trips it while its splice is built at compile time, a bound
+call or a bind trips the identical check while its composite is built at
+link time. The fix is therefore offered only where demotion provably cannot
+change acceptance — the two alphabets differ in size, or the pair's two
+glyphs already share an index — and the finding reports without one
+everywhere else.
+
+The worked example is the stdlib's own delimited `binaryNumbers::
+invertNumber`, which calls the bare `binaryNumbersBare::invertNumber` with
+its two marker glyphs collapsed onto the callee's blank. As shipped, that
+collapse is already one-way (`'^' => '_'`, `'$' => '_'`), and the rule says
+nothing about it — bare invert's own graph writes only the two digits,
+never a blank, so the collapse's write-back half was always dead, and
+`=>` says exactly that. The transcript below is the same call with both
+marker pairs rewritten to `->`, showing what the rule says about the shape
+the stdlib deliberately avoids:
+
+```
+$ tmt lint std.tmc
+std.tmc:257:39: lint: the write-back half of `'^' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
+std.tmc:257:51: lint: the write-back half of `'$' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
+```
+
+The two digit pairs on the same call (`'0' -> '0'`, `'1' -> '1'`) stay
+two-way in both forms and are never flagged: bare invert's graph writes
+both digits, so their write-back halves are live.
+
 ### state-may-trap (opt-in)
 
 A state whose rules leave some input unmatched and that has no

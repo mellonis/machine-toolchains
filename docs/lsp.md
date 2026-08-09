@@ -392,6 +392,54 @@ declaration's own doc paragraphs and deprecation callout under it. The
 signature line is the part the source text alone does not give a reader:
 the bound values come from the resolved module.
 
+**A routine's or a graph's own declaration also carries a write-set
+block**, one `writes <tape>: {...}` line per signature tape in signature
+order, inserted between the signature line and the doc paragraphs. Each
+line is the tape's inferred write footprint (`docs/tmt/lint.md
+(dead-map-pair)` explains the same inference from the lint side) — the
+symbols the world's body may ever write to that tape, glyphs rather than
+indices, ascending order, comma-space joined; a tape the body never writes
+still gets its line, rendered `{}`, rather than being dropped:
+
+```
+routine r(tape a: bits, tape b: bits)
+
+writes a: {'0', '1'}
+writes b: {}
+
+Only tape a is written.
+```
+
+The set is projected through calls: a routine that never writes its own
+tape directly but hands it to a callee under a symbol map still shows
+whatever the callee's write set maps back onto it, since a caller's write
+set is host-independent — it depends only on what the callee, and
+everything the callee in turn calls, provably writes.
+
+The block appears only on a **declaration** hover — the routine's or
+graph's own name, where its signature line is answered — never on a
+reference. Hovering a `call`, `graft`, or `use` site that names a `std::`
+routine from another document resolves to that routine's qualified path
+and doc paragraphs only, with no signature line and so no write-set block
+either: an external reference carries nothing of the target document's own
+analysis to compute one from. Opening the embedded standard library's
+materialized source as its own document and hovering a routine's
+declaration name inside it is an ordinary declaration hover against that
+document's own resolved module, so it does get the block, the same as any
+other `.tmc` file:
+
+```
+routine std::binaryNumbersBare::invertNumber(tape num: symbols)
+
+writes num: {'0', '1'}
+
+Flip every bit of a number. On entry the head is on the leftmost digit; on exit it rests on the trailing blank.
+```
+
+There is currently no position that answers a hover on a `machine`
+block's own declaration, so the write-set block cannot be observed there
+today — only on a routine or a graph.
+
 **`.pma` and `.tma` never answer hover.** `hoverProvider` is still
 advertised as one merged capability, but assembly text has no
 doc/attention-line grammar for a hover to render, so every request returns
@@ -424,9 +472,12 @@ language would reject:
 What this means per service today: `.pmc` and `.pma` offer lint-derived
 quickfixes. `.tma` offers them too, from the arch-agnostic assembly rules
 it shares with `.pma` (`docs/core.md`) — `redundant-jump-to-next` and
-`leftover-debugger` are the two that carry fixes on that path. No `.tmc`
-rule and no TM-1 `.tma` rule addition emits a fix of its own, so `.tmc`
-code actions are the two fatal-derived quickfixes above and nothing else.
+`leftover-debugger` are the two that carry fixes on that path. `.tmc`
+offers both kinds: the two fatal-derived quickfixes above, plus a code
+action for every finding whose rule attaches a `Fix`, through the same
+mechanical conversion every service uses — `MachineApplicable` preferred,
+`MaybeIncorrect` not. `docs/tmt/lint.md` is the catalog of which `.tmc`
+rules carry one.
 
 ## Semantic tokens
 

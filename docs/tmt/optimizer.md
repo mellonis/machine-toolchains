@@ -188,7 +188,11 @@ splices a callee's rows onto the caller's own tapes rather than
 building a second tapes list, and `outline`'s synthesized routines
 mirror the host's tape declarations, volatility included, when hoisting
 a repeated subgraph out. The flag therefore survives both passes
-unchanged.
+unchanged. Footprint inference (`docs/tmt/cli.md (tmt ir footprints)`) is
+orthogonal to this and answers a different question: a footprint says
+WHICH symbols a body may ever write, while volatility says WHETHER a write
+may be elided or merged — a volatile tape's footprint is inferred exactly
+like any other's, and neither question constrains the other's answer.
 
 **`tail-call` runs before `tail-merge`.** The order of the two is
 load-bearing, not a preference. `tail-merge`'s whole-state dedup can
