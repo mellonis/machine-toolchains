@@ -29,6 +29,7 @@
             "2": { "name": "entity.name.namespace.pmc" }
           }
         },
+        { "name": "keyword.control.pmc", "match": "\\bvolatile\\b" },
         { "name": "keyword.control.pmc", "match": "\\bexport\\b" },
         { "name": "keyword.control.pmc", "match": "\\bas\\b" }
       ]

@@ -6,3 +6,15 @@ members = ["crates/core", "crates/post-machine", "crates/turing-machine"]
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/mellonis/machine-toolchains"
+
+# Dev-loop build speed (measured 2026-08-09): relinking the ~65
+# integration-test binaries after a core touch cost 183s at full debug
+# info, 154s with line tables, 150s with none — the link itself
+# dominates, so line tables are kept (backtraces and breakpoints stay;
+# switch to `debug = true` locally when a debugger session needs variable
+# inspection). Suite runtimes are a non-issue (slowest: 0.47s), so no
+# test-profile opt-level override. For the run phase, `cargo nextest run`
+# covers the warm workspace suite ~7x faster than `cargo test` (4.8s vs
+# 34.7s) — a dev-tool choice, not a manifest setting.
+[profile.dev]
+debug = "line-tables-only"

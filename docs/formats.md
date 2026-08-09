@@ -183,15 +183,18 @@ u16 format version (readers accept 1..=3; writers emit
                 then OBJECT_FORMAT_VERSION_V3 = 3)
 u8 arch
 u8 flags (bit 0 = has debug section, bit 1 = has signatures,
-                bit 2 = has table blobs)
+                bit 2 = has table blobs, bit 3 = has variant tags,
+                bit 4 = the program is a volatile build)
 u32 crc32
 string table:   u32 count, then per string: u16 length, UTF-8 bytes
 symbol table:   u32 count, then per symbol: u32 name (string index),
                 u8 kind (0 = external, 1 = defined, 2 = local),
                 u32 blob index (defined/local) or 0xFFFFFFFF (external)
 code blobs:     u32 count, then per blob: u32 length, code bytes
-                (one blob per defined/local function; intra-function jumps
-                already resolved; every blob starts with ent)
+                (one blob per defined/local function — two where a
+                function ships both build columns, see variant tags
+                below; intra-function jumps already resolved; every blob
+                starts with ent)
 relocations:    u32 count, then per relocation: u32 blob, u32 offset,
                 u32 symbol (one relocation per call site; each hole is a
                 4-byte placeholder, the operand of a far call instruction
@@ -200,12 +203,15 @@ debug section (present iff flags bit 0 is set), once per blob:
                 u32 label count, then per label: u32 name (string index),
                 u32 code offset
                 u32 line count, then per line: u32 code offset, u32 source line
-── version 3 appends four trailing sections, in this order ──
+── version 3 appends five trailing sections, in this order ──
 signatures (present iff flags bit 1 is set), once per blob:
                 u8 arity (1..=16), then arity × u32 alphabet cardinality
                 (each >= 1)
 table blobs (present iff flags bit 2 is set), once per blob:
                 u32 length, table bytes
+variant tags (present iff flags bit 3 is set):
+                u32 count (= the blob count), then per blob: u8 tag
+                (0 = normal, 1 = volatile, 2 = both)
 table fixups:   u32 count, then per fixup: u32 blob, u32 offset,
                 u32 table offset (into that blob's own table blob)
 bound calls:    u32 count, then per bound call: u32 blob, u32 offset,
@@ -220,17 +226,26 @@ invisible to cross-object resolution, so it can neither shadow nor be
 shadowed (`docs/pmt/language.md (visibility)`, `docs/pmt/stdlib.md`). Version-1
 object bytes (no locals) still decode under a later reader.
 
-Object format version 3 was added for generic-routine composition: it
-appends four record kinds — routine signatures, per-routine table blobs,
-table fixups, and bound calls. An object carrying any of them serializes as
-version 3; a plain PM-1 object, with none present, still serializes
-byte-for-byte as version 2. In practice `pmt compile`/`pmt asm` emit
-version 2 and `tmt compile`/`tmt asm` emit version 3, since every TM-1
-object carries at least a routine signature. A reader accepts 1..=3 and rejects a pre-version-3 object that sets
-either version-3 flag bit. The signature and table-blob sections are gated
-by flags bits 1 and 2; the table-fixup and bound-call sections are
-unconditional — a version-3 object always writes both counts, zero when the
-respective list is empty.
+Object format version 3 was added for generic-routine composition, with
+four record kinds — routine signatures, per-routine table blobs, table
+fixups, and bound calls. Build columns added a fifth kind later, the
+per-blob variant tags, alongside a program-volatile header bit; being
+later in time says nothing about where it sits on the wire, and the
+layout above places it third of the five. An
+object carrying any of them serializes as version 3; an object with none
+present still serializes byte-for-byte as version 2. In practice
+`tmt compile` emits version 3, since every routine it generates carries a
+signature, and so does `pmt compile`, since every `.pmc` compilation
+records build columns — even a program whose two columns are identical
+throughout tags each blob `both`. The version-2 shape is what an
+assembler still produces from text that asks for none of the version-3
+records: a `.pma` file with no `.volatile` directive, or a `.tma` file
+with no `.routine` signature, table section, or bound call. A reader
+accepts 1..=3 and rejects a pre-version-3 object that sets any
+version-3 flag bit. The signature, table-blob, and variant-tag
+sections are gated by flags bits 1, 2, and 3; the table-fixup and
+bound-call sections are unconditional — a version-3 object always writes
+both counts, zero when the respective list is empty.
 
 - **Routine signatures** state a generic routine's contract: the virtual
   tape arity — how many tapes the routine operates on, `1..=16` — and, per
@@ -250,6 +265,40 @@ respective list is empty.
   it and the symbol map between the two alphabets. A map pair flagged
   **one-way** is read-only: collapse is allowed and it is excluded from
   write-back.
+- **Variant tags** name each blob's **build column** — one `u8` per blob,
+  parallel to the blobs like the debug section, and carrying its own
+  explicit count so a length mismatch is a decode-time rejection rather
+  than a debug-build assertion. A PM-1 compilation builds every function
+  both ways (`docs/pmt/language.md (volatile programs)`), so a name whose
+  two builds differ contributes two adjacent blobs tagged `normal` and
+  `volatile`, and a name whose builds came out identical contributes one
+  blob tagged `both`, serving either program kind.
+
+**The program-volatile bit** (flags bit 4) is not a section: it records
+that this object's program is a volatile build, which the linker reads
+off the object defining the entry symbol to choose a column for every
+name (`docs/core.md (linking)`). The bit is deliberately **independent**
+of the tag section. An object may set it while carrying no tags at all —
+that is exactly what a hand-assembled volatile program looks like
+(`.volatile` before the first `.func`, no per-function directive) — and
+such a link is legal: every reached name then offers only the normal
+column and every one of them is counted as a fallback, which is the
+intended signal rather than a degenerate case.
+
+The **legacy rule is typed, not inferred**: an object with no variant
+section at all — one written before variant tags existed, one produced
+by `pmt asm` from directive-free text, one from an architecture with no
+build columns — reads as all-`normal`. It offers exactly one column, so
+a volatile program linking it takes that counted fallback instead of an
+error. The absence is stored as an absence (no stand-in vector of
+`normal` tags), which is what lets an object of the older shape keep its
+version-2 bytes.
+
+Compatibility is worth stating plainly: an object carrying variant
+records is MO version 3, and every `.pmo` `pmt compile` writes now
+carries them. Readers check the version field before decoding anything,
+so one that predates version 3 rejects such an object rather than
+misreading it — but it does reject it.
 
 The format layer validates **structure** only. It bounds-checks every
 field — arity in `1..=16`, cardinality non-zero, `caller_tape` below 16,
@@ -377,8 +426,10 @@ trimmed. 32 is a floor, so a group only ever widens past it, never below
 it — which is what keeps output unchanged for a group whose members all
 fit under it already. A group is the maximal run of lines that share one
 comment column; it ends at a blank line, an own-line comment printed at
-column 0 (below), a `.section`/`.func`/`.routine` directive, or a
-`.rept` block. A line with no trailing comment still belongs to its
+column 0 (below), a `.rept` block, or any structural directive — the
+formatter treats `.section`, `.func`, `.routine`, and `.volatile` alike
+there, as block structure rather than as grid lines. A line with no
+trailing comment still belongs to its
 group but contributes no width to it, and a `.rept` block's body prints
 verbatim rather than through this grid at all, so it contributes no
 width either. The column is not capped by the 80-column limit: a group
@@ -404,7 +455,8 @@ label on its own line unconditionally, regardless of length. `pmt fmt`
 treats both shapes as already canonical, so reformatting the output of
 either `pmt compile -S` or `pmt dis` is always a no-op. `pmt dis` output
 is always valid assembler input — round-tripping through `asm`
-reproduces the original bytes exactly.
+reproduces the original bytes exactly, build-column tags and the
+program-volatile bit included ("The `.volatile` directive" below).
 
 `pmt dis` accepts either binary. From a `.pmo`: real names come from the
 symbol table, code is shown per function, and call sites are named from
@@ -442,6 +494,116 @@ elsewhere in the toolchain), but the label grammar does not accept `::`
 or `.`, which is what lets the parser tell a label (`L1:`) apart from a
 namespaced/nested symbol reference without ambiguity.
 
+### The `.volatile` directive
+
+`.volatile` is a presence-form directive — no operand, no value — naming
+a **build column** (`docs/pmt/language.md (volatile programs)`). It has
+two legal placements, meaning different things:
+
+- **Directly after a `.func` line** it tags that block as the volatile
+  column. Absence is the normal column; there is no `.normal`.
+- **Before the first `.func`** it sets the object's program-volatile bit
+  — the header flag the linker reads off the entry-defining object to
+  pick a column for every name (the `.pmo` section above;
+  `docs/core.md (linking)`).
+
+Anywhere else is an error. "Directly after" means the next item: own-line
+comments are trivia and do not close the slot, but a label, an
+instruction, or a second `.volatile` does, and the complaint is that
+`.volatile` must directly follow its `.func`. A second file-level
+`.volatile` is a duplicate `.volatile`.
+
+A name may be defined **once per column**, which makes a bare/`.volatile`
+pair the only same-name pair one file may carry; two bare `.func f`
+blocks stay `duplicate-function` exactly as before. The two members of a
+pair must also agree on visibility: `.func f local` paired with a
+`.func f` is refused, because the linker pairs a name's columns only
+among exported ones and a half-local pair would half-vanish there.
+
+All three of those complaints — the two placement ones above and the
+visibility one — render as `syntax` (`docs/core.md (error codes)`). The
+directive introduces no error code of its own; the only coded diagnostic
+it changes is `duplicate-function`, which it makes column-aware rather
+than name-only.
+
+What an author controls, then, is four shapes:
+
+| The file writes | The object carries | A normal program links | A volatile program links |
+|---|---|---|---|
+| one bare `.func f` | one `normal` blob | it | it, counted as a fallback |
+| one `.func f` + `.volatile` | one `volatile` blob | it, counted as a fallback | it |
+| a pair with different bodies | a `normal` and a `volatile` blob | the bare one | the tagged one |
+| a pair with identical bodies | one `both` blob | it | it |
+
+The last row is the assembler's own dedup, mirroring the compiler's: a
+legal pair whose two blocks assemble to the same bytes and the same call
+sites collapses to one `both`-tagged blob. A single block is deliberately
+never auto-promoted to `both` — `both` is a **statement**, made by
+writing the function twice. Promoting a lone block would erase the
+fallback signal the first two rows exist to carry: a normal-only or
+volatile-only function would become unwritable. It would cost the text
+round trip too, since a single bare `.func f` would then assemble to a
+`both` blob, which disassembles as two blocks — text that no longer
+comes back as the text that produced it.
+
+`pmt dis` emits all of it — the program-bit line leads the dump, a
+tagged block carries the directive under its `.func`, and a `both` blob
+prints twice, bare first — so the text reassembles to the object it came
+from, byte for byte:
+
+```
+$ pmt compile -O1 two-v.pmc -o two-v.pmo
+$ pmt dis two-v.pmo > two-v.pma
+$ pmt asm two-v.pma -o rt.pmo && cmp two-v.pmo rt.pmo && echo identical
+identical
+$ cat two-v.pma
+.volatile
+.func main
+        wr      1
+        stp
+.func main
+.volatile
+        wr      1
+        wr      1
+        stp
+```
+
+(That is `volatile main() { mark; mark; }` at `-O1`: the normal column
+drops the idempotent second write, the gated column keeps it, and the
+object carries both plus the program bit.) The round trip is byte-exact
+without `-g`; a `-g` object's debug lines describe `.pmc` sources the
+disassembly does not have, so they do not survive the trip — the same
+declared exception that applies to every other debug side table.
+
+**The directive is selection metadata, not protection.** It says which
+column a blob belongs to and which kind of program this object builds.
+It says nothing about the body, which the assembler transcribes exactly
+as written either way. Hand-written assembly preserves the author's
+transactions on both architectures regardless of any directive: nothing
+after the assembler reorders, merges, or drops tape operations — PM-1's
+only post-assembly rewrite is the linker narrowing a call's width, and
+TM-1's mono stamping remaps symbols, never sequences. So a `.pma` file
+with no `.volatile` in it is not "an unprotected build"; it is a
+normal-column build of exactly the instructions it lists.
+
+**One footgun.** A `.volatile` block's calls bind the callee's volatile
+column. For a `local` callee — bound directly within the object, never
+through the linker's namespace — a missing volatile twin has nowhere to
+fall back to, so the reference becomes an external and the link fails
+with a bare `unresolved symbols: NAME`, which never mentions the column
+that was missing. Give a local helper both columns, or export it (an
+exported name falls back and is merely counted).
+
+**PM-1 only.** `.func` is a core directive both dialects share, but
+`.volatile` rides an assembler capability only the PM-1 dialect enables:
+`.tma` does not recognize the word at all, since TM-1 volatility is a
+property of a tape parameter rather than of a routine
+(`docs/tmt/language.md (volatile tapes)`). The framework also refuses to
+combine the directive with `.routine` signatures or table sections —
+merging build columns renumbers blobs, and those records are indexed by
+blob — a rule no shipped dialect can reach, since the one dialect with
+the directive has no table surface.
+
 ### Dialect version history
 
 - **0.1** — the v1 toolchain's dialect; the retroactive baseline the
@@ -451,9 +613,12 @@ namespaced/nested symbol reference without ambiguity.
   letters still legal). Symbol names in `.func` and jump/call operands are
   unaffected — the dotted/`::`-segmented grammar above still applies to
   them.
-- **0.3** — additive: the fused write+move mnemonics `wrl` and `wrr` join
-  the mnemonic set (each takes a one-element symbol vector like `wr`). No
-  existing program changes meaning; the accepted set only grew (`docs/pmt/isa.md`).
+- **0.3** — additive, two things. The fused write+move mnemonics `wrl`
+  and `wrr` join the mnemonic set (each takes a one-element symbol vector
+  like `wr`, `docs/pmt/isa.md`). And the `.volatile` directive joins the
+  directive set, in both placements ("The `.volatile` directive" above).
+  No existing program changes meaning; the accepted set only grew, and a
+  file that writes neither assembles to the bytes it always did.
 
 ## `.tma` — assembly text (TM-1)
 

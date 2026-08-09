@@ -5,16 +5,18 @@
 //! span-carrying, coded [`Diagnostic`]s — library code never prints
 //! (docs/pmt/cli.md).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use mtc_core::diagnostics::{Diagnostic, Span};
-use mtc_core::formats::object::ObjectFile;
+use mtc_core::formats::object::{
+    BlobDebug, BlobVariant, ObjectFile, Relocation, Symbol, SymbolDef,
+};
 
 use crate::codegen::{CodegenOptions, emit_program};
 use crate::cst::Cst;
 use crate::ir::IrProgram;
 use crate::lexer::{LexMode, Token};
-use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
+use crate::optimizer::{OptLevel, OptOptions, OptReport, gated_pass_names, optimize};
 use crate::parser::{FnDoc, Program};
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -95,6 +97,9 @@ pub enum CompileErrorKind {
     UnknownAttribute(String),
     /// A second `[deprecated]` attribute inside one run.
     DuplicateAttribute,
+    /// `volatile` on a definition other than the un-namespaced top-level
+    /// `main` — the offending definition's name.
+    VolatileNotOnMain(String),
 }
 
 /// Binds each [`CompileErrorKind`] variant to its stable code exactly
@@ -150,6 +155,7 @@ impl CompileErrorKind {
         CompileErrorKind::DocLineOrder => "doc-line-order",
         CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
         CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
+        CompileErrorKind::VolatileNotOnMain(_) => "volatile-not-on-main",
     }
 }
 
@@ -266,11 +272,32 @@ impl std::fmt::Display for CompileErrorKind {
             CompileErrorKind::DuplicateAttribute => {
                 write!(f, "duplicate `[deprecated]` attribute in the same run")
             }
+            CompileErrorKind::VolatileNotOnMain(name) => {
+                write!(
+                    f,
+                    "`volatile` is only allowed on the top-level `main` — remove it from `{name}`"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for CompileError {}
+
+/// Which build columns a compilation emits. Every function is built
+/// twice — the normal pipeline and the gated one a volatile program needs
+/// — unless the caller already knows which column will be linked
+/// (docs/pmt/language.md (volatile programs)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VariantColumns {
+    /// Both columns, deduped per function. The rule for anything that
+    /// outlives the invocation: an on-disk `.pmo` cannot know its future
+    /// program.
+    #[default]
+    Both,
+    NormalOnly,
+    VolatileOnly,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompileOptions {
@@ -287,6 +314,8 @@ pub struct CompileOptions {
     /// Capture per-stage IR snapshots (`--emit-ir=<stage>` backing):
     /// `"lowered"`, `"after:<pass>"` per changing pass, `"final"`.
     pub capture_ir: bool,
+    /// Which build columns to emit (default: both).
+    pub columns: VariantColumns,
 }
 
 /// Structured stage report — `pmt -v` renders it; the library never
@@ -299,15 +328,29 @@ pub struct CompileReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileOutput {
+    /// The ONE object every built column merges into: per function, a
+    /// single `Both`-tagged blob when the columns came out identical, else
+    /// the normal and volatile blobs adjacent under one name
+    /// (docs/formats.md (MO)).
     pub object: ObjectFile,
-    /// The generated assembly (`-S` output). The object is assembled from
-    /// exactly this text, so the code bytes can never disagree; under `-g`
-    /// the object's debug LINES are additionally remapped to `.pmc`
-    /// sources, so `object != assemble(pma, true)` on that side table.
+    /// The generated assembly (`-S` output) of the column this compile
+    /// RENDERS — the normal one, unless only the volatile column was asked
+    /// for. Each column is assembled from its own listing, so the code
+    /// bytes of the rendered column can never disagree with the object's;
+    /// the object as a whole additionally carries the other column's blobs
+    /// and the variant tags, so `object != assemble(pma, …)` for a
+    /// two-column build. Under `-g` the object's debug LINES are also
+    /// remapped to `.pmc` sources, so they differ on that side table too.
     pub pma: String,
-    /// The FINAL CFG (post-optimizer at -O1; the lowered CFG at -O0).
+    /// The FINAL CFG of the same column `pma` renders (post-optimizer at
+    /// -O1; the lowered CFG at -O0).
     pub ir: IrProgram,
+    /// The volatile column's final CFG whenever that column was built —
+    /// including a volatile-only build, where it equals `ir`. `None` only
+    /// when the volatile column was skipped.
+    pub ir_volatile: Option<IrProgram>,
     /// Per-stage IR snapshots when `capture_ir` was set; empty otherwise.
+    /// One column's — the same one `ir` and `pma` describe.
     pub ir_snapshots: Vec<(String, IrProgram)>,
     pub report: CompileReport,
 }
@@ -496,31 +539,139 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
     }
 }
 
-/// `.pmc` source → object file: lex → parse → lower → emit `.pma` →
-/// assemble. Assembly failure of GENERATED text is a compiler bug and
-/// reports as `CompileErrorKind::Internal`.
+/// `.pmc` source → object file: lex → parse → lower → optimize each
+/// column → emit `.pma` → assemble → merge. Assembly failure of GENERATED
+/// text is a compiler bug and reports as `CompileErrorKind::Internal`.
+///
+/// One lowering feeds BOTH columns (docs/pmt/language.md (volatile
+/// programs)): the normal one is today's pipeline exactly, the volatile
+/// one runs it with the gated passes disabled on top of the caller's own
+/// `--fno-` set. Functions whose two columns assemble identically dedup to
+/// a single `Both`-tagged blob.
 pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, CompileError> {
     let analysis = analyze(source)?;
     let AnalysisOutput {
-        mut ir,
+        ast,
+        ir: lowered,
         diagnostics,
         ..
     } = analysis;
+    // The program bit records what the SOURCE declared, never which
+    // columns this invocation happened to build: a single-column build of
+    // a plain program is still a non-volatile program. Only the top-level
+    // `main` can carry the modifier (the parser rejects it anywhere else).
+    let program_volatile = ast.functions.iter().any(|f| f.volatile);
+
+    let build_normal = !matches!(options.columns, VariantColumns::VolatileOnly);
+    let build_volatile = !matches!(options.columns, VariantColumns::NormalOnly);
+
     let mut ir_snapshots = Vec::new();
     if options.capture_ir {
-        ir_snapshots.push(("lowered".to_string(), ir.clone()));
+        ir_snapshots.push(("lowered".to_string(), lowered.clone()));
     }
+    let user_disabled: HashSet<String> = options.disabled_passes.iter().cloned().collect();
+    let mut gated_disabled = user_disabled.clone();
+    gated_disabled.extend(gated_pass_names().iter().map(|name| (*name).to_string()));
+
+    // `pma`, `ir`, `ir_snapshots` and the opt report all describe the
+    // PRIMARY column — normal unless only the volatile one was asked for.
+    // The secondary column's snapshots are discarded so the `--emit-ir`
+    // stage list stays one column's.
+    let mut discarded_snapshots = Vec::new();
+    let normal = if build_normal {
+        Some(build_column(
+            lowered.clone(),
+            &options,
+            &user_disabled,
+            options.capture_ir,
+            &mut ir_snapshots,
+        )?)
+    } else {
+        None
+    };
+    let volatile = if build_volatile {
+        let primary = !build_normal;
+        let snapshots = if primary {
+            &mut ir_snapshots
+        } else {
+            &mut discarded_snapshots
+        };
+        Some(build_column(
+            lowered,
+            &options,
+            &gated_disabled,
+            options.capture_ir && primary,
+            snapshots,
+        )?)
+    } else {
+        None
+    };
+
+    let (object, pma, ir, ir_volatile, opt) = match (normal, volatile) {
+        (Some(n), Some(v)) => (
+            merge_columns(&n.object, &v.object, program_volatile)?,
+            n.pma,
+            n.ir,
+            Some(v.ir),
+            n.opt,
+        ),
+        (Some(n), None) => (
+            tag_single_column(n.object, BlobVariant::Normal, program_volatile),
+            n.pma,
+            n.ir,
+            None,
+            n.opt,
+        ),
+        (None, Some(v)) => (
+            tag_single_column(v.object, BlobVariant::Volatile, program_volatile),
+            v.pma,
+            v.ir.clone(),
+            Some(v.ir),
+            v.opt,
+        ),
+        (None, None) => unreachable!("every VariantColumns builds at least one column"),
+    };
+
+    Ok(CompileOutput {
+        object,
+        pma,
+        ir,
+        ir_volatile,
+        ir_snapshots,
+        report: CompileReport { diagnostics, opt },
+    })
+}
+
+/// One build column's outputs.
+struct Column {
+    ir: IrProgram,
+    pma: String,
+    object: ObjectFile,
+    opt: OptReport,
+}
+
+/// Optimize one copy of the lowered CFG under `disabled`, emit its `.pma`,
+/// assemble it, and remap its debug lines with ITS OWN line map. The two
+/// columns number their listings differently, so the remap belongs here,
+/// per column, before any merge can compare debug side tables.
+fn build_column(
+    mut ir: IrProgram,
+    options: &CompileOptions,
+    disabled: &HashSet<String>,
+    capture: bool,
+    snapshots: &mut Vec<(String, IrProgram)>,
+) -> Result<Column, CompileError> {
     let opt = optimize(
         &mut ir,
         &OptOptions {
             level: options.opt_level,
-            disabled: options.disabled_passes.iter().cloned().collect(),
-            capture: options.capture_ir,
+            disabled: disabled.clone(),
+            capture,
         },
-        &mut ir_snapshots,
+        snapshots,
     );
-    if options.capture_ir {
-        ir_snapshots.push(("final".to_string(), ir.clone()));
+    if capture {
+        snapshots.push(("final".to_string(), ir.clone()));
     }
     let pma = emit_program(
         &ir,
@@ -536,12 +687,254 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
     if options.debug_info {
         remap_debug_lines(&mut object, &pma.line_map);
     }
-    Ok(CompileOutput {
-        object,
-        pma: pma.text,
+    Ok(Column {
         ir,
-        ir_snapshots,
-        report: CompileReport { diagnostics, opt },
+        pma: pma.text,
+        object,
+        opt,
+    })
+}
+
+/// Tag a single-column object: every blob is that column, and the program
+/// bit still comes from the source.
+fn tag_single_column(
+    mut object: ObjectFile,
+    tag: BlobVariant,
+    program_volatile: bool,
+) -> ObjectFile {
+    object.variants = Some(vec![tag; object.blobs.len()]);
+    object.program_volatile = program_volatile;
+    object
+}
+
+/// A compiler-bug fatal at no particular source span.
+fn internal(message: String) -> CompileError {
+    CompileError {
+        span: Span::point(0, 0),
+        kind: CompileErrorKind::Internal(message),
+    }
+}
+
+/// Everything about one blob that decides whether the two columns built
+/// the same function: its code, its relocations as `(offset, callee NAME)`
+/// — the two columns number their symbol tables independently, so indices
+/// are not comparable — and its debug side table.
+type BlobRecord<'a> = (&'a [u8], Vec<(u32, &'a str)>, Option<&'a BlobDebug>);
+
+fn blob_record(object: &ObjectFile, blob: usize) -> BlobRecord<'_> {
+    let mut relocations: Vec<(u32, &str)> = object
+        .relocations
+        .iter()
+        .filter(|r| r.blob as usize == blob)
+        .map(|r| (r.offset, object.symbols[r.symbol as usize].name.as_str()))
+        .collect();
+    relocations.sort_unstable();
+    (
+        object.blobs[blob].as_slice(),
+        relocations,
+        object.debug.as_ref().map(|per_blob| &per_blob[blob]),
+    )
+}
+
+/// Merge the two assembled columns into one object.
+///
+/// Both columns come from one lowering and no pass adds, drops or reorders
+/// functions, so blob `i` is the same function in both — the merge pairs
+/// by index and checks that rather than trusting it. Per function: kept as
+/// ONE `Both`-tagged blob under one symbol, or emitted as the normal blob
+/// then the volatile blob adjacent, with two symbols carrying the same
+/// name and the same visibility.
+///
+/// Deduping is **transitive**, not per function. A function may be `Both`
+/// only if its own two records match AND every function it calls inside
+/// this object is `Both` too. Record equality alone is not enough: a
+/// function that merely calls others is byte-identical in both columns and
+/// names the same callees, so it would dedup — and then its single blob
+/// would have to bind ONE column of a callee that split, silently pinning
+/// a volatile program's entry to the normal call graph. Demotion
+/// propagates to a fixpoint (it only ever removes `Both`, so it
+/// terminates); the cost is more splitting, never a wrong edge. Calls that
+/// leave the object are excluded — those resolve by name at link time.
+/// Self-recursion is not a demotion: a `Both` function calling itself
+/// still only references `Both`.
+///
+/// Relocations are rewritten **column-coherent**: a call from the normal
+/// column binds the callee's normal symbol, a call from the volatile
+/// column binds its volatile one (a deduped callee has just the one). That
+/// is what keeps a volatile program's whole call graph gated — the
+/// linker's local-symbol path binds a relocation's blob directly
+/// (docs/core.md (linking)).
+fn merge_columns<'a>(
+    normal: &'a ObjectFile,
+    volatile: &'a ObjectFile,
+    program_volatile: bool,
+) -> Result<ObjectFile, CompileError> {
+    for (which, object) in [("normal", normal), ("volatile", volatile)] {
+        if object.signatures.is_some()
+            || object.table_blobs.is_some()
+            || !object.table_fixups.is_empty()
+            || !object.bound_calls.is_empty()
+        {
+            return Err(internal(format!(
+                "{which} column carries table or signature records PM-1 never emits"
+            )));
+        }
+    }
+    let count = normal.blobs.len();
+    if count != volatile.blobs.len() {
+        return Err(internal(format!(
+            "columns disagree on function count: normal {count}, volatile {}",
+            volatile.blobs.len()
+        )));
+    }
+
+    // Pass 1: per-function record equality, then demote to a fixpoint any
+    // candidate that calls a function which is not itself deduped.
+    let mut deduped: Vec<bool> = (0..count)
+        .map(|index| blob_record(normal, index) == blob_record(volatile, index))
+        .collect();
+    let index_of: HashMap<&str, usize> = (0..count)
+        .map(|index| (normal.symbols[index].name.as_str(), index))
+        .collect();
+    // Intra-object callees per function. A dedup candidate's two columns
+    // reference the same names by construction (the record comparison
+    // includes relocations keyed by callee name), so reading the normal
+    // column's is enough for every function whose status can still change.
+    let callees: Vec<Vec<usize>> = (0..count)
+        .map(|index| {
+            let mut targets: Vec<usize> = normal
+                .relocations
+                .iter()
+                .filter(|r| r.blob as usize == index)
+                .filter_map(|r| {
+                    index_of
+                        .get(normal.symbols[r.symbol as usize].name.as_str())
+                        .copied()
+                })
+                .collect();
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        })
+        .collect();
+    loop {
+        let mut demoted = false;
+        for (index, targets) in callees.iter().enumerate() {
+            if deduped[index] && targets.iter().any(|&callee| !deduped[callee]) {
+                deduped[index] = false;
+                demoted = true;
+            }
+        }
+        if !demoted {
+            break;
+        }
+    }
+
+    let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(count);
+    let mut variants: Vec<BlobVariant> = Vec::with_capacity(count);
+    let mut symbols: Vec<Symbol> = Vec::with_capacity(count);
+    let mut debug: Option<Vec<BlobDebug>> = normal.debug.as_ref().map(|_| Vec::new());
+    // Callee name -> (normal symbol index, volatile symbol index); the two
+    // are equal for a deduped function.
+    let mut defined: HashMap<&str, (u32, u32)> = HashMap::new();
+    // Where each merged blob came from, for the relocation pass.
+    let mut sources: Vec<(bool /* from the volatile column */, usize)> = Vec::new();
+
+    for (index, &keep) in deduped.iter().enumerate() {
+        let symbol = &normal.symbols[index];
+        let blob = match symbol.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } => blob as usize,
+            SymbolDef::External => usize::MAX,
+        };
+        if blob != index || volatile.symbols[index].name != symbol.name {
+            return Err(internal(format!(
+                "columns disagree on function {index}: normal `{}`, volatile `{}`",
+                symbol.name, volatile.symbols[index].name
+            )));
+        }
+
+        let mut push = |from_volatile: bool, tag: BlobVariant| -> u32 {
+            let object = if from_volatile { volatile } else { normal };
+            let merged = blobs.len() as u32;
+            blobs.push(object.blobs[index].clone());
+            variants.push(tag);
+            if let Some(per_blob) = debug.as_mut() {
+                per_blob
+                    .push(object.debug.as_ref().expect("both columns carry debug")[index].clone());
+            }
+            let symbol_index = symbols.len() as u32;
+            symbols.push(Symbol {
+                name: symbol.name.clone(),
+                def: match symbol.def {
+                    SymbolDef::Local { .. } => SymbolDef::Local { blob: merged },
+                    _ => SymbolDef::Defined { blob: merged },
+                },
+            });
+            sources.push((from_volatile, index));
+            symbol_index
+        };
+
+        if keep {
+            let only = push(false, BlobVariant::Both);
+            defined.insert(symbol.name.as_str(), (only, only));
+        } else {
+            let n = push(false, BlobVariant::Normal);
+            let v = push(true, BlobVariant::Volatile);
+            defined.insert(symbol.name.as_str(), (n, v));
+        }
+    }
+
+    // External symbols are minted in first-reference order over the merged
+    // blobs — the order re-assembling the merged listing would produce.
+    let mut relocations: Vec<Relocation> = Vec::new();
+    let mut externals: HashMap<&str, u32> = HashMap::new();
+    for (merged, &(from_volatile, index)) in sources.iter().enumerate() {
+        let object = if from_volatile { volatile } else { normal };
+        let mut per_blob: Vec<&Relocation> = object
+            .relocations
+            .iter()
+            .filter(|r| r.blob as usize == index)
+            .collect();
+        per_blob.sort_by_key(|r| r.offset);
+        for relocation in per_blob {
+            let name = object.symbols[relocation.symbol as usize].name.as_str();
+            let symbol = match defined.get(name) {
+                Some(&(n, v)) => {
+                    if from_volatile {
+                        v
+                    } else {
+                        n
+                    }
+                }
+                None => *externals.entry(name).or_insert_with(|| {
+                    let fresh = symbols.len() as u32;
+                    symbols.push(Symbol {
+                        name: name.to_string(),
+                        def: SymbolDef::External,
+                    });
+                    fresh
+                }),
+            };
+            relocations.push(Relocation {
+                blob: merged as u32,
+                offset: relocation.offset,
+                symbol,
+            });
+        }
+    }
+
+    Ok(ObjectFile {
+        arch: normal.arch,
+        symbols,
+        blobs,
+        relocations,
+        debug,
+        signatures: None,
+        table_blobs: None,
+        table_fixups: Vec::new(),
+        bound_calls: Vec::new(),
+        variants: Some(variants),
+        program_volatile,
     })
 }
 
@@ -991,7 +1384,7 @@ mod tests {
 
     #[test]
     fn error_codes_are_pairwise_distinct() {
-        // One representative kind per variant (all 23), in declaration
+        // One representative kind per variant (all 24), in declaration
         // order. The `code_registry!` expansion already ties every
         // variant to a `CODES` row structurally (one list feeds both
         // the match and the table); this witness list additionally
@@ -1030,6 +1423,7 @@ mod tests {
             CompileErrorKind::DocLineOrder,
             CompileErrorKind::UnknownAttribute("x".into()),
             CompileErrorKind::DuplicateAttribute,
+            CompileErrorKind::VolatileNotOnMain("x".into()),
         ];
         let witnessed: Vec<&str> = kinds.iter().map(|k| k.code()).collect();
         assert_eq!(
@@ -1092,7 +1486,14 @@ mod tests {
     fn object_equals_assembly_of_the_emitted_pma() {
         let out = compile("f() { 1: right; check(1, !); }", CompileOptions::default()).unwrap();
         let direct = crate::asm::assemble(&out.pma, false).unwrap();
-        assert_eq!(out.object, direct);
+        // At -O0 the two build columns are identical by construction, so
+        // they dedup and the object holds exactly the emitted listing's
+        // blobs — plus the variant tags, which a directive-free listing
+        // does not carry.
+        assert_eq!(out.object.variants, Some(vec![BlobVariant::Both]));
+        let mut object = out.object;
+        object.variants = None;
+        assert_eq!(object, direct);
     }
 
     #[test]

@@ -192,12 +192,22 @@ impl std::fmt::Display for CallMech {
     }
 }
 
+/// The BFS entry symbol a link resolves from when [`LinkOptions::entry`]
+/// is `None` (docs/core.md (linking)).
+///
+/// Exported because the choice is observable outside the link: a caller
+/// that has to know WHICH object supplies the entry — and therefore which
+/// object's header the link reads its per-object flags from — must look up
+/// the same name this does, and a private literal here would let the two
+/// drift apart silently.
+pub const DEFAULT_ENTRY: &str = "main";
+
 /// Linker knobs; `relax` (default `true`) enables the far→short call
 /// relaxation fixpoint (docs/core.md (relaxation); `--no-relax` opts out).
 #[derive(Debug, Clone)]
 pub struct LinkOptions {
     pub relax: bool,
-    /// BFS entry symbol; `None` selects the default `"main"`. Threaded to
+    /// BFS entry symbol; `None` selects [`DEFAULT_ENTRY`]. Threaded to
     /// `resolve` as the reachability root (the `tmt link --entry` flag).
     pub entry: Option<String>,
     /// The bound-call lowering mechanism the composition engine applies
@@ -328,6 +338,30 @@ pub struct LinkReport {
     /// Extra match rows produced by one-way collapse expansion in mono
     /// stamping (the growth beyond one row per original); 0 in frames mode.
     pub expanded_rows: u32,
+    /// Sorted names that linked the build column NOT matching the
+    /// program's volatile bit, because the wanted one was absent
+    /// (docs/core.md (linking)). Every name here IS in the image — the
+    /// counter reports what shipped, not what the namespace held.
+    ///
+    /// The counter is SYMMETRIC, because column selection is: a name that
+    /// offers only the volatile column is counted for a normal program
+    /// exactly as a normal-only name is counted for a volatile one. So
+    /// this is empty precisely when every reached name offers the column
+    /// [`LinkReport::program_volatile`] selects — never "empty whenever
+    /// the bit is clear". A consumer wording a message about it must read
+    /// that field rather than assume a direction.
+    ///
+    /// Note the bit is independent of variant records: an object may set
+    /// it while carrying no tags at all (docs/formats.md (MO)), which is
+    /// what a hand-assembled volatile program looks like — every name then
+    /// offers only the normal column, so EVERY reached name is counted.
+    /// That is the intended signal, not a degenerate case.
+    pub variant_fallbacks: Vec<String>,
+    /// The volatile bit this link resolved with: the bit carried by the
+    /// object defining the entry symbol, which selects the column every
+    /// name resolves to (docs/core.md (linking)). Reported so a consumer
+    /// can say which column a counted fallback was missing.
+    pub program_volatile: bool,
 }
 
 #[derive(Debug)]
@@ -346,7 +380,7 @@ pub fn link(
     libraries: &[ObjectFile],
     options: LinkOptions,
 ) -> Result<LinkOutput, LinkError> {
-    let entry = options.entry.as_deref().unwrap_or("main");
+    let entry = options.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
     let resolved = resolve::resolve(objects, libraries, entry)?;
 
     let arch = objects
@@ -450,6 +484,8 @@ pub fn link(
     // one concatenated sort is enough — no merge, and no risk of dropping a
     // genuine duplicate, since `dedup` only collapses ADJACENT equal
     // strings, which a sort already guarantees are adjacent.
+    let variant_fallbacks = resolved.variant_fallbacks;
+    let program_volatile = resolved.program_volatile;
     let mut dropped = resolved.dropped;
     dropped.extend(orphaned);
     dropped.sort();
@@ -472,6 +508,8 @@ pub fn link(
             dedup_savings: stats.dedup_savings,
             synthesized_trap_rows: stats.synthesized_trap_rows,
             expanded_rows: stats.expanded_rows,
+            variant_fallbacks,
+            program_volatile,
         },
     })
 }

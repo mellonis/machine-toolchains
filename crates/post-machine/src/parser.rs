@@ -16,6 +16,19 @@ pub const RESERVED: [&str; 8] = [
     "goto", "check", "left", "right", "mark", "unmark", "halt", "debugger",
 ];
 
+/// True for every [`RESERVED`] command word AND for `volatile` — unlike
+/// the `RESERVED` vocabulary, `volatile` is not a statement keyword (it
+/// never starts a top-level statement the way `goto`/`left`/… do); it is
+/// reserved from naming a function or namespace ONLY. This is the check
+/// the two definition-name sites (`function`'s own name, a
+/// `namespace NAME {`'s name) run; it is never used for the modifier's
+/// own contextual-keyword lookahead (`Parser::peek_is_volatile_modifier`),
+/// which disambiguates the modifier from the (rejected) literal name in
+/// the first place.
+fn is_reserved_definition_name(name: &str) -> bool {
+    RESERVED.contains(&name) || name == "volatile"
+}
+
 /// The `.pmc` language acceptance-contract version (docs/pmt/language.md):
 /// pre-1.0 the version is 0.N and N bumps on ANY grammar change; at a
 /// declared 1.0 the axes activate (major = breaking, minor = additive).
@@ -25,9 +38,12 @@ pub const RESERVED: [&str; 8] = [
 /// made this 0.2 (the v1 grammar is retroactively 0.1). Doc lines (`?`)
 /// and attention lines (`!`) — plus the accompanying acceptance change
 /// that a line-leading `!` is always an attention line, never a
-/// successor — made this 0.3 (docs/pmt/language.md "Doc lines and attention
-/// lines").
-pub const PMC_LANG_VERSION: &str = "0.3";
+/// successor — made this 0.3 (docs/pmt/language.md "Doc lines and
+/// attention lines"). Reserving `volatile` and accepting it as the
+/// leading modifier of the un-namespaced top-level `main` — everywhere
+/// else it is either a reserved name or `VolatileNotOnMain` — made this
+/// 0.4.
+pub const PMC_LANG_VERSION: &str = "0.4";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
@@ -78,6 +94,12 @@ pub struct Function {
     pub body: Vec<Statement>,
     /// `export` (contextual keyword) or `main` (always exported).
     pub exported: bool,
+    /// The `volatile` modifier: `VolatileNotOnMain` rejects it everywhere
+    /// except the un-namespaced top-level `main`, so by the time a
+    /// `Function` exists this is `true` for at most that one definition
+    /// and `false` for every other. Unlike `exported`, nothing folds into
+    /// it — the parser only ever copies the written token through.
+    pub volatile: bool,
     /// Nesting is always local; flatten computes this for top-level
     /// functions as `!exported`.
     pub local: bool,
@@ -365,8 +387,11 @@ fn lower_items(
 /// body order) and, like the pre-C1 parser, carry an EMPTY `ns` — flatten
 /// resolves nesting through the top-level ancestor. `exported` is copied
 /// from the CST (the caller stamped top-level `main`'s auto-export);
-/// nested functions are never exported. `doc` is [`reduce_doc_run`] over
-/// the CST's bound `doc_run`.
+/// nested functions are never exported. `volatile` is copied straight
+/// from `has_volatile` — by the time a `FunctionCst` reaches here the
+/// parser has already rejected every illegal carrier (`VolatileNotOnMain`),
+/// so a `true` here can only be the un-namespaced top-level `main`. `doc`
+/// is [`reduce_doc_run`] over the CST's bound `doc_run`.
 fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
     let mut body = Vec::new();
     let mut nested = Vec::new();
@@ -389,6 +414,7 @@ fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
         name_span: f.name_span,
         body,
         exported: f.exported,
+        volatile: f.has_volatile,
         local: false,
         nested,
         ns: ns.to_vec(),
@@ -772,25 +798,51 @@ impl Parser<'_> {
         true
     }
 
-    /// True iff the current position starts a nested function definition
-    /// (`IDENT ( ) {` — visibility-only nesting): shared by the doc-run
-    /// dangling check and the body loop's own nested-definition
-    /// dispatch, so both read the identical shape. Read-only.
-    fn next_is_nested_function_start(&self) -> bool {
-        matches!(&self.peek().kind, TokenKind::Ident(w)
-                if !RESERVED.contains(&w.as_str()))
+    /// True iff the current position is the `volatile` contextual keyword
+    /// used as a modifier — `volatile` followed by another identifier.
+    /// Mirrors `export`'s own keyword-vs-name disambiguation (`export` +
+    /// identifier = modifier, `export` + `(` = a function literally
+    /// named `export`) — but unlike `export`, `volatile` + `(` is never
+    /// a legal name (`is_reserved_definition_name` rejects it in
+    /// `function`'s own name check), so no separate `KeywordNeedsName`
+    /// hint case is needed the way `namespace {`/`use {`/`export {}`
+    /// needed one. Shared by the top-level header's own consumption, the
+    /// nested-function-start predicate below, and the nested dispatch's
+    /// own consumption — all three need the identical lookahead. Peek
+    /// only; never advances `self.pos`.
+    fn peek_is_volatile_modifier(&self) -> bool {
+        matches!(&self.peek().kind, TokenKind::Ident(w) if w == "volatile")
             && matches!(
                 self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                Some(TokenKind::LParen)
+                Some(TokenKind::Ident(_))
             )
-            && matches!(
-                self.tokens.get(self.pos + 2).map(|t| &t.kind),
-                Some(TokenKind::RParen)
-            )
-            && matches!(
-                self.tokens.get(self.pos + 3).map(|t| &t.kind),
-                Some(TokenKind::LBrace)
-            )
+    }
+
+    /// True iff the current position starts a nested function definition
+    /// (`IDENT ( ) {` — visibility-only nesting), optionally preceded by
+    /// the `volatile` modifier (`volatile IDENT ( ) {`). The modifier is
+    /// syntactically legal here — nesting still counts as a
+    /// nested-function start so parsing (and doc-run attachment)
+    /// proceeds exactly as it would without it — but the body loop's own
+    /// dispatch always rejects it afterward with `VolatileNotOnMain`,
+    /// since a nested definition is never the top-level `main`. Shared
+    /// by the doc-run dangling check and the body loop's own
+    /// nested-definition dispatch. Read-only.
+    fn next_is_nested_function_start(&self) -> bool {
+        let offset = usize::from(self.peek_is_volatile_modifier());
+        matches!(
+            self.tokens.get(self.pos + offset).map(|t| &t.kind),
+            Some(TokenKind::Ident(w)) if !RESERVED.contains(&w.as_str())
+        ) && matches!(
+            self.tokens.get(self.pos + offset + 1).map(|t| &t.kind),
+            Some(TokenKind::LParen)
+        ) && matches!(
+            self.tokens.get(self.pos + offset + 2).map(|t| &t.kind),
+            Some(TokenKind::RParen)
+        ) && matches!(
+            self.tokens.get(self.pos + offset + 3).map(|t| &t.kind),
+            Some(TokenKind::LBrace)
+        )
     }
 
     /// One namespace level's item loop, building `TopItem`s in source
@@ -1050,7 +1102,7 @@ impl Parser<'_> {
                     unreachable!("checked above");
                 };
                 let name = name.clone();
-                if RESERVED.contains(&name.as_str()) {
+                if is_reserved_definition_name(&name) {
                     return Err(Self::err_at(
                         &name_tok,
                         CompileErrorKind::ReservedName {
@@ -1126,10 +1178,23 @@ impl Parser<'_> {
                 });
                 continue;
             }
-            // Contextual keyword: `export` + identifier = exported def;
-            // `export` + `(` is a function NAMED export.
+            // Contextual keyword: `volatile` + identifier = the volatile
+            // modifier; `volatile` + `(` is a function literally NAMED
+            // `volatile` — `function`'s own name check rejects that as a
+            // reserved name, so it is never treated as the modifier
+            // here. Fixed order: `volatile` precedes `export` when both
+            // are written.
             let fn_saved = self.prev_end_line;
             let fn_line = self.peek().line;
+            let volatile_tok = if self.peek_is_volatile_modifier() {
+                let tok = self.peek().clone();
+                self.bump();
+                Some(tok)
+            } else {
+                None
+            };
+            // Contextual keyword: `export` + identifier = exported def;
+            // `export` + `(` is a function NAMED export.
             let export_start = if matches!(&self.peek().kind, TokenKind::Ident(w) if w == "export")
                 && matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
@@ -1142,11 +1207,16 @@ impl Parser<'_> {
                 None
             };
             let exported = export_start.is_some();
-            // Threaded through so `FunctionCst::span` starts at `export`
-            // (the header's true first token) rather than the name — see
-            // `cst.rs`'s `FunctionCst::span` doc. `doc_run` is empty
-            // unless the loop above just collected and validated one.
-            let mut f = self.function(export_start, doc_run)?;
+            // Threaded through so `FunctionCst::span` starts at the
+            // earliest header token written (`volatile` if present, else
+            // `export`) rather than the name — see `cst.rs`'s
+            // `FunctionCst::span` doc. `doc_run` is empty unless the loop
+            // above just collected and validated one.
+            let header_start = volatile_tok
+                .as_ref()
+                .map(|t| t.span().start)
+                .or(export_start);
+            let mut f = self.function(header_start, doc_run)?;
             // The literal keyword presence — unlike `exported` below, this
             // does NOT
             // fold in `main`'s auto-export.
@@ -1154,6 +1224,18 @@ impl Parser<'_> {
             // Only the un-namespaced top-level `main` auto-exports (and is
             // the entry); a namespaced `main` is an ordinary function.
             f.exported = exported || (ns.is_empty() && f.name == "main");
+            f.has_volatile = volatile_tok.is_some();
+            // `volatile` is legal ONLY on the un-namespaced top-level
+            // `main` — checked before the duplicate-name checks below so
+            // the more specific rule is the one that surfaces.
+            if let Some(tok) = &volatile_tok
+                && !(ns.is_empty() && f.name == "main")
+            {
+                return Err(Self::err_at(
+                    tok,
+                    CompileErrorKind::VolatileNotOnMain(f.name.clone()),
+                ));
+            }
             if self.declared_fns.contains(&(ns.to_vec(), f.name.clone())) {
                 return Err(CompileError {
                     span: mtc_core::diagnostics::Span::point(f.line, f.col),
@@ -1186,20 +1268,24 @@ impl Parser<'_> {
         }
     }
 
-    // `export_start`: the `export` keyword's span start when the caller
-    // already consumed a leading `export` for this function (top-level
-    // only — a nested definition passes `None`, `NestedExport` bars a
-    // nested `export` before this is ever called). Threaded in rather
-    // than re-detected here because `top_items` already consumed the
-    // token; `FunctionCst::span` starts here when present, at the name
-    // token otherwise (cst.rs's `FunctionCst::span` doc). `doc_run`: the
-    // run the caller already collected and validated as bound to THIS
-    // declaration (empty when undocumented) — this function only stores
-    // it, it never collects one itself (the caller owns the "what comes
-    // next" dispatch a run's dangling check depends on).
+    // `header_start`: the earliest header modifier's span start when the
+    // caller already consumed one for this function — `volatile`'s start
+    // if a leading `volatile` was consumed (top level or nested — both
+    // paths thread it; `VolatileNotOnMain` is decided by the CALLER once
+    // this returns), else `export`'s start when a leading `export` was
+    // consumed (top level only — a nested definition passes `None` for
+    // this half, `NestedExport` bars a nested `export` before this is
+    // ever called). Threaded in rather than re-detected here because the
+    // caller already consumed the token(s); `FunctionCst::span` starts
+    // here when present, at the name token otherwise (cst.rs's
+    // `FunctionCst::span` doc). `doc_run`: the run the caller already
+    // collected and validated as bound to THIS declaration (empty when
+    // undocumented) — this function only stores it, it never collects one
+    // itself (the caller owns the "what comes next" dispatch a run's
+    // dangling check depends on).
     fn function(
         &mut self,
-        export_start: Option<Pos>,
+        header_start: Option<Pos>,
         doc_run: Vec<DocRunItem>,
     ) -> Result<FunctionCst, CompileError> {
         let name_tok = self.peek().clone();
@@ -1207,7 +1293,7 @@ impl Parser<'_> {
             return Err(Self::expected(&name_tok, "a function name"));
         };
         let name = name.clone();
-        if RESERVED.contains(&name.as_str()) {
+        if is_reserved_definition_name(&name) {
             return Err(Self::err_at(
                 &name_tok,
                 CompileErrorKind::ReservedName {
@@ -1293,9 +1379,27 @@ impl Parser<'_> {
             } else {
                 Vec::new()
             };
-            // Nested definition: IDENT ( ) {  — visibility-only nesting.
+            // Nested definition: `[volatile] IDENT ( ) {` — visibility-only
+            // nesting. A leading `volatile` is syntactically part of the
+            // same shape but always illegal here — nesting can never be
+            // the top-level `main` — so it is rejected immediately, the
+            // same way `NestedExport` below rejects a leading `export`
+            // without parsing the rest of the definition first.
             let is_nested_def = self.next_is_nested_function_start();
             if is_nested_def {
+                if self.peek_is_volatile_modifier() {
+                    let tok = self.peek().clone();
+                    // The shape `next_is_nested_function_start` just
+                    // confirmed guarantees an identifier right after
+                    // `volatile` here.
+                    let TokenKind::Ident(name) = &self.tokens[self.pos + 1].kind else {
+                        unreachable!("next_is_nested_function_start confirmed an identifier here");
+                    };
+                    return Err(Self::err_at(
+                        &tok,
+                        CompileErrorKind::VolatileNotOnMain(name.clone()),
+                    ));
+                }
                 let nested_saved = self.prev_end_line;
                 let nested_line = self.peek().line;
                 // Nested definitions can never carry a leading `export`
@@ -1403,9 +1507,10 @@ impl Parser<'_> {
             line: name_tok.line,
             col: name_tok.col,
             span: Span {
-                start: export_start.unwrap_or_else(|| name_tok.span().start),
+                start: header_start.unwrap_or_else(|| name_tok.span().start),
                 end: close_span.end,
             },
+            has_volatile: false,
             exported: false,
             has_export: false,
             body,
@@ -2345,6 +2450,37 @@ main() {
         // together the two assertions in this test cover both cases.
     }
 
+    /// The CST-level counterpart to the `volatile`/`export` parser tests
+    /// below: `FunctionCst::span` starts at `volatile` (not `export`, not
+    /// the name) when a leading `volatile` was written, mirroring how
+    /// `function_and_namespace_extent_spans` pins `export`'s own extent
+    /// start — and `has_volatile` records the token losslessly, the same
+    /// way `has_export` does, for the formatter to read.
+    #[test]
+    fn volatile_extent_and_has_volatile_are_recorded_on_the_cst() {
+        use crate::cst::TopKind;
+
+        let tokens = lex("volatile main() {\n    mark;\n}\n").unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let TopKind::Function(f) = &cst.items[0].kind else {
+            panic!("expected a function item");
+        };
+        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "volatile", not "main"
+        assert!(f.has_volatile);
+        assert!(!f.has_export);
+
+        // Fixed order: `volatile` still wins the extent start over
+        // `export` when both are written.
+        let tokens = lex("volatile export main() {\n    mark;\n}\n").unwrap();
+        let cst = parse_cst(&tokens).unwrap();
+        let TopKind::Function(f) = &cst.items[0].kind else {
+            panic!("expected a function item");
+        };
+        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "volatile", not "export"
+        assert!(f.has_volatile);
+        assert!(f.has_export);
+    }
+
     #[test]
     fn import_spans_exclude_the_alias() {
         let p = parse_src("use std::go as g;\nmain() { @g(); }").unwrap();
@@ -2889,5 +3025,78 @@ main() { right; }
         let prog = parse_src("! [deprecated]  two spaces\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.deprecated, Some("two spaces".to_string()));
+    }
+
+    // `volatile` (0.4): a contextual keyword-plus-reservation. Legal
+    // only as the leading modifier of the un-namespaced top-level
+    // `main`; a reserved word
+    // everywhere it would otherwise name a function or namespace.
+
+    #[test]
+    fn volatile_main_parses_and_sets_the_flag() {
+        let p = parse_src("volatile main() { mark; }").unwrap();
+        assert!(p.functions[0].volatile);
+        assert!(p.functions[0].exported);
+    }
+
+    #[test]
+    fn volatile_export_main_parses_with_fixed_order() {
+        let p = parse_src("volatile export main() { mark; }").unwrap();
+        assert!(p.functions[0].volatile);
+        assert!(p.functions[0].exported);
+
+        // Fixed order: `volatile` precedes `export`. Written the other
+        // way round, `top_items` consumes `export` as the export
+        // modifier (it's followed by an identifier), leaving `function()`
+        // to parse "volatile" itself as the name — which the reserved-name
+        // check rejects.
+        let e = parse_src("export volatile main() { mark; }").unwrap_err();
+        assert!(
+            matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "function"),
+            "got: {:?}",
+            e.kind
+        );
+    }
+
+    #[test]
+    fn volatile_on_a_non_main_function_errors() {
+        let e = parse_src("volatile foo() { mark; }").unwrap_err();
+        assert!(
+            matches!(e.kind, CompileErrorKind::VolatileNotOnMain(ref name) if name == "foo"),
+            "got: {:?}",
+            e.kind
+        );
+        assert_eq!(e.kind.code(), "volatile-not-on-main");
+        let m = e.to_string();
+        assert!(m.contains("volatile") && m.contains("foo"), "got: {m}");
+    }
+
+    #[test]
+    fn volatile_on_a_nested_function_errors() {
+        // A nested `main` is not top-level `main` — the flag never
+        // survives nesting, so this fails the same way a nested
+        // non-`main` name would.
+        let e = parse_src("main() { volatile inner() { mark; } }").unwrap_err();
+        assert!(
+            matches!(e.kind, CompileErrorKind::VolatileNotOnMain(ref name) if name == "inner"),
+            "got: {:?}",
+            e.kind
+        );
+    }
+
+    #[test]
+    fn volatile_as_a_definition_name_is_reserved() {
+        let e = parse_src("volatile() { mark; }").unwrap_err();
+        assert!(
+            matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "function"),
+            "got: {:?}",
+            e.kind
+        );
+        let e = parse_src("namespace volatile { }").unwrap_err();
+        assert!(
+            matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "namespace"),
+            "got: {:?}",
+            e.kind
+        );
     }
 }

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, parse_asm_cst_with};
-use mtc_core::asm::{AsmError, Flow, SyntaxEntry, format_asm, lint};
+use mtc_core::asm::{AsmError, Flow, SyntaxEntry, lint};
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
@@ -33,7 +33,7 @@ use mtc_core::lsp::{
 };
 use mtc_core::vm::OperandKind;
 
-use crate::asm::pm1_syntax;
+use crate::asm::{format_asm, pm1_syntax};
 
 use super::{ConfigResolver, actions_from_findings, parse_ide_allow};
 
@@ -169,8 +169,8 @@ impl LanguageService for PmaLanguageService {
         //    `lint::lint_cst` call over that CST gives the fatal gate
         //    (lower/assemble failure) AND the lint findings in one shot,
         //    without re-parsing it — `.pma` has no separate compile-warning
-        //    channel. PM-1's caps are the default set, so this is the same
-        //    parse `parse_asm_cst` produced before.
+        //    channel. Parsed under PM-1's own caps, so the service sees the
+        //    same grammar the assembler accepts (`.volatile` included).
         let syntax = pm1_syntax();
         let cst = parse_asm_cst_with(text, syntax.caps);
         let (fatal, lint_findings) = match lint::lint_cst(&syntax, text, &cst, &effective_allow) {
@@ -475,10 +475,11 @@ fn item_end_pos(item: &AsmItem, line: u32) -> Pos {
         AsmItemKind::Func(f) => f.span.end,
         AsmItemKind::Line(l) => l.span.end,
         AsmItemKind::Raw(r) => r.span.end,
+        AsmItemKind::Volatile(v) => v.span.end,
         // Opt-in caps nodes (sections, table directives, `.rept`,
-        // `.routine`): PM-1's caps are off, so `parse_asm_cst` never
-        // shapes these here, but each still carries a `span` whose end
-        // is its own end position.
+        // `.routine`): PM-1 enables none of those caps, so `parse_asm_cst`
+        // never shapes these here, but each still carries a `span` whose
+        // end is its own end position.
         AsmItemKind::Section(s) => s.span.end,
         AsmItemKind::TableDirective(d) => d.span.end,
         AsmItemKind::Rept(r) => r.span.end,
@@ -564,6 +565,44 @@ mod tests {
             )
         );
         assert_eq!(service.watched_globs(), &["**/pmt.json"]);
+    }
+
+    /// A two-column listing — the shape `pmt dis` emits for a merged
+    /// object: the program bit, a split pair, and a deduped function
+    /// printed twice. The service must read it like any other `.pma`
+    /// document (no fatal, no findings, symbols for every block).
+    const TWO_COLUMN_FIXTURE: &str = "\
+.volatile
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        rgt
+        call    helper
+        stp
+.func helper
+        ret
+.func helper
+.volatile
+        ret
+";
+
+    #[test]
+    fn a_two_column_listing_is_read_like_any_other_document() {
+        let mut service = PmaLanguageService::new();
+        let diags = service.did_update("untitled:Untitled-1", TWO_COLUMN_FIXTURE);
+        assert!(diags.is_empty(), "{diags:?}");
+        let symbols = service
+            .document_symbols("untitled:Untitled-1")
+            .expect("an open document has symbols");
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["main", "main", "helper", "helper"]);
+        // And the canonical grid is a fixed point on it.
+        let formatted = service
+            .format("untitled:Untitled-1")
+            .expect("a valid document formats");
+        assert_eq!(formatted, TWO_COLUMN_FIXTURE);
     }
 
     #[test]

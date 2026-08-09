@@ -225,3 +225,37 @@ fn emit_ir_stage_choices_are_all_accepted_by_the_real_stage_check() {
     let bogus = execute(&args(&["compile", "--emit-ir=not-a-real-stage"]));
     assert!(matches!(&bogus, Err(message) if message.contains("unknown IR stage")));
 }
+
+/// `ir graph --variant` validates its own value (`cli/inspect.rs`),
+/// independently of the flag scanner — the same shape `--emit-ir`'s
+/// stage check has, and the same reason to probe it: a choice the
+/// registry advertises but the CLI rejects would otherwise ship.
+#[test]
+fn ir_graph_variant_choices_are_all_accepted_by_the_real_parser() {
+    let reg = registry();
+    let ir_graph = find(&reg, &["ir", "graph"]);
+    let variant = ir_graph
+        .flags
+        .iter()
+        .find(|f| f.name == "--variant")
+        .expect("ir graph should register --variant");
+    let FlagKind::Value(ValueHint::Choices(choices)) = &variant.kind else {
+        panic!("--variant should be a Value(Choices(..)) — the space-or-equals shape");
+    };
+    assert_eq!(choices, &["normal".to_string(), "volatile".to_string()]);
+    for choice in choices {
+        // No positional: the value check runs first, so a legal choice
+        // gets past it and fails on the missing file instead.
+        let out = execute(&args(&["ir", "graph", "--variant", choice]));
+        let Err(message) = &out else {
+            panic!("`ir graph --variant {choice}` with no input should ask for a file");
+        };
+        assert!(
+            !message.contains("unknown variant"),
+            "registry --variant choice `{choice}` was rejected by the real check: {message}"
+        );
+    }
+    // Sanity check: a genuinely bad column IS rejected.
+    let bogus = execute(&args(&["ir", "graph", "--variant", "sideways"]));
+    assert!(matches!(&bogus, Err(message) if message.contains("unknown variant")));
+}

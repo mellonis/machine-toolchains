@@ -15,8 +15,9 @@
 //! cover `.byte` acceptance and round-tripping at the assembler level.
 
 use mtc_core::asm::AsmErrorKind;
+use mtc_core::formats::object::BlobVariant;
 use mtc_post_machine::asm::{assemble, disassemble_object};
-use mtc_post_machine::compiler::{CompileOptions, compile};
+use mtc_post_machine::compiler::{CompileOptions, VariantColumns, compile};
 use mtc_post_machine::optimizer::OptLevel;
 use mtc_post_machine::stdlib;
 
@@ -129,14 +130,29 @@ const OPT_LEVELS: [OptLevel; 2] = [OptLevel::O0, OptLevel::O1];
 
 #[test]
 fn emitted_pma_reassembles_byte_identically_to_the_direct_object() {
+    // A default compile emits BOTH build columns into one object, while
+    // `-S` renders the normal column alone — so the listing is measured
+    // against the normal column built by itself. Variant tags are dropped
+    // from the comparison: they are compiler metadata that a
+    // directive-free listing does not carry.
     for level in OPT_LEVELS {
         for &(name, src) in PROGRAMS {
             let options = CompileOptions {
                 opt_level: level,
                 ..Default::default()
             };
-            let out = compile(src, options)
+            let out = compile(src, options.clone())
                 .unwrap_or_else(|e| panic!("{name} at {level:?}: compile failed: {e}"));
+            let mut expected = compile(
+                src,
+                CompileOptions {
+                    columns: VariantColumns::NormalOnly,
+                    ..options
+                },
+            )
+            .unwrap_or_else(|e| panic!("{name} at {level:?}: compile failed: {e}"))
+            .object;
+            expected.variants = None;
             let reassembled = assemble(&out.pma, false).unwrap_or_else(|e| {
                 panic!(
                     "{name} at {level:?}: emitted .pma failed to reassemble: {e}\n{}",
@@ -145,9 +161,30 @@ fn emitted_pma_reassembles_byte_identically_to_the_direct_object() {
             });
             assert_eq!(
                 reassembled.to_bytes(),
-                out.object.to_bytes(),
-                "{name} at {level:?}: -S reassembly diverged from the directly compiled object\n{}",
+                expected.to_bytes(),
+                "{name} at {level:?}: -S reassembly diverged from the normal column\n{}",
                 out.pma
+            );
+            // And measure the MERGED object itself, not only its
+            // single-column twin: the blobs it tags Normal or Both are the
+            // very code the listing assembles to, in the same order.
+            let projection: Vec<&Vec<u8>> = out
+                .object
+                .blobs
+                .iter()
+                .zip(
+                    out.object
+                        .variants
+                        .as_deref()
+                        .expect("a compiled object carries variant tags"),
+                )
+                .filter(|(_, tag)| !matches!(tag, BlobVariant::Volatile))
+                .map(|(blob, _)| blob)
+                .collect();
+            assert_eq!(
+                projection,
+                expected.blobs.iter().collect::<Vec<_>>(),
+                "{name} at {level:?}: the merged object's normal column diverged from the listing"
             );
         }
     }
@@ -161,10 +198,16 @@ fn compiled_objects_survive_a_disassemble_reassemble_round_trip() {
     // assembler input — round-tripping through `asm` reproduces the
     // original bytes exactly." Full struct equality (not just blob
     // bytes) pins that stronger, documented invariant.
+    // Single-column objects: a two-column object disassembles to a
+    // same-name `.func` pair, which needs the `.volatile` directive to be
+    // assemblable again — that round trip is proven where the directive
+    // lands. Variant tags are dropped from the comparison for the same
+    // reason: a directive-free listing carries none.
     for level in OPT_LEVELS {
         for &(name, src) in PROGRAMS {
             let options = CompileOptions {
                 opt_level: level,
+                columns: VariantColumns::NormalOnly,
                 ..Default::default()
             };
             let out = compile(src, options)
@@ -173,8 +216,10 @@ fn compiled_objects_survive_a_disassemble_reassemble_round_trip() {
             let back = assemble(&text, false).unwrap_or_else(|e| {
                 panic!("{name} at {level:?}: disassembly failed to reassemble: {e}\n{text}")
             });
+            let mut expected = out.object;
+            expected.variants = None;
             assert_eq!(
-                back, out.object,
+                back, expected,
                 "{name} at {level:?}: dis -> asm round trip diverged\n{text}"
             );
         }

@@ -8,8 +8,7 @@
 //! `tests/asm_acceptance.rs`'s reassembly/round-trip sweep — same
 //! program battery, one more property checked over it.
 
-use mtc_core::asm::format_asm;
-use mtc_post_machine::asm::disassemble_object;
+use mtc_post_machine::asm::{disassemble_object, format_asm};
 use mtc_post_machine::compiler::{CompileOptions, compile};
 use mtc_post_machine::optimizer::OptLevel;
 use mtc_post_machine::stdlib;
@@ -103,4 +102,32 @@ fn dis_output_is_already_canonical() {
             );
         }
     }
+}
+
+/// The `.volatile` directive prints as a column-0 structural line, like
+/// `.func` — so a two-column listing is already canonical and formatting
+/// it is the identity (docs/formats.md (assembly text)).
+#[test]
+fn the_volatile_directive_formats_at_column_zero() {
+    const CANONICAL: &str = "\
+.volatile
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        rgt
+        stp
+.func helper
+        ret
+";
+    assert_eq!(
+        format_asm(CANONICAL).expect("formats"),
+        CANONICAL,
+        "the canonical two-column grid must be a fixed point"
+    );
+    // And an off-grid spelling normalizes to it.
+    let scrambled = CANONICAL.replace("\n.volatile\n        rgt", "\n   .volatile\n rgt");
+    assert_ne!(scrambled, CANONICAL);
+    assert_eq!(format_asm(&scrambled).expect("formats"), CANONICAL);
 }

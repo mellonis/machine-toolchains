@@ -216,6 +216,160 @@ $ cat coupled.pma
         stp
 ```
 
+## Volatile builds
+
+A **volatile program** — one whose entry is declared `volatile main()`
+(`docs/pmt/language.md (volatile programs)`) — drives a device rather
+than memory. Every tape access is externally observable, and the outside
+world may change the cell under the head between two accesses. That
+generalizes the `brk` barrier above from a point to a standing,
+whole-run rule: no pass may assume a value written to the tape reads
+back, and no pass may change the tape's access sequence — no dropping
+idempotent or dead writes, no fusing write+move shapes, no deciding a
+branch from a value the program only wrote.
+
+The compiler does not switch the pipeline on a flag. It builds every
+function twice — the ordinary column, and a **gated** column that runs
+this same pipeline with three passes disabled — and the linker picks one
+column per name from the program's volatile bit
+(`docs/core.md (linking)`). So the gated build is still an optimized
+build; it is simply not optimized on any assumption about what the tape
+will answer.
+
+**The gated set** is `cell-state`, `branch-fold`, and `fuse-tape-ops`.
+The dividing line is what a pass believes about the tape:
+
+- `cell-state` drops idempotent and dead writes. Both rules delete a
+  write the source asked for, and the idempotent rule additionally reads
+  its licence off a preceding write.
+- `branch-fold` decides a `check` from a known cell value. Where that
+  knowledge came from a `check` edge it is the latched flag and stays
+  sound; where it came from a `wr` it is exactly the write-read-back
+  assumption. The gate is per PASS, not per path, so the sound half is
+  gated with the unsound one.
+- `fuse-tape-ops` folds `wr x` plus a move into `wrl`/`wrr`, which skips
+  the intermediate latch read of the written cell: two device
+  transactions become one.
+
+The remaining six keep running. Five of them only rewire control flow
+between accesses they leave untouched (`check-fold`, `jump-threading`,
+`tail-call`, `tail-merge`, `inline`) and `dce` deletes code that never
+runs. Note `check-fold` is NOT the same shape as `branch-fold` despite
+the neighbouring names: it rewrites `Check{k, k}` into `Goto{k}`, a test
+whose two arms already name one block, and consults nothing about the
+tape at all.
+
+**The MF-coupling invariant is moot in the gated column.** That
+invariant (under Contracts above) is the entire licence for reasoning
+about a cell's value from a preceding write, and it lives in one
+dataflow module whose only two consumers are `cell-state` and
+`branch-fold`. Both are gated, so in a volatile build the analysis has
+no live consumer at all — the question of whether a written value can be
+predicted never arises rather than being answered carefully. The match
+flag as a REGISTER — latched by an access the program actually
+performed, then read again with no access in between — is untouched by
+any of this and stays sound on any tape.
+
+### A worked example
+
+Eleven tape commands, in two comma groups:
+
+```c
+main() {
+    mark, mark, right, unmark, mark;
+    left, mark, unmark, mark, right, unmark;
+}
+```
+
+Compiled at `-O1`, that is four instructions:
+
+```
+$ pmt build -O1 pulse.pmc -o pulse.pmx && pmt dis pulse.pmx
+.func main
+        wrr     1
+        wrl     1
+        wrr     1
+        wr      0
+        stp
+```
+
+Two passes did all of it. `cell-state` dropped four of the eight writes —
+one idempotent re-`mark`, and three whose value was overwritten before
+anything could read it — and `fuse-tape-ops` folded the three surviving
+writes that are followed by a move into `wrl`/`wrr`:
+
+```
+$ pmt compile -O1 -v pulse.pmc -o pulse.pmo
+opt: 2 round(s)
+  cell-state main: 4 change(s)
+  fuse-tape-ops main: 3 change(s)
+```
+
+The same body with `volatile main` keeps all eight writes and all three
+moves, as eleven separate bus transactions:
+
+```
+$ pmt build -O1 pulse-v.pmc -o pulse-v.pmx && pmt dis pulse-v.pmx
+.func main
+        wr      1
+        wr      1
+        rgt
+        wr      0
+        wr      1
+        lft
+        wr      1
+        wr      0
+        wr      1
+        rgt
+        wr      0
+        stp
+```
+
+Both programs leave the same tape and stop the same way — the observable
+equivalence contract holds across the two columns as it does across
+`-O0` and `-O1` — and the cost of the difference is what the timing
+model charges for those extra transactions
+(`docs/core.md (timing model)`):
+
+```
+$ pmt run pulse.pmx --tape-cells " "
+outcome: Stopped
+steps 5, core tacts 15, stall tacts 11 (total 26)
+origin 0, head 1 reads ' '
+|* |
+$ pmt run pulse-v.pmx --tape-cells " "
+outcome: Stopped
+steps 12, core tacts 33, stall tacts 22 (total 55)
+origin 0, head 1 reads ' '
+|* |
+```
+
+For memory the four-instruction form is pure win. For a device those
+"redundant" transactions — keep-alive pulses, command sequences,
+intermediate sensor samples — are what the program is *for*, and
+dropping them is not an optimization but a different program.
+
+The strict-cells example under Contracts above is the same story from
+the other end: what `--fno-cell-state` buys one pass at a time,
+`volatile main` states once for the whole program
+(`docs/pmt/isa.md (the tape)`).
+
+**Seeing the gated column.** `pmt compile -S` and `--emit-ir` render the
+NORMAL column, for a volatile program too — they describe one
+compilation, not one link. `pmt ir graph FILE.pmc --variant volatile`
+renders the gated CFG, and `pmt dis` of the linked `.pmx` shows what
+actually shipped (`docs/pmt/cli.md (pmt ir)`).
+
+**One caveat about `-O0`.** `-O0` is an off switch for the unit the
+compiler is compiling, so its two columns are identical and the program
+bit changes nothing about that unit's own code. It does not follow that
+a `-O0` *image* is bit-independent: the embedded standard library is
+compiled at `-O1` regardless of the flag on the command line
+(`docs/pmt/stdlib.md`), and three of its routines really do ship two
+columns, so a `-O0` link of a volatile program that reaches one of them
+takes the gated body and produces a different image than the same
+program without the modifier.
+
 ## Reading the examples
 
 Each pass below is shown transforming a small program, and every example

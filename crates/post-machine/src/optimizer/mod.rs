@@ -19,6 +19,18 @@
 //! (optimization); this header is the binding version for pass authors —
 //! it is a contract between passes, not with users, so it stays here.)
 //!
+//! A volatile program (docs/pmt/language.md (volatile programs)) generalizes the
+//! `brk` barrier from a point to a standing, whole-run rule: every tape
+//! access is externally observable, and the outside world may change the
+//! cell under the head between accesses. No pass may assume a value
+//! written to the tape reads back, and no pass may change the tape's
+//! access sequence — no dropping idempotent or dead writes, no fusing
+//! write+move shapes, no deciding a branch from a value the program only
+//! wrote. Such programs compile in a second, GATED column that runs this
+//! same pipeline with [`gated_pass_names`] disabled; the passes outside
+//! that set keep running, so a volatile build is optimized, just not on
+//! any assumption about what the tape will answer.
+//!
 //! Passes also MUST preserve the closed-terminator-targets invariant
 //! (every terminator's target is a block id that still exists in the
 //! function), checked in debug builds after every application.
@@ -105,6 +117,42 @@ pub fn pass_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = PROGRAM_PIPELINE.iter().map(|(name, _)| *name).collect();
     names.extend(PIPELINE.iter().map(|(name, _)| *name));
     names
+}
+
+/// The passes a VOLATILE build disables, on top of whatever the user
+/// already disabled (docs/pmt/optimizer.md (volatile builds)). Names come
+/// from the same space as [`pass_names`] and reach the pipeline through
+/// the ordinary `disabled` set, so the gate needs no second mechanism.
+///
+/// The dividing line is what a pass believes about the tape. The match
+/// flag as a REGISTER — latched by an access the program actually
+/// performed, then read again with no access in between — stays sound on
+/// any tape, volatile or not. PREDICTING the flag (or the cell) from a
+/// value the program merely wrote assumes the tape reads back what was
+/// written, which a device does not owe anyone. The same line, drawn
+/// around instructions rather than values: a pass may move jumps between
+/// accesses, but may not drop, merge, split or reorder the accesses
+/// themselves. Three passes cross it:
+///
+/// - `cell-state` — drops idempotent and dead writes. Both rules delete a
+///   write the source asked for, and the idempotent rule additionally
+///   reads its licence off a preceding write.
+/// - `branch-fold` — decides a `check` from a known cell value. On a path
+///   whose knowledge came from a `check` edge that is the latched flag and
+///   sound; on a path whose knowledge came from a `wr` it is exactly the
+///   write-read-back assumption. The gate is per PASS, not per path, so
+///   the sound half is gated with the unsound one.
+/// - `fuse-tape-ops` — folds `wr x` + move into `wrl`/`wrr`, which skips
+///   the intermediate latch read of the written cell: two transactions
+///   become one.
+///
+/// The remaining six only rewire control flow between accesses they leave
+/// untouched (`check-fold`, `jump-threading`, `tail-call`, `tail-merge`,
+/// `inline`) or delete code that never runs (`dce`), so they keep running
+/// in the volatile column. Every verdict here, gated and clean alike, is
+/// pinned by a test in tests/gated_passes.rs.
+pub fn gated_pass_names() -> &'static [&'static str] {
+    &["cell-state", "branch-fold", "fuse-tape-ops"]
 }
 
 /// Run the enabled pipeline to a change-fixpoint (round-capped). `-O0`

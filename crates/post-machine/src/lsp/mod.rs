@@ -1872,6 +1872,23 @@ export main() {
     }
 
     #[test]
+    fn format_keeps_the_volatile_modifier() {
+        // `format()` has no head-rendering logic of its own — it's a
+        // thin delegate to `crate::fmt::format` (see its own doc
+        // comment above) — so this pins that the delegation carries the
+        // modifier through rather than re-proving `fmt::format`'s own
+        // printer contract.
+        const SRC: &str = "volatile main() {\n    right;\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update("untitled:Untitled-1", SRC);
+
+        let via_service = service
+            .format("untitled:Untitled-1")
+            .expect("valid source formats");
+        assert_eq!(via_service, SRC);
+    }
+
+    #[test]
     fn format_returns_none_on_a_parse_error() {
         let mut service = PmcLanguageService::new();
         service.did_update("untitled:Untitled-1", "main( {");
@@ -2337,7 +2354,7 @@ export main() {
         let edits: Vec<mtc_core::lsp::types::TextEdit> =
             serde_json::from_value(outputs[3]["result"].clone()).unwrap();
         assert_eq!(edits.len(), 1, "{edits:?}");
-        let canonical = mtc_core::asm::format_asm(PMA_UNUSED_LABEL).expect("valid source formats");
+        let canonical = crate::asm::format_asm(PMA_UNUSED_LABEL).expect("valid source formats");
         assert_ne!(
             PMA_UNUSED_LABEL, canonical,
             "sanity: the fixture really was unformatted"

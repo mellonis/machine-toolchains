@@ -9,15 +9,24 @@ pub const MAGIC_OBJECT: [u8; 3] = [b'M', b'O', 0x01];
 /// it is what PM-1's compiler emits and what the v2-shape path serializes
 /// byte-for-byte.
 pub const OBJECT_FORMAT_VERSION_V2: u16 = 2;
-/// MO v3 adds generic-routine signatures, table blobs, table fixups, and
-/// declarative bound calls. An object with any of those present serializes
-/// as v3 (see `is_v2_shape`); the reader accepts both v2 and v3.
+/// MO v3 adds generic-routine signatures, table blobs, table fixups,
+/// declarative bound calls, per-blob build-variant tags, and a
+/// program-volatile header bit. An object with any of those present
+/// serializes as v3 (see `is_v2_shape`); the reader accepts both v2 and v3.
 pub const OBJECT_FORMAT_VERSION_V3: u16 = 3;
 const CRC_OFFSET: usize = 7;
 const EXTERNAL_BLOB: u32 = 0xFFFF_FFFF;
 const FLAG_HAS_DEBUG: u8 = 0b0000_0001;
 const FLAG_HAS_SIGNATURES: u8 = 0b0000_0010;
 const FLAG_HAS_TABLES: u8 = 0b0000_0100;
+/// Gates the per-blob build-variant tag section, parallel to `blobs` when
+/// present.
+const FLAG_HAS_VARIANTS: u8 = 0b0000_1000;
+/// A pure header bit — no section of its own — set when the object's
+/// program is a volatile build (only ever true on the object defining the
+/// entry symbol; carried here rather than derived so a tag-free legacy
+/// object still links unambiguously as non-volatile).
+const FLAG_PROGRAM_VOLATILE: u8 = 0b0001_0000;
 
 /// In-memory object: symbols + code blobs + call relocations (+ optional
 /// per-blob debug info).
@@ -33,11 +42,14 @@ const FLAG_HAS_TABLES: u8 = 0b0000_0100;
 /// - each blob's first byte is the arch's entry opcode — function bodies
 ///   begin with their `ent` prologue;
 /// - `debug`, when present, parallels `blobs` one-to-one, with label and
-///   line offsets on instruction boundaries.
+///   line offsets on instruction boundaries;
+/// - `variants`, when present, parallels `blobs` one-to-one — one tag per
+///   blob, same indexing as `debug`/`signatures`/`table_blobs`.
 ///
-/// The four v3 fields (`signatures`, `table_blobs`, `table_fixups`,
-/// `bound_calls`) are absent in a v2-shape object — the shape PM-1's
-/// compiler emits, serialized byte-for-byte as v2. When any is present the
+/// The six v3 fields (`signatures`, `table_blobs`, `table_fixups`,
+/// `bound_calls`, `variants`, `program_volatile`) are absent/default in a
+/// v2-shape object — the shape PM-1's compiler emitted before volatile
+/// builds, serialized byte-for-byte as v2. When any is present/set the
 /// object serializes as v3 (see `is_v2_shape`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectFile {
@@ -58,6 +70,27 @@ pub struct ObjectFile {
     /// Declarative bound call sites (`call name [binding]`), the composition
     /// engine's input.
     pub bound_calls: Vec<BoundCall>,
+    /// Per-blob build-variant tag for volatile builds, parallel to `blobs`
+    /// when present. `None` means "no variant records" — a legacy or
+    /// assembled/TM object, read back as all-`Normal` by the linker's
+    /// selection rule rather than stored as such here (a typed absence, not
+    /// a stand-in vector).
+    pub variants: Option<Vec<BlobVariant>>,
+    /// True when the object's program (the object defining the entry
+    /// symbol) is a volatile build. A pure header bit: no section, and
+    /// independent of `variants` — an object can set this without carrying
+    /// variant tags of its own.
+    pub program_volatile: bool,
+}
+
+/// A code blob's build variant under volatile builds: which lowering(s) of
+/// its function the blob holds. `Both` marks a blob whose normal and
+/// volatile columns compiled byte-identical and were deduped into one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobVariant {
+    Normal,
+    Volatile,
+    Both,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,8 +196,8 @@ impl StringPool {
 }
 
 impl ObjectFile {
-    /// Construct a v2-shape object: the four v3 fields absent
-    /// (`None`/`None`/empty/empty). This is what PM-1's compiler and the
+    /// Construct a v2-shape object: the six v3 fields absent
+    /// (`None`/`None`/empty/empty/`None`/`false`). This is what PM-1's compiler and the
     /// assembler emit — `is_v2_shape` holds for the result.
     pub fn v2(
         arch: u8,
@@ -183,6 +216,8 @@ impl ObjectFile {
             table_blobs: None,
             table_fixups: Vec::new(),
             bound_calls: Vec::new(),
+            variants: None,
+            program_volatile: false,
         }
     }
 
@@ -193,6 +228,8 @@ impl ObjectFile {
             && self.table_blobs.is_none()
             && self.table_fixups.is_empty()
             && self.bound_calls.is_empty()
+            && self.variants.is_none()
+            && !self.program_volatile
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -307,10 +344,12 @@ impl ObjectFile {
 
     /// Serialize a v3-shape object: the v2 body through the debug section
     /// (version field = 3, flags gaining `FLAG_HAS_SIGNATURES` /
-    /// `FLAG_HAS_TABLES` when the respective field is present), followed by
-    /// the v3 sections — per-blob signatures, per-blob table blobs, the
-    /// unconditional table-fixup section, and the unconditional bound-call
-    /// section. Read back by `from_bytes` in the same order.
+    /// `FLAG_HAS_TABLES` / `FLAG_HAS_VARIANTS` / `FLAG_PROGRAM_VOLATILE`
+    /// when the respective field is present/set), followed by the v3
+    /// sections — per-blob signatures, per-blob table blobs, the per-blob
+    /// variant-tag section, the unconditional table-fixup section, and the
+    /// unconditional bound-call section. Read back by `from_bytes` in the
+    /// same order.
     fn to_bytes_v3(&self) -> Vec<u8> {
         let mut pool = StringPool::new();
         let symbol_names: Vec<u32> = self.symbols.iter().map(|s| pool.intern(&s.name)).collect();
@@ -331,6 +370,12 @@ impl ObjectFile {
         }
         if self.table_blobs.is_some() {
             flags |= FLAG_HAS_TABLES;
+        }
+        if self.variants.is_some() {
+            flags |= FLAG_HAS_VARIANTS;
+        }
+        if self.program_volatile {
+            flags |= FLAG_PROGRAM_VOLATILE;
         }
 
         let mut out = Vec::new();
@@ -448,6 +493,30 @@ impl ObjectFile {
                     u32::try_from(table.len()).expect("table fits u32"),
                 );
                 out.extend_from_slice(table);
+            }
+        }
+
+        // Unlike signatures/table blobs (implicitly blob-count-many, so a
+        // mismatch is only a debug-only invariant), the variant section
+        // ALSO carries its own explicit count, so a length mismatch is a
+        // decode-time `Malformed` for any object that reaches bytes — not
+        // just a debug-build panic on the construction path.
+        if let Some(variants) = &self.variants {
+            debug_assert_eq!(
+                variants.len(),
+                self.blobs.len(),
+                "variants must parallel blobs"
+            );
+            put_u32(
+                &mut out,
+                u32::try_from(variants.len()).expect("variant count fits u32"),
+            );
+            for v in variants {
+                out.push(match v {
+                    BlobVariant::Normal => 0,
+                    BlobVariant::Volatile => 1,
+                    BlobVariant::Both => 2,
+                });
             }
         }
 
@@ -572,7 +641,7 @@ impl ObjectFile {
 
         // v3 sections. Pre-v3 objects must not claim v3 flags; v3 objects
         // read the trailing sections written by `to_bytes_v3`.
-        let (signatures, table_blobs, table_fixups, bound_calls) =
+        let (signatures, table_blobs, variants, table_fixups, bound_calls) =
             if version >= OBJECT_FORMAT_VERSION_V3 {
                 let signatures = if flags & FLAG_HAS_SIGNATURES != 0 {
                     let mut sigs = Vec::new();
@@ -606,6 +675,25 @@ impl ObjectFile {
                         tables.push(r.bytes(len)?.to_vec());
                     }
                     Some(tables)
+                } else {
+                    None
+                };
+
+                let variants = if flags & FLAG_HAS_VARIANTS != 0 {
+                    let variant_count = r.u32()? as usize;
+                    if variant_count != blob_count {
+                        return Err(FormatError::Malformed("variants section length mismatch"));
+                    }
+                    let mut tags = Vec::with_capacity(variant_count);
+                    for _ in 0..variant_count {
+                        tags.push(match r.u8()? {
+                            0 => BlobVariant::Normal,
+                            1 => BlobVariant::Volatile,
+                            2 => BlobVariant::Both,
+                            _ => return Err(FormatError::Malformed("unknown blob variant tag")),
+                        });
+                    }
+                    Some(tags)
                 } else {
                     None
                 };
@@ -689,12 +777,18 @@ impl ObjectFile {
                     });
                 }
 
-                (signatures, table_blobs, table_fixups, bound_calls)
+                (signatures, table_blobs, variants, table_fixups, bound_calls)
             } else {
-                if flags & 0b110 != 0 {
+                if flags
+                    & (FLAG_HAS_SIGNATURES
+                        | FLAG_HAS_TABLES
+                        | FLAG_HAS_VARIANTS
+                        | FLAG_PROGRAM_VOLATILE)
+                    != 0
+                {
                     return Err(FormatError::Malformed("v3 flags in pre-v3 object"));
                 }
-                (None, None, Vec::new(), Vec::new())
+                (None, None, None, Vec::new(), Vec::new())
             };
 
         r.finish()?;
@@ -750,6 +844,8 @@ impl ObjectFile {
             table_blobs,
             table_fixups,
             bound_calls,
+            variants,
+            program_volatile: flags & FLAG_PROGRAM_VOLATILE != 0,
         })
     }
 }
@@ -1067,6 +1163,174 @@ mod tests {
         assert!(matches!(
             ObjectFile::from_bytes(&bytes),
             Err(FormatError::Malformed("reserved map-pair flags"))
+        ));
+    }
+
+    /// A byte string captured from the pre-variant-tags encoder, pinned so
+    /// adding `variants`/`program_volatile` to `ObjectFile` cannot shift a
+    /// single byte for an object that leaves both fields at their defaults
+    /// (`None`/`false`) — no shape drift for tag-free objects, ever.
+    #[rustfmt::skip]
+    const V3_FULL_LEGACY_BYTES: [u8; 155] = [
+        0x4d, 0x4f, 0x01, 0x03, 0x00, 0x01, 0x06, 0x9a, 0x8d, 0x41, 0x37, 0x02,
+        0x00, 0x00, 0x00, 0x04, 0x00, 0x6d, 0x61, 0x69, 0x6e, 0x07, 0x00, 0x67,
+        0x6f, 0x54, 0x6f, 0x45, 0x6e, 0x64, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0xff, 0xff, 0xff, 0xff, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
+        0x0d, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02,
+        0x03, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+        0x02, 0x01, 0x00, 0x01, 0x7f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x02, 0x02, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+
+    #[test]
+    fn variants_absent_stays_byte_identical_to_pre_variant_encoding() {
+        let obj = sample_v3_full();
+        assert!(obj.variants.is_none() && !obj.program_volatile);
+        assert_eq!(obj.to_bytes(), V3_FULL_LEGACY_BYTES);
+    }
+
+    #[test]
+    fn variants_and_program_volatile_round_trip() {
+        let mut obj = sample_v3_full();
+        obj.variants = Some(vec![BlobVariant::Both]); // one blob in sample_v3_full
+        obj.program_volatile = true;
+        let bytes = obj.to_bytes();
+        assert_eq!(ObjectFile::from_bytes(&bytes).unwrap(), obj);
+    }
+
+    #[test]
+    fn multi_blob_variants_round_trip() {
+        let mut obj = sample();
+        obj.blobs.push(vec![0x0D, 0x02]); // ent, stp
+        obj.symbols.push(Symbol {
+            name: "helper".into(),
+            def: SymbolDef::Local { blob: 1 },
+        });
+        obj.variants = Some(vec![BlobVariant::Normal, BlobVariant::Volatile]);
+        obj.program_volatile = true;
+        let bytes = obj.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 3);
+        assert_eq!(ObjectFile::from_bytes(&bytes).unwrap(), obj);
+    }
+
+    /// One blob per tag, exercising all three `BlobVariant` values in a
+    /// single object alongside `program_volatile`.
+    #[test]
+    fn all_three_variant_tags_round_trip() {
+        let mut obj = sample();
+        obj.blobs.push(vec![0x0D, 0x02]); // ent, stp
+        obj.symbols.push(Symbol {
+            name: "helper_a".into(),
+            def: SymbolDef::Local { blob: 1 },
+        });
+        obj.blobs.push(vec![0x0D, 0x02]); // ent, stp
+        obj.symbols.push(Symbol {
+            name: "helper_b".into(),
+            def: SymbolDef::Local { blob: 2 },
+        });
+        obj.variants = Some(vec![
+            BlobVariant::Normal,
+            BlobVariant::Volatile,
+            BlobVariant::Both,
+        ]);
+        obj.program_volatile = true;
+        let bytes = obj.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 3);
+        assert_eq!(ObjectFile::from_bytes(&bytes).unwrap(), obj);
+    }
+
+    /// Legacy bytes (no variants flag) decode to `None`/`false`, not a
+    /// stringly-typed "no variants" marker.
+    #[test]
+    fn legacy_object_decodes_to_no_variants() {
+        let obj = sample_v3_full();
+        let back = ObjectFile::from_bytes(&obj.to_bytes()).unwrap();
+        assert_eq!(back.variants, None);
+        assert!(!back.program_volatile);
+    }
+
+    #[test]
+    fn program_volatile_without_variants_round_trips() {
+        // The two new fields are independent: the header bit can be set with
+        // no per-blob variant section present at all.
+        let mut obj = sample();
+        obj.program_volatile = true;
+        let bytes = obj.to_bytes();
+        assert_eq!(u16::from_le_bytes(bytes[3..5].try_into().unwrap()), 3);
+        let back = ObjectFile::from_bytes(&bytes).unwrap();
+        assert_eq!(back, obj);
+    }
+
+    #[test]
+    fn variants_length_mismatch_rejected() {
+        // Build a VALID object (`variants.len() == blobs.len()`, so the
+        // encoder's `debug_assert_eq!` doesn't fire) and hand-corrupt the
+        // on-wire count to disagree with the blob count — the shape a
+        // decoder actually has to reject; the encoder can no longer produce
+        // it directly now that it asserts the invariant on the way out.
+        let mut obj = sample(); // 1 blob
+        obj.variants = Some(vec![BlobVariant::Normal]);
+        assert!(obj.table_fixups.is_empty() && obj.bound_calls.is_empty());
+        let mut bytes = obj.to_bytes();
+        assert_eq!(&bytes[bytes.len() - 8..], [0, 0, 0, 0, 0, 0, 0, 0]); // both trailing counts = 0
+        let count_pos = bytes.len() - 9 - 4; // the section's u32 count, right before its one tag byte
+        assert_eq!(&bytes[count_pos..count_pos + 4], &1u32.to_le_bytes());
+        bytes[count_pos..count_pos + 4].copy_from_slice(&2u32.to_le_bytes()); // claims 2 tags, blob_count is 1
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        assert!(matches!(
+            ObjectFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("variants section length mismatch"))
+        ));
+    }
+
+    #[test]
+    fn variants_bad_tag_byte_rejected() {
+        // `sample()` has no signatures/table_blobs and empty table_fixups/
+        // bound_calls, so its v3 encoding ends with the variants section
+        // (`u32 count = 1` + one tag byte) immediately followed by the two
+        // unconditional trailing counts, both zero: the tag byte sits at a
+        // fixed, structurally-known offset from the end (len - 4 - 4 - 1),
+        // with no risk of an accidental byte collision elsewhere in the file.
+        let mut obj = sample(); // 1 blob
+        obj.variants = Some(vec![BlobVariant::Normal]);
+        assert!(obj.table_fixups.is_empty() && obj.bound_calls.is_empty());
+        let mut bytes = obj.to_bytes();
+        assert_eq!(&bytes[bytes.len() - 8..], [0, 0, 0, 0, 0, 0, 0, 0]); // both trailing counts = 0
+        let tag_pos = bytes.len() - 9;
+        assert_eq!(bytes[tag_pos], 0); // BlobVariant::Normal's tag byte
+        bytes[tag_pos] = 3; // outside 0..=2
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        assert!(matches!(
+            ObjectFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("unknown blob variant tag"))
+        ));
+    }
+
+    #[test]
+    fn pre_v3_object_claiming_flag_has_variants_rejected() {
+        let mut bytes = sample().to_bytes(); // v2 shape
+        assert_eq!(u16::from_le_bytes([bytes[3], bytes[4]]), 2);
+        bytes[6] |= FLAG_HAS_VARIANTS; // flags byte (magic 3 + version 2 + arch 1)
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        assert!(matches!(
+            ObjectFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("v3 flags in pre-v3 object"))
+        ));
+    }
+
+    #[test]
+    fn pre_v3_object_claiming_flag_program_volatile_rejected() {
+        let mut bytes = sample().to_bytes(); // v2 shape
+        bytes[6] |= FLAG_PROGRAM_VOLATILE; // flags byte
+        crate::formats::crc32::stamp_crc(&mut bytes, CRC_OFFSET);
+        assert!(matches!(
+            ObjectFile::from_bytes(&bytes),
+            Err(FormatError::Malformed("v3 flags in pre-v3 object"))
         ));
     }
 }

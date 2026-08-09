@@ -62,6 +62,19 @@ head.
   arbitration — accidental collision is impossible (local symbols are
   invisible to cross-object resolution, `docs/pmt/language.md (visibility)`),
   while a deliberate override is explicit.
+- **Both build columns ship:** the embedded library is one object,
+  compiled once per process, and it carries both build columns
+  (`docs/pmt/language.md (volatile programs)`) — so a volatile program
+  and a plain one link the bodies each needs out of the same `std.pmo`,
+  with no second library and nothing to select at build time. The dedup
+  keeps that cheap: only `eraseSection`, `removeFirstMark`, and
+  `removeLastMark` compile to two different bodies; the other eight are
+  identical either way and ship as a single blob serving both. One
+  consequence is worth knowing: the library is compiled at `-O1`
+  regardless of the level on your command line, so a `-O0` build of a
+  volatile program that reaches one of those three still links its gated
+  body, and its image differs from the same program without the modifier
+  (`docs/pmt/optimizer.md (volatile builds)`).
 - **Interposition vs optimization (semantic-binding caveat):** `-O1`'s
   inline pass binds intra-module calls at compile time. That means
   overriding one of a *library's own internal* callees only affects call

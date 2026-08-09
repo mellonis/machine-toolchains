@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use mtc_core::formats::object::{BlobVariant, ObjectFile, SymbolDef};
 use mtc_post_machine::cli::execute;
 
 fn args(list: &[&str]) -> Vec<String> {
@@ -889,5 +890,756 @@ fn bare_fmt_formats_exactly_the_declared_set() {
         fs::read_to_string(dir.join("src/app.pmc")).unwrap(),
         "main(){@util();}",
         "a declared file is formatted in place"
+    );
+}
+
+// --- Variant columns: the disk vs in-memory rule --------------------------
+
+/// `mark; right;` fuses in the normal column and stays two transactions
+/// in the gated one, so every routine here genuinely splits at `-O1` —
+/// unlabelled, because a `.pmc` label starts a new block and
+/// `fuse-tape-ops` only fuses within one.
+const VOLATILE_MAIN: &str = "volatile main() {\n    mark;\n    right;\n    @util();\n}\n";
+const NORMAL_MAIN: &str = "main() {\n    mark;\n    right;\n    @util();\n}\n";
+const UTIL_FUSING: &str = "export util() {\n    mark;\n    right;\n}\n";
+
+/// A hand-written, directive-free object: no variant records at all, i.e.
+/// exactly what a pre-volatile toolchain emitted.
+const LEGACY_UTIL_PMA: &str = ".func util\n        wr      1\n        rgt\n        ret\n";
+
+/// A hand-written volatile program. The two `.volatile` lines are
+/// different directives in different positions: before the first `.func`
+/// it sets the object's PROGRAM bit, inside the block it tags that blob
+/// as the volatile column. Both are needed — a program bit with an
+/// untagged `main` is the legacy shape, and links `main` itself as a
+/// counted fallback.
+const VOLATILE_MAIN_PMA: &str =
+    ".volatile\n.func main\n.volatile\n        call   util\n        stp\n";
+
+fn variant_pairs(pmo: &Path, name: &str) -> Vec<BlobVariant> {
+    let bytes = fs::read(pmo).unwrap();
+    let obj = ObjectFile::from_bytes(&bytes).expect("reads back");
+    let variants = obj
+        .variants
+        .as_deref()
+        .expect("a compiled object is tagged");
+    obj.symbols
+        .iter()
+        .filter(|s| s.name == name)
+        .filter_map(|s| match s.def {
+            SymbolDef::Defined { blob } | SymbolDef::Local { blob } => {
+                Some(variants[blob as usize])
+            }
+            SymbolDef::External => None,
+        })
+        .collect()
+}
+
+#[test]
+fn keep_objects_writes_both_variant_columns() {
+    let dir = scratch("variant_keep_objects");
+    let main = dir.join("main.pmc");
+    let util = dir.join("util.pmc");
+    fs::write(&main, VOLATILE_MAIN).unwrap();
+    fs::write(&util, UTIL_FUSING).unwrap();
+
+    execute(&args(&[
+        "build",
+        "--keep-objects",
+        "-O1",
+        main.to_str().unwrap(),
+        util.to_str().unwrap(),
+        "-o",
+        dir.join("kept.pmx").to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        variant_pairs(&dir.join("util.pmo"), "util"),
+        vec![BlobVariant::Normal, BlobVariant::Volatile],
+        "a kept object lands on disk, where it outlives the link that knew the program kind"
+    );
+    assert_eq!(
+        variant_pairs(&dir.join("main.pmo"), "main"),
+        vec![BlobVariant::Normal, BlobVariant::Volatile],
+        "the entry unit is no exception — --keep-objects is the disk rule"
+    );
+
+    // Switching the whole build back to two columns is an intermediate
+    // artifact decision, never an image decision: the linker selects one
+    // column either way.
+    execute(&args(&[
+        "build",
+        "-O1",
+        main.to_str().unwrap(),
+        util.to_str().unwrap(),
+        "-o",
+        dir.join("plain.pmx").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fs::read(dir.join("kept.pmx")).unwrap(),
+        fs::read(dir.join("plain.pmx")).unwrap(),
+        "--keep-objects must not change the executable"
+    );
+}
+
+/// The spec's gate: the in-memory driver compiles only the needed column,
+/// and the `.pmx` it produces must equal the one built through on-disk
+/// two-column objects. Runs in BOTH directions of the rule.
+fn in_memory_equals_on_disk(tag: &str, main_source: &str) {
+    let dir = scratch(tag);
+    let main = dir.join("main.pmc");
+    let util = dir.join("util.pmc");
+    fs::write(&main, main_source).unwrap();
+    fs::write(&util, UTIL_FUSING).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        main.to_str().unwrap(),
+        util.to_str().unwrap(),
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        main.to_str().unwrap(),
+        "-o",
+        dir.join("main.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "compile",
+        "-O1",
+        util.to_str().unwrap(),
+        "-o",
+        dir.join("util.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    let linked = execute(&args(&[
+        "link",
+        "-v",
+        dir.join("main.pmo").to_str().unwrap(),
+        dir.join("util.pmo").to_str().unwrap(),
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "{tag}: the in-memory column rule must not change the image"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("mem.pmx.map")).unwrap(),
+        fs::read_to_string(dir.join("disk.pmx.map")).unwrap(),
+        "{tag}: nor the debug sidecar"
+    );
+    for (which, out) in [("build", &built), ("link", &linked)] {
+        assert!(
+            !out.stderr.contains("volatile column"),
+            "{tag}: {which} reported a fallback where every name offers both columns:\n{}",
+            out.stderr
+        );
+    }
+}
+
+#[test]
+fn in_memory_build_equals_the_on_disk_path_for_a_volatile_program() {
+    in_memory_equals_on_disk("variant_inmem_volatile", VOLATILE_MAIN);
+}
+
+#[test]
+fn in_memory_build_equals_the_on_disk_path_for_a_normal_program() {
+    in_memory_equals_on_disk("variant_inmem_normal", NORMAL_MAIN);
+}
+
+/// The two paths run DIFFERENT compiler machinery, not just different
+/// amounts of it: a single-column build tags every blob and dedups
+/// nothing, while a both-columns build runs the transitive demotion
+/// fixpoint — a function byte-identical across columns still splits when
+/// a transitive callee splits. This chain is built to make that cascade
+/// fire (`main` and `mid` are column-invariant on their own and demote
+/// only through `leaf`, and every body stays over the inliner's limit in
+/// both columns), so it is the shape where the volatile column's bytes
+/// could differ between the two paths if the fixpoint leaked into them.
+#[test]
+fn in_memory_build_equals_the_on_disk_path_through_a_demotion_cascade() {
+    const CASCADE: &str = "\
+volatile main() {
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+}
+mid() {
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+}
+leaf() {
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+}
+";
+    let dir = scratch("variant_cascade");
+    let src = dir.join("chain.pmc");
+    fs::write(&src, CASCADE).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        src.to_str().unwrap(),
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("volatile column"),
+        "every name in the chain offers the volatile column:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        src.to_str().unwrap(),
+        "-o",
+        dir.join("chain.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    // The kept object really does carry the cascade — otherwise the two
+    // paths would be comparing the same work twice.
+    assert_eq!(
+        variant_pairs(&dir.join("chain.pmo"), "mid"),
+        vec![BlobVariant::Normal, BlobVariant::Volatile],
+        "mid must have demoted through leaf, or this fixture proves nothing"
+    );
+    execute(&args(&[
+        "link",
+        dir.join("chain.pmo").to_str().unwrap(),
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "the demoted columns must be the same bytes the single-column build emits"
+    );
+}
+
+/// The program bit can arrive on a `.pma` input (file-level `.volatile`),
+/// not only from a `.pmc` `volatile main` — the driver's pre-scan must
+/// see it, or every `.pmc` sibling compiles the wrong column.
+#[test]
+fn a_pma_program_bit_drives_the_in_memory_column() {
+    let dir = scratch("variant_pma_bit");
+    let app = dir.join("app.pma");
+    let helper = dir.join("util.pmc");
+    fs::write(&app, VOLATILE_MAIN_PMA).unwrap();
+    fs::write(&helper, UTIL_FUSING).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        app.to_str().unwrap(),
+        helper.to_str().unwrap(),
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("volatile column"),
+        "the .pmc sibling must offer the volatile column:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "asm",
+        app.to_str().unwrap(),
+        "-o",
+        dir.join("app.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "compile",
+        "-O1",
+        helper.to_str().unwrap(),
+        "-o",
+        dir.join("util.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "link",
+        dir.join("app.pmo").to_str().unwrap(),
+        dir.join("util.pmo").to_str().unwrap(),
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "the in-memory path must agree with the on-disk one here too"
+    );
+}
+
+#[test]
+fn verbose_link_reports_the_variant_fallback_and_is_silent_at_zero() {
+    let dir = scratch("variant_fallback_line");
+    let legacy = dir.join("legacy.pma");
+    fs::write(&legacy, LEGACY_UTIL_PMA).unwrap();
+
+    let volatile = dir.join("volatile.pmc");
+    fs::write(&volatile, "volatile main() {\n    @util();\n}\n").unwrap();
+    let out = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        volatile.to_str().unwrap(),
+        legacy.to_str().unwrap(),
+        "-o",
+        dir.join("v.pmx").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        out.stderr
+            .contains("link: 1 name(s) with no volatile column linked normal [util]"),
+        "got:\n{}",
+        out.stderr
+    );
+
+    let normal = dir.join("normal.pmc");
+    fs::write(&normal, "main() {\n    @util();\n}\n").unwrap();
+    let out = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        normal.to_str().unwrap(),
+        legacy.to_str().unwrap(),
+        "-o",
+        dir.join("n.pmx").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !out.stderr.contains("volatile column"),
+        "a normal program wants the normal column — nothing fell back:\n{}",
+        out.stderr
+    );
+}
+
+/// A `.pma`/`.pmo` sibling that declares itself volatile but defines no
+/// `main`: the program bit belongs to the object that owns the ENTRY, so
+/// this one must not flip a plain program's columns.
+const VOLATILE_NON_ENTRY_PMA: &str =
+    ".volatile\n.func util\n        wr      1\n        rgt\n        ret\n";
+
+/// A hand-written pair: `util` in both columns, with genuinely different
+/// bodies (the bare one fuses write+move, the tagged one does not) so the
+/// linker's choice is visible in the image.
+const UTIL_PAIR_PMA: &str = ".func util\n        wrr     1\n        ret\n\
+                             .func util\n.volatile\n        wr      1\n        rgt\n        ret\n";
+
+/// Critical case the single-kind fixtures structurally cannot see: the
+/// bit is carried by an input that does NOT own the entry. The linker
+/// reads the entry owner's bit alone, so the driver must too — a union
+/// over the inputs compiles the wrong column here and the two paths
+/// diverge at -O1.
+#[test]
+fn a_non_entry_inputs_program_bit_does_not_flip_the_columns() {
+    let dir = scratch("variant_mixed_non_entry");
+    let app = dir.join("app.pmc");
+    let helper = dir.join("helper.pma");
+    fs::write(&app, NORMAL_MAIN).unwrap();
+    fs::write(&helper, VOLATILE_NON_ENTRY_PMA).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        app.to_str().unwrap(),
+        helper.to_str().unwrap(),
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("column"),
+        "the program is normal and every name offers the normal column:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        app.to_str().unwrap(),
+        "-o",
+        dir.join("app.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "asm",
+        helper.to_str().unwrap(),
+        "-o",
+        dir.join("helper.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "link",
+        dir.join("app.pmo").to_str().unwrap(),
+        dir.join("helper.pmo").to_str().unwrap(),
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "a bit on a non-entry input must not change the image"
+    );
+}
+
+/// The inverse mix: the entry unit declares itself volatile and a
+/// hand-written sibling offers both columns. The volatile bodies link,
+/// nothing falls back, and the two paths agree.
+#[test]
+fn a_volatile_entry_links_a_hand_written_volatile_column_in_a_mixed_build() {
+    let dir = scratch("variant_mixed_volatile_entry");
+    let app = dir.join("app.pmc");
+    let plain = dir.join("plain.pmc");
+    let pair = dir.join("pair.pma");
+    fs::write(&app, "volatile main() {\n    @util();\n}\n").unwrap();
+    fs::write(&plain, "main() {\n    @util();\n}\n").unwrap();
+    fs::write(&pair, UTIL_PAIR_PMA).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        app.to_str().unwrap(),
+        pair.to_str().unwrap(),
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("column"),
+        "the sibling offers both columns, so nothing falls back:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        app.to_str().unwrap(),
+        "-o",
+        dir.join("app.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "asm",
+        pair.to_str().unwrap(),
+        "-o",
+        dir.join("pair.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "link",
+        dir.join("app.pmo").to_str().unwrap(),
+        dir.join("pair.pmo").to_str().unwrap(),
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "the in-memory path must agree with the on-disk one"
+    );
+
+    // Non-vacuity: the same pair under a PLAIN main links the other body,
+    // so the column choice demonstrably reaches the image.
+    let plain_out = dir.join("plain.pmx");
+    execute(&args(&[
+        "build",
+        "-O1",
+        plain.to_str().unwrap(),
+        pair.to_str().unwrap(),
+        "-o",
+        plain_out.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_ne!(
+        fs::read(&mem).unwrap(),
+        fs::read(&plain_out).unwrap(),
+        "the two columns carry different code, so the images must differ"
+    );
+}
+
+/// The `.pmo` leg of the pre-scan: an entry unit arriving as an
+/// already-compiled object contributes its header bit like any other.
+#[test]
+fn a_pmo_entry_units_program_bit_drives_the_in_memory_column() {
+    let dir = scratch("variant_pmo_bit");
+    let app = dir.join("app.pmc");
+    let util = dir.join("util.pmc");
+    fs::write(&app, VOLATILE_MAIN).unwrap();
+    fs::write(&util, UTIL_FUSING).unwrap();
+    let app_pmo = dir.join("app.pmo");
+    execute(&args(&[
+        "compile",
+        "-O1",
+        app.to_str().unwrap(),
+        "-o",
+        app_pmo.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let mem = dir.join("mem.pmx");
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        app_pmo.to_str().unwrap(),
+        util.to_str().unwrap(),
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("column"),
+        "the .pmc sibling must offer the volatile column:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        util.to_str().unwrap(),
+        "-o",
+        dir.join("util.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    let disk = dir.join("disk.pmx");
+    execute(&args(&[
+        "link",
+        app_pmo.to_str().unwrap(),
+        dir.join("util.pmo").to_str().unwrap(),
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "an object input's bit must drive the sibling's column"
+    );
+}
+
+/// Column selection is symmetric, so the `-v` sentence must be: a NORMAL
+/// program reaching a name that offers only the volatile column falls
+/// back too, and the line has to name the column that was missing rather
+/// than assume the volatile one.
+#[test]
+fn verbose_link_names_whichever_column_was_missing() {
+    let dir = scratch("variant_fallback_direction");
+    let volatile_only = dir.join("util.pma");
+    fs::write(
+        &volatile_only,
+        ".func util\n.volatile\n        wr      1\n        rgt\n        ret\n",
+    )
+    .unwrap();
+    let normal = dir.join("normal.pmc");
+    fs::write(&normal, "main() {\n    @util();\n}\n").unwrap();
+
+    let out = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        normal.to_str().unwrap(),
+        volatile_only.to_str().unwrap(),
+        "-o",
+        dir.join("n.pmx").to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        out.stderr
+            .contains("link: 1 name(s) with no normal column linked volatile [util]"),
+        "got:\n{}",
+        out.stderr
+    );
+}
+
+/// A library can own the entry symbol (`pmt build util.pmc -L lib -l
+/// entry`), and then ITS object carries the program bit for the whole
+/// build. Both directions: bit set → the units compile the volatile
+/// column; bit clear → normal. Either way the in-memory image must equal
+/// the on-disk one and the `-v` line must stay silent.
+fn library_entry_case(tag: &str, entry_pma: &str) {
+    let dir = scratch(tag);
+    let lib_dir = dir.join("lib");
+    fs::create_dir_all(&lib_dir).unwrap();
+    let entry_src = dir.join("entry.pma");
+    fs::write(&entry_src, entry_pma).unwrap();
+    execute(&args(&[
+        "asm",
+        entry_src.to_str().unwrap(),
+        "-o",
+        lib_dir.join("entry.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let util = dir.join("util.pmc");
+    fs::write(&util, UTIL_FUSING).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        util.to_str().unwrap(),
+        "-L",
+        lib_dir.to_str().unwrap(),
+        "-l",
+        "entry",
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("column"),
+        "{tag}: every reached name offers the column the entry selects:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        util.to_str().unwrap(),
+        "-o",
+        dir.join("util.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "link",
+        dir.join("util.pmo").to_str().unwrap(),
+        "-L",
+        lib_dir.to_str().unwrap(),
+        "-l",
+        "entry",
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "{tag}: a library-owned entry must drive the in-memory column too"
+    );
+}
+
+#[test]
+fn a_library_owned_entry_with_the_bit_drives_the_in_memory_column() {
+    library_entry_case(
+        "variant_lib_entry_volatile",
+        ".volatile\n.func main\n.volatile\n        call    util\n        stp\n",
+    );
+}
+
+#[test]
+fn a_library_owned_entry_without_the_bit_stays_normal() {
+    library_entry_case(
+        "variant_lib_entry_plain",
+        ".func main\n        call    util\n        stp\n",
+    );
+}
+
+/// The two library-entry cases must not produce the same image, or the
+/// pair above would pass with the bit ignored entirely.
+#[test]
+fn the_two_library_entry_cases_select_different_code() {
+    let dir = scratch("variant_lib_entry_differ");
+    let lib_dir = dir.join("lib");
+    fs::create_dir_all(&lib_dir).unwrap();
+    let util = dir.join("util.pmc");
+    fs::write(&util, UTIL_FUSING).unwrap();
+
+    let mut images = Vec::new();
+    for (name, pma) in [
+        (
+            "vol",
+            ".volatile\n.func main\n.volatile\n        call    util\n        stp\n",
+        ),
+        ("plain", ".func main\n        call    util\n        stp\n"),
+    ] {
+        let src = dir.join(format!("{name}.pma"));
+        fs::write(&src, pma).unwrap();
+        execute(&args(&[
+            "asm",
+            src.to_str().unwrap(),
+            "-o",
+            lib_dir.join("entry.pmo").to_str().unwrap(),
+        ]))
+        .unwrap();
+        let out = dir.join(format!("{name}.pmx"));
+        execute(&args(&[
+            "build",
+            "-O1",
+            util.to_str().unwrap(),
+            "-L",
+            lib_dir.to_str().unwrap(),
+            "-l",
+            "entry",
+            "-o",
+            out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        images.push(fs::read(&out).unwrap());
+    }
+    assert_ne!(
+        images[0], images[1],
+        "the volatile column of `util` is different code from its normal one"
     );
 }

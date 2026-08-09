@@ -12,13 +12,63 @@ use super::syntax::{ArchSyntax, Flow};
 use super::{AsmError, AsmErrorKind};
 use crate::diagnostics::Span;
 use crate::formats::object::{
-    BlobDebug, BoundCall, MapPair, ObjectFile, Relocation, Symbol, SymbolDef, TableFixup,
-    TapeBinding,
+    BlobDebug, BlobVariant, BoundCall, MapPair, ObjectFile, Relocation, Symbol, SymbolDef,
+    TableFixup, TapeBinding,
 };
 use crate::vm::{Operand, OperandKind, encode_operand};
 
 fn err(span: Span, kind: AsmErrorKind) -> AsmError {
     AsmError { span, kind }
+}
+
+/// Name → symbol index, split by what a name can denote (docs/formats.md
+/// (assembly text)). A DEFINED name is keyed by `(name, build column)`, so
+/// a call site binds the callee lowering that belongs to its own column
+/// and a bare/`.volatile` pair never collapses into one entry. An EXTERNAL
+/// name has no column at all — it leaves the object and the linker chooses
+/// its column per program — so it is keyed by name alone and shared by
+/// call sites from both columns.
+///
+/// With no `.volatile` in the file every function sits in the normal
+/// column and every lookup keys on `(name, false)`, which is the flat
+/// name-keyed map this replaced.
+#[derive(Default)]
+struct SymbolIndex {
+    /// Per defined name, its symbol in each column (`[normal, volatile]`).
+    defined: HashMap<String, [Option<u32>; 2]>,
+    external: HashMap<String, u32>,
+}
+
+impl SymbolIndex {
+    /// The symbol a call from `column` to `name` binds: the callee's own
+    /// column when this file defines it, otherwise an external, minted on
+    /// first reference and appended after the function symbols.
+    ///
+    /// A file that defines `name` in the OTHER column only takes the
+    /// external path — the deliberate choice over silently binding across
+    /// columns, which would pin a gated caller to an ungated callee with
+    /// no record of it. As an external the name goes through the linker's
+    /// namespace instead, where the missing column is a counted fallback
+    /// (docs/core.md (linking)).
+    fn bind(&mut self, name: &str, column: bool, symbols: &mut Vec<Symbol>) -> u32 {
+        if let Some(idx) = self
+            .defined
+            .get(name)
+            .and_then(|slots| slots[usize::from(column)])
+        {
+            return idx;
+        }
+        if let Some(&idx) = self.external.get(name) {
+            return idx;
+        }
+        symbols.push(Symbol {
+            name: name.to_string(),
+            def: SymbolDef::External,
+        });
+        let idx = (symbols.len() - 1) as u32;
+        self.external.insert(name.to_string(), idx);
+        idx
+    }
 }
 
 /// One instruction after operand classification, before layout. Each
@@ -123,6 +173,10 @@ struct AssembledFunction {
     bound_calls: Vec<BoundCall>,
 }
 
+/// `.pma`-family source text → an [`ObjectFile`], under `syntax`'s dialect
+/// (docs/formats.md (assembly text)). Parses and lowers, then hands off to
+/// [`assemble_lowered`] — whose doc states the symbol-table layout
+/// invariant callers that pair symbols with blobs by position rely on.
 pub fn assemble(
     syntax: &ArchSyntax,
     arch_id: u8,
@@ -149,6 +203,19 @@ pub fn assemble(
 /// Borrows `lowered` (rather than consuming it) so a caller can go on to
 /// read the lowered functions/tables afterward — the lint context does;
 /// only `signatures` is cloned into the object as a result.
+///
+/// Symbol-table layout, relied on by callers that pair symbols with blobs
+/// by position: the defined symbols come first, one per emitted blob and
+/// in blob order, so symbol `i` defines blob `i`. Any `External` symbol is
+/// appended AFTER those, minted the first time an encoded call names
+/// something the source does not define — so externals never interleave
+/// with the function symbols, and their order is first-reference order
+/// across the blobs.
+///
+/// The defined run parallels the SOURCE functions one-to-one except where
+/// the `.volatile` directive is in play: a bare/`.volatile` pair whose two
+/// lowerings assemble identical contributes ONE `Both`-tagged blob and one
+/// symbol for its two `.func` blocks (docs/formats.md (assembly text)).
 pub(crate) fn assemble_lowered(
     syntax: &ArchSyntax,
     arch_id: u8,
@@ -156,6 +223,25 @@ pub(crate) fn assemble_lowered(
     with_debug: bool,
 ) -> Result<ObjectFile, AsmError> {
     let functions = &lowered.functions;
+    // A tagged file describes build columns, which is a code-section
+    // concept: the table/signature/bound-call records are indexed by
+    // source function position, and merging the columns renumbers blobs
+    // under them. No dialect enables both surfaces, so the combination is
+    // refused rather than defined.
+    let tagged = functions.iter().any(|f| f.volatile);
+    let refuse_table_records = || {
+        err(
+            functions
+                .iter()
+                .find(|f| f.volatile)
+                .expect("a tagged file has a tagged function")
+                .name_span,
+            AsmErrorKind::Syntax("`.volatile` does not combine with tables or signatures"),
+        )
+    };
+    if tagged && (!lowered.tables.is_empty() || lowered.signatures.is_some()) {
+        return Err(refuse_table_records());
+    }
 
     let mut symbols: Vec<Symbol> = functions
         .iter()
@@ -169,11 +255,11 @@ pub(crate) fn assemble_lowered(
             },
         })
         .collect();
-    let mut symbol_index: HashMap<String, u32> = symbols
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.clone(), i as u32))
-        .collect();
+    let mut symbol_index = SymbolIndex::default();
+    for (i, f) in functions.iter().enumerate() {
+        symbol_index.defined.entry(f.name.clone()).or_default()[usize::from(f.volatile)] =
+            Some(i as u32);
+    }
 
     let mut blobs = Vec::with_capacity(functions.len());
     let mut relocations = Vec::new();
@@ -207,7 +293,28 @@ pub(crate) fn assemble_lowered(
         }
     }
 
+    // Build columns: merge the pairs, then tag every emitted blob. This
+    // runs BEFORE table/signature/bound-call attachment because it
+    // renumbers blobs — and the refusal above guarantees there is nothing
+    // of that kind to renumber under it.
+    let variants = if tagged {
+        if !bound_calls.is_empty() || blob_table_refs.iter().any(|refs| !refs.is_empty()) {
+            return Err(refuse_table_records());
+        }
+        Some(merge_columns(
+            functions,
+            &mut symbols,
+            &mut blobs,
+            &mut relocations,
+            debug.as_mut(),
+        ))
+    } else {
+        None
+    };
+
     let mut object = ObjectFile::v2(arch_id, symbols, blobs, relocations, debug);
+    object.variants = variants;
+    object.program_volatile = lowered.program_volatile;
     // Table building runs when any table exists (it populates the v3
     // fields) or any TableRef hole exists (a reference with no tables at
     // all must still report its unknown label). Without either, the
@@ -236,13 +343,190 @@ pub(crate) fn assemble_lowered(
     Ok(object)
 }
 
+/// Collapses the assembled build columns into the object's final blob
+/// order and tags each blob (docs/formats.md (assembly text)). Every array
+/// handed in is provisional — one entry per `.func` BLOCK — and is
+/// rewritten in place to one entry per emitted blob.
+///
+/// A name's two blocks become ONE `Both`-tagged blob when their lowerings
+/// assemble to the same bytes and the same call sites by callee name, and
+/// two adjacent blobs (normal then volatile, whatever order the source
+/// wrote them in) otherwise. Deduping is TRANSITIVE: a candidate that
+/// calls a function this file splits is demoted with it, because its one
+/// blob could bind only one of the callee's columns and would silently pin
+/// a gated program to the ungated call graph. Demotion only ever removes
+/// `Both`, so the fixpoint terminates; self-recursion never demotes.
+///
+/// The record compared deliberately EXCLUDES debug info: a disassembled
+/// pair sits on two different source-line runs, so including it would make
+/// an object's variant structure depend on whether `-g` was passed. A
+/// deduped pair keeps the normal block's debug entry.
+fn merge_columns(
+    functions: &[SourceFunction],
+    symbols: &mut Vec<Symbol>,
+    blobs: &mut Vec<Vec<u8>>,
+    relocations: &mut Vec<Relocation>,
+    debug: Option<&mut Vec<BlobDebug>>,
+) -> Vec<BlobVariant> {
+    let old_symbols = std::mem::take(symbols);
+    let old_blobs = std::mem::take(blobs);
+    let old_relocations = std::mem::take(relocations);
+    let mut debug_slot = debug;
+    let old_debug: Option<Vec<BlobDebug>> = debug_slot.as_mut().map(|d| std::mem::take(&mut **d));
+
+    // Per block, its call sites as (hole offset, callee name, external?),
+    // in offset order — the shape both the record comparison and the
+    // relocation rebind read.
+    let mut sites: Vec<Vec<(u32, &str, bool)>> = vec![Vec::new(); functions.len()];
+    for r in &old_relocations {
+        let symbol = &old_symbols[r.symbol as usize];
+        sites[r.blob as usize].push((
+            r.offset,
+            symbol.name.as_str(),
+            matches!(symbol.def, SymbolDef::External),
+        ));
+    }
+    for per_block in &mut sites {
+        per_block.sort_by_key(|&(offset, _, _)| offset);
+    }
+
+    // Each name's blocks, by column, in first-appearance order.
+    let mut order: Vec<&str> = Vec::new();
+    let mut columns: HashMap<&str, [Option<usize>; 2]> = HashMap::new();
+    for (block, f) in functions.iter().enumerate() {
+        let slots = columns.entry(f.name.as_str()).or_insert_with(|| {
+            order.push(f.name.as_str());
+            [None, None]
+        });
+        slots[usize::from(f.volatile)] = Some(block);
+    }
+
+    let mut deduped: HashMap<&str, bool> = columns
+        .iter()
+        .map(|(&name, slots)| {
+            let same = match (slots[0], slots[1]) {
+                (Some(n), Some(v)) => {
+                    old_blobs[n] == old_blobs[v]
+                        && sites[n].len() == sites[v].len()
+                        && sites[n]
+                            .iter()
+                            .zip(&sites[v])
+                            .all(|(a, b)| a.0 == b.0 && a.1 == b.1)
+                }
+                _ => false,
+            };
+            (name, same)
+        })
+        .collect();
+    loop {
+        let mut demoted = false;
+        for &name in &order {
+            if !deduped[name] {
+                continue;
+            }
+            let normal = columns[name][0].expect("a dedup candidate has both columns");
+            let calls_a_split = sites[normal]
+                .iter()
+                .any(|(_, callee, _)| columns.contains_key(callee) && !deduped[callee]);
+            if calls_a_split {
+                deduped.insert(name, false);
+                demoted = true;
+            }
+        }
+        if !demoted {
+            break;
+        }
+    }
+
+    let mut variants: Vec<BlobVariant> = Vec::new();
+    let mut new_debug: Option<Vec<BlobDebug>> = old_debug.as_ref().map(|_| Vec::new());
+    // Per name, the symbol each column binds — the same index twice for a
+    // deduped name, so a call site from either column lands on it.
+    let mut defined: HashMap<&str, [Option<u32>; 2]> = HashMap::new();
+    // Per emitted blob, the block it came from.
+    let mut sources: Vec<usize> = Vec::new();
+    for &name in &order {
+        let slots = columns[name];
+        let emit: Vec<(usize, BlobVariant)> = if deduped[name] {
+            vec![(
+                slots[0].expect("a deduped name has both columns"),
+                BlobVariant::Both,
+            )]
+        } else {
+            [
+                (slots[0], BlobVariant::Normal),
+                (slots[1], BlobVariant::Volatile),
+            ]
+            .into_iter()
+            .filter_map(|(slot, tag)| slot.map(|block| (block, tag)))
+            .collect()
+        };
+        let mut pair: [Option<u32>; 2] = [None, None];
+        for (block, tag) in emit {
+            let merged = blobs.len() as u32;
+            blobs.push(old_blobs[block].clone());
+            variants.push(tag);
+            if let (Some(dst), Some(src)) = (new_debug.as_mut(), old_debug.as_ref()) {
+                dst.push(src[block].clone());
+            }
+            let symbol = symbols.len() as u32;
+            symbols.push(Symbol {
+                name: name.to_string(),
+                def: if functions[block].local {
+                    SymbolDef::Local { blob: merged }
+                } else {
+                    SymbolDef::Defined { blob: merged }
+                },
+            });
+            match tag {
+                BlobVariant::Both => pair = [Some(symbol), Some(symbol)],
+                BlobVariant::Normal => pair[0] = Some(symbol),
+                BlobVariant::Volatile => pair[1] = Some(symbol),
+            }
+            sources.push(block);
+        }
+        defined.insert(name, pair);
+    }
+
+    // Externals are re-minted in first-reference order over the MERGED
+    // blobs, so the symbol table comes out in the order re-assembling this
+    // object's own disassembly would produce.
+    let mut externals: HashMap<&str, u32> = HashMap::new();
+    for (merged, &block) in sources.iter().enumerate() {
+        let column = usize::from(functions[block].volatile);
+        for &(offset, callee, was_external) in &sites[block] {
+            let symbol = if was_external {
+                *externals.entry(callee).or_insert_with(|| {
+                    symbols.push(Symbol {
+                        name: callee.to_string(),
+                        def: SymbolDef::External,
+                    });
+                    (symbols.len() - 1) as u32
+                })
+            } else {
+                defined[callee][column].expect("a bound call names a column this file defines")
+            };
+            relocations.push(Relocation {
+                blob: merged as u32,
+                offset,
+                symbol,
+            });
+        }
+    }
+
+    if let (Some(dst), Some(merged)) = (debug_slot, new_debug) {
+        *dst = merged;
+    }
+    variants
+}
+
 fn assemble_function(
     syntax: &ArchSyntax,
     function: &SourceFunction,
     blob_idx: u32,
     sig_arity: Option<u8>,
     symbols: &mut Vec<Symbol>,
-    symbol_index: &mut HashMap<String, u32>,
+    symbol_index: &mut SymbolIndex,
 ) -> Result<AssembledFunction, AsmError> {
     // Pass A: classify items into slots; collect label → slot-index.
     let mut slots: Vec<Slot> = Vec::new();
@@ -555,13 +839,7 @@ fn assemble_function(
                     }
                     Slot::Call { opcode, symbol, .. } => {
                         blob.push(*opcode);
-                        let sym_idx = *symbol_index.entry(symbol.clone()).or_insert_with(|| {
-                            symbols.push(Symbol {
-                                name: symbol.clone(),
-                                def: SymbolDef::External,
-                            });
-                            (symbols.len() - 1) as u32
-                        });
+                        let sym_idx = symbol_index.bind(symbol, function.volatile, symbols);
                         relocs.push(Relocation {
                             blob: blob_idx,
                             offset: (blob.len()) as u32,
@@ -597,13 +875,7 @@ fn assemble_function(
                         blob.push(*opcode);
                         // Displacement half: relocates to the target
                         // symbol exactly like a plain call.
-                        let sym_idx = *symbol_index.entry(target.clone()).or_insert_with(|| {
-                            symbols.push(Symbol {
-                                name: target.clone(),
-                                def: SymbolDef::External,
-                            });
-                            (symbols.len() - 1) as u32
-                        });
+                        let sym_idx = symbol_index.bind(target, function.volatile, symbols);
                         relocs.push(Relocation {
                             blob: blob_idx,
                             offset: blob.len() as u32,
@@ -635,13 +907,7 @@ fn assemble_function(
                         // at link time (docs/formats.md (bound calls)). The
                         // callee may be extern; interning it mirrors a plain
                         // call's external-symbol handling.
-                        let sym_idx = *symbol_index.entry(target.clone()).or_insert_with(|| {
-                            symbols.push(Symbol {
-                                name: target.clone(),
-                                def: SymbolDef::External,
-                            });
-                            (symbols.len() - 1) as u32
-                        });
+                        let sym_idx = symbol_index.bind(target, function.volatile, symbols);
                         bound_calls.push(BoundCall {
                             blob: blob_idx,
                             offset: blob.len() as u32,
@@ -1152,6 +1418,30 @@ mod tests {
         assemble(&test_syntax(), 0x7E, src, false).unwrap()
     }
 
+    /// Build columns describe the CODE section, and the table/signature
+    /// records are indexed by source-function position, which merging the
+    /// columns renumbers under. No shipped dialect enables both surfaces —
+    /// PM-1 takes the volatile cap alone and TM-1 the table caps — so the
+    /// combination is refused rather than given a meaning. Only a
+    /// framework-level fixture can reach this at all.
+    #[test]
+    fn the_volatile_directive_refuses_to_combine_with_tables() {
+        let mut syntax = test_syntax();
+        syntax.caps = crate::asm::AsmCaps {
+            tables: true,
+            rept: true,
+            vectors: true,
+            volatile: true,
+        };
+        let src = ".section tables\nT0: .row [1]\n    .row [*]\n.section code\n\
+                   .func f\n.volatile\n        stop\n";
+        let err = assemble(&syntax, 0x7E, src, false).expect_err("the combination is refused");
+        assert_eq!(
+            err.kind,
+            AsmErrorKind::Syntax("`.volatile` does not combine with tables or signatures")
+        );
+    }
+
     #[test]
     fn single_function_with_backward_short_jump() {
         // fixture: ent 0x0E auto | nop 0x01 | jmp relaxable 0x20/0x30
@@ -1481,6 +1771,7 @@ mod tests {
                 tables: true,
                 rept: true,
                 vectors: true,
+                volatile: false,
             },
         }
     }

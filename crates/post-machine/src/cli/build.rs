@@ -5,9 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mtc_core::formats::object::ObjectFile;
-use mtc_core::linker::LinkOptions;
+use mtc_core::linker::{LinkOptions, LinkReport};
 
-use crate::compiler::{CompileOptions, CompileReport, compile as compile_source};
+use crate::compiler::{CompileOptions, CompileReport, VariantColumns, compile as compile_source};
 use crate::optimizer::OptLevel;
 use crate::stdlib;
 
@@ -52,6 +52,40 @@ pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &Compil
     }
 }
 
+/// The `-v` link summary — one wording for `pmt link` and for both of
+/// `pmt build`'s modes, so the three never drift apart
+/// (docs/pmt/cli.md (link)). `prefix` names the manifest target when
+/// there is one (`app: link: …`) and is empty otherwise.
+///
+/// The variant line is a pure rendering of `LinkReport`: it appears only
+/// when a reached name offered no body in the column the program's bit
+/// selects, so a build whose columns all match says nothing at all. Which
+/// column was missing depends on that bit — selection is symmetric, so
+/// the sentence reads its direction off `program_volatile` rather than
+/// assuming one (docs/core.md (linking)).
+pub(super) fn render_link_report(stderr: &mut String, prefix: &str, report: &LinkReport) {
+    let _ = writeln!(
+        stderr,
+        "{prefix}link: dropped [{}]; {} site(s) relaxed short, {} far",
+        report.dropped.join(", "),
+        report.relaxed_calls,
+        report.far_calls
+    );
+    if !report.variant_fallbacks.is_empty() {
+        let (missing, linked) = if report.program_volatile {
+            ("volatile", "normal")
+        } else {
+            ("normal", "volatile")
+        };
+        let _ = writeln!(
+            stderr,
+            "{prefix}link: {} name(s) with no {missing} column linked {linked} [{}]",
+            report.variant_fallbacks.len(),
+            report.variant_fallbacks.join(", ")
+        );
+    }
+}
+
 pub(super) fn render_opt_report(stderr: &mut String, report: &CompileReport) {
     let _ = writeln!(stderr, "opt: {} round(s)", report.opt.rounds);
     for change in &report.opt.changes {
@@ -78,6 +112,10 @@ pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
         } else {
             OptLevel::O0
         },
+        // The disk rule (docs/pmt/cli.md (build)): a standalone object
+        // outlives the invocation that made it and cannot know which
+        // program will link it, so it always carries both build columns.
+        columns: VariantColumns::Both,
         ..Default::default()
     };
     if args.flag("-O0") {
@@ -273,14 +311,7 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
 
     let mut stderr = String::new();
     if verbose {
-        let r = &linked.report;
-        let _ = writeln!(
-            stderr,
-            "link: dropped [{}]; {} site(s) relaxed short, {} far",
-            r.dropped.join(", "),
-            r.relaxed_calls,
-            r.far_calls
-        );
+        render_link_report(&mut stderr, "", &linked.report);
     }
     Ok(CliOutput::ok(String::new(), stderr))
 }

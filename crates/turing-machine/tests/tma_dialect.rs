@@ -376,3 +376,22 @@ miss:   hlt
     let flat = assemble(&one_line, false).expect("the one-line source assembles");
     assert_eq!(obj.to_bytes(), flat.to_bytes());
 }
+
+/// The `.volatile` build-variant directive is PM-1's alone: `.tma` leaves
+/// the capability off, so the word is as unknown to this dialect as any
+/// other dotted token. Two layers keep it that way — `tm1_syntax()` spells
+/// its `AsmCaps` exhaustively (a new capability cannot default itself on)
+/// and this test pins the resulting acceptance.
+#[test]
+fn the_volatile_directive_is_not_part_of_the_tma_dialect() {
+    let src = ".func main\n.volatile\n        stp\n";
+    let err = assemble(src, false).expect_err("`.volatile` is not a `.tma` directive");
+    assert_eq!(
+        err.kind,
+        mtc_core::asm::AsmErrorKind::UnknownMnemonic(".volatile".to_string())
+    );
+    assert!(
+        !mtc_core::asm::recognized_directives(tm1_syntax().caps).contains(&".volatile"),
+        "`.tma`'s directive inventory must not list `.volatile`"
+    );
+}

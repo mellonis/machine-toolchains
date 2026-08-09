@@ -15,7 +15,7 @@ use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use mtc_core::asm::format_asm;
+use crate::asm::format_asm;
 use mtc_core::diagnostics::Span;
 
 use crate::fmt::format as format_source;

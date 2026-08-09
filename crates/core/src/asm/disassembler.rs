@@ -14,7 +14,7 @@ use super::decode::{Body, Decoded, DecodedOperand, decode_at, decode_stream};
 use super::fmt::wrap_operand_list;
 use super::syntax::{ArchSyntax, Flow};
 use crate::formats::executable::Executable;
-use crate::formats::object::{BoundCall, ObjectFile, SymbolDef, TapeBinding};
+use crate::formats::object::{BlobVariant, BoundCall, ObjectFile, SymbolDef, TapeBinding};
 use crate::linker::MapFile;
 use crate::vm::OperandKind;
 
@@ -717,15 +717,23 @@ fn dispatch_entries_within(tables: &[u8], start: u32, end: u32) -> Vec<u32> {
 }
 
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
-    let mut out = String::new();
+    let mut text = String::new();
+    // The program bit leads the dump: `.volatile` before the first `.func`
+    // is what sets it on the way back in (docs/formats.md (assembly text)).
+    // Both this and the per-blob tags below are gated on the dialect's own
+    // capability — a dialect that cannot parse the directive must never be
+    // handed text carrying it.
+    if syntax.caps.volatile && obj.program_volatile {
+        text.push_str(".volatile\n");
+    }
     // Tables render first, in their own section, with `.section code`
     // before the function bodies. A no-tables object emits neither line,
     // so its output stays byte-identical to a pre-tables object.
     let (table_labels, code_labels) = match render_tables_section(syntax, obj) {
         Some((section, labels, code_labels)) => {
-            out.push_str(".section tables\n");
-            out.push_str(&section);
-            out.push_str(".section code\n");
+            text.push_str(".section tables\n");
+            text.push_str(&section);
+            text.push_str(".section code\n");
             (labels, code_labels)
         }
         None => (HashMap::new(), CodeLabels::new()),
@@ -757,23 +765,12 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
             SymbolDef::External => continue,
         };
         let code = &obj.blobs[blob as usize];
-        // A signed object re-emits each function's `.routine` line ahead
-        // of its `.func`, so dis ∘ asm preserves signatures (they are
-        // all-or-none per object, parallel to blobs — docs/formats.md
-        // (.pmo)).
-        if let Some(sig) = obj.signatures.as_ref().and_then(|s| s.get(blob as usize)) {
-            out.push_str(&routine_line(
-                &symbol.name,
-                sig.arity,
-                &sig.cardinalities,
-                None,
-            ));
-        }
-        out.push_str(&format!(
-            ".func {}{}\n",
-            symbol.name,
-            if local { " local" } else { "" }
-        ));
+        // The body renders once into `block`; a `Both`-tagged blob then
+        // prints it under BOTH headers — bare and `.volatile` — which is
+        // what lets the two same-name blocks dedup back into this one blob
+        // on the way in (docs/formats.md (assembly text)).
+        let mut block = String::new();
+        let out = &mut block;
         // Skip the leading entry byte if present (implied by .func).
         let start = if code.first() == Some(&syntax.entry_opcode) {
             1
@@ -816,7 +813,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
             let label_name = labels_at.get(&d.addr).cloned();
             match &d.body {
                 Body::Raw(b) => {
-                    push_byte_lines(&mut out, label_name.as_deref(), &[*b]);
+                    push_byte_lines(out, label_name.as_deref(), &[*b]);
                 }
                 Body::Instr { mnemonic, operand } => {
                     let entry = syntax.by_mnemonic(mnemonic).unwrap();
@@ -900,7 +897,7 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                         }
                         None => {
                             push_byte_lines(
-                                &mut out,
+                                out,
                                 label_name.as_deref(),
                                 &code[d.addr as usize..(d.addr + d.len) as usize],
                             );
@@ -909,8 +906,51 @@ pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
                 }
             }
         }
+
+        // One header per build column this blob serves: an untagged or
+        // `Normal` blob is bare, a `Volatile` one carries the directive,
+        // and a `Both` one prints both ways.
+        let gated: &[bool] = match variant_of(obj, blob) {
+            _ if !syntax.caps.volatile => &[false],
+            BlobVariant::Normal => &[false],
+            BlobVariant::Volatile => &[true],
+            BlobVariant::Both => &[false, true],
+        };
+        for &volatile in gated {
+            // A signed object re-emits each function's `.routine` line
+            // ahead of its `.func`, so dis ∘ asm preserves signatures
+            // (they are all-or-none per object, parallel to blobs —
+            // docs/formats.md (.pmo)).
+            if let Some(sig) = obj.signatures.as_ref().and_then(|s| s.get(blob as usize)) {
+                text.push_str(&routine_line(
+                    &symbol.name,
+                    sig.arity,
+                    &sig.cardinalities,
+                    None,
+                ));
+            }
+            text.push_str(&format!(
+                ".func {}{}\n",
+                symbol.name,
+                if local { " local" } else { "" }
+            ));
+            if volatile {
+                text.push_str(".volatile\n");
+            }
+            text.push_str(&block);
+        }
     }
-    out
+    text
+}
+
+/// A blob's build column, reading an object with no variant records at all
+/// — a legacy or hand-assembled one — as all-`Normal`, exactly as the
+/// linker's selection rule does (docs/formats.md (MO)).
+fn variant_of(obj: &ObjectFile, blob: u32) -> BlobVariant {
+    obj.variants
+        .as_ref()
+        .and_then(|tags| tags.get(blob as usize).copied())
+        .unwrap_or(BlobVariant::Normal)
 }
 
 /// Decode ONE instruction at `addr` (None = unknown opcode / truncated).
@@ -1759,6 +1799,7 @@ mod tests {
                 tables: true,
                 rept: true,
                 vectors: true,
+                volatile: false,
             },
         }
     }
@@ -1799,6 +1840,7 @@ T0:     .row    [1, 2]
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // And it reassembles to the identical object — a full round trip.
@@ -1830,6 +1872,7 @@ B:  stp
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // And the code section DEFINES the two names the table printed,
@@ -2097,6 +2140,7 @@ B:  stp
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_listed_names_are_defined(&dis);
@@ -2141,6 +2185,7 @@ B:  stp
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2167,6 +2212,7 @@ B:  stp
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2191,6 +2237,7 @@ B:  stp
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2252,6 +2299,7 @@ L0001:  nop
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         assert_eq!(assemble(&syntax, 0x7E, &dis, false).unwrap(), obj);
@@ -2289,6 +2337,7 @@ F0:     .frame  tapes=(2, 0)
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // Full object round trip (no exits here, so it round-trips at the
@@ -2320,6 +2369,7 @@ F0:     .frame  tapes=(2, 0)
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&dis, caps).unwrap(), dis);
         // Full object round trip: the bound-call records — including every
@@ -2400,6 +2450,7 @@ other:  stp
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&text, caps).unwrap(), text);
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
@@ -2445,6 +2496,7 @@ done:   stp
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         assert_eq!(format_asm_with(&text, caps).unwrap(), text);
         let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();

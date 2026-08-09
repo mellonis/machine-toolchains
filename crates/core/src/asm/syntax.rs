@@ -35,6 +35,20 @@ pub struct AsmCaps {
     pub rept: bool,
     /// `[a, *, -, <, >, .]` vector operand tokens.
     pub vectors: bool,
+    /// The `.volatile` build-variant directive: per-function build-column
+    /// tags and the object's program bit (docs/formats.md (assembly text)).
+    /// Selection metadata only — it names which column a blob belongs to,
+    /// never anything about the body, which the assembler transcribes
+    /// as written either way.
+    ///
+    /// [`AsmCaps`]'s `Default` is all-off, so a dialect that does not ask
+    /// for this field does not get the directive — adding a capability
+    /// here can never switch one on for a dialect that predates it,
+    /// whether that dialect spells the struct out or fills the rest from
+    /// `..Default::default()`. `tm1_syntax()` does spell every field,
+    /// which turns each future addition into a compile-time decision
+    /// there; `pm1_syntax()` names only what it enables.
+    pub volatile: bool,
 }
 
 pub struct ArchSyntax {

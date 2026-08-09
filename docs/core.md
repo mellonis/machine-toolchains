@@ -507,8 +507,15 @@ knowledge arrives via `ArchSyntax`, and the text grammar they accept is
 - **Capabilities** (`AsmCaps`) — opt-in grammar extensions, all off by
   default so a classic dialect's acceptance is byte-for-byte unchanged:
   `tables` (`.section` regions with `.row`/`.targets`/`.target`),
-  `rept` (`.rept v, lo, hi` … `.endr` with `{expr}` substitution), and
-  `vectors` (`[a, *, -, <, >, .]` operand tokens).
+  `rept` (`.rept v, lo, hi` … `.endr` with `{expr}` substitution),
+  `vectors` (`[a, *, -, <, >, .]` operand tokens), and `volatile` (the
+  `.volatile` build-column directive — selection metadata naming which
+  column a blob belongs to, never anything about the body). The struct's
+  default has every capability off, so one a dialect does not ask for is
+  off: adding a capability to the framework can never switch it on for a
+  dialect that predates it. TM-1 goes one further and spells every field
+  out, which turns each future addition into a compile-time decision
+  there rather than a silent opt-out.
 
 ### Control flow
 
@@ -607,8 +614,10 @@ Objects in, one executable image out, in two phases.
   through the namespace, so it can neither shadow nor be shadowed. This
   is the linking-visibility rule every source language's private-by-
   default visibility rests on.
-- Reachability is a BFS from the entry symbol — `main` by default, or
-  whatever a caller's entry override names; a missing entry symbol is an
+- Reachability is a BFS from the entry symbol — `main` by default (the
+  linker exports that default name, so a driver reproducing its rules
+  ahead of the link cannot drift from it), or whatever a caller's entry
+  override names; a missing entry symbol is an
   error carrying the name that was looked up. Functions the walk never
   reaches are **dropped**, and a dropped function may reference anything
   at all: unresolved references only matter for what survives.
@@ -617,6 +626,45 @@ Objects in, one executable image out, in two phases.
   specialized copy, so a generic routine reached before lowering but left
   with no remaining caller afterward is dropped too, exactly as if the
   first BFS had never reached it.
+
+**Build columns.** A name may carry two definitions — the two build
+columns of one function, for architectures whose toolchain compiles both
+(`docs/pmt/language.md (volatile programs)`). The namespace therefore
+maps each name to a **column pair** rather than to a single definition,
+and the rules around that pair are narrow on purpose:
+
+- A definition claims the column(s) its tag covers: `normal`, `volatile`,
+  or `both` (which claims each). Claiming a column twice is a duplicate
+  however the two are tagged, so `{normal, volatile}` is the ONLY
+  same-name pair one object may carry.
+- A name's two columns always come from ONE input. A user object's
+  definition shadows a library's whole pair, and library first-wins
+  keeps a pair whole too — the columns of one name never span two
+  inputs.
+- An object with no variant records at all reads as all-`normal`
+  (`docs/formats.md (MO)`): it offers one column, which is what makes
+  every legacy and hand-assembled object link unchanged.
+
+**Which column** is decided once for the whole link, by the program's
+volatile bit — the header bit carried by the object that DEFINES the
+entry symbol, not a union over the inputs. (With no entry definer there
+is no link either: the missing-entry error fires first.) Every name then
+resolves to that column. A name that ships only the other one is linked
+anyway, from the column it has, and its name is **counted** in the link
+report. The counter is symmetric, because selection is: a normal program
+reaching a volatile-only body is counted exactly as a volatile program
+reaching a normal-only one, so the report also carries the bit the link
+resolved with, and a message about a fallback must read that bit rather
+than assume a direction.
+
+Nothing about columns is validated at the link boundary — the tags are
+selection metadata, not checked facts, and a mismatch degrades to that
+counted fallback rather than to an error. A fallback is a **mixed link
+by design**: the borrowed body keeps its own object's intra-object edges
+(a local callee binds a blob directly and is never re-chosen), while
+every name it resolves through the namespace is picked by the program's
+bit again. That is inherent to taking a body from the other column, and
+the counter is the signal that it happened, not a hole to be closed.
 
 **Name resolution** is also exposed on its own, without layout: a query
 answers which symbols the reachability walk reaches — in BFS order,
@@ -648,8 +696,9 @@ that moves code keeps table references correct.
 
 Every link returns a structured account of what it did, which the CLIs
 render under `-v` and libraries never print: the dropped functions, how
-many call sites relaxed and how many stayed far, and — where a
-composition engine ran — the stamps emitted, the composite count and
+many call sites relaxed and how many stayed far, which names had to take
+the other build column and which column this link selected, and — where
+a composition engine ran — the stamps emitted, the composite count and
 compose-matrix size, the stamps and descriptors avoided by interning,
 and the trap rows and expanded rows synthesized. The counters are
 image-level aggregates:
@@ -664,6 +713,15 @@ image-level aggregates:
 | `dedup_savings` | stamps and descriptors avoided by interning an already-built copy |
 | `synthesized_trap_rows` | unmapped-read trap rows prepended to stamped match tables |
 | `expanded_rows` | extra match rows from one-way collapse expansion |
+| `variant_fallbacks` | sorted names that linked the build column NOT matching the program's bit, because the wanted one was absent |
+| `program_volatile` | the volatile bit this link resolved with — the column every name was selected by |
+
+`variant_fallbacks` names what SHIPPED, not what the namespace held:
+every name on it is in the image. It is empty precisely when every
+reached name offered the selected column — never "empty whenever the bit
+is clear", since selection is symmetric (Linking above). `program_volatile`
+is reported so a consumer can say which column a counted fallback was
+missing without guessing a direction.
 
 Debug names travel out of band in the map sidecar, keeping the image
 itself a pure binary.

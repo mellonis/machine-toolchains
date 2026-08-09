@@ -103,6 +103,8 @@ pub(super) fn semantic_tokens(state: &TmaDocState) -> Vec<SemToken> {
             | AsmItemKind::Section(_)
             | AsmItemKind::Rept(_)
             | AsmItemKind::Raw(_)
+            // `.volatile` is PM-1's alone; `.tma` never shapes one.
+            | AsmItemKind::Volatile(_)
             | AsmItemKind::Comment(_) => {}
         }
     }
