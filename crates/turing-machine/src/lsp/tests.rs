@@ -1240,10 +1240,15 @@ fn hovering_a_routine_shows_its_signature_with_tape_alphabets_and_its_doc() {
 fn hovering_a_routine_shows_its_write_sets() {
     // Two tapes, `a` written (both digits, so ordering is observable) and
     // `b` never touched — one line each, the untouched tape's set rendered
-    // as `{}` rather than omitted.
+    // as `{}` rather than omitted. A doc line is attached deliberately: the
+    // exact-string assertion below pins the writes block's PLACEMENT — head,
+    // then writes lines, then doc body — not just its presence, which a
+    // fixture with no doc body could never observe (the block would just be
+    // the tail of the string either way).
     let src = "\
 alphabet bits { '_', '0', '1' }
 
+? Only tape a is written.
 routine r(tape a: bits, tape b: bits) {
   entry state s {
     ['0', *] -> write ['1', -] return;
@@ -1264,7 +1269,9 @@ machine {
         .expect("a hover");
     assert_eq!(
         hover.text,
-        "routine r(tape a: bits, tape b: bits)\n\nwrites a: {'0', '1'}\nwrites b: {}"
+        "routine r(tape a: bits, tape b: bits)\n\n\
+         writes a: {'0', '1'}\nwrites b: {}\n\n\
+         Only tape a is written."
     );
 }
 
