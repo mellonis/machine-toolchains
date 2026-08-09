@@ -530,6 +530,123 @@ machine {
     compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
 }
 
+// -- dead-map-pair ------------------------------------------------------
+
+/// A graft whose graph writes only `'0'`, so the map's `'1' -> '1'` pair has
+/// a write-back half that can never fire. Cardinalities differ (5 vs 3), so
+/// demoting the pair is acceptance-neutral and the fix ships.
+const DEAD_PAIR: &str = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+alphabet bare3 { '_', '0', '1' }
+
+graph zeroing(tape v: bare3, state done) {
+  entry state s {
+    ['1'] -> write ['0'] move [>] goto s;
+    [*] -> done;
+  }
+}
+
+machine {
+  tape t: host5;
+  entry graft zeroing(v = t with map { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }, done = fin) as z;
+  state fin { [*] -> stop; }
+}
+";
+
+#[test]
+fn a_dead_map_pair_file_reports_and_exits_one() {
+    let dir = scratch("dead-map-pair");
+    let f = write(&dir, "m.tmc", DEAD_PAIR);
+    let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stdout
+            .contains("lint: the write-back half of `'1' -> '1'` never fires"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn allow_suppresses_dead_map_pair() {
+    // The code joins the shared allow namespace automatically (the `known_code`
+    // union covers every `RULES` entry), so naming it is accepted rather than
+    // rejected as a typo, and it silences the finding.
+    let report = lint(
+        DEAD_PAIR,
+        LintOptions {
+            allow: vec!["dead-map-pair".to_string()],
+            warn: Vec::new(),
+        },
+    )
+    .expect("a known allow code");
+    assert!(report.diagnostics.iter().all(|d| d.code != "dead-map-pair"));
+}
+
+#[test]
+fn dead_map_pair_fix_demotes_the_arrow_and_relints_clean() {
+    let d = findings(DEAD_PAIR)
+        .into_iter()
+        .find(|d| d.code == "dead-map-pair")
+        .expect("a dead-map-pair finding");
+    let fix = d.fix.expect("a demote fix");
+    let fixed = apply_fix(DEAD_PAIR, &fix.edits);
+    // Demotion, not deletion: the read half survives, only the arrow changes.
+    assert!(fixed.contains("'0' -> '0', '1' => '1'"), "{fixed}");
+    assert!(!fixed.contains("'1' -> '1'"), "{fixed}");
+    assert!(
+        findings(&fixed).iter().all(|d| d.code != "dead-map-pair"),
+        "{:?}",
+        findings(&fixed)
+    );
+    compile(&fixed, CompileOptions::default()).expect("fixed source compiles");
+}
+
+#[test]
+fn dead_map_pair_demotion_is_object_neutral_for_a_graft() {
+    // The strongest form of the soundness claim, for the graft path: the dead
+    // write-back entry produces no spliced row, so demoting it leaves the
+    // compiled object byte-identical. (Only for grafts — a bound CALL emits
+    // its map into the object's binding record, where dropping the entry is
+    // still behaviour-preserving but visibly different bytes.)
+    let d = findings(DEAD_PAIR)
+        .into_iter()
+        .find(|d| d.code == "dead-map-pair")
+        .expect("a dead-map-pair finding");
+    let fixed = apply_fix(DEAD_PAIR, &d.fix.expect("a demote fix").edits);
+    let before = compile(DEAD_PAIR, CompileOptions::default()).expect("the source compiles");
+    let after = compile(&fixed, CompileOptions::default()).expect("the demoted source compiles");
+    assert_eq!(before.tma, after.tma, "the emitted assembly must not move");
+    assert_eq!(
+        before.object.to_bytes(),
+        after.object.to_bytes(),
+        "demoting a dead write-back half must be object-neutral"
+    );
+}
+
+#[test]
+fn no_golden_tmc_carries_a_dead_map_pair() {
+    // The corpus gate: every committed `.tmc` teaching fixture is free of the
+    // finding, so a rule that over-reported would fail here rather than in a
+    // user's editor.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let mut seen = 0;
+    for entry in fs::read_dir(&dir).expect("the golden directory") {
+        let path = entry.expect("a directory entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("tmc") {
+            continue;
+        }
+        seen += 1;
+        let src = fs::read_to_string(&path).expect("read the fixture");
+        let dead: Vec<Diagnostic> = findings(&src)
+            .into_iter()
+            .filter(|d| d.code == "dead-map-pair")
+            .collect();
+        assert!(dead.is_empty(), "{}: {dead:#?}", path.display());
+    }
+    assert!(seen >= 7, "the golden corpus is present, got {seen} files");
+}
+
 // -- flagship acceptance: unused-label on `.tma` ------------------------
 
 #[test]
