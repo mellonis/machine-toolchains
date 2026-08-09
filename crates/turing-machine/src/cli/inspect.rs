@@ -624,15 +624,20 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
 
 const IR_USAGE: &str = "\
 USAGE: tmt ir graph FILE.ir.json [--function NAME]
+       tmt ir footprints FILE.ir.json [--function NAME]
 
-Renders --emit-ir output as a Mermaid flowchart (one per world). The filter
-flag keeps pmt's `--function` name for cross-tool muscle memory; a TM world
-IS the unit here (the `machine` block or a routine), so NAME is a world name.
+`graph` renders --emit-ir output as a Mermaid flowchart (one per world).
+`footprints` renders each world's inferred write footprint: per tape, the
+symbol indices its body may ever write, out of the tape's cardinality. Both
+share the `--function` flag (pmt's flag name, for cross-tool muscle memory);
+a TM world IS the unit here (the `machine` block or a routine), so NAME is a
+world name.
 ";
 
 pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
         Some("graph") => ir_graph(&raw[1..]),
+        Some("footprints") => ir_footprints(&raw[1..]),
         _ => Ok(CliOutput::ok(IR_USAGE.into(), String::new())),
     }
 }
@@ -660,6 +665,78 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
         });
     }
     Ok(CliOutput::ok(out, String::new()))
+}
+
+/// `tmt ir footprints FILE.ir.json [--function NAME]` — renders
+/// [`crate::footprint::infer_ir`]'s per-world, per-tape write-set inference
+/// over `--emit-ir` JSON. The IR is index-only by contract (no glyph table
+/// travels in the sidecar), so the report prints symbol INDICES, one line
+/// per tape, in the world's own tape order:
+///
+/// ```text
+/// world std::binaryNumbersBare::invertNumber
+///   tape 0 (num): writes {1, 2} of 3
+/// ```
+///
+/// Worlds render in the IR's own program order (never the footprint
+/// table's `HashMap` iteration order, which is unspecified) so the report
+/// is stable across runs. `--function` filters to one world, mirroring
+/// `ir graph`'s flag and error shape exactly, including the unknown-world
+/// message (docs/tmt/cli.md (tmt ir)).
+fn ir_footprints(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    let filter = args.value("--function")?;
+    let inputs = args.positionals()?;
+    let [input] = inputs.as_slice() else {
+        return Err(format!(
+            "ir footprints takes exactly one file\n\n{IR_USAGE}"
+        ));
+    };
+    let text = fs::read_to_string(input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    let program = IrProgram::from_json(&text).map_err(|e| format!("{input}: {e}"))?;
+    let table = crate::footprint::infer_ir(&program);
+
+    let mut blocks: Vec<String> = Vec::new();
+    for world in &program.worlds {
+        if filter.as_deref().is_some_and(|f| f != world.name) {
+            continue;
+        }
+        // `infer_ir` computes one entry per world `program.worlds` lists, so
+        // this always resolves — a lookup miss would mean the table and the
+        // program it was built from disagree on which worlds exist.
+        let footprint = table
+            .worlds
+            .get(&world.name)
+            .expect("infer_ir covers every world its own input program lists");
+        let mut block = format!("world {}\n", world.name);
+        for (index, tape) in world.tapes.iter().enumerate() {
+            // `FootprintTable.worlds` is keyed by name, so two worlds
+            // sharing a name collapse to the LAST one's arity — a shape
+            // `--emit-ir` itself never produces (its names are mangled
+            // unique), but the file this leaf reads is untrusted input, not
+            // a value this process just built, so a hand-edited or
+            // corrupted `.ir.json` can still name-collide two
+            // differently-sized worlds. Defaulting to the empty set on a
+            // miss keeps that case a (conservative) report line rather
+            // than a panic.
+            let set = footprint.tapes.get(index).copied().unwrap_or_default();
+            let members: Vec<String> = set.iter().map(|i| i.to_string()).collect();
+            block.push_str(&format!(
+                "  tape {index} ({}): writes {{{}}} of {}\n",
+                tape.name,
+                members.join(", "),
+                tape.cardinality
+            ));
+        }
+        blocks.push(block);
+    }
+    if blocks.is_empty() {
+        return Err(match filter {
+            Some(f) => format!("no world `{f}` in {input}"),
+            None => format!("{input}: no worlds"),
+        });
+    }
+    Ok(CliOutput::ok(blocks.join("\n"), String::new()))
 }
 
 fn tape_show(raw: &[String]) -> Result<CliOutput, String> {

@@ -33,12 +33,6 @@
 //! Consumers that see only source form (the lint layer) get the coarser
 //! answer, which is the safe one.
 
-// Nothing in the crate reads the table at this point in the build-out, and
-// `SymSet` deliberately ships as a whole set primitive rather than trimmed to
-// today's call sites: a set type missing `len` or `is_superset` is a worse
-// primitive than one carrying an unused method.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fmt;
 
@@ -109,6 +103,11 @@ impl SymSet {
     }
 
     /// Whether every member of `other` is a member here.
+    // No consumer outside this module's own tests yet — every current
+    // superset-shaped question is answered by `union_with`'s growth flag
+    // instead. Kept because a set primitive missing `is_superset` is a
+    // worse primitive than one carrying an unused method.
+    #[allow(dead_code)]
     pub(crate) fn is_superset(&self, other: SymSet) -> bool {
         self.0 & other.0 == other.0
     }
@@ -127,11 +126,18 @@ impl SymSet {
     }
 
     /// How many symbols are in the set.
+    // No consumer yet: every current member-count question is answered by
+    // rendering `iter()`'s members directly (the `ir footprints` report) or
+    // by `union_with`'s growth flag, never a bare cardinality.
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> u32 {
         self.0.count_ones()
     }
 
     /// Whether the set is empty.
+    // No consumer yet: every current emptiness question is answered by
+    // `iter()` naturally yielding nothing, never a dedicated check.
+    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.0 == 0
     }

@@ -826,10 +826,14 @@ unbounded tape, not the whole of it.
 
 ```
 USAGE: tmt ir graph FILE.ir.json [--function NAME]
+       tmt ir footprints FILE.ir.json [--function NAME]
 
-Renders --emit-ir output as a Mermaid flowchart (one per world). The filter
-flag keeps pmt's `--function` name for cross-tool muscle memory; a TM world
-IS the unit here (the `machine` block or a routine), so NAME is a world name.
+`graph` renders --emit-ir output as a Mermaid flowchart (one per world).
+`footprints` renders each world's inferred write footprint: per tape, the
+symbol indices its body may ever write, out of the tape's cardinality. Both
+share the `--function` flag (pmt's flag name, for cross-tool muscle memory);
+a TM world IS the unit here (the `machine` block or a routine), so NAME is a
+world name.
 ```
 
 Reads a `--emit-ir` JSON file and renders each world's state graph as a
