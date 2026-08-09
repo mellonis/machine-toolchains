@@ -435,3 +435,144 @@ fn a_normal_program_links_the_normal_column() {
         "the volatile column is unreachable in a normal program and must not reach the image"
     );
 }
+
+#[test]
+fn a_column_invariant_entry_splits_when_a_transitive_callee_splits() {
+    // The dedup key cannot be per-function alone. `main` and `mid` here
+    // are byte-identical in both columns AND reference the same callee
+    // NAMES, yet `leaf` fuses and splits — so a `Both` `mid` would bind
+    // the normal `leaf` and a `Both` `main` the normal `mid`, leaving the
+    // volatile column of a program that declares itself volatile
+    // unreachable from its own entry. Deduping is therefore transitive: a
+    // function may be `Both` only if every intra-object callee is too.
+    //
+    // The shape is deliberately adversarial to a single forward pass:
+    // the chain is declared entry-first, so `main` is decided before
+    // `mid` is known to have demoted. Only a fixpoint gets it right.
+    // Sizes keep the inliner out in BOTH columns — `leaf` stays over the
+    // op limit even once fused, and `mid`/`main` contain calls.
+    let src = "\
+volatile main() {
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+}
+mid() {
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+}
+leaf() {
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+}
+";
+    let out = build(src, OptLevel::O1, VariantColumns::Both);
+    let obj = &out.object;
+    assert!(obj.program_volatile, "the fixture declares a volatile main");
+
+    let leaf = columns_of(obj, "leaf");
+    let mid = columns_of(obj, "mid");
+    let main = columns_of(obj, "main");
+    assert_eq!(leaf.len(), 2, "leaf fuses, so it splits: {leaf:?}");
+    assert_eq!(
+        mid.len(),
+        2,
+        "mid is column-invariant itself but must follow its split callee: {mid:?}"
+    );
+    assert_eq!(
+        main.len(),
+        2,
+        "main must follow mid transitively, not dedup: {main:?}"
+    );
+    for (name, cols) in [("leaf", &leaf), ("mid", &mid), ("main", &main)] {
+        assert_eq!(
+            (cols[0].1, cols[1].1),
+            (BlobVariant::Normal, BlobVariant::Volatile),
+            "{name} splits normal-first"
+        );
+    }
+
+    let callees = |from: u32| -> Vec<u32> {
+        obj.relocations
+            .iter()
+            .filter(|r| r.blob == from)
+            .map(|r| match obj.symbols[r.symbol as usize].def {
+                SymbolDef::Defined { blob } | SymbolDef::Local { blob } => blob,
+                SymbolDef::External => panic!("every callee here is defined in this object"),
+            })
+            .collect()
+    };
+    // Both levels of the chain stay inside their own column.
+    for (level, caller, callee) in [
+        ("main -> mid", main[0].0, mid[0].0),
+        ("mid -> leaf", mid[0].0, leaf[0].0),
+    ] {
+        assert!(
+            !callees(caller).is_empty() && callees(caller).iter().all(|&b| b == callee),
+            "normal {level}: {:?} should all be blob {callee}",
+            callees(caller)
+        );
+    }
+    for (level, caller, callee) in [
+        ("main -> mid", main[1].0, mid[1].0),
+        ("mid -> leaf", mid[1].0, leaf[1].0),
+    ] {
+        assert!(
+            !callees(caller).is_empty() && callees(caller).iter().all(|&b| b == callee),
+            "volatile {level}: {:?} should all be blob {callee}",
+            callees(caller)
+        );
+    }
+}
+
+#[test]
+fn a_fully_column_invariant_chain_still_dedups() {
+    // The transitive rule must not over-split: when nothing in the chain
+    // touches the tape, every function stays `Both`. (`debugger` and the
+    // calls keep the inliner from collapsing the chain into main.)
+    let src = "\
+tail() {
+    debugger;
+    halt;
+}
+mid() {
+    @tail();
+}
+main() {
+    @mid();
+}
+";
+    let out = build(src, OptLevel::O1, VariantColumns::Both);
+    let obj = &out.object;
+    assert_eq!(
+        variants(obj),
+        &[BlobVariant::Both, BlobVariant::Both, BlobVariant::Both],
+        "a tape-free chain dedups end to end"
+    );
+    for name in ["tail", "mid", "main"] {
+        assert_eq!(columns_of(obj, name).len(), 1, "{name} keeps one symbol");
+    }
+}

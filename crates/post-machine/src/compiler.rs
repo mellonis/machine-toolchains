@@ -740,10 +740,23 @@ fn blob_record(object: &ObjectFile, blob: usize) -> BlobRecord<'_> {
 ///
 /// Both columns come from one lowering and no pass adds, drops or reorders
 /// functions, so blob `i` is the same function in both — the merge pairs
-/// by index and checks that rather than trusting it. Per function: the two
-/// records equal → one blob tagged `Both` and one symbol; different → the
-/// normal blob then the volatile blob adjacent, with two symbols carrying
-/// the same name and the same visibility.
+/// by index and checks that rather than trusting it. Per function: kept as
+/// ONE `Both`-tagged blob under one symbol, or emitted as the normal blob
+/// then the volatile blob adjacent, with two symbols carrying the same
+/// name and the same visibility.
+///
+/// Deduping is **transitive**, not per function. A function may be `Both`
+/// only if its own two records match AND every function it calls inside
+/// this object is `Both` too. Record equality alone is not enough: a
+/// function that merely calls others is byte-identical in both columns and
+/// names the same callees, so it would dedup — and then its single blob
+/// would have to bind ONE column of a callee that split, silently pinning
+/// a volatile program's entry to the normal call graph. Demotion
+/// propagates to a fixpoint (it only ever removes `Both`, so it
+/// terminates); the cost is more splitting, never a wrong edge. Calls that
+/// leave the object are excluded — those resolve by name at link time.
+/// Self-recursion is not a demotion: a `Both` function calling itself
+/// still only references `Both`.
 ///
 /// Relocations are rewritten **column-coherent**: a call from the normal
 /// column binds the callee's normal symbol, a call from the volatile
@@ -775,6 +788,48 @@ fn merge_columns<'a>(
         )));
     }
 
+    // Pass 1: per-function record equality, then demote to a fixpoint any
+    // candidate that calls a function which is not itself deduped.
+    let mut deduped: Vec<bool> = (0..count)
+        .map(|index| blob_record(normal, index) == blob_record(volatile, index))
+        .collect();
+    let index_of: HashMap<&str, usize> = (0..count)
+        .map(|index| (normal.symbols[index].name.as_str(), index))
+        .collect();
+    // Intra-object callees per function. A dedup candidate's two columns
+    // reference the same names by construction (the record comparison
+    // includes relocations keyed by callee name), so reading the normal
+    // column's is enough for every function whose status can still change.
+    let callees: Vec<Vec<usize>> = (0..count)
+        .map(|index| {
+            let mut targets: Vec<usize> = normal
+                .relocations
+                .iter()
+                .filter(|r| r.blob as usize == index)
+                .filter_map(|r| {
+                    index_of
+                        .get(normal.symbols[r.symbol as usize].name.as_str())
+                        .copied()
+                })
+                .collect();
+            targets.sort_unstable();
+            targets.dedup();
+            targets
+        })
+        .collect();
+    loop {
+        let mut demoted = false;
+        for (index, targets) in callees.iter().enumerate() {
+            if deduped[index] && targets.iter().any(|&callee| !deduped[callee]) {
+                deduped[index] = false;
+                demoted = true;
+            }
+        }
+        if !demoted {
+            break;
+        }
+    }
+
     let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(count);
     let mut variants: Vec<BlobVariant> = Vec::with_capacity(count);
     let mut symbols: Vec<Symbol> = Vec::with_capacity(count);
@@ -785,7 +840,7 @@ fn merge_columns<'a>(
     // Where each merged blob came from, for the relocation pass.
     let mut sources: Vec<(bool /* from the volatile column */, usize)> = Vec::new();
 
-    for index in 0..count {
+    for (index, &keep) in deduped.iter().enumerate() {
         let symbol = &normal.symbols[index];
         let blob = match symbol.def {
             SymbolDef::Defined { blob } | SymbolDef::Local { blob } => blob as usize,
@@ -819,7 +874,7 @@ fn merge_columns<'a>(
             symbol_index
         };
 
-        if blob_record(normal, index) == blob_record(volatile, index) {
+        if keep {
             let only = push(false, BlobVariant::Both);
             defined.insert(symbol.name.as_str(), (only, only));
         } else {
