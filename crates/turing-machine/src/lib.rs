@@ -14,6 +14,7 @@ mod config;
 pub mod cst;
 pub mod expand;
 pub mod fmt;
+pub(crate) mod footprint;
 pub mod ir;
 pub mod lexer;
 pub mod lint;
