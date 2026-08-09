@@ -176,12 +176,14 @@ pub enum VariantColumns { Both, NormalOnly, VolatileOnly }   // CompileOptions.c
 - Consumes: `ObjectFile.variants`/`program_volatile` (Task 4).
 - Produces: `LinkReport.variant_fallbacks: Vec<String>` (sorted names that linked the non-matching column). Selection rules pinned below; Task 7 renders the counter under `-v`, Task 8 exercises the legacy path end-to-end.
 
+**State inherited from Task 5 (review-adjudicated):** a bounded slice already landed in resolve.rs (the namespace loops skip `Volatile`-tagged blobs — correct for the program-bit-FALSE case only; without it every `-O1` link died `DuplicateSymbol("main")`). Intra-object edges are **column-coherent by construction** (a volatile blob's relocations bind the callee's volatile symbol; `Both` demotes via the merge's call-graph fixpoint unless all its intra-object callees are `Both`), and `Local` callees bind blobs directly — so Task 6's rules govern the **`Defined`/exported-name namespace surface only**.
+
 **Selection rules (the design, pinned):**
 1. The program bit = `program_volatile` of the object defining the entry symbol (default `main`). No definer → `false`.
-2. Namespace stays **name-level first-wins** exactly as today (user dup = error, libraries first-wins, shadowing silent). The winning definition for a name is the whole variant *pair* from one object — columns are never mixed across objects for one name.
-3. Within the winner: prefer the column matching the program bit; `Both` matches both; missing column → take the other and record the name in `variant_fallbacks`. A tag-free legacy object is all-`Normal` (Task 4's decode rule), so a volatile program linking it counts fallbacks — visible, never an error.
-4. Two same-name symbols in ONE object are legal **only** as a `{Normal, Volatile}` pair (tags must differ and not be `Both`); any other same-name pair keeps today's duplicate error.
-5. BFS reachability, relaxation, emission, map sidecar: unchanged — they see one chosen blob per name, names stay clean.
+2. Namespace stays **name-level first-wins** (user dup = error, libraries first-wins, shadowing silent), but the namespace value WIDENS from one `Site` per name to a per-name **column pair** `(normal/Both def, volatile/Both def)` filled from one object (a `Both` blob fills both slots; columns are never mixed across objects for one name). This replaces Task 5's interim skip-Volatile behavior.
+3. At resolution: prefer the slot matching the program bit; missing slot → take the other and record the name in `variant_fallbacks`. A tag-free legacy object is all-`Normal` (Task 4's decode rule), so a volatile program linking it counts fallbacks — visible, never an error.
+4. Two same-name symbols in ONE object are legal **only** as a `{Normal, Volatile}` pair (tags must differ and not be `Both`); any other same-name pair keeps today's duplicate error — validated at namespace construction.
+5. BFS reachability, relaxation, emission, map sidecar: unchanged — they see one chosen blob per resolved name, names stay clean.
 
 **Steps:**
 
@@ -237,7 +239,7 @@ pub enum VariantColumns { Both, NormalOnly, VolatileOnly }   // CompileOptions.c
   - `legacy_object_end_to_end` — assemble a hand-written DIRECTIVE-FREE `.pma` routine (`pmt asm` path → tag-free normal-only object), link into a volatile program: runs correctly, report counts one fallback.
   - `handwritten_volatile_column_links_without_fallback` — a hand-written `.pma` with a same-name pair (bare + `.volatile` bodies, Task 10's directive): a volatile program links the `.volatile` body (assert by image bytes), `variant_fallbacks` empty.
   - `dis_roundtrips_a_two_column_object` — `pmt dis` a Task 5 merged object (with the program bit set), assemble the printed text: the re-assembled object is byte-identical, tags and program bit included (Task 10's round-trip contract, proven end-to-end here).
-  - `O0_matrix` — the first corpus fixture at `-O0` both columns: byte-identical `.pmx` to each other and to today's `-O0` build (the `-O0` bit-identity floor extended to the volatile world).
+  - `o0_matrix` (lowercase — clippy `non_snake_case` is an error under `-D warnings`) — the first corpus fixture at `-O0` both columns: byte-identical `.pmx` to each other and to today's `-O0` build (the `-O0` bit-identity floor extended to the volatile world).
 - [ ] **Step 2: Run the file; every test must pass against Tasks 1-7's implementation** — any failure here is a real integration defect, fix it in the owning module (with the owning task's test updated if its pin was wrong) before this task completes.
 - [ ] **Step 3: Run the full gate set**: `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check`, `cargo build -p mtc-core --no-default-features` (foreground).
 - [ ] **Step 4: Commit** `test(post-machine): the volatile equivalence and byte-identity corpus`.
@@ -281,7 +283,8 @@ Sequencing: execute AFTER Task 5 (needs `ObjectFile.variants` and merged two-col
 3. `duplicate-function` becomes variant-aware: a same-name `.func` pair is legal iff exactly one member carries `.volatile`; two bare or two `.volatile` same-name blocks keep today's error.
 4. Asm-side dedup mirrors the compiler's: a legal same-name pair whose assembled records come out byte-identical collapses to ONE blob tagged `Both`. (dis prints a `Both` function twice — bare + `.volatile` — so dis→asm restores the exact object.)
 5. A directive-free file assembles exactly as today — byte-identical object, `variants: None` (legacy). This is the PM byte-identity gate for this task.
-6. PM-dialect-only: `.tma` must NOT recognize `.volatile` (negative test — a `.tma` file with the directive fails with the dialect's standard unknown-directive error). Mechanism: implementer's choice between an arch-syntax-contributed directive table or a caps field only `pm1_syntax()` enables — whichever keeps `crates/core` arch-agnostic and the existing caps semantics intact; state the choice and its rationale in the report. Update the `recognized_directives` inventory + its bidirectional drift guard for whichever mechanism.
+6. **Variant-aware call-name binding (hard requirement, from Task 5's review):** the assembler's `symbol_index` is a last-wins-on-duplicates HashMap today — it must become variant-aware so a call site inside a bare `.func` binds the callee's Normal-or-Both symbol and one inside a `.volatile` `.func` binds Volatile-or-Both. Task 5's merge fixpoint guarantees a `Both` function only references `Both` functions, so a bare-func `call f` is NEVER ambiguous; assert that property in a test.
+7. PM-dialect-only: `.tma` must NOT recognize `.volatile` (negative test — a `.tma` file with the directive fails with the dialect's standard unknown-directive error). Mechanism: implementer's choice between an arch-syntax-contributed directive table or a caps field only `pm1_syntax()` enables — whichever keeps `crates/core` arch-agnostic and the existing caps semantics intact; state the choice and its rationale in the report. Update the `recognized_directives` inventory + its bidirectional drift guard for whichever mechanism.
 
 **Steps:**
 
