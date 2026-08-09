@@ -27,17 +27,19 @@
 //! deleting the pair would take the live READ half with it. Demotion drops one
 //! write-map entry that nothing consults, so the run is unchanged.
 //!
-//! Whether the program still ASSEMBLES is a second question, and there the two
-//! lowering paths differ. Across differently sized alphabets a demoted pair's
-//! callee glyph merely becomes a write hole, which — being never written — no
-//! row ever crosses. Across EQUAL-sized alphabets the graft path additionally
-//! requires the two-way pairs, identity-completed, to form a bijection: a map
-//! that satisfies that today is a permutation, so dropping any entry that is
-//! not a fixed point makes the identity fill collide with the entry that used
-//! to produce it, and the demoted source stops compiling. The fix is therefore
-//! offered only where it provably cannot change acceptance — unequal
-//! cardinalities, or a pair whose two glyphs sit at the same index — and the
-//! finding still reports without one otherwise.
+//! Whether the program is still ACCEPTED is a second question, and the answer
+//! is not the same everywhere. Across differently sized alphabets a demoted
+//! pair's callee glyph merely becomes a write hole, which — being never
+//! written — no row ever crosses. Across EQUAL-sized alphabets the two-way
+//! pairs must identity-complete to a bijection (docs/formats.md (bound
+//! calls)), and a map satisfying that is a permutation: dropping any entry
+//! that is not a fixed point leaves the identity fill colliding with the
+//! unique entry that used to produce that image. That requirement holds for
+//! every site kind — a graft meets it while splicing, a bound call or bind
+//! when its composite is built — so demotion is not merely a graft-side
+//! hazard. The fix is therefore offered only where it provably cannot change
+//! acceptance — unequal cardinalities, or a pair whose two glyphs sit at the
+//! same index — and the finding still reports without one otherwise.
 
 use std::collections::HashMap;
 
@@ -78,11 +80,13 @@ fn index_of(glyphs: &[String], glyph: &str) -> Option<u32> {
 /// Whether demoting a pair provably cannot change whether the program is
 /// ACCEPTED — the precondition for offering the fix at all (module head).
 ///
-/// Unequal cardinalities: no bijection check exists on either lowering path,
-/// and the demoted glyph becomes a write hole nothing crosses. Equal
-/// cardinalities: safe only for a fixed point, where the identity fill
-/// reproduces exactly the entry that was dropped. A host side that does not
-/// resolve leaves the question undecidable, so the fix is withheld.
+/// Unequal cardinalities: no bijection requirement applies at all, and the
+/// demoted glyph becomes a write hole nothing crosses. Equal cardinalities:
+/// safe only for a fixed point, where the identity fill reproduces exactly the
+/// entry that was dropped. The test is deliberately kind-agnostic — the
+/// bijection requirement is the same for a graft, a bound call and a bind. A
+/// host side that does not resolve leaves the question undecidable, so the fix
+/// is withheld.
 fn demotion_preserves_acceptance(
     host_glyphs: Option<&[String]>,
     callee_glyphs: &[String],
@@ -395,6 +399,27 @@ machine {
     }
 
     #[test]
+    fn a_bind_on_the_machine_world_name_is_silent() {
+        // `main` is the MACHINE world's mangled name. An out-of-unit bind that
+        // happens to be spelled `main` resolves as external, yet the name
+        // still hits the world table — so a lookup unguarded by the external
+        // flag would hand this site the machine itself as its callee and judge
+        // the pair against the machine's own footprint. The bind's parameter
+        // name is deliberately a real machine tape, so nothing but the
+        // external guard stands between this source and a false finding.
+        let src = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+
+machine {
+  tape t: host5;
+  bind main(t = t with map { '0' -> '1' }) as b;
+  entry state go { [*] -> write ['0'] stop; }
+}
+";
+        assert!(messages(src).is_empty(), "{:?}", messages(src));
+    }
+
+    #[test]
     fn the_fix_demotes_the_arrow_only() {
         let f = findings(GRAFT_SRC);
         let fix = f[0].fix.clone().expect("a demote fix");
@@ -412,11 +437,13 @@ machine {
 
     #[test]
     fn an_equal_cardinality_permutation_reports_without_a_fix() {
-        // Equal-sized alphabets make the two-way pairs a permutation the graft
-        // path checks for bijectivity. `'x' -> 'b'` is dead (the graph writes
-        // only `'a'`), but demoting it would leave `'y' -> 'a'` and an
-        // identity fill both producing `'a'` — the demoted source stops
-        // compiling, so the finding ships without the fix.
+        // Equal-sized alphabets make the two-way pairs a permutation that must
+        // stay a bijection. `'x' -> 'b'` is dead (the graph writes only `'a'`),
+        // but demoting it would leave `'y' -> 'a'` and an identity fill both
+        // producing `'a'`, so the finding ships without the fix. A graft is
+        // rejected while splicing, as below; the same demotion on a bound call
+        // or bind is rejected when its composite is built instead — the
+        // requirement is one, only the stage it bites at differs.
         let src = "\
 alphabet hostA { '_', 'x', 'y' }
 alphabet grA { '_', 'a', 'b' }
