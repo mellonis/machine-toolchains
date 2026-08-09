@@ -508,29 +508,30 @@ fn binding_contribution(
     out
 }
 
-/// The host tapes an unresolvable callee may write: the ones its named args
-/// bind, or — when it carries no named args and therefore rides the identity
-/// placement — all of them.
+/// The host tapes an unresolvable callee may write: the ones its args
+/// IDENTIFY by name, or — when no arg identifies one — all of them.
 ///
-/// A named arg naming no host tape is either a state continuation or an
-/// unresolvable tape target; the first writes nothing and the second stops the
-/// compile, so skipping it stays on the safe side of the contract.
+/// The fallback is keyed on the identified tapes, never on the raw arg list.
+/// An arg naming no host tape says nothing about where the callee writes: it
+/// may be a state continuation, a typo'd tape name, or a `call` on a local
+/// graph that resolution routed to `external`. Reading "names nothing
+/// recognizable" as "reaches nothing" would also make the answer non-monotone,
+/// since adding a useless arg would shrink it, so a site with args but no
+/// identifiable tape gets exactly the argless site's answer.
 fn unresolved_contribution(host: &ResolvedWorld, args: &[BindingArg]) -> Vec<SymSet> {
-    let named: Vec<&BindingArg> = args
+    let bound: Vec<usize> = args
         .iter()
-        .filter(|a| matches!(a.value, BindingValue::Named { .. }))
+        .filter_map(|a| match &a.value {
+            BindingValue::Named { target, .. } => host.tapes.iter().position(|t| t.name == *target),
+            BindingValue::Terminator { .. } => None,
+        })
         .collect();
-    if named.is_empty() {
+    if bound.is_empty() {
         return full_alphabets_src(host);
     }
     let mut out = vec![SymSet::empty(); host.tapes.len()];
-    for arg in named {
-        let BindingValue::Named { target, .. } = &arg.value else {
-            continue;
-        };
-        if let Some(phys) = host.tapes.iter().position(|t| t.name == *target) {
-            out[phys] = SymSet::full(host.tapes[phys].cardinality as u32);
-        }
+    for phys in bound {
+        out[phys] = SymSet::full(host.tapes[phys].cardinality as u32);
     }
     out
 }
@@ -1471,6 +1472,56 @@ machine {
             main[1],
             SymSet::full(3),
             "the tape the short vector never reached must not read as keep"
+        );
+    }
+
+    #[test]
+    fn an_unresolved_site_naming_no_host_tape_is_full_on_every_tape() {
+        // An arg that names no host tape tells this walk NOTHING about where
+        // the callee writes — it may be a state continuation, a typo'd tape
+        // name, or a `call` on a local graph that resolution routed to
+        // `external`. Reading "names nothing recognizable" as "reaches
+        // nothing" would make the answer non-monotone: adding a useless arg
+        // would SHRINK it. Both shapes must match the argless site.
+        let site = |args: &str| {
+            let src = format!(
+                "\
+alphabet bits {{ '_', '0', '1' }}
+alphabet wide {{ '_', 'a', 'b' }}
+
+machine {{
+  tape a: bits;
+  tape b: wide;
+  entry state s {{ [*, *] -> call other::helper({args}) then stop; }}
+}}
+"
+            );
+            let resolved = resolve(&src);
+            infer_resolved(&resolved).worlds["main"].tapes.clone()
+        };
+
+        let argless = site("");
+        assert_eq!(
+            argless,
+            vec![SymSet::full(3), SymSet::full(3)],
+            "an argless site rides identity placement and reaches every tape"
+        );
+        assert_eq!(
+            site("done = s"),
+            argless,
+            "a state-continuation arg identifies no tape, so nothing may be ruled out"
+        );
+        assert_eq!(
+            site("num = notATape"),
+            argless,
+            "a target that names no host tape identifies no tape either"
+        );
+        // The precision is kept where an arg DOES identify a tape: the
+        // fallback widens only when none of them does.
+        assert_eq!(
+            site("num = a, done = s"),
+            vec![SymSet::full(3), SymSet::empty()],
+            "one arg identifies tape a, so tape b stays out"
         );
     }
 
