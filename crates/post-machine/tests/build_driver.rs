@@ -1510,3 +1510,136 @@ fn verbose_link_names_whichever_column_was_missing() {
         out.stderr
     );
 }
+
+/// A library can own the entry symbol (`pmt build util.pmc -L lib -l
+/// entry`), and then ITS object carries the program bit for the whole
+/// build. Both directions: bit set → the units compile the volatile
+/// column; bit clear → normal. Either way the in-memory image must equal
+/// the on-disk one and the `-v` line must stay silent.
+fn library_entry_case(tag: &str, entry_pma: &str) {
+    let dir = scratch(tag);
+    let lib_dir = dir.join("lib");
+    fs::create_dir_all(&lib_dir).unwrap();
+    let entry_src = dir.join("entry.pma");
+    fs::write(&entry_src, entry_pma).unwrap();
+    execute(&args(&[
+        "asm",
+        entry_src.to_str().unwrap(),
+        "-o",
+        lib_dir.join("entry.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let util = dir.join("util.pmc");
+    fs::write(&util, UTIL_FUSING).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        util.to_str().unwrap(),
+        "-L",
+        lib_dir.to_str().unwrap(),
+        "-l",
+        "entry",
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("column"),
+        "{tag}: every reached name offers the column the entry selects:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        util.to_str().unwrap(),
+        "-o",
+        dir.join("util.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "link",
+        dir.join("util.pmo").to_str().unwrap(),
+        "-L",
+        lib_dir.to_str().unwrap(),
+        "-l",
+        "entry",
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "{tag}: a library-owned entry must drive the in-memory column too"
+    );
+}
+
+#[test]
+fn a_library_owned_entry_with_the_bit_drives_the_in_memory_column() {
+    library_entry_case(
+        "variant_lib_entry_volatile",
+        ".volatile\n.func main\n.volatile\n        call    util\n        stp\n",
+    );
+}
+
+#[test]
+fn a_library_owned_entry_without_the_bit_stays_normal() {
+    library_entry_case(
+        "variant_lib_entry_plain",
+        ".func main\n        call    util\n        stp\n",
+    );
+}
+
+/// The two library-entry cases must not produce the same image, or the
+/// pair above would pass with the bit ignored entirely.
+#[test]
+fn the_two_library_entry_cases_select_different_code() {
+    let dir = scratch("variant_lib_entry_differ");
+    let lib_dir = dir.join("lib");
+    fs::create_dir_all(&lib_dir).unwrap();
+    let util = dir.join("util.pmc");
+    fs::write(&util, UTIL_FUSING).unwrap();
+
+    let mut images = Vec::new();
+    for (name, pma) in [
+        (
+            "vol",
+            ".volatile\n.func main\n.volatile\n        call    util\n        stp\n",
+        ),
+        ("plain", ".func main\n        call    util\n        stp\n"),
+    ] {
+        let src = dir.join(format!("{name}.pma"));
+        fs::write(&src, pma).unwrap();
+        execute(&args(&[
+            "asm",
+            src.to_str().unwrap(),
+            "-o",
+            lib_dir.join("entry.pmo").to_str().unwrap(),
+        ]))
+        .unwrap();
+        let out = dir.join(format!("{name}.pmx"));
+        execute(&args(&[
+            "build",
+            "-O1",
+            util.to_str().unwrap(),
+            "-L",
+            lib_dir.to_str().unwrap(),
+            "-l",
+            "entry",
+            "-o",
+            out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        images.push(fs::read(&out).unwrap());
+    }
+    assert_ne!(
+        images[0], images[1],
+        "the volatile column of `util` is different code from its normal one"
+    );
+}

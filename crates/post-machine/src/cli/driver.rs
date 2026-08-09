@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::object::SymbolDef;
-use mtc_core::linker::LinkOptions;
+use mtc_core::linker::{DEFAULT_ENTRY, LinkOptions};
 
 use crate::compiler::{CompileOptions, CompileReport, VariantColumns, compile as compile_source};
 use crate::optimizer::OptLevel;
@@ -22,12 +22,6 @@ use super::build::{
 };
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
-
-/// The entry symbol a link resolves from when nothing overrides it —
-/// `LinkOptions::entry`'s `None` case (docs/core.md (linking)). The
-/// driver needs it by name to find the unit that owns the entry before
-/// anything is linked.
-const DEFAULT_ENTRY: &str = "main";
 
 const BUILD_USAGE: &str = "\
 USAGE: pmt build [INPUT.pmc|.pma|.pmo ...] [-o OUT.pmx] [FLAGS]   (argv mode)
@@ -256,19 +250,10 @@ fn build_one_target(
         .map(|raw| resolve(raw))
         .collect::<Result<_, _>>()?;
     let units = load_units(&paths, &options, flags.keep_objects, &read_err_prefix)?;
-    // The same entry name this target links with (`LinkOptions::entry`
-    // below), so the column decision reads the bit off the object the
-    // linker will actually resolve the entry from.
-    let entry = target.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
-    options.columns = columns_for(entry_owner_is_volatile(&units, entry), flags.keep_objects);
-    compile_units(
-        units,
-        &options,
-        flags.keep_objects,
-        &mut objects,
-        &mut reports,
-    )?;
 
+    // The libraries are resolved BEFORE anything is compiled, because the
+    // entry symbol may come from one of them and its object's bit then
+    // decides every unit's build column.
     let libs = manifest.effective_libraries(target);
     let dirs: Vec<String> = libs
         .dirs
@@ -282,6 +267,22 @@ fn build_one_target(
     if manifest.stdlib {
         libraries.push(stdlib::object().clone());
     }
+
+    // The same entry name this target links with (`LinkOptions::entry`
+    // below), so the column decision reads the bit off the object the
+    // linker will actually resolve the entry from.
+    let entry = target.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
+    options.columns = columns_for(
+        entry_owner_is_volatile(&units, &libraries, entry),
+        flags.keep_objects,
+    );
+    compile_units(
+        units,
+        &options,
+        flags.keep_objects,
+        &mut objects,
+        &mut reports,
+    )?;
 
     refine_reports(&mut reports, &defined_names(&objects, &libraries));
     let mut stderr = String::new();
@@ -416,10 +417,21 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
     let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
     let units = load_units(&paths, &options, flags.keep_objects, "")?;
+
+    // Resolved before compiling: `-l` can supply the entry symbol, and
+    // then its object's bit is the program's.
+    let mut libraries = Vec::new();
+    for name in &flags.lib_names {
+        libraries.push(find_library(name, &flags.search_dirs)?);
+    }
+    if !flags.nostdlib {
+        libraries.push(stdlib::object().clone());
+    }
+
     // Argv mode links with `LinkOptions::default()`, i.e. the default
     // entry symbol.
     options.columns = columns_for(
-        entry_owner_is_volatile(&units, DEFAULT_ENTRY),
+        entry_owner_is_volatile(&units, &libraries, DEFAULT_ENTRY),
         flags.keep_objects,
     );
     compile_units(
@@ -429,14 +441,6 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
         &mut objects,
         &mut reports,
     )?;
-
-    let mut libraries = Vec::new();
-    for name in &flags.lib_names {
-        libraries.push(find_library(name, &flags.search_dirs)?);
-    }
-    if !flags.nostdlib {
-        libraries.push(stdlib::object().clone());
-    }
 
     refine_reports(&mut reports, &defined_names(&objects, &libraries));
 
@@ -543,10 +547,7 @@ impl Unit {
     fn defines(&self, name: &str) -> bool {
         match self {
             Unit::Source { scan, .. } => scan.exports.iter().any(|e| e == name),
-            Unit::Object(object) => object.symbols.iter().any(|s| {
-                s.name == name
-                    && matches!(s.def, mtc_core::formats::object::SymbolDef::Defined { .. })
-            }),
+            Unit::Object(object) => defines_symbol(object, name),
         }
     }
 }
@@ -643,23 +644,40 @@ fn write_object(source: &Path, object: &ObjectFile) -> Result<(), String> {
 /// the bit would flip the columns of a program the linker then resolves
 /// as normal, and the two builds would emit different code.
 ///
-/// So: walk the units in input order, take the first that defines
-/// `entry`, and read its bit alone. First-in-order matches the namespace
-/// the linker builds, which is first-wins over the user objects. Two
-/// units defining `entry` is a duplicate-symbol link error whichever bit
-/// is chosen, so the tie is broken deterministically and not diagnosed
-/// here; no unit defining it is a `NoEntrySymbol` link error, and the
-/// column is moot — normal, which is also the linker's assumption.
+/// So: walk the inputs in the order the linker's namespace is built —
+/// the units first, then the libraries — take the first that defines
+/// `entry`, and read its bit alone. First-in-order matches first-wins,
+/// and a library only ever owns the entry when no unit does, exactly as
+/// `resolve` fills its namespace with `or_insert`. Two units defining
+/// `entry` is a duplicate-symbol link error whichever bit is chosen, so
+/// the tie is broken deterministically and not diagnosed here; nothing
+/// defining it at all is a `NoEntrySymbol` link error, and the column is
+/// moot — normal, which is also the linker's assumption.
 ///
-/// Boundary, stated rather than glossed: only the build's own units are
-/// scanned, never its libraries. The embedded stdlib qualifies every name
-/// under `std::`, so it cannot own an unqualified entry; a `-l` library
-/// that defines the entry AND sets the bit would be read as normal here.
-fn entry_owner_is_volatile(units: &[Unit], entry: &str) -> bool {
-    units
+/// The libraries have to be in it: `pmt build util.pmc -L lib -l entry`
+/// is a link whose entry comes from a library, and reading the bit off
+/// the units alone there compiles the wrong column for the whole build.
+/// The embedded stdlib is the harmless case that motivated the wrong
+/// shortcut — every std name is `std::`-qualified, so it can never own an
+/// unqualified entry, and its own bit is clear regardless.
+fn entry_owner_is_volatile(units: &[Unit], libraries: &[ObjectFile], entry: &str) -> bool {
+    if let Some(unit) = units.iter().find(|unit| unit.defines(entry)) {
+        return unit.volatile();
+    }
+    libraries
         .iter()
-        .find(|unit| unit.defines(entry))
-        .is_some_and(Unit::volatile)
+        .find(|library| defines_symbol(library, entry))
+        .is_some_and(|library| library.program_volatile)
+}
+
+/// Whether an object defines `name` the way the linker's namespace sees
+/// definitions: `Defined` only, never a `Local` (a local is invisible
+/// there, so it can never own the entry).
+fn defines_symbol(object: &ObjectFile, name: &str) -> bool {
+    object
+        .symbols
+        .iter()
+        .any(|s| s.name == name && matches!(s.def, SymbolDef::Defined { .. }))
 }
 
 /// The column rule (docs/pmt/cli.md (build)). An in-memory object dies
@@ -742,7 +760,7 @@ mod tests {
             source("main() { @util(); }"),
             object(".volatile\n.func util\n        wr      1\n        ret\n"),
         ];
-        assert!(!entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+        assert!(!entry_owner_is_volatile(&units, &[], DEFAULT_ENTRY));
 
         // The inverse: the entry unit declares itself, a plain sibling
         // does not drag it back to normal.
@@ -750,19 +768,19 @@ mod tests {
             source("volatile main() { @util(); }"),
             object(".func util\n        wr      1\n        ret\n"),
         ];
-        assert!(entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+        assert!(entry_owner_is_volatile(&units, &[], DEFAULT_ENTRY));
     }
 
     #[test]
     fn the_entry_owner_may_be_an_object_and_is_the_first_definer() {
         let volatile_main = ".volatile\n.func main\n.volatile\n        stp\n";
         let units = vec![source("export util() { mark; }"), object(volatile_main)];
-        assert!(entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+        assert!(entry_owner_is_volatile(&units, &[], DEFAULT_ENTRY));
 
         // Two definers is a duplicate-symbol link error whichever bit is
         // read; the tie resolves to the first in input order, silently.
         let units = vec![object(".func main\n        stp\n"), object(volatile_main)];
-        assert!(!entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+        assert!(!entry_owner_is_volatile(&units, &[], DEFAULT_ENTRY));
     }
 
     #[test]
@@ -775,11 +793,11 @@ mod tests {
             source("export other() { mark; }"),
             source("volatile main() { mark; }\nexport start() { mark; }"),
         ];
-        assert!(entry_owner_is_volatile(&units, "start"));
-        assert!(entry_owner_is_volatile(&units, DEFAULT_ENTRY));
-        assert!(!entry_owner_is_volatile(&units, "other"));
+        assert!(entry_owner_is_volatile(&units, &[], "start"));
+        assert!(entry_owner_is_volatile(&units, &[], DEFAULT_ENTRY));
+        assert!(!entry_owner_is_volatile(&units, &[], "other"));
         // A name no unit defines: the link will fail, the column is moot.
-        assert!(!entry_owner_is_volatile(&units, "nowhere"));
+        assert!(!entry_owner_is_volatile(&units, &[], "nowhere"));
     }
 
     #[test]
@@ -795,6 +813,57 @@ mod tests {
         let scan = scan_source("namespace ns { export main() { mark; } }");
         assert_eq!(scan.exports, vec!["ns::main".to_string()]);
         assert!(!scan.volatile);
+    }
+
+    /// `pmt build util.pmc -L lib -l entry`: the entry symbol comes from a
+    /// LIBRARY, so its object carries the program bit and decides every
+    /// unit's column. Scanning the units alone reads no bit at all and
+    /// compiles the whole build against the wrong column.
+    #[test]
+    fn a_library_may_own_the_entry_and_supply_the_bit() {
+        let units = vec![source("export util() { mark; }")];
+        let volatile_entry =
+            crate::asm::assemble(".volatile\n.func main\n.volatile\n        stp\n", false)
+                .expect("the fixture assembles");
+        let plain_entry =
+            crate::asm::assemble(".func main\n        stp\n", false).expect("assembles");
+
+        assert!(entry_owner_is_volatile(
+            &units,
+            std::slice::from_ref(&volatile_entry),
+            DEFAULT_ENTRY
+        ));
+        assert!(!entry_owner_is_volatile(
+            &units,
+            std::slice::from_ref(&plain_entry),
+            DEFAULT_ENTRY
+        ));
+
+        // A unit that owns the entry outranks any library: the linker's
+        // namespace takes user objects first, and a library copy is
+        // silently shadowed.
+        let owning_units = vec![source("main() { @util(); }")];
+        assert!(!entry_owner_is_volatile(
+            &owning_units,
+            std::slice::from_ref(&volatile_entry),
+            DEFAULT_ENTRY
+        ));
+
+        // Between libraries it is first-wins in link order, which is why
+        // the stdlib riding last can never displace a `-l` library.
+        let both = vec![volatile_entry.clone(), plain_entry.clone()];
+        assert!(entry_owner_is_volatile(&[], &both, DEFAULT_ENTRY));
+        let reversed = vec![plain_entry, volatile_entry];
+        assert!(!entry_owner_is_volatile(&[], &reversed, DEFAULT_ENTRY));
+    }
+
+    /// The embedded stdlib qualifies every export under `std::`, so it can
+    /// never own an unqualified entry however it is ordered.
+    #[test]
+    fn the_stdlib_cannot_own_the_default_entry() {
+        let std_object = crate::stdlib::object().clone();
+        assert!(!defines_symbol(&std_object, DEFAULT_ENTRY));
+        assert!(!std_object.program_volatile);
     }
 
     #[test]

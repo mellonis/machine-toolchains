@@ -192,12 +192,22 @@ impl std::fmt::Display for CallMech {
     }
 }
 
+/// The BFS entry symbol a link resolves from when [`LinkOptions::entry`]
+/// is `None` (docs/core.md (linking)).
+///
+/// Exported because the choice is observable outside the link: a caller
+/// that has to know WHICH object supplies the entry — and therefore which
+/// object's header the link reads its per-object flags from — must look up
+/// the same name this does, and a private literal here would let the two
+/// drift apart silently.
+pub const DEFAULT_ENTRY: &str = "main";
+
 /// Linker knobs; `relax` (default `true`) enables the far→short call
 /// relaxation fixpoint (docs/core.md (relaxation); `--no-relax` opts out).
 #[derive(Debug, Clone)]
 pub struct LinkOptions {
     pub relax: bool,
-    /// BFS entry symbol; `None` selects the default `"main"`. Threaded to
+    /// BFS entry symbol; `None` selects [`DEFAULT_ENTRY`]. Threaded to
     /// `resolve` as the reachability root (the `tmt link --entry` flag).
     pub entry: Option<String>,
     /// The bound-call lowering mechanism the composition engine applies
@@ -370,7 +380,7 @@ pub fn link(
     libraries: &[ObjectFile],
     options: LinkOptions,
 ) -> Result<LinkOutput, LinkError> {
-    let entry = options.entry.as_deref().unwrap_or("main");
+    let entry = options.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
     let resolved = resolve::resolve(objects, libraries, entry)?;
 
     let arch = objects
