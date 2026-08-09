@@ -222,6 +222,10 @@ mod tests {
         roster_names.sort_unstable();
         assert_eq!(roster_names.len(), 11);
 
+        // The roster is a set of NAMES. A routine whose two build columns
+        // came out different exports the same name twice — one symbol per
+        // column — so dedup before comparing: that is one routine in two
+        // lowerings, not two routines.
         let mut object_names: Vec<&str> = object()
             .symbols
             .iter()
@@ -229,6 +233,7 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         object_names.sort_unstable();
+        object_names.dedup();
 
         assert_eq!(roster_names, object_names);
     }

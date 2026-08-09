@@ -178,6 +178,9 @@ fn stdlib_compiles_clean_and_exports_exactly_the_roster() {
         .map(|s| s.name.as_str())
         .collect();
     names.sort_unstable();
+    // One name per routine: a routine whose build columns diverged carries
+    // one exported symbol per column, and the roster names routines.
+    names.dedup();
     let mut expected = vec![
         "std::appendMark",
         "std::eraseSection",

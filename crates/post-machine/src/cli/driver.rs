@@ -13,7 +13,7 @@ use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::object::SymbolDef;
 use mtc_core::linker::LinkOptions;
 
-use crate::compiler::{CompileOptions, CompileReport, compile as compile_source};
+use crate::compiler::{CompileOptions, CompileReport, VariantColumns, compile as compile_source};
 use crate::optimizer::OptLevel;
 use crate::stdlib;
 
@@ -226,6 +226,9 @@ fn build_one_target(
         opt_level: profile.opt_level,
         disabled_passes: flags.disabled_passes.clone(),
         capture_ir: false,
+        // The in-memory build's needed-column rule lands with the CLI's
+        // volatile surface; until then every unit builds both columns.
+        columns: VariantColumns::Both,
     };
     if flags.o0 {
         options.opt_level = OptLevel::O0;
@@ -384,6 +387,9 @@ fn argv_compile_options(flags: &Flags) -> CompileOptions {
         },
         disabled_passes: flags.disabled_passes.clone(),
         capture_ir: false,
+        // The in-memory build's needed-column rule lands with the CLI's
+        // volatile surface; until then every unit builds both columns.
+        columns: VariantColumns::Both,
     };
     if flags.o0 {
         options.opt_level = OptLevel::O0;
