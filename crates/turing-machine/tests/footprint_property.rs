@@ -39,6 +39,7 @@ use mtc_core::formats::tapeblock::TapeSnapshot;
 use mtc_core::vm::{ArchRegistry, DeviceFault, Machine, RunLimits, RunOptions, Tape, WideTape};
 use mtc_turing_machine::arch::Tm1;
 use mtc_turing_machine::cli::execute;
+use mtc_turing_machine::ir::{IrProgram, IrTransition};
 
 // ── the recorder ────────────────────────────────────────────────────────────
 
@@ -54,9 +55,10 @@ use mtc_turing_machine::cli::execute;
 /// projection predicts, never the callee's.
 ///
 /// A `-` keep cell never reaches here at all: the arch lowers a keep marker to
-/// no device write (docs/tmt/isa.md (vector operands)), so "actually written"
-/// needs no filtering of its own. A faulted write is not recorded — nothing
-/// landed on the cell.
+/// no device write, and an all-keep vector does no work whatsoever
+/// (docs/tmt/isa.md (reading, writing and moving)), so "actually written" needs
+/// no filtering of its own. A faulted write is not recorded — nothing landed on
+/// the cell.
 struct RecordingTape<T: Tape> {
     inner: T,
     writes: BTreeSet<u32>,
@@ -300,7 +302,11 @@ fn run_recording(exe: &Executable, seeds: Case) -> (String, Vec<BTreeSet<u32>>) 
 /// legitimately write nothing (a fixture seeded into an immediate trap or
 /// halt), but a fixture whose whole case list writes nothing would pass
 /// containment while proving nothing at all.
-fn assert_over_approximates(label: &str, units: &[String], cases: &[Case]) {
+///
+/// Returns the scratch directory, so a fixture whose point is the SHAPE the
+/// optimizer left behind can go on to pin it from the very IR the report was
+/// read from ([`emitted_ir`]).
+fn assert_over_approximates(label: &str, units: &[String], cases: &[Case]) -> PathBuf {
     assert!(!cases.is_empty(), "{label}: the fixture carries seeds");
     let dir = scratch(label);
     for level in ["-O0", "-O1"] {
@@ -328,6 +334,33 @@ fn assert_over_approximates(label: &str, units: &[String], cases: &[Case]) {
             "{label} {level}: no case wrote anything, so containment proved nothing"
         );
     }
+    dir
+}
+
+/// Unit 0's emitted world IR at `level` — the very file [`build`] handed to
+/// `tmt ir footprints`, so a shape pinned here is a shape of the same program
+/// the containment above was checked on.
+fn emitted_ir(dir: &Path, level: &str) -> IrProgram {
+    let path = dir
+        .join(level.trim_start_matches('-'))
+        .join("u0.ir.json")
+        .to_str()
+        .expect("utf-8 path")
+        .to_string();
+    let text = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    IrProgram::from_json(&text).expect("the emitted IR decodes")
+}
+
+/// Every transition one world's rules carry, in emission order.
+fn transitions<'a>(ir: &'a IrProgram, world: &str) -> Vec<&'a IrTransition> {
+    ir.worlds
+        .iter()
+        .find(|w| w.name == world)
+        .unwrap_or_else(|| panic!("the IR carries a world `{world}`"))
+        .states
+        .iter()
+        .flat_map(|s| s.rules.iter().map(|r| &r.transition))
+        .collect()
 }
 
 /// A single-unit fixture.
@@ -537,10 +570,34 @@ fn map_chain_over_approximates() {
     // 3 and bits 2→wide 4, so `data` infers {3,4} and `ctl`, bound nowhere,
     // infers the empty set. The union of the two runs is {3,4} on `data` and
     // nothing on `ctl` — containment holds with no slack on either band.
-    assert_over_approximates(
+    let dir = assert_over_approximates(
         "map_chain",
         &one(MAP_CHAIN.to_string()),
         &[&[(&[], 0), (&[3], 0)], &[(&[], 0), (&[4], 0)]],
+    );
+
+    // The shape the fixture claims: BOTH mapped calls survive `-O1`, so the
+    // projection really is exercised at both levels. Believing it without
+    // asserting it would let a future inliner swallow the chain and leave the
+    // `-O1` leg checking a program with no calls in it at all.
+    let ir = emitted_ir(&dir, "-O1");
+    assert!(
+        matches!(
+            transitions(&ir, "main").as_slice(),
+            [IrTransition::CallThen { target, binding, .. }]
+                if target == "relay" && !binding.is_empty()
+        ),
+        "-O1 keeps the machine's mapped call: {:?}",
+        transitions(&ir, "main")
+    );
+    assert!(
+        matches!(
+            transitions(&ir, "relay").as_slice(),
+            [IrTransition::CallThen { target, binding, .. }]
+                if target == "flip" && !binding.is_empty()
+        ),
+        "-O1 keeps the inner mapped call: {:?}",
+        transitions(&ir, "relay")
     );
 }
 
@@ -592,9 +649,37 @@ fn cross_unit_tail_call_chain_over_approximates() {
     // writes '1' (bits index 2) and returns straight to `main`, which stops.
     // Actual {2}; inferred {0,1,2} — the deliberate slack of an out-of-unit
     // callee, and the whole point of the fixture is that the slack is REACHED.
-    assert_over_approximates(
+    let dir = assert_over_approximates(
         "cross_unit_tail_call",
         &[TAIL_CHAIN_MAIN.to_string(), TAIL_CHAIN_LEAF.to_string()],
         &[&[(&[], 0)]],
+    );
+
+    // The structural pin behind the fixture's whole reason to exist, in its
+    // two-sided form — which also spells out the level asymmetry this file's
+    // "the levels infer different sets" claim rests on. `hop`'s one rule is a
+    // plain bindless call at `-O0` and a TAIL call at `-O1`. If a later
+    // optimizer change quietly stopped producing the tail call here, the
+    // corpus would lose its only coverage of that edge while staying green,
+    // and the containment above would be checked on the `-O0` shape twice.
+    let o0 = emitted_ir(&dir, "-O0");
+    assert!(
+        matches!(
+            transitions(&o0, "hop").as_slice(),
+            [IrTransition::CallThen { target, binding, .. }]
+                if target == "ext::leaf" && binding.is_empty()
+        ),
+        "-O0 leaves the bindless call in place: {:?}",
+        transitions(&o0, "hop")
+    );
+    let o1 = emitted_ir(&dir, "-O1");
+    assert!(
+        matches!(
+            transitions(&o1, "hop").as_slice(),
+            [IrTransition::TailCall { target }] if target == "ext::leaf"
+        ),
+        "-O1 rewrites it to a tail call — the edge this corpus exists to \
+         cover: {:?}",
+        transitions(&o1, "hop")
     );
 }
