@@ -21,12 +21,12 @@ const FLAG_HAS_SIGNATURES: u8 = 0b0000_0010;
 const FLAG_HAS_TABLES: u8 = 0b0000_0100;
 /// Gates the per-blob build-variant tag section, parallel to `blobs` when
 /// present.
-pub const FLAG_HAS_VARIANTS: u8 = 0b0000_1000;
+const FLAG_HAS_VARIANTS: u8 = 0b0000_1000;
 /// A pure header bit — no section of its own — set when the object's
 /// program is a volatile build (only ever true on the object defining the
 /// entry symbol; carried here rather than derived so a tag-free legacy
 /// object still links unambiguously as non-volatile).
-pub const FLAG_PROGRAM_VOLATILE: u8 = 0b0001_0000;
+const FLAG_PROGRAM_VOLATILE: u8 = 0b0001_0000;
 
 /// In-memory object: symbols + code blobs + call relocations (+ optional
 /// per-blob debug info).
@@ -196,8 +196,8 @@ impl StringPool {
 }
 
 impl ObjectFile {
-    /// Construct a v2-shape object: the four v3 fields absent
-    /// (`None`/`None`/empty/empty). This is what PM-1's compiler and the
+    /// Construct a v2-shape object: the six v3 fields absent
+    /// (`None`/`None`/empty/empty/`None`/`false`). This is what PM-1's compiler and the
     /// assembler emit — `is_v2_shape` holds for the result.
     pub fn v2(
         arch: u8,
