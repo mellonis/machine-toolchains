@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use mtc_core::asm::cst::{AsmCst, AsmItem, AsmItemKind, FuncCst, OperandToken, parse_asm_cst_with};
-use mtc_core::asm::{AsmError, Flow, SyntaxEntry, format_asm, lint};
+use mtc_core::asm::{AsmError, Flow, SyntaxEntry, lint};
 use mtc_core::diagnostics::{Diagnostic, Pos, Span};
 use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
@@ -33,7 +33,7 @@ use mtc_core::lsp::{
 };
 use mtc_core::vm::OperandKind;
 
-use crate::asm::pm1_syntax;
+use crate::asm::{format_asm, pm1_syntax};
 
 use super::{ConfigResolver, actions_from_findings, parse_ide_allow};
 
@@ -475,10 +475,11 @@ fn item_end_pos(item: &AsmItem, line: u32) -> Pos {
         AsmItemKind::Func(f) => f.span.end,
         AsmItemKind::Line(l) => l.span.end,
         AsmItemKind::Raw(r) => r.span.end,
+        AsmItemKind::Volatile(v) => v.span.end,
         // Opt-in caps nodes (sections, table directives, `.rept`,
-        // `.routine`): PM-1's caps are off, so `parse_asm_cst` never
-        // shapes these here, but each still carries a `span` whose end
-        // is its own end position.
+        // `.routine`): PM-1 enables none of those caps, so `parse_asm_cst`
+        // never shapes these here, but each still carries a `span` whose
+        // end is its own end position.
         AsmItemKind::Section(s) => s.span.end,
         AsmItemKind::TableDirective(d) => d.span.end,
         AsmItemKind::Rept(r) => r.span.end,

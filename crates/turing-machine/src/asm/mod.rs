@@ -201,6 +201,9 @@ pub fn tm1_syntax() -> ArchSyntax {
             tables: true,
             rept: true,
             vectors: true,
+            // TM-1 has no build-variant surface: `.volatile` is PM-1's,
+            // and `.tma` rejects it as an unknown word.
+            volatile: false,
         },
     }
 }

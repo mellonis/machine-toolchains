@@ -7,6 +7,7 @@
     { "include": "#comments" },
     { "include": "#funcDirective" },
     { "include": "#byteDirective" },
+    { "include": "#volatileDirective" },
     { "include": "#label" },
     { "include": "#mnemonics" },
     { "include": "#symbol" },
@@ -29,6 +30,10 @@
     "byteDirective": {
       "name": "keyword.control.pma",
       "match": "\\.byte\\b"
+    },
+    "volatileDirective": {
+      "name": "keyword.control.pma",
+      "match": "\\.volatile\\b"
     },
     "mnemonics": {
       "name": "keyword.control.pma",

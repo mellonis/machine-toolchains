@@ -11,7 +11,9 @@ use crate::arch::opcodes::*;
 /// PM-1 `.pma` dialect version — an acceptance contract (docs/formats.md
 /// (assembly text)): pre-1.0 it is 0.N and N bumps on ANY grammar
 /// change. 0.2: labels tightened to letters/digits/underscore. 0.3: the
-/// fused write+move mnemonics `wrl`/`wrr` are accepted.
+/// fused write+move mnemonics `wrl`/`wrr` are accepted, and the
+/// `.volatile` build-variant directive tags a `.func`'s build column (or,
+/// ahead of the first `.func`, sets the object's program bit).
 pub const PM1_PMA_DIALECT_VERSION: &str = "0.3";
 
 pub fn pm1_syntax() -> ArchSyntax {
@@ -164,13 +166,25 @@ pub fn pm1_syntax() -> ArchSyntax {
         // no symbol maps to cross, so it never needs a synthesized trap.
         trap_opcode: None,
         // PM-1 `.pma` uses the classic assembly grammar — no vector /
-        // substitution / table surface.
-        caps: AsmCaps::default(),
+        // substitution / table surface — plus the `.volatile` directive,
+        // the text form of the two build columns a `.pmc` compile emits.
+        caps: AsmCaps {
+            volatile: true,
+            ..AsmCaps::default()
+        },
     }
 }
 
 pub fn assemble(source: &str, with_debug: bool) -> Result<ObjectFile, AsmError> {
     mtc_core::asm::assemble(&pm1_syntax(), ARCH_PM1, source, with_debug)
+}
+
+/// `.pma` source → the canonical grid, under PM-1's own dialect caps —
+/// the one spelling every PM consumer (the CLI, the language server, the
+/// test suites) formats through, so the printer can never be handed a
+/// narrower grammar than the assembler accepts.
+pub fn format_asm(source: &str) -> Result<String, AsmError> {
+    mtc_core::asm::format_asm_with(source, pm1_syntax().caps)
 }
 
 pub fn disassemble_object(obj: &ObjectFile) -> String {

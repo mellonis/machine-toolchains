@@ -2354,7 +2354,7 @@ export main() {
         let edits: Vec<mtc_core::lsp::types::TextEdit> =
             serde_json::from_value(outputs[3]["result"].clone()).unwrap();
         assert_eq!(edits.len(), 1, "{edits:?}");
-        let canonical = mtc_core::asm::format_asm(PMA_UNUSED_LABEL).expect("valid source formats");
+        let canonical = crate::asm::format_asm(PMA_UNUSED_LABEL).expect("valid source formats");
         assert_ne!(
             PMA_UNUSED_LABEL, canonical,
             "sanity: the fixture really was unformatted"

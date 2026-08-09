@@ -12,8 +12,8 @@
 //!    the line's own word even starts), or the cursor on/touching the
 //!    line's own instruction word (however it resolves, known mnemonic
 //!    or not — an in-progress edit is exactly where this context is most
-//!    useful): every `pm1_syntax()` mnemonic plus the `.byte`/`.func`
-//!    directives.
+//!    useful): every `pm1_syntax()` mnemonic plus the
+//!    `.byte`/`.func`/`.volatile` directives.
 //! 2. **Operand position, right after `@`** — the cursor sits on/
 //!    touching an operand whose text starts with `@`: the doc's `.func`
 //!    names, replacing the name portion only (never the `@` sigil
@@ -108,7 +108,7 @@ fn zero_span(pos: Pos) -> Span {
 }
 
 /// A candidate with no `detail` — every context but the mnemonic list
-/// (labels, functions, and the `.byte`/`.func` directives, whose hints
+/// (labels, functions, and the `.byte`/`.func`/`.volatile` directives, whose hints
 /// are set separately). `.pma` has no attribute grammar of its own, so
 /// `deprecated` stays false permanently, not just this round.
 fn mk_candidate(label: &str, kind: CandidateKind, replace_span: Span) -> Candidate {
@@ -163,9 +163,10 @@ fn operand_hint_detail(entry: &SyntaxEntry) -> Option<String> {
     }
 }
 
-/// Context 1: every `pm1_syntax()` mnemonic plus the `.byte`/`.func`
-/// directives — all Keyword-kind, sharing `replace_span`. Mnemonics
-/// carry their [`operand_hint_detail`]; the two directives carry their
+/// Context 1: every `pm1_syntax()` mnemonic plus the
+/// `.byte`/`.func`/`.volatile` directives — all Keyword-kind, sharing
+/// `replace_span`. Mnemonics carry their [`operand_hint_detail`]; the
+/// three directives carry their
 /// own fixed operand-hint strings (they have no `SyntaxEntry` of their
 /// own to derive one from).
 fn word_position_candidates(replace_span: Span) -> Vec<Candidate> {
@@ -192,6 +193,12 @@ fn word_position_candidates(replace_span: Span) -> Vec<Candidate> {
         CandidateKind::Keyword,
         replace_span,
         Some(".func <name> [local]".to_string()),
+    ));
+    out.push(mk_candidate_with_detail(
+        ".volatile",
+        CandidateKind::Keyword,
+        replace_span,
+        Some(".volatile (build column)".to_string()),
     ));
     out
 }
@@ -244,7 +251,7 @@ mod tests {
     const URI: &str = "untitled:Complete-1";
 
     fn mnemonic_and_directive_count() -> usize {
-        pm1_syntax().entries.len() + 2 // + `.byte`, `.func`
+        pm1_syntax().entries.len() + 3 // + `.byte`, `.func`, `.volatile`
     }
 
     #[test]

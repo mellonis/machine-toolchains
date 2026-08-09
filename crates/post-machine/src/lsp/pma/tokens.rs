@@ -29,9 +29,11 @@ pub(super) fn semantic_tokens(state: &PmaDocState) -> Vec<SemToken> {
         match &item.kind {
             AsmItemKind::Func(f) => emit_func(f, &mut out),
             AsmItemKind::Line(line) => emit_line(line, &syntax, &functions, &mut out),
-            // Opt-in caps nodes never appear under PM-1's default caps;
-            // no semantic tokens to emit for them here.
-            AsmItemKind::Comment(_)
+            // `.volatile` carries no name to classify — like `.func`'s own
+            // directive word, its colouring is the grammar's. The opt-in
+            // caps nodes below never appear at all under PM-1's caps.
+            AsmItemKind::Volatile(_)
+            | AsmItemKind::Comment(_)
             | AsmItemKind::Raw(_)
             | AsmItemKind::Section(_)
             | AsmItemKind::TableDirective(_)

@@ -35,6 +35,16 @@ pub struct AsmCaps {
     pub rept: bool,
     /// `[a, *, -, <, >, .]` vector operand tokens.
     pub vectors: bool,
+    /// The `.volatile` build-variant directive: per-function build-column
+    /// tags and the object's program bit (docs/formats.md (assembly text)).
+    /// Selection metadata only — it names which column a blob belongs to,
+    /// never anything about the body, which the assembler transcribes
+    /// as written either way.
+    ///
+    /// Every dialect spells this struct exhaustively, so a dialect can
+    /// only acquire the directive by typing `volatile: true` — a new
+    /// capability never defaults itself on.
+    pub volatile: bool,
 }
 
 pub struct ArchSyntax {

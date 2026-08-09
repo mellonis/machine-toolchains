@@ -44,6 +44,7 @@ pub(crate) const TARGET_WORD: &str = ".target";
 pub(crate) const FRAME_WORD: &str = ".frame";
 pub(crate) const MAP_WORD: &str = ".map";
 pub(crate) const EXITS_WORD: &str = ".exits";
+pub(crate) const VOLATILE_WORD: &str = ".volatile";
 
 /// The frame-descriptor directive family, shaped under
 /// [`AsmCaps::tables`] and reported precisely by lower when malformed.
@@ -67,8 +68,9 @@ const CONTINUABLE_WORDS: [&str; 3] = [TARGETS_WORD, EXITS_WORD, MAP_WORD];
 /// `caps`, sorted (docs/formats.md (assembly text)). `.func` and
 /// `.byte` are the caps-independent classic surface; the
 /// section/table/signature/frame family rides [`AsmCaps::tables`];
-/// `.rept`/`.endr` ride [`AsmCaps::rept`]; the vectors cap adds operand
-/// tokens, never directives.
+/// `.rept`/`.endr` ride [`AsmCaps::rept`]; `.volatile` rides
+/// [`AsmCaps::volatile`]; the vectors cap adds operand tokens, never
+/// directives.
 ///
 /// This is the drift-guard authority: the editor-grammar suites
 /// set-compare the directive words each dialect's grammar paints
@@ -89,6 +91,9 @@ pub fn recognized_directives(caps: AsmCaps) -> Vec<&'static str> {
     }
     if caps.rept {
         words.extend([REPT_WORD, ENDR_WORD]);
+    }
+    if caps.volatile {
+        words.push(VOLATILE_WORD);
     }
     words.sort_unstable();
     words
@@ -182,6 +187,12 @@ pub enum AsmItemKind {
     /// either cap off some field character stays Junk and the line
     /// shapes Raw.
     RoutineDirective(RoutineDirectiveCst),
+    /// `.volatile` — the build-variant directive (docs/formats.md
+    /// (assembly text)), shaped under [`AsmCaps::volatile`] and only when
+    /// structurally exact (the bare word, unlabeled); anything else
+    /// starting `.volatile` stays a Line for lower to report precisely
+    /// (mirror `.func`).
+    Volatile(VolatileCst),
     /// `.frame`/`.map`/`.exits` — the frame-descriptor directive family
     /// (docs/formats.md (frame descriptors)), shaped under
     /// [`AsmCaps::tables`] (+ `rept` for the `(..)` groups, + the arrow
@@ -257,6 +268,15 @@ pub struct RawCst {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionCst {
     pub name: String,
+    pub span: Span,
+    pub trailing: Option<TrailingComment>,
+}
+
+/// `.volatile`. `span` covers the directive word, excluding any trailing
+/// comment — mirroring [`FuncCst`]. The directive carries no operands, so
+/// the word IS the whole node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolatileCst {
     pub span: Span,
     pub trailing: Option<TrailingComment>,
 }
@@ -859,6 +879,16 @@ fn shape_line(src: &ItemText<'_>, tokens: &[AsmToken], caps: AsmCaps) -> AsmItem
         }
     }
 
+    // `.volatile` (caps.volatile): a no-label, no-operand directive,
+    // mirroring `.func` — the bare word alone shapes; anything else
+    // starting `.volatile` stays a Line so lower reports it precisely.
+    if caps.volatile
+        && word_text(&body[0]) == Some(VOLATILE_WORD)
+        && let [_] = body
+    {
+        return AsmItemKind::Volatile(VolatileCst { span, trailing });
+    }
+
     // `.section NAME` (caps.tables): a no-label region marker, mirroring
     // `.func` — structurally exact (`.section` + one Word name) only,
     // else it stays a Line.
@@ -1318,6 +1348,7 @@ pub(super) fn parse_binding(inner: &str, line_no: u32) -> Option<Vec<(u32, Vec<F
         tables: true,
         rept: true,
         vectors: false,
+        volatile: false,
     };
     let tokens: Vec<AsmToken> = lex_line(inner, line_no, caps)
         .into_iter()
@@ -1855,6 +1886,7 @@ L1:     rgt
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         }
     }
 
@@ -2288,6 +2320,7 @@ F0: .frame tapes=(3, 0)
                 tables: false,
                 rept: true,
                 vectors: true,
+                volatile: false,
             },
         ] {
             let cst = parse_asm_cst_with(src, caps);
@@ -2439,6 +2472,9 @@ F0: .frame tapes=(3, 0)
             // `.rept`/`.endr` are only directives as a matched pair —
             // the block recognizer consumes both or neither.
             REPT_WORD | ENDR_WORD => ".func probe\n.rept v, 0, 0\nnop\n.endr\nstop\n".to_string(),
+            // Directly after its `.func`, which is the one placement the
+            // directive accepts.
+            VOLATILE_WORD => ".func probe\n.volatile\nstop\n".to_string(),
             // Bare in code: answered by the malformed-`.routine` /
             // malformed-frame-directive complaints.
             ROUTINE_WORD | FRAME_WORD | MAP_WORD | EXITS_WORD => {
@@ -2467,9 +2503,10 @@ F0: .frame tapes=(3, 0)
             tables: true,
             rept: true,
             vectors: true,
+            volatile: true,
         };
         let everything = recognized_directives(all_on);
-        assert_eq!(everything.len(), 12, "the audited directive surface");
+        assert_eq!(everything.len(), 13, "the audited directive surface");
         let tiers = [
             AsmCaps::default(),
             AsmCaps {
@@ -2478,6 +2515,10 @@ F0: .frame tapes=(3, 0)
             },
             AsmCaps {
                 rept: true,
+                ..AsmCaps::default()
+            },
+            AsmCaps {
+                volatile: true,
                 ..AsmCaps::default()
             },
             all_on,

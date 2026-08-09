@@ -208,6 +208,9 @@ fn item_span(item: &AsmItem) -> Option<Span> {
         AsmItemKind::Rept(r) => Some(r.span),
         AsmItemKind::RoutineDirective(r) => Some(r.span),
         AsmItemKind::FrameDirective(d) => Some(d.span()),
+        // `.volatile` is PM-1's alone; `.tma` never shapes one, but the
+        // node still carries its own span.
+        AsmItemKind::Volatile(v) => Some(v.span),
         AsmItemKind::Comment(_) => None,
     }
 }

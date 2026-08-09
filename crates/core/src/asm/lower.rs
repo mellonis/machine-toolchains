@@ -7,7 +7,7 @@ use super::cst::{
     AsmCst, AsmItem, AsmItemKind, BYTE_WORD, FRAME_DIRECTIVE_WORDS, FUNC_WORD, FrameDirectiveCst,
     FrameHeaderCst, FrameMapCst, FramePairCst, FuncCst, InstrCst, LabelCst, LineCst, OperandToken,
     ROUTINE_WORD, ROW_WORD, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst,
-    TableDirectiveKind, parse_asm_cst_with, parse_binding,
+    TableDirectiveKind, VOLATILE_WORD, VolatileCst, parse_asm_cst_with, parse_binding,
 };
 use super::subst::substitute;
 use super::syntax::{ArchSyntax, Flow, SyntaxEntry};
@@ -38,6 +38,10 @@ pub struct SourceFunction {
     /// file that signs any.
     pub name_span: Span,
     pub local: bool,
+    /// This block carries a `.volatile` directive, so its blob belongs to
+    /// the gated build column (docs/formats.md (assembly text)). Absence
+    /// is the normal column; a name may be defined once per column.
+    pub volatile: bool,
     pub items: Vec<SourceItem>,
 }
 
@@ -199,6 +203,11 @@ pub struct LoweredSource {
     /// function carries one (all or none: the MO signature section is
     /// parallel to the blobs, docs/formats.md (MO)).
     pub signatures: Option<Vec<RoutineSig>>,
+    /// The file declares a `.volatile` ahead of its first `.func`: this
+    /// source builds a volatile program (docs/formats.md (assembly text)).
+    /// Independent of any per-function tag — it is a whole-object header
+    /// bit, not a blob record.
+    pub program_volatile: bool,
 }
 
 /// Which source section the lowering cursor is in. The default is code,
@@ -306,6 +315,20 @@ struct LowerCtx {
     /// every non-rept label keeps its own span and cap-off dialects (no
     /// `.rept`) are unaffected.
     span_override: Option<Span>,
+    /// A `.volatile` seen ahead of the first `.func` — the object's
+    /// program bit (docs/formats.md (assembly text)).
+    program_volatile: bool,
+    /// The open function was tagged by lookahead and its `.volatile` line
+    /// has not been consumed yet. The directive is legal exactly where
+    /// this is set — the item directly after its own `.func`, own-line
+    /// comments being trivia that do not close the slot.
+    volatile_pending: bool,
+    /// One-item lookahead: the next non-comment item after the one being
+    /// lowered is a `.volatile`. A `.func` reads it to learn its own build
+    /// column at the moment it is defined, which keeps the duplicate check
+    /// exactly where it always fired rather than deferring it to a
+    /// post-pass that would reorder diagnostics.
+    next_is_volatile: bool,
 }
 
 pub(crate) fn lower_source(
@@ -322,9 +345,13 @@ pub(crate) fn lower_source(
         pending_sigs: Vec::new(),
         func_sigs: Vec::new(),
         span_override: None,
+        program_volatile: false,
+        volatile_pending: false,
+        next_is_volatile: false,
     };
 
-    for item in &cst.items {
+    for (i, item) in cst.items.iter().enumerate() {
+        ctx.next_is_volatile = leads_with_volatile(&cst.items[i + 1..]);
         lower_item(item, syntax, source, &mut ctx)?;
     }
 
@@ -374,7 +401,17 @@ pub(crate) fn lower_source(
         functions: ctx.functions,
         tables: ctx.tables,
         signatures,
+        program_volatile: ctx.program_volatile,
     })
+}
+
+/// Does this run of items open with a `.volatile` directive? Own-line
+/// comments are trivia and are skipped, so a comment may sit between a
+/// `.func` and the directive that tags it.
+fn leads_with_volatile(rest: &[AsmItem]) -> bool {
+    rest.iter()
+        .find(|item| !matches!(item.kind, AsmItemKind::Comment(_)))
+        .is_some_and(|item| matches!(item.kind, AsmItemKind::Volatile(_)))
 }
 
 /// Lowers one CST item. Shared by the top-level pass and — via
@@ -400,6 +437,7 @@ fn lower_item(
         AsmItemKind::Rept(r) => lower_rept(r, syntax, source, ctx)?,
         AsmItemKind::RoutineDirective(d) => lower_routine_directive(d, ctx)?,
         AsmItemKind::FrameDirective(d) => lower_frame_directive(d, ctx)?,
+        AsmItemKind::Volatile(v) => lower_volatile(v, ctx)?,
     }
     Ok(())
 }
@@ -1039,6 +1077,11 @@ fn lower_rept_body(
             // block needs its own `.endr`, absent from one line).
             let cst = parse_asm_cst_with(&expanded, syntax.caps);
             for expanded_item in &cst.items {
+                // The enclosing item's lookahead says nothing about a
+                // one-line re-parse, and a body line is expanded alone —
+                // nothing can follow it here — so no expanded `.func`
+                // is ever tagged.
+                ctx.next_is_volatile = false;
                 lower_item(expanded_item, syntax, source, ctx).map_err(|e| err(span, e.kind))?;
             }
         }
@@ -1060,7 +1103,32 @@ fn body_item_span(item: &AsmItem) -> Option<Span> {
         AsmItemKind::Rept(r) => Some(r.span),
         AsmItemKind::RoutineDirective(d) => Some(d.span),
         AsmItemKind::FrameDirective(d) => Some(d.span()),
+        AsmItemKind::Volatile(v) => Some(v.span),
     }
+}
+
+/// `.volatile` (docs/formats.md (assembly text)) in its two placements:
+/// ahead of the first `.func` it sets the object's program bit; directly
+/// after a `.func` it tags that block's build column — and there the tag
+/// was already applied by the lookahead in [`lower_source`], so this arm
+/// only consumes the slot the `.func` opened. Anywhere else — after code,
+/// after a pending label, or a second time in one block — the slot is
+/// closed and the placement is an error.
+fn lower_volatile(v: &VolatileCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
+    if ctx.functions.is_empty() {
+        if ctx.program_volatile {
+            return Err(err(v.span, AsmErrorKind::Syntax("duplicate `.volatile`")));
+        }
+        ctx.program_volatile = true;
+        return Ok(());
+    }
+    if !std::mem::take(&mut ctx.volatile_pending) {
+        return Err(err(
+            v.span,
+            AsmErrorKind::Syntax("`.volatile` must directly follow its `.func`"),
+        ));
+    }
+    Ok(())
 }
 
 fn lower_func(func: &FuncCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
@@ -1084,20 +1152,55 @@ fn lower_func(func: &FuncCst, ctx: &mut LowerCtx) -> Result<(), AsmError> {
             AsmErrorKind::Syntax("bad function name"),
         ));
     }
-    if ctx.functions.iter().any(|f| f.name == func.name) {
+    open_function(
+        func.name.clone(),
+        func.name_span,
+        func.local,
+        std::mem::take(&mut ctx.next_is_volatile),
+        ctx,
+    )
+}
+
+/// Records one `.func` after its name has been validated, applying the
+/// variant-aware duplicate rule (docs/formats.md (assembly text)): a name
+/// may be defined once per build column, so a bare/`.volatile` pair is the
+/// only same-name pair a file may carry, and the two members must agree on
+/// visibility (the linker's namespace pairs a name's columns, and it only
+/// pairs exported ones — a `Local`/`Defined` mix would half-vanish there).
+fn open_function(
+    name: String,
+    name_span: Span,
+    local: bool,
+    volatile: bool,
+    ctx: &mut LowerCtx,
+) -> Result<(), AsmError> {
+    let mut twin = None;
+    for prior in ctx.functions.iter().filter(|f| f.name == name) {
+        if prior.volatile == volatile {
+            return Err(err(name_span, AsmErrorKind::DuplicateFunction(name)));
+        }
+        twin = Some(prior);
+    }
+    if let Some(twin) = twin
+        && twin.local != local
+    {
         return Err(err(
-            func.name_span,
-            AsmErrorKind::DuplicateFunction(func.name.clone()),
+            name_span,
+            AsmErrorKind::Syntax("a `.volatile` twin must match its function's visibility"),
         ));
     }
-    let sig = take_pending_sig(ctx, &func.name);
+    let sig = take_pending_sig(ctx, &name);
     ctx.functions.push(SourceFunction {
-        name: func.name.clone(),
-        name_span: func.name_span,
-        local: func.local,
+        name,
+        name_span,
+        local,
+        volatile,
         items: Vec::new(),
     });
     ctx.func_sigs.push(sig);
+    // The directive that tagged this block is still ahead of the cursor;
+    // its own arm consumes the slot.
+    ctx.volatile_pending = volatile;
     Ok(())
 }
 
@@ -1178,6 +1281,18 @@ fn lower_line(line: &LineCst, syntax: &ArchSyntax, ctx: &mut LowerCtx) -> Result
         return Err(err(
             instr.word_span,
             AsmErrorKind::Syntax("`.routine` takes `<name>, tapes=<int>, alpha=(<int>, …)`"),
+        ));
+    }
+
+    // A malformed `.volatile` — the CST keeps it a Line when the bare
+    // word carries anything at all — gets its own complaint instead of
+    // UnknownMnemonic, for dialects whose caps could shape one. Labeled
+    // (`L1: .volatile`) it is not a directive at all, exactly as with
+    // `.func`, and falls through to mnemonic lookup.
+    if instr.word == VOLATILE_WORD && line.labels.is_empty() && syntax.caps.volatile {
+        return Err(err(
+            instr.word_span,
+            AsmErrorKind::Syntax("`.volatile` takes no operands"),
         ));
     }
 
@@ -1262,21 +1377,13 @@ fn lower_malformed_func(instr: &InstrCst, ctx: &mut LowerCtx) -> Result<(), AsmE
     if !is_symbol_name(name) {
         return Err(err(word_span, AsmErrorKind::Syntax("bad function name")));
     }
-    if ctx.functions.iter().any(|f| f.name == name) {
-        return Err(err(
-            word_span,
-            AsmErrorKind::DuplicateFunction(name.to_string()),
-        ));
-    }
-    let sig = take_pending_sig(ctx, name);
-    ctx.functions.push(SourceFunction {
-        name: name.to_string(),
-        name_span: word_span,
+    open_function(
+        name.to_string(),
+        word_span,
         local,
-        items: Vec::new(),
-    });
-    ctx.func_sigs.push(sig);
-    Ok(())
+        std::mem::take(&mut ctx.next_is_volatile),
+        ctx,
+    )
 }
 
 /// `.byte N` — a single 0..=255 operand. Span on the operand, or on the

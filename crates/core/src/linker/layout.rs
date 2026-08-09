@@ -1219,6 +1219,7 @@ X:      stop
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         };
         s
     }

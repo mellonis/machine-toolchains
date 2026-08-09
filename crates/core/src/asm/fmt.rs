@@ -31,7 +31,7 @@
 use super::cst::{
     AsmCst, AsmItemKind, FrameDirectiveCst, FrameMapCst, FramePairCst, FuncCst, LabelCst, LineCst,
     OperandToken, ReptCst, RoutineDirectiveCst, SectionCst, TableDirectiveCst, TableDirectiveKind,
-    TrailingComment, parse_asm_cst_with,
+    TrailingComment, VolatileCst, parse_asm_cst_with,
 };
 use super::syntax::AsmCaps;
 use super::{AsmError, AsmErrorKind};
@@ -230,6 +230,7 @@ fn render_pieces(cst: &AsmCst, source: &str) -> Vec<Piece> {
                 AsmItemKind::Rept(r) => render_rept(r, source),
                 AsmItemKind::RoutineDirective(r) => render_routine(r),
                 AsmItemKind::FrameDirective(d) => render_frame_directive(d),
+                AsmItemKind::Volatile(v) => render_volatile(v),
             };
             p.blank_before = i > 0 && item.blank_before;
             p
@@ -247,6 +248,19 @@ fn render_func(f: &FuncCst) -> Piece {
     Piece {
         code: line,
         comment: f.trailing.as_ref().map(|tc| tc.text.clone()),
+        header_comment: None,
+        kind: PieceKind::Structural,
+        blank_before: false,
+    }
+}
+
+/// `.volatile [; comment]` — a column-0 directive, printed like `.func`:
+/// it belongs to the block structure (it names its `.func`'s build column),
+/// not to the instruction grid.
+fn render_volatile(v: &VolatileCst) -> Piece {
+    Piece {
+        code: String::from(".volatile"),
+        comment: v.trailing.as_ref().map(|tc| tc.text.clone()),
         header_comment: None,
         kind: PieceKind::Structural,
         blank_before: false,
@@ -1262,6 +1276,7 @@ START:  nop
             tables: true,
             rept: true,
             vectors: true,
+            volatile: false,
         }
     }
 
