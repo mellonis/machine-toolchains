@@ -149,6 +149,14 @@ pub fn assemble(
 /// Borrows `lowered` (rather than consuming it) so a caller can go on to
 /// read the lowered functions/tables afterward — the lint context does;
 /// only `signatures` is cloned into the object as a result.
+///
+/// Symbol-table layout, relied on by callers that pair symbols with blobs
+/// by position: the first `functions.len()` symbols parallel the source's
+/// functions one-to-one and in order, so symbol `i` defines blob `i`. Any
+/// `External` symbol is appended AFTER those, minted the first time an
+/// encoded call names something the source does not define — so externals
+/// never interleave with the function symbols, and their order is
+/// first-reference order across the blobs.
 pub(crate) fn assemble_lowered(
     syntax: &ArchSyntax,
     arch_id: u8,
