@@ -6,6 +6,14 @@
 //! reference anything, even names that don't exist. Reachability follows
 //! both relocation call sites and declarative bound-call sites.
 //!
+//! A name may carry TWO definitions — the normal and volatile build
+//! columns of one function — so the namespace maps each name to a
+//! [`ColumnPair`] rather than a single site. The program's volatile bit,
+//! read off the object that defines the entry symbol, picks the column;
+//! a name that ships only the other one is linked anyway and reported in
+//! `variant_fallbacks`. Everything downstream — BFS, relaxation, emission,
+//! the map sidecar — sees one chosen blob per name, exactly as before.
+//!
 //! This BFS runs once, before the composition engine lowers any bound
 //! call. Under `mono`/`hybrid` stamping, a routine reached here can still
 //! end up with no caller once every site is retargeted to a specialized
@@ -21,20 +29,133 @@ use crate::formats::object::{
     BlobDebug, BlobVariant, BoundCall, ObjectFile, RoutineSig, SymbolDef,
 };
 
-/// True for a blob holding the VOLATILE lowering of its function — the
-/// second build column of a name whose normal column sits in the same
-/// object (docs/formats.md (MO)). The namespace carries the normal one, so
-/// the pair reads as one definition rather than a duplicate.
-///
-/// This is the program-bit-false case: choosing the column by the
-/// program's own volatile bit, and counting the fallback when the chosen
-/// column is missing, arrive with variant-aware resolution. A tag-free
-/// object has no volatile blobs and is unaffected.
-fn is_volatile_column(object: &ObjectFile, blob: u32) -> bool {
+/// A blob's build column (docs/formats.md (MO)). An object carrying no
+/// variant records at all — a legacy object, a hand-assembled one, any
+/// object from an architecture without volatile builds — reads as
+/// all-`Normal`: it offers exactly one column, and a volatile program
+/// linking it takes a counted fallback rather than an error.
+fn variant_of(object: &ObjectFile, blob: u32) -> BlobVariant {
     object
         .variants
         .as_ref()
-        .is_some_and(|tags| matches!(tags.get(blob as usize), Some(BlobVariant::Volatile)))
+        .and_then(|tags| tags.get(blob as usize).copied())
+        .unwrap_or(BlobVariant::Normal)
+}
+
+/// One exported name's two build columns (docs/core.md (linking)): the
+/// definition a normal build links, and the one a volatile build links. A
+/// `Both`-tagged blob — a function whose two columns compiled identical
+/// and deduped — fills both slots with the same site. A name defined in
+/// only one column leaves the other empty. At least one slot is always
+/// filled, and both always come from ONE object: a name's columns are
+/// never mixed across inputs.
+#[derive(Debug, Clone, Copy, Default)]
+struct ColumnPair {
+    normal: Option<Site>,
+    volatile: Option<Site>,
+}
+
+impl ColumnPair {
+    /// Claim the slot(s) `tag` covers. `Err` when a claimed slot is
+    /// already filled: the name then has two definitions in one column,
+    /// which is a duplicate however the two are tagged — so a
+    /// `{Normal, Volatile}` pair is the ONLY same-name pair one object may
+    /// carry.
+    fn fill(&mut self, tag: BlobVariant, site: Site) -> Result<(), ()> {
+        let claims_normal = !matches!(tag, BlobVariant::Volatile);
+        let claims_volatile = !matches!(tag, BlobVariant::Normal);
+        if (claims_normal && self.normal.is_some()) || (claims_volatile && self.volatile.is_some())
+        {
+            return Err(());
+        }
+        if claims_normal {
+            self.normal = Some(site);
+        }
+        if claims_volatile {
+            self.volatile = Some(site);
+        }
+        Ok(())
+    }
+
+    /// The object both columns came from.
+    fn owner(&self) -> usize {
+        self.slot(false)
+            .or_else(|| self.slot(true))
+            .expect("a namespace entry holds at least one column")
+            .0
+    }
+
+    fn slot(&self, volatile: bool) -> Option<Site> {
+        if volatile { self.volatile } else { self.normal }
+    }
+
+    /// The site a program with this volatile bit links, and whether it had
+    /// to fall back to the other column because the wanted one is absent.
+    ///
+    /// A fallback is a mixed link by design, not a coherence hole: the
+    /// borrowed body keeps its own object's intra-object edges (a volatile
+    /// body's private callees stay volatile — those bind blobs directly),
+    /// while every name it resolves through this namespace is chosen by
+    /// the program's bit again. Counting the name is the signal that this
+    /// happened; the caller surfaces it (docs/core.md (linking)).
+    fn choose(&self, volatile: bool) -> (Site, bool) {
+        match self.slot(volatile) {
+            Some(site) => (site, false),
+            None => (
+                self.slot(!volatile)
+                    .expect("a namespace entry holds at least one column"),
+                true,
+            ),
+        }
+    }
+}
+
+/// One object's exported names as column pairs, in first-appearance symbol
+/// order (so a reported duplicate names the first offending symbol, as it
+/// always did). Local symbols are skipped: not exported, not shadowable.
+///
+/// `strict` — user objects — reports a repeated column as a duplicate.
+/// A library stays LENIENT, which is today's behaviour: a name it defines
+/// twice silently keeps the first definition, exactly as `first-wins`
+/// already silently shadows a second library's copy.
+fn object_columns(
+    object: &ObjectFile,
+    oi: usize,
+    strict: bool,
+) -> Result<Vec<(&str, ColumnPair)>, LinkError> {
+    let mut order: Vec<&str> = Vec::new();
+    let mut pairs: HashMap<&str, ColumnPair> = HashMap::new();
+    for symbol in &object.symbols {
+        let SymbolDef::Defined { blob } = symbol.def else {
+            continue;
+        };
+        let name = symbol.name.as_str();
+        let pair = pairs.entry(name).or_insert_with(|| {
+            order.push(name);
+            ColumnPair::default()
+        });
+        if pair.fill(variant_of(object, blob), (oi, blob)).is_err() && strict {
+            return Err(LinkError::DuplicateSymbol(symbol.name.clone()));
+        }
+    }
+    Ok(order.into_iter().map(|name| (name, pairs[name])).collect())
+}
+
+/// The producer's guarantee, checked rather than assumed: a `Both` blob
+/// only ever references `Both` blobs INSIDE its own object. The two-column
+/// compiler enforces it with a call-graph fixpoint — a dedup candidate
+/// that calls a function which split, splits with it — because a `Both`
+/// blob's relocations name one column and would otherwise pin a volatile
+/// program to the normal call graph. Cross-object references are exempt:
+/// those resolve by name, so the column is chosen per program.
+///
+/// Checked under `debug_assert` only. Nothing in the container format
+/// enforces it, so a hand-crafted object could trip it — the same standing
+/// as this module's `expect`s on well-formed symbol tables.
+fn both_is_column_closed(object: &ObjectFile, caller: Site, callee: Site) -> bool {
+    variant_of(object, caller.1) != BlobVariant::Both
+        || callee.0 != caller.0
+        || variant_of(object, callee.1) == BlobVariant::Both
 }
 
 #[derive(Debug)]
@@ -83,6 +204,9 @@ pub(crate) struct Resolved<'a> {
     /// Sorted names whose winning (post-shadowing) definition went
     /// unreached; shadowed library copies are not reported.
     pub dropped: Vec<String>,
+    /// Sorted names that linked the build column NOT matching the
+    /// program's volatile bit, because the wanted one was absent.
+    pub variant_fallbacks: Vec<String>,
 }
 
 /// (object index within the user+library concatenation, blob index)
@@ -106,27 +230,21 @@ pub(crate) fn resolve<'a>(
     }
 
     // Namespace: user objects (dup = error), then libraries (first-wins).
-    // Local symbols never enter the namespace: not exported, not shadowable.
-    let mut namespace: HashMap<&str, Site> = HashMap::new();
+    // Each name maps to its column PAIR, filled from one object.
+    let mut namespace: HashMap<&str, ColumnPair> = HashMap::new();
     for (oi, object) in objects.iter().enumerate() {
-        for symbol in &object.symbols {
-            if let SymbolDef::Defined { blob } = symbol.def
-                && !is_volatile_column(object, blob)
-                && namespace.insert(symbol.name.as_str(), (oi, blob)).is_some()
-            {
-                return Err(LinkError::DuplicateSymbol(symbol.name.clone()));
+        for (name, pair) in object_columns(object, oi, true)? {
+            if namespace.insert(name, pair).is_some() {
+                return Err(LinkError::DuplicateSymbol(name.to_string()));
             }
         }
     }
     for (li, library) in libraries.iter().enumerate() {
-        for symbol in &library.symbols {
-            if let SymbolDef::Defined { blob } = symbol.def
-                && !is_volatile_column(library, blob)
-            {
-                namespace
-                    .entry(symbol.name.as_str())
-                    .or_insert((objects.len() + li, blob));
-            }
+        // First-wins, silent: a name already defined — by a user object or
+        // an earlier library — keeps the definition it has, both columns
+        // of it, so a name's columns never span two inputs.
+        for (name, pair) in object_columns(library, objects.len() + li, false)? {
+            namespace.entry(name).or_insert(pair);
         }
     }
 
@@ -138,10 +256,22 @@ pub(crate) fn resolve<'a>(
         }
     };
 
-    // BFS from the entry symbol.
-    let Some(&entry_site) = namespace.get(entry) else {
+    // BFS from the entry symbol. The program's volatile bit — which
+    // column every name resolves to — is the bit carried by the object
+    // that DEFINES the entry symbol.
+    let Some(&entry_pair) = namespace.get(entry) else {
         return Err(LinkError::NoEntrySymbol(entry.to_string()));
     };
+    let program_volatile = object_at(entry_pair.owner()).program_volatile;
+    // Names that linked the other column. The entry counts like any other
+    // name: it never passes through a relocation, so a volatile program
+    // whose `main` ships only a normal body would otherwise read as a
+    // clean link.
+    let mut fallbacks: BTreeSet<String> = BTreeSet::new();
+    let (entry_site, entry_fell_back) = entry_pair.choose(program_volatile);
+    if entry_fell_back {
+        fallbacks.insert(entry.to_string());
+    }
     let mut order_sites: Vec<Site> = vec![entry_site];
     let mut index_of: HashMap<Site, usize> = HashMap::from([(entry_site, 0)]);
     let mut queue: VecDeque<Site> = VecDeque::from([entry_site]);
@@ -154,14 +284,16 @@ pub(crate) fn resolve<'a>(
     // A symbol reference (a relocation callee or a bound callee) resolves
     // to a site the same way: a Local binds directly within its own
     // object — never through the namespace, so it can't shadow or be
-    // shadowed (docs/core.md (linking)) —
-    // otherwise it goes through the namespace.
-    let resolve_target = |object: &ObjectFile, oi: usize, sym: u32| -> Option<Site> {
+    // shadowed, and it carries no column choice because the relocation
+    // already names one blob (docs/core.md (linking)) — otherwise it goes
+    // through the namespace, where the program's bit picks the column.
+    // The flag is `true` when that pick had to fall back.
+    let resolve_target = |object: &ObjectFile, oi: usize, sym: u32| -> Option<(Site, bool)> {
         match object.symbols[sym as usize].def {
-            SymbolDef::Local { blob } => Some((oi, blob)),
+            SymbolDef::Local { blob } => Some(((oi, blob), false)),
             _ => namespace
                 .get(object.symbols[sym as usize].name.as_str())
-                .copied(),
+                .map(|pair| pair.choose(program_volatile)),
         }
     };
 
@@ -193,7 +325,14 @@ pub(crate) fn resolve<'a>(
                 None => {
                     unresolved.insert(object.symbols[reloc.symbol as usize].name.clone());
                 }
-                Some(callee) => {
+                Some((callee, fell_back)) => {
+                    if fell_back {
+                        fallbacks.insert(object.symbols[reloc.symbol as usize].name.clone());
+                    }
+                    debug_assert!(
+                        both_is_column_closed(object, site, callee),
+                        "a Both blob may only call Both blobs in its own object"
+                    );
                     let idx = reach(callee, &mut index_of, &mut order_sites, &mut queue);
                     calls.push((reloc.offset, idx));
                 }
@@ -217,7 +356,14 @@ pub(crate) fn resolve<'a>(
                 None => {
                     unresolved.insert(object.symbols[bc.symbol as usize].name.clone());
                 }
-                Some(callee) => {
+                Some((callee, fell_back)) => {
+                    if fell_back {
+                        fallbacks.insert(object.symbols[bc.symbol as usize].name.clone());
+                    }
+                    debug_assert!(
+                        both_is_column_closed(object, site, callee),
+                        "a Both blob may only bind Both blobs in its own object"
+                    );
                     let idx = reach(callee, &mut index_of, &mut order_sites, &mut queue);
                     bound.push((bc.offset, idx, bc));
                 }
@@ -231,12 +377,16 @@ pub(crate) fn resolve<'a>(
     }
 
     // Dropped names, post-shadowing: the namespace already resolved every
-    // name to the ONE site that would have been linked, so a name is
-    // dropped exactly when that winning site went unreached. Shadowed
-    // library copies were never candidates and are not reported.
+    // name to the ONE site that would have been linked — the column this
+    // program's bit chooses — so a name is dropped exactly when that
+    // winning site went unreached. Shadowed library copies were never
+    // candidates and are not reported. The fallback flag is deliberately
+    // discarded here: `variant_fallbacks` names what LINKED, and nothing
+    // in this loop did.
     let mut dropped: BTreeSet<String> = BTreeSet::new();
-    for (&name, site) in &namespace {
-        if !index_of.contains_key(site) {
+    for (&name, pair) in &namespace {
+        let (site, _) = pair.choose(program_volatile);
+        if !index_of.contains_key(&site) {
             dropped.insert(name.to_string());
         }
     }
@@ -288,6 +438,7 @@ pub(crate) fn resolve<'a>(
     Ok(Resolved {
         order,
         dropped: dropped.into_iter().collect(),
+        variant_fallbacks: fallbacks.into_iter().collect(),
     })
 }
 
@@ -431,17 +582,92 @@ mod tests {
         );
     }
 
-    /// Like `obj`, but functions whose name is in `locals` get Local defs.
-    fn obj_with_locals(arch: u8, funcs: &[(&str, &[&str])], locals: &[&str]) -> ObjectFile {
-        let mut o = obj(arch, funcs);
-        for s in &mut o.symbols {
+    /// Demote the named symbols to `Local` defs.
+    fn make_local(object: &mut ObjectFile, locals: &[&str]) {
+        for s in &mut object.symbols {
             if locals.contains(&s.name.as_str())
                 && let SymbolDef::Defined { blob } = s.def
             {
                 s.def = SymbolDef::Local { blob };
             }
         }
+    }
+
+    /// Like `obj`, but functions whose name is in `locals` get Local defs.
+    fn obj_with_locals(arch: u8, funcs: &[(&str, &[&str])], locals: &[&str]) -> ObjectFile {
+        let mut o = obj(arch, funcs);
+        make_local(&mut o, locals);
         o
+    }
+
+    /// Like `obj`, but every entry carries its build-variant tag and is one
+    /// BLOB, so a split function appears twice under one name. Bodies are
+    /// distinguishable: each carries one `0x01` filler per column (Normal
+    /// 1, Volatile 2, Both 3) right after its `ent`. Callee names bind
+    /// **column-coherently** — from a split callee a `Normal` caller takes
+    /// the normal symbol and a `Volatile` caller the volatile one, the
+    /// shape the two-column compiler emits.
+    fn variant_obj(arch: u8, funcs: &[(&str, BlobVariant, &[&str])]) -> ObjectFile {
+        let fillers = |tag: BlobVariant| match tag {
+            BlobVariant::Normal => 1,
+            BlobVariant::Volatile => 2,
+            BlobVariant::Both => 3,
+        };
+        // The symbol a `caller` column binds for `name`: the sole
+        // definition when the name has one, else the matching column.
+        let column_symbol = |name: &str, caller: BlobVariant| -> Option<usize> {
+            let columns: Vec<usize> = funcs
+                .iter()
+                .enumerate()
+                .filter(|(_, (n, _, _))| *n == name)
+                .map(|(i, _)| i)
+                .collect();
+            match columns.len() {
+                0 => None,
+                1 => Some(columns[0]),
+                _ => columns
+                    .iter()
+                    .find(|&&i| funcs[i].1 == caller)
+                    .or(columns.first())
+                    .copied(),
+            }
+        };
+        let mut symbols: Vec<Symbol> = funcs
+            .iter()
+            .enumerate()
+            .map(|(i, (n, _, _))| Symbol {
+                name: (*n).into(),
+                def: SymbolDef::Defined { blob: i as u32 },
+            })
+            .collect();
+        let mut blobs = Vec::new();
+        let mut relocations = Vec::new();
+        for (bi, (_, tag, callees)) in funcs.iter().enumerate() {
+            let mut blob = vec![0x0E];
+            blob.resize(blob.len() + fillers(*tag), 0x01);
+            for callee in *callees {
+                let sym = column_symbol(callee, *tag).unwrap_or_else(|| {
+                    symbols.push(Symbol {
+                        name: (*callee).into(),
+                        def: SymbolDef::External,
+                    });
+                    symbols.len() - 1
+                });
+                blob.push(0x21);
+                relocations.push(Relocation {
+                    blob: bi as u32,
+                    offset: blob.len() as u32,
+                    symbol: sym as u32,
+                });
+                blob.extend([0u8; 4]);
+            }
+            blob.push(0x02);
+            blobs.push(blob);
+        }
+        let variants = funcs.iter().map(|&(_, tag, _)| tag).collect();
+        let mut object = ObjectFile::v2(arch, symbols, blobs, relocations, None);
+        object.variants = Some(variants);
+        object
     }
 
     #[test]
@@ -470,12 +696,10 @@ mod tests {
     }
 
     /// A `{Normal, Volatile}` same-name pair in one object is ONE
-    /// definition in two build columns, not a duplicate: the namespace
-    /// carries the normal column and the link succeeds. (Choosing the
-    /// column by the program's volatile bit, and counting the fallback
-    /// when the wanted column is absent, arrive with variant-aware
-    /// resolution; this pins the program-bit-false behaviour the two-column
-    /// compiler needs today.)
+    /// definition in two build columns, not a duplicate: the name's
+    /// namespace entry holds both, and a program with the bit clear links
+    /// the normal one. Untagged, the same shape is two normal columns for
+    /// one name — a duplicate, as it always was.
     #[test]
     fn a_variant_pair_in_one_object_is_not_a_duplicate_symbol() {
         // main is built twice; the volatile column's blob is a distinct
@@ -498,6 +722,183 @@ mod tests {
         assert_eq!(
             resolve(std::slice::from_ref(&untagged), &[], "main").unwrap_err(),
             LinkError::DuplicateSymbol("main".into())
+        );
+    }
+
+    #[test]
+    fn the_program_bit_selects_the_entry_column_and_its_call_graph() {
+        // The two-column compiler's own shape, in miniature: `main` splits
+        // and its PRIVATE helper split with it, relocations
+        // column-coherent. The program bit rides on the object defining
+        // the entry symbol, and it decides both ends of the graph.
+        let build = |program_volatile: bool| {
+            let mut a = variant_obj(
+                0x7E,
+                &[
+                    ("main", BlobVariant::Normal, &["helper"][..]),
+                    ("main", BlobVariant::Volatile, &["helper"][..]),
+                    ("helper", BlobVariant::Normal, &[][..]),
+                    ("helper", BlobVariant::Volatile, &[][..]),
+                ],
+            );
+            make_local(&mut a, &["helper"]);
+            a.program_volatile = program_volatile;
+            a
+        };
+
+        let volatile = build(true);
+        let r = resolve(std::slice::from_ref(&volatile), &[], "main").unwrap();
+        let linked: Vec<&[u8]> = r.order.iter().map(|f| f.blob.as_ref()).collect();
+        assert_eq!(
+            linked,
+            vec![volatile.blobs[1].as_slice(), volatile.blobs[3].as_slice(),],
+            "a volatile program enters the volatile main and reaches the volatile helper"
+        );
+        assert!(r.variant_fallbacks.is_empty(), "{:?}", r.variant_fallbacks);
+
+        // The same object with the bit clear is today's link, unchanged.
+        let normal = build(false);
+        let r = resolve(std::slice::from_ref(&normal), &[], "main").unwrap();
+        let linked: Vec<&[u8]> = r.order.iter().map(|f| f.blob.as_ref()).collect();
+        assert_eq!(
+            linked,
+            vec![normal.blobs[0].as_slice(), normal.blobs[2].as_slice()],
+        );
+        assert!(r.variant_fallbacks.is_empty(), "{:?}", r.variant_fallbacks);
+    }
+
+    #[test]
+    fn a_missing_column_falls_back_and_is_counted() {
+        // A tag-free library is all-normal (no variant records at all), so
+        // a volatile program takes its normal column — visible in the
+        // report, never an error. The names are sorted and each is named
+        // once however many times it is referenced.
+        // `main` is deduped, so only the library's missing column can
+        // force a fallback — the entry itself never does.
+        let mut user = variant_obj(
+            0x7E,
+            &[("main", BlobVariant::Both, &["zeta", "alpha", "zeta"][..])],
+        );
+        user.program_volatile = true;
+        let lib = obj(0x7E, &[("zeta", &[]), ("alpha", &[])]);
+        assert!(lib.variants.is_none(), "the library is tag-free");
+        let r = resolve(
+            std::slice::from_ref(&user),
+            std::slice::from_ref(&lib),
+            "main",
+        )
+        .unwrap();
+        assert_eq!(
+            r.variant_fallbacks,
+            vec!["alpha".to_string(), "zeta".to_string()]
+        );
+
+        // The same library in a normal program is no fallback at all.
+        let mut plain = user.clone();
+        plain.program_volatile = false;
+        let r = resolve(
+            std::slice::from_ref(&plain),
+            std::slice::from_ref(&lib),
+            "main",
+        )
+        .unwrap();
+        assert!(r.variant_fallbacks.is_empty(), "{:?}", r.variant_fallbacks);
+    }
+
+    #[test]
+    fn an_unreached_missing_column_is_not_counted() {
+        // The counter names what LINKED: `dead` is defined in the tag-free
+        // library and never reached, so it is dropped, not a fallback.
+        let mut user = variant_obj(0x7E, &[("main", BlobVariant::Volatile, &[][..])]);
+        user.program_volatile = true;
+        let lib = obj(0x7E, &[("dead", &[])]);
+        let r = resolve(
+            std::slice::from_ref(&user),
+            std::slice::from_ref(&lib),
+            "main",
+        )
+        .unwrap();
+        assert!(r.variant_fallbacks.is_empty(), "{:?}", r.variant_fallbacks);
+        assert_eq!(r.dropped, vec!["dead".to_string()]);
+    }
+
+    #[test]
+    fn a_fallback_entry_is_counted_too() {
+        // A program bit with no volatile entry column to match — a
+        // hand-written `.volatile` program whose `main` ships one body.
+        // The entry never goes through a relocation, so it needs counting
+        // at the entry lookup or it reads as a clean link.
+        let mut a = variant_obj(0x7E, &[("main", BlobVariant::Normal, &[][..])]);
+        a.program_volatile = true;
+        let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+        assert_eq!(r.order[0].blob.as_ref(), a.blobs[0].as_slice());
+        assert_eq!(r.variant_fallbacks, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn a_both_column_serves_either_program_without_a_fallback() {
+        for program_volatile in [false, true] {
+            let mut a = variant_obj(
+                0x7E,
+                &[
+                    ("main", BlobVariant::Both, &["helper"][..]),
+                    ("helper", BlobVariant::Both, &[][..]),
+                ],
+            );
+            a.program_volatile = program_volatile;
+            let r = resolve(std::slice::from_ref(&a), &[], "main").unwrap();
+            let linked: Vec<&[u8]> = r.order.iter().map(|f| f.blob.as_ref()).collect();
+            assert_eq!(
+                linked,
+                vec![a.blobs[0].as_slice(), a.blobs[1].as_slice()],
+                "the one deduped column serves both program kinds"
+            );
+            assert!(
+                r.variant_fallbacks.is_empty(),
+                "program_volatile = {program_volatile}: {:?}",
+                r.variant_fallbacks
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_normal_volatile_pair_shares_one_name_in_one_object() {
+        // Two columns of one name are ONE definition; anything else under
+        // one name is the duplicate it has always been.
+        for tags in [
+            [BlobVariant::Normal, BlobVariant::Normal],
+            [BlobVariant::Volatile, BlobVariant::Volatile],
+            [BlobVariant::Both, BlobVariant::Both],
+            [BlobVariant::Both, BlobVariant::Normal],
+            [BlobVariant::Volatile, BlobVariant::Both],
+        ] {
+            let a = variant_obj(
+                0x7E,
+                &[("main", tags[0], &[][..]), ("main", tags[1], &[][..])],
+            );
+            assert_eq!(
+                resolve(std::slice::from_ref(&a), &[], "main").unwrap_err(),
+                LinkError::DuplicateSymbol("main".into()),
+                "{tags:?} is not a legal column pair"
+            );
+        }
+    }
+
+    #[test]
+    fn columns_of_one_name_never_span_two_objects() {
+        // Rule: a name's pair is filled from ONE object. Two user objects
+        // each contributing a column is the duplicate it was before.
+        let a = variant_obj(
+            0x7E,
+            &[
+                ("main", BlobVariant::Normal, &[][..]),
+                ("f", BlobVariant::Normal, &[][..]),
+            ],
+        );
+        let b = variant_obj(0x7E, &[("f", BlobVariant::Volatile, &[][..])]);
+        assert_eq!(
+            resolve(&[a, b], &[], "main").unwrap_err(),
+            LinkError::DuplicateSymbol("f".into())
         );
     }
 

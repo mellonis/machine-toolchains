@@ -328,6 +328,12 @@ pub struct LinkReport {
     /// Extra match rows produced by one-way collapse expansion in mono
     /// stamping (the growth beyond one row per original); 0 in frames mode.
     pub expanded_rows: u32,
+    /// Sorted names that linked the build column NOT matching the
+    /// program's volatile bit, because the wanted one was absent
+    /// (docs/core.md (linking)). Every name here IS in the image — the
+    /// counter reports what shipped, not what the namespace held. Empty
+    /// for any link without variant records.
+    pub variant_fallbacks: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -450,6 +456,7 @@ pub fn link(
     // one concatenated sort is enough — no merge, and no risk of dropping a
     // genuine duplicate, since `dedup` only collapses ADJACENT equal
     // strings, which a sort already guarantees are adjacent.
+    let variant_fallbacks = resolved.variant_fallbacks;
     let mut dropped = resolved.dropped;
     dropped.extend(orphaned);
     dropped.sort();
@@ -472,6 +479,7 @@ pub fn link(
             dedup_savings: stats.dedup_savings,
             synthesized_trap_rows: stats.synthesized_trap_rows,
             expanded_rows: stats.expanded_rows,
+            variant_fallbacks,
         },
     })
 }
