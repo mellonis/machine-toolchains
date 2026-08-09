@@ -179,7 +179,9 @@ fn stdlib_compiles_clean_and_exports_exactly_the_roster() {
         .collect();
     names.sort_unstable();
     // One name per routine: a routine whose build columns diverged carries
-    // one exported symbol per column, and the roster names routines.
+    // one exported symbol per column, and the roster names routines. A
+    // genuine double definition cannot hide here — the compiler rejects a
+    // duplicate name before any of this.
     names.dedup();
     let mut expected = vec![
         "std::appendMark",

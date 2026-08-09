@@ -225,7 +225,9 @@ mod tests {
         // The roster is a set of NAMES. A routine whose two build columns
         // came out different exports the same name twice — one symbol per
         // column — so dedup before comparing: that is one routine in two
-        // lowerings, not two routines.
+        // lowerings, not two routines. Two genuinely distinct definitions
+        // cannot reach this point to be collapsed by mistake: the compiler
+        // rejects a duplicate name long before codegen.
         let mut object_names: Vec<&str> = object()
             .symbols
             .iter()

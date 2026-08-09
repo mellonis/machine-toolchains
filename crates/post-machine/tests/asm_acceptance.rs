@@ -15,6 +15,7 @@
 //! cover `.byte` acceptance and round-tripping at the assembler level.
 
 use mtc_core::asm::AsmErrorKind;
+use mtc_core::formats::object::BlobVariant;
 use mtc_post_machine::asm::{assemble, disassemble_object};
 use mtc_post_machine::compiler::{CompileOptions, VariantColumns, compile};
 use mtc_post_machine::optimizer::OptLevel;
@@ -163,6 +164,27 @@ fn emitted_pma_reassembles_byte_identically_to_the_direct_object() {
                 expected.to_bytes(),
                 "{name} at {level:?}: -S reassembly diverged from the normal column\n{}",
                 out.pma
+            );
+            // And measure the MERGED object itself, not only its
+            // single-column twin: the blobs it tags Normal or Both are the
+            // very code the listing assembles to, in the same order.
+            let projection: Vec<&Vec<u8>> = out
+                .object
+                .blobs
+                .iter()
+                .zip(
+                    out.object
+                        .variants
+                        .as_deref()
+                        .expect("a compiled object carries variant tags"),
+                )
+                .filter(|(_, tag)| !matches!(tag, BlobVariant::Volatile))
+                .map(|(blob, _)| blob)
+                .collect();
+            assert_eq!(
+                projection,
+                expected.blobs.iter().collect::<Vec<_>>(),
+                "{name} at {level:?}: the merged object's normal column diverged from the listing"
             );
         }
     }
