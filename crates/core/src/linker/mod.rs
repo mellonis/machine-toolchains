@@ -333,14 +333,25 @@ pub struct LinkReport {
     /// (docs/core.md (linking)). Every name here IS in the image — the
     /// counter reports what shipped, not what the namespace held.
     ///
-    /// Empty for any link whose program bit is clear, and for any bit-set
-    /// link where every reached name offers the volatile column. Note the
-    /// bit is independent of variant records: an object may set it while
-    /// carrying no tags at all (docs/formats.md (MO)), which is what a
-    /// hand-assembled volatile program looks like — every name then offers
-    /// only the normal column, so EVERY reached name is counted. That is
-    /// the intended signal, not a degenerate case.
+    /// The counter is SYMMETRIC, because column selection is: a name that
+    /// offers only the volatile column is counted for a normal program
+    /// exactly as a normal-only name is counted for a volatile one. So
+    /// this is empty precisely when every reached name offers the column
+    /// [`LinkReport::program_volatile`] selects — never "empty whenever
+    /// the bit is clear". A consumer wording a message about it must read
+    /// that field rather than assume a direction.
+    ///
+    /// Note the bit is independent of variant records: an object may set
+    /// it while carrying no tags at all (docs/formats.md (MO)), which is
+    /// what a hand-assembled volatile program looks like — every name then
+    /// offers only the normal column, so EVERY reached name is counted.
+    /// That is the intended signal, not a degenerate case.
     pub variant_fallbacks: Vec<String>,
+    /// The volatile bit this link resolved with: the bit carried by the
+    /// object defining the entry symbol, which selects the column every
+    /// name resolves to (docs/core.md (linking)). Reported so a consumer
+    /// can say which column a counted fallback was missing.
+    pub program_volatile: bool,
 }
 
 #[derive(Debug)]
@@ -464,6 +475,7 @@ pub fn link(
     // genuine duplicate, since `dedup` only collapses ADJACENT equal
     // strings, which a sort already guarantees are adjacent.
     let variant_fallbacks = resolved.variant_fallbacks;
+    let program_volatile = resolved.program_volatile;
     let mut dropped = resolved.dropped;
     dropped.extend(orphaned);
     dropped.sort();
@@ -487,6 +499,7 @@ pub fn link(
             synthesized_trap_rows: stats.synthesized_trap_rows,
             expanded_rows: stats.expanded_rows,
             variant_fallbacks,
+            program_volatile,
         },
     })
 }

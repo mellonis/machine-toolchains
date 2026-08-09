@@ -216,6 +216,11 @@ pub(crate) struct Resolved<'a> {
     /// Sorted names that linked the build column NOT matching the
     /// program's volatile bit, because the wanted one was absent.
     pub variant_fallbacks: Vec<String>,
+    /// The volatile bit this link resolved with — the bit carried by the
+    /// object that DEFINES the entry symbol. It selects the column every
+    /// name resolves to, so a consumer reporting a fallback needs it to
+    /// name which column was missing.
+    pub program_volatile: bool,
 }
 
 /// (object index within the user+library concatenation, blob index)
@@ -448,6 +453,7 @@ pub(crate) fn resolve<'a>(
         order,
         dropped: dropped.into_iter().collect(),
         variant_fallbacks: fallbacks.into_iter().collect(),
+        program_volatile,
     })
 }
 

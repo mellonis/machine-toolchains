@@ -58,9 +58,11 @@ pub(super) fn render_warnings(stderr: &mut String, input: &Path, report: &Compil
 /// there is one (`app: link: …`) and is empty otherwise.
 ///
 /// The variant line is a pure rendering of `LinkReport`: it appears only
-/// when a name reached by a volatile program offered no volatile column,
-/// so a build whose columns all match says nothing at all
-/// (docs/core.md (linking)).
+/// when a reached name offered no body in the column the program's bit
+/// selects, so a build whose columns all match says nothing at all. Which
+/// column was missing depends on that bit — selection is symmetric, so
+/// the sentence reads its direction off `program_volatile` rather than
+/// assuming one (docs/core.md (linking)).
 pub(super) fn render_link_report(stderr: &mut String, prefix: &str, report: &LinkReport) {
     let _ = writeln!(
         stderr,
@@ -70,9 +72,14 @@ pub(super) fn render_link_report(stderr: &mut String, prefix: &str, report: &Lin
         report.far_calls
     );
     if !report.variant_fallbacks.is_empty() {
+        let (missing, linked) = if report.program_volatile {
+            ("volatile", "normal")
+        } else {
+            ("normal", "volatile")
+        };
         let _ = writeln!(
             stderr,
-            "{prefix}link: {} name(s) with no volatile column linked normal [{}]",
+            "{prefix}link: {} name(s) with no {missing} column linked {linked} [{}]",
             report.variant_fallbacks.len(),
             report.variant_fallbacks.join(", ")
         );

@@ -23,6 +23,12 @@ use super::build::{
 use super::lint::render_fatal;
 use super::{Args, CliOutput};
 
+/// The entry symbol a link resolves from when nothing overrides it —
+/// `LinkOptions::entry`'s `None` case (docs/core.md (linking)). The
+/// driver needs it by name to find the unit that owns the entry before
+/// anything is linked.
+const DEFAULT_ENTRY: &str = "main";
+
 const BUILD_USAGE: &str = "\
 USAGE: pmt build [INPUT.pmc|.pma|.pmo ...] [-o OUT.pmx] [FLAGS]   (argv mode)
        pmt build [TARGET ...] [FLAGS]                             (manifest mode)
@@ -250,7 +256,11 @@ fn build_one_target(
         .map(|raw| resolve(raw))
         .collect::<Result<_, _>>()?;
     let units = load_units(&paths, &options, flags.keep_objects, &read_err_prefix)?;
-    options.columns = columns_for(program_is_volatile(&units), flags.keep_objects);
+    // The same entry name this target links with (`LinkOptions::entry`
+    // below), so the column decision reads the bit off the object the
+    // linker will actually resolve the entry from.
+    let entry = target.entry.as_deref().unwrap_or(DEFAULT_ENTRY);
+    options.columns = columns_for(entry_owner_is_volatile(&units, entry), flags.keep_objects);
     compile_units(
         units,
         &options,
@@ -406,7 +416,12 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
     let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
     let units = load_units(&paths, &options, flags.keep_objects, "")?;
-    options.columns = columns_for(program_is_volatile(&units), flags.keep_objects);
+    // Argv mode links with `LinkOptions::default()`, i.e. the default
+    // entry symbol.
+    options.columns = columns_for(
+        entry_owner_is_volatile(&units, DEFAULT_ENTRY),
+        flags.keep_objects,
+    );
     compile_units(
         units,
         &options,
@@ -468,10 +483,72 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
 /// One build input, carried as far as the build-column decision allows.
 /// `.pma` and `.pmo` inputs are already objects and their build column
 /// is settled; a `.pmc` source still has to be compiled, and cannot be
-/// until the program's kind is known.
+/// until the program's kind is known — so it travels with the facts a
+/// parse-only pass could establish about it.
 enum Unit {
-    Source { path: PathBuf, text: String },
+    Source {
+        path: PathBuf,
+        text: String,
+        scan: SourceScan,
+    },
     Object(ObjectFile),
+}
+
+/// What one parse-only pass over a `.pmc` source tells the driver: no
+/// flatten, no IR, no optimizer, no codegen. A source that does not even
+/// parse yields the empty scan and gets its real diagnostic moments later
+/// when it is compiled.
+#[derive(Default)]
+struct SourceScan {
+    /// A top-level `volatile main`, i.e. the program bit this unit's
+    /// object will carry — the same thing the compiler derives it from.
+    volatile: bool,
+    /// The symbol names this unit will define for cross-object resolution
+    /// (`export`ed top-level functions plus `main`, namespace-qualified as
+    /// the compiler mangles them). Locals are omitted: they never enter
+    /// the linker's namespace, so they can never own the entry.
+    exports: Vec<String>,
+}
+
+fn scan_source(text: &str) -> SourceScan {
+    let Some(program) = crate::lexer::lex(text)
+        .ok()
+        .and_then(|tokens| crate::parser::parse(&tokens).ok())
+    else {
+        return SourceScan::default();
+    };
+    SourceScan {
+        volatile: program.functions.iter().any(|f| f.volatile),
+        exports: program
+            .functions
+            .iter()
+            .filter(|f| f.exported)
+            .map(|f| crate::compiler::full_name(&f.ns, &f.name))
+            .collect(),
+    }
+}
+
+impl Unit {
+    /// The program bit this unit's object carries.
+    fn volatile(&self) -> bool {
+        match self {
+            Unit::Source { scan, .. } => scan.volatile,
+            Unit::Object(object) => object.program_volatile,
+        }
+    }
+
+    /// Whether this unit defines `name` the way the linker's namespace
+    /// sees definitions — `SymbolDef::Defined` for an object, an export
+    /// for a source.
+    fn defines(&self, name: &str) -> bool {
+        match self {
+            Unit::Source { scan, .. } => scan.exports.iter().any(|e| e == name),
+            Unit::Object(object) => object.symbols.iter().any(|s| {
+                s.name == name
+                    && matches!(s.def, mtc_core::formats::object::SymbolDef::Defined { .. })
+            }),
+        }
+    }
 }
 
 /// Phase one of the load (docs/pmt/cli.md (build)): every input in argv
@@ -496,9 +573,11 @@ fn load_units(
             Some("pmc") => {
                 let text = fs::read_to_string(path)
                     .map_err(|e| format!("{read_err_prefix}cannot read {}: {e}", path.display()))?;
+                let scan = scan_source(&text);
                 units.push(Unit::Source {
                     path: path.clone(),
                     text,
+                    scan,
                 });
             }
             Some("pma") => {
@@ -534,7 +613,7 @@ fn compile_units(
     for unit in units {
         match unit {
             Unit::Object(object) => objects.push(object),
-            Unit::Source { path, text } => {
+            Unit::Source { path, text, .. } => {
                 let out = compile_source(&text, options.clone()).map_err(|e| {
                     let mut stderr = String::new();
                     render_fatal(&mut stderr, &path, e.span, &e.kind, e.kind.code());
@@ -557,27 +636,30 @@ fn write_object(source: &Path, object: &ObjectFile) -> Result<(), String> {
 }
 
 /// The program's volatile bit as the driver can know it BEFORE compiling
-/// anything (docs/pmt/cli.md (build)). A `.pmc` source contributes its
-/// top-level `volatile main` through a parse-only pass — no compile, no
-/// optimizer, no codegen; a source that does not even parse contributes
-/// nothing and gets its real diagnostic when it is compiled a moment
-/// later. An already-loaded `.pma`/`.pmo` object contributes its header
-/// bit instead, which is how a hand-written volatile program declares
-/// itself. `main` may live in either kind of input, so the scan is a
-/// union over all of them; no `main` anywhere means a normal program,
-/// which is also what the linker assumes.
-fn program_is_volatile(units: &[Unit]) -> bool {
-    units.iter().any(|unit| match unit {
-        Unit::Source { text, .. } => declares_volatile_main(text),
-        Unit::Object(object) => object.program_volatile,
-    })
-}
-
-fn declares_volatile_main(text: &str) -> bool {
-    crate::lexer::lex(text)
-        .ok()
-        .and_then(|tokens| crate::parser::parse(&tokens).ok())
-        .is_some_and(|program| program.functions.iter().any(|f| f.volatile))
+/// anything (docs/pmt/cli.md (build)), reproducing the rule the linker
+/// applies (docs/core.md (linking)): the bit belongs to the ONE object
+/// that defines the entry symbol, not to the inputs collectively. A
+/// union over every input would disagree — a non-entry input carrying
+/// the bit would flip the columns of a program the linker then resolves
+/// as normal, and the two builds would emit different code.
+///
+/// So: walk the units in input order, take the first that defines
+/// `entry`, and read its bit alone. First-in-order matches the namespace
+/// the linker builds, which is first-wins over the user objects. Two
+/// units defining `entry` is a duplicate-symbol link error whichever bit
+/// is chosen, so the tie is broken deterministically and not diagnosed
+/// here; no unit defining it is a `NoEntrySymbol` link error, and the
+/// column is moot — normal, which is also the linker's assumption.
+///
+/// Boundary, stated rather than glossed: only the build's own units are
+/// scanned, never its libraries. The embedded stdlib qualifies every name
+/// under `std::`, so it cannot own an unqualified entry; a `-l` library
+/// that defines the entry AND sets the bit would be read as normal here.
+fn entry_owner_is_volatile(units: &[Unit], entry: &str) -> bool {
+    units
+        .iter()
+        .find(|unit| unit.defines(entry))
+        .is_some_and(Unit::volatile)
 }
 
 /// The column rule (docs/pmt/cli.md (build)). An in-memory object dies
@@ -619,5 +701,106 @@ fn defined_names(objects: &[ObjectFile], libraries: &[ObjectFile]) -> HashSet<St
 fn refine_reports(reports: &mut [(PathBuf, CompileReport)], defined: &HashSet<String>) {
     for (_, report) in reports.iter_mut() {
         crate::compiler::refine_undeclared(&mut report.diagnostics, defined);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(text: &str) -> Unit {
+        Unit::Source {
+            path: PathBuf::from("unit.pmc"),
+            text: text.to_string(),
+            scan: scan_source(text),
+        }
+    }
+
+    fn object(pma: &str) -> Unit {
+        Unit::Object(crate::asm::assemble(pma, false).expect("the fixture assembles"))
+    }
+
+    /// The two single-column arms are what this driver exists to choose;
+    /// nothing downstream can tell them from a both-columns build, because
+    /// the linker selects one column either way and the image is identical
+    /// — so only a direct test can stop the rule from silently reverting
+    /// to compiling twice the work.
+    #[test]
+    fn the_column_rule_builds_one_column_in_memory_and_both_on_disk() {
+        assert_eq!(columns_for(true, false), VariantColumns::VolatileOnly);
+        assert_eq!(columns_for(false, false), VariantColumns::NormalOnly);
+        assert_eq!(columns_for(true, true), VariantColumns::Both);
+        assert_eq!(columns_for(false, true), VariantColumns::Both);
+    }
+
+    #[test]
+    fn the_entry_owners_bit_decides_not_a_union_over_the_inputs() {
+        // The reproducing shape: a non-entry input carries the bit while
+        // the entry unit does not. A union would say volatile; the linker
+        // resolves the entry from `app.pmc`, so the answer is normal.
+        let units = vec![
+            source("main() { @util(); }"),
+            object(".volatile\n.func util\n        wr      1\n        ret\n"),
+        ];
+        assert!(!entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+
+        // The inverse: the entry unit declares itself, a plain sibling
+        // does not drag it back to normal.
+        let units = vec![
+            source("volatile main() { @util(); }"),
+            object(".func util\n        wr      1\n        ret\n"),
+        ];
+        assert!(entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+    }
+
+    #[test]
+    fn the_entry_owner_may_be_an_object_and_is_the_first_definer() {
+        let volatile_main = ".volatile\n.func main\n.volatile\n        stp\n";
+        let units = vec![source("export util() { mark; }"), object(volatile_main)];
+        assert!(entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+
+        // Two definers is a duplicate-symbol link error whichever bit is
+        // read; the tie resolves to the first in input order, silently.
+        let units = vec![object(".func main\n        stp\n"), object(volatile_main)];
+        assert!(!entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+    }
+
+    #[test]
+    fn a_custom_entry_name_is_looked_up_by_that_name() {
+        // A `.pmc` unit's bit is "does it contain a volatile main", which
+        // is independent of which of its exports the link enters through:
+        // the linker reads the OBJECT's bit once it knows which object
+        // owns the entry.
+        let units = vec![
+            source("export other() { mark; }"),
+            source("volatile main() { mark; }\nexport start() { mark; }"),
+        ];
+        assert!(entry_owner_is_volatile(&units, "start"));
+        assert!(entry_owner_is_volatile(&units, DEFAULT_ENTRY));
+        assert!(!entry_owner_is_volatile(&units, "other"));
+        // A name no unit defines: the link will fail, the column is moot.
+        assert!(!entry_owner_is_volatile(&units, "nowhere"));
+    }
+
+    #[test]
+    fn a_local_definition_never_owns_the_entry() {
+        // `main` is always exported, a bare sibling never is — and a local
+        // is invisible to the linker's namespace, so it cannot be reached
+        // by name at all.
+        let scan = scan_source("volatile main() { @helper(); }\nhelper() { mark; }");
+        assert_eq!(scan.exports, vec!["main".to_string()]);
+        assert!(scan.volatile);
+
+        // A namespaced `main` is `ns::main`, not the entry.
+        let scan = scan_source("namespace ns { export main() { mark; } }");
+        assert_eq!(scan.exports, vec!["ns::main".to_string()]);
+        assert!(!scan.volatile);
+    }
+
+    #[test]
+    fn an_unparsable_source_scans_empty_instead_of_guessing() {
+        let scan = scan_source("volatile main() { this is not a program");
+        assert!(!scan.volatile);
+        assert!(scan.exports.is_empty());
     }
 }
