@@ -159,12 +159,18 @@ fn an_untagged_func_stays_normal_in_a_tagged_file() {
 
 #[test]
 fn a_file_level_volatile_sets_the_program_bit_without_tagging() {
-    let obj = assemble(".volatile\n.func main\n        stp\n", false).expect("assembles");
+    let src = ".volatile\n.func main\n        stp\n";
+    let obj = assemble(src, false).expect("assembles");
     assert!(obj.program_volatile);
     assert_eq!(
         obj.variants, None,
         "the program bit is independent of per-blob tags"
     );
+    // This bit-set/tag-free shape is exactly what the linker's counted
+    // fallback exists for, so it has to survive the text form too.
+    let text = disassemble_object(&obj);
+    assert!(text.starts_with(".volatile\n"), "{text}");
+    assert_eq!(assemble(&text, false).expect("dis output assembles"), obj);
 }
 
 // --- The variant-aware duplicate rules -----------------------------------
@@ -508,4 +514,83 @@ volatile main() {
             "{level:?}: dis -> asm diverged\n{text}"
         );
     }
+}
+
+// --- Debug info and the lint surface -------------------------------------
+
+/// A `Both` blob keeps ONE debug entry (the bare block's), a split pair
+/// keeps one each — so the per-blob debug section stays parallel to the
+/// blobs, which is a format invariant `from_bytes` enforces and nothing
+/// upstream of it checks.
+#[test]
+fn debug_info_stays_parallel_to_the_merged_blobs() {
+    const DEDUPS: &str = ".func f\n        stp\n.func f\n.volatile\n        stp\n";
+    const SPLITS: &str =
+        ".func f\n        rgt\n        stp\n.func f\n.volatile\n        lft\n        stp\n";
+    for (name, src, blobs) in [("dedups", DEDUPS, 1usize), ("splits", SPLITS, 2)] {
+        let obj = assemble(src, true).expect("assembles with debug");
+        assert_eq!(obj.blobs.len(), blobs, "{name}");
+        let debug = obj.debug.as_ref().expect("with_debug carries debug info");
+        assert_eq!(debug.len(), obj.blobs.len(), "{name}: debug/blob mismatch");
+        assert_eq!(
+            tags(&obj).expect("tagged").len(),
+            obj.blobs.len(),
+            "{name}: variants/blob mismatch"
+        );
+        // The format layer is the real judge of parallelism.
+        let back = ObjectFile::from_bytes(&obj.to_bytes()).expect("the object is well-formed");
+        assert_eq!(back, obj, "{name}: wire round trip diverged");
+    }
+}
+
+/// Whether `-g` was passed must not change an object's variant STRUCTURE —
+/// the dedup record reads code and call sites, never the source-line map.
+#[test]
+fn debug_info_does_not_change_the_variant_structure() {
+    const SRC: &str = "\
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        call    helper
+        stp
+.func helper
+        ret
+.func helper
+.volatile
+        ret
+";
+    let plain = assemble(SRC, false).expect("assembles");
+    let debugged = assemble(SRC, true).expect("assembles with debug");
+    assert_eq!(plain.variants, debugged.variants);
+    assert_eq!(plain.blobs, debugged.blobs);
+    assert_eq!(plain.symbols, debugged.symbols);
+    assert_eq!(plain.relocations, debugged.relocations);
+}
+
+/// `pmt lint`'s `.pma` route is the remaining consumer of the lowered
+/// functions, and a two-column listing is the first input that hands it
+/// two same-name blocks. It must read one like any other file.
+#[test]
+fn a_two_column_listing_lints_clean() {
+    const SRC: &str = "\
+.volatile
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        rgt
+        call    helper
+        stp
+.func helper
+        ret
+.func helper
+.volatile
+        ret
+";
+    let syntax = mtc_post_machine::asm::pm1_syntax();
+    let findings = mtc_core::asm::lint::lint(&syntax, SRC, &[]).expect("the listing lints");
+    assert!(findings.is_empty(), "{findings:?}");
 }
