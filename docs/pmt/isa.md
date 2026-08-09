@@ -53,6 +53,18 @@ at `-O0` faults, because the pass removed the re-mark the strict device
 would have refused. Build with `--fno-cell-state` when strict-cell
 faults are the point (`docs/pmt/optimizer.md (cell-state)`).
 
+A **volatile program** cannot lose a strict-cell fault this way at all,
+by construction: `cell-state` is one of the three passes its gated build
+column disables, so every write the source asked for survives to face
+the strict device (`docs/pmt/language.md (volatile programs)`,
+`docs/pmt/optimizer.md (volatile builds)`). `volatile main()` is
+therefore the whole-program statement of what `--fno-cell-state` says
+one pass at a time. The two are not interchangeable, so it is worth
+knowing which is wanted: the flag leaves the rest of the pipeline —
+including the write+move fusion — running as before, while the modifier
+also stands down `branch-fold` and `fuse-tape-ops`, and changes which
+build column the linker picks for every name in the image.
+
 ### Loading
 
 The general loading sequence is `docs/core.md (loading)`. PM-1

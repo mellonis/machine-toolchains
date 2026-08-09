@@ -1,6 +1,6 @@
 # The `.pmc` language reference
 
-The `.pmc` language version is **0.3** (pre-1.0: the version is `0.N` and `N`
+The `.pmc` language version is **0.4** (pre-1.0: the version is `0.N` and `N`
 bumps on any grammar change; at a declared 1.0 the axes activate — major =
 breaking acceptance change, minor = additive syntax; no patch digit —
 spec-text corrections are errata, implementation-conformance fixes live in
@@ -95,6 +95,13 @@ return (in `main`, an implicit stop).
   path — `@std::goto();` and `use std::goto;` are both syntax errors,
   because such a symbol could never be defined from `.pmc` source in the
   first place.
+- **`volatile` is reserved where a definition is NAMED**, and contextual
+  everywhere else. `volatile() { … }` and `namespace volatile { … }` are
+  both `reserved-name` errors; `volatile main() { … }` is the modifier
+  (see Volatile programs below). Unlike the eight command words above,
+  the bar is not extended to `::` path segments — `use ns::volatile;`
+  still parses, even though no `.pmc` source can define the symbol it
+  declares.
 - **Sigil adjacency:** `@` must be immediately followed by the callee
   name — no whitespace, digit, punctuation, comment, or end of input
   between them; `@ qq();` is a syntax error, because the sigil is part of
@@ -123,6 +130,63 @@ return (in `main`, an implicit stop).
   fully qualified (see Visibility).
 - Duplicate function definitions in one file are a compile error; across
   objects, a link-time error (see `docs/pmt/stdlib.md`).
+
+### Volatile programs
+
+The un-namespaced top-level `main` — and only it — accepts a leading
+`volatile` modifier:
+
+```c
+volatile main() { … }
+volatile export main() { … }   // fixed order: `volatile` first
+```
+
+A **volatile program** drives a device rather than memory. Every tape
+access it performs is externally observable, and the outside world may
+change the cell under the head between two of them. The toolchain
+therefore compiles it under a standing rule: no access the source asked
+for is dropped, merged, split, or reordered, and no value the program
+wrote is ever assumed to read back. That is the `debugger` barrier
+(under Optimization below) generalized from a point to the whole run —
+`docs/pmt/optimizer.md (volatile builds)` names the passes it rules out
+and works a program through both builds.
+
+Volatility is a property of the PROGRAM, not of a function. PM-1 drives
+one tape and every function in the program touches that same tape, so
+the modifier sits on the one declaration the program is named by. On any
+other definition it is the error `volatile-not-on-main` — a plain
+function, a nested one, or a `main` inside a `namespace` block, which is
+an ordinary function and never the entry point:
+
+```
+$ pmt compile bad.pmc -o bad.pmo
+pmt: bad.pmc:1:1: error: `volatile` is only allowed on the top-level `main` — remove it from `foo` [volatile-not-on-main]
+```
+
+When both modifiers are written the order is fixed: `volatile` first,
+then `export` (which on the top-level `main` is a redundant no-op
+anyway). Written the other way round, `volatile` lands where the parser
+expects a function name, and it cannot be one — that is the reservation
+in Rules above, and the diagnostic is `reserved-name`.
+
+**The author never picks a variant.** A `.pmc` compilation builds every
+function TWICE — once through the ordinary pipeline, once through the
+gated one — and the object carries both columns, tagged per function
+(`docs/formats.md (MO)`). Functions whose two builds come out identical
+— anything that never touches the tape, and everything at `-O0` — dedup
+back to one blob serving both. What the modifier records is not a
+compiler switch but the object's **program bit**, and it is the LINKER
+that reads that bit and picks one column per name
+(`docs/core.md (linking)`). So a library compiled long before its
+callers existed still supplies gated bodies to a volatile program and
+ordinary ones to a plain program, out of the same `.pmo`, with no
+build-time coordination and no second library.
+
+Nothing about volatility is checked at the link boundary. A name that
+ships only one column links anyway: the linker takes the column it has
+and counts the name, which `pmt link -v` and `pmt build -v` report
+(`docs/pmt/cli.md (link)`). A mismatch degrades to that counted
+fallback — it is never an error.
 
 ## Visibility, nesting, namespaces, imports
 
@@ -323,6 +387,12 @@ intermediate step counts/states. The one exception: an un-stripped
 motion or elimination happens across it, so a debugger attached at `-O1`
 still sees honest state at every breakpoint.
 
+**Volatile programs** keep this guarantee and add to it: the gated build
+a `volatile main` selects preserves the tape's whole access sequence, so
+the observables above are joined by the sequence of reads and writes the
+device actually sees — Volatile programs above, and
+`docs/pmt/optimizer.md (volatile builds)` for the passes that costs.
+
 **Interposition:** `-O1`'s inline pass binds intra-module calls at compile
 time, so if you shadow one of a library's *internal* callees (see
 `docs/pmt/stdlib.md`), the override only affects call sites that survive
@@ -376,3 +446,11 @@ See `docs/formats.md (IR JSON)` for the JSON shape and version number.
   attention line, never a successor or check-arm return — a
   hand-wrapped multi-line call that put the closing `!` on its own
   line, previously legal, is now a parse error.
+- **0.4** — additive: the `volatile` modifier on the un-namespaced
+  top-level `main` (see "Volatile programs" above), with
+  `volatile-not-on-main` for every other definition and a fixed
+  `volatile export` order when both modifiers are written. `volatile`
+  becomes a reserved definition name in the same bump — a function or a
+  namespace called `volatile` is now a `reserved-name` error, where
+  before it was an ordinary identifier. Beyond that one reservation, no
+  existing program changes meaning.

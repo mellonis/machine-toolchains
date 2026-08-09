@@ -130,7 +130,10 @@ USAGE: pmt asm INPUT.pma [-o OUT.pmo] [-g]
 ```
 
 Assembles hand-written or disassembled `.pma` text into a `.pmo` object;
-`-g` records the label/line debug section (`docs/formats.md`).
+`-g` records the label/line debug section (`docs/formats.md`). Hand-written
+text can author build columns: `.volatile` tags a `.func` block as the
+gated column, or sets the object's program bit when it precedes the first
+`.func` (`docs/formats.md (the .volatile directive)`).
 
 ### Assembly errors
 
@@ -139,9 +142,10 @@ compile error: `FILE:LINE:COL: error: MESSAGE [CODE]`. The bracketed code
 is a stable kebab-case identifier — permanent, safe to match in scripts
 and editor integrations, same contract as `pmt compile` (compile errors)
 above. The catalog is the assembler framework's shared namespace,
-tabulated once in `docs/core.md (error codes)`; the PM-1 dialect enables
-none of the assembler's capability extensions, so only the rows marked
-reachable in every dialect can fire from `pmt asm` — a capability-gated
+tabulated once in `docs/core.md (error codes)`; of the assembler's
+capability extensions the PM-1 dialect enables only `volatile` — which
+adds a directive, not a code — so still only the rows marked reachable
+in every dialect can fire from `pmt asm`, and a capability-gated
 directive such as `.rept` is not recognized and surfaces through the
 base codes instead.
 
@@ -169,6 +173,55 @@ directory to fall back to; the standard library is embedded in the
 toolchain binary itself. `-v` renders which defined-but-unreachable
 functions were dropped and how many call/jump sites relaxed to their short
 form versus stayed far.
+
+**Build columns under `-v`.** Every link also picks a build column per
+name — the one matching the program's volatile bit, read off the object
+that defines the entry symbol (`docs/core.md (linking)`,
+`docs/pmt/language.md (volatile programs)`). Where a reached name ships
+only the other column, the linker takes what it has and `-v` says so on
+a second line, naming every such name. A hand-assembled volatile program
+is the clearest case: `.volatile` before the first `.func` sets the
+program bit while tagging no blob, so every reached name is counted.
+
+```asm
+; hand.pma
+.volatile
+.func main
+        wr      1
+        stp
+```
+
+```
+$ pmt asm hand.pma -o hand.pmo
+$ pmt link -v --nostdlib hand.pmo -o hand.pmx
+link: dropped []; 0 site(s) relaxed short, 0 far
+link: 1 name(s) with no volatile column linked normal [main]
+```
+
+The sentence is direction-aware, because column selection is symmetric —
+a plain program reaching a volatile-only body falls back exactly the same
+way, and says the opposite. Here `app.pmc` is
+`use util; main() { @util(); }` and `util.pma` defines `util` in the
+volatile column only:
+
+```asm
+; util.pma
+.func util
+.volatile
+        wr      1
+        ret
+```
+
+```
+$ pmt compile app.pmc -o app.pmo && pmt asm util.pma -o util.pmo
+$ pmt link -v --nostdlib app.pmo util.pmo -o app.pmx
+link: dropped []; 1 site(s) relaxed short, 0 far
+link: 1 name(s) with no normal column linked volatile [util]
+```
+
+A link whose reached names all offer the selected column prints no such
+line at all. The same wording is used by `pmt link -v` and by both of
+`pmt build`'s modes, so the three never drift apart.
 
 ## `pmt build`
 
@@ -257,6 +310,36 @@ target — `NAME`, a tab, then `run` when that target carries a run block
 **`--keep-objects`:** in both modes, writes each intermediate `.pmo`
 object next to its source file instead of discarding it once linked in
 memory.
+
+**Build columns: disk carries both, memory carries one.** A `.pmc`
+compilation builds every function twice, and which columns end up in an
+object depends on whether that object outlives the invocation
+(`docs/pmt/language.md (volatile programs)`). A `.pmo` written to disk —
+by `pmt compile`, or by `pmt build --keep-objects` — always carries both
+columns, because it cannot know which program will link it later. An
+object `pmt build` holds only in memory dies inside a link whose program
+kind is already decided, so the driver compiles only the column that
+link will select and the other one is provably dead work.
+
+The program kind is decided the way the linker decides it: by the ONE
+input that defines the entry symbol, taking the inputs in the linker's
+own order — the units first, then the `-l` libraries, first definition
+wins — not by a union over the inputs. A non-entry input carrying the
+program bit does not flip the columns of a program the linker then
+resolves as normal.
+
+The rule is an optimization with no observable effect: the linker
+selects one column either way, so **the `.pmx` from the in-memory path
+is byte-identical to the one built through on-disk objects**, and
+`--keep-objects` changes what is written beside the sources, never what
+is linked.
+
+```
+$ pmt build -O1 pulse-v.pmc -o mem.pmx
+$ pmt compile -O1 pulse-v.pmc -o disk.pmo && pmt link disk.pmo -o disk.pmx
+$ cmp mem.pmx disk.pmx && echo identical
+identical
+```
 
 **Undeclared-external refinement:** the ordinary "undeclared external"
 compile warning fires per file, on a bare call whose name that file
@@ -615,11 +698,48 @@ level (default -O0, as in `pmt compile`). Both flags need a .pmc input —
 a .ir.json file already holds exactly one column.
 ```
 
-Reads a `--emit-ir` JSON file (`docs/formats.md (IR JSON)`) and renders
-each function's control-flow graph as a Mermaid `flowchart TD`; block
-contents (labels, ops, terminal instruction) become node text, `check`
-terminators become a pair of `MF`/`!MF` edges. `--function NAME` restricts
-output to one function.
+Renders each function's control-flow graph as a Mermaid `flowchart TD`:
+block contents (labels, ops, terminal instruction) become node text, and
+`check` terminators become a pair of `MF`/`!MF` edges. `--function NAME`
+restricts the output to one function.
+
+The input is either a `--emit-ir` JSON file (`docs/formats.md (IR JSON)`)
+or a `.pmc` source, and the two accept different flags. A JSON file
+already holds exactly one compiled column at one optimization level, so
+`--variant` and `-O0`/`-O1` are errors on it. A `.pmc` input is compiled
+in memory first, and those two flags say what to compile:
+
+- **`--variant normal|volatile`** picks the build column
+  (`docs/pmt/language.md (volatile programs)`); the default is `normal`.
+  This is an inspection tool, so it shows either column of any program:
+  asking for `volatile` on a program with no `volatile main` renders a
+  CFG that program would never link, and asking for `normal` on a
+  volatile program renders the one it never links. Which column actually
+  ships is the linker's choice, from the program bit.
+- **`-O0`/`-O1`** sets the optimization level, defaulting to `-O0` as in
+  `pmt compile`. Writing both is not an error and `-O1` wins regardless
+  of the order they appear in — also as in `pmt compile`.
+
+```
+$ pmt ir graph two.pmc -O1
+%% main
+flowchart TD
+    B0["wr 1<br/>ret"]
+
+$ pmt ir graph two.pmc -O1 --variant volatile
+%% main
+flowchart TD
+    B0["wr 1<br/>wr 1<br/>ret"]
+```
+
+(`two.pmc` is `main() { mark; mark; }`: the gated column keeps the
+idempotent second write that `cell-state` drops from the other one.)
+
+`pmt compile --emit-ir` has no such flag — it writes the **normal**
+column, for a volatile program too, exactly as `-S` renders the normal
+column's assembly. Both describe one compilation rather than one link;
+`--variant volatile` here, or `pmt dis` on the linked `.pmx`, is how the
+gated column is read.
 
 ## `pmt lsp`
 
