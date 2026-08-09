@@ -1062,6 +1062,106 @@ fn in_memory_build_equals_the_on_disk_path_for_a_normal_program() {
     in_memory_equals_on_disk("variant_inmem_normal", NORMAL_MAIN);
 }
 
+/// The two paths run DIFFERENT compiler machinery, not just different
+/// amounts of it: a single-column build tags every blob and dedups
+/// nothing, while a both-columns build runs the transitive demotion
+/// fixpoint — a function byte-identical across columns still splits when
+/// a transitive callee splits. This chain is built to make that cascade
+/// fire (`main` and `mid` are column-invariant on their own and demote
+/// only through `leaf`, and every body stays over the inliner's limit in
+/// both columns), so it is the shape where the volatile column's bytes
+/// could differ between the two paths if the fixpoint leaked into them.
+#[test]
+fn in_memory_build_equals_the_on_disk_path_through_a_demotion_cascade() {
+    const CASCADE: &str = "\
+volatile main() {
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+    @mid();
+}
+mid() {
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+    @leaf();
+}
+leaf() {
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+    mark;
+    right;
+}
+";
+    let dir = scratch("variant_cascade");
+    let src = dir.join("chain.pmc");
+    fs::write(&src, CASCADE).unwrap();
+    let mem = dir.join("mem.pmx");
+    let disk = dir.join("disk.pmx");
+
+    let built = execute(&args(&[
+        "build",
+        "-O1",
+        "-v",
+        src.to_str().unwrap(),
+        "-o",
+        mem.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert!(
+        !built.stderr.contains("volatile column"),
+        "every name in the chain offers the volatile column:\n{}",
+        built.stderr
+    );
+
+    execute(&args(&[
+        "compile",
+        "-O1",
+        src.to_str().unwrap(),
+        "-o",
+        dir.join("chain.pmo").to_str().unwrap(),
+    ]))
+    .unwrap();
+    // The kept object really does carry the cascade — otherwise the two
+    // paths would be comparing the same work twice.
+    assert_eq!(
+        variant_pairs(&dir.join("chain.pmo"), "mid"),
+        vec![BlobVariant::Normal, BlobVariant::Volatile],
+        "mid must have demoted through leaf, or this fixture proves nothing"
+    );
+    execute(&args(&[
+        "link",
+        dir.join("chain.pmo").to_str().unwrap(),
+        "-o",
+        disk.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        fs::read(&mem).unwrap(),
+        fs::read(&disk).unwrap(),
+        "the demoted columns must be the same bytes the single-column build emits"
+    );
+}
+
 /// The program bit can arrive on a `.pma` input (file-level `.volatile`),
 /// not only from a `.pmc` `volatile main` — the driver's pre-scan must
 /// see it, or every `.pmc` sibling compiles the wrong column.
