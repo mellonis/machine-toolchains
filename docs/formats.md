@@ -226,10 +226,12 @@ invisible to cross-object resolution, so it can neither shadow nor be
 shadowed (`docs/pmt/language.md (visibility)`, `docs/pmt/stdlib.md`). Version-1
 object bytes (no locals) still decode under a later reader.
 
-Object format version 3 was added for generic-routine composition: it
-appends four record kinds — routine signatures, per-routine table blobs,
-table fixups, and bound calls — and then, for volatile builds, a fifth:
-the per-blob variant tags, alongside a program-volatile header bit. An
+Object format version 3 was added for generic-routine composition, with
+four record kinds — routine signatures, per-routine table blobs, table
+fixups, and bound calls. Build columns added a fifth kind later, the
+per-blob variant tags, alongside a program-volatile header bit; being
+later in time says nothing about where it sits on the wire, and the
+layout above places it third of the five. An
 object carrying any of them serializes as version 3; an object with none
 present still serializes byte-for-byte as version 2. In practice
 `tmt compile` emits version 3, since every routine it generates carries a
@@ -509,9 +511,7 @@ Anywhere else is an error. "Directly after" means the next item: own-line
 comments are trivia and do not close the slot, but a label, an
 instruction, or a second `.volatile` does, and the complaint is that
 `.volatile` must directly follow its `.func`. A second file-level
-`.volatile` is a duplicate `.volatile`. Both render as `syntax`
-(`docs/core.md (error codes)`) — the directive introduces no error code
-of its own.
+`.volatile` is a duplicate `.volatile`.
 
 A name may be defined **once per column**, which makes a bare/`.volatile`
 pair the only same-name pair one file may carry; two bare `.func f`
@@ -519,6 +519,12 @@ blocks stay `duplicate-function` exactly as before. The two members of a
 pair must also agree on visibility: `.func f local` paired with a
 `.func f` is refused, because the linker pairs a name's columns only
 among exported ones and a half-local pair would half-vanish there.
+
+All three of those complaints — the two placement ones above and the
+visibility one — render as `syntax` (`docs/core.md (error codes)`). The
+directive introduces no error code of its own; the only coded diagnostic
+it changes is `duplicate-function`, which it makes column-aware rather
+than name-only.
 
 What an author controls, then, is four shapes:
 

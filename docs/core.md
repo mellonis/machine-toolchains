@@ -510,9 +510,12 @@ knowledge arrives via `ArchSyntax`, and the text grammar they accept is
   `rept` (`.rept v, lo, hi` … `.endr` with `{expr}` substitution),
   `vectors` (`[a, *, -, <, >, .]` operand tokens), and `volatile` (the
   `.volatile` build-column directive — selection metadata naming which
-  column a blob belongs to, never anything about the body). Every
-  dialect spells the capability struct exhaustively, so a dialect can
-  only acquire an extension by asking for it by name.
+  column a blob belongs to, never anything about the body). The struct's
+  default has every capability off, so one a dialect does not ask for is
+  off: adding a capability to the framework can never switch it on for a
+  dialect that predates it. TM-1 goes one further and spells every field
+  out, which turns each future addition into a compile-time decision
+  there rather than a silent opt-out.
 
 ### Control flow
 

@@ -41,9 +41,13 @@ pub struct AsmCaps {
     /// never anything about the body, which the assembler transcribes
     /// as written either way.
     ///
-    /// Every dialect spells this struct exhaustively, so a dialect can
-    /// only acquire the directive by typing `volatile: true` — a new
-    /// capability never defaults itself on.
+    /// [`AsmCaps`]'s `Default` is all-off, so a dialect that does not ask
+    /// for this field does not get the directive — adding a capability
+    /// here can never switch one on for a dialect that predates it,
+    /// whether that dialect spells the struct out or fills the rest from
+    /// `..Default::default()`. `tm1_syntax()` does spell every field,
+    /// which turns each future addition into a compile-time decision
+    /// there; `pm1_syntax()` names only what it enables.
     pub volatile: bool,
 }
 
