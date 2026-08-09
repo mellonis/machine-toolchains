@@ -622,6 +622,18 @@ pub(crate) fn infer_resolved(resolved: &Resolved) -> FootprintTable {
         for state in &world.states {
             for rule in &state.rules {
                 let Some(write) = &rule.write else { continue };
+                // A vector is one cell per tape, by position — but that width
+                // is enforced during expansion, not resolution, so a walk over
+                // a merely-resolved module can meet a short one (an editor
+                // sees one on every half-typed rule). Reading a missing cell
+                // as `keep` would UNDER-approximate, so a width that does not
+                // match the world's arity answers full on every tape instead.
+                if write.cells.len() != world.tapes.len() {
+                    for (slot, cap) in sets[wi].iter_mut().zip(&caps[wi]) {
+                        slot.union_with(*cap);
+                    }
+                    continue;
+                }
                 for (tape, cell) in write.cells.iter().enumerate() {
                     let (Some(rt), Some(cap)) = (world.tapes.get(tape), caps[wi].get(tape)) else {
                         continue;
@@ -1268,7 +1280,9 @@ machine {
         let out = compile(CALL_CHAIN_SRC, CompileOptions::default()).expect("the fixture compiles");
         let ir = infer_ir(&out.ir);
 
-        assert!(!ir.worlds.is_empty());
+        // Pinned, not merely non-empty: a shrinking world set would leave the
+        // loop below asserting almost nothing while still passing.
+        assert_eq!(ir.worlds.len(), 3, "main, twice and flip: {:?}", ir.worlds);
         for (name, iw) in &ir.worlds {
             let sw = source
                 .worlds
@@ -1327,6 +1341,13 @@ export graph flipOnes(tape v: tri, state done) {
         // The graph writes its blank and its '0'. The host binds '^' one-way
         // onto the graph's blank and '0' two-way onto the graph's '0', across
         // differently-sized alphabets (5 vs 3), so the map is CLOSED.
+        //
+        // The fixture also shows the walk over-approximating the splice on
+        // purpose, which is why it stops at `analyze`: host '1' reads as no
+        // graph symbol, so the graph's `['1'] -> write ['_']` rule has an
+        // empty read preimage and the splice would DROP it — the blank this
+        // test asserts the host gains can never actually land. Keeping it is
+        // the safe direction.
         let src = "\
 alphabet host5 { '_', '^', '$', '0', '1' }
 alphabet bare3 { '_', '0', '1' }
@@ -1423,6 +1444,34 @@ export routine echoIt(tape v: tri) {
         let resolved = resolve(src);
         let table = infer_resolved(&resolved);
         assert_eq!(table.worlds["echoIt"].tapes[0], SymSet::full(3));
+    }
+
+    #[test]
+    fn a_malformed_write_vector_is_conservatively_full() {
+        // The vector-width check lives in expansion, NOT in resolution, so a
+        // source walk over `analyze` output really can meet a write vector
+        // narrower than the world's arity — an editor sees it on every
+        // half-typed rule. Walking it positionally would read the missing
+        // cells as `keep` and UNDER-approximate, the one direction this
+        // analysis may never take.
+        let src = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+machine {
+  tape a: bits;
+  tape b: wide;
+  entry state s { [*, *] -> write ['1'] stop; }
+}
+";
+        let resolved = resolve(src);
+        let main = &infer_resolved(&resolved).worlds["main"].tapes;
+        assert_eq!(main[0], SymSet::full(3));
+        assert_eq!(
+            main[1],
+            SymSet::full(3),
+            "the tape the short vector never reached must not read as keep"
+        );
     }
 
     #[test]
