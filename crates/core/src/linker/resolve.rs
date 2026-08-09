@@ -17,7 +17,25 @@ use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use super::LinkError;
-use crate::formats::object::{BlobDebug, BoundCall, ObjectFile, RoutineSig, SymbolDef};
+use crate::formats::object::{
+    BlobDebug, BlobVariant, BoundCall, ObjectFile, RoutineSig, SymbolDef,
+};
+
+/// True for a blob holding the VOLATILE lowering of its function — the
+/// second build column of a name whose normal column sits in the same
+/// object (docs/formats.md (MO)). The namespace carries the normal one, so
+/// the pair reads as one definition rather than a duplicate.
+///
+/// This is the program-bit-false case: choosing the column by the
+/// program's own volatile bit, and counting the fallback when the chosen
+/// column is missing, arrive with variant-aware resolution. A tag-free
+/// object has no volatile blobs and is unaffected.
+fn is_volatile_column(object: &ObjectFile, blob: u32) -> bool {
+    object
+        .variants
+        .as_ref()
+        .is_some_and(|tags| matches!(tags.get(blob as usize), Some(BlobVariant::Volatile)))
+}
 
 #[derive(Debug)]
 pub(crate) struct FuncRef<'a> {
@@ -93,6 +111,7 @@ pub(crate) fn resolve<'a>(
     for (oi, object) in objects.iter().enumerate() {
         for symbol in &object.symbols {
             if let SymbolDef::Defined { blob } = symbol.def
+                && !is_volatile_column(object, blob)
                 && namespace.insert(symbol.name.as_str(), (oi, blob)).is_some()
             {
                 return Err(LinkError::DuplicateSymbol(symbol.name.clone()));
@@ -101,7 +120,9 @@ pub(crate) fn resolve<'a>(
     }
     for (li, library) in libraries.iter().enumerate() {
         for symbol in &library.symbols {
-            if let SymbolDef::Defined { blob } = symbol.def {
+            if let SymbolDef::Defined { blob } = symbol.def
+                && !is_volatile_column(library, blob)
+            {
                 namespace
                     .entry(symbol.name.as_str())
                     .or_insert((objects.len() + li, blob));
@@ -446,6 +467,38 @@ mod tests {
         let b = obj_with_locals(0x7E, &[("helper", &[])], &["helper"]);
         let e = resolve(&[a, b], &[], "main").unwrap_err();
         assert_eq!(e, LinkError::Unresolved(vec!["helper".into()]));
+    }
+
+    /// A `{Normal, Volatile}` same-name pair in one object is ONE
+    /// definition in two build columns, not a duplicate: the namespace
+    /// carries the normal column and the link succeeds. (Choosing the
+    /// column by the program's volatile bit, and counting the fallback
+    /// when the wanted column is absent, arrive with variant-aware
+    /// resolution; this pins the program-bit-false behaviour the two-column
+    /// compiler needs today.)
+    #[test]
+    fn a_variant_pair_in_one_object_is_not_a_duplicate_symbol() {
+        // main is built twice; the volatile column's blob is a distinct
+        // body, tagged so the namespace can tell the two apart.
+        let mut a = obj(0x7E, &[("main", &[]), ("main", &[])]);
+        a.blobs[1].push(0x0E);
+        a.variants = Some(vec![BlobVariant::Normal, BlobVariant::Volatile]);
+        let r = resolve(std::slice::from_ref(&a), &[], "main").expect("a variant pair links");
+        let names: Vec<&str> = r.order.iter().map(|f| f.name.as_ref()).collect();
+        assert_eq!(names, vec!["main"], "one definition reaches the image");
+        assert_eq!(
+            r.order[0].blob.as_ref(),
+            a.blobs[0].as_slice(),
+            "the normal column is the one linked"
+        );
+
+        // Without the tags the same shape stays a duplicate.
+        let mut untagged = a.clone();
+        untagged.variants = None;
+        assert_eq!(
+            resolve(std::slice::from_ref(&untagged), &[], "main").unwrap_err(),
+            LinkError::DuplicateSymbol("main".into())
+        );
     }
 
     #[test]
