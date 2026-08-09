@@ -657,10 +657,18 @@ fn handwritten_volatile_column_links_without_fallback() {
 /// merged two-column object disassembles to `.pma` that assembles back to
 /// the same bytes — variant tags and program bit included. Anything the
 /// compiler can put in an object, an author can write by hand.
+///
+/// The two levels round-trip DIFFERENT shapes, and each asserts its own
+/// before trusting the byte compare. At `-O1` `main` fuses `mark; right`
+/// and `helper` does not touch the tape, so the object carries a split
+/// `{Normal, Volatile}` pair AND a `Both` blob — the shape that exercises
+/// the per-blob `.volatile` tag. At `-O0` nothing is withheld, so every
+/// blob is `Both` and only the program bit and the print-twice path are
+/// under test. Pinning both keeps the split leg from decaying to green:
+/// were `main`'s columns to coincide at `-O1`, the bytes would still
+/// round-trip while proving nothing about tags.
 #[test]
 fn dis_roundtrips_a_two_column_object() {
-    // A `Both` blob (`helper` touches no tape), a split pair (`main`
-    // fuses), and the program bit.
     const SRC: &str = "\
 helper() {
     halt;
@@ -675,7 +683,10 @@ volatile main() {
     let dir = scratch("volatile_dis_roundtrip");
     let src = dir.join("app.pmc");
     fs::write(&src, SRC).unwrap();
-    for level in ["-O0", "-O1"] {
+    for (level, main_columns) in [
+        ("-O0", &[BlobVariant::Both][..]),
+        ("-O1", &[BlobVariant::Normal, BlobVariant::Volatile][..]),
+    ] {
         let object = dir.join(format!("app{level}.pmo"));
         execute(&args(&[
             "compile",
@@ -685,9 +696,20 @@ volatile main() {
             object.to_str().unwrap(),
         ]))
         .unwrap();
+        let compiled = read_object(&object);
         assert!(
-            read_object(&object).program_volatile,
+            compiled.program_volatile,
             "{level}: the compiled object carries the program bit"
+        );
+        assert_eq!(
+            columns_of(&compiled, "main"),
+            main_columns,
+            "{level}: the fixture no longer round-trips the shape this leg is for"
+        );
+        assert_eq!(
+            columns_of(&compiled, "helper"),
+            vec![BlobVariant::Both],
+            "{level}: `helper` touches no tape, so its columns dedup at either level"
         );
 
         let text = execute(&args(&["dis", object.to_str().unwrap()])).unwrap();
@@ -713,6 +735,49 @@ volatile main() {
             text.stdout
         );
     }
+}
+
+/// The embedded stdlib's column roster, in full. The `stdlib` corpus
+/// fixture proves that the ONE routine it calls links its gated body;
+/// this pins which routines have a gated body to link at all. Three of
+/// the eleven touch the tape in a way the gate withholds work from and
+/// ship two columns; the other eight dedup to one `Both` blob. The
+/// roster is a published fact about the library, so a stdlib edit that
+/// splits a ninth routine — or fuses one of the three — has to come
+/// through here rather than silently dating the documentation.
+#[test]
+fn the_stdlib_ships_exactly_three_split_routines() {
+    const SPLIT: [&str; 3] = [
+        "std::eraseSection",
+        "std::removeFirstMark",
+        "std::removeLastMark",
+    ];
+    const DEDUPED: [&str; 8] = [
+        "std::appendMark",
+        "std::goToBegin",
+        "std::goToBlankLeft",
+        "std::goToBlankRight",
+        "std::goToEnd",
+        "std::goToMarkLeft",
+        "std::goToMarkRight",
+        "std::prependMark",
+    ];
+    let object = mtc_post_machine::stdlib::object();
+    let mut names: Vec<&str> = object.symbols.iter().map(|s| s.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+
+    let mut split: Vec<&str> = Vec::new();
+    let mut deduped: Vec<&str> = Vec::new();
+    for name in names {
+        match columns_of(object, name).as_slice() {
+            [BlobVariant::Both] => deduped.push(name),
+            [BlobVariant::Normal, BlobVariant::Volatile] => split.push(name),
+            other => panic!("`{name}` carries an unexpected column shape: {other:?}"),
+        }
+    }
+    assert_eq!(split, SPLIT, "the split routines moved");
+    assert_eq!(deduped, DEDUPED, "the column-invariant routines moved");
 }
 
 /// The `-O0` bit-identity floor, extended to the volatile world: with the
