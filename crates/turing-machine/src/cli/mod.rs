@@ -54,7 +54,7 @@ SUBCOMMANDS:
   dis          disassemble a .tmo or .tmx (--listing for the address view)
   run          execute a .tmx on a multi-tape .tmt block
   tape-block   new/set/show .tmt tape-block snapshots
-  ir           render --emit-ir JSON (ir graph -> Mermaid)
+  ir           render --emit-ir JSON (ir graph -> Mermaid, ir footprints -> write sets)
   lint         hygiene findings over .tmc and .tma sources
   fmt          canonical formatting for .tmc and .tma sources
   lsp          run the LSP server for .tmc and .tma on stdio

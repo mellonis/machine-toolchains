@@ -683,6 +683,14 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
 /// is stable across runs. `--function` filters to one world, mirroring
 /// `ir graph`'s flag and error shape exactly, including the unknown-world
 /// message (docs/tmt/cli.md (tmt ir)).
+///
+/// `--emit-ir` itself never produces two worlds with the same name (its
+/// names are mangled unique), but the file this leaf reads is untrusted
+/// input, not a value this process just built — a hand-edited or corrupted
+/// `.ir.json` can still name-collide two worlds. `FootprintTable` is keyed
+/// by name, so a collision would silently render one world's inferred
+/// write-sets under the other's tape list; that is caught up front,
+/// rejected before either world's report is built.
 fn ir_footprints(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
     let filter = args.value("--function")?;
@@ -694,6 +702,9 @@ fn ir_footprints(raw: &[String]) -> Result<CliOutput, String> {
     };
     let text = fs::read_to_string(input).map_err(|e| format!("cannot read {input}: {e}"))?;
     let program = IrProgram::from_json(&text).map_err(|e| format!("{input}: {e}"))?;
+    if let Some(name) = duplicate_world_name(&program) {
+        return Err(format!("duplicate world `{name}` in {input}"));
+    }
     let table = crate::footprint::infer_ir(&program);
 
     let mut blocks: Vec<String> = Vec::new();
@@ -710,15 +721,16 @@ fn ir_footprints(raw: &[String]) -> Result<CliOutput, String> {
             .expect("infer_ir covers every world its own input program lists");
         let mut block = format!("world {}\n", world.name);
         for (index, tape) in world.tapes.iter().enumerate() {
-            // `FootprintTable.worlds` is keyed by name, so two worlds
-            // sharing a name collapse to the LAST one's arity — a shape
-            // `--emit-ir` itself never produces (its names are mangled
-            // unique), but the file this leaf reads is untrusted input, not
-            // a value this process just built, so a hand-edited or
-            // corrupted `.ir.json` can still name-collide two
-            // differently-sized worlds. Defaulting to the empty set on a
-            // miss keeps that case a (conservative) report line rather
-            // than a panic.
+            // With duplicate world names already rejected above, `footprint`
+            // is this exact world's own entry, and `infer_ir` always sizes
+            // it to `world.tapes.len()` — so this `get` cannot miss for any
+            // input `duplicate_world_name` lets through today. It stays a
+            // `get` rather than an index because that equality is an
+            // invariant of `infer_ir`'s current implementation, not a
+            // parsed-JSON shape this leaf itself checks; the guard's only
+            // remaining job is an arity/tape-count mismatch, so a future
+            // change to that invariant reports an empty set here instead of
+            // panicking on a JSON file that still parses.
             let set = footprint.tapes.get(index).copied().unwrap_or_default();
             let members: Vec<String> = set.iter().map(|i| i.to_string()).collect();
             block.push_str(&format!(
@@ -737,6 +749,20 @@ fn ir_footprints(raw: &[String]) -> Result<CliOutput, String> {
         });
     }
     Ok(CliOutput::ok(blocks.join("\n"), String::new()))
+}
+
+/// The name of the first world that repeats an earlier world's name, or
+/// `None` if every name in `program.worlds` is distinct. Scoped to the `ir
+/// footprints` leaf: `FootprintTable`'s name-keyed shape is what makes a
+/// collision unsafe here, not a property of `.ir.json` in general (`ir
+/// graph` renders each world independently and has no such hazard).
+fn duplicate_world_name(program: &IrProgram) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+    program
+        .worlds
+        .iter()
+        .find(|w| !seen.insert(w.name.as_str()))
+        .map(|w| w.name.as_str())
 }
 
 fn tape_show(raw: &[String]) -> Result<CliOutput, String> {

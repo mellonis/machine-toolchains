@@ -1237,12 +1237,12 @@ fn ir_footprints_unreadable_file_is_an_error() {
 /// uniqueness on world names — so the file this leaf reads need not come
 /// from a trusted `--emit-ir` run; a hand-edited or corrupted `.ir.json` can
 /// legally deserialize with two worlds sharing a name but different
-/// arities. `FootprintTable` is keyed by name, so the two collapse to the
-/// LAST one's tape count. This pins that the report renders the FIRST
-/// occurrence's extra tape as a conservative `{}` rather than panicking on
-/// an out-of-bounds index.
+/// arities. `FootprintTable` is keyed by name, so the two would otherwise
+/// collapse to the LAST one's tape count and the FIRST occurrence's extra
+/// tape would index past it — this pins that the leaf rejects the file
+/// outright instead of ever reaching that render.
 #[test]
-fn ir_footprints_survives_two_worlds_sharing_a_name_at_different_arities() {
+fn ir_footprints_rejects_colliding_world_names_at_different_arities() {
     let dir = scratch("tmc_ir_footprints_colliding_names");
     let json = r#"{
       "version": 2,
@@ -1282,11 +1282,55 @@ fn ir_footprints_survives_two_worlds_sharing_a_name_at_different_arities() {
     let ir_path = dir.join("colliding.ir.json");
     fs::write(&ir_path, json).unwrap();
 
-    let out = execute(&args(&["ir", "footprints", ir_path.to_str().unwrap()])).unwrap();
+    let err = execute(&args(&["ir", "footprints", ir_path.to_str().unwrap()])).unwrap_err();
     assert_eq!(
-        out.stdout,
-        "world dup\n  tape 0 (a): writes {} of 3\n  tape 1 (b): writes {} of 3\n\n\
-         world dup\n  tape 0 (num): writes {} of 3\n"
+        err,
+        format!("duplicate world `dup` in {}", ir_path.to_str().unwrap())
+    );
+}
+
+/// Equal arity is the shape that used to render successfully with WRONG
+/// data instead of an out-of-range index: both worlds have one tape, so the
+/// shadowed world's in-range lookup silently returned the SURVIVING world's
+/// write-set relabeled onto its own tape name — a bug bounds-checking alone
+/// can never catch. Pins that the rejection is keyed on the name collision
+/// itself, not on a tape-count mismatch.
+#[test]
+fn ir_footprints_rejects_colliding_world_names_at_equal_arity() {
+    let dir = scratch("tmc_ir_footprints_colliding_names_equal_arity");
+    let json = r#"{
+      "version": 2,
+      "worlds": [
+        {
+          "name": "dup",
+          "kind": "machine",
+          "arity": 1,
+          "tapes": [ { "name": "a", "alphabet": "bits", "cardinality": 3 } ],
+          "entry": 0,
+          "states": [ { "id": 0, "name": "s", "line": 1, "rules": [] } ],
+          "local": false,
+          "line": 1
+        },
+        {
+          "name": "dup",
+          "kind": "routine",
+          "arity": 1,
+          "tapes": [ { "name": "num", "alphabet": "bits", "cardinality": 3 } ],
+          "entry": 0,
+          "states": [ { "id": 0, "name": "s", "line": 1, "rules": [] } ],
+          "local": true,
+          "line": 1
+        }
+      ],
+      "entry_world": 0
+    }"#;
+    let ir_path = dir.join("colliding.ir.json");
+    fs::write(&ir_path, json).unwrap();
+
+    let err = execute(&args(&["ir", "footprints", ir_path.to_str().unwrap()])).unwrap_err();
+    assert_eq!(
+        err,
+        format!("duplicate world `dup` in {}", ir_path.to_str().unwrap())
     );
 }
 
