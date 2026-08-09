@@ -8,7 +8,8 @@
 
 use mtc_core::asm::AsmErrorKind;
 use mtc_core::formats::object::{BlobVariant, ObjectFile, SymbolDef};
-use mtc_post_machine::asm::{assemble, disassemble_object};
+use mtc_core::linker::LinkOptions;
+use mtc_post_machine::asm::{assemble, disassemble_object, link};
 use mtc_post_machine::compiler::{CompileOptions, VariantColumns, compile};
 use mtc_post_machine::optimizer::OptLevel;
 
@@ -58,6 +59,25 @@ fn edges(obj: &ObjectFile) -> Vec<(u32, &str, Option<u32>)> {
 
 fn err_of(src: &str) -> AsmErrorKind {
     assemble(src, false).expect_err("must be rejected").kind
+}
+
+/// The producer guarantee the linker checks under `debug_assert`: a `Both`
+/// blob only ever references `Both` blobs inside its own object. Asserted
+/// over every fixture whose dedup could reach a `Both` blob at all — a
+/// fixture where each name dedups on its own record satisfies it no matter
+/// what the transitive demotion does, so it is the SPLIT fixtures that give
+/// the property its teeth.
+fn assert_both_blobs_are_column_closed(obj: &ObjectFile) {
+    let variants = tags(obj).expect("tagged");
+    for (caller, name, callee) in edges(obj) {
+        if variants[caller as usize] == BlobVariant::Both {
+            assert_eq!(
+                callee.map(|b| variants[b as usize]),
+                Some(BlobVariant::Both),
+                "a Both blob calls `{name}`, which is not Both"
+            );
+        }
+    }
 }
 
 // --- The byte-identity gate ----------------------------------------------
@@ -335,16 +355,7 @@ fn a_both_blob_only_calls_both_blobs() {
             ("helper", 1, BlobVariant::Both)
         ]
     );
-    let variants = tags(&obj).expect("tagged");
-    for (caller, name, callee) in edges(&obj) {
-        if variants[caller as usize] == BlobVariant::Both {
-            assert_eq!(
-                callee.map(|b| variants[b as usize]),
-                Some(BlobVariant::Both),
-                "a Both blob calls `{name}`, which is not Both"
-            );
-        }
-    }
+    assert_both_blobs_are_column_closed(&obj);
 }
 
 #[test]
@@ -382,6 +393,10 @@ fn a_dedup_candidate_calling_a_split_callee_splits_with_it() {
         edges(&obj),
         vec![(0, "helper", Some(2)), (1, "helper", Some(3))]
     );
+    // The biting instance of the column-closure property: `main`'s record
+    // alone would dedup, so without the transitive demotion it would come
+    // out `Both` and bind ONE of `helper`'s columns — which this catches.
+    assert_both_blobs_are_column_closed(&obj);
 }
 
 #[test]
@@ -405,6 +420,42 @@ fn a_call_with_no_matching_column_becomes_external() {
             .any(|s| s.name == "helper" && matches!(s.def, SymbolDef::External)),
         "the unmatched column mints an external, not a cross-column bind"
     );
+}
+
+/// The mirror of the case above: the callee ships only the VOLATILE
+/// column, so it is the bare caller whose site leaves the object while the
+/// gated one binds locally. The rule is the column, not the direction.
+#[test]
+fn the_no_matching_column_rule_is_symmetric() {
+    let src = "\
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        call    helper
+        stp
+.func helper
+.volatile
+        ret
+";
+    let obj = assemble(src, false).expect("assembles");
+    assert_eq!(
+        defs(&obj),
+        vec![
+            ("main", 0, BlobVariant::Normal),
+            ("main", 1, BlobVariant::Volatile),
+            ("helper", 2, BlobVariant::Volatile),
+        ]
+    );
+    assert_eq!(
+        edges(&obj),
+        vec![(0, "helper", None), (1, "helper", Some(2))],
+        "the bare caller externalizes, the gated one binds the one column there is"
+    );
+    // And the shape survives its own text form.
+    let text = disassemble_object(&obj);
+    assert_eq!(assemble(&text, false).expect("dis output assembles"), obj);
 }
 
 // --- Disassembly ---------------------------------------------------------
@@ -593,4 +644,102 @@ fn a_two_column_listing_lints_clean() {
     let syntax = mtc_post_machine::asm::pm1_syntax();
     let findings = mtc_core::asm::lint::lint(&syntax, SRC, &[]).expect("the listing lints");
     assert!(findings.is_empty(), "{findings:?}");
+}
+
+// --- The assembler -> linker seam ----------------------------------------
+
+/// Objects the `.volatile` path builds must be objects the linker accepts.
+/// Both merged shapes go through a real PM-1 link, under BOTH program
+/// bits: a split pair (two columns per name) and an all-deduped one (a
+/// single `Both` blob per name). Every reached name ships the wanted
+/// column, so nothing may be counted as a fallback — and the linker's
+/// `both_is_column_closed` assertion, live under `cargo test`, sees every
+/// call site these images make.
+#[test]
+fn merged_objects_link_under_either_program_bit() {
+    // `main`'s blocks are byte-identical; `helper`'s are not, so `main` is
+    // demoted and both names ship two columns.
+    const SPLIT: &str = "\
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        call    helper
+        stp
+.func helper
+        rgt
+        ret
+.func helper
+.volatile
+        lft
+        ret
+";
+    // Every block dedups: one `Both` blob per name.
+    const DEDUPED: &str = "\
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        call    helper
+        stp
+.func helper
+        ret
+.func helper
+.volatile
+        ret
+";
+    for (name, body) in [("split", SPLIT), ("deduped", DEDUPED)] {
+        for gated in [false, true] {
+            let src = if gated {
+                format!(".volatile\n{body}")
+            } else {
+                body.to_string()
+            };
+            let obj = assemble(&src, false).expect("assembles");
+            assert_eq!(obj.program_volatile, gated);
+            let out = link(&[obj], &[], LinkOptions::default())
+                .unwrap_or_else(|e| panic!("{name} (gated={gated}) failed to link: {e:?}"));
+            assert!(
+                out.report.variant_fallbacks.is_empty(),
+                "{name} (gated={gated}): every name ships both columns, \
+                 so nothing may fall back — got {:?}",
+                out.report.variant_fallbacks
+            );
+            assert!(
+                out.report.dropped.is_empty(),
+                "{name} (gated={gated}): both functions are reachable — dropped {:?}",
+                out.report.dropped
+            );
+            assert!(
+                out.map.functions.iter().any(|f| f.name == "main")
+                    && out.map.functions.iter().any(|f| f.name == "helper"),
+                "{name} (gated={gated}): both functions must be laid out"
+            );
+        }
+    }
+}
+
+/// The counted fallback, from the assembler's side: a gated program whose
+/// callee ships only the normal column links anyway, and the linker names
+/// the mixed edge rather than hiding it. This is the shape a hand-written
+/// half-tagged file produces (docs/core.md (linking)).
+#[test]
+fn a_gated_program_missing_a_column_links_with_a_counted_fallback() {
+    let src = "\
+.volatile
+.func main
+        call    helper
+        stp
+.func main
+.volatile
+        call    helper
+        stp
+.func helper
+        ret
+";
+    let obj = assemble(src, false).expect("assembles");
+    let out = link(&[obj], &[], LinkOptions::default()).expect("links");
+    assert_eq!(out.report.variant_fallbacks, vec!["helper".to_string()]);
 }
