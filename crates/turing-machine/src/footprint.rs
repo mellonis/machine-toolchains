@@ -1516,6 +1516,11 @@ machine {{
             argless,
             "a target that names no host tape identifies no tape either"
         );
+        assert_eq!(
+            site("done = return"),
+            argless,
+            "a terminator arg binds no tape at all — it is a continuation"
+        );
         // The precision is kept where an arg DOES identify a tape: the
         // fallback widens only when none of them does.
         assert_eq!(
