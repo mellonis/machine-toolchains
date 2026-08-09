@@ -187,12 +187,21 @@ fn parse_footprints(report: &str) -> HashMap<String, Vec<BTreeSet<u32>>> {
 /// world and its IR is what the report is read from. One compile feeds both
 /// halves, so the image that runs and the IR that is analysed are the same
 /// build, not two invocations that happen to agree.
-fn build(dir: &Path, level: &str, units: &[String]) -> (Executable, Vec<BTreeSet<u32>>) {
+///
+/// `link_flags` goes to `tmt link` verbatim, for a fixture that pins the
+/// bound-call lowering it means to exercise rather than inheriting the default.
+fn build(
+    dir: &Path,
+    level: &str,
+    units: &[String],
+    link_flags: &[&str],
+) -> (Executable, Vec<BTreeSet<u32>>) {
     let dir = dir.join(level.trim_start_matches('-'));
     fs::create_dir_all(&dir).expect("scratch dir");
     let path = |name: String| dir.join(name).to_str().expect("utf-8 path").to_string();
 
     let mut link_argv = vec!["link".to_string()];
+    link_argv.extend(link_flags.iter().map(|f| f.to_string()));
     let mut ir_json = String::new();
     for (k, unit) in units.iter().enumerate() {
         let src = path(format!("u{k}.tmc"));
@@ -293,6 +302,46 @@ fn run_recording(exe: &Executable, seeds: Case) -> (String, Vec<BTreeSet<u32>>) 
     (format!("{:?}", result.outcome), writes)
 }
 
+/// What one checked fixture leaves behind for further pinning: its scratch
+/// directory, and per opt level the entry world's inferred sets beside the
+/// union of what the fixture's cases ACTUALLY wrote, band by band.
+struct Checked {
+    dir: PathBuf,
+    /// One entry per level, in `-O0`, `-O1` order.
+    levels: Vec<LevelCheck>,
+}
+
+struct LevelCheck {
+    level: &'static str,
+    /// Per band, the entry world's inferred write set.
+    inferred: Vec<BTreeSet<u32>>,
+    /// Per band, the union of every case's actual writes at that level.
+    actual: Vec<BTreeSet<u32>>,
+}
+
+impl Checked {
+    /// Pin a fixture whose inferred sets are exactly what its cases write —
+    /// per band, per level, union across the cases.
+    ///
+    /// Containment alone cannot fail on a WIDER inference (a set degraded to
+    /// its tape's whole alphabet contains everything), so a fixture that
+    /// claims tightness in prose and checks only containment would survive the
+    /// analysis collapsing into "anything may be written". Equality is what
+    /// makes that collapse fail, which is why the two fixtures whose
+    /// derivations predict an exact answer assert it instead of describing it.
+    fn assert_tight(&self, label: &str) {
+        for lv in &self.levels {
+            assert_eq!(
+                lv.actual, lv.inferred,
+                "{} {}: the fixture's derivation predicts the inferred sets \
+                 EXACTLY — its cases' writes and the inference must agree band \
+                 for band (actual union vs inferred)",
+                label, lv.level
+            );
+        }
+    }
+}
+
 /// THE PROPERTY. Build `units` at `-O0` and at `-O1`, run every case on both
 /// images with recording bands, and assert each band's actually-written
 /// symbols are contained in the entry world's inferred set for that band.
@@ -302,16 +351,23 @@ fn run_recording(exe: &Executable, seeds: Case) -> (String, Vec<BTreeSet<u32>>) 
 /// legitimately write nothing (a fixture seeded into an immediate trap or
 /// halt), but a fixture whose whole case list writes nothing would pass
 /// containment while proving nothing at all.
-///
-/// Returns the scratch directory, so a fixture whose point is the SHAPE the
-/// optimizer left behind can go on to pin it from the very IR the report was
-/// read from ([`emitted_ir`]).
-fn assert_over_approximates(label: &str, units: &[String], cases: &[Case]) -> PathBuf {
+fn assert_over_approximates(label: &str, units: &[String], cases: &[Case]) -> Checked {
+    assert_over_approximates_with(label, units, cases, &[])
+}
+
+/// [`assert_over_approximates`] with explicit `tmt link` flags.
+fn assert_over_approximates_with(
+    label: &str,
+    units: &[String],
+    cases: &[Case],
+    link_flags: &[&str],
+) -> Checked {
     assert!(!cases.is_empty(), "{label}: the fixture carries seeds");
     let dir = scratch(label);
+    let mut levels = Vec::new();
     for level in ["-O0", "-O1"] {
-        let (exe, inferred) = build(&dir, level, units);
-        let mut union: BTreeSet<u32> = BTreeSet::new();
+        let (exe, inferred) = build(&dir, level, units, link_flags);
+        let mut union: Vec<BTreeSet<u32>> = vec![BTreeSet::new(); inferred.len()];
         for (i, case) in cases.iter().enumerate() {
             let (outcome, actual) = run_recording(&exe, case);
             assert_eq!(
@@ -326,15 +382,20 @@ fn assert_over_approximates(label: &str, units: &[String], cases: &[Case]) -> Pa
                      {act:?}, which escapes the inferred {inf:?} — the inference \
                      UNDER-approximated",
                 );
-                union.extend(act.iter().copied());
+                union[band].extend(act.iter().copied());
             }
         }
         assert!(
-            !union.is_empty(),
+            union.iter().any(|b| !b.is_empty()),
             "{label} {level}: no case wrote anything, so containment proved nothing"
         );
+        levels.push(LevelCheck {
+            level,
+            inferred,
+            actual: union,
+        });
     }
-    dir
+    Checked { dir, levels }
 }
 
 /// Unit 0's emitted world IR at `level` — the very file [`build`] handed to
@@ -519,12 +580,13 @@ fn mutual_recursion_over_approximates() {
     // 0, `pong` writes '0' (1) at cell 1, `ping` meets the blank and the stack
     // unwinds. Actual writes {1,2}; the pair's fixpoint infers exactly {1,2} on
     // both routines and so on `main` through the identity binding — the
-    // tightest containment in the corpus.
+    // tightest containment in the corpus, asserted rather than described.
     assert_over_approximates(
         "mutual_recursion",
         &one(MUTUAL_RECURSION.to_string()),
         &[&[(&[1, 2], 0)]],
-    );
+    )
+    .assert_tight("mutual_recursion");
 }
 
 /// A two-hop call chain where BOTH hops carry an explicit symbol map: the
@@ -568,19 +630,33 @@ fn map_chain_over_approximates() {
     // pairs both digits across EQUAL cardinalities, so {1,2} survives the hop;
     // the machine's map is CLOSED (5 glyphs against 3) and carries bits 1→wide
     // 3 and bits 2→wide 4, so `data` infers {3,4} and `ctl`, bound nowhere,
-    // infers the empty set. The union of the two runs is {3,4} on `data` and
-    // nothing on `ctl` — containment holds with no slack on either band.
-    let dir = assert_over_approximates(
+    // infers the empty set.
+    //
+    // Neither SEED is tight on its own — one run writes {4}, the other {3} —
+    // but their UNION is exactly {3,4} on `data` and empty on `ctl`, which is
+    // the relation `assert_tight` checks and the reason the fixture carries two
+    // seeds rather than one.
+    //
+    // The lowering is pinned to `frames` rather than left to the default:
+    // frames is what routes the write through the composite's write map, and
+    // that map is the whole reason a symbol recorded at the band is in the
+    // CALLER's frame. A future default that stamped this chain mono instead
+    // would leave that path unexercised while every assertion here still
+    // passed.
+    let checked = assert_over_approximates_with(
         "map_chain",
         &one(MAP_CHAIN.to_string()),
         &[&[(&[], 0), (&[3], 0)], &[(&[], 0), (&[4], 0)]],
+        &["--call-mech", "frames"],
     );
+    checked.assert_tight("map_chain");
+    let dir = &checked.dir;
 
     // The shape the fixture claims: BOTH mapped calls survive `-O1`, so the
     // projection really is exercised at both levels. Believing it without
     // asserting it would let a future inliner swallow the chain and leave the
     // `-O1` leg checking a program with no calls in it at all.
-    let ir = emitted_ir(&dir, "-O1");
+    let ir = emitted_ir(dir, "-O1");
     assert!(
         matches!(
             transitions(&ir, "main").as_slice(),
@@ -649,7 +725,7 @@ fn cross_unit_tail_call_chain_over_approximates() {
     // writes '1' (bits index 2) and returns straight to `main`, which stops.
     // Actual {2}; inferred {0,1,2} — the deliberate slack of an out-of-unit
     // callee, and the whole point of the fixture is that the slack is REACHED.
-    let dir = assert_over_approximates(
+    let checked = assert_over_approximates(
         "cross_unit_tail_call",
         &[TAIL_CHAIN_MAIN.to_string(), TAIL_CHAIN_LEAF.to_string()],
         &[&[(&[], 0)]],
@@ -662,7 +738,7 @@ fn cross_unit_tail_call_chain_over_approximates() {
     // optimizer change quietly stopped producing the tail call here, the
     // corpus would lose its only coverage of that edge while staying green,
     // and the containment above would be checked on the `-O0` shape twice.
-    let o0 = emitted_ir(&dir, "-O0");
+    let o0 = emitted_ir(&checked.dir, "-O0");
     assert!(
         matches!(
             transitions(&o0, "hop").as_slice(),
@@ -672,7 +748,7 @@ fn cross_unit_tail_call_chain_over_approximates() {
         "-O0 leaves the bindless call in place: {:?}",
         transitions(&o0, "hop")
     );
-    let o1 = emitted_ir(&dir, "-O1");
+    let o1 = emitted_ir(&checked.dir, "-O1");
     assert!(
         matches!(
             transitions(&o1, "hop").as_slice(),
