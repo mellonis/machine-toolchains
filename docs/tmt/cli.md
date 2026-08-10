@@ -230,6 +230,8 @@ graft-map family in the graft section of the same page.
 | `wrong-arg-kind` | A binding argument is the wrong kind for its parameter. |
 | `unresolved-tape-target` | A tape-parameter argument names a target that is not a tape in the enclosing world. |
 | `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
+| `contract-symbol-unknown` | A `writes`/`preserves` clause names a glyph that is not a symbol of the parameter's alphabet. |
+| `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `preserves`). |
 | `graft-cycle` | A graph definition graft-depends on itself, directly or through a cycle of definitions. |
 | `graft-call-unsupported` | A grafted graph's body contains a `call` — splicing a calling graph into the host is not supported. |
 | `map-symbol-not-in-alphabet` | A graft binding's symbol map references a glyph that is not in the tape it maps. |

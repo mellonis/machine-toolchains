@@ -20,13 +20,14 @@ use mtc_core::formats::object::ObjectFile;
 
 use crate::codegen::{CodegenOptions, emit_program};
 use crate::cst::Cst;
+use crate::footprint::SymSet;
 use crate::ir::{IrProgram, lower, validate_world};
 use crate::lexer::{LexMode, Token, lex, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
-    Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Machine,
-    PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit, Transition, lower_cst,
-    parse, parse_cst,
+    Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
+    Graft, Machine, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
+    Transition, lower_cst, parse, parse_cst,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -177,6 +178,26 @@ pub enum CompileErrorKind {
     /// A `call` on a world-local bind name carries binding arguments. A bind
     /// is already fully bound at its declaration, so a call on it takes none.
     BindCallArgs(String),
+    /// A `writes`/`preserves` clause names a glyph the parameter's alphabet
+    /// does not contain. A contract is stated in the tape's own frame, so
+    /// every element must be a symbol of that alphabet. `clause` names which
+    /// of the two clauses carried it.
+    ContractSymbolUnknown {
+        glyph: String,
+        clause: &'static str,
+        alphabet: String,
+    },
+    /// A world's inferred write footprint on one tape leaves the effective
+    /// set its contract declares (`writes` minus `preserves`, or everything
+    /// minus `preserves` when there is no `writes`). `glyphs` are the
+    /// offending symbols, ascending. The inference OVER-approximates: a
+    /// symbol outside the footprint provably never lands, while one inside it
+    /// merely may — hence "may write".
+    WritesOutsideContract {
+        world: String,
+        tape: String,
+        glyphs: Vec<String>,
+    },
 
     // -- graft + range expansion (Task 5) ----------------------------------
     /// A graph definition graft-depends on itself (directly or through a
@@ -332,6 +353,8 @@ impl CompileErrorKind {
         CompileErrorKind::WrongArgKind { .. } => "wrong-arg-kind",
         CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
         CompileErrorKind::BindCallArgs(_) => "bind-call-args",
+        CompileErrorKind::ContractSymbolUnknown { .. } => "contract-symbol-unknown",
+        CompileErrorKind::WritesOutsideContract { .. } => "writes-outside-contract",
         CompileErrorKind::GraftCycle(_) => "graft-cycle",
         CompileErrorKind::GraftCallUnsupported(_) => "graft-call-unsupported",
         CompileErrorKind::MapSymbolNotInAlphabet(_) => "map-symbol-not-in-alphabet",
@@ -556,6 +579,31 @@ impl std::fmt::Display for CompileErrorKind {
                 write!(
                     f,
                     "`{n}` is a bind and already bound — a call on it takes no arguments"
+                )
+            }
+            CompileErrorKind::ContractSymbolUnknown {
+                glyph,
+                clause,
+                alphabet,
+            } => {
+                write!(
+                    f,
+                    "'{glyph}' in the `{clause}` clause is not a symbol of alphabet `{alphabet}`"
+                )
+            }
+            CompileErrorKind::WritesOutsideContract {
+                world,
+                tape,
+                glyphs,
+            } => {
+                let named = glyphs
+                    .iter()
+                    .map(|g| format!("'{g}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    f,
+                    "`{world}` may write {named} on tape `{tape}`, which its contract forbids"
                 )
             }
             CompileErrorKind::GraftCycle(n) => {
@@ -863,6 +911,15 @@ pub(crate) struct ResolvedTape {
     pub cardinality: usize,
     pub span: Span,
     pub volatile: bool,
+    /// The declared `writes { … }` clause as symbol indices in THIS tape's
+    /// alphabet frame; `None` when the parameter declares none (an absent
+    /// clause permits every symbol, which is not the same as an empty one).
+    /// Always `None` on a machine tape — only a signature parameter takes a
+    /// contract.
+    pub writes: Option<SymSet>,
+    /// The declared `preserves { … }` clause, same frame and same `None`
+    /// meaning: nothing is declared off-limits.
+    pub preserves: Option<SymSet>,
 }
 
 /// A resolved graft declaration: the mangled graph target plus the raw
@@ -975,6 +1032,7 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
         diagnostics: Vec::new(),
     };
     ctx.check_worlds(program, &resolved)?;
+    check_contracts(&resolved)?;
     let WorldCtx {
         imports_used,
         mut diagnostics,
@@ -982,6 +1040,84 @@ fn resolve_program(program: &Program) -> Result<(Resolved, Vec<Diagnostic>), Com
     } = ctx;
     unused_import_warnings(program, &imports_used, &mut diagnostics);
     Ok((resolved, diagnostics))
+}
+
+/// Check every declared write contract against the inferred write footprint.
+///
+/// A contract states what a world's body — and everything it calls or grafts —
+/// may put on one of its tapes. The effective permission is `writes` (or, with
+/// no `writes` clause, the whole alphabet) MINUS `preserves`; a symbol in both
+/// clauses is redundancy rather than an error, and the subtraction settles it
+/// in `preserves`' favour. A footprint reaching outside that set is fatal at
+/// the parameter that declared the contract.
+///
+/// The inference OVER-approximates (`crate::footprint`'s soundness contract):
+/// a symbol it excludes provably never lands on the tape, while one it
+/// includes merely may. The finding is worded accordingly — a body can be
+/// reported for a write no run performs, never the other way round.
+///
+/// The whole-module fixpoint runs at most once per compile, and only when some
+/// world actually declares a clause: an uncontracted module pays nothing.
+fn check_contracts(resolved: &Resolved) -> Result<(), CompileError> {
+    let contracted = resolved.worlds.iter().any(|w| {
+        w.tapes
+            .iter()
+            .any(|t| t.writes.is_some() || t.preserves.is_some())
+    });
+    if !contracted {
+        return Ok(());
+    }
+    let table = crate::footprint::infer_resolved(resolved);
+    // Worlds in resolved order, tapes in signature order, so the first finding
+    // on a module with several is the source-first one.
+    for world in &resolved.worlds {
+        let Some(footprint) = table.worlds.get(&world.name) else {
+            // Every resolved world is a table entry (the table is built from
+            // this same list, and duplicate names are already rejected); a
+            // miss can only mean no inference to check against.
+            continue;
+        };
+        for (k, tape) in world.tapes.iter().enumerate() {
+            if tape.writes.is_none() && tape.preserves.is_none() {
+                continue;
+            }
+            let declared = tape
+                .writes
+                .unwrap_or_else(|| SymSet::full(tape.cardinality as u32));
+            let preserved = tape.preserves.unwrap_or_else(SymSet::empty);
+            let mut allowed = SymSet::empty();
+            for index in declared.iter() {
+                if !preserved.contains(index) {
+                    allowed.insert(index);
+                }
+            }
+            let inferred = footprint.tapes.get(k).copied().unwrap_or_default();
+            let glyphs = resolved
+                .alphabets
+                .get(&tape.alphabet)
+                .map(|a| a.glyphs.as_slice())
+                .unwrap_or_default();
+            // Every inferred index is clamped below its own tape's
+            // cardinality (`footprint.rs`'s soundness contract), so indexing
+            // the glyph table directly is safe.
+            let offending: Vec<String> = inferred
+                .iter()
+                .filter(|index| !allowed.contains(*index))
+                .map(|index| glyphs[index as usize].clone())
+                .collect();
+            if !offending.is_empty() {
+                return Err(CompileError {
+                    span: tape.span,
+                    kind: CompileErrorKind::WritesOutsideContract {
+                        world: world.name.clone(),
+                        tape: tape.name.clone(),
+                        glyphs: offending,
+                    },
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// True when every match cell of a rule's pattern is a wildcard (`[*, …]`) —
@@ -1535,17 +1671,32 @@ fn resolve_world(
     for p in &sig.params {
         match &p.kind {
             SigParamKind::Tape {
-                alphabet, volatile, ..
+                alphabet,
+                volatile,
+                writes,
+                preserves,
+                ..
             } => {
                 let (full, card) =
                     resolve_tape_alphabet(alphabet, p.name_span, ns, scopes, alphabets)?;
+                let glyphs = alphabets
+                    .get(&full)
+                    .map(|a| a.glyphs.as_slice())
+                    .expect("a resolved tape alphabet is in the table");
                 tapes.push(ResolvedTape {
                     name: p.name.clone(),
                     name_span: p.name_span,
-                    alphabet: full,
+                    alphabet: full.clone(),
                     cardinality: card,
                     span: p.span,
                     volatile: *volatile,
+                    writes: resolve_contract_clause(writes.as_ref(), "writes", glyphs, &full)?,
+                    preserves: resolve_contract_clause(
+                        preserves.as_ref(),
+                        "preserves",
+                        glyphs,
+                        &full,
+                    )?,
                 });
             }
             SigParamKind::State => state_params.push(p.name.clone()),
@@ -1633,6 +1784,10 @@ fn resolve_machine_world(
             cardinality: card,
             span: t.span,
             volatile: t.volatile,
+            // A machine tape declaration has no contract grammar: the clauses
+            // live on signature parameters, where a caller can read them.
+            writes: None,
+            preserves: None,
         });
     }
     let (grafts, binds, entry) = resolve_world_reuse(&m.grafts, &m.binds, &m.states, &[], scopes)?;
@@ -1676,6 +1831,52 @@ fn resolve_tape_alphabet(
             kind: CompileErrorKind::UnresolvedAlphabet(alphabet.to_string()),
         }),
     }
+}
+
+/// Resolve one `writes`/`preserves` clause into a symbol-index set in its
+/// tape's own alphabet frame. `None` in, `None` out — an absent clause is not
+/// an empty one: it declares nothing, where `writes {}` declares that nothing
+/// is written.
+///
+/// A clause body is the alphabet-body element grammar, so it resolves the same
+/// way: a range expands by [`expand_range`] (inheriting its ascending and
+/// single-scalar-endpoint rules) and every resulting label must name a symbol
+/// of the alphabet. A repeat is harmless — a set absorbs it.
+fn resolve_contract_clause(
+    clause: Option<&ContractClause>,
+    which: &'static str,
+    glyphs: &[String],
+    alphabet: &str,
+) -> Result<Option<SymSet>, CompileError> {
+    let Some(clause) = clause else {
+        return Ok(None);
+    };
+    let mut set = SymSet::empty();
+    let mut take = |label: String, span: Span| match glyphs.iter().position(|g| *g == label) {
+        Some(index) => {
+            set.insert(index as u32);
+            Ok(())
+        }
+        None => Err(CompileError {
+            span,
+            kind: CompileErrorKind::ContractSymbolUnknown {
+                glyph: label,
+                clause: which,
+                alphabet: alphabet.to_string(),
+            },
+        }),
+    };
+    for elem in &clause.elems {
+        match elem {
+            AlphabetElem::Single(s) => take(glyph_label(s), s.span())?,
+            AlphabetElem::Range { lo, hi, span } => {
+                for label in expand_range(lo, hi, *span)? {
+                    take(label, *span)?;
+                }
+            }
+        }
+    }
+    Ok(Some(set))
 }
 
 /// Resolve a world's graft targets (to mangled graph names) and bind targets
@@ -2673,6 +2874,16 @@ mod tests {
             },
             CompileErrorKind::UnresolvedTapeTarget("x".into()),
             CompileErrorKind::BindCallArgs("x".into()),
+            CompileErrorKind::ContractSymbolUnknown {
+                glyph: "x".into(),
+                clause: "writes",
+                alphabet: "a".into(),
+            },
+            CompileErrorKind::WritesOutsideContract {
+                world: "w".into(),
+                tape: "t".into(),
+                glyphs: vec!["x".into()],
+            },
             CompileErrorKind::GraftCycle("x".into()),
             CompileErrorKind::GraftCallUnsupported("x".into()),
             CompileErrorKind::MapSymbolNotInAlphabet("x".into()),
@@ -3201,6 +3412,233 @@ alphabet b { '_', '0', '1' }
         let e = err(src);
         assert_eq!(e.kind.code(), "missing-arg");
         assert_eq!(e.span.start.line, 3);
+    }
+
+    // -- declared write contracts -------------------------------------------
+
+    #[test]
+    fn contract_clauses_resolve_to_index_sets_in_the_tapes_own_frame() {
+        let a = ok("\
+alphabet bits { '_', '0', '1' }
+routine r(tape t: bits writes {'0'..'1'} preserves {'_'}) {
+  entry state s { [*] -> return; }
+}
+");
+        let world = a.resolved.worlds.iter().find(|w| w.name == "r").unwrap();
+        let tape = &world.tapes[0];
+        // A clause range expands exactly as an alphabet body's does — by
+        // scalar succession — and lands as positions in the tape's alphabet.
+        assert_eq!(
+            tape.writes.unwrap().iter().collect::<Vec<_>>(),
+            vec![1, 2],
+            "`'0'..'1'` is positions 1 and 2 of `{{'_', '0', '1'}}`"
+        );
+        assert_eq!(tape.preserves.unwrap().iter().collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn a_tape_with_no_clause_carries_no_contract() {
+        let a = ok("\
+alphabet bits { '_', '0' }
+routine r(tape t: bits) { entry state s { [*] -> return; } }
+machine { tape m: bits; entry state s { [*] -> stop; } }
+");
+        let routine = a.resolved.worlds.iter().find(|w| w.name == "r").unwrap();
+        assert!(routine.tapes[0].writes.is_none());
+        assert!(routine.tapes[0].preserves.is_none());
+        // A machine tape declaration has no clause grammar at all, so the
+        // machine world's tapes are unconditionally uncontracted.
+        let machine = a.resolved.worlds.iter().find(|w| w.name == "main").unwrap();
+        assert!(machine.tapes[0].writes.is_none());
+        assert!(machine.tapes[0].preserves.is_none());
+    }
+
+    #[test]
+    fn a_satisfied_writes_contract_compiles() {
+        ok("\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'0','1'}) {
+  entry state s { [*] -> write ['1'] return; }
+}
+");
+    }
+
+    #[test]
+    fn a_violated_writes_contract_names_the_world_the_glyph_and_the_tape() {
+        let e = err("\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'0'}) {
+  entry state s { [*] -> write ['1'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "writes-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "`mark` may write '1' on tape `t`, which its contract forbids"
+        );
+        // The finding lands on the PARAMETER that declared the contract, not
+        // on the rule that writes.
+        assert_eq!(e.span.start.line, 2);
+    }
+
+    #[test]
+    fn a_violated_preserves_contract_errors() {
+        let e = err("\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits preserves {'1'}) {
+  entry state s { [*] -> write ['1'] return; }
+}
+");
+        assert_eq!(e.kind.code(), "writes-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "`mark` may write '1' on tape `t`, which its contract forbids"
+        );
+    }
+
+    #[test]
+    fn preserves_subtracts_from_writes_where_the_two_overlap() {
+        // `'1'` in BOTH clauses is redundancy, not an error — and `preserves`
+        // wins the subtraction, so a body writing it violates the contract.
+        let overlapping = "\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
+  entry state s { [*] -> write ['1'] return; }
+}
+";
+        assert_eq!(code(overlapping), "writes-outside-contract");
+        // The same declaration over a body writing only `'0'` is satisfied.
+        ok("\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'0','1'} preserves {'1'}) {
+  entry state s { [*] -> write ['0'] return; }
+}
+");
+    }
+
+    #[test]
+    fn an_empty_writes_clause_forbids_every_write() {
+        ok("\
+alphabet bits { '_', '0', '1' }
+routine walk(tape t: bits writes {}) {
+  entry state s { [*] -> move [>] return; }
+}
+");
+        assert_eq!(
+            code(
+                "\
+alphabet bits { '_', '0', '1' }
+routine walk(tape t: bits writes {}) {
+  entry state s { [*] -> write ['0'] return; }
+}
+"
+            ),
+            "writes-outside-contract"
+        );
+    }
+
+    #[test]
+    fn every_forbidden_glyph_is_named_ascending() {
+        let e = err("\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'_'}) {
+  entry state s {
+    ['0'] -> write ['1'] return;
+    [*]   -> write ['0'] return;
+  }
+}
+");
+        assert_eq!(
+            e.kind.to_string(),
+            "`mark` may write '0', '1' on tape `t`, which its contract forbids"
+        );
+    }
+
+    #[test]
+    fn an_unknown_glyph_in_a_contract_clause_is_rejected_per_clause() {
+        let e = err("\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'x'}) {
+  entry state s { [*] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "contract-symbol-unknown");
+        assert_eq!(
+            e.kind.to_string(),
+            "'x' in the `writes` clause is not a symbol of alphabet `bits`"
+        );
+        let e = err("\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits preserves {'x'}) {
+  entry state s { [*] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "contract-symbol-unknown");
+        assert_eq!(
+            e.kind.to_string(),
+            "'x' in the `preserves` clause is not a symbol of alphabet `bits`"
+        );
+    }
+
+    #[test]
+    fn the_unknown_glyph_message_names_the_resolved_alphabet() {
+        // The clause resolves against the alphabet the tape actually draws
+        // from, so the message names it by its mangled name — the identity
+        // `ResolvedTape.alphabet` carries — not the reference as written.
+        let e = err("\
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+  export routine mark(tape t: bits writes {'x'}) {
+    entry state s { [*] -> return; }
+  }
+}
+");
+        assert_eq!(
+            e.kind.to_string(),
+            "'x' in the `writes` clause is not a symbol of alphabet `lib::bits`"
+        );
+    }
+
+    #[test]
+    fn a_contract_on_a_graph_parameter_is_checked() {
+        // A graph is an inferred world like any other — its signature tapes
+        // take contracts and the same check applies.
+        let e = err("\
+alphabet bits { '_', '0', '1' }
+graph g(tape t: bits writes {'0'}, state done) {
+  entry state s { ['0'] -> done; [*] -> write ['1'] goto s; }
+}
+");
+        assert_eq!(e.kind.code(), "writes-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "`g` may write '1' on tape `t`, which its contract forbids"
+        );
+    }
+
+    #[test]
+    fn a_contract_sees_what_a_call_writes_back_through_its_map() {
+        // `outer` writes nothing itself; `inner` writes `'b'`, which the
+        // binding maps back onto the caller's `'1'`. The inference is
+        // transitive, so the contract sees it.
+        let e = err("\
+alphabet bits  { '_', '0', '1' }
+alphabet marks { '_', 'a', 'b' }
+
+routine inner(tape u: marks) {
+  entry state s { [*] -> write ['b'] return; }
+}
+
+routine outer(tape t: bits writes {'0'}) {
+  entry state s { [*] -> call inner(u = t with map { '0'->'a', '1'->'b' }) then done; }
+  state done { [*] -> return; }
+}
+");
+        assert_eq!(e.kind.code(), "writes-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "`outer` may write '1' on tape `t`, which its contract forbids"
+        );
     }
 
     // -- the canonical examples resolve end-to-end -------------------------
