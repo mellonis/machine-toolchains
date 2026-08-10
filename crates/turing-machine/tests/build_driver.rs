@@ -1467,6 +1467,61 @@ fn manifest_mode_flushes_rendered_warnings_when_the_link_fails() {
     );
 }
 
+/// The RUN-LEG twin of the two `flushes_rendered_warnings` tests above:
+/// `run_target` has its own early-return sites (now unified behind
+/// `run_once`, docs/tmt/cli.md (run)), separate from the build's own —
+/// including the two pointed pre-attempt guards, which `run_once` does
+/// not exercise here since this fixture DOES declare a `run` block with
+/// a `tape`. `dead()` is exported but never called from `main`'s entry
+/// state, so it is unreachable and the linker drops it — the build
+/// itself SUCCEEDS with only the compile-time undeclared-external
+/// warning surviving. `--run`'s declared `tape` names a file that does
+/// not exist, so `run_once`'s `execute_run` call fails; the build's
+/// warning must still reach the user. Failing mutation: `run_once`'s
+/// error returned bare (unprefixed) from `run_target`.
+#[test]
+fn build_run_flushes_rendered_warnings_when_the_run_leg_fails() {
+    let dir = scratch("tm_manifest_warn_then_run_leg_fail");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/orphan.tmc"),
+        "alphabet ab { '_', 'a' }\n\
+         machine {\n\
+           tape t: ab;\n\
+           entry state s { [*] -> stop; }\n\
+         }\n\
+         export routine dead(tape t: ab) {\n\
+           entry state s { [*] -> call missing() then done; }\n\
+           state done { [*] -> return; }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "targets": { "orphan": { "sources": ["src/orphan.tmc"],
+                "run": { "tape": "nope.tmt" } } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "--run", "orphan"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undeclared"),
+        "the compile-stage warning must survive a failing run leg: {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("nope.tmt"),
+        "the run-leg error itself must still be reported: {stderr}"
+    );
+}
+
 /// The manifest-mode half of `argv_mode_refines_undeclared_external_…`:
 /// the declared set a target is refined against is that target's OWN
 /// `sources` list (docs/tmt/cli.md (build)), not the files named on the

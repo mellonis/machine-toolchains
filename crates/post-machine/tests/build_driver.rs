@@ -443,6 +443,51 @@ fn manifest_mode_flushes_rendered_warnings_when_the_link_fails() {
     );
 }
 
+/// The RUN-LEG twin of the two `flushes_rendered_warnings` tests above:
+/// `run_target` has its own early-return sites (now unified behind
+/// `run_once`, docs/pmt/project.md (run block)), separate from the
+/// build's own. `dead()` is exported but never called from `main`, so it
+/// is unreachable and the linker drops it — the build itself SUCCEEDS
+/// with only the compile-time undeclared-external warning surviving.
+/// `--run`'s declared `tape-block` names a file that does not exist, so
+/// `run_once`'s `execute_run` call fails; the build's warning must still
+/// reach the user. Failing mutation: `run_once`'s error returned bare
+/// (unprefixed) from `run_target`.
+#[test]
+fn build_run_flushes_rendered_warnings_when_the_run_leg_fails() {
+    let dir = scratch("manifest_warn_then_run_leg_fail");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/orphan.pmc"),
+        "main() { mark; }\nexport dead() { @missing(); }",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "targets": { "orphan": { "sources": ["src/orphan.pmc"],
+                "run": { "tape-block": "nope.pmt" } } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "--run", "orphan"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undeclared"),
+        "the compile-stage warning must survive a failing run leg: {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("nope.pmt"),
+        "the run-leg error itself must still be reported: {stderr}"
+    );
+}
+
 /// `pmt build --run TARGET` builds then runs the target's `run` block,
 /// adopting the machine's own exit code (docs/pmt/cli.md (build)):
 /// `bench`'s `run: { tape: " *" }` reaches `halt` -> exit 2 and the

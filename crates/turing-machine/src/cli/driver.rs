@@ -404,13 +404,35 @@ fn link_and_write(
 /// loaded from a `.tmt` snapshot — there is no empty-tape default to
 /// fall back on — so a target without a declared `run` block, or one
 /// whose block declares no `tape`, cannot be `--run`; both cases name
-/// the target in a pointed error instead of inventing a run.
+/// the target in a pointed error instead of inventing a run. The build's
+/// stderr chunk is prefixed onto the run's — on success by concatenation,
+/// and on failure by prefixing `run_once`'s error, the same
+/// fallible-tail-then-prefix shape `link_and_write` uses for the build's
+/// own link-then-write tail (docs/tmt/cli.md (run)).
 fn run_target(
     root: &Path,
     output: &Path,
     name: &str,
     run: Option<&crate::project::RunSpec>,
     build_stderr: String,
+) -> Result<CliOutput, String> {
+    let mut run_out =
+        run_once(root, output, name, run).map_err(|e| format!("{build_stderr}{e}"))?;
+    run_out.stderr = format!("{build_stderr}{}", run_out.stderr);
+    Ok(run_out)
+}
+
+/// The fallible tail of `run_target`: the two pointed pre-attempt guards
+/// (no `run` block; a `run` block with no `tape`), resolving the tape
+/// path, and driving the just-built executable. Factored out so a
+/// failure anywhere in it is one `Result` its caller can prefix with the
+/// build's warnings at a single site, rather than trusting every early
+/// return inside to remember.
+fn run_once(
+    root: &Path,
+    output: &Path,
+    name: &str,
+    run: Option<&crate::project::RunSpec>,
 ) -> Result<CliOutput, String> {
     let Some(spec) = run else {
         return Err(format!(
@@ -436,9 +458,7 @@ fn run_target(
         max_tacts: spec.max_tacts,
         trace: false,
     };
-    let mut run_out = super::run::execute_run(output, &settings, &mut std::io::sink())?;
-    run_out.stderr = format!("{build_stderr}{}", run_out.stderr);
-    Ok(run_out)
+    super::run::execute_run(output, &settings, &mut std::io::sink())
 }
 
 /// Compile options for argv mode: exactly `tmt compile`'s preset/flag

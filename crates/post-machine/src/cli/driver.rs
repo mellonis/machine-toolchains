@@ -370,12 +370,30 @@ fn link_and_write(
 /// absent block runs `pmt run`'s own defaults (empty tape, head 0, no
 /// limits) rather than erroring. The build's stderr chunk is prefixed
 /// onto the run's so `--run`'s combined output reads as one build+run
-/// invocation.
+/// invocation — on success by concatenation, and on failure by prefixing
+/// `run_once`'s error, the same fallible-tail-then-prefix shape
+/// `link_and_write` uses for the build's own link-then-write tail
+/// (docs/pmt/project.md (run block)).
 fn run_target(
     root: &Path,
     output: &Path,
     run: Option<&crate::project::RunSpec>,
     build_stderr: String,
+) -> Result<CliOutput, String> {
+    let mut run_out = run_once(root, output, run).map_err(|e| format!("{build_stderr}{e}"))?;
+    run_out.stderr = format!("{build_stderr}{}", run_out.stderr);
+    Ok(run_out)
+}
+
+/// The fallible tail of `run_target`: resolves the run block's tape path
+/// and drives the just-built executable. Factored out so a failure
+/// anywhere in it — resolving the path, or the run itself — is one
+/// `Result` its caller can prefix with the build's warnings at a single
+/// site, rather than trusting every `?` inside to remember.
+fn run_once(
+    root: &Path,
+    output: &Path,
+    run: Option<&crate::project::RunSpec>,
 ) -> Result<CliOutput, String> {
     use mtc_core::vm::TactProfile;
     let spec = run.cloned().unwrap_or_default();
@@ -409,9 +427,7 @@ fn run_target(
             }),
         trace: false,
     };
-    let mut run_out = super::run::execute_run(output, &settings, &mut std::io::sink())?;
-    run_out.stderr = format!("{build_stderr}{}", run_out.stderr);
-    Ok(run_out)
+    super::run::execute_run(output, &settings, &mut std::io::sink())
 }
 
 /// Compile options for argv mode: exactly `pmt compile`'s preset/flag
