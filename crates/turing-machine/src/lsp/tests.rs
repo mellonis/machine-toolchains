@@ -1083,6 +1083,27 @@ machine {
 }
 
 #[test]
+fn after_a_signature_tapes_alphabet_the_clause_position_completion_offers_nothing_yet() {
+    // Mirrors `after_volatile_the_item_boundary_completion_offers_nothing_yet`:
+    // `writes`/`preserves` are reserved keywords with no `classify_context`
+    // arm of their own, so the position right after a signature tape's
+    // alphabet name falls through every branch (the previous token is an
+    // `Ident`, not a boundary punctuation mark) and returns `None`. This is
+    // an accepted gap, not a fix owed here: offering the two clause keywords
+    // — and later the brace-set contents behind them — needs a
+    // signature-frame context of its own, a small feature of its own.
+    let head = "\
+alphabet bits { '_', '1' }
+
+routine r(tape num: bits ";
+    let got = labels(&complete_between(
+        head,
+        "writes { '1' }) {\n  entry state s { [*] -> return; }\n}\n",
+    ));
+    assert!(got.is_empty(), "{got:?}");
+}
+
+#[test]
 fn completions_survive_a_document_that_no_longer_resolves() {
     // The roster is the sanctioned staleness exception: names stay
     // available across an edit that breaks resolution, because positions
@@ -1272,6 +1293,146 @@ machine {
         "routine r(tape a: bits, tape b: bits)\n\n\
          writes a: {'0', '1'}\nwrites b: {}\n\n\
          Only tape a is written."
+    );
+}
+
+#[test]
+fn hovering_a_routine_shows_its_declared_contract() {
+    // Extends `hovering_a_routine_shows_its_write_sets`'s placement pin: the
+    // DECLARED clause now sits inside the signature head itself (fmt's own
+    // canonical spelling), the INFERRED writes block stays right below it,
+    // and the doc body stays last — three independent lines about the same
+    // tape, one promise and one computation, never merged into one.
+    let src = "\
+alphabet bits { '_', '0', '1' }
+
+? Writes both symbols.
+routine r(tape a: bits writes { '0', '1' }) {
+  entry state s {
+    ['0'] -> write ['1'] return;
+    [*] -> write ['0'] return;
+  }
+}
+
+machine {
+  tape x: bits;
+  entry state main { [*] -> call r(a = x) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "call r", 5))
+        .expect("a hover");
+    assert_eq!(
+        hover.text,
+        "routine r(tape a: bits writes { '0', '1' })\n\n\
+         writes a: {'0', '1'}\n\n\
+         Writes both symbols."
+    );
+}
+
+#[test]
+fn hovering_a_routine_shows_the_declared_and_inferred_writes_diverging() {
+    // The declared clause is a PROMISE — what the body is allowed to write
+    // — and the inferred block is a COMPUTATION — what the body actually
+    // does write. The contract checker only rejects writing OUTSIDE the
+    // declared set, so a body writing a strict subset is legal; the two
+    // surfaces legitimately disagree here, and hover shows both, honestly.
+    let src = "\
+alphabet bits { '_', '0', '1' }
+
+routine r(tape a: bits writes { '0', '1' }) {
+  entry state s { [*] -> write ['0'] return; }
+}
+
+machine {
+  tape x: bits;
+  entry state main { [*] -> call r(a = x) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "call r", 5))
+        .expect("a hover");
+    assert!(
+        hover
+            .text
+            .contains("routine r(tape a: bits writes { '0', '1' })"),
+        "{}",
+        hover.text
+    );
+    assert!(hover.text.contains("writes a: {'0'}"), "{}", hover.text);
+}
+
+#[test]
+fn tape_hover_shows_the_clause() {
+    let src = "\
+alphabet bits { '_', '0', '1' }
+
+routine r(tape num: bits writes { '0', '1' }) {
+  entry state s { [*] -> return; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "tape num", 5))
+        .expect("a hover");
+    assert_eq!(hover.text, "tape num: bits writes { '0', '1' }");
+}
+
+#[test]
+fn hovering_a_routine_shows_volatile_with_both_clauses_in_order() {
+    // The three modifiers together, not just the pairwise cases: `volatile`
+    // then `writes` then `preserves`, in the fixed grammar order (fmt's own
+    // `volatile_and_both_clauses_compose_in_a_signature_param` pins the same
+    // shape for the printer). The head builds this string unconditionally
+    // (writes pushed before preserves) rather than reading an order back out
+    // of the source, which is correct only because the parser itself
+    // rejects `preserves` before `writes` — this pins that the two stay in
+    // step.
+    let src = "\
+alphabet symbols { '0', '1', '#' }
+
+routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
+  entry state s { [*] -> stop; }
+}
+
+machine {
+  tape m: symbols;
+  entry state main { [*] -> call w(num = m) then stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "call w", 5))
+        .expect("a hover");
+    assert!(
+        hover
+            .text
+            .contains("routine w(volatile tape num: symbols writes { '0' } preserves { '#' })"),
+        "{}",
+        hover.text
+    );
+}
+
+#[test]
+fn tape_hover_shows_volatile_with_both_clauses_in_order() {
+    let src = "\
+alphabet symbols { '0', '1', '#' }
+
+routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {
+  entry state s { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "tape num", 5))
+        .expect("a hover");
+    assert_eq!(
+        hover.text,
+        "volatile tape num: symbols writes { '0' } preserves { '#' }"
     );
 }
 

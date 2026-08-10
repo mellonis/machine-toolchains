@@ -724,7 +724,11 @@ fn continuation_text(cont: &Continuation) -> String {
 /// to consider here — unlike `render_alphabet` or `paren_list`, a clause is
 /// always one unbroken run of tokens on the line its parameter entry
 /// occupies.
-fn contract_clause_text(keyword: &str, clause: &ContractClause) -> String {
+///
+/// `pub(crate)` so the LSP hover renderers (`lsp/navigate.rs`) can spell a
+/// declared clause identically to this printer's canonical output instead of
+/// keeping a second copy of the same string in sync.
+pub(crate) fn contract_clause_text(keyword: &str, clause: &ContractClause) -> String {
     let entries: Vec<String> = clause.elems.iter().map(alphabet_elem_text).collect();
     if entries.is_empty() {
         format!(" {keyword} {{}}")
