@@ -17,11 +17,11 @@ This page is the dialect's own surface: how a `.tma` file looks, what
 mnemonics are spelled, and what the `.tmc` compiler emits. The grammar
 those spellings sit in is shared with every other dialect and lives in
 `docs/formats.md (assembly text)` — the lexical shape and canonical
-column grid, the `.section`/`.routine` pair, the `[..]` vector
-vocabulary, match and dispatch tables, the compact symbol family, the
-`.rept` macro, frame descriptors, and the binding-call operand, each
-with the bytes it lowers to. The assembler framework behind both
-dialects, with the capability set a dialect opts into, is
+column grid, sections and the routine signature, vector operands, match
+and dispatch tables, the compact symbol family, the `.rept` macro, frame
+descriptors, and bound calls, each with the bytes it lowers to. The
+assembler framework behind both dialects, with the capability set a
+dialect opts into, is
 `docs/core.md (the assembler framework)`; opcode semantics and timing
 are `docs/tmt/isa.md`.
 

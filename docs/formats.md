@@ -399,8 +399,8 @@ then `tmt tape-block show in.tmt`, and
 
 Both toolchains assemble from a line-oriented text dialect: PM-1's `.pma`
 and TM-1's `.tma`. Each dialect's own surface — its sample shape, its
-mnemonic spellings, what its directives mean for that architecture, and
-its version history — is its toolchain's page: `docs/pmt/asm.md` and
+mnemonic spellings, the directives only it has, and its version
+history — is its toolchain's page: `docs/pmt/asm.md` and
 `docs/tmt/asm.md`. This section is what the two share: the lexical shape
 and canonical layout every dialect prints in, the grammar extensions the
 assembler framework offers behind capabilities a dialect opts into
