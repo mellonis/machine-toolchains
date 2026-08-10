@@ -576,6 +576,52 @@ fn a_wide_writes_clause_breaks_the_param_list_without_wrapping_the_clause() {
     assert_eq!(out, twice, "formatting the output is not idempotent");
 }
 
+/// `volatile` and BOTH clauses compose on the same tape parameter — the
+/// three modifiers together, not just the pairwise cases above.
+#[test]
+fn volatile_and_both_clauses_compose_in_a_signature_param() {
+    let src = "alphabet symbols { '0', '1', '#' }\n\n\
+               routine w(volatile   tape  num:symbols   writes{'0'}preserves{'#'}) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: symbols;\n\
+               \x20 entry state s { [*] -> call w(num = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {",
+        "volatile and both clauses compose in signature position, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// A bare `preserves`-only clause (no `writes`) formats canonically — the
+/// grammar allows `preserves` with no preceding `writes`.
+#[test]
+fn a_preserves_only_clause_formats_canonically() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               routine w(tape t:bits preserves{'_'}) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(tape t: bits preserves { '_' }) {",
+        "a bare preserves-only clause formats canonically, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
 /// A range element (`lo..hi`) inside a clause re-encodes losslessly, the
 /// same as inside an alphabet body.
 #[test]
