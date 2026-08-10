@@ -1,0 +1,40 @@
+name: test
+
+# The full quality gate: the same four commands the repo asks for locally,
+# in the same order — formatting, lints, the no_std build of the core crate,
+# then the workspace test suite. Runs on every push to master and on every
+# pull request targeting it.
+#
+# The suite runs under cargo-nextest: one process per test, which keeps
+# tests that touch shared temporary paths from colliding the way they can
+# under the default in-process threading.
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build the core crate without std
+        run: cargo build -p mtc-core --no-default-features
+      - uses: taiki-e/install-action@nextest
+      - name: Run the workspace test suite
+        run: cargo nextest run --workspace
