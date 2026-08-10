@@ -821,14 +821,14 @@ A deprecated entity's callers are a lint finding
 
 ## Reserved keywords
 
-Twenty-five words are fully reserved and may not be used as any name — a
+Twenty-seven words are fully reserved and may not be used as any name — a
 tape, state, world, namespace, alias, binding, or graft-instance name:
 
 ```
 alphabet  machine  tape    state   entry   routine  graph   namespace
 export    use      graft   bind    as      map      with    write
 move      goto     call    then    return  stop     halt    debugger
-volatile
+volatile  writes   preserves
 ```
 
 Reservation is enforced wherever a name is expected: `tape state: ab;` is

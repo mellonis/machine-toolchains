@@ -583,6 +583,21 @@ fn volatile_is_reserved_as_a_name() {
     );
 }
 
+#[test]
+fn writes_is_reserved_as_a_name() {
+    // A tape may not be NAMED writes — the word is reserved.
+    assert_eq!(err_code("machine { tape writes: bits; }"), "reserved-name");
+}
+
+#[test]
+fn preserves_is_reserved_as_a_name() {
+    // A tape may not be NAMED preserves — the word is reserved.
+    assert_eq!(
+        err_code("machine { tape preserves: bits; }"),
+        "reserved-name"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Binding grammar (the shared call/graft/bind algebra).
 // ---------------------------------------------------------------------------
