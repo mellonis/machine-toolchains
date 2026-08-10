@@ -283,7 +283,7 @@ that cover what they hold in common.
   tape devices, loading, the trap taxonomy, `DebugSession`, the composition
   engine, and the assembler, lint, and linker frameworks.
 - `docs/formats.md` — the container formats — `.pmo`/`.tmo`, `.pmx`/`.tmx`,
-  `.pmt`/`.tmt` — the assembly text grammar the two dialects share, the
+  `.pmt`/`.tmt`, the assembly text grammar the two dialects share, the
   `.map` sidecar, and IR JSON — with the sniff-not-extension rule shared by
   both toolchains.
 - `docs/lsp.md` — the language-server framework and its per-language

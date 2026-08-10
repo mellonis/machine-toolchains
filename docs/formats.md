@@ -457,9 +457,9 @@ namespaced/nested symbol reference without ambiguity.
 
 ### Sections and the routine signature
 
-A file in a dialect with the tables capability is split into two `.section tables` holds the
-match tables, the dispatch tables, and the frame descriptors;
-`.section code` holds the functions. The
+A file in a dialect with the tables capability is split into two
+sections. `.section tables` holds the match tables, the dispatch tables,
+and the frame descriptors; `.section code` holds the functions. The
 default section is `code`, so a file may omit `.section code`. Only table
 directives are legal in the tables section, and only functions/code in the
 code section.
@@ -480,12 +480,14 @@ and does not survive into the image, so `alpha` there is the
 **physical** tape each virtual one projects onto instead — a
 `; derived` trailing comment marks the line to say so.
 
-
 ### Vector operands
 
-Four instructions and the `.row` directive take a bracketed vector with
-**one element per tape**, left to right. The element vocabulary depends on
-where the vector appears:
+Under the vectors capability, the `.row` directive and any instruction
+whose operand kind asks for one take a bracketed vector with **one
+element per tape**, left to right. Which mnemonics those are is each
+dialect's own business — TM-1 spells them `wr`, `mov`, and `wrmv`
+(`docs/tmt/asm.md (the mnemonic set)`), and the examples below use that
+spelling. The element vocabulary depends on where the vector appears:
 
 - **match rows** (`.row [..]`): a symbol index is an **exact** match on
   that tape's head; `*` is the wildcard ("any symbol").
@@ -494,16 +496,18 @@ where the vector appears:
 - **move vectors** (`mov [..]`): `>` steps that head right, `<` left, `.`
   stays put.
 
-`wrmv [w…], [m…]` takes **two** vectors — a write vector then a move
-vector, comma-separated — fusing a rule's whole write+move action into
-one instruction. Its execution order is `docs/tmt/isa.md (reading,
-writing and moving)`. A hand-written `wr`/`mov` pair remains equally
-valid; `wrmv` is the fused spelling, not a new capability.
+A fused write+move operand (`wrmv [w…], [m…]`) takes **two** vectors — a
+write vector then a move vector, comma-separated — fusing a rule's whole
+write+move action into one instruction. Its execution order is the
+architecture's to define; TM-1's is `docs/tmt/isa.md (reading, writing
+and moving)`. A hand-written write/move pair remains equally valid; the
+fused form is a spelling, not a new capability.
 
 ### Match and dispatch tables
 
 A **match table** is a labeled run of `.row` directives. Each row is one
-vector; a run of rows under one label forms the table `mtc` walks.
+vector; a run of rows under one label forms the table the architecture's
+match instruction walks (TM-1's `mtc`).
 
 A **dispatch table** is a labeled run of `.targets`/`.target` directives:
 `.targets L1, …, Lk` lists the targets indexed by MR (MR = 1 selects
@@ -515,18 +519,19 @@ continuation (several `.targets`/`.target` lines under one label); a
 single directive's own operand list has a separate, *list*-level one,
 described next.
 
-`.targets`, `.exits` (below), and `.map` (below) are the dialect's three
+`.targets`, `.exits` (below), and `.map` (below) are the grammar's three
 unbounded lists: a `.targets`/`.exits`/`.map` line ending in a bare
 trailing comma — nothing after it but whitespace, no comment — continues
 that directive's list onto the next physical line, so a wide table can be
 authored (or emitted) across several lines instead of one long one. A
 comma followed by a comment does not continue (only the list's *last*
 physical line may carry a trailing comment); a trailing comma on any
-other directive stays the syntax error it has always been. `tmt fmt` /
-`tmt dis` wrap the other direction — a list whose single-line form would
-cross the 80-column line limit is broken after a comma, with
-continuation lines aligned under the list's first element
-(`docs/tmt/fmt.md`) — and the two meet: a wrapped line always ends in the
+other directive stays the syntax error it has always been. The
+canonical-grid printer wraps the other direction — a list whose
+single-line form would cross the 80-column line limit is broken after a
+comma, with continuation lines aligned under the list's first element
+(`docs/tmt/fmt.md` shows it on `.tma`, the one shipped dialect that has
+these lists) — and the two meet: a wrapped line always ends in the
 trailing comma the continuation grammar reads back into one logical
 directive, so reformatting a wide table is idempotent. Every other
 list-shaped operand — a `.row`/`wr`/`mov`/`wrmv` vector, a `.frame
@@ -540,14 +545,14 @@ spellings are `docs/tmt/isa.md (match and dispatch)`.
 
 ### The compact symbol family (the `0x7F` rule)
 
-TM-1 tables and vectors use the **compact** symbol family: one byte per
-element, holding a 7-bit symbol index in `0`..=`126`. The value `0x7F` is
-**reserved as the transparent marker** — a match-row byte of `0x7F`
-matches any latched symbol (this is what `*` compiles to), and a write
-element of `0x7F` keeps the cell (what `-` compiles to). Reserving `0x7F`
-is why a compact operand can **name** only indices `0`..=`126`: every
-payload index must stay at or below `0x7E`, and a `wr` or `.row` element
-outside that range is a fatal `bad-vector` error.
+Table rows and vector operands use the **compact** symbol family: one
+byte per element, holding a 7-bit symbol index in `0`..=`126`. The value
+`0x7F` is **reserved as the transparent marker** — a match-row byte of
+`0x7F` matches any latched symbol (this is what `*` compiles to), and a
+write element of `0x7F` keeps the cell (what `-` compiles to). Reserving
+`0x7F` is why a compact operand can **name** only indices `0`..=`126`:
+every payload index must stay at or below `0x7E`, and a write or match
+element outside that range is a fatal `bad-vector` error.
 
 This is a limit on what an instruction can *mention*, not on how wide a
 tape's alphabet may be. A `.routine` may declare a cardinality above 127
@@ -689,16 +694,21 @@ symbol it collapses onto is a write hole unless a two-way pair also names it.
 
 The PM-1 dialect's own surface — its sample shape, the `pmt dis` round
 trip, symbol jumps, and the `.volatile` build-column directive — is
-`docs/pmt/asm.md`. What it shares with every other dialect is "Assembly
-text", above.
+`docs/pmt/asm.md`. It enables none of the capability-gated subsections of
+"Assembly text", above — its one capability adds the `.volatile`
+directive, documented on that same page — so what it draws from that
+section is the opening tier: the lexical shape, the canonical column
+grid, the comment-column rules, and the `.func` visibility and name
+grammar.
 
 ## `.tma` — assembly text (TM-1)
 
 The TM-1 dialect's own surface — its sample shape, the `tmt dis` round
 trip, how its twenty mnemonics are spelled, and what the `.tmc` compiler
-emits — is `docs/tmt/asm.md`. What it shares with every other dialect,
-including the sectioned tables, vector operands, and `.rept` macro it
-turns on, is "Assembly text", above.
+emits — is `docs/tmt/asm.md`. The grammar it sits in is "Assembly text",
+above — the opening tier every dialect draws on, plus every
+capability-gated subsection there, since `.tma` is currently the one
+dialect enabling them all.
 
 ## `.pmx.map` / `.tmx.map` — link-time sidecar
 
