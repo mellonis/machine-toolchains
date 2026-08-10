@@ -49,7 +49,7 @@ fn apply_fix(src: &str, edits: &[Edit]) -> String {
             )
         })
         .collect();
-    ranges.sort_by(|a, b| b.0.cmp(&a.0));
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.0));
     let mut out = src.to_string();
     for (s, e, rep) in ranges {
         out.replace_range(s..e, &rep);
