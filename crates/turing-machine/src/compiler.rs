@@ -756,7 +756,7 @@ fn resolve_alphabet_glyphs(a: &Alphabet) -> Result<Vec<String>, CompileError> {
 /// The glyph label a single symbol literal contributes. Numeric literals mint
 /// the decimal string of their VALUE (`05` and `5` both label `"5"`) — a
 /// numeric glyph's identity is its value, per the spec's numeric-range rule.
-fn glyph_label(s: &SymLit) -> String {
+pub(crate) fn glyph_label(s: &SymLit) -> String {
     match s {
         SymLit::Glyph { value, .. } => value.clone(),
         SymLit::Number { value, .. } => value.to_string(),
@@ -766,7 +766,11 @@ fn glyph_label(s: &SymLit) -> String {
 /// Expand a range element into its glyph labels. Glyph ranges require
 /// single-scalar endpoints and walk Unicode scalar succession; numeric ranges
 /// mint each value's decimal string. Both are inclusive and ascending.
-fn expand_range(lo: &SymLit, hi: &SymLit, span: Span) -> Result<Vec<String>, CompileError> {
+pub(crate) fn expand_range(
+    lo: &SymLit,
+    hi: &SymLit,
+    span: Span,
+) -> Result<Vec<String>, CompileError> {
     match (lo, hi) {
         (SymLit::Number { value: l, .. }, SymLit::Number { value: h, .. }) => {
             if l > h {
@@ -838,8 +842,8 @@ fn push_glyph(
 }
 
 // ---------------------------------------------------------------------------
-// The resolved module — the front-end structure Task 5 (graft + range
-// expansion) and Task 6 (IR lowering) consume.
+// The resolved module — the front-end structure the graft/range expansion
+// and the IR lowering consume.
 // ---------------------------------------------------------------------------
 
 /// The whole resolved module. Rules stay in SOURCE form (patterns unexpanded
