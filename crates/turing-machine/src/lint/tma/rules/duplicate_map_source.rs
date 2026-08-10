@@ -42,8 +42,9 @@
 //! deletion can never swallow a comment, and no comment-withholding guard
 //! is needed here. A comment after the `)` is the one comment a
 //! duplicate-carrying `.map` can hold, and it sits outside every deletion
-//! span. The tests pin each shape; if the continuation rules ever loosen,
-//! they fail and this reasoning must be revisited.
+//! span. The tests pin each shape; if the continuation rules or the
+//! group-closing requirement ever loosen, they fail and this reasoning must
+//! be revisited.
 
 use std::collections::HashMap;
 
@@ -317,6 +318,16 @@ alt:    hlt
     #[test]
     fn an_own_line_comment_inside_the_group_is_an_assemble_fatal() {
         let src = program("rmap=(1->2,\n    ; note\n            1->3)");
+        assert!(lint_tma(&src, &[]).is_err());
+    }
+
+    /// A `;` before the `)` comments the closer out: the group never closes,
+    /// so the directive is malformed and the fatal gate rejects it. This
+    /// shape rests on the group-closing requirement, not on the continuation
+    /// rules — it needs its own pin.
+    #[test]
+    fn a_comment_before_the_closer_is_an_assemble_fatal() {
+        let src = program("rmap=(1->2, 1->3 ; note)");
         assert!(lint_tma(&src, &[]).is_err());
     }
 
