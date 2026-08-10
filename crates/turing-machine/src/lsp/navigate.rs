@@ -31,8 +31,8 @@ use mtc_core::lsp::{DefTarget, HoverContent};
 use super::{DocState, render_doc, span_touches, std_enabled};
 use crate::compiler::{Resolved, WorldKind, full_name};
 use crate::parser::{
-    Alphabet, Bind, BindingArg, BindingValue, Continuation, Doc, Graft, Program, SigParamKind,
-    Signature, State, Transition,
+    Alphabet, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc, Graft, Program,
+    SigParamKind, Signature, State, Transition,
 };
 
 /// What the cursor is on, in resolved terms.
@@ -74,12 +74,25 @@ struct WorldView<'a> {
     ns: &'a [String],
     kind: WorldKind,
     name_span: Span,
-    /// `(name, name span, alphabet as written, alphabet span, volatile)`.
-    tapes: Vec<(&'a str, Span, &'a str, Span, bool)>,
+    tapes: Vec<WorldTape<'a>>,
     sig: Option<&'a Signature>,
     states: &'a [State],
     grafts: &'a [Graft],
     binds: &'a [Bind],
+}
+
+/// One tape as written, whichever carrier declared it. `writes`/`preserves`
+/// are the declared contract clauses; a machine tape declaration has no
+/// contract grammar at all, so both are always `None` there — only a
+/// signature tape parameter can carry one.
+struct WorldTape<'a> {
+    name: &'a str,
+    name_span: Span,
+    alphabet: &'a str,
+    alphabet_span: Span,
+    volatile: bool,
+    writes: Option<&'a ContractClause>,
+    preserves: Option<&'a ContractClause>,
 }
 
 const NO_NS: &[String] = &[];
@@ -95,14 +108,14 @@ fn world_views(program: &Program) -> Vec<WorldView<'_>> {
             tapes: m
                 .tapes
                 .iter()
-                .map(|t| {
-                    (
-                        t.name.as_str(),
-                        t.name_span,
-                        t.alphabet.as_str(),
-                        t.alphabet_span,
-                        t.volatile,
-                    )
+                .map(|t| WorldTape {
+                    name: t.name.as_str(),
+                    name_span: t.name_span,
+                    alphabet: t.alphabet.as_str(),
+                    alphabet_span: t.alphabet_span,
+                    volatile: t.volatile,
+                    writes: None,
+                    preserves: None,
                 })
                 .collect(),
             sig: None,
@@ -140,7 +153,7 @@ fn world_views(program: &Program) -> Vec<WorldView<'_>> {
     out
 }
 
-fn sig_tapes(sig: &Signature) -> Vec<(&str, Span, &str, Span, bool)> {
+fn sig_tapes(sig: &Signature) -> Vec<WorldTape<'_>> {
     sig.params
         .iter()
         .filter_map(|p| match &p.kind {
@@ -148,14 +161,17 @@ fn sig_tapes(sig: &Signature) -> Vec<(&str, Span, &str, Span, bool)> {
                 alphabet,
                 alphabet_span,
                 volatile,
-                ..
-            } => Some((
-                p.name.as_str(),
-                p.name_span,
-                alphabet.as_str(),
-                *alphabet_span,
-                *volatile,
-            )),
+                writes,
+                preserves,
+            } => Some(WorldTape {
+                name: p.name.as_str(),
+                name_span: p.name_span,
+                alphabet: alphabet.as_str(),
+                alphabet_span: *alphabet_span,
+                volatile: *volatile,
+                writes: writes.as_ref(),
+                preserves: preserves.as_ref(),
+            }),
             SigParamKind::State => None,
         })
         .collect()
@@ -270,19 +286,20 @@ fn reference_in_world(
     }
     // Tape declarations and signature tape parameters: the name declares a
     // tape, the alphabet references one.
-    for (name, name_span, alphabet, alphabet_span, _) in &world.tapes {
-        if span_touches(*name_span, pos) {
+    for tape in &world.tapes {
+        if span_touches(tape.name_span, pos) {
             return Some((
                 Target::Tape {
                     world: world.mangled.clone(),
-                    name: (*name).to_string(),
+                    name: tape.name.to_string(),
                 },
-                *name_span,
+                tape.name_span,
             ));
         }
-        if span_touches(*alphabet_span, pos) {
-            let mangled = resolve_written(program, alphabet, world.ns, alphabet_exists(program))?;
-            return Some((Target::Alphabet(mangled), *alphabet_span));
+        if span_touches(tape.alphabet_span, pos) {
+            let mangled =
+                resolve_written(program, tape.alphabet, world.ns, alphabet_exists(program))?;
+            return Some((Target::Alphabet(mangled), tape.alphabet_span));
         }
     }
     for graft in world.grafts {
@@ -463,7 +480,7 @@ fn binding_args_reference(
         } = &arg.value
             && span_touches(*target_span, pos)
         {
-            if world.tapes.iter().any(|(name, ..)| name == target) {
+            if world.tapes.iter().any(|t| t.name == target) {
                 return Some((
                     Target::Tape {
                         world: world.mangled.clone(),
@@ -520,12 +537,7 @@ fn declaration_span(state: &DocState, program: &Program, target: &Target) -> Opt
         Target::Tape { world, name } => world_views(program)
             .into_iter()
             .find(|w| w.mangled == *world)
-            .and_then(|w| {
-                w.tapes
-                    .iter()
-                    .find(|(tape, ..)| tape == name)
-                    .map(|(_, span, ..)| *span)
-            }),
+            .and_then(|w| w.tapes.iter().find(|t| t.name == name).map(|t| t.name_span)),
         // A graft instance's states are written in the GRAPH it splices,
         // so that graph's declaration is the useful destination.
         Target::Graft { world, instance } => {
@@ -669,6 +681,13 @@ fn render(program: &Program, state: &DocState, target: &Target) -> Option<String
             let view = world_views(program)
                 .into_iter()
                 .find(|w| w.mangled == *mangled)?;
+            // `world_head` already carries any DECLARED `writes`/`preserves`
+            // clauses (a promise about a signature tape parameter); the
+            // `writes <tape>: {…}` lines appended below are the INFERRED
+            // footprint (a computation over the body). The two can
+            // legitimately disagree — a body writing a strict subset of
+            // what it declared is legal — so a hover showing both is
+            // showing two different statements, not restating one.
             let head = world_head(&view);
             let head = match resolved.and_then(|r| write_set_lines(r, mangled)) {
                 Some(lines) => format!("{head}\n\n{lines}"),
@@ -681,10 +700,16 @@ fn render(program: &Program, state: &DocState, target: &Target) -> Option<String
             let view = world_views(program)
                 .into_iter()
                 .find(|w| w.mangled == *world)?;
-            let (_, _, alphabet, _, volatile) =
-                view.tapes.iter().find(|(tape, ..)| tape == name)?;
-            let prefix = if *volatile { "volatile " } else { "" };
-            (format!("{prefix}tape {name}: {alphabet}"), None)
+            let tape = view.tapes.iter().find(|t| t.name == name)?;
+            let prefix = if tape.volatile { "volatile " } else { "" };
+            let mut head = format!("{prefix}tape {name}: {}", tape.alphabet);
+            if let Some(clause) = tape.writes {
+                head.push_str(&crate::fmt::contract_clause_text("writes", clause));
+            }
+            if let Some(clause) = tape.preserves {
+                head.push_str(&crate::fmt::contract_clause_text("preserves", clause));
+            }
+            (head, None)
         }
         Target::Bind { world, name } => (bind_head(resolved, world, name)?, None),
         Target::Graft { world, instance } => {
@@ -743,7 +768,10 @@ fn alphabet_head(mangled: &str, alphabet: &Alphabet, resolved: Option<&Resolved>
 }
 
 /// A world's signature as written, tape parameters with their alphabets
-/// included — the pmc hover's "signature" line, in TM terms.
+/// and any declared `writes`/`preserves` clauses included — the pmc hover's
+/// "signature" line, in TM terms. Clause text is rendered through fmt's own
+/// `contract_clause_text`, so a declared clause reads identically here and
+/// in the canonical `.tmc` printer.
 fn world_head(view: &WorldView<'_>) -> String {
     let carrier = match view.kind {
         WorldKind::Routine => "routine",
@@ -758,10 +786,21 @@ fn world_head(view: &WorldView<'_>) -> String {
         .iter()
         .map(|p| match &p.kind {
             SigParamKind::Tape {
-                alphabet, volatile, ..
+                alphabet,
+                volatile,
+                writes,
+                preserves,
+                ..
             } => {
                 let prefix = if *volatile { "volatile " } else { "" };
-                format!("{prefix}tape {}: {alphabet}", p.name)
+                let mut param = format!("{prefix}tape {}: {alphabet}", p.name);
+                if let Some(clause) = writes {
+                    param.push_str(&crate::fmt::contract_clause_text("writes", clause));
+                }
+                if let Some(clause) = preserves {
+                    param.push_str(&crate::fmt::contract_clause_text("preserves", clause));
+                }
+                param
             }
             SigParamKind::State => format!("state {}", p.name),
         })

@@ -1181,6 +1181,44 @@ machine {
 }
 
 #[test]
+fn a_violated_write_contract_fails_compile_with_its_code() {
+    let dir = scratch("tmc_contract");
+    // `mark` declares it writes only `'0'`, and its body writes `'1'`.
+    let src = "\
+alphabet bits { '_', '0', '1' }
+
+routine mark(tape t: bits writes {'0'}) {
+  entry state s { [*] -> write ['1'] return; }
+}
+
+machine {
+  tape t: bits;
+  entry state go { [*] -> call mark(t = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let srcpath = dir.join("contract.tmc");
+    fs::write(&srcpath, src).unwrap();
+    let obj = dir.join("contract.tmo");
+    // A scratch directory outlives the run that made it, so the
+    // nothing-was-written assertion below needs a clean slate of its own.
+    let _ = fs::remove_file(&obj);
+    let err = execute(&args(&[
+        "compile",
+        srcpath.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+    ]))
+    .unwrap_err();
+    assert!(err.contains("[writes-outside-contract]"), "{err}");
+    assert!(
+        err.contains("`mark` may write '1' on tape `t`"),
+        "the CLI renders the whole finding: {err}"
+    );
+    assert!(!obj.exists(), "no object is written on a compile error");
+}
+
+#[test]
 fn ir_graph_renders_mermaid_and_filters_by_world() {
     let dir = scratch("tmc_ir_graph");
     let obj = dir.join("a1.tmo");

@@ -541,6 +541,164 @@ fn volatile_state_parameter_is_an_error() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `writes`/`preserves` contract clauses on signature tape parameters.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn contract_clauses_round_trip_on_a_tape_param() {
+    let src = "routine r(tape t: bits writes { 'a', 'b'..'c' } preserves { 'd' }) \
+               { entry state s { [*] -> stop; } }";
+    let p = parse_src(src).expect("parses");
+    let r = &p.routines[0];
+    assert_eq!(r.sig.params.len(), 1);
+    let SigParamKind::Tape {
+        writes, preserves, ..
+    } = &r.sig.params[0].kind
+    else {
+        panic!("expected a tape parameter");
+    };
+    let writes = writes.as_ref().expect("a `writes` clause");
+    assert_eq!(writes.elems.len(), 2);
+    assert!(matches!(writes.elems[0], AlphabetElem::Single(_)));
+    assert!(matches!(writes.elems[1], AlphabetElem::Range { .. }));
+    let preserves = preserves.as_ref().expect("a `preserves` clause");
+    assert_eq!(preserves.elems.len(), 1);
+    assert!(matches!(preserves.elems[0], AlphabetElem::Single(_)));
+
+    // `kw_span` pins to the keyword token itself; each clause's span starts
+    // there and extends past it (through the closing `}`); `preserves`
+    // starts only after `writes` closes; `SigParam.span` reaches the last
+    // clause's close.
+    let tokens = lex(src).unwrap();
+    let writes_tok = tokens
+        .iter()
+        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "writes"))
+        .expect("a `writes` token in the stream");
+    assert_eq!(writes.kw_span, writes_tok.span());
+    let preserves_tok = tokens
+        .iter()
+        .find(|t| matches!(&t.kind, TokenKind::Ident(w) if w == "preserves"))
+        .expect("a `preserves` token in the stream");
+    assert_eq!(preserves.kw_span, preserves_tok.span());
+    assert_eq!(writes.span.start, writes.kw_span.start);
+    assert!(writes.span.end > writes.kw_span.end);
+    assert!(preserves.kw_span.start >= writes.span.end);
+    assert_eq!(preserves.span.start, preserves.kw_span.start);
+    assert!(preserves.span.end > preserves.kw_span.end);
+    assert_eq!(r.sig.params[0].span.end, preserves.span.end);
+}
+
+#[test]
+fn writes_clause_may_be_empty() {
+    let src = "routine r(tape t: bits writes {}) { entry state s { [*] -> stop; } }";
+    let p = parse_src(src).expect("an empty `writes {}` clause parses");
+    let r = &p.routines[0];
+    let SigParamKind::Tape {
+        writes, preserves, ..
+    } = &r.sig.params[0].kind
+    else {
+        panic!("expected a tape parameter");
+    };
+    let writes = writes.as_ref().expect("a `writes` clause");
+    assert!(writes.elems.is_empty());
+    assert!(preserves.is_none());
+}
+
+#[test]
+fn preserves_clause_may_be_empty() {
+    let src = "routine r(tape t: bits preserves {}) { entry state s { [*] -> stop; } }";
+    let p = parse_src(src).expect("an empty `preserves {}` clause parses");
+    let r = &p.routines[0];
+    let SigParamKind::Tape {
+        writes, preserves, ..
+    } = &r.sig.params[0].kind
+    else {
+        panic!("expected a tape parameter");
+    };
+    assert!(writes.is_none());
+    let preserves = preserves.as_ref().expect("a `preserves` clause");
+    assert!(preserves.elems.is_empty());
+}
+
+#[test]
+fn a_tape_param_with_no_clauses_leaves_both_fields_none() {
+    let p =
+        parse_src("routine r(tape t: bits) { entry state s { [*] -> stop; } }").expect("parses");
+    let r = &p.routines[0];
+    let SigParamKind::Tape {
+        writes, preserves, ..
+    } = &r.sig.params[0].kind
+    else {
+        panic!("expected a tape parameter");
+    };
+    assert!(writes.is_none());
+    assert!(preserves.is_none());
+}
+
+#[test]
+fn preserves_before_writes_is_a_targeted_order_error() {
+    let err = parse_src(
+        "routine r(tape t: bits preserves { 'a' } writes { 'b' }) \
+         { entry state s { [*] -> stop; } }",
+    )
+    .unwrap_err();
+    assert_eq!(err.kind.code(), "contract-clause-order");
+    assert_eq!(
+        err.kind.to_string(),
+        "`writes` must come before `preserves`"
+    );
+}
+
+#[test]
+fn duplicate_writes_clause_is_an_error() {
+    let err = parse_src(
+        "routine r(tape t: bits writes { 'a' } writes { 'b' }) \
+         { entry state s { [*] -> stop; } }",
+    )
+    .unwrap_err();
+    assert_eq!(err.kind.code(), "duplicate-contract-clause");
+    assert_eq!(err.kind.to_string(), "duplicate `writes` clause");
+}
+
+#[test]
+fn duplicate_preserves_clause_is_an_error() {
+    let err = parse_src(
+        "routine r(tape t: bits preserves { 'a' } preserves { 'b' }) \
+         { entry state s { [*] -> stop; } }",
+    )
+    .unwrap_err();
+    assert_eq!(err.kind.code(), "duplicate-contract-clause");
+    assert_eq!(err.kind.to_string(), "duplicate `preserves` clause");
+}
+
+#[test]
+fn contract_clause_on_a_machine_tape_decl_is_rejected() {
+    // Falls out of `parse_tape`'s own `;` expectation — clauses are
+    // signature-only, and a machine tape decl never looks for one.
+    let err = parse_src("machine { tape t: bits writes {}; entry state s { [*] -> stop; } }")
+        .unwrap_err();
+    assert_eq!(err.kind.code(), "unexpected-token");
+    assert!(
+        matches!(&err.kind, CompileErrorKind::Expected { what, .. } if *what == "`;`"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn contract_clause_on_a_state_param_is_rejected() {
+    // Falls out of `signature()`'s list loop — the `State` branch never
+    // looks for a clause keyword, so `writes` here is just an unexpected
+    // token where `,` or `)` was expected.
+    let err = parse_src("routine r(state done writes {}) { entry state s { [*] -> done; } }")
+        .unwrap_err();
+    assert_eq!(err.kind.code(), "unexpected-token");
+    assert!(
+        matches!(&err.kind, CompileErrorKind::Expected { what, .. } if *what == "`,` or `)`"),
+        "{err:?}"
+    );
+}
+
 #[test]
 fn non_entry_graft_needs_a_name() {
     assert_eq!(
@@ -579,6 +737,21 @@ fn volatile_is_reserved_as_a_name() {
     // A tape may not be NAMED volatile — the word is reserved.
     assert_eq!(
         err_code("machine { tape volatile: bits; }"),
+        "reserved-name"
+    );
+}
+
+#[test]
+fn writes_is_reserved_as_a_name() {
+    // A tape may not be NAMED writes — the word is reserved.
+    assert_eq!(err_code("machine { tape writes: bits; }"), "reserved-name");
+}
+
+#[test]
+fn preserves_is_reserved_as_a_name() {
+    // A tape may not be NAMED preserves — the word is reserved.
+    assert_eq!(
+        err_code("machine { tape preserves: bits; }"),
         "reserved-name"
     );
 }

@@ -919,7 +919,7 @@ mod tests {
         }
         assert!(
             lint.flags.iter().all(|f| f.name != "--fix"),
-            "tmt lint has no --fix (no TM-1 rule emits a fix)"
+            "tmt lint has no --fix (fixes surface through LSP code actions; the CLI has no --fix)"
         );
     }
 }

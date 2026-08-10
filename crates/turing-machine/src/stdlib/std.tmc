@@ -54,7 +54,7 @@ namespace std {
 
     ? Behavior graph for goToNumber: walk right until the first '$', then
     ? leave via `done` with the head on that '$'.
-    export graph goToNumberGraph(tape num: symbols, state done) {
+    export graph goToNumberGraph(tape num: symbols writes {}, state done) {
       entry state walk {
         ['$'] -> done;
         [*]   -> move [>] goto walk;
@@ -64,13 +64,16 @@ namespace std {
     ? Walk right to the current number's end marker. On entry the head is on
     ? the number (any cell up to and including its '$'); on exit it rests on
     ? that '$'. The tape is unchanged.
-    export routine goToNumber(tape num: symbols) {
+    export routine goToNumber(tape num: symbols writes {}) {
       entry graft goToNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToNumbersStart: walk left until the first '^',
     ? then leave via `done` with the head on that '^'.
-    export graph goToNumbersStartGraph(tape num: symbols, state done) {
+    export graph goToNumbersStartGraph(
+      tape num: symbols writes {},
+      state done
+    ) {
       entry state walk {
         ['^'] -> done;
         [*]   -> move [<] goto walk;
@@ -80,14 +83,14 @@ namespace std {
     ? Walk left to the current number's start marker. On entry the head is on
     ? the number (any cell from its '^' rightward); on exit it rests on that
     ? '^'. The tape is unchanged.
-    export routine goToNumbersStart(tape num: symbols) {
+    export routine goToNumbersStart(tape num: symbols writes {}) {
       entry graft goToNumbersStartGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToNextNumber: step one cell right, then walk right
     ? to the following number's '$' (reusing goToNumberGraph). Exits via
     ? `done` on that '$'.
-    export graph goToNextNumberGraph(tape num: symbols, state done) {
+    export graph goToNextNumberGraph(tape num: symbols writes {}, state done) {
       entry state step { [*] -> move [>] goto scan; }
       graft goToNumberGraph(num = num, done = done) as scan;
     }
@@ -95,13 +98,16 @@ namespace std {
     ? Move to the next number's end marker. On entry the head is on the
     ? current number's '$' (or the blank gap after it); it steps right and
     ? then walks to the next number's '$', where it stops. Unchanged tape.
-    export routine goToNextNumber(tape num: symbols) {
+    export routine goToNextNumber(tape num: symbols writes {}) {
       entry graft goToNextNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToPreviousNumber: step one cell left, then walk
     ? left to the previous number's '$'. Exits via `done` on that '$'.
-    export graph goToPreviousNumberGraph(tape num: symbols, state done) {
+    export graph goToPreviousNumberGraph(
+      tape num: symbols writes {},
+      state done
+    ) {
       entry state step { [*] -> move [<] goto scan; }
       state scan {
         ['$'] -> done;
@@ -115,7 +121,7 @@ namespace std {
     ? left onto the adjacent '$' and stops there, on the number it started
     ? after rather than the one before. From the '$' it steps left and walks
     ? back to the previous number's '$', where it stops. The tape is unchanged.
-    export routine goToPreviousNumber(tape num: symbols) {
+    export routine goToPreviousNumber(tape num: symbols writes {}) {
       entry graft goToPreviousNumberGraph(num = num, done = return);
     }
 
@@ -333,7 +339,10 @@ namespace std {
 
     ? Behavior graph for invertNumber: sweep right flipping each bit, halt at
     ? the trailing blank. Exits via `done` on that blank.
-    export graph invertNumberGraph(tape num: symbols, state done) {
+    export graph invertNumberGraph(
+      tape num: symbols preserves { '_' },
+      state done
+    ) {
       entry state sweep {
         ['0'] -> write ['1'] move [>] goto sweep;
         ['1'] -> write ['0'] move [>] goto sweep;
@@ -343,7 +352,7 @@ namespace std {
 
     ? Flip every bit of a number. On entry the head is on the leftmost digit;
     ? on exit it rests on the trailing blank.
-    export routine invertNumber(tape num: symbols) {
+    export routine invertNumber(tape num: symbols preserves { '_' }) {
       entry graft invertNumberGraph(num = num, done = return);
     }
 
@@ -363,6 +372,131 @@ namespace std {
     ? '0' when the number was all zeros). The value zero keeps its
     ? representation.
     export routine normalizeNumber(tape num: symbols) {
+      entry graft normalizeNumberGraph(num = num, done = return);
+    }
+  }
+
+  // The volatile twins. Each of the two namespaces below mirrors one of the
+  // namespaces above routine-for-routine, under the same names, with the
+  // tape parameter declared `volatile`.
+  //
+  // They exist for the CALLEE side of a call. The library reaches a program
+  // at link time already compiled, so nothing a caller declares about its own
+  // band travels into the routine it calls — the mark has to be on the
+  // signature the routine itself was compiled from. A program whose band is a
+  // device therefore calls the twin, and the rule that nothing may be assumed
+  // about that band's contents holds inside the library too.
+  //
+  // No behavior is duplicated to get there. A twin facade grafts the SAME
+  // graph its counterpart grafts: a graft is governed by its host, so the
+  // spliced rows land on the twin's flagged tape without the graph knowing
+  // anything about it. The two routines whose bodies are compositions of
+  // calls mirror those chains with every call retargeted to the twin of its
+  // callee — a twin calling a plain routine would drop the mark at that one
+  // boundary and quietly undo the whole point. Contract clauses are mirrored
+  // exactly; the twin of a routine that writes nothing writes nothing.
+  namespace binaryNumbersVolatile {
+    use std::binaryNumbers::symbols;
+    use std::binaryNumbers::goToNumberGraph;
+    use std::binaryNumbers::goToNumbersStartGraph;
+    use std::binaryNumbers::goToNextNumberGraph;
+    use std::binaryNumbers::goToPreviousNumberGraph;
+    use std::binaryNumbers::deleteNumberGraph;
+    use std::binaryNumbers::normalizeNumberGraph;
+    use std::binaryNumbers::plusOneGraph;
+    use std::binaryNumbers::minusOneFastGraph;
+
+    ? std::binaryNumbers::goToNumber's contract, over a volatile tape.
+    export routine goToNumber(volatile tape num: symbols writes {}) {
+      entry graft goToNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::goToNumbersStart's contract, over a volatile tape.
+    export routine goToNumbersStart(volatile tape num: symbols writes {}) {
+      entry graft goToNumbersStartGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::goToNextNumber's contract, over a volatile tape.
+    export routine goToNextNumber(volatile tape num: symbols writes {}) {
+      entry graft goToNextNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::goToPreviousNumber's contract, over a volatile tape.
+    export routine goToPreviousNumber(volatile tape num: symbols writes {}) {
+      entry graft goToPreviousNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::deleteNumber's contract, over a volatile tape.
+    export routine deleteNumber(volatile tape num: symbols) {
+      entry graft deleteNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::normalizeNumber's contract, over a volatile tape.
+    export routine normalizeNumber(volatile tape num: symbols) {
+      entry graft normalizeNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::plusOne's contract, over a volatile tape.
+    export routine plusOne(volatile tape num: symbols) {
+      entry graft plusOneGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::minusOneFast's contract, over a volatile tape.
+    export routine minusOneFast(volatile tape num: symbols) {
+      entry graft minusOneFastGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::invertNumber's contract, over a volatile tape. The
+    ? cross-representation call goes to the bare namespace's OWN twin, so the
+    ? tape stays volatile on the far side of the representation boundary.
+    export routine invertNumber(volatile tape num: symbols) {
+      entry state toStart {
+        ['^'] -> move [>] goto atFirstDigit;
+        [*]   -> move [<] goto toStart;
+      }
+      state atFirstDigit {
+        [*] -> call std::binaryNumbersBareVolatile::invertNumber(
+                 num = num with map { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+               ) then return;
+      }
+    }
+
+    ? std::binaryNumbers::minusOne's contract, over a volatile tape. Every
+    ? leg of the composition is this namespace's own routine, so the tape is
+    ? volatile at each of the four calls.
+    export routine minusOne(volatile tape num: symbols) {
+      entry state s1 { [*] -> call invertNumber(num = num) then s2; }
+      state s2       { [*] -> call plusOne(num = num) then s3; }
+      state s3       { [*] -> call invertNumber(num = num) then s4; }
+      state s4       { [*] -> call normalizeNumber(num = num) then return; }
+    }
+  }
+
+  namespace binaryNumbersBareVolatile {
+    use std::binaryNumbersBare::symbols;
+    use std::binaryNumbersBare::plusOneGraph;
+    use std::binaryNumbersBare::minusOneGraph;
+    use std::binaryNumbersBare::invertNumberGraph;
+    use std::binaryNumbersBare::normalizeNumberGraph;
+
+    ? std::binaryNumbersBare::plusOne's contract, over a volatile tape.
+    export routine plusOne(volatile tape num: symbols) {
+      entry graft plusOneGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbersBare::minusOne's contract, over a volatile tape.
+    export routine minusOne(volatile tape num: symbols) {
+      entry graft minusOneGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbersBare::invertNumber's contract, over a volatile tape.
+    export routine invertNumber(volatile tape num: symbols preserves { '_' }) {
+      entry graft invertNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbersBare::normalizeNumber's contract, over a volatile
+    ? tape.
+    export routine normalizeNumber(volatile tape num: symbols) {
       entry graft normalizeNumberGraph(num = num, done = return);
     }
   }

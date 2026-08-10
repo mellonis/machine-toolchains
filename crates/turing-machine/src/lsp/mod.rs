@@ -620,6 +620,8 @@ impl LanguageService for TmcLanguageService {
         //    read the AST and a COMMENT-FREE token stream; the editor lexes
         //    with comment trivia, so filter to `significant` to match the
         //    batch path's comment-free stream (identical findings either way).
+        //    The editor already has the comment-INCLUSIVE stream too
+        //    (`raw_tokens`, pre-filter) — handed over as-is, at no extra cost.
         let lint = match (
             staged.resolved.as_ref(),
             staged.program.as_ref(),
@@ -632,6 +634,7 @@ impl LanguageService for TmcLanguageService {
                     diagnostics: &staged.diagnostics,
                     program,
                     tokens: &tokens,
+                    comment_tokens: raw_tokens,
                 };
                 Some(run_rules(&ctx, &effective_allow, &effective_warn))
             }

@@ -415,3 +415,79 @@ fn bare_normalize_number_all_zero_preserves_zero() {
     let src = consumer(BARE, "std::binaryNumbersBare::normalizeNumber");
     assert_stdlib_golden(&src, 3, snap(0, &[1, 1], 0), snap(2, &[1], 2));
 }
+
+// ── contract clauses are codegen-inert ──────────────────────────────────────
+
+/// The standing guarantee behind the library declaring its contracts: a
+/// `writes` / `preserves` clause is a compile-time assertion about a world's
+/// write set — resolved, checked against the inferred footprint, then
+/// discarded — so declaring one may never move a byte of what is emitted.
+///
+/// The proof is a fixture pair: one source carrying clauses, the same source
+/// with every clause deleted, compiled at both optimization levels with the
+/// emitted assembly AND the object bytes compared. The pair mirrors the two
+/// shapes the standard library itself declares — an unconditional walker that
+/// writes nothing, and a sweep that preserves the blank — over both a graph
+/// and its facade, plus a machine that calls each facade, so the check covers
+/// the graft-splice and the call paths as well as the declarations.
+#[test]
+fn contracts_are_codegen_inert() {
+    const WITH_CLAUSES: &str = "\
+alphabet bits { '_', '0', '1' }
+
+export graph walkGraph(tape num: bits writes {}, state done) {
+  entry state walk {
+    ['_'] -> done;
+    [*]   -> move [>] goto walk;
+  }
+}
+
+export routine walk(tape num: bits writes {}) {
+  entry graft walkGraph(num = num, done = return);
+}
+
+export graph sweepGraph(tape num: bits preserves { '_' }, state done) {
+  entry state sweep {
+    ['0'] -> write ['1'] move [>] goto sweep;
+    ['1'] -> write ['0'] move [>] goto sweep;
+    ['_'] -> done;
+  }
+}
+
+export routine sweep(tape num: bits preserves { '_' }) {
+  entry graft sweepGraph(num = num, done = return);
+}
+
+machine {
+  tape num: bits;
+  entry state a { [*] -> call walk(num = num) then b; }
+  state b       { [*] -> call sweep(num = num) then c; }
+  state c       { [*] -> stop; }
+}
+";
+    let clause_free = WITH_CLAUSES
+        .replace(" writes {}", "")
+        .replace(" preserves { '_' }", "");
+    assert_ne!(
+        clause_free, WITH_CLAUSES,
+        "the pair must differ in source, or the comparison below is vacuous"
+    );
+
+    for level in [OptLevel::O0, OptLevel::O1] {
+        let opts = || CompileOptions {
+            opt_level: level,
+            ..Default::default()
+        };
+        let declared = compile(WITH_CLAUSES, opts()).expect("the clause-bearing source compiles");
+        let bare = compile(&clause_free, opts()).expect("the clause-free source compiles");
+        assert_eq!(
+            declared.tma, bare.tma,
+            "{level:?}: a contract clause must not move the emitted assembly"
+        );
+        assert_eq!(
+            declared.object.to_bytes(),
+            bare.object.to_bytes(),
+            "{level:?}: a contract clause must not move the emitted object"
+        );
+    }
+}

@@ -158,9 +158,9 @@ use crate::cst::{
 };
 use crate::lexer::{Comment, CommentKind, LexMode, Token, TokenKind, lex_with};
 use crate::parser::{
-    AlphabetElem, BindingArg, BindingValue, Continuation, MapArrow, MoveCell, MoveDir, MoveVec,
-    Pattern, PatternCell, PatternCellKind, SigParamKind, Signature, SymLit, SymMap, TermKind,
-    Transition, WriteCell, WriteCellKind, WriteVec, parse_cst,
+    AlphabetElem, BindingArg, BindingValue, Continuation, ContractClause, MapArrow, MoveCell,
+    MoveDir, MoveVec, Pattern, PatternCell, PatternCellKind, SigParamKind, Signature, SymLit,
+    SymMap, TermKind, Transition, WriteCell, WriteCellKind, WriteVec, parse_cst,
 };
 
 /// Spaces per block level (module doc, "Indentation").
@@ -711,15 +711,52 @@ fn continuation_text(cont: &Continuation) -> String {
     }
 }
 
+/// One `writes { … }` or `preserves { … }` clause, re-encoded losslessly:
+/// a single leading space ahead of the keyword, then the same brace-body
+/// spacing an `alphabet` renders inline (`{ elem, elem }`, `render_alphabet`
+/// above). An empty clause is meaningful — it declares that the parameter
+/// writes (or preserves) nothing, distinct from no clause at all — and
+/// prints `{}` with no inner space; this deliberately does NOT mirror
+/// `render_alphabet`'s empty-body spacing because a bare `alphabet` body can
+/// never be empty (the compiler rejects it), so that path renders no real
+/// input and sets no convention. A clause carries no interior comments (the
+/// parser never attaches any to one), so there is no interior/wrapping case
+/// to consider here — unlike `render_alphabet` or `paren_list`, a clause is
+/// always one unbroken run of tokens on the line its parameter entry
+/// occupies.
+///
+/// `pub(crate)` so the LSP hover renderers (`lsp/navigate.rs`) can spell a
+/// declared clause identically to this printer's canonical output instead of
+/// keeping a second copy of the same string in sync.
+pub(crate) fn contract_clause_text(keyword: &str, clause: &ContractClause) -> String {
+    let entries: Vec<String> = clause.elems.iter().map(alphabet_elem_text).collect();
+    if entries.is_empty() {
+        format!(" {keyword} {{}}")
+    } else {
+        format!(" {keyword} {{ {} }}", entries.join(", "))
+    }
+}
+
 fn signature_params(sig: &Signature) -> Vec<String> {
     sig.params
         .iter()
         .map(|param| match &param.kind {
             SigParamKind::Tape {
-                alphabet, volatile, ..
+                alphabet,
+                volatile,
+                writes,
+                preserves,
+                ..
             } => {
                 let prefix = if *volatile { "volatile " } else { "" };
-                format!("{prefix}tape {}: {alphabet}", param.name)
+                let mut out = format!("{prefix}tape {}: {alphabet}", param.name);
+                if let Some(clause) = writes {
+                    out.push_str(&contract_clause_text("writes", clause));
+                }
+                if let Some(clause) = preserves {
+                    out.push_str(&contract_clause_text("preserves", clause));
+                }
+                out
             }
             SigParamKind::State => format!("state {}", param.name),
         })

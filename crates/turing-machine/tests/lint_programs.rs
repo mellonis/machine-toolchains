@@ -647,6 +647,78 @@ fn no_golden_tmc_carries_a_dead_map_pair() {
     assert!(seen >= 7, "the golden corpus is present, got {seen} files");
 }
 
+// -- contract-clause-overlap ---------------------------------------------
+
+/// A `writes`/`preserves` clause pair sharing the glyph `'1'` — `preserves`
+/// wins the effective-set subtraction, so the `writes` entry naming `'1'` is
+/// inert. The body writes only `'0'`, so the contract itself is satisfied and
+/// the file compiles; only the redundancy fires.
+const CONTRACT_OVERLAP: &str = "\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
+  entry state s { [*] -> write ['0'] return; }
+}
+";
+
+#[test]
+fn a_contract_clause_overlap_file_reports_and_exits_one() {
+    let dir = scratch("contract-overlap");
+    let f = write(&dir, "m.tmc", CONTRACT_OVERLAP);
+    let out = execute(&args(&["lint", f.to_str().unwrap()])).unwrap();
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stdout.contains(
+            "lint: '1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+        ),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn allow_suppresses_contract_clause_overlap() {
+    // The code joins the shared allow namespace automatically (the
+    // `known_code` union covers every `RULES` entry), so naming it is
+    // accepted rather than rejected as a typo, and it silences the finding.
+    let report = lint(
+        CONTRACT_OVERLAP,
+        LintOptions {
+            allow: vec!["contract-clause-overlap".to_string()],
+            warn: Vec::new(),
+        },
+    )
+    .expect("a known allow code");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "contract-clause-overlap")
+    );
+}
+
+#[test]
+fn no_golden_tmc_carries_a_contract_clause_overlap() {
+    // The corpus gate: every committed `.tmc` teaching fixture is free of the
+    // finding, so a rule that over-reported would fail here rather than in a
+    // user's editor.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+    let mut seen = 0;
+    for entry in fs::read_dir(&dir).expect("the golden directory") {
+        let path = entry.expect("a directory entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("tmc") {
+            continue;
+        }
+        seen += 1;
+        let src = fs::read_to_string(&path).expect("read the fixture");
+        let overlaps: Vec<Diagnostic> = findings(&src)
+            .into_iter()
+            .filter(|d| d.code == "contract-clause-overlap")
+            .collect();
+        assert!(overlaps.is_empty(), "{}: {overlaps:#?}", path.display());
+    }
+    assert!(seen >= 7, "the golden corpus is present, got {seen} files");
+}
+
 // -- flagship acceptance: unused-label on `.tma` ------------------------
 
 #[test]

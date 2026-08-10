@@ -12,6 +12,7 @@
     { "include": "#keywordsModifier" },
     { "include": "#keywordsImport" },
     { "include": "#keywordsControl" },
+    { "include": "#keywordsContract" },
     { "include": "#keywordsOperation" },
     { "include": "#keywordsDebugger" },
     { "include": "#glyph" },
@@ -67,6 +68,10 @@
     "keywordsDebugger": {
       "name": "keyword.control.tmc",
       "match": "\\b(debugger)\\b"
+    },
+    "keywordsContract": {
+      "name": "keyword.control.tmc",
+      "match": "\\b(writes|preserves)\\b"
     },
     "declaration": {
       "comment": "Colors the name introduced by a declaring keyword. The keyword itself is re-scoped here because a TextMate rule consumes what it matches; the authoritative keyword lists are the `keywords*` rules above.",

@@ -421,3 +421,226 @@ fn volatile_signature_params_format_canonically() {
     let twice = format(&out).expect("the formatted output re-formats");
     assert_eq!(out, twice, "formatting the output is not idempotent");
 }
+
+/// A signature tape parameter's `writes { … }` and `preserves { … }` clauses
+/// print in canonical form: a single space ahead of each keyword, and the
+/// brace body spaced the same way an `alphabet` body is (`{ elem, elem }`).
+#[test]
+fn writes_and_preserves_clauses_format_canonically() {
+    let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
+               routine w(tape t:bits writes{'0','1'}preserves{'#'}) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(tape t: bits writes { '0', '1' } preserves { '#' }) {",
+        "the contract clauses print in canonical form, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// An already-canonical clause is a fixed point — formatting it a first time
+/// changes nothing, distinct from the messy-input case above.
+#[test]
+fn an_already_canonical_contract_clause_is_a_fixed_point() {
+    let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
+               routine w(tape t: bits writes { '0', '1' } preserves { '#' }) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(tape t: bits writes { '0', '1' } preserves { '#' }) {",
+        "an already-canonical clause round-trips unchanged, got: {sig_line:?}"
+    );
+}
+
+/// A clause-bearing signature is the `formatting_never_changes_a_token`
+/// property (module doc) narrowed to a single fixture: the printer must not
+/// silently drop the `writes`/`preserves` tokens (or their brace bodies) the
+/// way an entry that only reads `alphabet` off `SigParamKind::Tape` would.
+#[test]
+fn formatting_never_changes_a_token_with_contract_clauses() {
+    let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
+               routine w(tape t: bits writes { '0', '1' } preserves { '#' }) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let formatted = format(src).expect("formats");
+    assert_eq!(
+        token_signature(src),
+        token_signature(&formatted),
+        "the formatted text does not lex to the same token stream when contract clauses are present"
+    );
+}
+
+/// The empty clause `writes {}` (distinct from no clause at all — see
+/// `resolve_contract_clause` in the compiler) prints with no inner space,
+/// never the alphabet formatter's `{ }`.
+#[test]
+fn an_empty_contract_clause_prints_with_no_inner_space() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               routine w(tape t:bits writes{}) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(tape t: bits writes {}) {",
+        "an empty clause has no inner space, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// `volatile` and a `writes` clause compose on the same tape parameter.
+#[test]
+fn volatile_and_writes_clause_compose_in_a_signature_param() {
+    // A second `state` parameter after the clause-bearing one exercises the
+    // comma-adjacency the printer's `paren_list` actually joins entries
+    // with — the shape where a stray space ahead of the `,` would show.
+    let src = "alphabet symbols { '0', '1' }\n\n\
+               routine w(volatile   tape  num:symbols   writes{'0'},state done) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: symbols;\n\
+               \x20 entry state s { [*] -> call w(num = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(volatile tape num: symbols writes { '0' }, state done) {",
+        "volatile and a writes clause compose in signature position, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// A clause wide enough to push the whole parameter past the line width
+/// forces the signature list to break one parameter per line (the existing
+/// `paren_list` behavior) — the clause itself never wraps internally.
+#[test]
+fn a_wide_writes_clause_breaks_the_param_list_without_wrapping_the_clause() {
+    let elems: Vec<String> = (0..40).map(|n| n.to_string()).collect();
+    let src = format!(
+        "alphabet bytes {{ 0..99 }}\n\n\
+         routine w(tape t: bytes writes {{{}}}) {{ entry state g {{ [*] -> stop; }} }}\n\n\
+         machine {{\n\
+         \x20 tape m: bytes;\n\
+         \x20 entry state s {{ [*] -> call w(t = m) then stop; }}\n\
+         }}\n",
+        elems.join(",")
+    );
+    let out = format(&src).expect("formats");
+    let lines: Vec<&str> = out.lines().collect();
+    let head_idx = lines
+        .iter()
+        .position(|l| *l == "routine w(")
+        .expect("the wide signature breaks onto its own opening line");
+    let entry_line = lines[head_idx + 1];
+    let expected_entry = format!("  tape t: bytes writes {{ {} }}", elems.join(", "));
+    assert_eq!(
+        entry_line, expected_entry,
+        "the single wide clause entry is not itself wrapped, got: {entry_line:?}"
+    );
+    assert!(
+        entry_line.chars().count() > 80,
+        "the fixture must actually exceed the line width to exercise the break"
+    );
+    assert_eq!(
+        lines[head_idx + 2],
+        ") {",
+        "the signature list closes on its own line after a break"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// `volatile` and BOTH clauses compose on the same tape parameter — the
+/// three modifiers together, not just the pairwise cases above.
+#[test]
+fn volatile_and_both_clauses_compose_in_a_signature_param() {
+    let src = "alphabet symbols { '0', '1', '#' }\n\n\
+               routine w(volatile   tape  num:symbols   writes{'0'}preserves{'#'}) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: symbols;\n\
+               \x20 entry state s { [*] -> call w(num = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(volatile tape num: symbols writes { '0' } preserves { '#' }) {",
+        "volatile and both clauses compose in signature position, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// A bare `preserves`-only clause (no `writes`) formats canonically — the
+/// grammar allows `preserves` with no preceding `writes`.
+#[test]
+fn a_preserves_only_clause_formats_canonically() {
+    let src = "alphabet bits { '_', '0', '1' }\n\n\
+               routine w(tape t:bits preserves{'_'}) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(tape t: bits preserves { '_' }) {",
+        "a bare preserves-only clause formats canonically, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}
+
+/// A range element (`lo..hi`) inside a clause re-encodes losslessly, the
+/// same as inside an alphabet body.
+#[test]
+fn a_range_element_inside_a_clause_formats_canonically() {
+    let src = "alphabet bits { '_', '0', '1', '#' }\n\n\
+               routine w(tape t:bits writes{'0'..'1'}preserves{'#'}) { entry state g { [*] -> stop; } }\n\n\
+               machine {\n\
+               \x20 tape m: bits;\n\
+               \x20 entry state s { [*] -> call w(t = m) then stop; }\n\
+               }\n";
+    let out = format(src).expect("formats");
+    let sig_line = out
+        .lines()
+        .find(|l| l.starts_with("routine w"))
+        .expect("the routine signature survives");
+    assert_eq!(
+        sig_line, "routine w(tape t: bits writes { '0'..'1' } preserves { '#' }) {",
+        "a range element re-encodes losslessly inside a clause, got: {sig_line:?}"
+    );
+    let twice = format(&out).expect("the formatted output re-formats");
+    assert_eq!(out, twice, "formatting the output is not idempotent");
+}

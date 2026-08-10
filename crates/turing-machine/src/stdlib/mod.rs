@@ -8,9 +8,13 @@
 //!
 //! The library ports the two binary-number libraries from the
 //! turing-machine-js project: `std::binaryNumbers` (a 5-symbol delimited
-//! representation) and `std::binaryNumbersBare` (a 3-symbol bare one). See
-//! `std.tmc`'s own comment block for the representation trade-off and the
-//! facade convention the source is organized around.
+//! representation) and `std::binaryNumbersBare` (a 3-symbol bare one), each
+//! mirrored by a volatile twin namespace — `std::binaryNumbersVolatile` and
+//! `std::binaryNumbersBareVolatile` — whose routines differ only in
+//! declaring their tape parameter `volatile` (docs/tmt/stdlib.md (the
+//! volatile twins)). See `std.tmc`'s own comment block for the
+//! representation trade-off and the facade convention the source is
+//! organized around.
 //!
 //! [`roster`] and [`materialized_std_uri`] below serve the LSP's
 //! go-to-definition on `std::` calls (docs/lsp.md (materialized standard
@@ -124,7 +128,7 @@ pub(crate) fn roster() -> &'static [RosterEntry] {
 /// The embedded stdlib's resolved doc map (docs/lsp.md (hover)), keyed by
 /// the same fully-qualified `ns::name` form [`roster`] uses. Covers every
 /// documented top-level entity — routines, graphs, and alphabets — not
-/// just the [`roster`]'s 14 linkable routines, so hovering a `std::` graph
+/// just the [`roster`]'s 28 linkable routines, so hovering a `std::` graph
 /// or alphabet reference still has something to say even though neither
 /// can ever be a go-to-definition target of its own.
 // consumer: the .tmc language service's hover surface, wired in separately
@@ -227,6 +231,24 @@ mod tests {
     use mtc_core::formats::object::SymbolDef;
 
     use super::*;
+    use crate::compiler::{ResolvedCall, ResolvedCallTarget};
+
+    /// The plain namespace each volatile twin mirrors, plain first.
+    const TWIN_NAMESPACES: [(&str, &str); 2] = [
+        ("std::binaryNumbers", "std::binaryNumbersVolatile"),
+        ("std::binaryNumbersBare", "std::binaryNumbersBareVolatile"),
+    ];
+
+    /// A plain qualified routine name mapped onto its twin's. Anything not in
+    /// a plain std namespace passes through unchanged.
+    fn twin_of(name: &str) -> String {
+        for (plain, twin) in TWIN_NAMESPACES {
+            if let Some(rest) = name.strip_prefix(&format!("{plain}::")) {
+                return format!("{twin}::{rest}");
+            }
+        }
+        name.to_string()
+    }
 
     /// A fresh scratch directory under `std::env::temp_dir()`, unique per
     /// call (process id + an atomic counter — this crate has no tempfile
@@ -271,12 +293,14 @@ mod tests {
         PathBuf::from(decode_percent(rest))
     }
 
-    /// Drift guard: the roster's full paths are exactly the fourteen
+    /// Drift guard: the roster's full paths are exactly the twenty-eight
     /// exported routines the stdlib declares — ten in `binaryNumbers`, four
-    /// in `binaryNumbersBare`. Also spot-checks that one entry's
-    /// `name_span` slices out exactly its routine name in `SOURCE`.
+    /// in `binaryNumbersBare`, and one volatile twin of each in
+    /// `binaryNumbersVolatile` / `binaryNumbersBareVolatile`. Also
+    /// spot-checks that one entry's `name_span` slices out exactly its
+    /// routine name in `SOURCE`.
     #[test]
-    fn roster_is_the_fourteen_exported_routines() {
+    fn roster_is_the_twenty_eight_exported_routines() {
         let mut roster_paths: Vec<&str> = roster().iter().map(|e| e.full_path.as_str()).collect();
         roster_paths.sort_unstable();
 
@@ -295,6 +319,20 @@ mod tests {
             "std::binaryNumbersBare::minusOne",
             "std::binaryNumbersBare::invertNumber",
             "std::binaryNumbersBare::normalizeNumber",
+            "std::binaryNumbersVolatile::goToNumber",
+            "std::binaryNumbersVolatile::goToNumbersStart",
+            "std::binaryNumbersVolatile::goToNextNumber",
+            "std::binaryNumbersVolatile::goToPreviousNumber",
+            "std::binaryNumbersVolatile::deleteNumber",
+            "std::binaryNumbersVolatile::normalizeNumber",
+            "std::binaryNumbersVolatile::plusOne",
+            "std::binaryNumbersVolatile::minusOneFast",
+            "std::binaryNumbersVolatile::invertNumber",
+            "std::binaryNumbersVolatile::minusOne",
+            "std::binaryNumbersBareVolatile::plusOne",
+            "std::binaryNumbersBareVolatile::minusOne",
+            "std::binaryNumbersBareVolatile::invertNumber",
+            "std::binaryNumbersBareVolatile::normalizeNumber",
         ];
         expected.sort_unstable();
         assert_eq!(roster_paths, expected);
@@ -327,7 +365,7 @@ mod tests {
     /// view: it must cover all three documented entity kinds — a routine,
     /// a graph, and an alphabet — not just the routines the roster links.
     /// Asserting only a routine here would still pass if `docs()` were
-    /// truncated to the roster's 14 entries, so all three are checked.
+    /// truncated to the roster's 28 entries, so all three are checked.
     #[test]
     fn docs_cover_routines_graphs_and_alphabets() {
         let map = docs();
@@ -346,10 +384,144 @@ mod tests {
             "graph doc present"
         );
 
+        // The volatile twins declare no graph and no alphabet of their own —
+        // they graft the shared graphs and import the shared alphabets — so
+        // their whole contribution to the doc map is their fourteen routines.
+        for entry in roster() {
+            assert!(
+                map.contains_key(&entry.full_path),
+                "every exported routine is documented, including the twins: {}",
+                entry.full_path
+            );
+        }
+
         // Every documented entity in std.tmc: 10 routines + 8 graphs + 1
         // alphabet in binaryNumbers, 4 routines + 4 graphs + 1 alphabet in
-        // binaryNumbersBare.
-        assert_eq!(map.len(), 28, "all documented std.tmc entities");
+        // binaryNumbersBare, 10 routines in binaryNumbersVolatile, 4 in
+        // binaryNumbersBareVolatile.
+        assert_eq!(map.len(), 42, "all documented std.tmc entities");
+    }
+
+    /// Drift guard for the volatile twins: `std::binaryNumbersVolatile` and
+    /// `std::binaryNumbersBareVolatile` mirror their plain namespaces
+    /// routine-for-routine, and differ from them ONLY in the volatile mark.
+    /// Same exported names, same signature shape, same contract clauses, the
+    /// SAME shared graphs grafted (no graph is duplicated into a twin), and
+    /// every `call` retargeted to the twin of its callee.
+    ///
+    /// That last clause is the one the twins exist for, and the only one
+    /// nothing else would catch. A twin that called a PLAIN routine would
+    /// drop the volatile mark at that boundary while still computing the
+    /// same thing out of byte-identical code — invisible to a behavioral or
+    /// a byte-identity check. So the call targets are compared directly,
+    /// site by site in source order, against the plain chain's targets
+    /// mapped through `twin_of`.
+    #[test]
+    fn the_volatile_twins_mirror_their_plain_namespaces() {
+        let resolved = analyze_staged(SOURCE)
+            .resolved
+            .expect("the embedded stdlib always resolves");
+
+        let world = |name: &str| {
+            resolved
+                .worlds
+                .iter()
+                .find(|w| w.name == name)
+                .unwrap_or_else(|| panic!("{name} is a declared world"))
+        };
+        // Exported routine names local to `ns`. The `::`-terminated prefix is
+        // what keeps `std::binaryNumbers` from also claiming
+        // `std::binaryNumbersBare`'s and `std::binaryNumbersVolatile`'s.
+        let locals = |ns: &str| {
+            let prefix = format!("{ns}::");
+            let mut names: Vec<String> = resolved
+                .worlds
+                .iter()
+                .filter(|w| matches!(w.kind, WorldKind::Routine) && w.exported)
+                .filter_map(|w| w.name.strip_prefix(&prefix).map(str::to_owned))
+                .collect();
+            names.sort_unstable();
+            names
+        };
+        let call_target = |c: &ResolvedCall| match &c.target {
+            ResolvedCallTarget::Routine { name, .. } => name.clone(),
+            // The stdlib declares no `bind`; asserted per world below, which
+            // is what keeps this arm from being a hole in the comparison.
+            ResolvedCallTarget::Bind { name } => format!("bind {name}"),
+        };
+
+        let mut graft_sites = 0usize;
+        let mut call_sites = 0usize;
+        for (plain_ns, twin_ns) in TWIN_NAMESPACES {
+            let names = locals(plain_ns);
+            assert!(!names.is_empty(), "{plain_ns} exports routines");
+            assert_eq!(
+                names,
+                locals(twin_ns),
+                "{twin_ns} mirrors {plain_ns}'s exported routines name-for-name"
+            );
+
+            for local in &names {
+                let plain = world(&format!("{plain_ns}::{local}"));
+                let twin = world(&format!("{twin_ns}::{local}"));
+                let at = format!("{twin_ns}::{local}");
+
+                assert!(
+                    plain.binds.is_empty() && twin.binds.is_empty(),
+                    "{at}: the stdlib declares no `bind` — the bind arm of \
+                     the call-target comparison must stay unreachable"
+                );
+                assert_eq!(
+                    plain.state_params, twin.state_params,
+                    "{at}: same state parameters"
+                );
+                assert_eq!(plain.tapes.len(), twin.tapes.len(), "{at}: same tape arity");
+                for (p, t) in plain.tapes.iter().zip(&twin.tapes) {
+                    assert_eq!(p.name, t.name, "{at}: same tape parameter name");
+                    // The mangled alphabet name, not a same-glyph copy: the
+                    // twin imports its counterpart's `symbols` rather than
+                    // restating the representation.
+                    assert_eq!(p.alphabet, t.alphabet, "{at}: the SAME alphabet");
+                    assert_eq!(p.cardinality, t.cardinality, "{at}: same cardinality");
+                    assert_eq!(p.writes, t.writes, "{at}: same `writes` clause");
+                    assert_eq!(p.preserves, t.preserves, "{at}: same `preserves` clause");
+                    assert!(
+                        !p.volatile,
+                        "{plain_ns}::{local}: the plain side is never volatile"
+                    );
+                    assert!(t.volatile, "{at}: every twin tape parameter is volatile");
+                }
+
+                let plain_grafts: Vec<&str> =
+                    plain.grafts.iter().map(|g| g.target.as_str()).collect();
+                let twin_grafts: Vec<&str> =
+                    twin.grafts.iter().map(|g| g.target.as_str()).collect();
+                assert_eq!(
+                    plain_grafts, twin_grafts,
+                    "{at}: grafts the SAME graph, not a twin-namespace copy"
+                );
+                graft_sites += twin_grafts.len();
+
+                let expected: Vec<String> = plain
+                    .calls
+                    .iter()
+                    .map(|c| twin_of(&call_target(c)))
+                    .collect();
+                let actual: Vec<String> = twin.calls.iter().map(&call_target).collect();
+                assert_eq!(
+                    expected, actual,
+                    "{at}: every call retargeted to the twin of its callee"
+                );
+                call_sites += actual.len();
+            }
+        }
+
+        // Non-vacuity: both comparisons above must have had something to
+        // compare. The graft count is the twelve graph-backed facades; the
+        // call count is the delimited `invertNumber`'s one cross-namespace
+        // call plus `minusOne`'s four.
+        assert_eq!(graft_sites, 12, "every graph-backed twin facade compared");
+        assert_eq!(call_sites, 5, "every twin call site compared");
     }
 
     /// ASCII guard: every declaration line a `name_span` sits on is pure
@@ -362,7 +534,7 @@ mod tests {
     /// go-to-definition target.
     #[test]
     fn every_roster_declaration_line_is_ascii() {
-        assert_eq!(roster().len(), 14, "would be vacuous over an empty roster");
+        assert_eq!(roster().len(), 28, "would be vacuous over an empty roster");
         for entry in roster() {
             let line_ix = (entry.name_span.start.line - 1) as usize;
             let line = SOURCE.lines().nth(line_ix).expect("span line exists");

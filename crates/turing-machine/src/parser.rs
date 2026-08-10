@@ -6,7 +6,7 @@
 //! [`Program`] the rest of the front end consumes. Every fatal is raised by
 //! `parse_cst`; `lower_cst` never fails.
 //!
-//! The 25 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
+//! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
 //! expected. `deprecated` is contextual (an attribute word) and is not in that
 //! set.
@@ -145,12 +145,28 @@ pub struct SigParam {
     pub span: Span,
 }
 
+/// One `writes { … }` or `preserves { … }` contract clause on a signature
+/// tape parameter: the brace-set's elements (the same element grammar as an
+/// alphabet body — singles and ranges), the keyword's own span, and the
+/// whole clause's span (keyword start → closing `}`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractClause {
+    pub elems: Vec<AlphabetElem>,
+    pub kw_span: Span,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SigParamKind {
     Tape {
         alphabet: String,
         alphabet_span: Span,
         volatile: bool,
+        /// A declared `writes { … }` clause, signature-only (never present
+        /// on a machine tape declaration).
+        writes: Option<ContractClause>,
+        /// A declared `preserves { … }` clause, signature-only.
+        preserves: Option<ContractClause>,
     },
     State,
 }
@@ -1537,15 +1553,54 @@ impl Parser<'_> {
             let (name, name_span) = self.name("a tape parameter name")?;
             self.expect(&TokenKind::Colon, "`:` after the tape parameter name")?;
             let (alphabet, alphabet_span) = self.name("an alphabet name")?;
+            // `writes { … }`, then `preserves { … }`, both optional — the
+            // fixed order is a grammar rule, not an fmt convention, because
+            // fmt is token-preserving and cannot reorder an author's
+            // clauses.
+            let mut writes: Option<ContractClause> = None;
+            let mut preserves: Option<ContractClause> = None;
+            loop {
+                if self.at_kw("writes") {
+                    if preserves.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::ContractClauseOrder,
+                        ));
+                    }
+                    if writes.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::DuplicateContractClause { what: "writes" },
+                        ));
+                    }
+                    writes = Some(self.contract_clause()?);
+                } else if self.at_kw("preserves") {
+                    if preserves.is_some() {
+                        return Err(Self::err_at(
+                            self.peek(),
+                            CompileErrorKind::DuplicateContractClause { what: "preserves" },
+                        ));
+                    }
+                    preserves = Some(self.contract_clause()?);
+                } else {
+                    break;
+                }
+            }
+            let last_span = preserves
+                .as_ref()
+                .or(writes.as_ref())
+                .map_or(alphabet_span, |c| c.span);
             Ok(SigParam {
                 kind: SigParamKind::Tape {
                     alphabet,
                     alphabet_span,
                     volatile,
+                    writes,
+                    preserves,
                 },
                 name,
                 name_span,
-                span: join(t.span(), alphabet_span),
+                span: join(t.span(), last_span),
             })
         } else if self.at_kw("state") {
             self.bump();
@@ -1562,6 +1617,38 @@ impl Parser<'_> {
                 "a `tape` or `state` signature parameter",
             ))
         }
+    }
+
+    /// A `writes { … }` or `preserves { … }` clause body, the current token
+    /// already the keyword: mirrors [`Self::parse_alphabet`]'s body loop
+    /// (comma-separated [`Self::alphabet_elem`], empty allowed). Interior
+    /// comments are deliberately not accepted here — unlike an alphabet
+    /// body, a clause is a short one-line construct, and a comment splitting
+    /// one open is not worth the complexity budget this early; a comment
+    /// written inside one still parses, but reprints outside the clause on
+    /// the next fmt pass (the same relocation an author sees writing a
+    /// comment inside a signature or binding argument list).
+    fn contract_clause(&mut self) -> Result<ContractClause, CompileError> {
+        let kw_span = self.peek().span();
+        self.bump(); // `writes` / `preserves`
+        self.expect(&TokenKind::LBrace, "`{` to open the clause body")?;
+        let mut elems: Vec<AlphabetElem> = Vec::new();
+        if !matches!(self.peek().kind, TokenKind::RBrace) {
+            loop {
+                elems.push(self.alphabet_elem()?);
+                match self.peek().kind {
+                    TokenKind::Comma => self.bump(),
+                    TokenKind::RBrace => break,
+                    _ => return Err(Self::expected(self.peek(), "`,` or `}`")),
+                }
+            }
+        }
+        let close = self.expect(&TokenKind::RBrace, "`}` to close the clause body")?;
+        Ok(ContractClause {
+            elems,
+            kw_span,
+            span: join(kw_span, close.span()),
+        })
     }
 
     // ---- world bodies -----------------------------------------------------
