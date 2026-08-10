@@ -8,8 +8,8 @@ use mtc_core::vm::OperandKind;
 
 use crate::arch::opcodes::*;
 
-/// PM-1 `.pma` dialect version — an acceptance contract (docs/formats.md
-/// (assembly text)): pre-1.0 it is 0.N and N bumps on ANY grammar
+/// PM-1 `.pma` dialect version — an acceptance contract (docs/pmt/asm.md
+/// (dialect version history)): pre-1.0 it is 0.N and N bumps on ANY grammar
 /// change. 0.2: labels tightened to letters/digits/underscore. 0.3: the
 /// fused write+move mnemonics `wrl`/`wrr` are accepted, and the
 /// `.volatile` build-variant directive tags a `.func`'s build column (or,

@@ -34,7 +34,7 @@ Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 own version), `pmc language <VERSION>` (the `.pmc` language
 acceptance-contract version — `docs/pmt/language.md`), and
 `pma dialect (pm-1) <VERSION>` (the PM-1 `.pma` dialect version —
-`docs/formats.md (assembly text)`). The three numbers move on independent
+`docs/pmt/asm.md`). The three numbers move on independent
 axes: a crate release with no grammar change repeats the same
 language-version and dialect-version lines, and each of the two grammar
 versions only bumps when its own grammar changes.
@@ -133,7 +133,7 @@ Assembles hand-written or disassembled `.pma` text into a `.pmo` object;
 `-g` records the label/line debug section (`docs/formats.md`). Hand-written
 text can author build columns: `.volatile` tags a `.func` block as the
 gated column, or sets the object's program bit when it precedes the first
-`.func` (`docs/formats.md (the .volatile directive)`).
+`.func` (`docs/pmt/asm.md (the .volatile directive)`).
 
 ### Assembly errors
 

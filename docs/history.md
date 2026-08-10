@@ -48,7 +48,7 @@ safety the 2007 generation's stack never had.
 inspected and understood primarily through disassembly, not written
 against a high-level source language — the disassembler-first mindset
 this toolchain's own `pmt dis` (with its recursive-descent function
-discovery, `docs/formats.md (assembly text)`) is a direct descendant of.
+discovery, `docs/pmt/asm.md`) is a direct descendant of.
 `PMProcessor`'s `TPostMachineProcessor`/`TBelt` split — the processor
 talking to the tape only through a narrow interface, never touching it
 directly — is the ancestor of PM-1's bus architecture (`docs/pmt/isa.md`),

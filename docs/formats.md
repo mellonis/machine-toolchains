@@ -1,8 +1,9 @@
 # File formats
 
 All multi-byte integers are little-endian. This page covers the three
-binary container formats — objects, executables and tape blocks — the two
-assembly text dialects, the link-time map sidecar, and the IR JSON
+binary container formats — objects, executables and tape blocks — the
+assembly text grammar the two dialects share, the link-time map sidecar,
+and the IR JSON
 artifact. It is a **wire-format** page: what the bytes and the text mean,
 never what the machine does with them. Opcode and execution semantics are
 `docs/pmt/isa.md` for PM-1 and `docs/tmt/isa.md` for TM-1; the parts of the
@@ -21,8 +22,10 @@ The `pmt` subcommands that read and write these files are
 `docs/pmt/cli.md`; the `tmt` ones are `docs/tmt/cli.md`. One section below
 describes each container once, for both toolchains; where their contents
 differ, the difference is called out in that section rather than split into
-a second one. The two assembly dialects, being different languages, get a
-section each.
+a second one. The two assembly dialects, being different languages, are
+documented per toolchain — `docs/pmt/asm.md` for `.pma` and
+`docs/tmt/asm.md` for `.tma` — over the one shared section below that
+holds the grammar and the byte layouts they have in common.
 
 ## Shared conventions
 
@@ -156,8 +159,9 @@ Its three parts, in order:
 
 **How the fields index each other.** The frame register `FR` is a
 **composite index**: 0 is the identity context, and `1..=K` name directory
-entries. A framed call carries a **site index** (the framed-call operand
-below), and the two tables resolve it in one lookup each:
+entries. A framed call carries a **site index** (the `call.m` operand,
+`docs/tmt/asm.md (the mnemonic set)`), and the two tables resolve it in
+one lookup each:
 
 ```
 FR'         = compose[FR][site]        ; the composite active for the duration of the call
@@ -391,33 +395,27 @@ then `tmt tape-block show in.tmt`, and
 `tmt run app.tmx --tape-block in.tmt [--save-tape-block out.tmt]`
 (`docs/tmt/cli.md`).
 
-## `.pma` — assembly text
+## Assembly text
 
-The PM-1 `.pma` dialect version is **0.3** (pre-1.0: the version is `0.N`
-and `N` bumps on any grammar change, the same acceptance-contract shape as
-the `.pmc` language version in `docs/pmt/language.md`). See "Dialect version
-history" below for what each version changed.
+Both toolchains assemble from a line-oriented text dialect: PM-1's `.pma`
+and TM-1's `.tma`. Each dialect's own surface — its sample shape, its
+mnemonic spellings, the directives only it has, and its version
+history — is its toolchain's page: `docs/pmt/asm.md` and
+`docs/tmt/asm.md`. This section is what the two share: the lexical shape
+and canonical layout every dialect prints in, the grammar extensions the
+assembler framework offers behind capabilities a dialect opts into
+(`docs/core.md (the assembler framework)`), and the bytes that text
+lowers to. A dialect that leaves a capability off does not accept the
+directives riding it: the classic `.pma` grammar enables none of the
+sectioned, vector, and macro surface below, and `.tma` is today the only
+dialect that enables all of it.
 
-```asm
-.func goToEnd                   ; emits ent, defines symbol
-L1:     rgt
-        jm      L1              ; assembler picks jm.s automatically
-        lft
-        ret
-
-.func main
-        call    goToEnd         ; width decided at link time
-        rgt
-        wr      1               ; mark
-        stp
-```
-
-One instruction per line, `;` line comments. The **canonical column
-grid** — labels at column 0, mnemonics at column 8, operands at column
-16, trailing spaces trimmed — is what `pmt fmt` (`docs/pmt/cli.md`)
-enforces on hand-written `.pma` source, and what `pmt compile -S` and
-`pmt dis` emit directly; the assembler's parser itself accepts any
-whitespace on input.
+One instruction — or one table directive — per line, `;` line comments.
+The **canonical column grid** — labels at column 0, mnemonics at column
+8, operands at column 16, trailing spaces trimmed — is what `pmt fmt`
+and `tmt fmt` (`docs/pmt/cli.md`, `docs/tmt/cli.md`) enforce on
+hand-written source, and what `compile -S` and `dis` emit directly; the
+assembler's parser itself accepts any whitespace on input.
 
 A trailing comment's column is not fixed at 32; it aligns per **group**
 at `max(32, widest code width in the group + 1)`, where a line's code
@@ -446,43 +444,6 @@ trailing one — prints at column 0. Column 8, the mnemonic column, is
 never a comment position: it is where statements live, and a comment is
 not a statement.
 
-The two producers differ on one point, the long-label rule: `pmt dis`'s
-grid (`grid_line`) keeps a short label field — 7 characters or fewer,
-the name plus its `:` — inline with its instruction, and moves only a
-field of 8 characters or more to its own line, so a long label never
-pushes the mnemonic column out of alignment; `pmt compile -S` puts every
-label on its own line unconditionally, regardless of length. `pmt fmt`
-treats both shapes as already canonical, so reformatting the output of
-either `pmt compile -S` or `pmt dis` is always a no-op. `pmt dis` output
-is always valid assembler input — round-tripping through `asm`
-reproduces the original bytes exactly, build-column tags and the
-program-volatile bit included ("The `.volatile` directive" below).
-
-`pmt dis` accepts either binary. From a `.pmo`: real names come from the
-symbol table, code is shown per function, and call sites are named from
-relocations. From a `.pmx`: names come from the `-g` sidecar map when one
-is present (`FILE.pmx.map` beside the executable, or `--map`); otherwise
-they are synthesized via **recursive-descent discovery** — a worklist walk
-from the entry point following control-flow edges; every verified `call`
-target is a function root (exact in v1, which has no indirect control
-flow). Discovered roots are named `main` (the entry) or `func_XXXX`;
-internal jump targets are named `LXXXX`; bytes never reached by the walk
-print as `.byte` directives, one per byte. The `ent` byte remains the
-runtime call guard, but function discovery itself comes from control flow,
-not byte scanning — an operand byte that happens to equal the entry opcode
-is never mistaken for a function start.
-
-**Symbol jumps (tail calls):** `jmp @name` takes a function symbol, not a
-label — in an object it assembles as a far `jmp` plus a relocation (the
-same hole-and-relocation mechanism as `call`), and relaxes to `jmp.s` at
-link time exactly like a `call`. `jmp.s @name` is a syntax error (width is
-linker-selected, like `call.s`), and conditional `jm @name`/`jnm @name` are
-errors — v1 branches take labels only. Disassemblers print a relocated jump
-(from an object, via its relocation table) or a jump landing on a function
-root (from an executable, via discovery) in the `jmp @name` form; a jump
-into another function's middle that lands on no known root falls back to
-`.byte`.
-
 **Visibility and names:** `.func name local` declares an unexported
 (local) function; plain `.func name` exports. Symbol names — in `.func`
 lines and in jump/call operands — accept `::`-separated segments of
@@ -494,184 +455,11 @@ elsewhere in the toolchain), but the label grammar does not accept `::`
 or `.`, which is what lets the parser tell a label (`L1:`) apart from a
 namespaced/nested symbol reference without ambiguity.
 
-### The `.volatile` directive
-
-`.volatile` is a presence-form directive — no operand, no value — naming
-a **build column** (`docs/pmt/language.md (volatile programs)`). It has
-two legal placements, meaning different things:
-
-- **Directly after a `.func` line** it tags that block as the volatile
-  column. Absence is the normal column; there is no `.normal`.
-- **Before the first `.func`** it sets the object's program-volatile bit
-  — the header flag the linker reads off the entry-defining object to
-  pick a column for every name (the `.pmo` section above;
-  `docs/core.md (linking)`).
-
-Anywhere else is an error. "Directly after" means the next item: own-line
-comments are trivia and do not close the slot, but a label, an
-instruction, or a second `.volatile` does, and the complaint is that
-`.volatile` must directly follow its `.func`. A second file-level
-`.volatile` is a duplicate `.volatile`.
-
-A name may be defined **once per column**, which makes a bare/`.volatile`
-pair the only same-name pair one file may carry; two bare `.func f`
-blocks stay `duplicate-function` exactly as before. The two members of a
-pair must also agree on visibility: `.func f local` paired with a
-`.func f` is refused, because the linker pairs a name's columns only
-among exported ones and a half-local pair would half-vanish there.
-
-All three of those complaints — the two placement ones above and the
-visibility one — render as `syntax` (`docs/core.md (error codes)`). The
-directive introduces no error code of its own; the only coded diagnostic
-it changes is `duplicate-function`, which it makes column-aware rather
-than name-only.
-
-What an author controls, then, is four shapes:
-
-| The file writes | The object carries | A normal program links | A volatile program links |
-|---|---|---|---|
-| one bare `.func f` | one `normal` blob | it | it, counted as a fallback |
-| one `.func f` + `.volatile` | one `volatile` blob | it, counted as a fallback | it |
-| a pair with different bodies | a `normal` and a `volatile` blob | the bare one | the tagged one |
-| a pair with identical bodies | one `both` blob | it | it |
-
-The last row is the assembler's own dedup, mirroring the compiler's: a
-legal pair whose two blocks assemble to the same bytes and the same call
-sites collapses to one `both`-tagged blob. A single block is deliberately
-never auto-promoted to `both` — `both` is a **statement**, made by
-writing the function twice. Promoting a lone block would erase the
-fallback signal the first two rows exist to carry: a normal-only or
-volatile-only function would become unwritable. It would cost the text
-round trip too, since a single bare `.func f` would then assemble to a
-`both` blob, which disassembles as two blocks — text that no longer
-comes back as the text that produced it.
-
-`pmt dis` emits all of it — the program-bit line leads the dump, a
-tagged block carries the directive under its `.func`, and a `both` blob
-prints twice, bare first — so the text reassembles to the object it came
-from, byte for byte:
-
-```
-$ pmt compile -O1 two-v.pmc -o two-v.pmo
-$ pmt dis two-v.pmo > two-v.pma
-$ pmt asm two-v.pma -o rt.pmo && cmp two-v.pmo rt.pmo && echo identical
-identical
-$ cat two-v.pma
-.volatile
-.func main
-        wr      1
-        stp
-.func main
-.volatile
-        wr      1
-        wr      1
-        stp
-```
-
-(That is `volatile main() { mark; mark; }` at `-O1`: the normal column
-drops the idempotent second write, the gated column keeps it, and the
-object carries both plus the program bit.) The round trip is byte-exact
-without `-g`; a `-g` object's debug lines describe `.pmc` sources the
-disassembly does not have, so they do not survive the trip — the same
-declared exception that applies to every other debug side table.
-
-**The directive is selection metadata, not protection.** It says which
-column a blob belongs to and which kind of program this object builds.
-It says nothing about the body, which the assembler transcribes exactly
-as written either way. Hand-written assembly preserves the author's
-transactions on both architectures regardless of any directive: nothing
-after the assembler reorders, merges, or drops tape operations — PM-1's
-only post-assembly rewrite is the linker narrowing a call's width, and
-TM-1's mono stamping remaps symbols, never sequences. So a `.pma` file
-with no `.volatile` in it is not "an unprotected build"; it is a
-normal-column build of exactly the instructions it lists.
-
-**One footgun.** A `.volatile` block's calls bind the callee's volatile
-column. For a `local` callee — bound directly within the object, never
-through the linker's namespace — a missing volatile twin has nowhere to
-fall back to, so the reference becomes an external and the link fails
-with a bare `unresolved symbols: NAME`, which never mentions the column
-that was missing. Give a local helper both columns, or export it (an
-exported name falls back and is merely counted).
-
-**PM-1 only.** `.func` is a core directive both dialects share, but
-`.volatile` rides an assembler capability only the PM-1 dialect enables:
-`.tma` does not recognize the word at all, since TM-1 volatility is a
-property of a tape parameter rather than of a routine
-(`docs/tmt/language.md (volatile tapes)`). The framework also refuses to
-combine the directive with `.routine` signatures or table sections —
-merging build columns renumbers blobs, and those records are indexed by
-blob — a rule no shipped dialect can reach, since the one dialect with
-the directive has no table surface.
-
-### Dialect version history
-
-- **0.1** — the v1 toolchain's dialect; the retroactive baseline the
-  version scheme measures from.
-- **0.2** — one tightening: label names dropped `.` and `::` from their
-  accepted characters, leaving letters, digits, and underscores (Unicode
-  letters still legal). Symbol names in `.func` and jump/call operands are
-  unaffected — the dotted/`::`-segmented grammar above still applies to
-  them.
-- **0.3** — additive, two things. The fused write+move mnemonics `wrl`
-  and `wrr` join the mnemonic set (each takes a one-element symbol vector
-  like `wr`, `docs/pmt/isa.md`). And the `.volatile` directive joins the
-  directive set, in both placements ("The `.volatile` directive" above).
-  No existing program changes meaning; the accepted set only grew, and a
-  file that writes neither assembles to the bytes it always did.
-
-## `.tma` — assembly text (TM-1)
-
-The TM-1 `.tma` dialect version is **0.3** (pre-1.0: the version is `0.N`
-and `N` bumps on any grammar change — the same acceptance-contract shape
-as the `.pma` dialect above). Where PM-1 drives one two-symbol tape, TM-1
-drives up to sixteen tapes, each with its own alphabet, and branches
-through match/dispatch tables rather than the mark register alone. The
-dialect turns on three grammar features the classic `.pma` grammar leaves
-off — a **tables** section, the `.rept` macro, and `[..]` **vector**
-operands — plus a per-routine signature directive. Version 0.3 adds the
-fused write+move mnemonic `wrmv` (a rule's whole write+move action in one
-instruction). Its full version history is at the end of this section.
-
-```asm
-.section tables
-Tfetch: .row    [1, *, *, *]    ; match tape 0 == 1, others any
-        .row    [8, *, *, *]
-Dfetch: .targets L_step, L_halt ; MR = 1 → L_step, MR = 2 → L_halt
-
-.section code
-.routine main, tapes=4, alpha=(9, 127, 127, 2)
-.func main
-L_step: rd                      ; latch every head into its slot
-        mtc     Tfetch          ; walk the table, set the match reg
-        djmp    Dfetch          ; dispatch on the match reg
-L_halt: stp
-```
-
-One instruction (or one table directive) per line, `;` line comments, the
-same **canonical column grid** as `.pma` (labels at column 0, mnemonics at
-8, operands at 16, trailing comments aligned per group at or past 32 —
-see "assembly text", above, for the exact rule); the parser accepts any
-whitespace on input, and `tmt fmt` / `tmt dis` emit the grid. `tmt dis`
-output is valid assembler input — including a `--call-mech=mono` linked
-image, whose stamped specialized routine copy is named with a
-`.`-separated digest suffix (`bare.513e6968`, see `docs/tmt/isa.md
-(call mechanisms)`) drawn from the same character set an ordinary
-identifier already accepts, so the name re-lexes like any other.
-Reassembling an **object's** disassembly reproduces the original bytes
-exactly. Reassembling and re-linking a **linked image's** disassembly
-reproduces an equivalent image — same code, same table content — but not
-always the same bytes: a frame that originated from a declarative binding
-always disassembles to raw `.frame`/`call.m` syntax (there is no way to
-reconstruct the declarative form), and relinking that syntax does not
-necessarily lay out the tables section the way the original
-declarative-binding link did.
-
 ### Sections and the routine signature
 
-A `.tma` file is split into two sections. `.section tables` holds the
-match tables, the dispatch tables, and the frame descriptors;
-`.section code` holds the functions. The
+A file in a dialect with the tables capability is split into two
+sections. `.section tables` holds the match tables, the dispatch tables,
+and the frame descriptors; `.section code` holds the functions. The
 default section is `code`, so a file may omit `.section code`. Only table
 directives are legal in the tables section, and only functions/code in the
 code section.
@@ -692,36 +480,14 @@ and does not survive into the image, so `alpha` there is the
 **physical** tape each virtual one projects onto instead — a
 `; derived` trailing comment marks the line to say so.
 
-### The mnemonic set
-
-The dialect accepts twenty mnemonics. The opcode table — each mnemonic's
-byte, operand shape, and semantics — is `docs/tmt/isa.md (instruction
-set)`. What belongs here is how they are *spelled*:
-
-- **Jump and call targets are labels**; `call` additionally accepts a
-  routine symbol. `call.s` exists in the mnemonic table for disassembly
-  display and link-time relaxation only: the assembler always emits far
-  `call` and rejects `call.s <target>` in source, because the width is
-  linker-selected. The linker's relaxation fixpoint narrows a far `call`
-  to `call.s` when the target is in short range, exactly as PM-1 does.
-- **`mtc` and `djmp` take a table label** defined in the tables section.
-- **`wr`, `mov`, and `wrmv` take bracketed vectors** — see *Vector
-  operands* below; `wrmv` takes two, comma-separated.
-- **`trap` and `retx` take an immediate.** `#<n>` is a single unsigned
-  byte, `0`..=`255`, written with a leading `#` (`trap #0`, `retx #1`).
-  It is distinct from a symbol or a label — it carries a raw number.
-- **`call.m <target>, <frame>`** pairs a call target with a `.frame`
-  label from the tables section. The operand's two halves are a rel
-  displacement and, after link, a call-site index (see *The frames
-  region* above).
-- **`ent` is emitted implicitly by `.func`** and is the runtime call
-  guard; it is never written by hand.
-
 ### Vector operands
 
-Four instructions and the `.row` directive take a bracketed vector with
-**one element per tape**, left to right. The element vocabulary depends on
-where the vector appears:
+Under the vectors capability, the `.row` directive and any instruction
+whose operand kind asks for one take a bracketed vector with **one
+element per tape**, left to right. Which mnemonics those are is each
+dialect's own business — TM-1 spells them `wr`, `mov`, and `wrmv`
+(`docs/tmt/asm.md (the mnemonic set)`), and the examples below use that
+spelling. The element vocabulary depends on where the vector appears:
 
 - **match rows** (`.row [..]`): a symbol index is an **exact** match on
   that tape's head; `*` is the wildcard ("any symbol").
@@ -730,16 +496,18 @@ where the vector appears:
 - **move vectors** (`mov [..]`): `>` steps that head right, `<` left, `.`
   stays put.
 
-`wrmv [w…], [m…]` takes **two** vectors — a write vector then a move
-vector, comma-separated — fusing a rule's whole write+move action into
-one instruction. Its execution order is `docs/tmt/isa.md (reading,
-writing and moving)`. A hand-written `wr`/`mov` pair remains equally
-valid; `wrmv` is the fused spelling, not a new capability.
+A fused write+move operand (`wrmv [w…], [m…]`) takes **two** vectors — a
+write vector then a move vector, comma-separated — fusing a rule's whole
+write+move action into one instruction. Its execution order is the
+architecture's to define; TM-1's is `docs/tmt/isa.md (reading, writing
+and moving)`. A hand-written write/move pair remains equally valid; the
+fused form is a spelling, not a new capability.
 
 ### Match and dispatch tables
 
 A **match table** is a labeled run of `.row` directives. Each row is one
-vector; a run of rows under one label forms the table `mtc` walks.
+vector; a run of rows under one label forms the table the architecture's
+match instruction walks (TM-1's `mtc`).
 
 A **dispatch table** is a labeled run of `.targets`/`.target` directives:
 `.targets L1, …, Lk` lists the targets indexed by MR (MR = 1 selects
@@ -751,18 +519,19 @@ continuation (several `.targets`/`.target` lines under one label); a
 single directive's own operand list has a separate, *list*-level one,
 described next.
 
-`.targets`, `.exits` (below), and `.map` (below) are the dialect's three
+`.targets`, `.exits` (below), and `.map` (below) are the grammar's three
 unbounded lists: a `.targets`/`.exits`/`.map` line ending in a bare
 trailing comma — nothing after it but whitespace, no comment — continues
 that directive's list onto the next physical line, so a wide table can be
 authored (or emitted) across several lines instead of one long one. A
 comma followed by a comment does not continue (only the list's *last*
 physical line may carry a trailing comment); a trailing comma on any
-other directive stays the syntax error it has always been. `tmt fmt` /
-`tmt dis` wrap the other direction — a list whose single-line form would
-cross the 80-column line limit is broken after a comma, with
-continuation lines aligned under the list's first element
-(`docs/tmt/fmt.md`) — and the two meet: a wrapped line always ends in the
+other directive stays the syntax error it has always been. The
+canonical-grid printer wraps the other direction — a list whose
+single-line form would cross the 80-column line limit is broken after a
+comma, with continuation lines aligned under the list's first element
+(`docs/tmt/fmt.md` shows it on `.tma`, the one shipped dialect that has
+these lists) — and the two meet: a wrapped line always ends in the
 trailing comma the continuation grammar reads back into one logical
 directive, so reformatting a wide table is idempotent. Every other
 list-shaped operand — a `.row`/`wr`/`mov`/`wrmv` vector, a `.frame
@@ -776,14 +545,14 @@ spellings are `docs/tmt/isa.md (match and dispatch)`.
 
 ### The compact symbol family (the `0x7F` rule)
 
-TM-1 tables and vectors use the **compact** symbol family: one byte per
-element, holding a 7-bit symbol index in `0`..=`126`. The value `0x7F` is
-**reserved as the transparent marker** — a match-row byte of `0x7F`
-matches any latched symbol (this is what `*` compiles to), and a write
-element of `0x7F` keeps the cell (what `-` compiles to). Reserving `0x7F`
-is why a compact operand can **name** only indices `0`..=`126`: every
-payload index must stay at or below `0x7E`, and a `wr` or `.row` element
-outside that range is a fatal `bad-vector` error.
+Table rows and vector operands use the **compact** symbol family: one
+byte per element, holding a 7-bit symbol index in `0`..=`126`. The value
+`0x7F` is **reserved as the transparent marker** — a match-row byte of
+`0x7F` matches any latched symbol (this is what `*` compiles to), and a
+write element of `0x7F` keeps the cell (what `-` compiles to). Reserving
+`0x7F` is why a compact operand can **name** only indices `0`..=`126`:
+every payload index must stay at or below `0x7E`, and a write or match
+element outside that range is a fatal `bad-vector` error.
 
 This is a limit on what an instruction can *mention*, not on how wide a
 tape's alphabet may be. A `.routine` may declare a cardinality above 127
@@ -921,41 +690,25 @@ everything but the blank (blank↔blank is always implicit). A one-way `=>`
 pair, being read-only, establishes no write-back, so on an unequal tape the
 symbol it collapses onto is a write hole unless a two-way pair also names it.
 
-### What the `.tmc` compiler emits
+## `.pma` — assembly text
 
-The `.tmc` language front end (`tmt compile`) generates this dialect and
-nothing exotic: a conditional state lowers to `rd` / `mtc` / `djmp` over a
-match table satisfying the row discipline (`docs/tmt/isa.md (match and
-dispatch)`), a rule's write+move
-action lowers to a single `wrmv` (elided when it is all-keep + all-stay),
-and a cross-alphabet `call` lowers to the **binding-call operand** —
-never a hand-authored `.frame`. So a compiled object always reaches the
-link stage as ordinary code plus bound-call records, and the choice of
-call mechanism stays a link-time decision independent of the source.
+The PM-1 dialect's own surface — its sample shape, the `pmt dis` round
+trip, symbol jumps, and the `.volatile` build-column directive — is
+`docs/pmt/asm.md`. It enables none of the capability-gated subsections of
+"Assembly text", above — its one capability adds the `.volatile`
+directive, documented on that same page — so what it draws from that
+section is the opening tier: the lexical shape, the canonical column
+grid, the comment-column rules, and the `.func` visibility and name
+grammar.
 
-### Dialect version history
+## `.tma` — assembly text (TM-1)
 
-- **0.1** — the initial TM-1 assembly surface: the base mnemonics, the
-  sectioned `.routine` / `.section` / `.row` / `.targets` / `.rept`
-  directives, and the `[..]` write- and move-vector operand forms.
-- **0.2** — the **frames** family: the framed call `call.m`, the
-  multi-exit return `retx`, the explicit `trap`, the `#imm` immediate
-  operand, the `.frame` / `.map` / `.exits` frame descriptors, and the
-  declarative binding-call operand.
-- **0.3** — additive: the fused write+move mnemonic `wrmv [w…], [m…]` —
-  the write vector then the move vector in one instruction (all writes
-  precede all moves). It is the `-O0` codegen canon for a rule's action;
-  no earlier program changes meaning.
-
-0.3 also gained the trailing-comma list continuation on `.targets`,
-`.exits`, and `.map` ("Match and dispatch tables" and "Frame
-descriptors" above) without becoming 0.4, even though the stated
-acceptance contract is that `N` bumps on *any* grammar change: no
-released build has ever fixed 0.3 as a contract to preserve, so there is
-nothing yet for an additive grammar surface to break. The version stays
-free to absorb changes like this one until a release actually ships it —
-at that point 0.3 becomes a real acceptance floor and the next grammar
-change bumps to 0.4 in the ordinary way.
+The TM-1 dialect's own surface — its sample shape, the `tmt dis` round
+trip, how its twenty mnemonics are spelled, and what the `.tmc` compiler
+emits — is `docs/tmt/asm.md`. The grammar it sits in is "Assembly text",
+above — the opening tier every dialect draws on, plus every
+capability-gated subsection there, since `.tma` is currently the one
+dialect enabling them all.
 
 ## `.pmx.map` / `.tmx.map` — link-time sidecar
 

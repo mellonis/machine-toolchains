@@ -36,7 +36,8 @@ pub struct AsmCaps {
     /// `[a, *, -, <, >, .]` vector operand tokens.
     pub vectors: bool,
     /// The `.volatile` build-variant directive: per-function build-column
-    /// tags and the object's program bit (docs/formats.md (assembly text)).
+    /// tags and the object's program bit (docs/core.md (the assembler
+    /// framework)).
     /// Selection metadata only — it names which column a blob belongs to,
     /// never anything about the body, which the assembler transcribes
     /// as written either way.

@@ -601,7 +601,8 @@ fn legacy_object_end_to_end() {
 }
 
 /// Hand-written assembly can offer both columns: a same-name pair, one
-/// bare and one `.volatile` (docs/formats.md (assembly text)). A gated
+/// bare and one `.volatile` (docs/pmt/asm.md (the .volatile directive)).
+/// A gated
 /// program then links the tagged bodies with nothing borrowed — and the
 /// choice is visible in the image, not merely in the report. `main` is
 /// written as an identical pair, which the assembler would dedup to one

@@ -784,7 +784,7 @@ mod tests {
     use crate::diagnostics::Span;
     use crate::vm::OperandKind;
 
-    // The `.pma` example from docs/formats.md (assembly text) — the
+    // A small `.pma` sample — the
     // SAME constant `cst.rs`'s own doc-example test pins, reproduced
     // here as a `const` so this module's tests don't reach across a
     // sibling module's private `#[cfg(test)]` items.

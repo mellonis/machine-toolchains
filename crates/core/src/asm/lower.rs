@@ -39,7 +39,8 @@ pub struct SourceFunction {
     pub name_span: Span,
     pub local: bool,
     /// This block carries a `.volatile` directive, so its blob belongs to
-    /// the gated build column (docs/formats.md (assembly text)). Absence
+    /// the gated build column (docs/core.md (the assembler framework)).
+    /// Absence
     /// is the normal column; a name may be defined once per column.
     pub volatile: bool,
     pub items: Vec<SourceItem>,
@@ -204,7 +205,7 @@ pub struct LoweredSource {
     /// parallel to the blobs, docs/formats.md (MO)).
     pub signatures: Option<Vec<RoutineSig>>,
     /// The file declares a `.volatile` ahead of its first `.func`: this
-    /// source builds a volatile program (docs/formats.md (assembly text)).
+    /// source builds a volatile program (docs/core.md (linking)).
     /// Independent of any per-function tag — it is a whole-object header
     /// bit, not a blob record.
     pub program_volatile: bool,
@@ -316,7 +317,7 @@ struct LowerCtx {
     /// `.rept`) are unaffected.
     span_override: Option<Span>,
     /// A `.volatile` seen ahead of the first `.func` — the object's
-    /// program bit (docs/formats.md (assembly text)).
+    /// program bit (docs/core.md (linking)).
     program_volatile: bool,
     /// The open function was tagged by lookahead and its `.volatile` line
     /// has not been consumed yet. The directive is legal exactly where

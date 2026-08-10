@@ -194,7 +194,7 @@ fn emitted_pma_reassembles_byte_identically_to_the_direct_object() {
 
 #[test]
 fn compiled_objects_survive_a_disassemble_reassemble_round_trip() {
-    // docs/formats.md (assembly text): "`pmt dis` output is always valid
+    // docs/pmt/asm.md: "`pmt dis` output is always valid
     // assembler input — round-tripping through `asm` reproduces the
     // original bytes exactly." Full struct equality (not just blob
     // bytes) pins that stronger, documented invariant.

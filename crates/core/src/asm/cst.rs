@@ -1560,7 +1560,8 @@ mod tests {
         trailing.as_ref().map(|t| t.text.as_str())
     }
 
-    // The `.pma` example from docs/formats.md (assembly text).
+    // A small `.pma` sample, in the canonical grid
+    // (docs/formats.md (assembly text)).
     const DOC_EXAMPLE: &str = "\
 .func goToEnd                   ; emits ent, defines symbol
 L1:     rgt
