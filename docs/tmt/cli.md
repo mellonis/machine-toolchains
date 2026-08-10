@@ -46,8 +46,10 @@ grammar version only bumps when its own grammar changes.
 Every usage block on this page is quoted verbatim from the binary and
 checked against it by a test — this page is a reference, not a paraphrase.
 For most subcommands that block is the real `--help` output; `tape` and
-`ir` are the exception, since their children take no `--help` of their
-own, so those two blocks are the bare-invocation group usage instead (each
+`ir` are the exception: every action inside one of those groups answers
+`--help` too, but renders that group's own shared usage text — the same
+block a bare invocation of the group prints — so the blocks quoted here
+come from the bare invocation and cover every action in the group (each
 of those sections repeats this).
 
 ## `tmt compile`
@@ -620,8 +622,8 @@ Three subcommands author and inspect `.tmt` tape-block snapshots without
 hand-editing bytes. The unit is the **block** — the whole multi-tape band —
 so one invocation authors all of it. There is no `tape-block build`: PM-1's
 is glyph-pattern sugar tied to a fixed two-symbol alphabet, while TM-1 tapes
-carry per-tape alphabets. Note that the group's children take no `--help` of
-their own — run `tmt tape-block` bare for the usage above.
+carry per-tape alphabets. Every action answers `--help` with the same usage
+shown above — bare `tmt tape-block` prints the identical text.
 
 ### Edit flags
 
@@ -841,8 +843,9 @@ world name.
 
 Reads a `--emit-ir` JSON file and renders each world's state graph as a
 Mermaid `flowchart TD`. `--function NAME` restricts output to one world;
-naming a world the file does not contain is an error. As with `tape`, the
-`graph` child takes no `--help` — run `tmt ir` bare for the usage above.
+naming a world the file does not contain is an error. As with `tape`,
+`graph --help` renders the same usage block shown above, same as bare
+`tmt ir`.
 
 ### `tmt ir footprints`
 

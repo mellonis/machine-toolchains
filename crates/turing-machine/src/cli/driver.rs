@@ -82,7 +82,7 @@ struct Flags {
 
 pub(super) fn build(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(BUILD_USAGE.into(), String::new()));
     }
     let mut disabled_passes = Vec::new();

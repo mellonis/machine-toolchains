@@ -82,7 +82,7 @@ fn format_tmc(source: &str) -> Result<String, (mtc_core::diagnostics::Span, Stri
 
 pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(FMT_USAGE.into(), String::new()));
     }
     let check = args.flag("--check");

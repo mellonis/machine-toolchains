@@ -30,6 +30,50 @@ fn unknown_subcommand_errors() {
     assert!(execute(&args(&["bogus"])).is_err());
 }
 
+/// Every action reachable through a nested group (`tape-block build|new|
+/// set|show`, `ir graph`) answers `--help`, and its `-h` alias, with
+/// usage text and exit code 0 — the same shape a leaf subcommand's
+/// `--help` has always had (docs/pmt/cli.md (tape-block), (pmt ir)).
+/// Before this, only the group's BARE invocation rendered usage; a
+/// nested action errored "unknown flag `--help`". Failing mutation:
+/// dropping the per-action `args.help()` check.
+#[test]
+fn nested_group_actions_answer_help_and_its_h_alias() {
+    let actions: &[&[&str]] = &[
+        &["tape-block", "build"],
+        &["tape-block", "new"],
+        &["tape-block", "set"],
+        &["tape-block", "show"],
+        &["ir", "graph"],
+    ];
+    for action in actions {
+        for flag in ["--help", "-h"] {
+            let mut argv: Vec<&str> = action.to_vec();
+            argv.push(flag);
+            let out = execute(&args(&argv)).unwrap_or_else(|e| {
+                panic!("`pmt {}` should render help, got: {e}", argv.join(" "))
+            });
+            assert_eq!(out.code, 0, "{}", argv.join(" "));
+            assert!(
+                out.stdout.starts_with("USAGE:"),
+                "{}: {}",
+                argv.join(" "),
+                out.stdout
+            );
+        }
+    }
+}
+
+/// `-h` is a strict alias of `--help` at a leaf subcommand too, not only
+/// at the top level and in nested groups — same wording, same exit.
+#[test]
+fn a_leaf_subcommand_accepts_the_h_alias() {
+    let long = execute(&args(&["dis", "--help"])).unwrap();
+    let short = execute(&args(&["dis", "-h"])).unwrap();
+    assert_eq!(long.stdout, short.stdout);
+    assert_eq!(short.code, 0);
+}
+
 #[test]
 fn version_reports_the_language_version() {
     let out = execute(&args(&["--version"])).unwrap();

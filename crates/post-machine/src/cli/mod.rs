@@ -205,6 +205,17 @@ impl Args {
         false
     }
 
+    /// Consume `--help`, then `-h` — `-h` is a strict alias of `--help`
+    /// everywhere the latter is recognized (top level, subcommands, nested
+    /// actions): both are consumed unconditionally rather than short-
+    /// circuited, so an invocation that (redundantly) writes both still
+    /// leaves neither token to trip `positionals`' unknown-flag check.
+    pub(crate) fn help(&mut self) -> bool {
+        let long = self.flag("--help");
+        let short = self.flag("-h");
+        long || short
+    }
+
     /// Consume `name value` or `name=value`.
     pub(crate) fn value(&mut self, name: &str) -> Result<Option<String>, String> {
         for i in 0..self.tokens.len() {

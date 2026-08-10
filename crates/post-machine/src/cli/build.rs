@@ -99,7 +99,7 @@ pub(super) fn render_opt_report(stderr: &mut String, report: &CompileReport) {
 
 pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(COMPILE_USAGE.into(), String::new()));
     }
     let debug_preset = args.flag("--debug");
@@ -227,7 +227,7 @@ USAGE: pmt asm INPUT.pma [-o OUT.pmo] [-g]
 
 pub(super) fn asm(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(ASM_USAGE.into(), String::new()));
     }
     let with_debug = args.flag("-g");
@@ -266,7 +266,7 @@ info when the objects carry -g debug data).
 
 pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(LINK_USAGE.into(), String::new()));
     }
     let relax = !args.flag("--no-relax");

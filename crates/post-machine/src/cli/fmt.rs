@@ -75,7 +75,7 @@ fn format_by_lang(source: &str, lang: Lang) -> Result<String, (Span, String, &'s
 
 pub(super) fn fmt(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(FMT_USAGE.into(), String::new()));
     }
     let check = args.flag("--check");

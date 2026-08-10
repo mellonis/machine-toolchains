@@ -45,7 +45,7 @@ FLAGS:
 
 pub(super) fn lint(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(LINT_USAGE.into(), String::new()));
     }
     let allow = args.values("--allow")?;
