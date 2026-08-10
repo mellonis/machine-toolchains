@@ -9,7 +9,7 @@
 //! grafts; graft holes already survive as [`crate::expand::Transition2::TrapRead`]
 //! / [`TrapWrite`](crate::expand::Transition2::TrapWrite) markers) together with
 //! the [`crate::compiler::Resolved`] context (visibility, `bind` records, world
-//! name spans). Codegen (Task 7) consumes the IR; `tmt ir graph` (Task 8) renders
+//! name spans). Codegen consumes the IR; `tmt ir graph` renders
 //! [`IrWorld::to_mermaid`].
 //!
 //! # The versioned contract ([`TM_IR_VERSION`])
@@ -30,7 +30,7 @@
 //!
 //! A cross-world `call` carries the declarative binding-call record
 //! ([`IrTransition::CallThen`]'s `binding`): the SAME per-callee-tape data the
-//! `.tma` binding-call operand carries (Task 7 renders it), with `caller_tape`
+//! `.tma` binding-call operand carries (codegen renders it), with `caller_tape`
 //! the host physical tape index and each pair's `src`/`dst` the AUTHORED
 //! symbols resolved to caller/callee alphabet indices. No blank pin or closure
 //! is applied here — the composition engine does that at link.

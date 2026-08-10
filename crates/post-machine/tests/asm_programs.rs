@@ -1,5 +1,5 @@
-//! PM-1 assembly end-to-end: the docs/pmt/asm.md sample,
-//! byte-exact, and an assembled program actually running on the Machine.
+//! PM-1 assembly end-to-end: the docs/pmt/asm.md sample, byte-exact,
+//! and an assembled program actually running on the Machine.
 
 use mtc_core::formats::object::SymbolDef;
 use mtc_core::vm::{InfiniteTape, Machine, Outcome, RunOptions};

@@ -199,7 +199,7 @@ pub enum CompileErrorKind {
         glyphs: Vec<String>,
     },
 
-    // -- graft + range expansion (Task 5) ----------------------------------
+    // -- graft + range expansion -------------------------------------------
     /// A graph definition graft-depends on itself (directly or through a
     /// cycle of definitions) — infinite expansion. `name` is one graph on the
     /// cycle. Instance-level cycles (continuation loops) stay legal.
@@ -273,7 +273,7 @@ pub enum CompileErrorKind {
     /// the state parameter.
     StateParamContinuationUnsupported(String),
 
-    // -- codegen / assemble orchestration (Task 7) -------------------------
+    // -- codegen / assemble orchestration ----------------------------------
     /// A compiler-internal invariant broke: the codegen-produced `.tma`
     /// failed to assemble, or an IR world the compiler itself built failed
     /// [`crate::ir::validate_world`]. Never a user error — the message
@@ -847,9 +847,9 @@ fn push_glyph(
 // ---------------------------------------------------------------------------
 
 /// The whole resolved module. Rules stay in SOURCE form (patterns unexpanded
-/// — Task 5 owns expansion); every span is preserved. Cross-world references
-/// (`call`/`graft`/`bind` targets, tape alphabets) are resolved to mangled
-/// names; the worlds carry the rest verbatim.
+/// — the graft/range expander owns expansion); every span is preserved.
+/// Cross-world references (`call`/`graft`/`bind` targets, tape alphabets) are
+/// resolved to mangled names; the worlds carry the rest verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolved {
     /// Resolved alphabets, keyed by mangled name → glyph vector.
@@ -890,8 +890,8 @@ pub(crate) struct ResolvedWorld {
     /// Bind instances declared in this world.
     pub binds: Vec<ResolvedBind>,
     /// The entry state / graft-instance name; `None` for an unnamed entry
-    /// graft (Task 5 names it the spliced entry state) or a library-world
-    /// with an entry that carries no addressable name.
+    /// graft (the graft/range expander names it the spliced entry state) or
+    /// a library-world with an entry that carries no addressable name.
     pub entry: Option<String>,
     /// Resolved `call` transitions in this world's rules, in source order.
     pub calls: Vec<ResolvedCall>,
@@ -929,7 +929,7 @@ pub(crate) struct ResolvedTape {
 }
 
 /// A resolved graft declaration: the mangled graph target plus the raw
-/// (source-form) binding args Task 5 applies at splice time.
+/// (source-form) binding args the graft/range expander applies at splice time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedGraft {
     pub entry: bool,
@@ -1996,7 +1996,7 @@ fn unused_import_warnings(program: &Program, used: &[bool], diagnostics: &mut Ve
 }
 
 // ---------------------------------------------------------------------------
-// compile() — the end-to-end driver (Task 7). Mirrors the `.pmc` compiler's
+// compile() — the end-to-end driver. Mirrors the `.pmc` compiler's
 // `compile()` field-for-field, with `.tma` text where PM-1 has `.pma`.
 // ---------------------------------------------------------------------------
 
@@ -2661,7 +2661,7 @@ impl WorldCtx<'_> {
     /// Arity + argument-KIND checks against a locally-defined signature. Tape
     /// params take tape targets (world tapes); state params take state names
     /// (same-world states) or terminators. Map LEGALITY (glyph sets, etc.) is
-    /// Task 5's — this only checks the kind.
+    /// the graft/range expander's — this only checks the kind.
     #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
@@ -3802,7 +3802,7 @@ namespace lib {
         );
     }
 
-    // -- compile() orchestration (Task 7) ------------------------------------
+    // -- compile() orchestration -------------------------------------------
 
     const A1: &str = "\
 alphabet ab { '_', 'a', 'b' }

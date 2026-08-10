@@ -719,7 +719,7 @@ fn dispatch_entries_within(tables: &[u8], start: u32, end: u32) -> Vec<u32> {
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     let mut text = String::new();
     // The program bit leads the dump: `.volatile` before the first `.func`
-    // is what sets it on the way back in (docs/core.md (linking)).
+    // is what sets it on the way back in (docs/formats.md (MO)).
     // Both this and the per-blob tags below are gated on the dialect's own
     // capability — a dialect that cannot parse the directive must never be
     // handed text carrying it.

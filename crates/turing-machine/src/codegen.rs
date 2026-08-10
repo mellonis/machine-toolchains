@@ -1,10 +1,9 @@
 //! TM IR → `.tma` text — the canonical `-O0` lowering (docs/tmt/asm.md
 //! (what the `.tmc` compiler emits)). The generated text is fed to the core
-//! assembler (the compile → assemble
-//! pipeline), which supplies encoding, table-section layout, intra-function
-//! jump relaxation, and the `ent` prologue via `.func` — codegen never
-//! touches bytes and never emits `ent` (the `.func` directive prepends it,
-//! exactly as PM-1 codegen relies on).
+//! assembler (the compile → assemble pipeline), which supplies encoding,
+//! table-section layout, intra-function jump relaxation, and the `ent`
+//! prologue via `.func` — codegen never touches bytes and never emits `ent`
+//! (the `.func` directive prepends it, exactly as PM-1 codegen relies on).
 //!
 //! The canon, per world:
 //!

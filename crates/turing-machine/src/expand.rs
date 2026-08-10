@@ -43,7 +43,7 @@ use crate::parser::{
 };
 
 // ---------------------------------------------------------------------------
-// Output — the concrete, index-resolved module Task 6 (IR lowering) consumes.
+// Output — the concrete, index-resolved module the IR lowering stage consumes.
 // ---------------------------------------------------------------------------
 
 /// The fully-expanded module: every world's states carry concrete rules only.
@@ -1545,7 +1545,8 @@ fn check_state_rows(
 // ---------------------------------------------------------------------------
 
 /// Expand a resolved module: graft splicing then range expansion, producing
-/// worlds whose states carry only concrete, index-resolved rules (Task 6 input).
+/// worlds whose states carry only concrete, index-resolved rules (IR
+/// lowering input).
 pub(crate) fn expand(resolved: &Resolved) -> Result<Expanded, CompileError> {
     let graphs: HashMap<&str, &ResolvedWorld> = resolved
         .worlds

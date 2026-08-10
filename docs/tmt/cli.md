@@ -37,12 +37,11 @@ Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 
 `tmt --version` prints three lines: `tmt <VERSION>` (the toolchain crate's
 own version), `tmc language <VERSION>` (the `.tmc` language
-acceptance-contract version — `docs/tmt/language.md`), and
-`tma dialect (tm-1) <VERSION>` (the TM-1 `.tma` dialect version —
-`docs/tmt/asm.md`). The three numbers move on independent
-axes: a crate release with no grammar change repeats the same
-language-version and dialect-version lines, and each grammar version only
-bumps when its own grammar changes.
+acceptance-contract version — `docs/tmt/language.md`), and `tma dialect
+(tm-1) <VERSION>` (the TM-1 `.tma` dialect version — `docs/tmt/asm.md`). The
+three numbers move on independent axes: a crate release with no grammar
+change repeats the same language-version and dialect-version lines, and each
+grammar version only bumps when its own grammar changes.
 
 Every usage block on this page is quoted verbatim from the binary and
 checked against it by a test — this page is a reference, not a paraphrase.

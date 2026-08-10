@@ -27,6 +27,12 @@ pub struct RelaxPair {
 
 /// Per-dialect syntax capabilities. Defaults = the classic surface
 /// (everything off) — the .pma dialect's acceptance is unchanged.
+///
+/// Deliberately exhaustive with public fields (docs/core.md (the assembler
+/// framework)): arch crates construct it literally, and the all-off
+/// `Default` keeps every capability opt-in. A new capability is a
+/// semver-visible field addition — accepted so literal construction stays
+/// possible outside this crate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AsmCaps {
     /// `.section` regions, `.row`/`.targets`/`.target` directives.
@@ -37,10 +43,9 @@ pub struct AsmCaps {
     pub vectors: bool,
     /// The `.volatile` build-variant directive: per-function build-column
     /// tags and the object's program bit (docs/core.md (the assembler
-    /// framework)).
-    /// Selection metadata only — it names which column a blob belongs to,
-    /// never anything about the body, which the assembler transcribes
-    /// as written either way.
+    /// framework)). Selection metadata only — it names which column a blob
+    /// belongs to, never anything about the body, which the assembler
+    /// transcribes as written either way.
     ///
     /// [`AsmCaps`]'s `Default` is all-off, so a dialect that does not ask
     /// for this field does not get the directive — adding a capability

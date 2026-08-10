@@ -32,12 +32,11 @@ Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
 
 `pmt --version` prints three lines: `pmt <VERSION>` (the toolchain crate's
 own version), `pmc language <VERSION>` (the `.pmc` language
-acceptance-contract version — `docs/pmt/language.md`), and
-`pma dialect (pm-1) <VERSION>` (the PM-1 `.pma` dialect version —
-`docs/pmt/asm.md`). The three numbers move on independent
-axes: a crate release with no grammar change repeats the same
-language-version and dialect-version lines, and each of the two grammar
-versions only bumps when its own grammar changes.
+acceptance-contract version — `docs/pmt/language.md`), and `pma dialect
+(pm-1) <VERSION>` (the PM-1 `.pma` dialect version — `docs/pmt/asm.md`). The
+three numbers move on independent axes: a crate release with no grammar
+change repeats the same language-version and dialect-version lines, and
+each of the two grammar versions only bumps when its own grammar changes.
 
 Every flag below appears verbatim in the corresponding subcommand's
 `--help` text; this page is a reference, not a paraphrase.
