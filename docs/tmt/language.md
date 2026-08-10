@@ -286,10 +286,11 @@ list — single glyphs and ascending ranges, the same grammar an
 `alphabet` body uses (see "Alphabets"), except that a clause's list may
 be empty where a bare `alphabet` body may not. Both clauses are
 optional, and the order between them is fixed when both appear: `writes`
-first, `preserves` second. Writing `preserves` before `writes` is the
-`contract-clause-order` error; a second `writes` or a second `preserves`
-on one parameter is `duplicate-contract-clause`. The fixed order is a
-grammar rule rather than a style preference, and it has to be: `tmt fmt`
+first, `preserves` second. Both are parse errors: writing `preserves`
+before `writes` is the `contract-clause-order` error; a second `writes`
+or a second `preserves` on one parameter is `duplicate-contract-clause`.
+The fixed order is a grammar rule rather than a style preference, and it
+has to be: `tmt fmt`
 is a token-preserving printer (`docs/tmt/fmt.md`) that never reorders
 what an author wrote, so canonical output requires the grammar itself to
 settle the question once, at parse time — there is no later pass that
@@ -327,28 +328,32 @@ reports what a world *may* write, phrased as a possibility, never as an
 observed fact.
 
 That over-approximation has one sharp edge worth knowing before reaching
-for either clause on a routine whose body computes what it writes: a
-write cell that is a substitution **fold** expression (`{expr}`, an
-operator applied to a bound value — see "Substitution") is answered by
-the check's own walk as writing the tape's *whole* alphabet, regardless
-of what the fold can actually produce, because that walk works from
-source form and does not evaluate a fold's possible outputs, only
-whether one appears at all. Once a body writes through a fold on a given
-tape, that tape's inferred footprint is the full alphabet no matter how
-narrow the fold's real range is — so the effective set has to be the
-full alphabet too for the check on THAT tape to pass, which rules out a
-`writes` clause naming anything less than every symbol and rules out
-`preserves` naming anything at all; a fold write on one tape says
-nothing about a plain clause on another tape of the same world.
-`preserves` is the clause this bites hardest, since reaching for it is
-usually trying to say "this glyph is never touched," and that is exactly
-the claim a fold write makes unprovable to the checker:
+for either clause on a routine whose body computes what it writes: ANY
+write cell that is a substitution (`{…}` — a bare passthrough and an
+arithmetic fold alike, see "Substitution") is answered by the check's
+own walk as writing the tape's *whole* alphabet, regardless of what the
+substitution can actually produce, because that walk works from source
+form and does not evaluate a substitution's possible outputs, only
+whether one appears at all. The passthrough gets no special case here,
+even though it looks like it should merely echo whatever the pattern
+already matched — the walk cannot tell "echoes the input" from "computes
+something new" without evaluating the row, which it does not do. Once a
+body writes through a substitution on a given tape, that tape's inferred
+footprint is the full alphabet no matter how narrow the substitution's
+real range is — so the effective set has to be the full alphabet too for
+the check on THAT tape to pass, which rules out a `writes` clause naming
+anything less than every symbol and rules out `preserves` naming
+anything at all; a substitution write on one tape says nothing about a
+plain clause on another tape of the same world. `preserves` is the
+clause this bites hardest, since reaching for it is usually trying to
+say "this glyph is never touched," and that is exactly the claim a
+substitution write makes unprovable to the checker:
 `writes-outside-contract` fires at the parameter on every such body,
 honestly — the message still says a world *may* write the glyph, never
 that it does — but not usefully. There is no narrower spelling that
 escapes this today; the honest remedy is to drop the clause from a
-parameter whose body writes through a fold rather than declare a promise
-the checker can never confirm.
+parameter whose body writes through a substitution rather than declare a
+promise the checker can never confirm.
 
 A machine's own `tape` declaration carries no contract grammar at all —
 `writes`/`preserves` are legal only on a signature tape parameter, which
