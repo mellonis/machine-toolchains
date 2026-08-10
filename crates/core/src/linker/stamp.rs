@@ -24,7 +24,8 @@
 //!   the row dead (dropped, with the paired dispatch entry removed).
 //! - each bound tape with `rmap` holes gets synthesized unmapped-read trap
 //!   rows: one machine-width row per hole physical symbol, dispatching to a
-//!   shared `trap #0` stub. A hole symbol reaches its trap row because no
+//!   shared `trap #0` stub. Given each machine position is projected by at
+//!   most one callee tape, a hole symbol reaches its trap row because no
 //!   surviving row can match it, not because of where the row sits.
 //!
 //! Renaming cells permutes rows out of the order the callee's table was
@@ -1237,11 +1238,18 @@ fn rewrite_match_table(
 /// (match tables)) — carrying each row's dispatch source with it.
 ///
 /// The preimage rewrite renames cells, which permutes rows out of the order
-/// the callee's table was authored in. Nothing at run time minds: the exact
-/// rows a stamp emits are pairwise disjoint, so first-match reaches the same
-/// row either way. A disassembly does mind — it prints rows in stored order,
-/// and an out-of-order table is text the assembler refuses, breaking the
-/// round trip that keeps an image expressible as assembly.
+/// the callee's table was authored in. Nothing at run time minds — given each
+/// machine position is projected by at most one callee tape, the exact rows a
+/// stamp emits are pairwise disjoint, and disjoint from every trap row, so
+/// first-match reaches the same row either way. (Two callee tapes projecting
+/// onto ONE machine position break that premise: the later projection
+/// overwrites the earlier in a row, which can leave a row exact that overlaps
+/// a trap row. Such a binding already disagrees with the frames lowering
+/// before any reordering; it is a divergent shape under separate adjudication,
+/// not one this ordering is claimed to preserve.) A disassembly does mind — it
+/// prints rows in stored order, and an out-of-order table is text the
+/// assembler refuses, breaking the round trip that keeps an image expressible
+/// as assembly.
 ///
 /// Row position IS load-bearing for one consumer: MR is the matched row's
 /// 1-based ordinal and the dispatch table is indexed by it, so a row and its

@@ -40,6 +40,32 @@ machine {
 }
 ";
 
+/// A two-tape callee whose rows span all three classes — one exact rule, one
+/// partial-wildcard rule, one catch-all — under the same crossed binding on
+/// both tapes. The rewrite sends the exact row to `[2, 2]` and the partial one
+/// to `[1, *]`, so canonical order and byte order DISAGREE: the class axis
+/// puts the exact row first, plain byte comparison would not.
+const MIXED_ROWS: &str = "\
+alphabet outer { '_', 'a', 'b' }
+alphabet inner { '_', 'y', 'x' }
+routine callee(tape p: inner, tape q: inner) {
+  entry state s {
+    ['y', 'y'] -> write ['x', 'x'] goto s;
+    ['x', *]   -> write ['y', -] goto s;
+    [*, *]     -> return;
+  }
+}
+machine {
+  tape t: outer;
+  tape u: outer;
+  entry state go {
+    [*, *] -> call callee(p = t with map { 'a' -> 'x', 'b' -> 'y' },
+                          q = u with map { 'a' -> 'x', 'b' -> 'y' }) then fin;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+
 fn object(src: &str) -> ObjectFile {
     compile(src, CompileOptions::default())
         .unwrap_or_else(|e| panic!("the fixture must compile: {e}"))
@@ -138,17 +164,66 @@ fn a_stamped_match_table_keeps_the_canonical_row_order() {
     }
 }
 
+/// The canonical order has a CLASS axis as well as a payload axis: exact rows
+/// come before wildcard-bearing ones however their bytes compare. A two-tape
+/// callee mixing an exact rule, a partial-wildcard rule and a catch-all pins
+/// it — the rewrite leaves the exact row with the HIGHER leading byte, so an
+/// order that compared row bytes alone would sort it behind the partial one
+/// and produce a table the assembler refuses.
+#[test]
+fn a_stamped_table_orders_by_row_class_not_by_row_bytes() {
+    let obj = object(MIXED_ROWS);
+    for mech in [CallMech::Mono, CallMech::Hybrid] {
+        let text = dis(&obj, mech);
+
+        // Derivation. Both tapes carry the same crossed map, so on each the
+        // preimage of virtual 'y'(1) is physical 2 and of 'x'(2) is physical
+        // 1. The callee's rows — exact ['y','y'], partial ['x',*], catch-all —
+        // rewrite to [2,2], [1,*], [*,*]. Canonically the exact row leads even
+        // though 2 > 1; by bytes alone [1,*] would come first.
+        assert_eq!(
+            rows(&text),
+            vec!["[2, 2]", "[1, *]", "[*, *]"],
+            "exact rows lead regardless of payload magnitude under {mech}:\n{text}"
+        );
+
+        // And the targets moved with them. Row [2,2] is the ['y','y'] rule,
+        // which writes ['x','x'] — the write map sends 'x'(2) to physical 1 on
+        // both tapes. Row [1,*] is the ['x',*] rule, writing 'y' → physical 2
+        // on tape 0 and keeping tape 1. The catch-all returns.
+        let t = targets(&text);
+        assert_eq!(t.len(), 3, "one dispatch entry per row under {mech}");
+        assert_eq!(
+            instr_at(&text, &t[0]),
+            "wrmv [1, 1], [., .]",
+            "row [2, 2] writes 'x' on both tapes ({mech})"
+        );
+        assert_eq!(
+            instr_at(&text, &t[1]),
+            "wrmv [2, -], [., .]",
+            "row [1, *] writes 'y' on tape 0 and keeps tape 1 ({mech})"
+        );
+        assert_eq!(
+            instr_at(&text, &t[2]),
+            "ret",
+            "the catch-all returns ({mech})"
+        );
+    }
+}
+
 /// The round trip the row order exists to keep: the disassembly of a stamped
 /// image is valid assembler input. Frames rides along as the control — it
-/// lowers this site through a runtime descriptor instead of a stamp, so it
+/// lowers these sites through a runtime descriptor instead of a stamp, so it
 /// never had the defect.
 #[test]
 fn a_stamped_image_disassembles_to_valid_assembler_input() {
-    let obj = object(CROSSED_BINDING);
-    for mech in [CallMech::Mono, CallMech::Hybrid, CallMech::Frames] {
-        let text = dis(&obj, mech);
-        assemble(&text, false).unwrap_or_else(|e| {
-            panic!("the {mech} image's disassembly must re-assemble: {e}\n{text}")
-        });
+    for src in [CROSSED_BINDING, MIXED_ROWS] {
+        let obj = object(src);
+        for mech in [CallMech::Mono, CallMech::Hybrid, CallMech::Frames] {
+            let text = dis(&obj, mech);
+            assemble(&text, false).unwrap_or_else(|e| {
+                panic!("the {mech} image's disassembly must re-assemble: {e}\n{text}")
+            });
+        }
     }
 }

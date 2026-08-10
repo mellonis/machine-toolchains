@@ -2114,6 +2114,32 @@ T2: stp
         assert!(asm_table("T:  .row [1, 2]\n    .row [2, 1]\n    .row [*, *]").is_ok());
     }
 
+    /// `classify_match_row` reads a match row as payloads-or-wildcard, so
+    /// every non-payload element folds into "wildcard". That is only sound
+    /// because a match row can carry NOTHING else: the move and keep markers a
+    /// `wr`/`mov` vector accepts are rejected while the row is still being
+    /// lowered, one module upstream, and never reach the classifier. Pin that
+    /// gate here — it is the precondition, and it lives elsewhere.
+    #[test]
+    fn a_match_row_cannot_carry_a_move_or_keep_marker() {
+        let asm_row = |row: &str| {
+            let src = format!(
+                ".section tables\nT:  .row {row}\n.section code\n.func main\n    tmatch T\n    stp\n"
+            );
+            assemble(&fake_syntax(), 0x7E, &src, false)
+        };
+        for row in ["[>]", "[<]", "[.]", "[-]", "[1, >]"] {
+            let e = asm_row(row).unwrap_err();
+            assert_eq!(
+                e.kind,
+                AsmErrorKind::BadVector("match rows allow payloads and `*` only"),
+                "`.row {row}` must be refused before classification"
+            );
+        }
+        // The control: the two elements a match row DOES accept.
+        assert!(asm_row("[1, *]").is_ok());
+    }
+
     #[test]
     fn table_in_code_section_rejected() {
         // The default section is code — a `.row` there is misplaced.
