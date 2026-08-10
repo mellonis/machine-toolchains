@@ -437,15 +437,18 @@ and the inferred set the checker actually computed underneath it.
 
 The block appears only on a **declaration** hover — the routine's or
 graph's own name, where its signature line is answered — never on a
-reference. Hovering a `call`, `graft`, or `use` site that names a `std::`
-routine from another document resolves to that routine's qualified path
-and doc paragraphs only, with no signature line and so no write-set block
-either: an external reference carries nothing of the target document's own
-analysis to compute one from. Opening the embedded standard library's
-materialized source as its own document and hovering a routine's
-declaration name inside it is an ordinary declaration hover against that
-document's own resolved module, so it does get the block, the same as any
-other `.tmc` file:
+reference **from another document**. Hovering a `call`, `graft`, or `use`
+site that names a `std::` routine from another document resolves to that
+routine's qualified path and doc paragraphs only, with no signature line
+and so no write-set block either: an external reference carries nothing
+of the target document's own analysis to compute one from. A reference to
+a different routine *within the same open document* is not external in
+that sense — it resolves against the same already-computed module, so it
+gets the full declaration block too, write-set included. Opening the
+embedded standard library's materialized source as its own document and
+hovering a routine's declaration name inside it is an ordinary
+declaration hover against that document's own resolved module, so it
+does get the block, the same as any other `.tmc` file:
 
 ```
 routine std::binaryNumbersBare::invertNumber(tape num: symbols preserves { '_' })

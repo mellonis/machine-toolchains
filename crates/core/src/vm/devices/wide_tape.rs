@@ -1,9 +1,10 @@
-//! Unbounded wide-alphabet tape with paged sparse storage (docs/core.md (the
-//! tape and device bus)). `InfiniteTape` is physically two-symbol (a packed
-//! bit array); this device generalizes it to per-cell symbol indices in
-//! `0..width`, for architectures whose tapes declare alphabets wider than
-//! two. Blank cells (index 0) are never stored, so memory stays O(non-blank
-//! cells); the layout mirrors `InfiniteTape`'s so their snapshots agree.
+//! Unbounded wide-alphabet tape with per-cell sparse storage (docs/core.md
+//! (the tape and device bus)). `InfiniteTape` is physically two-symbol (a
+//! packed, paged bit array); this device generalizes it to per-cell symbol
+//! indices in `0..width`, for architectures whose tapes declare alphabets
+//! wider than two — one map entry per non-blank cell, with no page grouping.
+//! Blank cells (index 0) are never stored, so memory stays O(non-blank
+//! cells); the snapshot layout mirrors `InfiniteTape`'s so the two agree.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

@@ -104,7 +104,9 @@ The general sequence is `docs/core.md (loading)`. TM-1 contributes:
 - **nothing is latched at load.** A multi-tape image starts with MR = 0
   and an empty TR; head symbols enter only through an explicit `rd`.
   PM-1's tact-free initial match latch has no TM-1 counterpart, which is
-  why a TM-1 state always begins by reading.
+  why a **conditional** TM-1 state always begins by reading. A state
+  whose one rule is an unconditional catch-all needs no match at all and
+  compiles to zero `rd` instructions (Match and dispatch, below).
 
 ## Instruction set
 
@@ -185,8 +187,11 @@ The element vocabularies and their byte encodings are `docs/formats.md
 
 ### Match and dispatch
 
-A TM-1 state is `rd` / `mtc` / `djmp`: read every head, find which rule
-fires, jump to that rule's body.
+A **conditional** TM-1 state is `rd` / `mtc` / `djmp`: read every head,
+find which rule fires, jump to that rule's body. A state with a single
+unconditional catch-all rule needs no match to decide anything — it
+skips straight to that rule's action and transition, with no `rd` /
+`mtc` / `djmp` block at all.
 
 **`mtc <table>`** walks a match table — a labelled run of `.row`
 directives, one vector per row — comparing each row against TR position
@@ -223,9 +228,11 @@ Both are load-bearing idioms. A dispatch table shorter than the MR it is
 handed traps `DispatchOutOfRange` — a table with rows the dispatch has no
 targets for is caught at run time, not silently.
 
-One caveat worth carrying into the next section: the discipline governs
-**authored** tables. The linker's mono lowering (below) emits rows that
-preserve first-match *meaning* rather than source sortedness.
+One note worth carrying into the next section: the discipline binds a
+table the linker emits exactly as it binds an authored one. The linker's
+mono lowering (below) rewrites a stamped table's rows through a
+symbol-map preimage and sorts them back into the same canonical order,
+so the stamped table disassembles to text the assembler accepts.
 
 ## The frames execution profile
 
@@ -371,9 +378,14 @@ instead shows a digest-named copy (`bare.513e6968`) whose match-table
 rows have been rewritten through the read map's preimage: the callee's
 single blank row expands into one row per caller symbol that reads as
 blank, which is where the `expanded_rows` counter comes from. Where a
-caller symbol has no image at all, a synthesized trap row is prepended
-ahead of everything else — which is the concrete case behind the caveat
-above that the row discipline governs authored tables only.
+caller symbol has no image at all, a synthesized trap row is sorted into
+the stamped table's own canonical position rather than pinned ahead of
+everything else — it wins because no surviving row can match that
+symbol, not because of where it sits. That holds for every binding the
+composition engine builds, since a binding is required to place callee
+tapes injectively (`docs/tmt/language.md (call)`); a hand-authored raw
+`.frame` descriptor sits outside that check and outside mono lowering
+altogether — mono never stamps a raw framed call.
 
 ## Timing model (tacts)
 

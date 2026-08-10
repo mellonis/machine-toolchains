@@ -193,14 +193,15 @@ itself takes to answer.
 Shipped tape implementations:
 
 - **InfiniteTape** — unbounded in both directions, two symbols, paged
-  sparse storage: a hash map of fixed-size pages, each a `u64` bitmask,
-  with the current page cached (the head only ever moves ±1). Reads
-  never allocate — a page miss is blank; a write that zeroes its page
-  frees it — so memory stays proportional to the number of pages holding
-  a non-blank cell, never to how far the head has walked.
-- **WideTape** — the same unbounded paged sparse storage for an alphabet
-  of up to 256 symbols. A two-symbol band is just a `WideTape` of width
-  2, so an architecture with wide alphabets uses this device throughout.
+  sparse storage: a `BTreeMap` of fixed-size pages, each a `u64` bitmask.
+  Reads never allocate — a page miss is blank; a write that zeroes its
+  page frees it — so memory stays proportional to the number of pages
+  holding a non-blank cell, never to how far the head has walked.
+- **WideTape** — unbounded sparse storage for an alphabet of up to 256
+  symbols: a `BTreeMap` entry per non-blank cell, with no page grouping
+  (unlike `InfiniteTape`). A two-symbol band is just a `WideTape` of
+  width 2, so an architecture with wide alphabets uses this device
+  throughout.
 - **AnnularTape** — a ring-shaped bounded tape (wraps at both ends);
   `AnnularTape::new(size)` takes its size from the caller (2048 is a
   common example size, not a hardcoded default).
@@ -278,10 +279,11 @@ the order the author happened to write them in; catch-all-last means a
 catch-all never shadows a row behind it. How a dialect spells the
 resulting error is its own business.
 
-The discipline governs **authored** tables. Tables the linker emits —
-mono lowering rewrites rows through a symbol-map preimage and prepends
-trap rows — preserve first-match *meaning* rather than source
-sortedness.
+The discipline binds a table the linker emits exactly as it binds an
+authored one: mono lowering rewrites rows through a symbol-map preimage
+and sorts the result back into canonical order — trap rows synthesized
+for an unmapped read included — so a stamped table disassembles to text
+the assembler accepts as readily as hand-written source does.
 
 ## Timing model (tacts)
 
@@ -711,7 +713,7 @@ image-level aggregates:
 | `composites` | the directory size `K` — distinct composites in the frames region |
 | `compose_table_bytes` | the compose matrix size, `(K+1) × S × 2` for `S` sites |
 | `dedup_savings` | stamps and descriptors avoided by interning an already-built copy |
-| `synthesized_trap_rows` | unmapped-read trap rows prepended to stamped match tables |
+| `synthesized_trap_rows` | unmapped-read trap rows synthesized into stamped match tables |
 | `expanded_rows` | extra match rows from one-way collapse expansion |
 | `variant_fallbacks` | sorted names that linked the build column NOT matching the program's bit, because the wanted one was absent |
 | `program_volatile` | the volatile bit this link resolved with — the column every name was selected by |
@@ -759,9 +761,11 @@ produce different images from the same objects:
 - **mono** compiles for the base profile: it stamps a specialized copy
   of the callee per distinct composite, folding the projection and
   symbol maps into that copy's vectors and match tables. A statically
-  known hole keeps the trap taxonomy — an unmapped-read symbol becomes a
-  first-match trap row prepended to every match table, and a write with
-  no physical image becomes a trap stub. Identical stamps dedup behind a
+  known hole keeps the trap taxonomy — an unmapped-read symbol gets a
+  synthesized trap row, sorted into the stamped table's canonical
+  position alongside the rewritten rows; it wins because no other row
+  can match that symbol, not because of where it sits. A write with no
+  physical image becomes a trap stub. Identical stamps dedup behind a
   digest-suffixed name, `<routine>.<digest8>` — a period, so the name
   re-lexes as ordinary assembly text. A period is legal in a hand-written
   routine name too, so the linker checks every freshly minted stamp name
@@ -782,14 +786,23 @@ produce different images from the same objects:
 All three are **observably equivalent** on the same program and inputs —
 same outcome, same final device state, and the **same trap kind** on a
 crossed hole or an unmatched read. The fault offset and the tact cost
-may differ; the kind never does.
+may differ; the kind never does. That equivalence rests on the
+composition engine placing callee tapes **injectively** — a binding may
+not bind two callee tapes to one caller tape (`docs/formats.md (bound
+calls)`), which is also why a callee may never declare more tapes than
+its caller has to bind them to. A hand-authored raw `.frame` descriptor
+sits outside that check: it is never built from a binding, and mono
+never stamps one, so it carries none of the divergence risk the check
+exists to rule out.
 
 Two restrictions bind the **mono lowering path**. A raw hand-authored
 framed call cannot be lowered onto the base profile, which has no
 compose machinery to activate a descriptor with. And a holey binding
 whose synthesized trap rows would be consumed by a conditional branch
-rather than a dispatch jump is refused, since the prepended row could
-misroute the branch. Both errors name the offending routine.
+rather than a dispatch jump is refused, since a synthesized trap row
+still sets MR to a nonzero value that a conditional branch would misread
+as an ordinary match, wherever in the table it sorts. Both errors name
+the offending routine.
 
 `hybrid` inherits those restrictions only where it actually stamps.
 Because an identity binding collapses to a plain call, it never seeds a

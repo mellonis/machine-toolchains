@@ -173,7 +173,7 @@ pub struct UseCst {
     ///
     /// Sparse and index-keyed rather than a per-path wrapper, so [`UsePath`]
     /// stays trivia-free and `lower_cst` hands it to the AST unchanged
-    /// (docs/pmt/fmt.md (interior comments)).
+    /// (docs/pmt/fmt.md (comments inside a use list)).
     pub interior: Vec<(usize, Comment)>,
 }
 

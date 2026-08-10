@@ -59,6 +59,31 @@ reconstruct the declarative form), and relinking that syntax does not
 necessarily lay out the tables section the way the original
 declarative-binding link did.
 
+The same "equivalent image, not always the same bytes" rule covers one
+more shape, hand-written-only like the frame case above: a body whose
+explicit entry-prologue (`ent`) byte is the target of an unconditional
+jump re-links to a byte-different but semantically identical image —
+same outcome, same tape content, under every call mechanism — when the
+jump opens a **genuine cut** of the disassembler's control-flow walk
+(`docs/pmt/asm.md` states the same rule for `.pma`). A cut needs all
+four of: nothing falls through into the boundary; the region it opens
+never falls out its own end (it always stops or resolves its own final
+jump); no local-label edge spans the boundary in either direction (a
+call, or a jump onto an already-established root, is exempt); and every
+table the boundary would split lies wholly on one side of it. These four
+are what the walk checks, and together they cover every mechanism by
+which the rendered text either names a code address or lets execution
+cross a boundary.
+
+The fourth condition is where `.tma` differs from `.pma`: `.tma` is the
+only dialect with table sections, so it is the only one where a boundary
+can actually collide with a table. A boundary that would split a match
+table, a dispatch table, or a frame descriptor across two regions is
+declined outright, rather than rendered as text the assembler would
+refuse (`bad-table`) — the discovered corpus never hits this (no shipped
+program hand-writes a mid-body `ent` at all), but the condition holds at
+the dialect level regardless.
+
 ## The mnemonic set
 
 The dialect accepts twenty mnemonics. The opcode table — each mnemonic's
@@ -83,7 +108,10 @@ set)`. What belongs here is how they are *spelled*:
   displacement and, after link, a call-site index
   (`docs/formats.md (the frames region)`).
 - **`ent` is emitted implicitly by `.func`** and is the runtime call
-  guard; it is never written by hand.
+  guard. Unlike `call.s` above, which the assembler rejects outright in
+  source, a hand-written `ent` is not a grammar violation — an extra one
+  anywhere in a function body assembles cleanly as a harmless duplicate
+  no-op. There is simply no reason to write it: `.func` already emits it.
 
 ## What the `.tmc` compiler emits
 
@@ -114,10 +142,9 @@ call mechanism stays a link-time decision independent of the source.
 
 0.3 also gained the trailing-comma list continuation on `.targets`,
 `.exits`, and `.map` (`docs/formats.md`, "match and dispatch tables" and
-"frame descriptors") without becoming 0.4, even though the stated
-acceptance contract is that `N` bumps on *any* grammar change: no
-released build has ever fixed 0.3 as a contract to preserve, so there is
-nothing yet for an additive grammar surface to break. The version stays
-free to absorb changes like this one until a release actually ships it —
-at that point 0.3 becomes a real acceptance floor and the next grammar
-change bumps to 0.4 in the ordinary way.
+"frame descriptors") without becoming 0.4. The stated acceptance contract
+is that `N` bumps on *any* grammar change once a version has shipped and
+so become a contract to preserve; this addition landed during 0.3's own
+development, before its first release, so it folded into 0.3 rather than
+opening 0.4. The dialect version is **0.3** as released; a grammar change
+proposed after that point bumps to 0.4 in the ordinary way.

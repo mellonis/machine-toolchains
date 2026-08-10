@@ -182,8 +182,8 @@ this".
 These five rules live in the arch-agnostic assembly rule catalog and
 apply to every `.pma` input, read against the PM-1 syntax. They draw
 control-flow and opcode knowledge from the target architecture rather
-than from PM-1 specifically, so the same catalog is ready for a future
-second architecture with no rule-level changes.
+than from PM-1 specifically, so the same catalog already serves TM-1's
+`.tma` lint layer too, with no rule-level changes.
 
 ### unreachable-code
 

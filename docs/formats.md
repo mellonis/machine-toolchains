@@ -43,7 +43,11 @@ content. A `.pmo` and a `.tmo` are both `MO 0x01`; a `.pmx` and a `.tmx` are
 both `MX 0x01`; a `.pmt` and a `.tmt` are both `MT 0x01`. **Neither
 toolchain ever dispatches on a file extension** — only on the sniffed
 magic, so a container renamed to the wrong extension still reads correctly,
-and one handed to the wrong subcommand is rejected for what it *is*.
+and one handed to the wrong subcommand is rejected for what it *is*. That
+is a claim about the three binary containers specifically: the
+source-text commands (`lint`, `fmt`) route `.pmc`/`.pma`/`.tmc`/`.tma`
+input by file extension on purpose, since source text carries no
+sniffable magic of its own.
 
 **CRC-32** (IEEE 802.3, reflected, polynomial `0xEDB88320`) covers the
 whole file with the 4-byte CRC field itself zeroed. Writers zero the field,
@@ -266,9 +270,11 @@ both counts, zero when the respective list is empty.
 - **Bound calls** are the declarative call sites of composed routines
   (`call name [binding]`): each marks a call operand hole, like a
   relocation, then binds every callee virtual tape — which caller tape feeds
-  it and the symbol map between the two alphabets. A map pair flagged
-  **one-way** is read-only: collapse is allowed and it is excluded from
-  write-back.
+  it and the symbol map between the two alphabets. Placement is
+  **injective**: two callee tapes may never name the same caller tape, so
+  a callee can never declare more tapes than its caller has to bind them
+  to. A map pair flagged **one-way** is read-only: collapse is allowed
+  and it is excluded from write-back.
 - **Variant tags** name each blob's **build column** — one `u8` per blob,
   parallel to the blobs like the debug section, and carrying its own
   explicit count so a length mismatch is a decode-time rejection rather
@@ -310,8 +316,9 @@ every blob and symbol index in range, each hole's `offset..offset + 4`
 inside its blob, each table offset inside its table blob — and rejects
 reserved map-pair flag bits. Whether a binding's maps form the legal
 bijection the composition demands — completion, hole rules, write-back
-consistency — is **mapping legality**, checked by the linker, not the
-format.
+consistency, and injective placement (the `caller_tape` fields of one
+binding must be pairwise distinct) — is **mapping legality**, checked by
+the linker, not the format.
 
 Per-function granularity is what gives the linker dead-function
 elimination and leaves link-time inlining open as a future extension. A

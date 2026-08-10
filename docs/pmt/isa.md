@@ -124,7 +124,10 @@ table rows — they decode to "invalid" or "reserved").
   (`CallTargetNotEntry`) unless the target byte is `0x0D`. Every function
   begins with `ent` — the compiler emits it, and the assembler's `.func`
   directive inserts it. Jumping onto an `ent` is legal (it executes as a
-  no-op); only `call` checks.
+  no-op); only `call` checks. A disassembler reads such a target as a
+  function start of its own only when the jump opens a genuine cut of the
+  discovered code (`docs/pmt/asm.md`); otherwise it stays an ordinary
+  label inside the body that jumps to it.
 - **`brk` is PM-1's declared debug break** (`docs/core.md (debug
   break)`): it retires as a no-op, pauses a debug session, and is what
   the `leftover-debugger` lint looks for.

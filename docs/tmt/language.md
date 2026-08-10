@@ -534,6 +534,15 @@ signature is known, and **every** parameter must be bound: a missing,
 duplicate, or unrecognized argument name is a compile error naming the
 parameter.
 
+Within one argument list, two tape parameters may not bind the same
+caller tape — a binding places callee tapes **injectively**, one caller
+tape backing at most one callee tape (`duplicate-tape-target`). The same
+caller tape may back different callee tapes across different calls; only
+aliasing it within one call is rejected. A direct consequence: a callee
+can never declare more tapes than the caller has to bind them to
+(`callee_arity ≤ caller_arity`) — a routine wider than its caller is
+unrepresentable, not merely unwritten.
+
 A call whose target lives in *another* compilation unit is the opposite
 case — it must not bind tapes at all. Projecting them would need the
 callee's signature, which this unit does not have, so the empty list is
@@ -551,7 +560,9 @@ use hidden;
 `graft` splices a `graph` into the host world at compile time. Each graft
 site gets its own private copy of the graph's states, and the graph's
 exit parameters are wired to host states at the site — a static
-continuation, no return stack involved.
+continuation, no return stack involved. Its tape argument list is
+checked the same way `call`'s is (above): two of the graph's tape
+parameters may not bind the same host tape.
 
 ```
 entry graft findX(t = work, found = celebrate, missing = giveUp) as seek;
@@ -591,7 +602,9 @@ machine {
 }
 ```
 
-A bind is a call target, not a state — `goto h` is a compile error.
+A bind is a call target, not a state — `goto h` is a compile error. Its
+declared argument list is checked the same way an ordinary `call`'s is:
+one caller tape may not back two of the callee's tape parameters.
 
 ### Choosing between them
 
@@ -623,6 +636,9 @@ call flip(n = num with map { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' })
 
 The map is written source-first: the left side names a symbol of the
 **caller's** tape, the right side a symbol of the **callee's** alphabet.
+A map is per caller tape, which is why one caller tape can never back
+two callee tapes at once (see "`call`", above): two maps layered onto
+one physical head is not a representable projection.
 
 ### The two arrows
 
