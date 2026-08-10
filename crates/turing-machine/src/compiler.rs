@@ -94,6 +94,14 @@ pub enum CompileErrorKind {
     UnknownAttribute(String),
     /// A second `[deprecated]` attribute inside one run.
     DuplicateAttribute,
+    /// A `writes { … }` clause on a signature tape parameter written after
+    /// that same parameter's `preserves` clause. The fixed order — `writes`
+    /// then `preserves` — is a grammar rule, not an fmt convention: fmt is
+    /// token-preserving and cannot reorder an author's clauses.
+    ContractClauseOrder,
+    /// A second `writes` or `preserves` clause on one signature tape
+    /// parameter. `what` names the repeated keyword.
+    DuplicateContractClause { what: &'static str },
 
     // -- resolution / flatten / world checks (this task) -------------------
     /// An alphabet with no elements — a world needs at least one symbol
@@ -297,6 +305,8 @@ impl CompileErrorKind {
         CompileErrorKind::DocLineOrder => "doc-line-order",
         CompileErrorKind::UnknownAttribute(_) => "unknown-attribute",
         CompileErrorKind::DuplicateAttribute => "duplicate-attribute",
+        CompileErrorKind::ContractClauseOrder => "contract-clause-order",
+        CompileErrorKind::DuplicateContractClause { .. } => "duplicate-contract-clause",
         CompileErrorKind::EmptyAlphabet => "empty-alphabet",
         CompileErrorKind::DuplicateGlyph(_) => "duplicate-glyph",
         CompileErrorKind::AlphabetTooLarge(_) => "alphabet-too-large",
@@ -432,6 +442,12 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::DuplicateAttribute => {
                 write!(f, "duplicate `[deprecated]` attribute in the same run")
+            }
+            CompileErrorKind::ContractClauseOrder => {
+                write!(f, "`writes` must come before `preserves`")
+            }
+            CompileErrorKind::DuplicateContractClause { what } => {
+                write!(f, "duplicate `{what}` clause")
             }
             CompileErrorKind::EmptyAlphabet => {
                 write!(f, "an alphabet needs at least one symbol")
@@ -2621,6 +2637,8 @@ mod tests {
             CompileErrorKind::DocLineOrder,
             CompileErrorKind::UnknownAttribute("x".into()),
             CompileErrorKind::DuplicateAttribute,
+            CompileErrorKind::ContractClauseOrder,
+            CompileErrorKind::DuplicateContractClause { what: "writes" },
             CompileErrorKind::EmptyAlphabet,
             CompileErrorKind::DuplicateGlyph("x".into()),
             CompileErrorKind::AlphabetTooLarge(200),

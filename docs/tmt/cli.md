@@ -203,6 +203,8 @@ graft-map family in the graft section of the same page.
 | `doc-line-order` | A `?` doc line appears after the run has already entered its `!` block. |
 | `unknown-attribute` | An attention line's leading `[ident]` names something other than the recognized attribute vocabulary (`deprecated`). |
 | `duplicate-attribute` | A second `[deprecated]` attribute inside one run. |
+| `contract-clause-order` | A `writes { … }` clause on a signature tape parameter written after that parameter's `preserves` clause — the fixed order is `writes` then `preserves`. |
+| `duplicate-contract-clause` | A second `writes` or `preserves` clause on one signature tape parameter. |
 | `empty-alphabet` | An alphabet with no elements — a world needs at least one symbol. |
 | `duplicate-glyph` | The same glyph appears twice in one alphabet. |
 | `alphabet-too-large` | An alphabet resolves to more than 127 symbols. |
