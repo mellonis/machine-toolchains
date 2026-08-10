@@ -842,8 +842,8 @@ fn push_glyph(
 }
 
 // ---------------------------------------------------------------------------
-// The resolved module — the front-end structure Task 5 (graft + range
-// expansion) and Task 6 (IR lowering) consume.
+// The resolved module — the front-end structure the graft/range expansion
+// and the IR lowering consume.
 // ---------------------------------------------------------------------------
 
 /// The whole resolved module. Rules stay in SOURCE form (patterns unexpanded

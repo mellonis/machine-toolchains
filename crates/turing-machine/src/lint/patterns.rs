@@ -129,11 +129,24 @@ mod tests {
         assert_in_lockstep(&glyph("f"), &glyph("a"));
         // The surrogate gap: both walkers must skip it identically.
         assert_in_lockstep(&glyph("\u{D7F0}"), &glyph("\u{E010}"));
-        // Endpoints resolution rejects: multi-scalar, empty, mixed kinds.
+        // Endpoints resolution rejects: multi-scalar, empty, mixed kinds —
+        // each class at BOTH positions, since the two sides carry
+        // independent single_scalar copies and a position-blind matrix
+        // cannot catch an endpoint-asymmetric drift.
         assert_in_lockstep(&glyph("ab"), &glyph("c"));
+        assert_in_lockstep(&glyph("a"), &glyph("bc"));
         assert_in_lockstep(&glyph("a"), &glyph(""));
+        assert_in_lockstep(&glyph(""), &glyph("a"));
         assert_in_lockstep(&num(1), &glyph("a"));
         assert_in_lockstep(&glyph("a"), &num(1));
+        // A non-canonical `written` at a range endpoint: the `05` ≡ `5`
+        // identity must hold there too, not just on the single-literal path.
+        let five_written_05 = SymLit::Number {
+            value: 5,
+            written: "05".to_string(),
+            span: Span::new(1, 1, 1, 3),
+        };
+        assert_in_lockstep(&five_written_05, &num(7));
     }
 
     /// Derivation-first check of the gap-crossing range itself, so the
@@ -147,11 +160,8 @@ mod tests {
         assert_eq!(labels.len(), 33);
         assert_eq!(labels.first().unwrap(), "\u{D7F0}");
         assert_eq!(labels.last().unwrap(), "\u{E010}");
-        assert!(
-            labels
-                .iter()
-                .all(|l| l.chars().all(|c| !(0xD800..=0xDFFF).contains(&(c as u32))))
-        );
+        // No separate no-surrogate assertion: a Rust `char` can never hold
+        // one, so the type system already guarantees it.
     }
 
     /// The single-literal leg of the same drift family: both sides label a
@@ -180,10 +190,14 @@ mod tests {
             assert_in_lockstep(&num(lo), &num(hi));
         }
 
-        /// Arbitrary glyph endpoints stay in lockstep. The delta bound
-        /// (±3000, wider than the 2048-wide surrogate gap) lets generated
-        /// pairs straddle the gap; a target landing IN the gap is not a
-        /// valid endpoint and is discarded.
+        /// Arbitrary glyph endpoints stay in lockstep over the broad endpoint
+        /// space `any::<char>()` draws from; the delta bound (±3000, wider
+        /// than the 2048-wide surrogate gap) merely permits a generated pair
+        /// to straddle the gap, it does not aim for it — `any::<char>()`
+        /// rarely lands near `0xD800`, so gap coverage here is incidental,
+        /// not guaranteed. The gap itself is covered deterministically by
+        /// the matrix's gap case and the derivation test above. A target
+        /// landing IN the gap is not a valid endpoint and is discarded.
         #[test]
         fn glyph_endpoints_stay_in_lockstep(lo in any::<char>(), delta in -3000i64..=3000) {
             let target = (i64::from(lo as u32) + delta).clamp(0, 0x10FFFF) as u32;
