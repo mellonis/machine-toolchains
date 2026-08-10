@@ -147,7 +147,10 @@ explicit `state` parameters, and then wrapped in a one-line `export routine`
 facade that grafts that graph with `done = return`:
 
 ```
-export graph invertNumberGraph(tape num: symbols, state done) {
+export graph invertNumberGraph(
+  tape num: symbols preserves { '_' },
+  state done
+) {
   entry state sweep {
     ['0'] -> write ['1'] move [>] goto sweep;
     ['1'] -> write ['0'] move [>] goto sweep;
@@ -155,7 +158,7 @@ export graph invertNumberGraph(tape num: symbols, state done) {
   }
 }
 
-export routine invertNumber(tape num: symbols) {
+export routine invertNumber(tape num: symbols preserves { '_' }) {
   entry graft invertNumberGraph(num = num, done = return);
 }
 ```

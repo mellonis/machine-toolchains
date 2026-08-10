@@ -54,7 +54,7 @@ namespace std {
 
     ? Behavior graph for goToNumber: walk right until the first '$', then
     ? leave via `done` with the head on that '$'.
-    export graph goToNumberGraph(tape num: symbols, state done) {
+    export graph goToNumberGraph(tape num: symbols writes {}, state done) {
       entry state walk {
         ['$'] -> done;
         [*]   -> move [>] goto walk;
@@ -64,13 +64,16 @@ namespace std {
     ? Walk right to the current number's end marker. On entry the head is on
     ? the number (any cell up to and including its '$'); on exit it rests on
     ? that '$'. The tape is unchanged.
-    export routine goToNumber(tape num: symbols) {
+    export routine goToNumber(tape num: symbols writes {}) {
       entry graft goToNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToNumbersStart: walk left until the first '^',
     ? then leave via `done` with the head on that '^'.
-    export graph goToNumbersStartGraph(tape num: symbols, state done) {
+    export graph goToNumbersStartGraph(
+      tape num: symbols writes {},
+      state done
+    ) {
       entry state walk {
         ['^'] -> done;
         [*]   -> move [<] goto walk;
@@ -80,14 +83,14 @@ namespace std {
     ? Walk left to the current number's start marker. On entry the head is on
     ? the number (any cell from its '^' rightward); on exit it rests on that
     ? '^'. The tape is unchanged.
-    export routine goToNumbersStart(tape num: symbols) {
+    export routine goToNumbersStart(tape num: symbols writes {}) {
       entry graft goToNumbersStartGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToNextNumber: step one cell right, then walk right
     ? to the following number's '$' (reusing goToNumberGraph). Exits via
     ? `done` on that '$'.
-    export graph goToNextNumberGraph(tape num: symbols, state done) {
+    export graph goToNextNumberGraph(tape num: symbols writes {}, state done) {
       entry state step { [*] -> move [>] goto scan; }
       graft goToNumberGraph(num = num, done = done) as scan;
     }
@@ -95,13 +98,16 @@ namespace std {
     ? Move to the next number's end marker. On entry the head is on the
     ? current number's '$' (or the blank gap after it); it steps right and
     ? then walks to the next number's '$', where it stops. Unchanged tape.
-    export routine goToNextNumber(tape num: symbols) {
+    export routine goToNextNumber(tape num: symbols writes {}) {
       entry graft goToNextNumberGraph(num = num, done = return);
     }
 
     ? Behavior graph for goToPreviousNumber: step one cell left, then walk
     ? left to the previous number's '$'. Exits via `done` on that '$'.
-    export graph goToPreviousNumberGraph(tape num: symbols, state done) {
+    export graph goToPreviousNumberGraph(
+      tape num: symbols writes {},
+      state done
+    ) {
       entry state step { [*] -> move [<] goto scan; }
       state scan {
         ['$'] -> done;
@@ -115,7 +121,7 @@ namespace std {
     ? left onto the adjacent '$' and stops there, on the number it started
     ? after rather than the one before. From the '$' it steps left and walks
     ? back to the previous number's '$', where it stops. The tape is unchanged.
-    export routine goToPreviousNumber(tape num: symbols) {
+    export routine goToPreviousNumber(tape num: symbols writes {}) {
       entry graft goToPreviousNumberGraph(num = num, done = return);
     }
 
@@ -333,7 +339,10 @@ namespace std {
 
     ? Behavior graph for invertNumber: sweep right flipping each bit, halt at
     ? the trailing blank. Exits via `done` on that blank.
-    export graph invertNumberGraph(tape num: symbols, state done) {
+    export graph invertNumberGraph(
+      tape num: symbols preserves { '_' },
+      state done
+    ) {
       entry state sweep {
         ['0'] -> write ['1'] move [>] goto sweep;
         ['1'] -> write ['0'] move [>] goto sweep;
@@ -343,7 +352,7 @@ namespace std {
 
     ? Flip every bit of a number. On entry the head is on the leftmost digit;
     ? on exit it rests on the trailing blank.
-    export routine invertNumber(tape num: symbols) {
+    export routine invertNumber(tape num: symbols preserves { '_' }) {
       entry graft invertNumberGraph(num = num, done = return);
     }
 

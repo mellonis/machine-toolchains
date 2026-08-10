@@ -418,8 +418,8 @@ the stdlib deliberately avoids:
 
 ```
 $ tmt lint std.tmc
-std.tmc:257:39: lint: the write-back half of `'^' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
-std.tmc:257:51: lint: the write-back half of `'$' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
+std.tmc:263:39: lint: the write-back half of `'^' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
+std.tmc:263:51: lint: the write-back half of `'$' -> '_'` never fires: `std::binaryNumbersBare::invertNumber` never writes '_'
 ```
 
 The two digit pairs on the same call (`'0' -> '0'`, `'1' -> '1'`) stay

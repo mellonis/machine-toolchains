@@ -429,7 +429,7 @@ document's own resolved module, so it does get the block, the same as any
 other `.tmc` file:
 
 ```
-routine std::binaryNumbersBare::invertNumber(tape num: symbols)
+routine std::binaryNumbersBare::invertNumber(tape num: symbols preserves { '_' })
 
 writes num: {'0', '1'}
 
