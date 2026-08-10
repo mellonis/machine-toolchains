@@ -1,4 +1,4 @@
-//! PM-1 assembly end-to-end: the docs/formats.md (assembly text) sample,
+//! PM-1 assembly end-to-end: the docs/pmt/asm.md sample,
 //! byte-exact, and an assembled program actually running on the Machine.
 
 use mtc_core::formats::object::SymbolDef;
@@ -7,7 +7,7 @@ use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::arch::opcodes::*;
 use mtc_post_machine::asm::{assemble, disassemble_object, pm1_syntax};
 
-/// The docs/formats.md (assembly text) sample, verbatim.
+/// The docs/pmt/asm.md sample, verbatim.
 const SPEC_SAMPLE: &str = "\
 .func goToEnd                   ; emits ent, defines symbol
 L1:     rgt

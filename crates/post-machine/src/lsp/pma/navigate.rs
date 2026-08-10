@@ -117,7 +117,7 @@ mod tests {
         // `jmp L1` — Flow::Jump with a BARE operand goes through the
         // same OperandRole::Label arm `jm`/`jnm` do (a bare jump target
         // is a label; only `@name` makes a jump a function symbol,
-        // docs/formats.md (symbol jumps)) — pinned separately so the
+        // docs/pmt/asm.md (symbol jumps)) — pinned separately so the
         // Jump half of the shared match arm isn't test-dead.
         let mut service = PmaLanguageService::new();
         let src = ".func f\nL1: rgt\n        jmp     L1\n";

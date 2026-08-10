@@ -39,7 +39,7 @@ Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 own version), `tmc language <VERSION>` (the `.tmc` language
 acceptance-contract version — `docs/tmt/language.md`), and
 `tma dialect (tm-1) <VERSION>` (the TM-1 `.tma` dialect version —
-`docs/formats.md (assembly text)`). The three numbers move on independent
+`docs/tmt/asm.md`). The three numbers move on independent
 axes: a crate release with no grammar change repeats the same
 language-version and dialect-version lines, and each grammar version only
 bumps when its own grammar changes.

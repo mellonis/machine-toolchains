@@ -1,5 +1,6 @@
 //! The `.pma` `.volatile` directive: the text form of a two-column object
-//! (docs/formats.md (assembly text)). A `.volatile` line inside a `.func`
+//! (docs/pmt/asm.md (the .volatile directive)). A `.volatile` line inside
+//! a `.func`
 //! block tags that blob's build column; one before the first `.func` sets
 //! the object's program bit. These tests pin the acceptance rules, the
 //! asm-side dedup that mirrors the compiler's, column-coherent call

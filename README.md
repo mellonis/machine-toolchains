@@ -236,6 +236,9 @@ that cover what they hold in common.
   optimization, the IR artifact, and the grammar-version history.
 - `docs/pmt/isa.md` — the PM-1 processor: registers, the opcode table,
   timing, and execution.
+- `docs/pmt/asm.md` — the `.pma` assembly dialect: the sample shape, the
+  `pmt dis` round trip, symbol jumps, the `.volatile` build-column
+  directive, and the dialect-version history.
 - `docs/pmt/cli.md` — every `pmt` subcommand and flag.
 - `docs/pmt/optimizer.md` — the `-O1` pipeline: the nine passes, the
   contracts binding them, and a worked before/after IR example per pass.
@@ -257,6 +260,9 @@ that cover what they hold in common.
 - `docs/tmt/isa.md` — the TM-1 processor: the opcode set, multi-tape
   vectors, match/dispatch tables, the frames execution profile, framed
   calls, traps, and the three call mechanisms.
+- `docs/tmt/asm.md` — the `.tma` assembly dialect: the sample shape, the
+  `tmt dis` round trip, how the twenty mnemonics are spelled, what the
+  `.tmc` compiler emits, and the dialect-version history.
 - `docs/tmt/cli.md` — every `tmt` subcommand and flag, and the `tmt.json`
   file's `lint` section.
 - `docs/tmt/optimizer.md` — the `-O1` pipeline: the eight passes, the
@@ -277,8 +283,9 @@ that cover what they hold in common.
   tape devices, loading, the trap taxonomy, `DebugSession`, the composition
   engine, and the assembler, lint, and linker frameworks.
 - `docs/formats.md` — the container formats — `.pmo`/`.tmo`, `.pmx`/`.tmx`,
-  `.pmt`/`.tmt`, the `.pma`/`.tma` assembly dialects, the `.map` sidecar,
-  and IR JSON — with the sniff-not-extension rule shared by both toolchains.
+  `.pmt`/`.tmt` — the assembly text grammar the two dialects share, the
+  `.map` sidecar, and IR JSON — with the sniff-not-extension rule shared by
+  both toolchains.
 - `docs/lsp.md` — the language-server framework and its per-language
   services: capabilities, editor wiring, and configuration.
 - `docs/history.md` — where both designs come from.

@@ -215,7 +215,7 @@ pub fn assemble(
 /// The defined run parallels the SOURCE functions one-to-one except where
 /// the `.volatile` directive is in play: a bare/`.volatile` pair whose two
 /// lowerings assemble identical contributes ONE `Both`-tagged blob and one
-/// symbol for its two `.func` blocks (docs/formats.md (assembly text)).
+/// symbol for its two `.func` blocks (docs/formats.md (MO)).
 pub(crate) fn assemble_lowered(
     syntax: &ArchSyntax,
     arch_id: u8,
@@ -344,7 +344,7 @@ pub(crate) fn assemble_lowered(
 }
 
 /// Collapses the assembled build columns into the object's final blob
-/// order and tags each blob (docs/formats.md (assembly text)). Every array
+/// order and tags each blob (docs/formats.md (MO)). Every array
 /// handed in is provisional — one entry per `.func` BLOCK — and is
 /// rewritten in place to one entry per emitted blob.
 ///

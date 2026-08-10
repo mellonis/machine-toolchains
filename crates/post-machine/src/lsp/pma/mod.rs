@@ -359,8 +359,7 @@ fn doc_functions(cst: &AsmCst) -> impl Iterator<Item = &FuncCst> {
 }
 
 /// Which reference kind an operand's raw, trimmed `text` plays for a
-/// resolved mnemonic `entry`, per docs/formats.md (assembly text) (symbol
-/// jumps): `@name` is always a function-symbol reference (only the
+/// resolved mnemonic `entry`, per docs/pmt/asm.md (symbol jumps): `@name` is always a function-symbol reference (only the
 /// RelI8/RelI32 operand kinds `jmp`/`jm`/`jnm`/`call` and their short
 /// forms share); a bare (non-`@`) name is a LABEL for `Jump`/`Branch` flow
 /// and a FUNCTION for `Call` flow — `call`'s bare operand already IS the
