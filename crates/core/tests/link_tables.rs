@@ -1784,9 +1784,10 @@ Fr: .frame  tapes=(0, 1)
     assert_eq!(out.executable.profile, PROFILE_FRAMES);
 }
 
-/// The hand-derived read-table rewrite: a machine-width match table with
-/// synthesized trap rows PREPENDED, a collapse expanding one row into two,
-/// and a no-preimage row DROPPED with the paired dispatch renumbered.
+/// The hand-derived read-table rewrite: a machine-width match table with a
+/// synthesized trap row, a collapse expanding one row into two, a no-preimage
+/// row DROPPED, and the whole thing sorted into the canonical row order with
+/// each dispatch entry carried alongside its row.
 /// `main` (1 tape, alphabet 4) mono-calls `sub` (1 tape, alphabet 3) binding
 /// physical 1 (two-way, so virtual 1 writes back) and physical 2 (one-way)
 /// both onto virtual 1 (a collapse); physical 3 is unlisted, so across the
@@ -1856,10 +1857,11 @@ C:      wr [2]
     let match_off = match_off.expect("stamp has a match table") as usize;
     let disp_off = disp_off.expect("stamp has a dispatch table") as usize;
 
-    // Match table: width 1, four rows [3][0][1][2] — the trap row for the
-    // read hole 3 FIRST, then virtual 0's preimage [0], then virtual 1's two
-    // preimages [1] and [2] (the collapse expansion). Virtual 2 (no
-    // preimage) dropped.
+    // Match table: width 1, four rows. The rewrite produces virtual 0's
+    // preimage [0], virtual 1's two preimages [1] and [2] (the collapse
+    // expansion), and a trap row [3] for the read hole; virtual 2 (no
+    // preimage) is dropped. All four are exact rows at this machine width,
+    // so the canonical row order is simply ascending: [0][1][2][3].
     let tbl = &exe.tables;
     assert_eq!(tbl[match_off], 1, "machine-width match table");
     assert_eq!(
@@ -1869,13 +1871,14 @@ C:      wr [2]
     );
     assert_eq!(
         &tbl[match_off + 3..match_off + 7],
-        &[3u8, 0, 1, 2],
-        "rows: [3](trap) [0] [1] [2]"
+        &[0u8, 1, 2, 3],
+        "rows sorted: [0] [1] [2] [3](trap)"
     );
 
-    // Dispatch: four entries. entry[0] → the trap stub (`trap #0`), entry[1]
-    // → A, entries[2] and [3] → B (the collapse points both preimages at the
-    // same target). C is dropped (no dispatch entry).
+    // Dispatch: four entries, each moved with its row. entry[0] → A (virtual
+    // 0), entries[1] and [2] → B (the collapse points both preimages at the
+    // same target), entry[3] → the trap stub (`trap #0`) now that the hole
+    // row sorts last. C is dropped (no dispatch entry).
     assert_eq!(
         u16::from_le_bytes([tbl[disp_off], tbl[disp_off + 1]]),
         4,
@@ -1885,15 +1888,15 @@ C:      wr [2]
         let at = disp_off + 2 + k * 4;
         u32::from_le_bytes(tbl[at..at + 4].try_into().unwrap()) as usize
     };
-    assert_eq!(code[entry(0)], 0x18, "trap-stub opcode");
-    assert_eq!(code[entry(0) + 1], 0, "trap #0 (unmapped read)");
-    assert_eq!(code[entry(1)], 0x07, "row 0 → A: wr");
+    assert_eq!(code[entry(0)], 0x07, "row [0] → A: wr");
     assert_eq!(
+        entry(1),
         entry(2),
-        entry(3),
         "the collapse expansion shares one target"
     );
-    assert_eq!(code[entry(2)], 0x07, "collapse rows → B: wr");
+    assert_eq!(code[entry(1)], 0x07, "collapse rows → B: wr");
+    assert_eq!(code[entry(3)], 0x18, "trap-stub opcode");
+    assert_eq!(code[entry(3) + 1], 0, "trap #0 (unmapped read)");
 
     // The write projection: `A: wr [0]` writes virtual 0 → physical 0. The
     // self-delimiting byte carries payload 0 with the high (last) bit set.
@@ -1907,7 +1910,7 @@ C:      wr [2]
 /// A holey mono binding synthesizes unmapped-read trap rows into the callee's
 /// match table, but only a dispatch jump can route them to the trap stub.
 /// When the callee reads the match result through a conditional branch
-/// instead (no dispatch), a hole symbol would match a prepended trap row and
+/// instead (no dispatch), a hole symbol would match a synthesized trap row and
 /// take the branch as if it had matched — a silent misroute. The stamp is
 /// refused with a clear link error rather than emitted.
 #[test]

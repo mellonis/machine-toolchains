@@ -1336,6 +1336,47 @@ fn emit_frame_descriptor(
     Ok(out)
 }
 
+/// Where one match row falls in the canonical row order (docs/core.md
+/// (match tables)). The derived `Ord` IS that order: exact rows first and
+/// ascending by payload vector, then partial-wildcard rows, then the
+/// all-wildcard catch-all last.
+///
+/// One definition, read from two sides — the assembler validates authored
+/// rows against it, and the linker orders the rows it emits by it — so the
+/// order a table is written in and the order a table is accepted in cannot
+/// drift apart.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum MatchRowClass {
+    /// Every cell a concrete payload; the payload vector orders the row.
+    Exact(Vec<u32>),
+    /// Concrete cells and wildcards mixed.
+    Partial,
+    /// Every cell a wildcard: the catch-all, which may only come last.
+    CatchAll,
+}
+
+/// Classify one row from its cells, `None` marking a wildcard.
+pub(crate) fn classify_match_row<I>(cells: I) -> MatchRowClass
+where
+    I: IntoIterator<Item = Option<u32>>,
+{
+    let mut payloads = Vec::new();
+    let mut wildcards = 0usize;
+    for cell in cells {
+        match cell {
+            Some(p) => payloads.push(p),
+            None => wildcards += 1,
+        }
+    }
+    if wildcards == 0 {
+        MatchRowClass::Exact(payloads)
+    } else if payloads.is_empty() {
+        MatchRowClass::CatchAll
+    } else {
+        MatchRowClass::Partial
+    }
+}
+
 /// Match-table discipline (docs/formats.md (assembly text)): all rows
 /// one width (1..=16); exact rows first, sorted lexicographically by
 /// payload vector and pairwise disjoint (strictly ascending covers
@@ -1365,16 +1406,12 @@ fn validate_match_discipline(name: &SpannedName, rows: &[SourceRow]) -> Result<(
             ));
         }
         // An exact row has a full payload key; any wildcard breaks it.
-        let key: Option<Vec<u32>> = row
-            .elems
-            .iter()
-            .map(|elem| match elem {
-                VecElem::Payload(p) => Some(*p),
-                _ => None,
-            })
-            .collect();
-        match key {
-            Some(key) => {
+        let class = classify_match_row(row.elems.iter().map(|elem| match elem {
+            VecElem::Payload(p) => Some(*p),
+            _ => None,
+        }));
+        match class {
+            MatchRowClass::Exact(key) => {
                 if seen_wildcard {
                     return Err(err(
                         row.span,
@@ -1393,10 +1430,10 @@ fn validate_match_discipline(name: &SpannedName, rows: &[SourceRow]) -> Result<(
                 }
                 prev_exact = Some(key);
             }
-            None => {
+            MatchRowClass::Partial => seen_wildcard = true,
+            MatchRowClass::CatchAll => {
                 seen_wildcard = true;
-                let all_wildcard = row.elems.iter().all(|e| matches!(e, VecElem::Wildcard));
-                if all_wildcard && i + 1 != rows.len() {
+                if i + 1 != rows.len() {
                     return Err(err(
                         row.span,
                         AsmErrorKind::TableDiscipline("the all-wildcard row must be last"),

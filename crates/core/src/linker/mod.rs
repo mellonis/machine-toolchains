@@ -82,7 +82,7 @@ pub enum LinkError {
     /// unmapped-read trap rows into the callee's match table — but only a
     /// dispatch jump routes those rows to the trap stub. This callee reads a
     /// match result through a conditional branch (or leaves it unconsumed),
-    /// so a hole symbol would match a prepended trap row and take the branch
+    /// so a hole symbol would match a synthesized trap row and take the branch
     /// as if it had matched: a silent misroute. `hybrid` hits the identical
     /// refusal whenever the holeyness sits one hop past whatever bound site
     /// its classifier inspected — a nested bound call under an outer
