@@ -135,6 +135,10 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
         "writes-through-collapse",
         rules::writes_through_collapse::check,
     ),
+    (
+        "contract-clause-overlap",
+        rules::contract_clause_overlap::check,
+    ),
 ];
 
 /// The opt-in rule table: off by default, run only when `--warn` names the
