@@ -6,8 +6,8 @@
 
 use mtc_core::linker::{LinkOptions, link};
 use mtc_turing_machine::asm::{
-    TM1_TMA_DIALECT_VERSION, assemble, disassemble_executable_with_map, disassemble_object,
-    tm1_syntax,
+    TM1_TMA_DIALECT_VERSION, assemble, disassemble_executable, disassemble_executable_with_map,
+    disassemble_object, tm1_syntax,
 };
 
 /// Every source mnemonic EXCEPT `djmp`, across two signed functions with a
@@ -394,4 +394,50 @@ fn the_volatile_directive_is_not_part_of_the_tma_dialect() {
         !mtc_core::asm::recognized_directives(tm1_syntax().caps).contains(&".volatile"),
         "`.tma`'s directive inventory must not list `.volatile`"
     );
+}
+
+/// A dispatch table whose targets sit on both sides of a jumped-onto `ent`.
+/// The `ent` looks like a function prologue — TM-1's entry opcode, reached
+/// by a jump — but the table's entries are spelled as ONE region's labels,
+/// so a boundary there would leave `.targets` naming a label the other
+/// function owns, and `tmt dis`'s own output would no longer assemble.
+const STRADDLED_DISPATCH: &str = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section tables
+T0: .row [1, 1]
+    .row [*, *]
+D0: .targets scan2, scan1, scan0
+.section code
+.func main
+        rd
+        mtc  T0
+        djmp D0
+scan0:  wr   [1, -]
+        mov  [>, .]
+        jmp  L1
+L1:     ent
+scan1:  wr   [-, 0]
+        mov  [>, .]
+        stp
+scan2:  stp
+";
+
+#[test]
+fn a_dispatch_table_straddling_a_jumped_onto_entry_byte_keeps_one_function() {
+    let out = link(
+        &tm1_syntax(),
+        &[assemble(STRADDLED_DISPATCH, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .expect("links");
+    let text = disassemble_executable(&out.executable);
+    // The property that matters: the text assembles AND re-links to the
+    // same image. A split fails at `asm`, before the link even runs —
+    // `.targets` would name a label the other function owns.
+    let obj2 = assemble(&text, false)
+        .unwrap_or_else(|e| panic!("rendered text must re-assemble: {e:?}\n{text}"));
+    let out2 = link(&tm1_syntax(), &[obj2], &[], LinkOptions::default()).expect("re-links");
+    assert_eq!(out2.executable.code, out.executable.code, "{text}");
+    assert_eq!(text.matches(".func").count(), 1, "one function:\n{text}");
 }

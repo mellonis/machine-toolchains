@@ -1165,6 +1165,11 @@ pub fn disassemble_executable(
     // Jump targets whose byte is the entry opcode — candidate function
     // starts, resolved by the cut filter once the walk has finished.
     let mut tail_jump_targets: BTreeSet<u32> = BTreeSet::new();
+    // The code edges a table carries, which no `RelTarget` operand shows:
+    // each table's selectable code addresses, and every instruction that
+    // reaches a table. The cut filter reads both.
+    let mut table_targets: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut table_sites: Vec<(u32, u32)> = Vec::new();
     while let Some(addr) = work.pop() {
         if addr >= len || instrs.contains_key(&addr) {
             continue;
@@ -1183,18 +1188,24 @@ pub fn disassemble_executable(
         // dispatches THROUGH its table). A dispatch table's entries are
         // code addresses the flow walk below cannot see, so they join
         // the work list — as label candidates, never roots.
-        if let DecodedOperand::TableAddr(t) = operand
-            && !table_kinds.contains_key(t)
-        {
-            let kind = if entry.flow == Flow::FallThrough {
-                TableKind::Match
-            } else {
-                TableKind::Dispatch
-            };
-            table_kinds.insert(*t, kind);
-            if matches!(kind, TableKind::Dispatch) {
-                for target in dispatch_entries(&exe.tables, *t) {
-                    work.push(target);
+        if let DecodedOperand::TableAddr(t) = operand {
+            // Every reference is recorded, not just the first: two sites in
+            // different regions reach the same table, and the cut filter
+            // below weighs each site against the entries it can select.
+            table_sites.push((addr, *t));
+            if !table_kinds.contains_key(t) {
+                let kind = if entry.flow == Flow::FallThrough {
+                    TableKind::Match
+                } else {
+                    TableKind::Dispatch
+                };
+                table_kinds.insert(*t, kind);
+                if matches!(kind, TableKind::Dispatch) {
+                    let targets = dispatch_entries(&exe.tables, *t);
+                    for &target in &targets {
+                        work.push(target);
+                    }
+                    table_targets.insert(*t, targets);
                 }
             }
         }
@@ -1209,14 +1220,17 @@ pub fn disassemble_executable(
         } = operand
         {
             site_target.insert(*site, *target);
-            if let Some(desc_off) = resolve_site(exe, *site)
-                && let std::collections::btree_map::Entry::Vacant(slot) =
+            if let Some(desc_off) = resolve_site(exe, *site) {
+                table_sites.push((addr, desc_off));
+                if let std::collections::btree_map::Entry::Vacant(slot) =
                     table_kinds.entry(desc_off)
-            {
-                slot.insert(TableKind::Frame);
-                if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
-                    for &exit in &frame.exits {
-                        work.push(exit);
+                {
+                    slot.insert(TableKind::Frame);
+                    if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
+                        for &exit in &frame.exits {
+                            work.push(exit);
+                        }
+                        table_targets.insert(desc_off, frame.exits);
                     }
                 }
             }
@@ -1255,6 +1269,30 @@ pub fn disassemble_executable(
         instrs.insert(addr, d);
     }
 
+    // Every directory descriptor is inspectable, whether or not any constant
+    // site named it during the walk (a context-dependent site resolves to no
+    // single descriptor). Register the whole directory as frame tables so
+    // all get an `F<n>` label + render — their exits become label
+    // candidates automatically when [`table_code_labels`] walks
+    // `table_kinds` below, without a separate candidate set
+    // (docs/formats.md (image-inspectability principle)). Their exits are
+    // recorded for the cut filter here too, without a site: a descriptor no
+    // site resolved to is reachable under some context this walk cannot
+    // name, so its exits are real code edges all the same.
+    let region = parse_frames_region(exe);
+    if let Some(region) = &region {
+        for &desc_off in &region.directory {
+            if let std::collections::btree_map::Entry::Vacant(slot) = table_kinds.entry(desc_off) {
+                slot.insert(TableKind::Frame);
+            }
+            if let std::collections::btree_map::Entry::Vacant(slot) = table_targets.entry(desc_off)
+                && let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off)
+            {
+                slot.insert(frame.exits);
+            }
+        }
+    }
+
     // Promote the tail-jump candidates that name a real function start.
     //
     // A function reached ONLY by a tail jump is named by nothing else in a
@@ -1275,22 +1313,37 @@ pub fn disassemble_executable(
     // blob that does not open with one — but not a sufficient one, since a
     // dialect may let that byte stand inside a body as an ordinary
     // instruction. Splitting a body there would be worse than the fold it
-    // avoids: the halves become separate functions the linker is free to
-    // re-order, so the text can describe a different program, and any local
-    // edge crossing the invented boundary is no longer expressible at all
-    // (it degrades to `.byte`, which then fails to link). So promote only
-    // across a genuine cut of the discovered code — nothing falls through
-    // into the boundary, and no local-label edge spans it in either
-    // direction. A real tail-jump callee passes: its caller ends in the
-    // jump, and the jump itself renders symbolically rather than as a
-    // crossing label. Declining costs only the fold, which is what the
-    // renderer did before promotion existed.
+    // avoids: the halves become separate functions, ordered by the linker's
+    // own discovery rather than by the text, so any edge that ran across
+    // the invented boundary now runs between two independently placed
+    // functions. Where the edge was a local label it cannot even be spelled
+    // (it degrades to `.byte`, which the linker then rejects); where it was
+    // a fall-through it silently lands somewhere else.
+    //
+    // So promote only across a genuine CUT of the discovered code — a
+    // boundary no edge of any kind spans:
+    //
+    //   * nothing falls through INTO it, and the region it opens does not
+    //     fall out of its own END (it finishes on a stop or a resolved
+    //     jump). Both are the same layout dependency, one boundary apart.
+    //   * no local-label edge crosses it in either direction.
+    //   * no table's selectable addresses cross it — a dispatch table's
+    //     entries and a frame descriptor's exits are code edges no operand
+    //     shows, and they must stay inside one region because the table
+    //     section spells them as that region's labels.
+    //
+    // A real tail-jump callee passes all three: its caller ends in the
+    // jump, the jump itself renders symbolically rather than as a crossing
+    // label, and the callee ends the way any function does. Declining costs
+    // only the fold, which is what the renderer did before promotion
+    // existed.
     if !tail_jump_targets.is_empty() {
-        // The successor and label edges the walk above followed: `continues`
-        // mirrors the `work.push(next)` arms (everything but a resolved jump
-        // and a stop), and `rel_edges` collects the relative operands whose
-        // rendering depends on which region holds them.
-        let mut falls_into: BTreeSet<u32> = BTreeSet::new();
+        // The successor and label edges the walk above followed:
+        // `continue_edges` mirrors the `work.push(next)` arms (everything
+        // but a resolved jump and a stop), and `rel_edges` collects the
+        // relative operands whose rendering depends on the region holding
+        // them.
+        let mut continue_edges: Vec<(u32, u32)> = Vec::new();
         let mut rel_edges: Vec<(u32, Flow, u32)> = Vec::new();
         for d in instrs.values() {
             let Body::Instr { mnemonic, operand } = &d.body else {
@@ -1303,7 +1356,7 @@ pub fn disassemble_executable(
             let resolved_jump =
                 flow == Flow::Jump && matches!(operand, DecodedOperand::RelTarget(_));
             if flow != Flow::Stop && !resolved_jump {
-                falls_into.insert(d.addr + d.len);
+                continue_edges.push((d.addr, d.addr + d.len));
             }
         }
 
@@ -1312,19 +1365,46 @@ pub fn disassemble_executable(
             .filter(|t| *t < len && !roots.contains(t))
             .collect();
         // Declining one candidate turns edges that pointed at it into
-        // local labels, which can disqualify another — so shrink to a
-        // fixpoint. Monotone (the set only loses members), so it ends.
+        // local labels, and moves the end of whatever region preceded it —
+        // either can disqualify another candidate, so shrink to a fixpoint.
+        // Monotone (the set only loses members), so it ends.
         loop {
             let doomed = cuts.iter().copied().find(|&t| {
-                falls_into.contains(&t)
+                // Where the region `t` opens ends: the next boundary above
+                // it, which is itself a moving target while the set shrinks.
+                let end = roots
+                    .range(t + 1..)
+                    .next()
+                    .into_iter()
+                    .chain(cuts.range(t + 1..).next())
+                    .min()
+                    .copied()
+                    .unwrap_or(len);
+                continue_edges
+                    .iter()
+                    .any(|&(addr, next)| next == t || (addr >= t && addr < end && next >= end))
                     || rel_edges.iter().any(|&(addr, flow, target)| {
-                        // A call renders by name, and a jump onto a root
-                        // renders in symbol form; neither depends on the
-                        // region holding it. Only a local label does.
+                        // A call renders by name, and a jump onto a root renders
+                        // in symbol form; neither depends on the region holding
+                        // it. Only a local label does.
                         let symbolic = flow == Flow::Call
                             || (flow == Flow::Jump
                                 && (roots.contains(&target) || cuts.contains(&target)));
                         !symbolic && ((addr < t && target >= t) || (addr >= t && target <= t))
+                    })
+                    || table_targets.iter().any(|(table, targets)| {
+                        // A table's entries are named as labels of ONE region,
+                        // so they must not straddle the boundary — nor may a
+                        // site reach across it into the entries it selects.
+                        let straddles =
+                            targets.iter().any(|&x| x < t) && targets.iter().any(|&x| x >= t);
+                        straddles
+                            || table_sites.iter().any(|&(site, key)| {
+                                key == *table
+                                    && targets
+                                        .iter()
+                                        .any(|&x| (site < t && x >= t) || (site >= t && x <= t))
+                            })
                     })
             });
             match doomed {
@@ -1333,22 +1413,6 @@ pub fn disassemble_executable(
             };
         }
         roots.extend(cuts);
-    }
-
-    // Every directory descriptor is inspectable, whether or not any constant
-    // site named it during the walk (a context-dependent site resolves to no
-    // single descriptor). Register the whole directory as frame tables so
-    // all get an `F<n>` label + render — their exits become label
-    // candidates automatically when [`table_code_labels`] walks
-    // `table_kinds` below, without a separate candidate set
-    // (docs/formats.md (image-inspectability principle)).
-    let region = parse_frames_region(exe);
-    if let Some(region) = &region {
-        for &desc_off in &region.directory {
-            if let std::collections::btree_map::Entry::Vacant(slot) = table_kinds.entry(desc_off) {
-                slot.insert(TableKind::Frame);
-            }
-        }
     }
 
     let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();

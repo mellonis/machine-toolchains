@@ -297,7 +297,7 @@ fn an_entry_byte_in_a_body_is_promoted_only_across_a_control_flow_cut() {
     // legally hold one inside a body — where it is indistinguishable from a
     // function prologue, since an image records no function boundaries. A
     // jump onto one is therefore promoted to a root only when the boundary
-    // it opens is a genuine cut of the code. These three are not, and each
+    // it opens is a genuine cut of the code. These four are not, and each
     // would break in its own way if it were split: the halves become
     // separate functions the linker orders by discovery, so the program can
     // change, and a local edge that spanned the boundary is left with no
@@ -346,6 +346,25 @@ L1:     ent
         stp
 .func helper
         ret
+",
+        ),
+        // No edge crosses the boundary going in, but the region it opens
+        // leaves by falling out of its own end — the same layout
+        // dependency one boundary later. Split, that fall-out lands on
+        // whatever the linker ordered next instead of on `helper`.
+        (
+            "fall-out",
+            "\
+.func main
+        call    helper
+        jmp     L1
+L1:     ent
+        wr      1
+.func helper
+        jm      L9
+        ret
+L9:     wr      0
+        stp
 ",
         ),
     ] {
@@ -404,4 +423,58 @@ L1:     ent
     }
     assert_eq!(outcomes[0], (Outcome::Stopped, vec![1]));
     assert_eq!(outcomes[1], outcomes[0]);
+}
+
+#[test]
+fn a_promoted_boundary_keeps_the_program_it_described_too() {
+    // The residue, pinned rather than asserted: an `ent` inside a body
+    // whose boundary IS a genuine cut is indistinguishable from a function
+    // start, so it is promoted, and the re-linked image can differ in
+    // bytes — the site's width authority moves to the linker and the
+    // invented function may be ordered elsewhere. What must NOT differ is
+    // the program. The halves are independent (nothing crosses the
+    // boundary, and the region ends on `stp`), so re-ordering them is
+    // free — this test is what makes that claim checkable.
+    let src = "\
+.func main
+        call    helper
+        jmp     L1
+L1:     ent
+        rgt
+        wr      1
+        stp
+.func helper
+        rgt
+        wr      1
+        ret
+";
+    let out = link(
+        &[assemble(src, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    let text = disassemble_executable(&out.executable);
+    let out2 = link(
+        &[assemble(&text, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    // The boundary really was promoted — without this the test could pass
+    // vacuously if a future rule declined it.
+    assert_eq!(text.matches(".func").count(), 3, "{text}");
+
+    let reg = registry();
+    let mut observed = Vec::new();
+    for exe in [&out.executable, &out2.executable] {
+        // Blank tape, head 0: helper steps right and marks cell 1; the
+        // promoted region steps right again and marks cell 2, then stops.
+        let mut tape = InfiniteTape::from_cells([], 0, 0);
+        let machine = Machine::from_executable(exe, &reg).unwrap();
+        let result = machine.run(&mut tape, RunOptions::default());
+        observed.push((result.outcome, tape.head(), tape.marked_cells()));
+    }
+    assert_eq!(observed[0], (Outcome::Stopped, 2, vec![1, 2]));
+    assert_eq!(observed[1], observed[0], "{text}");
 }
