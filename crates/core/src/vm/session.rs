@@ -19,7 +19,7 @@ use super::trap::{DeviceFault, Trap};
 ///
 /// Deliberately exhaustive — no `#[non_exhaustive]`: a pump loop must handle
 /// every event, so a new event kind is a compile-visible, semver-visible
-/// change, never a silently ignorable one.
+/// change, never a silently ignorable one (docs/core.md (async session)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PumpEvent {
     /// A device held READY low; nothing advanced past it. Pump again later.
