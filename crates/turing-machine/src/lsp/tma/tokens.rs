@@ -140,6 +140,24 @@ fn push_code_label_ref(
     });
 }
 
+/// Push a type-classed token for a table/frame operand when the name is a
+/// known declaration; unknown names stay unpainted (the same posture as
+/// `push_code_label_ref`).
+fn push_type_name_ref(
+    names: &BTreeSet<&str>,
+    name: &str,
+    span: mtc_core::diagnostics::Span,
+    out: &mut Vec<SemToken>,
+) {
+    if names.contains(name) {
+        out.push(SemToken {
+            span,
+            token_type: TOKEN_TYPE_TYPE,
+            modifiers: 0,
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_line(
     line: &LineCst,
@@ -196,24 +214,8 @@ fn emit_line(
                     });
                 }
             }
-            Some(OperandRole::Table) => {
-                if tables.contains(name) {
-                    out.push(SemToken {
-                        span: operand.span,
-                        token_type: TOKEN_TYPE_TYPE,
-                        modifiers: 0,
-                    });
-                }
-            }
-            Some(OperandRole::Frame) => {
-                if frames.contains(name) {
-                    out.push(SemToken {
-                        span: operand.span,
-                        token_type: TOKEN_TYPE_TYPE,
-                        modifiers: 0,
-                    });
-                }
-            }
+            Some(OperandRole::Table) => push_type_name_ref(tables, name, operand.span, out),
+            Some(OperandRole::Frame) => push_type_name_ref(frames, name, operand.span, out),
             None => {}
         }
     }
