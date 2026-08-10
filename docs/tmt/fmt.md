@@ -138,6 +138,21 @@ to that token's column:
        ) then fin;
 ```
 
+A tape parameter's `writes`/`preserves` clause
+(`docs/tmt/language.md (contract clauses)`) renders as part of the
+parameter it decorates — one leading space before the keyword, `{ … }`
+with interior spacing around a non-empty body and bare `{}` for an empty
+one — and counts toward that same parameter's own width like any other
+token, not as an exemption from it. A signature with a clause wraps
+exactly when an equivalent one without it would: past 80 columns, one
+parameter per line. The embedded standard library carries three real
+instances where adding a clause is what tips a two-parameter graph
+signature past the limit — `goToNumbersStartGraph`,
+`goToPreviousNumberGraph`, and the bare representation's
+`invertNumberGraph` all wrap one parameter per line for exactly this
+reason, where their routine-facade counterparts (one parameter, always
+shorter) stay on one line even with the same clause attached.
+
 A signature, a `call`/`graft`/`bind` argument list, and a `with map`
 pair list also break on a second, width-independent trigger: an interior
 comment written inside them, however short, forces the break regardless

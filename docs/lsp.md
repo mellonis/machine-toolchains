@@ -386,11 +386,16 @@ location to open.
 
 **`.tmc`** answers on the same references its go-to-definition resolves,
 and leads with a **signature line** — an alphabet with its glyphs, a world
-with its parameters and their alphabets, a bind instance with the mangled
-routine it targets and each argument's bound value — then the
-declaration's own doc paragraphs and deprecation callout under it. The
-signature line is the part the source text alone does not give a reader:
-the bound values come from the resolved module.
+with its parameters and their alphabets (any DECLARED `writes`/`preserves`
+clause on a tape parameter included, in fmt's own canonical spelling —
+`docs/tmt/language.md (contract clauses)`, `docs/tmt/fmt.md`), a bind
+instance with the mangled routine it targets and each argument's bound
+value — then the declaration's own doc paragraphs and deprecation callout
+under it. The signature line is the part the source text alone does not
+give a reader: the bound values come from the resolved module. Hovering a
+tape parameter on its own answers the same clause alone, in the same
+spelling, after the `volatile` prefix when both apply —
+`tape num: bits writes { '0', '1' }`.
 
 **A routine's or a graph's own declaration also carries a write-set
 block**, one `writes <tape>: {...}` line per signature tape in signature
@@ -415,6 +420,20 @@ tape directly but hands it to a callee under a symbol map still shows
 whatever the callee's write set maps back onto it, since a caller's write
 set is host-independent — it depends only on what the callee, and
 everything the callee in turn calls, provably writes.
+
+**Declared and inferred are two different statements, and a hover can
+show both at once.** When a tape parameter carries a `writes`/`preserves`
+clause, that clause already appears in the signature line above this
+block — a DECLARED promise about the parameter. The `writes <tape>:
+{...}` line here is a separate, INFERRED computation over the body. The
+checker only rejects a body that writes outside what it declared
+(`docs/tmt/language.md (contract clauses)`), so a body writing a strict
+subset of its own declared clause is legal, and the two lines can
+legitimately disagree — a hover is not restating one fact twice, it is
+answering two different questions about the same tape. The worked
+example below, a real declaration from the embedded standard library,
+shows the shape: a declared `preserves { '_' }` in the signature line,
+and the inferred set the checker actually computed underneath it.
 
 The block appears only on a **declaration** hover — the routine's or
 graph's own name, where its signature line is answered — never on a
