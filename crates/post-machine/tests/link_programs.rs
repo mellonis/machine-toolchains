@@ -290,3 +290,118 @@ LEND:   stp
     assert!(text.contains(&format!(".func {tail}")), "{text}");
     assert!(text.contains(&format!("jmp     @{tail}")), "{text}");
 }
+
+#[test]
+fn an_entry_byte_in_a_body_is_promoted_only_across_a_control_flow_cut() {
+    // `ent` is a landing pad that executes as a no-op, so an image can
+    // legally hold one inside a body — where it is indistinguishable from a
+    // function prologue, since an image records no function boundaries. A
+    // jump onto one is therefore promoted to a root only when the boundary
+    // it opens is a genuine cut of the code. These three are not, and each
+    // would break in its own way if it were split: the halves become
+    // separate functions the linker orders by discovery, so the program can
+    // change, and a local edge that spanned the boundary is left with no
+    // way to name its target at all.
+    for (name, src) in [
+        // Fall-through into the entry byte. Split, `main` runs off its end
+        // into whatever was ordered next — here `helper`'s `ret`, which
+        // turns a clean stop into a stack underflow.
+        (
+            "fall-through",
+            "\
+.func main
+        call    helper
+        jnm     L2
+        jmp     L1
+L2:     nop
+L1:     ent
+        stp
+.func helper
+        ret
+",
+        ),
+        // A branch from above the boundary to below it — the minimal
+        // witness: one function, one branch, one `ent`.
+        (
+            "forward edge",
+            "\
+.func main
+        jnm     L3
+        jmp     L1
+L1:     ent
+L3:     nop
+        stp
+",
+        ),
+        // …and from below the boundary back above it.
+        (
+            "backward edge",
+            "\
+.func main
+        call    helper
+LBACK:  nop
+        jmp     L1
+L1:     ent
+        jm      LBACK
+        stp
+.func helper
+        ret
+",
+        ),
+    ] {
+        for opts in [LinkOptions::default(), no_relax()] {
+            let out = link(&[assemble(src, false).unwrap()], &[], opts.clone()).unwrap();
+            let text = disassemble_executable(&out.executable);
+            // The text must still link at all — a cross-region edge falls
+            // back to `.byte`, which assembles and then fails to link.
+            let out2 = link(&[assemble(&text, false).unwrap()], &[], opts).unwrap();
+            assert_eq!(out2.executable.code, out.executable.code, "{name}:\n{text}");
+        }
+    }
+}
+
+#[test]
+fn a_declined_boundary_keeps_the_program_it_described() {
+    // The fall-through shape above, run rather than compared: the harm a
+    // wrongly invented boundary does is not byte drift but a different
+    // program. `main` marks, falls past `L2`, and stops; if the split
+    // happened it would fall into `helper`'s `ret` instead and underflow.
+    let src = "\
+.func main
+        call    helper
+        jnm     L2
+        jmp     L1
+L2:     wr      1
+L1:     ent
+        stp
+.func helper
+        rgt
+        ret
+";
+    let out = link(
+        &[assemble(src, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    let text = disassemble_executable(&out.executable);
+    let out2 = link(
+        &[assemble(&text, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+
+    let reg = registry();
+    let mut outcomes = Vec::new();
+    for exe in [&out.executable, &out2.executable] {
+        // Blank tape, head 0: helper steps right, the unmatched cell sends
+        // `jnm` to L2, which marks cell 1, then the `ent` no-op and `stp`.
+        let mut tape = InfiniteTape::from_cells([], 0, 0);
+        let machine = Machine::from_executable(exe, &reg).unwrap();
+        let result = machine.run(&mut tape, RunOptions::default());
+        outcomes.push((result.outcome, tape.marked_cells()));
+    }
+    assert_eq!(outcomes[0], (Outcome::Stopped, vec![1]));
+    assert_eq!(outcomes[1], outcomes[0]);
+}

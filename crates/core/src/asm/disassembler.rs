@@ -1162,6 +1162,9 @@ pub fn disassemble_executable(
     // routine of every composite reachable through the site (the map-less
     // legend's routine names, docs/formats.md (image-inspectability principle)).
     let mut site_target: HashMap<u32, u32> = HashMap::new();
+    // Jump targets whose byte is the entry opcode — candidate function
+    // starts, resolved by the cut filter once the walk has finished.
+    let mut tail_jump_targets: BTreeSet<u32> = BTreeSet::new();
     while let Some(addr) = work.pop() {
         if addr >= len || instrs.contains_key(&addr) {
             continue;
@@ -1222,33 +1225,13 @@ pub fn disassemble_executable(
             (Flow::FallThrough, _) => work.push(next),
             (Flow::Stop, _) => {}
             (Flow::Jump, DecodedOperand::RelTarget(t)) => {
-                // A jump landing on an entry prologue is a tail call, so its
-                // target is a function start and becomes a root — the site
-                // then renders in symbol form. Every linked function opens
-                // with the entry opcode (docs/core.md (linking)), so this
-                // catches every one of them; the converse is not guaranteed,
-                // since a dialect may let that byte stand inside a body as
-                // an ordinary instruction. Reading it as a prologue is the
-                // faithful choice anyway: a pure image records no function
-                // boundaries at all.
-                //
-                // Without it, a function reached ONLY by such a jump folds
-                // into its caller's region as a bare local label, which is
-                // lossy in BOTH widths. A symbol site's width is the
-                // linker's to choose and a local label's is the assembler's,
-                // so a far site re-narrows on reassembly; and a narrowed
-                // site, shorter in text than the far relocation the object
-                // held, shifts the reassembled object's layout under every
-                // other jump spanning it, flipping their widths too. Symbol
-                // form avoids both because it restores the OBJECT layout:
-                // symbol operands always reassemble far (the `far_mnemonic`
-                // display below prints a linker-narrowed site in its far
-                // form for exactly this reason), and the linker then
-                // re-derives the same narrowing — which is what makes
-                // dis → asm → link byte-exact (docs/formats.md (assembly
-                // text)).
+                // A jump landing on an entry prologue looks like a tail
+                // call, which would make its target a function start. Only
+                // a candidate here: the walk has not finished, and whether
+                // the boundary is real is decided once it has (see the cut
+                // filter below).
                 if code.get(*t as usize) == Some(&syntax.entry_opcode) {
-                    roots.insert(*t);
+                    tail_jump_targets.insert(*t);
                 }
                 work.push(*t);
             }
@@ -1270,6 +1253,86 @@ pub fn disassemble_executable(
             _ => work.push(next), // malformed flow/operand combo: keep walking
         }
         instrs.insert(addr, d);
+    }
+
+    // Promote the tail-jump candidates that name a real function start.
+    //
+    // A function reached ONLY by a tail jump is named by nothing else in a
+    // pure image: it has no relocation, no call, and images carry no
+    // function table. Folded into its caller's region it renders as a bare
+    // local label, which is lossy in BOTH widths — a symbol site's width is
+    // the linker's to choose and a local label's is the assembler's, so a
+    // far site re-narrows on reassembly, and a narrowed site, shorter in
+    // text than the far relocation the object held, shifts the reassembled
+    // object's layout under every other jump spanning it and flips their
+    // widths too. Rendering it as a root avoids both, because symbol form
+    // restores the OBJECT layout: a symbol operand always reassembles far
+    // (which is why the `far_mnemonic` display below prints a
+    // linker-narrowed site in its far form), and the linker then re-derives
+    // the same narrowing. That is what makes dis → asm → link byte-exact.
+    //
+    // The entry byte is a necessary signal — the linker rejects a function
+    // blob that does not open with one — but not a sufficient one, since a
+    // dialect may let that byte stand inside a body as an ordinary
+    // instruction. Splitting a body there would be worse than the fold it
+    // avoids: the halves become separate functions the linker is free to
+    // re-order, so the text can describe a different program, and any local
+    // edge crossing the invented boundary is no longer expressible at all
+    // (it degrades to `.byte`, which then fails to link). So promote only
+    // across a genuine cut of the discovered code — nothing falls through
+    // into the boundary, and no local-label edge spans it in either
+    // direction. A real tail-jump callee passes: its caller ends in the
+    // jump, and the jump itself renders symbolically rather than as a
+    // crossing label. Declining costs only the fold, which is what the
+    // renderer did before promotion existed.
+    if !tail_jump_targets.is_empty() {
+        // The successor and label edges the walk above followed: `continues`
+        // mirrors the `work.push(next)` arms (everything but a resolved jump
+        // and a stop), and `rel_edges` collects the relative operands whose
+        // rendering depends on which region holds them.
+        let mut falls_into: BTreeSet<u32> = BTreeSet::new();
+        let mut rel_edges: Vec<(u32, Flow, u32)> = Vec::new();
+        for d in instrs.values() {
+            let Body::Instr { mnemonic, operand } = &d.body else {
+                continue;
+            };
+            let flow = syntax.by_mnemonic(mnemonic).unwrap().flow;
+            if let DecodedOperand::RelTarget(t) = operand {
+                rel_edges.push((d.addr, flow, *t));
+            }
+            let resolved_jump =
+                flow == Flow::Jump && matches!(operand, DecodedOperand::RelTarget(_));
+            if flow != Flow::Stop && !resolved_jump {
+                falls_into.insert(d.addr + d.len);
+            }
+        }
+
+        let mut cuts: BTreeSet<u32> = tail_jump_targets
+            .into_iter()
+            .filter(|t| *t < len && !roots.contains(t))
+            .collect();
+        // Declining one candidate turns edges that pointed at it into
+        // local labels, which can disqualify another — so shrink to a
+        // fixpoint. Monotone (the set only loses members), so it ends.
+        loop {
+            let doomed = cuts.iter().copied().find(|&t| {
+                falls_into.contains(&t)
+                    || rel_edges.iter().any(|&(addr, flow, target)| {
+                        // A call renders by name, and a jump onto a root
+                        // renders in symbol form; neither depends on the
+                        // region holding it. Only a local label does.
+                        let symbolic = flow == Flow::Call
+                            || (flow == Flow::Jump
+                                && (roots.contains(&target) || cuts.contains(&target)));
+                        !symbolic && ((addr < t && target >= t) || (addr >= t && target <= t))
+                    })
+            });
+            match doomed {
+                Some(t) => cuts.remove(&t),
+                None => break,
+            };
+        }
+        roots.extend(cuts);
     }
 
     // Every directory descriptor is inspectable, whether or not any constant
@@ -2836,15 +2899,16 @@ START:  nop
     fn jump_only_callee_stays_a_root_so_its_site_keeps_symbol_form() {
         // `g` is reached ONLY by main's tail jump — never called, never the
         // entry — so nothing but the jump itself marks it as a function.
-        // Read as a prologue (its first byte is the entry opcode) it stays a
-        // root, and the site keeps the symbol form whose width belongs to
-        // the linker; folded into main's region it would become a local
-        // label, whose width belongs to the assembler.
+        // The boundary at `g` is a genuine cut (main ends in the jump, and
+        // the jump renders symbolically), so `g` stays a root and the site
+        // keeps the symbol form whose width belongs to the linker; folded
+        // into main's region it would become a local label, whose width
+        // belongs to the assembler.
         let syntax = test_syntax();
         let src = ".func main\n        jmp @g\n.func g\n        stop\n";
         let obj = assemble(&syntax, 0x7E, src, false).unwrap();
-        // Relaxation disabled: main = [ent][jmp<i32> = 1] (6 bytes), g at 6
-        // = [ent][stop]. The far jump's displacement is 6 − 6 = 0.
+        // Relaxation disabled: main = [ent][jmp<i32>] = 6 bytes, so g sits
+        // at 6; the far jump ends at 6 too, displacement 6 − 6 = 0.
         let opts = crate::linker::LinkOptions {
             relax: false,
             ..Default::default()
@@ -2863,17 +2927,20 @@ START:  nop
     }
 
     #[test]
-    fn a_jumped_to_entry_byte_inside_a_body_reads_as_a_function_start() {
-        // The converse of the rule above, pinned deliberately: a pure image
-        // records no function boundaries, so an entry byte standing inside
-        // a body is indistinguishable from a prologue when a jump lands on
-        // it, and dis reads it as one. Narrowing the rule further (say, by
-        // declining to promote a fall-through-entered target) would shrink
-        // the ambiguity without removing it, so it is not attempted: one
-        // reachable only by a jump is a no-op spelled the long way, and the
-        // purposeful use — a second landing pad, where the architecture's
-        // call verifies its target byte — is a call target, hence already a
-        // root and untouched by this rule.
+    fn an_entry_byte_in_a_body_that_cuts_cleanly_still_reads_as_a_function_start() {
+        // What the cut filter deliberately does NOT rescue, pinned so the
+        // residue stays visible: here the entry byte stands inside a body,
+        // but the boundary it opens is a genuine cut — nothing falls into
+        // it, no local edge spans it — so it is indistinguishable from a
+        // function start and is promoted. The text describes the same
+        // program either way (the halves are independent, so re-ordering
+        // them is harmless); only the bytes can differ, because the site's
+        // width authority moves from the assembler to the linker.
+        //
+        // The ambiguity is not removable: a pure image records no function
+        // boundaries at all. What the filter does remove is every case
+        // where splitting would change the program or produce text that
+        // will not link, which is the class worth paying for.
         let syntax = test_syntax();
         let src = ".func main\n        jmp L1\nL1:     ent\n        stop\n";
         let obj = assemble(&syntax, 0x7E, src, false).unwrap();
@@ -2882,6 +2949,48 @@ START:  nop
         let text = disassemble_executable(&syntax, &out.executable, None);
         assert!(text.contains(".func func_0003"), "{text}");
         assert!(text.contains("jmp     @func_0003"), "{text}");
+    }
+
+    #[test]
+    fn a_body_entry_byte_that_does_not_cut_is_left_folded() {
+        // The three ways a boundary fails to be a cut. Images are built
+        // here rather than assembled because the fixture's `br` is the
+        // unpaired-RelI8 traversal opcode, which assembler tests may not
+        // use; the rendering decision is what these pin, and the round-trip
+        // law over the same three shapes is pinned against a real dialect
+        // in the post-machine crate's link tests.
+        let syntax = test_syntax();
+        for (name, code) in [
+            // Fall-through into the entry byte at 6 (`nop` at 5 runs into
+            // it): splitting here would leave the first half running off
+            // its end into whatever the linker ordered next.
+            (
+                "fall-through",
+                vec![0x0E, 0x22, 0x02, 0x30, 0x01, 0x01, 0x0E, 0x02],
+            ),
+            // A branch below the entry byte at 5 targeting 7, above it:
+            // after a split the target is outside its region and can only
+            // be spelled as raw bytes.
+            (
+                "forward edge",
+                vec![0x0E, 0x22, 0x04, 0x30, 0x00, 0x0E, 0x01, 0x01, 0x02],
+            ),
+            // …and the mirror image: a branch above the entry byte at 4
+            // targeting 1, below it.
+            (
+                "backward edge",
+                vec![0x0E, 0x01, 0x30, 0x00, 0x0E, 0x22, 0xFA, 0x02],
+            ),
+        ] {
+            let exe = Executable::code_only(0x7E, 0, code);
+            let text = disassemble_executable(&syntax, &exe, None);
+            assert_eq!(text.matches(".func").count(), 1, "{name}:\n{text}");
+            assert!(!text.contains('@'), "{name}: no invented root:\n{text}");
+            assert!(
+                text.contains("ent"),
+                "{name}: the fold keeps the byte inline:\n{text}"
+            );
+        }
     }
 
     #[test]
