@@ -618,6 +618,125 @@ fn in_range_holes_trap_kinds_are_pinned() {
     }
 }
 
+// ── program (g): an ALIASED binding — refused in every mode ──────────────────
+
+/// The linker backstop for the aliasing rule (docs/formats.md (bound calls)):
+/// two binding tapes may not name one caller tape. A hand-assembled `.tma`
+/// object carries binding records without ever passing the `.tmc` compiler,
+/// so the rejection has to exist at the composition choke point as well —
+/// this is the only layer such an object meets.
+///
+/// The shape is the one that proved the mechanisms disagree: a 3-arity
+/// callee whose first two tapes both land on caller tape 0, across UNEQUAL
+/// alphabets (caller 4, callee 3) so the first projection carries read
+/// holes. Frames evaluates both projections of the one physical cell at run
+/// time — a conjunction that traps on the hole; mono writes per-position
+/// expectations into a stamped row, where the second projection overwrites
+/// the first and the hole silently disappears.
+const ALIASED: &str = "\
+.routine main, tapes=3, alpha=(4, 3, 3)
+.routine callee, tapes=3, alpha=(3, 3, 3)
+.section tables
+T:  .row [1, 2, 1]
+    .row [*, *, *]
+D:  .targets adv, fin
+.section code
+.func main
+        call    callee [0{1->1}, 0{2->2}, 1]
+        stp
+.func callee
+        rd
+        mtc     T
+        djmp    D
+adv:    mov     [., ., >]
+fin:    ret
+";
+
+/// The identical program with the placement made injective: same callee,
+/// same maps, same cardinalities — only the caller tape of the second
+/// binding tape differs. The positive control that the rejection is about
+/// aliasing and nothing else.
+const UNALIASED: &str = "\
+.routine main, tapes=3, alpha=(4, 3, 3)
+.routine callee, tapes=3, alpha=(3, 3, 3)
+.section tables
+T:  .row [1, 2, 1]
+    .row [*, *, *]
+D:  .targets adv, fin
+.section code
+.func main
+        call    callee [0{1->1}, 1{2->2}, 2]
+        stp
+.func callee
+        rd
+        mtc     T
+        djmp    D
+adv:    mov     [., ., >]
+fin:    ret
+";
+
+/// The link error text for `src` under `mech`, or a panic if it links.
+fn link_refusal(src: &str, mech: CallMech) -> String {
+    let obj = assemble(src, false).expect("assembles");
+    let err = link(
+        &[obj],
+        &[],
+        LinkOptions {
+            call_mech: mech,
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap_or_else(|| panic!("the {mech} link accepted an aliased binding"));
+    err.to_string()
+}
+
+#[test]
+fn an_aliased_binding_is_refused_in_every_mode() {
+    for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+        let msg = link_refusal(ALIASED, mech);
+        assert!(
+            msg.contains("binding tapes 0 and 1 both name caller tape 0")
+                && msg.contains("one caller tape cannot back two callee tapes"),
+            "{mech}: expected the aliasing refusal, got: {msg}"
+        );
+        assert!(
+            msg.contains("callee"),
+            "{mech}: the refusal must name the callee: {msg}"
+        );
+    }
+}
+
+#[test]
+fn the_same_binding_made_injective_links_and_runs_in_every_mode() {
+    // Cases chosen against the callee's match table: the exact row `[1, 2, 1]`
+    // fires only when every projection lands on it, and the read hole on
+    // caller tape 0 (symbols 2 and 3 have no callee image) traps.
+    assert_equivalent(
+        UNALIASED,
+        &[
+            &[(&[1], 0), (&[2], 0), (&[1], 0)], // the exact row fires
+            &[(&[1], 0), (&[1], 0), (&[1], 0)], // catch-all, plain return
+            &[(&[], 0), (&[], 0), (&[], 0)],    // all blank, catch-all
+            &[(&[3], 0), (&[2], 0), (&[1], 0)], // caller symbol 3 → read hole
+        ],
+    );
+    // And the run is a real one, not three identical refusals.
+    for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
+        let (exe, _) = build(UNALIASED, mech);
+        assert_eq!(
+            run(&exe, &[(&[1], 0), (&[2], 0), (&[1], 0)]).outcome,
+            "stopped",
+            "{mech}: the injective placement runs to a stop"
+        );
+        assert_eq!(
+            run(&exe, &[(&[3], 0), (&[2], 0), (&[1], 0)]).outcome,
+            "trapped:unmapped-read",
+            "{mech}: the unequal-alphabet read hole still traps"
+        );
+    }
+}
+
 // ── determinism: re-link is byte-identical (image + sidecar) ─────────────────
 
 #[test]
@@ -632,6 +751,7 @@ fn every_program_relinks_byte_identically_in_every_mode() {
         TRAP_TAXONOMY,
         NARROWER_IDENTITY,
         IN_RANGE_HOLES,
+        UNALIASED,
     ] {
         for mech in [CallMech::Mono, CallMech::Frames, CallMech::Hybrid] {
             let a = build_full(src, mech);
