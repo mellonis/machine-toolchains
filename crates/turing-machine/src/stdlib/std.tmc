@@ -375,4 +375,129 @@ namespace std {
       entry graft normalizeNumberGraph(num = num, done = return);
     }
   }
+
+  // The volatile twins. Each of the two namespaces below mirrors one of the
+  // namespaces above routine-for-routine, under the same names, with the
+  // tape parameter declared `volatile`.
+  //
+  // They exist for the CALLEE side of a call. The library reaches a program
+  // at link time already compiled, so nothing a caller declares about its own
+  // band travels into the routine it calls — the mark has to be on the
+  // signature the routine itself was compiled from. A program whose band is a
+  // device therefore calls the twin, and the rule that nothing may be assumed
+  // about that band's contents holds inside the library too.
+  //
+  // No behavior is duplicated to get there. A twin facade grafts the SAME
+  // graph its counterpart grafts: a graft is governed by its host, so the
+  // spliced rows land on the twin's flagged tape without the graph knowing
+  // anything about it. The two routines whose bodies are compositions of
+  // calls mirror those chains with every call retargeted to the twin of its
+  // callee — a twin calling a plain routine would drop the mark at that one
+  // boundary and quietly undo the whole point. Contract clauses are mirrored
+  // exactly; the twin of a routine that writes nothing writes nothing.
+  namespace binaryNumbersVolatile {
+    use std::binaryNumbers::symbols;
+    use std::binaryNumbers::goToNumberGraph;
+    use std::binaryNumbers::goToNumbersStartGraph;
+    use std::binaryNumbers::goToNextNumberGraph;
+    use std::binaryNumbers::goToPreviousNumberGraph;
+    use std::binaryNumbers::deleteNumberGraph;
+    use std::binaryNumbers::normalizeNumberGraph;
+    use std::binaryNumbers::plusOneGraph;
+    use std::binaryNumbers::minusOneFastGraph;
+
+    ? std::binaryNumbers::goToNumber's contract, over a volatile tape.
+    export routine goToNumber(volatile tape num: symbols writes {}) {
+      entry graft goToNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::goToNumbersStart's contract, over a volatile tape.
+    export routine goToNumbersStart(volatile tape num: symbols writes {}) {
+      entry graft goToNumbersStartGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::goToNextNumber's contract, over a volatile tape.
+    export routine goToNextNumber(volatile tape num: symbols writes {}) {
+      entry graft goToNextNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::goToPreviousNumber's contract, over a volatile tape.
+    export routine goToPreviousNumber(volatile tape num: symbols writes {}) {
+      entry graft goToPreviousNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::deleteNumber's contract, over a volatile tape.
+    export routine deleteNumber(volatile tape num: symbols) {
+      entry graft deleteNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::normalizeNumber's contract, over a volatile tape.
+    export routine normalizeNumber(volatile tape num: symbols) {
+      entry graft normalizeNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::plusOne's contract, over a volatile tape.
+    export routine plusOne(volatile tape num: symbols) {
+      entry graft plusOneGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::minusOneFast's contract, over a volatile tape.
+    export routine minusOneFast(volatile tape num: symbols) {
+      entry graft minusOneFastGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbers::invertNumber's contract, over a volatile tape. The
+    ? cross-representation call goes to the bare namespace's OWN twin, so the
+    ? tape stays volatile on the far side of the representation boundary.
+    export routine invertNumber(volatile tape num: symbols) {
+      entry state toStart {
+        ['^'] -> move [>] goto atFirstDigit;
+        [*]   -> move [<] goto toStart;
+      }
+      state atFirstDigit {
+        [*] -> call std::binaryNumbersBareVolatile::invertNumber(
+                 num = num with map { '^' => '_', '$' => '_', '0' -> '0', '1' -> '1' }
+               ) then return;
+      }
+    }
+
+    ? std::binaryNumbers::minusOne's contract, over a volatile tape. Every
+    ? leg of the composition is this namespace's own routine, so the tape is
+    ? volatile at each of the four calls.
+    export routine minusOne(volatile tape num: symbols) {
+      entry state s1 { [*] -> call invertNumber(num = num) then s2; }
+      state s2       { [*] -> call plusOne(num = num) then s3; }
+      state s3       { [*] -> call invertNumber(num = num) then s4; }
+      state s4       { [*] -> call normalizeNumber(num = num) then return; }
+    }
+  }
+
+  namespace binaryNumbersBareVolatile {
+    use std::binaryNumbersBare::symbols;
+    use std::binaryNumbersBare::plusOneGraph;
+    use std::binaryNumbersBare::minusOneGraph;
+    use std::binaryNumbersBare::invertNumberGraph;
+    use std::binaryNumbersBare::normalizeNumberGraph;
+
+    ? std::binaryNumbersBare::plusOne's contract, over a volatile tape.
+    export routine plusOne(volatile tape num: symbols) {
+      entry graft plusOneGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbersBare::minusOne's contract, over a volatile tape.
+    export routine minusOne(volatile tape num: symbols) {
+      entry graft minusOneGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbersBare::invertNumber's contract, over a volatile tape.
+    export routine invertNumber(volatile tape num: symbols preserves { '_' }) {
+      entry graft invertNumberGraph(num = num, done = return);
+    }
+
+    ? std::binaryNumbersBare::normalizeNumber's contract, over a volatile
+    ? tape.
+    export routine normalizeNumber(volatile tape num: symbols) {
+      entry graft normalizeNumberGraph(num = num, done = return);
+    }
+  }
 }

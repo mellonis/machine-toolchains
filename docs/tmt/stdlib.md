@@ -6,18 +6,21 @@ written in `.tmc` itself — dogfooding the compiler — and its goldens double
 as compiler and optimizer tests.
 
 It offers binary-number arithmetic on a tape, ported from the binary-number
-libraries of the `turing-machine-js` project, in **two namespaces**:
-`std::binaryNumbers` (ten routines) and `std::binaryNumbersBare` (four).
+libraries of the `turing-machine-js` project, in **two representations**:
+`std::binaryNumbers` (ten routines) and `std::binaryNumbersBare` (four). Each
+is mirrored by a volatile twin namespace, `std::binaryNumbersVolatile` and
+`std::binaryNumbersBareVolatile`, for programs whose band is a device — see
+*The volatile twins* below.
 
 ## Two representations, not two wrapper styles
 
-The split is the first thing to get right, because the two namespaces expose
-overlapping operations under the same names and nothing checks the choice
-early: calling a delimited routine over a bare tape compiles and links, and
-the mismatch surfaces only at run time — here as a `NoTransition` trap, when
-the routine looks for a marker the tape's alphabet does not have. The two
-differ in **how a number is written on the tape** — the alphabet and the
-framing — not in how the routines are packaged.
+The split is the first thing to get right, because the two representations
+expose overlapping operations under the same names and nothing checks the
+choice early: calling a delimited routine over a bare tape compiles and
+links, and the mismatch surfaces only at run time — here as a `NoTransition`
+trap, when the routine looks for a marker the tape's alphabet does not have.
+The two differ in **how a number is written on the tape** — the alphabet and
+the framing — not in how the routines are packaged.
 
 | | `std::binaryNumbers` | `std::binaryNumbersBare` |
 |---|---|---|
@@ -233,7 +236,97 @@ its framing intact.
 
 Linking shows the dependency: a program calling
 `std::binaryNumbers::invertNumber` keeps exactly two routines, the delimited
-facade and the bare implementation, and drops the other twelve.
+facade and the bare implementation, and drops the other twenty-six.
+
+## The volatile twins
+
+Each of the two representations is mirrored by a **volatile twin** namespace:
+
+| Representation | Plain namespace | Volatile twin |
+|---|---|---|
+| delimited | `std::binaryNumbers` | `std::binaryNumbersVolatile` |
+| bare | `std::binaryNumbersBare` | `std::binaryNumbersBareVolatile` |
+
+A twin exports the same routine names as its counterpart, under the same
+contracts, computing the same thing. It differs in exactly one way: its tape
+parameter is declared `volatile` (`docs/tmt/language.md (volatile tapes)`).
+
+```
+export routine plusOne(volatile tape num: symbols)
+```
+
+The naming rule is the whole convention, and it is a rule about namespaces:
+append `Volatile` to the namespace, never to the routine. It is
+`std::binaryNumbersVolatile::plusOne`, not
+`std::binaryNumbers::plusOneVolatile`. Choosing the namespace once at the top
+of a program is also the point — the mark is a property of the band, so it
+should not be a decision taken again at each call site.
+
+### Why a second namespace rather than something said at the call site
+
+A volatile band is one whose contents the program does not own: a device
+other machinery may read or write between two steps. Nothing may be assumed
+about a value written there earlier, and no access to it may be moved or
+dropped. Writing `volatile tape` on a machine's own tape declaration says
+that about the machine's own code.
+
+It says nothing whatsoever about a library routine that code calls. The
+standard library reaches a program at link time already compiled, from a
+source the program never sees; whatever the caller declared, the routine on
+the other side of that call was compiled from its OWN signature. Nor does
+inlining rescue it — a call into a linked object has no body on the caller's
+side to splice. So for the mark to reach the callee at all, it has to be in
+the callee's own source, in force when the library itself was compiled. That
+is what a twin is: the same library, compiled with the band declared
+volatile.
+
+Nothing in the library forces the choice. A program whose tape is ordinary
+memory calls the plain namespace and gets an ordinary routine; a program
+whose band is a device calls the twin.
+
+### The same graphs, and a chain that keeps the mark
+
+The twins duplicate no behaviour. Twelve of the fourteen are graph-backed
+facades, and each grafts the **same** exported graph its plain counterpart
+grafts — there is no `…Volatile` copy of any graph, and every behaviour is
+still defined exactly once, in one `?`-documented place.
+
+That works because a graft is governed by its host. The spliced rows land on
+whatever tape the host binds into the graph's parameter, so a graph written
+with no `volatile` keyword anywhere in it becomes volatile rows the moment a
+twin facade splices it — and the same graph spliced into a plain facade
+stays ordinary. A twin importing its counterpart's `symbols` alphabet rather
+than restating it is the same idea one level down: the representation, like
+the behaviour, is stated once.
+
+The other two routines — the delimited `invertNumber` and `minusOne` — are
+compositions of calls rather than graph facades, and they mirror their chains
+with every call **retargeted to its callee's twin**. The delimited
+`invertNumber` calls `std::binaryNumbersBareVolatile::invertNumber`, not the
+bare namespace's plain one; `minusOne`'s four legs are its own namespace's
+routines. A twin that called a plain routine would drop the mark at that one
+boundary, and the rest of the chain would run as if the band were ordinary
+memory — the mistake the namespace split exists to keep out of the library.
+
+### Byte-identical, for now
+
+Today a twin compiles to exactly the same bytes as its counterpart. Every
+pass in the pipeline already preserves per-band access sequences, so nothing
+currently gates on the volatile mark and there is nothing for it to change
+(`docs/tmt/optimizer.md (volatile barrier)`).
+
+That is a fact about the current optimizer, not a property of the twins, and
+the library's tests say so explicitly: one test asserts the byte identity and
+carries a standing obligation to be retired by the first pass that assumes
+values on a non-volatile band, while a separate test asserts the functional
+equivalence — same outcome, same final tape, across both optimization levels
+and all three call lowerings — that must hold whatever the optimizer learns
+to do. When the twins do start costing more than their counterparts, that is
+the mark working.
+
+In every other respect a twin is an ordinary exported routine: it links, it
+is reachable or dropped, and it is shadowed by a same-named definition of
+your own on exactly the same terms as the routine it mirrors.
 
 ## Linking and embedding
 
@@ -252,10 +345,11 @@ entirely at link.
 - **Lazy reachability.** The linker keeps only what the program transitively
   reaches, so an unreferenced routine costs nothing in the final `.tmx`. A
   program calling one bare routine links that one and drops the other
-  thirteen; `tmt link -v` reports exactly which
+  twenty-seven; `tmt link -v` reports exactly which
   (`docs/core.md (the linker)`). Reachability follows calls across the
   representation boundary too — the delimited `minusOne` pulls in its three
-  delimited callees and the bare `invertNumber` under them.
+  delimited callees and the bare `invertNumber` under them, and the twin of
+  that same `minusOne` pulls in the twins of all four.
 - **Symbol resolution.** The stdlib is appended *last*, and libraries resolve
   first-wins, so command-line objects and explicit `-l` libraries shadow it.
   Exporting a routine under the same qualified name in your own source
