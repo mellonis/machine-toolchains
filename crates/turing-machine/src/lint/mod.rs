@@ -122,6 +122,7 @@ pub(crate) const RULES: &[(&str, Rule)] = &[
     ("unused-exit", rules::unused_exit::check),
     ("deprecated-call", rules::deprecated_call::check),
     ("dead-rule", rules::dead_rule::check),
+    ("dead-map-pair", rules::dead_map_pair::check),
     (
         "redundant-identity-pairs",
         rules::redundant_identity_pairs::check,

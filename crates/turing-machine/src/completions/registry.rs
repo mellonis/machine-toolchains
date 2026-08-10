@@ -623,6 +623,18 @@ fn ir_graph_spec() -> CommandSpec {
     }
 }
 
+fn ir_footprints_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["ir", "footprints"]),
+        positional: Positional::One(PositionalHint::File(ext(&["ir.json"]))),
+        flags: vec![FlagSpec::value(
+            "--function",
+            "restrict output to one world",
+            ValueHint::Text,
+        )],
+    }
+}
+
 fn lsp_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["lsp"]),
@@ -655,7 +667,7 @@ fn top_level_help(name: &str) -> &'static str {
         "dis" => "disassemble a .tmo or .tmx (--listing for the address view)",
         "run" => "execute a .tmx on a multi-tape .tmt block",
         "tape-block" => "new/set/show .tmt tape-block snapshots",
-        "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
+        "ir" => "render --emit-ir JSON (ir graph -> Mermaid, ir footprints -> write sets)",
         "lint" => "hygiene findings over .tmc and .tma sources",
         "fmt" => "canonical formatting for .tmc and .tma sources",
         "lsp" => "run the LSP server on stdio",
@@ -673,6 +685,7 @@ fn group_child_help(path: &[String]) -> &'static str {
         (Some("tape-block"), Some("set")) => "clone a .tmt tape-block snapshot with edits",
         (Some("tape-block"), Some("show")) => "render a .tmt tape-block snapshot",
         (Some("ir"), Some("graph")) => "render --emit-ir JSON as a Mermaid flowchart",
+        (Some("ir"), Some("footprints")) => "render each world's inferred per-tape write set",
         _ => "",
     }
 }
@@ -722,6 +735,7 @@ pub fn registry() -> Registry {
         tape_set_spec(),
         tape_show_spec(),
         ir_graph_spec(),
+        ir_footprints_spec(),
         lint_spec(),
         fmt_spec(),
         lsp_spec(),

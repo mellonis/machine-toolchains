@@ -1237,6 +1237,74 @@ fn hovering_a_routine_shows_its_signature_with_tape_alphabets_and_its_doc() {
 }
 
 #[test]
+fn hovering_a_routine_shows_its_write_sets() {
+    // Two tapes, `a` written (both digits, so ordering is observable) and
+    // `b` never touched — one line each, the untouched tape's set rendered
+    // as `{}` rather than omitted. A doc line is attached deliberately: the
+    // exact-string assertion below pins the writes block's PLACEMENT — head,
+    // then writes lines, then doc body — not just its presence, which a
+    // fixture with no doc body could never observe (the block would just be
+    // the tail of the string either way).
+    let src = "\
+alphabet bits { '_', '0', '1' }
+
+? Only tape a is written.
+routine r(tape a: bits, tape b: bits) {
+  entry state s {
+    ['0', *] -> write ['1', -] return;
+    [*, *] -> write ['0', -] return;
+  }
+}
+
+machine {
+  tape x: bits;
+  tape y: bits;
+  entry state main { [*, *] -> call r(a = x, b = y) then done; }
+  state done { [*, *] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "call r", 5))
+        .expect("a hover");
+    assert_eq!(
+        hover.text,
+        "routine r(tape a: bits, tape b: bits)\n\n\
+         writes a: {'0', '1'}\nwrites b: {}\n\n\
+         Only tape a is written."
+    );
+}
+
+#[test]
+fn hover_write_sets_project_through_a_call() {
+    // `outer` never writes its own tape directly; everything it may write
+    // arrives through the map on its call to `inner`, which does write.
+    let src = "\
+alphabet bits { '_', '0', '1' }
+alphabet wide { '_', 'a', 'b' }
+
+routine inner(tape v: bits) {
+  entry state s { [*] -> write ['1'] return; }
+}
+
+routine outer(tape w: wide) {
+  entry state s { [*] -> call inner(v = w with map { 'a' -> '1' }) then return; }
+}
+
+machine {
+  tape t: wide;
+  entry state main { [*] -> call outer(w = t) then done; }
+  state done { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let hover = service
+        .hover(&uri, pos_after(src, "call outer", 5))
+        .expect("a hover");
+    assert!(hover.text.contains("writes w: {'a'}"), "{}", hover.text);
+}
+
+#[test]
 fn hovering_a_routine_prefixes_its_volatile_signature_parameters() {
     let src = "\
 alphabet bits { '_', '1' }

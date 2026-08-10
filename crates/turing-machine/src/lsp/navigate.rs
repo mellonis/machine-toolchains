@@ -669,7 +669,12 @@ fn render(program: &Program, state: &DocState, target: &Target) -> Option<String
             let view = world_views(program)
                 .into_iter()
                 .find(|w| w.mangled == *mangled)?;
-            (world_head(&view), Some(mangled))
+            let head = world_head(&view);
+            let head = match resolved.and_then(|r| write_set_lines(r, mangled)) {
+                Some(lines) => format!("{head}\n\n{lines}"),
+                None => head,
+            };
+            (head, Some(mangled))
         }
         Target::State { world, name } => (format!("state {name} (in {world})"), None),
         Target::Tape { world, name } => {
@@ -762,6 +767,52 @@ fn world_head(view: &WorldView<'_>) -> String {
         })
         .collect();
     format!("{carrier} {}({})", view.mangled, params.join(", "))
+}
+
+/// The `writes <tape>: {...}` block under a world's head: one line per
+/// signature tape, in signature order, the empty set rendered as `{}` and
+/// never omitted — an empty set says the tape provably carries no write at
+/// all, which is real information a missing line would erase. `None` when
+/// the mangled name is not a resolved world, or the world declares no
+/// tapes at all (a headless `writes` block would say nothing).
+///
+/// Recomputed fresh on every call: hover requests are rare and `.tmc`
+/// sources are small, so re-running the whole-module fixpoint per hover
+/// costs far less than widening `DocState` to cache a table for this one
+/// consumer.
+fn write_set_lines(resolved: &Resolved, mangled: &str) -> Option<String> {
+    let world = resolved.worlds.iter().find(|w| w.name == mangled)?;
+    if world.tapes.is_empty() {
+        return None;
+    }
+    let table = crate::footprint::infer_resolved(resolved);
+    let footprint = table.worlds.get(mangled);
+    let lines: Vec<String> = world
+        .tapes
+        .iter()
+        .enumerate()
+        .map(|(k, tape)| {
+            let glyphs = resolved
+                .alphabets
+                .get(&tape.alphabet)
+                .map(|a| a.glyphs.as_slice())
+                .unwrap_or_default();
+            let set = footprint
+                .and_then(|f| f.tapes.get(k))
+                .copied()
+                .unwrap_or_default();
+            // Every stored index is clamped below the tape's own
+            // cardinality (`footprint.rs`'s soundness contract), so
+            // indexing the glyph table directly is safe.
+            let members = set
+                .iter()
+                .map(|i| format!("'{}'", glyphs[i as usize]))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("writes {}: {{{members}}}", tape.name)
+        })
+        .collect();
+    Some(lines.join("\n"))
 }
 
 /// A bind instance's RESOLVED binding: the mangled routine it targets and

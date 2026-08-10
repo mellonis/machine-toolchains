@@ -1073,6 +1073,275 @@ fn ir_graph_renders_mermaid_and_filters_by_world() {
     assert!(err.contains("nope"), "{err}");
 }
 
+// --- ir footprints: the per-tape write-set report --------------------------
+
+/// A dedicated two-world fixture: a routine `zzHelper` (declared first, so
+/// program order lists it before the `machine` world `main` — and `zzHelper`
+/// sorts AFTER `main` alphabetically, so the same fixture also pins against
+/// an accidentally-alphabetical rendering) that a `machine` calls on one of
+/// its two tapes, leaving the other untouched.
+///
+/// Hand-derived expectations (glyphs of `bits`: `'_'`=0, `'0'`=1, `'1'`=2,
+/// all cardinality 3):
+///   - `zzHelper`'s two rows write `'1'` on a `'0'` read and `'0'` on a `'1'`
+///     read, so its tape 0 (`num`) write set is {1, 2}.
+///   - the call site's `num = ctl` binding carries no `with map`, so the
+///     binding is index-identity on equal cardinalities (3 both sides):
+///     callee symbols 1 and 2 write back as caller symbols 1 and 2
+///     unchanged, so `main`'s `ctl` tape write set is also {1, 2}.
+///   - `main`'s `spare` tape is never bound or written by anything, so its
+///     set is {}.
+const FOOTPRINT_FIXTURE_SRC: &str = "\
+alphabet bits { '_', '0', '1' }
+
+routine zzHelper(tape num: bits) {
+  entry state s {
+    ['0'] -> write ['1'] return;
+    ['1'] -> write ['0'] return;
+    [*]   -> return;
+  }
+}
+
+machine {
+  tape ctl: bits;
+  tape spare: bits;
+  entry state main {
+    [*, *] -> call zzHelper(num = ctl) then stop;
+  }
+}
+";
+
+/// `compile FOOTPRINT_FIXTURE_SRC --emit-ir`, returning the sidecar
+/// `.ir.json` path.
+fn footprint_fixture_ir(dir: &Path) -> PathBuf {
+    let src = dir.join("footprints.tmc");
+    fs::write(&src, FOOTPRINT_FIXTURE_SRC).unwrap();
+    let obj = dir.join("footprints.tmo");
+    execute(&args(&[
+        "compile",
+        src.to_str().unwrap(),
+        "-o",
+        obj.to_str().unwrap(),
+        "--emit-ir",
+    ]))
+    .unwrap();
+    dir.join("footprints.ir.json")
+}
+
+#[test]
+fn ir_footprints_renders_per_tape_write_sets_in_program_order() {
+    let dir = scratch("tmc_ir_footprints");
+    let ir_path = footprint_fixture_ir(&dir);
+
+    let out = execute(&args(&["ir", "footprints", ir_path.to_str().unwrap()])).unwrap();
+    assert_eq!(
+        out.stdout,
+        "world zzHelper\n  tape 0 (num): writes {1, 2} of 3\n\
+         \n\
+         world main\n  tape 0 (ctl): writes {1, 2} of 3\n  tape 1 (spare): writes {} of 3\n"
+    );
+    assert_eq!(out.code, 0);
+}
+
+#[test]
+fn ir_footprints_function_filters_to_one_world() {
+    let dir = scratch("tmc_ir_footprints_filter");
+    let ir_path = footprint_fixture_ir(&dir);
+
+    let out = execute(&args(&[
+        "ir",
+        "footprints",
+        ir_path.to_str().unwrap(),
+        "--function",
+        "zzHelper",
+    ]))
+    .unwrap();
+    assert_eq!(
+        out.stdout,
+        "world zzHelper\n  tape 0 (num): writes {1, 2} of 3\n"
+    );
+
+    let out = execute(&args(&[
+        "ir",
+        "footprints",
+        ir_path.to_str().unwrap(),
+        "--function",
+        "main",
+    ]))
+    .unwrap();
+    assert_eq!(
+        out.stdout,
+        "world main\n  tape 0 (ctl): writes {1, 2} of 3\n  tape 1 (spare): writes {} of 3\n"
+    );
+}
+
+#[test]
+fn ir_footprints_unknown_world_is_an_error() {
+    let dir = scratch("tmc_ir_footprints_unknown");
+    let ir_path = footprint_fixture_ir(&dir);
+
+    let err = execute(&args(&[
+        "ir",
+        "footprints",
+        ir_path.to_str().unwrap(),
+        "--function",
+        "nope",
+    ]))
+    .unwrap_err();
+    assert_eq!(
+        err,
+        format!("no world `nope` in {}", ir_path.to_str().unwrap())
+    );
+
+    // `--function` matches the whole world name, not a fragment of it: `zz`
+    // is a genuine PREFIX of the real world `zzHelper`, so a substring-match
+    // filter would wrongly accept it.
+    let err = execute(&args(&[
+        "ir",
+        "footprints",
+        ir_path.to_str().unwrap(),
+        "--function",
+        "zz",
+    ]))
+    .unwrap_err();
+    assert_eq!(
+        err,
+        format!("no world `zz` in {}", ir_path.to_str().unwrap())
+    );
+}
+
+#[test]
+fn ir_footprints_wrong_arg_count_prints_usage() {
+    let err = execute(&args(&["ir", "footprints"])).unwrap_err();
+    assert!(
+        err.starts_with("ir footprints takes exactly one file"),
+        "{err}"
+    );
+    assert!(err.contains("USAGE: tmt ir graph"), "{err}");
+    assert!(err.contains("tmt ir footprints"), "{err}");
+
+    let err = execute(&args(&["ir", "footprints", "a.ir.json", "b.ir.json"])).unwrap_err();
+    assert!(
+        err.starts_with("ir footprints takes exactly one file"),
+        "{err}"
+    );
+}
+
+#[test]
+fn ir_footprints_unreadable_file_is_an_error() {
+    let err = execute(&args(&["ir", "footprints", "/no/such/path.ir.json"])).unwrap_err();
+    assert!(err.starts_with("cannot read"), "{err}");
+}
+
+/// `IrProgram::from_json` is a bare `serde_json::from_str` — it enforces no
+/// uniqueness on world names — so the file this leaf reads need not come
+/// from a trusted `--emit-ir` run; a hand-edited or corrupted `.ir.json` can
+/// legally deserialize with two worlds sharing a name but different
+/// arities. `FootprintTable` is keyed by name, so the two would otherwise
+/// collapse to the LAST one's tape count and the FIRST occurrence's extra
+/// tape would index past it — this pins that the leaf rejects the file
+/// outright instead of ever reaching that render.
+#[test]
+fn ir_footprints_rejects_colliding_world_names_at_different_arities() {
+    let dir = scratch("tmc_ir_footprints_colliding_names");
+    let json = r#"{
+      "version": 2,
+      "worlds": [
+        {
+          "name": "dup",
+          "kind": "machine",
+          "arity": 2,
+          "tapes": [
+            { "name": "a", "alphabet": "bits", "cardinality": 3 },
+            { "name": "b", "alphabet": "bits", "cardinality": 3 }
+          ],
+          "entry": 0,
+          "states": [
+            { "id": 0, "name": "s", "line": 1, "rules": [] }
+          ],
+          "local": false,
+          "line": 1
+        },
+        {
+          "name": "dup",
+          "kind": "routine",
+          "arity": 1,
+          "tapes": [
+            { "name": "num", "alphabet": "bits", "cardinality": 3 }
+          ],
+          "entry": 0,
+          "states": [
+            { "id": 0, "name": "s", "line": 1, "rules": [] }
+          ],
+          "local": true,
+          "line": 1
+        }
+      ],
+      "entry_world": 0
+    }"#;
+    let ir_path = dir.join("colliding.ir.json");
+    fs::write(&ir_path, json).unwrap();
+
+    let err = execute(&args(&["ir", "footprints", ir_path.to_str().unwrap()])).unwrap_err();
+    assert_eq!(
+        err,
+        format!("duplicate world `dup` in {}", ir_path.to_str().unwrap())
+    );
+}
+
+/// Equal arity is the shape that used to render successfully with WRONG
+/// data instead of an out-of-range index: both worlds have one tape, so the
+/// shadowed world's in-range lookup silently returned the SURVIVING world's
+/// write-set relabeled onto its own tape name — a bug bounds-checking alone
+/// can never catch. Pins that the rejection is keyed on the name collision
+/// itself, not on a tape-count mismatch.
+#[test]
+fn ir_footprints_rejects_colliding_world_names_at_equal_arity() {
+    let dir = scratch("tmc_ir_footprints_colliding_names_equal_arity");
+    let json = r#"{
+      "version": 2,
+      "worlds": [
+        {
+          "name": "dup",
+          "kind": "machine",
+          "arity": 1,
+          "tapes": [ { "name": "a", "alphabet": "bits", "cardinality": 3 } ],
+          "entry": 0,
+          "states": [ { "id": 0, "name": "s", "line": 1, "rules": [] } ],
+          "local": false,
+          "line": 1
+        },
+        {
+          "name": "dup",
+          "kind": "routine",
+          "arity": 1,
+          "tapes": [ { "name": "num", "alphabet": "bits", "cardinality": 3 } ],
+          "entry": 0,
+          "states": [ { "id": 0, "name": "s", "line": 1, "rules": [] } ],
+          "local": true,
+          "line": 1
+        }
+      ],
+      "entry_world": 0
+    }"#;
+    let ir_path = dir.join("colliding.ir.json");
+    fs::write(&ir_path, json).unwrap();
+
+    let err = execute(&args(&["ir", "footprints", ir_path.to_str().unwrap()])).unwrap_err();
+    assert_eq!(
+        err,
+        format!("duplicate world `dup` in {}", ir_path.to_str().unwrap())
+    );
+}
+
+#[test]
+fn bare_ir_prints_usage_listing_both_leaves() {
+    let out = execute(&args(&["ir"])).unwrap();
+    assert_eq!(out.code, 0);
+    assert!(out.stdout.contains("tmt ir graph"), "{}", out.stdout);
+    assert!(out.stdout.contains("tmt ir footprints"), "{}", out.stdout);
+}
+
 // --- tape-block: whole-block authoring (docs/tmt/cli.md (tape-block)) -------
 
 /// Three tapes with cardinalities 5 / 2 / 2 — the shape that makes the

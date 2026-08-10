@@ -624,15 +624,20 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
 
 const IR_USAGE: &str = "\
 USAGE: tmt ir graph FILE.ir.json [--function NAME]
+       tmt ir footprints FILE.ir.json [--function NAME]
 
-Renders --emit-ir output as a Mermaid flowchart (one per world). The filter
-flag keeps pmt's `--function` name for cross-tool muscle memory; a TM world
-IS the unit here (the `machine` block or a routine), so NAME is a world name.
+`graph` renders --emit-ir output as a Mermaid flowchart (one per world).
+`footprints` renders each world's inferred write footprint: per tape, the
+symbol indices its body may ever write, out of the tape's cardinality. Both
+share the `--function` flag (pmt's flag name, for cross-tool muscle memory);
+a TM world IS the unit here (the `machine` block or a routine), so NAME is a
+world name.
 ";
 
 pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
         Some("graph") => ir_graph(&raw[1..]),
+        Some("footprints") => ir_footprints(&raw[1..]),
         _ => Ok(CliOutput::ok(IR_USAGE.into(), String::new())),
     }
 }
@@ -660,6 +665,104 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
         });
     }
     Ok(CliOutput::ok(out, String::new()))
+}
+
+/// `tmt ir footprints FILE.ir.json [--function NAME]` — renders
+/// [`crate::footprint::infer_ir`]'s per-world, per-tape write-set inference
+/// over `--emit-ir` JSON. The IR is index-only by contract (no glyph table
+/// travels in the sidecar), so the report prints symbol INDICES, one line
+/// per tape, in the world's own tape order:
+///
+/// ```text
+/// world std::binaryNumbersBare::invertNumber
+///   tape 0 (num): writes {1, 2} of 3
+/// ```
+///
+/// Worlds render in the IR's own program order (never the footprint
+/// table's `HashMap` iteration order, which is unspecified) so the report
+/// is stable across runs. `--function` filters to one world, mirroring
+/// `ir graph`'s flag and error shape exactly, including the unknown-world
+/// message (docs/tmt/cli.md (tmt ir)).
+///
+/// `--emit-ir` itself never produces two worlds with the same name (its
+/// names are mangled unique), but the file this leaf reads is untrusted
+/// input, not a value this process just built — a hand-edited or corrupted
+/// `.ir.json` can still name-collide two worlds. `FootprintTable` is keyed
+/// by name, so a collision would silently render one world's inferred
+/// write-sets under the other's tape list; that is caught up front,
+/// rejected before either world's report is built.
+fn ir_footprints(raw: &[String]) -> Result<CliOutput, String> {
+    let mut args = Args::new(raw);
+    let filter = args.value("--function")?;
+    let inputs = args.positionals()?;
+    let [input] = inputs.as_slice() else {
+        return Err(format!(
+            "ir footprints takes exactly one file\n\n{IR_USAGE}"
+        ));
+    };
+    let text = fs::read_to_string(input).map_err(|e| format!("cannot read {input}: {e}"))?;
+    let program = IrProgram::from_json(&text).map_err(|e| format!("{input}: {e}"))?;
+    if let Some(name) = duplicate_world_name(&program) {
+        return Err(format!("duplicate world `{name}` in {input}"));
+    }
+    let table = crate::footprint::infer_ir(&program);
+
+    let mut blocks: Vec<String> = Vec::new();
+    for world in &program.worlds {
+        if filter.as_deref().is_some_and(|f| f != world.name) {
+            continue;
+        }
+        // `infer_ir` computes one entry per world `program.worlds` lists, so
+        // this always resolves — a lookup miss would mean the table and the
+        // program it was built from disagree on which worlds exist.
+        let footprint = table
+            .worlds
+            .get(&world.name)
+            .expect("infer_ir covers every world its own input program lists");
+        let mut block = format!("world {}\n", world.name);
+        for (index, tape) in world.tapes.iter().enumerate() {
+            // With duplicate world names already rejected above, `footprint`
+            // is this exact world's own entry, and `infer_ir` always sizes
+            // it to `world.tapes.len()` — so this `get` cannot miss for any
+            // input `duplicate_world_name` lets through today. It stays a
+            // `get` rather than an index because that equality is an
+            // invariant of `infer_ir`'s current implementation, not a
+            // parsed-JSON shape this leaf itself checks; the guard's only
+            // remaining job is an arity/tape-count mismatch, so a future
+            // change to that invariant reports an empty set here instead of
+            // panicking on a JSON file that still parses.
+            let set = footprint.tapes.get(index).copied().unwrap_or_default();
+            let members: Vec<String> = set.iter().map(|i| i.to_string()).collect();
+            block.push_str(&format!(
+                "  tape {index} ({}): writes {{{}}} of {}\n",
+                tape.name,
+                members.join(", "),
+                tape.cardinality
+            ));
+        }
+        blocks.push(block);
+    }
+    if blocks.is_empty() {
+        return Err(match filter {
+            Some(f) => format!("no world `{f}` in {input}"),
+            None => format!("{input}: no worlds"),
+        });
+    }
+    Ok(CliOutput::ok(blocks.join("\n"), String::new()))
+}
+
+/// The name of the first world that repeats an earlier world's name, or
+/// `None` if every name in `program.worlds` is distinct. Scoped to the `ir
+/// footprints` leaf: `FootprintTable`'s name-keyed shape is what makes a
+/// collision unsafe here, not a property of `.ir.json` in general (`ir
+/// graph` renders each world independently and has no such hazard).
+fn duplicate_world_name(program: &IrProgram) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+    program
+        .worlds
+        .iter()
+        .find(|w| !seen.insert(w.name.as_str()))
+        .map(|w| w.name.as_str())
 }
 
 fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
