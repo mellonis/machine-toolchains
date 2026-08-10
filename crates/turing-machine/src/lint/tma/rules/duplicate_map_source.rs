@@ -29,6 +29,21 @@
 //! Top-level `.map` directives only: a `.map` inside a `.rept` body is not
 //! scanned (a completeness-only limit — never a wrong finding). The lint runs
 //! behind the assemble fatal gate, so every pair here is already well-formed.
+//!
+//! # Why the fix never meets a comment
+//!
+//! The fix's deletion span lies strictly inside the clause's `(..)` group,
+//! and the interior of a well-formed group can never hold a comment: a `;`
+//! before the `)` comments the closer out (the directive is malformed), a
+//! trailing comma followed by a comment does not continue the list, and an
+//! own-line comment between continuation lines breaks the fold
+//! (docs/formats.md (assembly text)). Every such shape is an assemble
+//! fatal, and the fatal gate runs before this rule on both routes — so the
+//! deletion can never swallow a comment, and no comment-withholding guard
+//! is needed here. A comment after the `)` is the one comment a
+//! duplicate-carrying `.map` can hold, and it sits outside every deletion
+//! span. The tests pin each shape; if the continuation rules ever loosen,
+//! they fail and this reasoning must be revisited.
 
 use std::collections::HashMap;
 
@@ -284,6 +299,33 @@ alt:    hlt
     #[test]
     fn the_fix_removes_a_shadowed_mapping_across_the_line_break() {
         assert_fix_no_op("rmap=(1->2,\n            1->3)", "rmap=(1->3)");
+    }
+
+    /// A trailing comma followed by a comment does not continue the list
+    /// (docs/formats.md (assembly text)) — the directive is malformed and
+    /// the assemble fatal gate rejects it before this rule can run. If
+    /// this ever starts assembling, a comment can reach a deletion span
+    /// and the fix must learn to withhold itself (module head).
+    #[test]
+    fn a_comma_followed_by_a_comment_is_an_assemble_fatal() {
+        let src = program("rmap=(1->2, ; note\n            1->3)");
+        assert!(lint_tma(&src, &[]).is_err());
+    }
+
+    /// An own-line comment between continuation lines breaks the fold —
+    /// same fatal gate, same consequence: the rule never sees the group.
+    #[test]
+    fn an_own_line_comment_inside_the_group_is_an_assemble_fatal() {
+        let src = program("rmap=(1->2,\n    ; note\n            1->3)");
+        assert!(lint_tma(&src, &[]).is_err());
+    }
+
+    /// A comment after the `)` is the one comment a duplicate-carrying
+    /// `.map` can hold, and it sits outside every deletion span: the fix
+    /// leaves it byte-for-byte in place.
+    #[test]
+    fn a_trailing_comment_after_the_group_survives_the_fix() {
+        assert_fix_no_op("rmap=(1->2, 1->3) ; note", "rmap=(1->3) ; note");
     }
 
     #[test]
