@@ -441,3 +441,49 @@ fn a_dispatch_table_straddling_a_jumped_onto_entry_byte_keeps_one_function() {
     assert_eq!(out2.executable.code, out.executable.code, "{text}");
     assert_eq!(text.matches(".func").count(), 1, "one function:\n{text}");
 }
+
+/// A MATCH table referenced from both sides of a jumped-onto `ent`. Match
+/// rows are symbol patterns, so this table names no code at all — but it is
+/// still stored per function and tied to exactly one, so a boundary between
+/// two of its `mtc` sites leaves the text tying it to two. The dispatch
+/// table here keeps its entries AND its site on one side, so nothing about
+/// the code addresses is what saves this shape.
+const SHARED_MATCH_TABLE: &str = "\
+.routine main, tapes=2, alpha=(2, 2)
+.section tables
+T0: .row [1, 1]
+    .row [*, *]
+D0: .targets hit, miss
+.section code
+.func main
+        rd
+        mtc  T0
+        jmp  L1
+L1:     ent
+        rd
+        mtc  T0
+        djmp D0
+hit:    wr   [1, -]
+        mov  [>, .]
+        stp
+miss:   hlt
+";
+
+#[test]
+fn a_match_table_shared_across_a_jumped_onto_entry_byte_keeps_one_function() {
+    let out = link(
+        &tm1_syntax(),
+        &[assemble(SHARED_MATCH_TABLE, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .expect("links");
+    let text = disassemble_executable(&out.executable);
+    // A split reports `bad-table` at `asm`: the table would be tied to two
+    // functions, which is what "one region owns a table" means in the text.
+    let obj2 = assemble(&text, false)
+        .unwrap_or_else(|e| panic!("rendered text must re-assemble: {e:?}\n{text}"));
+    let out2 = link(&tm1_syntax(), &[obj2], &[], LinkOptions::default()).expect("re-links");
+    assert_eq!(out2.executable.code, out.executable.code, "{text}");
+    assert_eq!(text.matches(".func").count(), 1, "one function:\n{text}");
+}

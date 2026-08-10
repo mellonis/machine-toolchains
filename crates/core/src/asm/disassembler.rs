@@ -1320,17 +1320,19 @@ pub fn disassemble_executable(
     // (it degrades to `.byte`, which the linker then rejects); where it was
     // a fall-through it silently lands somewhere else.
     //
-    // So promote only across a genuine CUT of the discovered code — a
-    // boundary no edge of any kind spans:
+    // So promote only across a genuine CUT of the discovered code:
     //
     //   * nothing falls through INTO it, and the region it opens does not
     //     fall out of its own END (it finishes on a stop or a resolved
     //     jump). Both are the same layout dependency, one boundary apart.
     //   * no local-label edge crosses it in either direction.
-    //   * no table's selectable addresses cross it — a dispatch table's
-    //     entries and a frame descriptor's exits are code edges no operand
-    //     shows, and they must stay inside one region because the table
-    //     section spells them as that region's labels.
+    //   * every table it could divide stays whole: a table's SITES and its
+    //     code entries must all land in one region. A table is stored per
+    //     function and belongs to exactly one, so a boundary between two of
+    //     its references leaves the text describing a table tied to two
+    //     functions — which the assembler rejects outright — and a boundary
+    //     between a reference and an entry leaves the entry spelled as some
+    //     other region's label. Both refusals happen before anything runs.
     //
     // A real tail-jump callee passes all three: its caller ends in the
     // jump, the jump itself renders symbolically rather than as a crossing
@@ -1359,6 +1361,29 @@ pub fn disassemble_executable(
                 continue_edges.push((d.addr, d.addr + d.len));
             }
         }
+
+        // Every address one table ties together: the instructions that
+        // reach it and the code it can select. A match table has only the
+        // former (its rows are symbol patterns, not addresses) and a
+        // directory descriptor no site resolved to has only the latter —
+        // both still pin the table to one function, so both are collected
+        // under the same key and weighed as one set.
+        let mut table_addrs: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (key, targets) in &table_targets {
+            table_addrs.entry(*key).or_default().extend(targets);
+        }
+        for &(site, key) in &table_sites {
+            table_addrs.entry(key).or_default().push(site);
+        }
+        // A descriptor no site named is reachable under a context this walk
+        // cannot resolve, so which region owns it cannot be established at
+        // all — only that its exits agree with each other, which is the
+        // weaker half of the rule and can miss a descriptor whose exits sit
+        // on the far side of a boundary from its owner. Where ownership is
+        // unknowable, no boundary is safe to invent.
+        let unowned_table = table_targets.iter().any(|(key, targets)| {
+            !targets.is_empty() && !table_sites.iter().any(|&(_, k)| k == *key)
+        });
 
         let mut cuts: BTreeSet<u32> = tail_jump_targets
             .into_iter()
@@ -1392,19 +1417,14 @@ pub fn disassemble_executable(
                                 && (roots.contains(&target) || cuts.contains(&target)));
                         !symbolic && ((addr < t && target >= t) || (addr >= t && target <= t))
                     })
-                    || table_targets.iter().any(|(table, targets)| {
-                        // A table's entries are named as labels of ONE region,
-                        // so they must not straddle the boundary — nor may a
-                        // site reach across it into the entries it selects.
-                        let straddles =
-                            targets.iter().any(|&x| x < t) && targets.iter().any(|&x| x >= t);
-                        straddles
-                            || table_sites.iter().any(|&(site, key)| {
-                                key == *table
-                                    && targets
-                                        .iter()
-                                        .any(|&x| (site < t && x >= t) || (site >= t && x <= t))
-                            })
+                    || unowned_table
+                    || table_addrs.values().any(|addrs| {
+                        // One region must hold the whole set. An address ON
+                        // the boundary is already outside it: that is the
+                        // opened region's root, which the text spells as a
+                        // function name, never as a label a table can name.
+                        addrs.contains(&t)
+                            || (addrs.iter().any(|&x| x < t) && addrs.iter().any(|&x| x > t))
                     })
             });
             match doomed {
