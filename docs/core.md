@@ -764,10 +764,15 @@ produce different images from the same objects:
   known hole keeps the trap taxonomy — an unmapped-read symbol gets a
   synthesized trap row, sorted into the stamped table's canonical
   position alongside the rewritten rows; it wins because no other row
-  can match that symbol, not because of where it sits. A write with no
-  physical image becomes a trap stub. Identical stamps dedup behind a
-  digest-suffixed name, `<routine>.<digest8>` — a period, so the name
-  re-lexes as ordinary assembly text. A period is legal in a hand-written
+  can match that symbol, not because of where it sits. That holds for
+  every binding the composition engine builds, since a binding is
+  required to place callee tapes injectively (`docs/formats.md (bound
+  calls)`); a hand-authored raw `.frame` descriptor sits outside that
+  check and outside mono lowering altogether — mono never stamps a raw
+  framed call. A write with no physical image becomes a trap stub.
+  Identical stamps dedup behind a digest-suffixed name,
+  `<routine>.<digest8>` — a period, so the name re-lexes as ordinary
+  assembly text. A period is legal in a hand-written
   routine name too, so the linker checks every freshly minted stamp name
   against every routine and stamp name already in play for this link and
   refuses with a typed error on a collision, rather than relying on the

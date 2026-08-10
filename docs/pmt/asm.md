@@ -99,9 +99,10 @@ errors — v1 branches take labels only. Disassemblers print a relocated jump
 (from an object, via its relocation table) or a jump landing on a function
 root (from an executable, via discovery) in the `jmp @name` form; a jump
 into another function's middle that lands on no known root falls back to
-`.byte`. That fallback text carries no control-flow meaning the assembler
-can restore, so it never reassembles as a jump; an executable whose
-disassembly contains it is not a legal `asm` input.
+`.byte`. That specific fallback stays unreachable from legal `.pma` — a
+real program's jump target is always a label inside its own function, a
+call, or a discovered root — and text built to contain it does not link
+back to a working program.
 
 ## The `.volatile` directive
 

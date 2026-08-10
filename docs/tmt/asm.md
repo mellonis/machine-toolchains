@@ -146,5 +146,5 @@ call mechanism stays a link-time decision independent of the source.
 is that `N` bumps on *any* grammar change once a version has shipped and
 so become a contract to preserve; this addition landed during 0.3's own
 development, before its first release, so it folded into 0.3 rather than
-opening 0.4. The dialect version is **0.3** as released; a grammar change
-proposed after that point bumps to 0.4 in the ordinary way.
+opening 0.4. The dialect version is **0.3**; a grammar change proposed
+after that point bumps to 0.4 in the ordinary way.
