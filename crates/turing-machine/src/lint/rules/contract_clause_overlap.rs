@@ -35,11 +35,29 @@
 //! already cancelled it). So when the overlapping element is the clause's
 //! only one, the fix removes the whole clause instead, leaving no `writes`
 //! restriction at all rather than minting a new, stronger one nobody wrote.
+//! That widening is a real semantics change (unlike an ordinary element
+//! removal, which is inert by construction — the removed entry was already
+//! excluded by the `preserves` subtraction), so the whole-clause fix is
+//! `MaybeIncorrect`, the same tier every other whole-declaration deletion in
+//! this crate uses (`unused-alphabet` and its siblings); the ordinary
+//! element-removal fix stays `MachineApplicable`.
+//!
+//! # Comments inside the deletion span
+//!
+//! The analysis this rule reads is comment-free, but the SOURCE is not: a
+//! `writes {'0', /* … */ '1'}` can carry a comment between two elements.
+//! Silently deleting it would be the same defect fmt takes care to avoid (it
+//! relocates a clause-interior comment rather than dropping it), so before
+//! offering either fix this rule checks the comment-INCLUSIVE token stream
+//! for one landing inside the edit's own span and withholds the fix if it
+//! finds one — the finding still reports, same posture as a partial-range
+//! overlap.
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Edit, Fix, Span};
 
 use crate::compiler::full_name;
 use crate::footprint::SymSet;
+use crate::lexer::{Token, TokenKind};
 use crate::lint::LintContext;
 use crate::lint::patterns::{glyph_label, range_labels};
 use crate::parser::{AlphabetElem, ContractClause, Program, SigParam, SigParamKind};
@@ -124,16 +142,17 @@ fn writes_clause_for<'a>(params: &'a [SigParam], tape_name: &str) -> Option<&'a 
 
 /// The removal fix for a fully-covered `writes` element at index `i` of
 /// `clause`, naming the glyph(s) it removes. The clause's ONLY element takes
-/// the whole clause with it (module head); any other element takes just
-/// itself and its adjacent comma — the comma AFTER it, unless it is the last
-/// element, in which case the comma BEFORE it (so the remaining list still
-/// parses).
+/// the whole clause with it (module head) — a semantics-widening edit, so
+/// `MaybeIncorrect`; any other element takes just itself and its adjacent
+/// comma — the comma AFTER it, unless it is the last element, in which case
+/// the comma BEFORE it (so the remaining list still parses) — an inert edit,
+/// so `MachineApplicable`.
 fn removal_fix(clause: &ContractClause, i: usize, named: &str) -> Fix {
     let n = clause.elems.len();
     if n == 1 {
         return Fix {
             description: "remove the emptied `writes` clause".to_string(),
-            applicability: Applicability::MachineApplicable,
+            applicability: Applicability::MaybeIncorrect,
             edits: vec![Edit {
                 span: clause.span,
                 replacement: String::new(),
@@ -159,6 +178,22 @@ fn removal_fix(clause: &ContractClause, i: usize, named: &str) -> Fix {
             replacement: String::new(),
         }],
     }
+}
+
+/// Whether `a` and `b` share any source position — the half-open-range
+/// overlap test, over [`Span`]'s derived `Ord`.
+fn spans_overlap(a: Span, b: Span) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+/// Whether any comment token (from the comment-INCLUSIVE stream — the
+/// ordinary `ctx.tokens` never carries one) lands inside `span`. A candidate
+/// fix whose deletion span answers yes here must not be offered — deleting it
+/// would silently take the comment with it (module head).
+fn span_touches_a_comment(comment_tokens: &[Token], span: Span) -> bool {
+    comment_tokens
+        .iter()
+        .any(|t| matches!(t.kind, TokenKind::Comment(_)) && spans_overlap(t.span(), span))
 }
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
@@ -196,7 +231,13 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 }
                 let fully_covered = overlapping.len() == indices.len();
                 let named = quoted_list(&ascending_glyphs(glyphs, &overlapping));
-                let fix = fully_covered.then(|| removal_fix(clause, i, &named));
+                let fix = fully_covered
+                    .then(|| removal_fix(clause, i, &named))
+                    .filter(|f| {
+                        !f.edits
+                            .iter()
+                            .any(|e| span_touches_a_comment(ctx.comment_tokens, e.span))
+                    });
                 out.push(Diagnostic {
                     code: "contract-clause-overlap",
                     span: elem_span(elem),
@@ -357,6 +398,9 @@ routine mark(tape t: bits writes {'0', '1', '2'} preserves {'1'}) {
             .clone()
             .expect("a single glyph is always fully covered");
         assert_eq!(fix.description, "remove '1' from the `writes` clause");
+        // Inert (the removed entry was already excluded by the `preserves`
+        // subtraction), unlike the only-element whole-clause fix — pins the
+        // applicability split between the two branches.
         assert_eq!(fix.applicability, Applicability::MachineApplicable);
 
         let fixed = apply(src, &fix.edits);
@@ -400,7 +444,10 @@ routine mark(tape t: bits writes {'1'} preserves {'1'}) {
             .clone()
             .expect("a single glyph is always fully covered");
         assert_eq!(fix.description, "remove the emptied `writes` clause");
-        assert_eq!(fix.applicability, Applicability::MachineApplicable);
+        // Widens the declared contract (writes-nothing → full-minus-preserves)
+        // — a semantics change, unlike plain element removal — so this tier
+        // matches every other whole-declaration deletion fix in the crate.
+        assert_eq!(fix.applicability, Applicability::MaybeIncorrect);
 
         let fixed = apply(src, &fix.edits);
         assert!(
@@ -487,6 +534,58 @@ graph g(tape t: bits writes {'0', '1'} preserves {'1'}, state done) {
         assert_eq!(
             f[0].message,
             "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+        );
+    }
+
+    #[test]
+    fn a_namespaced_routines_overlap_is_found_under_its_mangled_name() {
+        // `world.name` is the world's MANGLED name (`lib::mark`), never the
+        // bare declared one — a namespaced world is the only shape where the
+        // two differ, so it is the only shape that can catch `world_sig`'s
+        // keying drifting to the bare `r.name` (mirrors the compiler's own
+        // guard for `check_contracts`, `a_contract_in_a_namespace_is_checked_
+        // under_its_mangled_name`).
+        let src = "\
+namespace lib {
+  alphabet bits { '_', '0', '1' }
+  routine mark(tape t: bits writes {'0', '1'} preserves {'1'}) {
+    entry state s { [*] -> write ['0'] return; }
+  }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].message,
+            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+        );
+        let start = byte_of(src, f[0].span.start);
+        let end = byte_of(src, f[0].span.end);
+        assert_eq!(&src[start..end], "'1'");
+    }
+
+    #[test]
+    fn a_comment_inside_the_deletion_span_withholds_the_fix() {
+        // `'1'` is the last (and only overlapping) element, so its removal
+        // span would otherwise run from the end of `'0'` through the end of
+        // `'1'` — exactly the range the interior comment sits in. The finding
+        // still reports; only the fix is withheld, the same posture as a
+        // partial-range overlap.
+        let src = "\
+alphabet bits { '_', '0', '1' }
+routine mark(tape t: bits writes {'0', /* keep me */ '1'} preserves {'1'}) {
+  entry state s { [*] -> write ['0'] return; }
+}
+";
+        let f = findings(src);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].message,
+            "'1' is in both `writes` and `preserves`; `preserves` wins, so the `writes` entry is inert"
+        );
+        assert!(
+            f[0].fix.is_none(),
+            "a fix spanning a comment must be withheld"
         );
     }
 }

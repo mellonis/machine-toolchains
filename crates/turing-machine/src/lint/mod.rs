@@ -36,7 +36,7 @@ pub mod tma;
 use mtc_core::diagnostics::Diagnostic;
 
 use crate::compiler::{self, CompileError, Resolved};
-use crate::lexer::Token;
+use crate::lexer::{LexMode, Token, lex_with};
 use crate::parser::Program;
 
 #[derive(Debug, Clone, Default)]
@@ -102,6 +102,14 @@ pub(crate) struct LintContext<'a> {
     /// `unused-graft-name` fixes recover spans (a declaration's `}`, a graft's
     /// `as` keyword) that no earlier artifact keeps.
     pub tokens: &'a [Token],
+    /// The COMMENT-INCLUSIVE token stream — `TokenKind::Comment` trivia the
+    /// `tokens` field above never carries. Read only by a fix that deletes a
+    /// source span and must first prove no comment sits inside it (deleting
+    /// one silently would be a defect fmt itself avoids by relocating rather
+    /// than dropping). The editor service already lexes this way for its own
+    /// purposes and hands the same slice over; the batch `lint()` path pays
+    /// one extra lex pass for it.
+    pub comment_tokens: &'a [Token],
 }
 
 /// A lint rule: reads the analysis context, pushes any findings.
@@ -206,11 +214,18 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     validate_allow(&options.allow)?;
     validate_allow(&options.warn)?;
     let analysis = compiler::analyze(source)?;
+    // The comment-free lex already succeeded (`analyze` above ran it), so a
+    // second, comment-inclusive pass over the same source is not expected to
+    // fail; falling back to an empty slice on the unreachable error path just
+    // means a comment-safety check finds nothing to withhold a fix over,
+    // never a new error class leaking out of `lint()`.
+    let comment_tokens = lex_with(source, LexMode::WithComments).unwrap_or_default();
     let ctx = LintContext {
         resolved: &analysis.resolved,
         diagnostics: &analysis.diagnostics,
         program: &analysis.program,
         tokens: &analysis.tokens,
+        comment_tokens: &comment_tokens,
     };
     let diagnostics = run_rules(&ctx, &options.allow, &options.warn);
     Ok(LintReport { diagnostics })
