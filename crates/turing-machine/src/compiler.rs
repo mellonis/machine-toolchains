@@ -901,7 +901,9 @@ pub(crate) enum WorldKind {
 }
 
 /// A resolved tape: its world-local name plus the mangled alphabet it draws
-/// from and that alphabet's cardinality (for index resolution in Task 6).
+/// from and that alphabet's cardinality — the frame every symbol index on
+/// this tape, from a rule's write cells to a declared contract, is resolved
+/// against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedTape {
     pub name: String,
@@ -1071,10 +1073,20 @@ fn check_contracts(resolved: &Resolved) -> Result<(), CompileError> {
     // Worlds in resolved order, tapes in signature order, so the first finding
     // on a module with several is the source-first one.
     for world in &resolved.worlds {
+        // Both sides key on the MANGLED world name (`main`, `ns::name`) —
+        // `infer_resolved` builds its table from this very list, so a miss is
+        // unreachable. Guarded rather than skipped quietly because the failure
+        // mode is invisible: keying that drifted apart would silently stop
+        // enforcing every contract in the module instead of breaking loudly.
+        // A `debug_assert` because the totality is the footprint engine's
+        // invariant to keep, not this module's to enforce at run time.
         let Some(footprint) = table.worlds.get(&world.name) else {
-            // Every resolved world is a table entry (the table is built from
-            // this same list, and duplicate names are already rejected); a
-            // miss can only mean no inference to check against.
+            debug_assert!(
+                false,
+                "no inferred footprint for world `{}` — the contract check's \
+                 keying has drifted from the footprint table's",
+                world.name
+            );
             continue;
         };
         for (k, tape) in world.tapes.iter().enumerate() {
@@ -3596,6 +3608,27 @@ namespace lib {
         assert_eq!(
             e.kind.to_string(),
             "'x' in the `writes` clause is not a symbol of alphabet `lib::bits`"
+        );
+    }
+
+    #[test]
+    fn a_contract_in_a_namespace_is_checked_under_its_mangled_name() {
+        // The footprint table is keyed by MANGLED world name, and so is the
+        // lookup that reads it. A namespaced world is the only shape where the
+        // two names differ, so it is the only shape that can catch the keying
+        // drifting apart — everything top-level would pass either way.
+        let e = err("\
+namespace lib {
+  export alphabet bits { '_', '0', '1' }
+  export routine mark(tape t: bits writes {'0'}) {
+    entry state s { [*] -> write ['1'] return; }
+  }
+}
+");
+        assert_eq!(e.kind.code(), "writes-outside-contract");
+        assert_eq!(
+            e.kind.to_string(),
+            "`lib::mark` may write '1' on tape `t`, which its contract forbids"
         );
     }
 
