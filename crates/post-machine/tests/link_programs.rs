@@ -6,7 +6,9 @@ use mtc_core::linker::LinkOptions;
 use mtc_core::vm::{ArchRegistry, InfiniteTape, Machine, Outcome, RunOptions, RunStats};
 use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::arch::opcodes::*;
-use mtc_post_machine::asm::{assemble, disassemble_executable, link};
+use mtc_post_machine::asm::{
+    assemble, disassemble_executable, disassemble_executable_with_map, link,
+};
 
 const SPEC_SAMPLE: &str = "\
 .func goToEnd
@@ -170,4 +172,121 @@ fn tail_call_layout_round_trips_through_disassembly() {
     let obj2 = assemble(&text, false).unwrap();
     let out2 = link(&[obj2], &[], LinkOptions::default()).unwrap();
     assert_eq!(out2.executable.code, out.executable.code);
+}
+
+fn no_relax() -> LinkOptions {
+    LinkOptions {
+        relax: false,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn jump_only_callee_keeps_its_own_func_under_both_link_widths() {
+    // `target` is reached ONLY by main's tail jump — never called, never
+    // the entry. Its site's width is the linker's to choose, so the
+    // disassembly has to keep it a symbol site: rendered as a local label
+    // inside main it would become the assembler's choice instead, and a
+    // link that held the site far would not survive reassembly.
+    let src = "\
+.func main
+        jmp     @target
+.func target
+        stp
+";
+    // Objects: main = [ENT][JMP <hole>] (6 bytes), target = [ENT][STP].
+    // Relaxation off, main first: target sits at 6, the far site ends at 6,
+    // so its displacement is 0. Relaxation on, the site narrows to 2 bytes:
+    // target moves to 3, the short site ends at 3, displacement 0 again.
+    for (opts, expected, synthesized) in [
+        (
+            no_relax(),
+            vec![ENT, JMP, 0, 0, 0, 0, ENT, STP],
+            "func_0006",
+        ),
+        (
+            LinkOptions::default(),
+            vec![ENT, JMP_S, 0, ENT, STP],
+            "func_0003",
+        ),
+    ] {
+        let obj = assemble(src, true).unwrap();
+        let out = link(&[obj], &[], opts.clone()).unwrap();
+        assert_eq!(out.executable.code, expected);
+
+        // Map-less (the synthesis the round-trip law runs on) and with the
+        // map (the debugger view) must both reproduce the image.
+        let mapless = disassemble_executable(&out.executable);
+        let mapped = disassemble_executable_with_map(&out.executable, &out.map);
+        for text in [&mapless, &mapped] {
+            let out2 = link(&[assemble(text, false).unwrap()], &[], opts.clone()).unwrap();
+            assert_eq!(out2.executable.code, out.executable.code, "{text}");
+        }
+
+        // …and both keep the boundary that makes that work.
+        assert!(
+            mapless.contains(&format!(".func {synthesized}")),
+            "{mapless}"
+        );
+        assert!(
+            mapless.contains(&format!("jmp     @{synthesized}")),
+            "{mapless}"
+        );
+        assert!(mapped.contains(".func target"), "{mapped}");
+        assert!(mapped.contains("jmp     @target"), "{mapped}");
+    }
+}
+
+#[test]
+fn a_folded_tail_jump_would_shift_the_reassembled_object_layout() {
+    // The same fold is lossy even where the tail-jump site itself narrows
+    // cleanly, because a folded site is 2 bytes of text where the object
+    // held a 5-byte relocation. Every jump spanning it shrinks by 3 on
+    // reassembly, and one sitting just past the signed-byte boundary flips
+    // width — so the loss lands on an unrelated instruction, under a
+    // default link. PAD is tuned to put `jm` exactly there.
+    const PAD: usize = 120;
+    let mut src = String::from(".func main\n        jm      LEND\n");
+    for _ in 0..PAD {
+        src.push_str("        nop\n");
+    }
+    src.push_str(
+        "        jnm     L2
+        jmp     @tail
+L2:     nop
+LEND:   stp
+.func tail
+        stp
+",
+    );
+
+    // main's object blob, far site and both branches resolved by the
+    // assembler's own fixpoint: ent(1) + jm(5) + PAD nops + jnm.s(2) +
+    // jmp<hole>(5) + nop(1) + stp(1). `jm` reaches LEND at 6 + PAD + 8 =
+    // 134 from its end at 6 — displacement 128, one past the signed byte,
+    // so it is far and stays far. Linking narrows the tail-jump site to 2
+    // bytes, which pulls LEND back to 131: `jm`'s displacement becomes 125
+    // and would now fit a byte, but a linked jump never changes width.
+    let mut expected = vec![ENT, JM];
+    expected.extend(125i32.to_le_bytes());
+    expected.extend(std::iter::repeat_n(NOP, PAD));
+    expected.extend([JNM_S, 2, JMP_S, 2, NOP, STP, ENT, STP]);
+
+    let obj = assemble(&src, false).unwrap();
+    let out = link(&[obj], &[], LinkOptions::default()).unwrap();
+    assert_eq!(out.executable.code, expected);
+    assert_eq!(out.report.relaxed_calls, 1); // the tail-jump site
+
+    let text = disassemble_executable(&out.executable);
+    let out2 = link(
+        &[assemble(&text, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(out2.executable.code, out.executable.code, "{text}");
+
+    let tail = format!("func_{:04X}", PAD + 12);
+    assert!(text.contains(&format!(".func {tail}")), "{text}");
+    assert!(text.contains(&format!("jmp     @{tail}")), "{text}");
 }

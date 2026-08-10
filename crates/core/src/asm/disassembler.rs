@@ -1221,7 +1221,37 @@ pub fn disassemble_executable(
         match (entry.flow, operand) {
             (Flow::FallThrough, _) => work.push(next),
             (Flow::Stop, _) => {}
-            (Flow::Jump, DecodedOperand::RelTarget(t)) => work.push(*t),
+            (Flow::Jump, DecodedOperand::RelTarget(t)) => {
+                // A jump landing on an entry prologue is a tail call, so its
+                // target is a function start and becomes a root — the site
+                // then renders in symbol form. Every linked function opens
+                // with the entry opcode (docs/core.md (linking)), so this
+                // catches every one of them; the converse is not guaranteed,
+                // since a dialect may let that byte stand inside a body as
+                // an ordinary instruction. Reading it as a prologue is the
+                // faithful choice anyway: a pure image records no function
+                // boundaries at all.
+                //
+                // Without it, a function reached ONLY by such a jump folds
+                // into its caller's region as a bare local label, which is
+                // lossy in BOTH widths. A symbol site's width is the
+                // linker's to choose and a local label's is the assembler's,
+                // so a far site re-narrows on reassembly; and a narrowed
+                // site, shorter in text than the far relocation the object
+                // held, shifts the reassembled object's layout under every
+                // other jump spanning it, flipping their widths too. Symbol
+                // form avoids both because it restores the OBJECT layout:
+                // symbol operands always reassemble far (the `far_mnemonic`
+                // display below prints a linker-narrowed site in its far
+                // form for exactly this reason), and the linker then
+                // re-derives the same narrowing — which is what makes
+                // dis → asm → link byte-exact (docs/formats.md (assembly
+                // text)).
+                if code.get(*t as usize) == Some(&syntax.entry_opcode) {
+                    roots.insert(*t);
+                }
+                work.push(*t);
+            }
             (Flow::Branch, DecodedOperand::RelTarget(t)) => {
                 work.push(*t);
                 work.push(next);
@@ -2800,6 +2830,58 @@ START:  nop
             crate::linker::link(&syntax, &[obj2], &[], crate::linker::LinkOptions::default())
                 .unwrap();
         assert_eq!(out2.executable.code, out.executable.code);
+    }
+
+    #[test]
+    fn jump_only_callee_stays_a_root_so_its_site_keeps_symbol_form() {
+        // `g` is reached ONLY by main's tail jump — never called, never the
+        // entry — so nothing but the jump itself marks it as a function.
+        // Read as a prologue (its first byte is the entry opcode) it stays a
+        // root, and the site keeps the symbol form whose width belongs to
+        // the linker; folded into main's region it would become a local
+        // label, whose width belongs to the assembler.
+        let syntax = test_syntax();
+        let src = ".func main\n        jmp @g\n.func g\n        stop\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        // Relaxation disabled: main = [ent][jmp<i32> = 1] (6 bytes), g at 6
+        // = [ent][stop]. The far jump's displacement is 6 − 6 = 0.
+        let opts = crate::linker::LinkOptions {
+            relax: false,
+            ..Default::default()
+        };
+        let out = crate::linker::link(&syntax, &[obj], &[], opts.clone()).unwrap();
+        assert_eq!(
+            out.executable.code,
+            vec![0x0E, 0x20, 0, 0, 0, 0, 0x0E, 0x02]
+        );
+        let text = disassemble_executable(&syntax, &out.executable, None);
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        let out2 = crate::linker::link(&syntax, &[obj2], &[], opts).unwrap();
+        assert_eq!(out2.executable.code, out.executable.code, "{text}");
+        assert!(text.contains(".func func_0006"), "{text}");
+        assert!(text.contains("jmp     @func_0006"), "{text}");
+    }
+
+    #[test]
+    fn a_jumped_to_entry_byte_inside_a_body_reads_as_a_function_start() {
+        // The converse of the rule above, pinned deliberately: a pure image
+        // records no function boundaries, so an entry byte standing inside
+        // a body is indistinguishable from a prologue when a jump lands on
+        // it, and dis reads it as one. Narrowing the rule further (say, by
+        // declining to promote a fall-through-entered target) would shrink
+        // the ambiguity without removing it, so it is not attempted: one
+        // reachable only by a jump is a no-op spelled the long way, and the
+        // purposeful use — a second landing pad, where the architecture's
+        // call verifies its target byte — is a call target, hence already a
+        // root and untouched by this rule.
+        let syntax = test_syntax();
+        let src = ".func main\n        jmp L1\nL1:     ent\n        stop\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let out = crate::linker::link(&syntax, &[obj], &[], crate::linker::LinkOptions::default())
+            .unwrap();
+        let text = disassemble_executable(&syntax, &out.executable, None);
+        assert!(text.contains(".func func_0003"), "{text}");
+        assert!(text.contains("jmp     @func_0003"), "{text}");
     }
 
     #[test]
