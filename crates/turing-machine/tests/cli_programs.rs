@@ -752,6 +752,141 @@ fn compile_link_run_a5_holey_read_traps_with_exit_3() {
     assert!(out.stdout.contains("Trapped"), "{}", out.stdout);
 }
 
+#[test]
+fn compile_link_run_inline_double_splice_regression() {
+    // Regression for an inline-optimizer defect: splicing a leaf callee's
+    // states into a caller copied each state's name verbatim. `twice` calls
+    // the leaf `flip` from two different states, so one optimizer round
+    // spliced `flip` in twice — leaving `twice` with two states both named
+    // `s` — and a later round spliced the now-leaf `twice` into `main`,
+    // whose own entry state happens to be named `s` too. Codegen mints
+    // `.tma` labels straight from state names, so the collision produced a
+    // duplicate label the assembler rejected and `-O1` failed to compile;
+    // `-O0` never runs inline, so it stayed clean. This pins both levels,
+    // then runs both executables to prove the fix is semantically correct,
+    // not merely non-crashing: a double flip is the identity on a '0'/'1'
+    // cell, so the two final tapes must agree.
+    let dir = scratch("tmc_inline_double_splice");
+    let src = "\
+alphabet bits { '_', '0', '1' }
+
+routine flip(tape num: bits) {
+  entry state s {
+    ['0'] -> write ['1'] return;
+    ['1'] -> write ['0'] return;
+    ['_'] -> return;
+  }
+}
+
+routine twice(tape num: bits) {
+  entry state a { [*] -> call flip(num = num) then b; }
+  state b { [*] -> call flip(num = num) then return; }
+}
+
+machine {
+  tape num: bits;
+  entry state s {
+    [*] -> call twice(num = num) then halt;
+  }
+}
+";
+    let srcpath = dir.join("double_splice.tmc");
+    fs::write(&srcpath, src).unwrap();
+
+    // -O0 first: pins the pair (inline never fires at -O0, so this side was
+    // always clean).
+    let obj0 = dir.join("double_splice.o0.tmo");
+    execute(&args(&[
+        "compile",
+        srcpath.to_str().unwrap(),
+        "-o",
+        obj0.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("-O0 compiles: {e}"));
+    let exe0 = dir.join("double_splice.o0.tmx");
+    execute(&args(&[
+        "link",
+        obj0.to_str().unwrap(),
+        "-o",
+        exe0.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    // -O1: the ICE reproducer. Must compile — the defect this test guards.
+    let obj1 = dir.join("double_splice.o1.tmo");
+    execute(&args(&[
+        "compile",
+        srcpath.to_str().unwrap(),
+        "-O1",
+        "-o",
+        obj1.to_str().unwrap(),
+    ]))
+    .unwrap_or_else(|e| panic!("-O1 compiles (spliced state names must be freshened): {e}"));
+    let exe1 = dir.join("double_splice.o1.tmx");
+    execute(&args(&[
+        "link",
+        obj1.to_str().unwrap(),
+        "-o",
+        exe1.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    // Seed a non-blank cell so the flip logic actually fires, and run both
+    // levels on the identical tape.
+    let tape = dir.join("double_splice.tmt");
+    execute(&args(&[
+        "tape-block",
+        "new",
+        "--from",
+        srcpath.to_str().unwrap(),
+        "-o",
+        tape.to_str().unwrap(),
+    ]))
+    .unwrap();
+    execute(&args(&[
+        "tape-block",
+        "set",
+        tape.to_str().unwrap(),
+        "--in-place",
+        "--from",
+        srcpath.to_str().unwrap(),
+        "--cells",
+        "num='1'",
+    ]))
+    .unwrap();
+
+    let out0 = dir.join("double_splice.out0.tmt");
+    let res0 = execute(&args(&[
+        "run",
+        exe0.to_str().unwrap(),
+        "--tape-block",
+        tape.to_str().unwrap(),
+        "--save-tape-block",
+        out0.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(res0.code, 2, "the machine halts (-O0):\n{}", res0.stdout);
+
+    let out1 = dir.join("double_splice.out1.tmt");
+    let res1 = execute(&args(&[
+        "run",
+        exe1.to_str().unwrap(),
+        "--tape-block",
+        tape.to_str().unwrap(),
+        "--save-tape-block",
+        out1.to_str().unwrap(),
+    ]))
+    .unwrap();
+    assert_eq!(res1.code, 2, "the machine halts (-O1):\n{}", res1.stdout);
+
+    let final0 = TapeBlockFile::from_bytes(&fs::read(&out0).unwrap()).unwrap();
+    let final1 = TapeBlockFile::from_bytes(&fs::read(&out1).unwrap()).unwrap();
+    assert_eq!(
+        final0.tapes[0].cells, final1.tapes[0].cells,
+        "double flip is the identity: -O0 and -O1 must agree on the final tape"
+    );
+}
+
 // ── compile flags: --emit-ir, -S, -Werror, ir graph ─────────────────────────
 
 #[test]

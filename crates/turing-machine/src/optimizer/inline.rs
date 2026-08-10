@@ -80,11 +80,15 @@
 //! call rule keeps its own pattern/write/move/`brk` and retargets to the spliced
 //! entry. A `brk` row inside the callee copies verbatim — per-instance
 //! duplication is the graft precedent, and the pause address is preserved at
-//! every splice. The pass never DELETES the now-uncalled routine world:
-//! reachability warnings already exist at lower, and the linker drops
+//! every splice. Each copied state's `name` is freshened against every name
+//! already present in the caller — its own states plus any earlier splice's
+//! copies — before the copy is appended, mirroring codegen's own label-minting
+//! idiom; nothing else keys off IR state names, so the rename is transparent
+//! everywhere downstream. The pass never DELETES the now-uncalled routine
+//! world: reachability warnings already exist at lower, and the linker drops
 //! unreachable functions, so a fully-inlined routine lingers inert until link.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ir::{
     IrCell, IrMove, IrProgram, IrRule, IrTapeBinding, IrThen, IrTransition, IrWorld, IrWorldKind,
@@ -216,10 +220,18 @@ fn splice(caller: &mut IrWorld, si: usize, ri: usize, candidates: &HashMap<Strin
     // Copy the callee's dense states in, shifted by `base` (so ids stay dense
     // in append order), each row widened to the caller's arity and its
     // `return`/`goto` rewritten. `callee.states[j].id == j` (dense), so the new
-    // id is `base + j`.
+    // id is `base + j`. Names are freshened against every name already in the
+    // caller — its own states plus any earlier splice's copies, since
+    // `caller.states` IS that accumulated set at this point in the loop —
+    // so two splices of the same callee, or a callee state name that happens
+    // to collide with the caller's own, never leave two states sharing a
+    // name (codegen mints its labels straight from state names and only
+    // collision-checks the synthetic ones it mints itself).
+    let mut used: HashSet<String> = caller.states.iter().map(|s| s.name.clone()).collect();
     for cst in &callee.states {
         let mut st = cst.clone();
         st.id = base + cst.id;
+        st.name = fresh(&mut used, &cst.name);
         for r in &mut st.rules {
             widen_rule(r, n);
             r.transition = remap_transition(&r.transition, base, then);
@@ -270,6 +282,24 @@ fn remap_transition(t: &IrTransition, base: u32, then: IrThen) -> IrTransition {
         IrTransition::CallThen { .. } | IrTransition::TailCall { .. } => {
             unreachable!("inline candidates are leaves — no nested call to remap")
         }
+    }
+}
+
+/// Mint a name distinct from every name in `used`, inserting it before
+/// returning: try `base` itself, then `{base}_1`, `{base}_2`, … Mirrors
+/// codegen's own synthetic-label minting idiom (a local copy, not a shared
+/// call — this pass must not reach into codegen's private surface).
+fn fresh(used: &mut HashSet<String>, base: &str) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut i = 1;
+    loop {
+        let cand = format!("{base}_{i}");
+        if used.insert(cand.clone()) {
+            return cand;
+        }
+        i += 1;
     }
 }
 
@@ -785,5 +815,102 @@ machine {
         let main = world(&ir, "main");
         assert!(!any_callthen(main), "the call was spliced away");
         assert!(main.tapes[0].volatile, "the caller's tape stays volatile");
+    }
+
+    /// The transition a state's single rule became after splicing — every
+    /// caller state built below has exactly one rule.
+    fn goto_target(w: &IrWorld, state_name: &str) -> u32 {
+        let st = w
+            .states
+            .iter()
+            .find(|s| s.name == state_name)
+            .unwrap_or_else(|| panic!("{state_name} is in {}", w.name));
+        match st.rules[0].transition {
+            IrTransition::Goto { state } => state,
+            ref t => panic!("expected a goto after inline, got {t:?}"),
+        }
+    }
+
+    /// All state names in `w`, asserting no two are equal.
+    fn assert_names_pairwise_distinct(w: &IrWorld) {
+        let names: Vec<&str> = w.states.iter().map(|s| s.name.as_str()).collect();
+        let unique: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "state names in {} are pairwise distinct: {names:?}",
+            w.name
+        );
+    }
+
+    #[test]
+    fn splicing_the_same_leaf_callee_at_two_sites_freshens_the_second_copy() {
+        // `main` calls the SAME leaf callee `flip` from two different states.
+        // Before the fix, both copies kept the callee's verbatim state name
+        // `s`, so the caller ended up with two states both named `s` —
+        // codegen mints `.tma` labels straight from state names, so this
+        // produced a duplicate label the assembler rejected. The fix
+        // freshens each copy against the names already in the caller,
+        // including any earlier splice's copies.
+        let mut ir = ir_of(
+            "alphabet ab { '_', 'a' }
+routine flip(tape t: ab) { entry state s { ['a'] -> write ['_'] return; [*] -> return; } }
+machine {
+  tape t: ab;
+  entry state m1 { [*] -> call flip(t = t) then m2; }
+  state m2       { [*] -> call flip(t = t) then done; }
+  state done     { [*] -> stop; }
+}",
+        );
+        assert_eq!(run(&mut ir), 2, "both call sites inline");
+        let main = world(&ir, "main");
+        assert!(!any_callthen(main), "both calls were spliced away");
+
+        // (a) both call sites became gotos into DISTINCT spliced entries.
+        let t1 = goto_target(main, "m1");
+        let t2 = goto_target(main, "m2");
+        assert_ne!(
+            t1, t2,
+            "the two splices land at distinct spliced entries, not the same one"
+        );
+
+        // (b) all state names in the caller are pairwise distinct.
+        assert_names_pairwise_distinct(main);
+        validate_world(main).unwrap();
+    }
+
+    #[test]
+    fn a_caller_state_colliding_with_the_callees_name_is_freshened() {
+        // The caller's OWN state is named `s`, the same name as the leaf
+        // callee's entry state — one call site, so this is the single-splice
+        // half of the missing-freshening hole (no earlier copy involved).
+        let mut ir = ir_of(
+            "alphabet ab { '_', 'a' }
+routine flip(tape t: ab) { entry state s { ['a'] -> write ['_'] return; [*] -> return; } }
+machine {
+  tape t: ab;
+  entry state s  { [*] -> call flip(t = t) then done; }
+  state done     { [*] -> stop; }
+}",
+        );
+        assert_eq!(run(&mut ir), 1);
+        let main = world(&ir, "main");
+        assert!(!any_callthen(main), "the call was spliced away");
+        assert_names_pairwise_distinct(main);
+        // Pin the exact freshening scheme: `used` seeds from `{"s", "done"}`,
+        // so the callee's own `s` collides and mints `s_1` — and that is the
+        // name of the state the call site's goto now actually targets, not
+        // merely some state carrying that name.
+        let entry_id = goto_target(main, "s");
+        let spliced = main
+            .states
+            .iter()
+            .find(|st| st.id == entry_id)
+            .unwrap_or_else(|| panic!("no state has id {entry_id}"));
+        assert_eq!(
+            spliced.name, "s_1",
+            "the spliced entry is freshened to exactly `s_1`"
+        );
+        validate_world(main).unwrap();
     }
 }
