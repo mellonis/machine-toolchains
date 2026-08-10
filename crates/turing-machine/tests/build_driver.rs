@@ -54,6 +54,19 @@ export routine util(tape t: ab) {
 }
 ";
 
+/// A bare call to a name that is never defined anywhere: warns at compile
+/// (undeclared external) and, being reachable from the entry state, fails
+/// to link (genuinely unresolved). Shared by the `-Werror` fixture above
+/// and the plain-path warning-survives-a-failing-link tests below.
+const LONE_MISSING_CALL: &str = "\
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state go { [*] -> call missing() then done; }
+  state done { [*] -> stop; }
+}
+";
+
 #[test]
 fn argv_mode_compiles_and_links_multiple_tmc_inputs_in_memory() {
     let dir = scratch("argv_two_tmc");
@@ -163,18 +176,32 @@ fn argv_mode_refines_undeclared_external_resolved_by_a_sibling() {
 
     // A genuinely unresolvable bare external still warns and -Werror fails.
     let lone = dir.join("lone.tmc");
-    fs::write(
-        &lone,
-        "alphabet ab { '_', 'a' }\n\
-         machine {\n\
-           tape t: ab;\n\
-           entry state go { [*] -> call missing() then done; }\n\
-           state done { [*] -> stop; }\n\
-         }\n",
-    )
-    .unwrap();
+    fs::write(&lone, LONE_MISSING_CALL).unwrap();
     let err = execute(&args(&["build", "-Werror", lone.to_str().unwrap()])).unwrap_err();
     assert!(err.contains("treated as errors"), "{err}");
+}
+
+/// On the PLAIN path (no `-Werror`) the compile stage's rendered warning
+/// must reach the user even though a later stage — the link, here — fails:
+/// `LONE_MISSING_CALL` warns at compile (undeclared external) and then
+/// fails to link (the external stays genuinely unresolved), and both must
+/// survive to the caller. Failing mutation: an early-returning `?` on the
+/// link (or a write after it) that drops the warnings already rendered
+/// into the driver's local buffer.
+#[test]
+fn argv_mode_flushes_rendered_warnings_when_the_link_fails() {
+    let dir = scratch("argv_warn_then_link_fail");
+    let lone = dir.join("lone.tmc");
+    fs::write(&lone, LONE_MISSING_CALL).unwrap();
+    let err = execute(&args(&["build", lone.to_str().unwrap()])).unwrap_err();
+    assert!(
+        err.contains("undeclared"),
+        "the compile-stage warning must survive a failing link: {err}"
+    );
+    assert!(
+        err.contains("unresolved symbols"),
+        "the link error itself must still be reported: {err}"
+    );
 }
 
 #[test]
@@ -1401,6 +1428,43 @@ fn werror_flag_overrides_a_manifest_profile_that_disables_it() {
         "-Werror flag must override the manifest profile's werror: false"
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("treated as errors"));
+}
+
+/// The manifest-mode twin of `argv_mode_flushes_rendered_warnings_when_
+/// the_link_fails`: `build_one_target` has its OWN early-return sites
+/// around the link and the writes after it, separate from argv mode's, so
+/// each path needs its own proof. `LONE_MISSING_CALL`'s bare `call
+/// missing()` is reachable from the entry state, warns at compile, and
+/// stays genuinely unresolved at link — on the plain path both must reach
+/// the user.
+#[test]
+fn manifest_mode_flushes_rendered_warnings_when_the_link_fails() {
+    let dir = scratch("tm_manifest_warn_then_link_fail");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lone.tmc"), LONE_MISSING_CALL).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        r#"{ "project": {
+            "targets": { "lone": { "sources": ["src/lone.tmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = tmt()
+        .args(["build", "lone"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undeclared"),
+        "the compile-stage warning must survive a failing link: {stderr}"
+    );
+    assert!(
+        stderr.contains("unresolved symbols"),
+        "the link error itself must still be reported: {stderr}"
+    );
 }
 
 /// The manifest-mode half of `argv_mode_refines_undeclared_external_…`:

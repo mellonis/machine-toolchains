@@ -182,7 +182,12 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
     let mut built: Vec<(String, PathBuf)> = Vec::new();
     for name in &selected {
         let target = &manifest.targets[*name];
-        let (output, chunk) = build_one_target(&root, &manifest, name, target, flags)?;
+        // A prior target's already-rendered warnings live in `stderr`
+        // before this call — prefixed onto a failure here for the same
+        // reason `build_one_target` prefixes its OWN warnings onto a
+        // failing link (docs/pmt/cli.md (build)).
+        let (output, chunk) = build_one_target(&root, &manifest, name, target, flags)
+            .map_err(|e| format!("{stderr}{e}"))?;
         stderr.push_str(&chunk);
         built.push((name.to_string(), output));
     }
@@ -300,11 +305,38 @@ fn build_one_target(
         ));
     }
 
+    // Link and write are one fallible unit below this point precisely so a
+    // failure anywhere in it — the link itself, or one of the writes after
+    // — carries the warnings already rendered above rather than dropping
+    // them on an early `?` return (docs/pmt/cli.md (build)).
+    let (output, tail) = link_and_write(root, manifest, name, target, &objects, &libraries, flags)
+        .map_err(|e| format!("{stderr}{e}"))?;
+    stderr.push_str(&tail);
+    Ok((output, stderr))
+}
+
+/// Links a target's compiled units, writes the executable (+ sidecar) to
+/// its resolved output path, and renders the `-v` link line — the tail of
+/// `build_one_target` past the point its compile-stage warnings are
+/// already rendered, factored out so that whole sequence is one fallible
+/// unit its caller can prefix with those warnings at a single site
+/// (docs/pmt/cli.md (build)). Returns the absolute output path and the
+/// (possibly empty) `-v` chunk; the caller owns concatenating it onto its
+/// own accumulated stderr.
+fn link_and_write(
+    root: &Path,
+    manifest: &crate::project::Manifest,
+    name: &str,
+    target: &crate::project::Target,
+    objects: &[ObjectFile],
+    libraries: &[ObjectFile],
+    flags: &Flags,
+) -> Result<(PathBuf, String), String> {
     // `entry` threads the manifest's per-target key into the linker's
     // BFS root; `call_mech` has no PM-1 analogue, so it stays default.
     let linked = crate::asm::link(
-        &objects,
-        &libraries,
+        objects,
+        libraries,
         LinkOptions {
             relax: !flags.no_relax,
             entry: target.entry.clone(),
@@ -313,7 +345,9 @@ fn build_one_target(
     )
     .map_err(|e| format!("target `{name}`: {e}"))?;
 
-    let output = resolve(&manifest.output_of(name, target))?;
+    let output = root.join(crate::project::normalize_rel(
+        &manifest.output_of(name, target),
+    )?);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -324,10 +358,11 @@ fn build_one_target(
     fs::write(&map_path, linked.map.to_json())
         .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
+    let mut tail = String::new();
     if flags.verbose {
-        render_link_report(&mut stderr, &format!("{name}: "), &linked.report);
+        render_link_report(&mut tail, &format!("{name}: "), &linked.report);
     }
-    Ok((output, stderr))
+    Ok((output, tail))
 }
 
 /// Maps a manifest `run` block onto `run.rs`'s `RunSettings` and runs
@@ -459,11 +494,32 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
         ));
     }
 
+    // Link and write are one fallible unit below this point precisely so a
+    // failure anywhere in it carries the warnings already rendered above
+    // rather than dropping them on an early `?` return
+    // (docs/pmt/cli.md (build)).
+    let tail = link_and_write_argv(&objects, &libraries, flags, &files[0])
+        .map_err(|e| format!("{stderr}{e}"))?;
+    stderr.push_str(&tail);
+    Ok(CliOutput::ok(String::new(), stderr))
+}
+
+/// The link + write tail of argv-mode `build`, factored out for the same
+/// reason as manifest mode's [`link_and_write`]: one fallible unit whose
+/// error a single call site can prefix with the already-rendered warnings
+/// (docs/pmt/cli.md (build)). Returns the (possibly empty) `-v` chunk; the
+/// output path itself is not needed past this point in argv mode.
+fn link_and_write_argv(
+    objects: &[ObjectFile],
+    libraries: &[ObjectFile],
+    flags: &Flags,
+    first_file: &str,
+) -> Result<String, String> {
     // LinkOptions has three fields (relax / entry / call_mech); argv mode
     // takes the defaults for the latter two, exactly as `pmt link` does.
     let linked = crate::asm::link(
-        &objects,
-        &libraries,
+        objects,
+        libraries,
         LinkOptions {
             relax: !flags.no_relax,
             ..Default::default()
@@ -471,17 +527,18 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     )
     .map_err(|e| e.to_string())?;
 
-    let target = out_path(Path::new(&files[0]), flags.out.clone(), "pmx");
+    let target = out_path(Path::new(first_file), flags.out.clone(), "pmx");
     fs::write(&target, linked.executable.to_bytes())
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     let map_path = sidecar_path(&target);
     fs::write(&map_path, linked.map.to_json())
         .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
+    let mut tail = String::new();
     if flags.verbose {
-        render_link_report(&mut stderr, "", &linked.report);
+        render_link_report(&mut tail, "", &linked.report);
     }
-    Ok(CliOutput::ok(String::new(), stderr))
+    Ok(tail)
 }
 
 /// One build input, carried as far as the build-column decision allows.
