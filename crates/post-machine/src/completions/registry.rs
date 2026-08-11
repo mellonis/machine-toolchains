@@ -443,6 +443,7 @@ fn tape_build_spec() -> CommandSpec {
                 "output path (default tape.pmt)",
                 ValueHint::File(any_file()),
             ),
+            FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
 }
@@ -483,6 +484,7 @@ fn tape_new_spec() -> CommandSpec {
         ]
         .into_iter()
         .chain(edit_flags())
+        .chain([FlagSpec::boolean("--help", "show subcommand help")])
         .collect(),
     }
 }
@@ -502,6 +504,7 @@ fn tape_set_spec() -> CommandSpec {
         ]
         .into_iter()
         .chain(edit_flags())
+        .chain([FlagSpec::boolean("--help", "show subcommand help")])
         .collect(),
     }
 }
@@ -513,6 +516,7 @@ fn tape_show_spec() -> CommandSpec {
         flags: vec![
             FlagSpec::boolean("--dense", "never separate cells").exclusive("show-delimit"),
             FlagSpec::boolean("--separated", "always separate cells").exclusive("show-delimit"),
+            FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
 }
@@ -585,6 +589,7 @@ fn ir_graph_spec() -> CommandSpec {
             FlagSpec::boolean("-O0", "optimization level O0 (default)").exclusive("opt-level"),
             FlagSpec::boolean("-O1", "optimization level O1 (full pass pipeline)")
                 .exclusive("opt-level"),
+            FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
 }

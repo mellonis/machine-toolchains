@@ -487,10 +487,10 @@ fn dis_spec() -> CommandSpec {
 }
 
 /// `tape new` takes no positional at all — the template is sized from
-/// `--from`. Note the absence of a `--help` flag on every `tape`/`ir`
-/// child: those parsers never consume one, so `positionals()` would
-/// reject it as an unknown flag (the group's own bare invocation prints
-/// the usage instead).
+/// `--from`. Every `tape`/`ir` child spec below carries a `--help` flag,
+/// same as any leaf — those parsers all consume `args.help()` before
+/// anything else. None of them carry `-h`: the alias is root-only, and
+/// no leaf spec anywhere in this registry models it either.
 /// The repeatable keyed edit flags, shared by `tape-block new` and `set`.
 fn edit_flags() -> Vec<FlagSpec> {
     vec![
@@ -527,6 +527,7 @@ fn tape_new_spec() -> CommandSpec {
                 ),
             ];
             flags.extend(edit_flags());
+            flags.push(FlagSpec::boolean("--help", "show subcommand help"));
             flags
         },
     }
@@ -563,6 +564,7 @@ fn tape_set_spec() -> CommandSpec {
         ]
         .into_iter()
         .chain(edit_flags())
+        .chain([FlagSpec::boolean("--help", "show subcommand help")])
         .collect(),
     }
 }
@@ -574,6 +576,7 @@ fn tape_show_spec() -> CommandSpec {
         flags: vec![
             FlagSpec::boolean("--dense", "never separate cells").exclusive("show-delimit"),
             FlagSpec::boolean("--separated", "always separate cells").exclusive("show-delimit"),
+            FlagSpec::boolean("--help", "show subcommand help"),
         ],
     }
 }
@@ -615,11 +618,14 @@ fn ir_graph_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["ir", "graph"]),
         positional: Positional::One(PositionalHint::File(ext(&["ir.json"]))),
-        flags: vec![FlagSpec::value(
-            "--function",
-            "restrict output to one world",
-            ValueHint::Text,
-        )],
+        flags: vec![
+            FlagSpec::value(
+                "--function",
+                "restrict output to one world",
+                ValueHint::Text,
+            ),
+            FlagSpec::boolean("--help", "show subcommand help"),
+        ],
     }
 }
 
@@ -627,11 +633,14 @@ fn ir_footprints_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["ir", "footprints"]),
         positional: Positional::One(PositionalHint::File(ext(&["ir.json"]))),
-        flags: vec![FlagSpec::value(
-            "--function",
-            "restrict output to one world",
-            ValueHint::Text,
-        )],
+        flags: vec![
+            FlagSpec::value(
+                "--function",
+                "restrict output to one world",
+                ValueHint::Text,
+            ),
+            FlagSpec::boolean("--help", "show subcommand help"),
+        ],
     }
 }
 
