@@ -259,6 +259,13 @@ pub(super) fn tape_block(raw: &[String]) -> Result<CliOutput, String> {
         Some("new") => tape_new(&raw[1..]),
         Some("set") => tape_set(&raw[1..]),
         Some("show") => tape_show(&raw[1..]),
+        // An unrecognized dashed token at the group level gets the same
+        // treatment `Args::positionals` gives a leaf: `--help`/`-h` are
+        // the one exception, since a group with no action name still
+        // answers those with its bare usage, same as no args at all.
+        Some(tok) if tok.starts_with('-') && tok != "-" && tok != "--help" && tok != "-h" => {
+            Err(format!("unknown flag `{tok}`"))
+        }
         _ => Ok(CliOutput::ok(TAPE_USAGE.into(), String::new())),
     }
 }
@@ -466,6 +473,10 @@ a .ir.json file already holds exactly one column.
 pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
         Some("graph") => ir_graph(&raw[1..]),
+        // See the matching arm on `tape_block` above.
+        Some(tok) if tok.starts_with('-') && tok != "-" && tok != "--help" && tok != "-h" => {
+            Err(format!("unknown flag `{tok}`"))
+        }
         _ => Ok(CliOutput::ok(IR_USAGE.into(), String::new())),
     }
 }

@@ -316,6 +316,9 @@ asynchronous execution surface for driving real hardware.
   count is a typed error instead of a panic, and `pmt dis` / `tmt dis`
   refuse an image or object built for the other architecture, the way
   `run` already did.
+- `tape-block` and `ir` now reject an unrecognized flag the same way a
+  leaf subcommand does, on both tools, instead of falling through to
+  the bare usage text with a success exit.
 
 ### Editors, CI, and docs
 

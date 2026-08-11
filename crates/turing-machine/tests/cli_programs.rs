@@ -1,6 +1,8 @@
-//! End-to-end `tmt` CLI tests, in-process: assemble → link → tape new →
-//! tape set → run, asserting exit codes and the tape-new alphabet upgrade.
-//! Mirrors the shape of the PM-1 `pmt` cli_programs tests.
+//! End-to-end `tmt` CLI tests: assemble → link → tape new → tape set → run,
+//! asserting exit codes and the tape-new alphabet upgrade, mostly in-process
+//! against `cli::execute` — a couple of tests spawn the real compiled binary
+//! where the real process exit code is the thing under test. Mirrors the
+//! shape of the PM-1 `pmt` cli_programs tests.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -158,6 +160,60 @@ fn nested_group_actions_answer_help_and_its_h_alias() {
                 out.stdout
             );
         }
+    }
+}
+
+/// A group command (`tape-block`, `ir`) rejects an unrecognized flag
+/// with the exact error shape a leaf subcommand's own unknown-flag
+/// rejection has always had (`Args::positionals`'s "unknown flag `TOK`"),
+/// instead of falling through to the group's bare usage text with a
+/// success exit — an automation script with a typo used to get exit 0
+/// (docs/tmt/cli.md (tape-block), (tmt ir)). Bare invocation and
+/// `--help`/`-h` are untouched: both still answer usage, exit 0. Failing
+/// mutation: dropping the group-level unknown-flag guard makes
+/// `tape-block --bogus` / `ir --bogus` fall through to `Ok` usage text
+/// with exit 0 instead of erroring.
+#[test]
+fn group_commands_reject_unknown_flags_like_leaves_do() {
+    for group in ["tape-block", "ir"] {
+        let err = execute(&args(&[group, "--bogus"])).unwrap_err();
+        assert_eq!(err, "unknown flag `--bogus`", "{group}: {err}");
+
+        let bare = execute(&args(&[group])).unwrap();
+        assert_eq!(bare.code, 0, "{group}");
+        assert!(
+            bare.stdout.starts_with("USAGE:"),
+            "{group}: {}",
+            bare.stdout
+        );
+
+        for flag in ["--help", "-h"] {
+            let out = execute(&args(&[group, flag])).unwrap();
+            assert_eq!(out.code, 0, "{group} {flag}");
+            assert_eq!(out.stdout, bare.stdout, "{group} {flag}");
+        }
+    }
+}
+
+/// The same rejection at the real process boundary: `bin/tmt.rs` turns
+/// any `Err` from `cli::execute` into a non-zero exit with a `tmt: `
+/// prefix on stderr — this proves the group-level rejection actually
+/// reaches that path, not just the library-level `Result`.
+#[test]
+fn group_unknown_flag_is_a_nonzero_process_exit() {
+    use std::process::Command;
+
+    for group in ["tape-block", "ir"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_tmt"))
+            .args([group, "--bogus"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{group}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stderr),
+            "tmt: unknown flag `--bogus`\n",
+            "{group}"
+        );
     }
 }
 
