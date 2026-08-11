@@ -175,6 +175,16 @@ pub(crate) enum ComposeError {
     /// read as blank) or a two-way `y -> 0` (its write-back `0 -> y` would
     /// un-pin blank; a read-only `y => 0` collapse is the legal spelling).
     Blank { tape: usize, src: u16, dst: u16 },
+    /// Two binding tapes name the same caller tape. One physical head cannot
+    /// back two callee tapes read and written through two independent maps
+    /// (docs/formats.md (bound calls)): the mechanisms disagree about what it
+    /// would mean, so the placement must stay injective. `first` is the
+    /// binding tape that claimed `caller_tape`.
+    AliasedCallerTape {
+        tape: usize,
+        first: usize,
+        caller_tape: u8,
+    },
 }
 
 impl std::fmt::Display for ComposeError {
@@ -229,6 +239,15 @@ impl std::fmt::Display for ComposeError {
                     )
                 }
             }
+            Self::AliasedCallerTape {
+                tape,
+                first,
+                caller_tape,
+            } => write!(
+                f,
+                "binding tapes {first} and {tape} both name caller tape \
+                 {caller_tape}; one caller tape cannot back two callee tapes"
+            ),
         }
     }
 }
@@ -237,10 +256,22 @@ impl std::fmt::Display for ComposeError {
 /// `phys` is the binding's `caller_tape` (an index into the caller's
 /// virtual tapes, resolved later by [`compose_composites`]); the read map
 /// carries every pair, the write map only the bidirectional ones. Validates
-/// arity, caller-tape range, callee-symbol range, per-direction conflicts,
-/// and blank pinning — together the full legality contract a binding must
-/// satisfy to become a composite; this is the only place that contract is
-/// checked.
+/// arity, caller-tape range, caller-tape aliasing, callee-symbol range,
+/// per-direction conflicts, and blank pinning — together the full legality
+/// contract a binding must satisfy to become a composite; this is the only
+/// place that contract is checked.
+///
+/// The aliasing rule (docs/formats.md (bound calls)): the placement must be
+/// injective — two binding tapes may not name one caller tape. One physical
+/// head cannot serve two callee tapes read and written through two
+/// independent maps, and the lowering mechanisms disagree about what it
+/// would mean, so it is rejected here rather than lowered inconsistently.
+/// Because every declarative binding passes through this function at every
+/// level, and composing injective placements stays injective, composites
+/// built out of declarative bindings alone are injective throughout. That
+/// says nothing about hand-authored `.frame` descriptors, which never reach
+/// this function — those are the power-tool layer and may place two callee
+/// tapes on one band (docs/core.md (call mechanisms)).
 ///
 /// `caller_cards` is the caller's per-virtual-tape alphabet cardinalities
 /// (its arity is `caller_cards.len()`). It is load-bearing for the
@@ -265,12 +296,23 @@ fn binding_to_composite(
 
     let caller_arity = caller_cards.len();
     let mut tapes = Vec::with_capacity(binding.len());
+    // Caller tape -> the binding tape that claimed it, for the injective
+    // placement rule below. Checked after the range check, so a binding that
+    // is both out of range and aliased reports the missing tape first.
+    let mut claimed: BTreeMap<u8, usize> = BTreeMap::new();
     for (k, tb) in binding.iter().enumerate() {
         if usize::from(tb.caller_tape) >= caller_arity {
             return Err(ComposeError::CallerTape {
                 tape: k,
                 caller_tape: tb.caller_tape,
                 caller_arity,
+            });
+        }
+        if let Some(first) = claimed.insert(tb.caller_tape, k) {
+            return Err(ComposeError::AliasedCallerTape {
+                tape: k,
+                first,
+                caller_tape: tb.caller_tape,
             });
         }
         // `RoutineSig` guarantees `cardinalities.len() == arity`; degrade to
@@ -665,6 +707,59 @@ mod tests {
         assert!(matches!(
             err,
             ComposeError::CallerTape { caller_tape: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn two_binding_tapes_on_one_caller_tape_are_rejected() {
+        // The placement must stay injective (docs/formats.md (bound calls)):
+        // one physical head cannot back two callee tapes read and written
+        // through two independent maps.
+        let s = sig(&[3, 3, 3]);
+        let err = absolutize(
+            &[4, 3, 3],
+            0,
+            &[
+                tape(0, vec![pair(1, 1, false)]),
+                tape(0, vec![pair(2, 2, false)]),
+                tape(1, vec![]),
+            ],
+            &s,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            ComposeError::AliasedCallerTape {
+                tape: 1,
+                first: 0,
+                caller_tape: 0
+            }
+        );
+        // The identical binding with an injective placement is accepted, so
+        // the rejection is about the repeat and nothing else about the shape.
+        absolutize(
+            &[4, 3, 3],
+            0,
+            &[
+                tape(0, vec![pair(1, 1, false)]),
+                tape(1, vec![pair(2, 2, false)]),
+                tape(2, vec![]),
+            ],
+            &s,
+        )
+        .expect("an injective placement of the same maps is legal");
+    }
+
+    #[test]
+    fn an_out_of_range_caller_tape_outranks_an_alias_on_it() {
+        // A binding that is both out of range and repeated must report the
+        // tape that does not exist — the alias message would name a caller
+        // tape the caller never had.
+        let s = sig(&[3, 3]);
+        let err = absolutize(&[3], 0, &[tape(4, vec![]), tape(4, vec![])], &s).unwrap_err();
+        assert!(matches!(
+            err,
+            ComposeError::CallerTape { caller_tape: 4, .. }
         ));
     }
 

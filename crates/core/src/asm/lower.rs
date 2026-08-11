@@ -40,8 +40,7 @@ pub struct SourceFunction {
     pub local: bool,
     /// This block carries a `.volatile` directive, so its blob belongs to
     /// the gated build column (docs/core.md (the assembler framework)).
-    /// Absence
-    /// is the normal column; a name may be defined once per column.
+    /// Absence is the normal column; a name may be defined once per column.
     pub volatile: bool,
     pub items: Vec<SourceItem>,
 }

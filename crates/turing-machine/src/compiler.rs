@@ -175,6 +175,16 @@ pub enum CompileErrorKind {
     /// A tape-parameter argument names a target that is not a tape in the
     /// enclosing world.
     UnresolvedTapeTarget(String),
+    /// Two tape-parameter arguments of one `call`/`graft`/`bind` name the
+    /// same caller tape, so one physical head would have to back two callee
+    /// tapes read through two independent maps
+    /// (docs/tmt/language.md (reuse)). `first` is the argument that claimed
+    /// `target`; the error is reported at the second one.
+    DuplicateTapeTarget {
+        first: String,
+        second: String,
+        target: String,
+    },
     /// A `call` on a world-local bind name carries binding arguments. A bind
     /// is already fully bound at its declaration, so a call on it takes none.
     BindCallArgs(String),
@@ -199,7 +209,7 @@ pub enum CompileErrorKind {
         glyphs: Vec<String>,
     },
 
-    // -- graft + range expansion (Task 5) ----------------------------------
+    // -- graft + range expansion -------------------------------------------
     /// A graph definition graft-depends on itself (directly or through a
     /// cycle of definitions) — infinite expansion. `name` is one graph on the
     /// cycle. Instance-level cycles (continuation loops) stay legal.
@@ -273,7 +283,7 @@ pub enum CompileErrorKind {
     /// the state parameter.
     StateParamContinuationUnsupported(String),
 
-    // -- codegen / assemble orchestration (Task 7) -------------------------
+    // -- codegen / assemble orchestration ----------------------------------
     /// A compiler-internal invariant broke: the codegen-produced `.tma`
     /// failed to assemble, or an IR world the compiler itself built failed
     /// [`crate::ir::validate_world`]. Never a user error — the message
@@ -352,6 +362,7 @@ impl CompileErrorKind {
         CompileErrorKind::MissingArg(_) => "missing-arg",
         CompileErrorKind::WrongArgKind { .. } => "wrong-arg-kind",
         CompileErrorKind::UnresolvedTapeTarget(_) => "unresolved-tape-target",
+        CompileErrorKind::DuplicateTapeTarget { .. } => "duplicate-tape-target",
         CompileErrorKind::BindCallArgs(_) => "bind-call-args",
         CompileErrorKind::ContractSymbolUnknown { .. } => "contract-symbol-unknown",
         CompileErrorKind::WritesOutsideContract { .. } => "writes-outside-contract",
@@ -574,6 +585,17 @@ impl std::fmt::Display for CompileErrorKind {
             }
             CompileErrorKind::UnresolvedTapeTarget(n) => {
                 write!(f, "`{n}` is not a tape in this world")
+            }
+            CompileErrorKind::DuplicateTapeTarget {
+                first,
+                second,
+                target,
+            } => {
+                write!(
+                    f,
+                    "binding arguments `{first}` and `{second}` both bind tape `{target}` — \
+                     one caller tape cannot back two callee tapes"
+                )
             }
             CompileErrorKind::BindCallArgs(n) => {
                 write!(
@@ -847,9 +869,9 @@ fn push_glyph(
 // ---------------------------------------------------------------------------
 
 /// The whole resolved module. Rules stay in SOURCE form (patterns unexpanded
-/// — Task 5 owns expansion); every span is preserved. Cross-world references
-/// (`call`/`graft`/`bind` targets, tape alphabets) are resolved to mangled
-/// names; the worlds carry the rest verbatim.
+/// — the graft/range expander owns expansion); every span is preserved.
+/// Cross-world references (`call`/`graft`/`bind` targets, tape alphabets) are
+/// resolved to mangled names; the worlds carry the rest verbatim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Resolved {
     /// Resolved alphabets, keyed by mangled name → glyph vector.
@@ -890,8 +912,8 @@ pub(crate) struct ResolvedWorld {
     /// Bind instances declared in this world.
     pub binds: Vec<ResolvedBind>,
     /// The entry state / graft-instance name; `None` for an unnamed entry
-    /// graft (Task 5 names it the spliced entry state) or a library-world
-    /// with an entry that carries no addressable name.
+    /// graft (the graft/range expander names it the spliced entry state) or
+    /// a library-world with an entry that carries no addressable name.
     pub entry: Option<String>,
     /// Resolved `call` transitions in this world's rules, in source order.
     pub calls: Vec<ResolvedCall>,
@@ -929,7 +951,7 @@ pub(crate) struct ResolvedTape {
 }
 
 /// A resolved graft declaration: the mangled graph target plus the raw
-/// (source-form) binding args Task 5 applies at splice time.
+/// (source-form) binding args the graft/range expander applies at splice time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedGraft {
     pub entry: bool,
@@ -1996,7 +2018,7 @@ fn unused_import_warnings(program: &Program, used: &[bool], diagnostics: &mut Ve
 }
 
 // ---------------------------------------------------------------------------
-// compile() — the end-to-end driver (Task 7). Mirrors the `.pmc` compiler's
+// compile() — the end-to-end driver. Mirrors the `.pmc` compiler's
 // `compile()` field-for-field, with `.tma` text where PM-1 has `.pma`.
 // ---------------------------------------------------------------------------
 
@@ -2661,7 +2683,18 @@ impl WorldCtx<'_> {
     /// Arity + argument-KIND checks against a locally-defined signature. Tape
     /// params take tape targets (world tapes); state params take state names
     /// (same-world states) or terminators. Map LEGALITY (glyph sets, etc.) is
-    /// Task 5's — this only checks the kind.
+    /// the graft/range expander's — this only checks the kind.
+    ///
+    /// Also the aliasing check (docs/tmt/language.md (reuse)): within ONE
+    /// argument list no two TAPE parameters may name the same caller tape.
+    /// One physical head cannot serve two callee tapes read and written
+    /// through two independent maps, and the lowering mechanisms disagree
+    /// about what it would mean. State parameters are exempt — two
+    /// continuations legitimately share one target state. Every `call`,
+    /// `graft`, and `bind` funnels through here, so one check covers all
+    /// three; a `.tmc` bound call always has a local signature to check
+    /// against, since binding tapes into another compilation unit is
+    /// rejected outright (`external-binding-unsupported`).
     #[allow(clippy::too_many_arguments)]
     fn check_binding_args(
         &self,
@@ -2681,6 +2714,9 @@ impl WorldCtx<'_> {
         };
         // arg name -> param kind, with duplicate + unknown detection.
         let mut arg_seen: HashSet<&str> = HashSet::new();
+        // Caller tape target -> the argument that claimed it. Scoped to this
+        // one argument list: the same tape in two DIFFERENT calls is legal.
+        let mut tape_seen: HashMap<&str, &str> = HashMap::new();
         for a in args {
             if !arg_seen.insert(&a.name) {
                 return Err(CompileError {
@@ -2694,7 +2730,22 @@ impl WorldCtx<'_> {
                     kind: CompileErrorKind::UnknownArg(a.name.clone()),
                 });
             };
+            // Kind first: a target that is not a tape at all is that error,
+            // not an alias.
             self.check_arg_kind(a, *kind, states, tapes)?;
+            if *kind == ParamKind::Tape
+                && let BindingValue::Named { target, .. } = &a.value
+                && let Some(first) = tape_seen.insert(target.as_str(), a.name.as_str())
+            {
+                return Err(CompileError {
+                    span: a.span,
+                    kind: CompileErrorKind::DuplicateTapeTarget {
+                        first: first.to_string(),
+                        second: a.name.clone(),
+                        target: target.clone(),
+                    },
+                });
+            }
         }
         // Every parameter must be bound.
         for (pname, _) in &sig.params {
@@ -2889,6 +2940,11 @@ mod tests {
                 expected: "a tape target",
             },
             CompileErrorKind::UnresolvedTapeTarget("x".into()),
+            CompileErrorKind::DuplicateTapeTarget {
+                first: "p".into(),
+                second: "q".into(),
+                target: "t".into(),
+            },
             CompileErrorKind::BindCallArgs("x".into()),
             CompileErrorKind::ContractSymbolUnknown {
                 glyph: "x".into(),
@@ -3420,6 +3476,142 @@ alphabet b { '_', '0', '1' }
         assert_eq!(code(&src), "wrong-arg-kind");
     }
 
+    // -- aliased tape arguments ---------------------------------------------
+
+    /// The aliasing rule (docs/tmt/language.md (reuse)): within ONE argument
+    /// list two tape parameters may not name the same caller tape. This is
+    /// the source-level half; the linker backstops hand-assembled objects.
+    ///
+    /// The `call` fixture is a three-tape callee whose `p` and `q` both bind
+    /// machine tape `t` through different maps across unequal alphabets — the
+    /// shape that made mono and frames disagree (one projects each callee
+    /// tape through its own map at run time; the other writes per-position
+    /// expectations into a stamped row, where the second projection
+    /// overwrites the first).
+    #[test]
+    fn two_tape_arguments_naming_one_caller_tape_are_rejected() {
+        let call = "\
+alphabet outer { '_', 'a', 'b', 'c' }
+alphabet inner { '_', 'y', 'x' }
+routine callee(tape p: inner, tape q: inner, tape r: inner) {
+  entry state go {
+    ['y', 'x', 'y'] -> move [., ., >] return;
+    [*, *, *]       -> return;
+  }
+}
+machine {
+  tape t: outer;
+  tape u: inner;
+  entry state start {
+    [*, *] -> call callee(p = t with map { 'a' -> 'y' },
+                          q = t with map { 'b' -> 'x' },
+                          r = u) then fin;
+  }
+  state fin { [*, *] -> stop; }
+}
+";
+        let e = err(call);
+        assert_eq!(e.kind.code(), "duplicate-tape-target");
+        assert_eq!(
+            e.kind.to_string(),
+            "binding arguments `p` and `q` both bind tape `t` — \
+             one caller tape cannot back two callee tapes"
+        );
+        // The second argument is what is blamed, not the call site.
+        assert_eq!(e.span.start.line, 14);
+
+        // A graft aliases through the same funnel.
+        let graft = "\
+alphabet b { '_', '0' }
+graph g(tape x: b, tape y: b, state done) {
+  entry state s { ['0', '0'] -> done; [*, *] -> move [>, >] goto s; }
+}
+machine {
+  tape t: b;
+  tape u: b;
+  entry graft g(x = t, y = t, done = celebrate) as seek;
+  state celebrate { [*, *] -> stop; }
+}
+";
+        assert_eq!(code(graft), "duplicate-tape-target");
+
+        // So does a `bind` declaration.
+        let bind = "\
+alphabet b { '_', '0' }
+routine r(tape x: b, tape y: b) { entry state s { [*, *] -> return; } }
+machine {
+  tape t: b;
+  tape u: b;
+  bind r(x = t, y = t) as h;
+  entry state s { [*, *] -> call h() then fin; }
+  state fin { [*, *] -> stop; }
+}
+";
+        assert_eq!(code(bind), "duplicate-tape-target");
+
+        // And a routine aliasing its OWN parameter into a nested call — the
+        // shape that would otherwise smuggle an alias in transitively.
+        let nested = "\
+alphabet b { '_', '0' }
+routine inner(tape x: b, tape y: b) { entry state s { [*, *] -> return; } }
+routine outer(tape a: b, tape c: b) {
+  entry state s { [*, *] -> call inner(x = a, y = a) then return; }
+}
+machine {
+  tape t: b;
+  tape u: b;
+  entry state s { [*, *] -> call outer(a = t, c = u) then fin; }
+  state fin { [*, *] -> stop; }
+}
+";
+        assert_eq!(code(nested), "duplicate-tape-target");
+    }
+
+    /// The rule is per argument list, and only about TAPE parameters.
+    /// Everything else the wording permits must keep compiling — a seen-set
+    /// hoisted out of the call scope, or one that ignores the parameter
+    /// kind, would fail here while the negative tests above still passed.
+    #[test]
+    fn the_aliasing_rule_is_scoped_to_one_argument_list_and_to_tape_params() {
+        // Same tape, two DIFFERENT calls.
+        ok("\
+alphabet b { '_', '0' }
+routine r(tape x: b) { entry state s { [*, *] -> return; } }
+machine {
+  tape t: b;
+  tape u: b;
+  entry state s { [*, *] -> call r(x = t) then two; }
+  state two   { [*, *] -> call r(x = t) then fin; }
+  state fin   { [*, *] -> stop; }
+}
+");
+        // Different tapes in ONE call — the Appendix-B callee, unaliased.
+        ok("\
+alphabet b { '_', '0' }
+routine r(tape x: b, tape y: b) { entry state s { [*, *] -> return; } }
+machine {
+  tape t: b;
+  tape u: b;
+  entry state s { [*, *] -> call r(x = t, y = u) then fin; }
+  state fin { [*, *] -> stop; }
+}
+");
+        // Two STATE parameters sharing one continuation: legal, and must not
+        // be mistaken for an alias.
+        ok("\
+alphabet b { '_', '0' }
+graph g(tape x: b, state hit, state miss) {
+  entry state s { ['0', *] -> hit; [*, *] -> miss; }
+}
+machine {
+  tape t: b;
+  tape u: b;
+  entry graft g(x = t, hit = done, miss = done) as seek;
+  state done { [*, *] -> stop; }
+}
+");
+    }
+
     #[test]
     fn missing_arg_on_an_argless_call_points_at_the_call() {
         // `helper` needs one tape arg; the call supplies none. The MissingArg
@@ -3802,7 +3994,7 @@ namespace lib {
         );
     }
 
-    // -- compile() orchestration (Task 7) ------------------------------------
+    // -- compile() orchestration -------------------------------------------
 
     const A1: &str = "\
 alphabet ab { '_', 'a', 'b' }

@@ -24,7 +24,7 @@ and a `.tma` file coexist in one session without perturbing each other.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.0, targeting `tmt` 0.2.0 as its tested
+- This plugin is version 0.1.0, targeting `tmt` 0.3.0 as its tested
   floor: on startup it runs `tmt --version` and shows a warning
   notification (not a hard failure) if the binary reports something
   older, or an error notification if the binary can't be found at all.

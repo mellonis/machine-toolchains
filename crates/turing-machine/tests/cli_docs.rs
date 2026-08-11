@@ -15,9 +15,11 @@
 //!  - `lsp` is probed as `lsp --help` and NEVER bare — a bare `tmt lsp`
 //!    hands real stdio to the server loop and would block this test
 //!    process forever waiting for a client that never connects;
-//!  - `tape` and `ir` are probed BARE, because their children consume no
-//!    `--help` (`tmt tape new --help` is an unknown-flag error); the
-//!    group's own usage comes from invoking the group with no arguments.
+//!  - `tape` and `ir` are probed BARE: their nested actions answer
+//!    `--help` too (`tmt tape new --help` prints usage, same as any leaf),
+//!    but every action in a group renders that group's ONE shared usage
+//!    text, byte-identical to the bare group's own — so probing bare is
+//!    simpler and exercises the same string.
 //!
 //! What is NOT checked: the page's prose. Only the fenced usage blocks
 //! are mechanically pinned; the surrounding explanation is reviewed by

@@ -43,21 +43,52 @@ treats both shapes as already canonical, so reformatting the output of
 either `pmt compile -S` or `pmt dis` is always a no-op. `pmt dis` output
 is always valid assembler input — round-tripping through `asm`
 reproduces the original bytes exactly, build-column tags and the
-program-volatile bit included ("The `.volatile` directive" below).
+program-volatile bit included ("The `.volatile` directive" below) —
+with one narrow, hand-written-only exception: a body containing an
+explicit entry-prologue (`ent`) byte that is the target of an
+unconditional jump **and** opens a genuine cut of the disassembler's
+control-flow walk (below) re-links to a **byte-different but
+semantically identical** image — same outcome, same final tape, under
+either link mode. No `pmt compile` output reaches this shape; it takes
+a hand-written `.pma` to construct.
 
 `pmt dis` accepts either binary. From a `.pmo`: real names come from the
 symbol table, code is shown per function, and call sites are named from
-relocations. From a `.pmx`: names come from the `-g` sidecar map when one
-is present (`FILE.pmx.map` beside the executable, or `--map`); otherwise
-they are synthesized via **recursive-descent discovery** — a worklist walk
-from the entry point following control-flow edges; every verified `call`
-target is a function root (exact in v1, which has no indirect control
-flow). Discovered roots are named `main` (the entry) or `func_XXXX`;
+relocations. From a `.pmx`: names come from the `.pmx.map` sidecar when
+one is present (`FILE.pmx.map` beside the executable, or `--map`) —
+written unconditionally by every `pmt link`; `-g` only widens what that
+sidecar carries (label and line debug detail), never whether it exists
+or whether it names functions. With no sidecar, names are synthesized
+via **recursive-descent discovery** — a worklist walk from the entry
+point following control-flow edges. A function root is the entry point,
+every verified `call` target, and — only when the jump opens a genuine
+cut of the walk — a jump target landing on an entry-prologue (`ent`)
+byte. A cut needs all four of:
+
+1. nothing falls through into the boundary;
+2. the region it opens never falls out its own end — it always stops or
+   resolves its own final jump;
+3. no local-label edge spans the boundary in either direction (a call,
+   or a jump onto an already-established root, is exempt and renders by
+   name regardless);
+4. every table the boundary would split lies wholly on one side of it —
+   vacuous for `.pma`, which enables no table sections at all
+   (`docs/tmt/asm.md` states the same condition where it bites).
+
+These four are what the walk checks, and together they cover every
+mechanism by which the rendered text either names a code address or lets
+execution cross a boundary — a fifth way for a boundary to misrender
+would have to be a mechanism outside that list. A target meeting all
+four keeps its `@name` symbol form, the same as an ordinary call target;
+failing any one, it stays an ordinary local label inside its caller's
+region. Discovered roots are named `main` (the entry) or `func_XXXX`;
 internal jump targets are named `LXXXX`; bytes never reached by the walk
 print as `.byte` directives, one per byte. The `ent` byte remains the
-runtime call guard, but function discovery itself comes from control flow,
-not byte scanning — an operand byte that happens to equal the entry opcode
-is never mistaken for a function start.
+runtime call guard, but function discovery itself comes from control
+flow at instruction boundaries the walk actually reaches, not byte
+scanning — an operand byte that happens to equal the entry opcode is
+never mistaken for a function start, because it is never decoded as an
+instruction boundary in the first place.
 
 **Symbol jumps (tail calls):** `jmp @name` takes a function symbol, not a
 label — in an object it assembles as a far `jmp` plus a relocation (the
@@ -68,7 +99,10 @@ errors — v1 branches take labels only. Disassemblers print a relocated jump
 (from an object, via its relocation table) or a jump landing on a function
 root (from an executable, via discovery) in the `jmp @name` form; a jump
 into another function's middle that lands on no known root falls back to
-`.byte`.
+`.byte`. That specific fallback stays unreachable from legal `.pma` — a
+real program's jump target is always a label inside its own function, a
+call, or a discovered root — and text built to contain it does not link
+back to a working program.
 
 ## The `.volatile` directive
 

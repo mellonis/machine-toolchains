@@ -37,18 +37,19 @@ Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
 
 `tmt --version` prints three lines: `tmt <VERSION>` (the toolchain crate's
 own version), `tmc language <VERSION>` (the `.tmc` language
-acceptance-contract version — `docs/tmt/language.md`), and
-`tma dialect (tm-1) <VERSION>` (the TM-1 `.tma` dialect version —
-`docs/tmt/asm.md`). The three numbers move on independent
-axes: a crate release with no grammar change repeats the same
-language-version and dialect-version lines, and each grammar version only
-bumps when its own grammar changes.
+acceptance-contract version — `docs/tmt/language.md`), and `tma dialect
+(tm-1) <VERSION>` (the TM-1 `.tma` dialect version — `docs/tmt/asm.md`). The
+three numbers move on independent axes: a crate release with no grammar
+change repeats the same language-version and dialect-version lines, and each
+grammar version only bumps when its own grammar changes.
 
 Every usage block on this page is quoted verbatim from the binary and
 checked against it by a test — this page is a reference, not a paraphrase.
 For most subcommands that block is the real `--help` output; `tape` and
-`ir` are the exception, since their children take no `--help` of their
-own, so those two blocks are the bare-invocation group usage instead (each
+`ir` are the exception: every action inside one of those groups answers
+`--help` too, but renders that group's own shared usage text — the same
+block a bare invocation of the group prints — so the blocks quoted here
+come from the bare invocation and cover every action in the group (each
 of those sections repeats this).
 
 ## `tmt compile`
@@ -229,6 +230,7 @@ graft-map family in the graft section of the same page.
 | `missing-arg` | A signature parameter has no binding argument. |
 | `wrong-arg-kind` | A binding argument is the wrong kind for its parameter. |
 | `unresolved-tape-target` | A tape-parameter argument names a target that is not a tape in the enclosing world. |
+| `duplicate-tape-target` | Two tape-parameter arguments of one `call`, `graft`, or `bind` name the same caller tape — one caller tape cannot back two callee tapes. |
 | `bind-call-args` | A `call` on a world-local bind name carries binding arguments — a bind is already fully bound at its declaration. |
 | `contract-symbol-unknown` | A `writes`/`preserves` clause names a glyph that is not a symbol of the parameter's alphabet. |
 | `writes-outside-contract` | A world's inferred write footprint on one tape leaves the effective set its contract declares (`writes` minus `preserves`). |
@@ -621,8 +623,8 @@ Three subcommands author and inspect `.tmt` tape-block snapshots without
 hand-editing bytes. The unit is the **block** — the whole multi-tape band —
 so one invocation authors all of it. There is no `tape-block build`: PM-1's
 is glyph-pattern sugar tied to a fixed two-symbol alphabet, while TM-1 tapes
-carry per-tape alphabets. Note that the group's children take no `--help` of
-their own — run `tmt tape-block` bare for the usage above.
+carry per-tape alphabets. Every action answers `--help` with the same usage
+shown above — bare `tmt tape-block` prints the identical text.
 
 ### Edit flags
 
@@ -842,8 +844,9 @@ world name.
 
 Reads a `--emit-ir` JSON file and renders each world's state graph as a
 Mermaid `flowchart TD`. `--function NAME` restricts output to one world;
-naming a world the file does not contain is an error. As with `tape`, the
-`graph` child takes no `--help` — run `tmt ir` bare for the usage above.
+naming a world the file does not contain is an error. As with `tape`,
+`graph --help` renders the same usage block shown above, same as bare
+`tmt ir`.
 
 ### `tmt ir footprints`
 

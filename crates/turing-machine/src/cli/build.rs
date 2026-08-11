@@ -63,7 +63,7 @@ pub(super) fn render_opt_report(stderr: &mut String, report: &CompileReport) {
 
 pub(super) fn compile(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(COMPILE_USAGE.into(), String::new()));
     }
     let debug_preset = args.flag("--debug");
@@ -225,7 +225,7 @@ USAGE: tmt asm INPUT.tma [-o OUT.tmo] [-g]
 
 pub(super) fn asm(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(ASM_USAGE.into(), String::new()));
     }
     let with_debug = args.flag("-g");
@@ -285,7 +285,7 @@ pub(super) fn parse_call_mech(raw: Option<String>) -> Result<CallMech, String> {
 
 pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(LINK_USAGE.into(), String::new()));
     }
     let relax = !args.flag("--no-relax");

@@ -76,7 +76,7 @@ impl Default for RunSettings {
 
 pub(super) fn run(raw: &[String], trace_out: &mut dyn std::io::Write) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(RUN_USAGE.into(), String::new()));
     }
     let trace = args.flag("--trace");

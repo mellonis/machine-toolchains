@@ -1,11 +1,10 @@
 //! The `.pma` `.volatile` directive: the text form of a two-column object
-//! (docs/pmt/asm.md (the .volatile directive)). A `.volatile` line inside
-//! a `.func`
-//! block tags that blob's build column; one before the first `.func` sets
-//! the object's program bit. These tests pin the acceptance rules, the
-//! asm-side dedup that mirrors the compiler's, column-coherent call
-//! binding, the disassembler's emission, and the standing gate that a
-//! directive-free file assembles to exactly the bytes it always did.
+//! (docs/pmt/asm.md (the .volatile directive)). A `.volatile` line inside a
+//! `.func` block tags that blob's build column; one before the first `.func`
+//! sets the object's program bit. These tests pin the acceptance rules, the
+//! asm-side dedup that mirrors the compiler's, column-coherent call binding,
+//! the disassembler's emission, and the standing gate that a directive-free
+//! file assembles to exactly the bytes it always did.
 
 use mtc_core::asm::AsmErrorKind;
 use mtc_core::formats::object::{BlobVariant, ObjectFile, SymbolDef};

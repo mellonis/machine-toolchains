@@ -23,8 +23,16 @@
 //!   one row per preimage; a virtual cell with no physical preimage makes
 //!   the row dead (dropped, with the paired dispatch entry removed).
 //! - each bound tape with `rmap` holes gets synthesized unmapped-read trap
-//!   rows PREPENDED (first-match): one machine-width row per hole physical
-//!   symbol, dispatching to a shared `trap #0` stub.
+//!   rows: one machine-width row per hole physical symbol, dispatching to a
+//!   shared `trap #0` stub. Given each machine position is projected by at
+//!   most one callee tape, a hole symbol reaches its trap row because no
+//!   surviving row can match it, not because of where the row sits.
+//!
+//! Renaming cells permutes rows out of the order the callee's table was
+//! authored in, so the finished table is sorted back into the canonical row
+//! order (docs/core.md (match tables)) with each row's dispatch entry moving
+//! alongside it — a stamped table is as expressible in assembly as the
+//! authored one it specializes.
 //!
 //! HYBRID classifies per site: a completed bijection (equal-size,
 //! injective, no holes, no one-way pairs) is mono-stamped; anything holey or
@@ -44,7 +52,7 @@ use super::engine::{
 };
 use super::resolve::FuncRef;
 use crate::asm::decode::{self, Body, DecodedOperand};
-use crate::asm::{ArchSyntax, Flow};
+use crate::asm::{ArchSyntax, Flow, MatchRowClass, classify_match_row};
 use crate::formats::object::{BoundCall, RoutineSig};
 use crate::vm::OperandKind;
 
@@ -86,7 +94,7 @@ enum EntrySrc {
 
 /// Whether a pending match-row remap carries a synthesized unmapped-read
 /// trap row. Such a remap MUST be consumed by a dispatch rebuild — that is
-/// the only path that routes the prepended trap rows to the trap stub. A
+/// the only path that routes those trap rows to the trap stub. A
 /// trap-bearing remap left unconsumed (or overwritten by a later match
 /// table) means a hole symbol would match a trap row and be read through a
 /// branch as a real match — the guard in `build_stamp` refuses that stamp.
@@ -947,7 +955,7 @@ fn build_stamp(
     // and only a dispatch jump routes them to the trap stub. If the body
     // finishes with a trap-bearing remap no dispatch consumed — the match
     // table feeds a conditional branch, or nothing reads its result — a hole
-    // symbol would match a prepended trap row and be taken as a real match: a
+    // symbol would match a synthesized trap row and be taken as a real match: a
     // silent misroute. Refuse the stamp (docs/core.md (the composition engine)).
     if remap_has_trap(&pending_remap) {
         return Err(LinkError::MonoHoleyMatchBranch(callee.name.to_string()));
@@ -1134,10 +1142,11 @@ fn encode_vec_into(blob: &mut Vec<u8>, vals: &[u8]) {
     }
 }
 
-/// Rewrite a match table from callee width to machine width, prepending
+/// Rewrite a match table from callee width to machine width, synthesizing
 /// unmapped-read trap rows and expanding/dropping rows per the read
-/// preimage. Returns the new table bytes, the dispatch-entry sources in the
-/// new row order, the count of synthesized trap rows, and the count of EXTRA
+/// preimage, then restoring the canonical row order. Returns the new table
+/// bytes, the dispatch-entry sources in the new row order, the count of
+/// synthesized trap rows, and the count of EXTRA
 /// rows one-way collapse expansion produced (the growth beyond one row per
 /// surviving original — docs/core.md (the link report)).
 fn rewrite_match_table(
@@ -1214,12 +1223,61 @@ fn rewrite_match_table(
         }
     }
 
+    let (rows, remap) = canonical_row_order(rows, remap);
+
     let mut out = vec![ma as u8];
     out.extend_from_slice(&(rows.len() as u16).to_le_bytes());
     for row in &rows {
         out.extend_from_slice(row);
     }
     Ok((out, remap, trap_rows, expanded))
+}
+
+/// Sort rewritten rows back into the canonical row order — exact rows
+/// ascending, then partial-wildcard rows, the catch-all last (docs/core.md
+/// (match tables)) — carrying each row's dispatch source with it.
+///
+/// The preimage rewrite renames cells, which permutes rows out of the order
+/// the callee's table was authored in. Nothing at run time minds — given each
+/// machine position is projected by at most one callee tape, the exact rows a
+/// stamp emits are pairwise disjoint, and disjoint from every trap row, so
+/// first-match reaches the same row either way. (Two callee tapes projecting
+/// onto ONE machine position break that premise: the later projection
+/// overwrites the earlier in a row, which can leave a row exact that overlaps
+/// a trap row. Such a binding already disagrees with the frames lowering
+/// before any reordering; it is a divergent shape under separate adjudication,
+/// not one this ordering is claimed to preserve.) A disassembly does mind — it
+/// prints rows in stored order, and an out-of-order table is text the
+/// assembler refuses, breaking the round trip that keeps an image expressible
+/// as assembly.
+///
+/// Row position IS load-bearing for one consumer: MR is the matched row's
+/// 1-based ordinal and the dispatch table is indexed by it, so a row and its
+/// dispatch source move as a pair or the table dispatches to the wrong
+/// target. The sort is STABLE, so rows sharing a key keep their relative
+/// order and first-match still selects the same one among them.
+fn canonical_row_order(rows: Vec<Vec<u8>>, remap: Vec<EntrySrc>) -> (Vec<Vec<u8>>, Vec<EntrySrc>) {
+    let mut ordered: Vec<(MatchRowClass, Vec<u8>, EntrySrc)> = rows
+        .into_iter()
+        .zip(remap)
+        .map(|(row, src)| {
+            // A stored cell is a 7-bit payload; 0x7F is the wildcard.
+            let class = classify_match_row(
+                row.iter()
+                    .map(|&cell| (cell != 0x7F).then_some(u32::from(cell))),
+            );
+            (class, row, src)
+        })
+        .collect();
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut sorted_rows = Vec::with_capacity(ordered.len());
+    let mut sorted_remap = Vec::with_capacity(ordered.len());
+    for (_, row, src) in ordered {
+        sorted_rows.push(row);
+        sorted_remap.push(src);
+    }
+    (sorted_rows, sorted_remap)
 }
 
 /// The cartesian product of per-position option lists, preserving position

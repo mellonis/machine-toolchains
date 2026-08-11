@@ -214,7 +214,7 @@ fn print_namespace(out: &mut String, ns: &NamespaceCst, indent: usize) {
 /// instead of being relocated below the statement — the same indexing
 /// rule as the mid-comma-group case: a comment trailing entry `i` is
 /// drained before entry `i+1` parses, so it keys to the FOLLOWING index
-/// (docs/pmt/fmt.md (interior comments)). Honouring `Comment::own_line`
+/// (docs/pmt/fmt.md (comments inside a use list)). Honouring `Comment::own_line`
 /// here — an own-line comment keeps its own line — is deliberate and
 /// differs from the statement comma-group printer ([`layout_leading`]
 /// and friends, out of scope for this list), which is shipped and
@@ -282,7 +282,7 @@ fn print_use(out: &mut String, u: &UseCst, indent: usize) {
             // to the following index — this reads even on the LAST entry,
             // whose "next" slot (`rendered.len()`) is the tail: a comment
             // between the last path and the `;` that stayed on the path's
-            // own line (docs/pmt/fmt.md (interior comments)).
+            // own line (docs/pmt/fmt.md (comments inside a use list)).
             for c in slot(i + 1, false) {
                 out.push(' ');
                 out.push_str(&normalize_comment_text(&c.text));

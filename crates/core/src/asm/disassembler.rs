@@ -719,7 +719,7 @@ fn dispatch_entries_within(tables: &[u8], start: u32, end: u32) -> Vec<u32> {
 pub fn disassemble_object(syntax: &ArchSyntax, obj: &ObjectFile) -> String {
     let mut text = String::new();
     // The program bit leads the dump: `.volatile` before the first `.func`
-    // is what sets it on the way back in (docs/core.md (linking)).
+    // is what sets it on the way back in (docs/formats.md (MO)).
     // Both this and the per-blob tags below are gated on the dialect's own
     // capability — a dialect that cannot parse the directive must never be
     // handed text carrying it.
@@ -1162,6 +1162,14 @@ pub fn disassemble_executable(
     // routine of every composite reachable through the site (the map-less
     // legend's routine names, docs/formats.md (image-inspectability principle)).
     let mut site_target: HashMap<u32, u32> = HashMap::new();
+    // Jump targets whose byte is the entry opcode — candidate function
+    // starts, resolved by the cut filter once the walk has finished.
+    let mut tail_jump_targets: BTreeSet<u32> = BTreeSet::new();
+    // The code edges a table carries, which no `RelTarget` operand shows:
+    // each table's selectable code addresses, and every instruction that
+    // reaches a table. The cut filter reads both.
+    let mut table_targets: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut table_sites: Vec<(u32, u32)> = Vec::new();
     while let Some(addr) = work.pop() {
         if addr >= len || instrs.contains_key(&addr) {
             continue;
@@ -1180,18 +1188,24 @@ pub fn disassemble_executable(
         // dispatches THROUGH its table). A dispatch table's entries are
         // code addresses the flow walk below cannot see, so they join
         // the work list — as label candidates, never roots.
-        if let DecodedOperand::TableAddr(t) = operand
-            && !table_kinds.contains_key(t)
-        {
-            let kind = if entry.flow == Flow::FallThrough {
-                TableKind::Match
-            } else {
-                TableKind::Dispatch
-            };
-            table_kinds.insert(*t, kind);
-            if matches!(kind, TableKind::Dispatch) {
-                for target in dispatch_entries(&exe.tables, *t) {
-                    work.push(target);
+        if let DecodedOperand::TableAddr(t) = operand {
+            // Every reference is recorded, not just the first: two sites in
+            // different regions reach the same table, and the cut filter
+            // below weighs each site against the entries it can select.
+            table_sites.push((addr, *t));
+            if !table_kinds.contains_key(t) {
+                let kind = if entry.flow == Flow::FallThrough {
+                    TableKind::Match
+                } else {
+                    TableKind::Dispatch
+                };
+                table_kinds.insert(*t, kind);
+                if matches!(kind, TableKind::Dispatch) {
+                    let targets = dispatch_entries(&exe.tables, *t);
+                    for &target in &targets {
+                        work.push(target);
+                    }
+                    table_targets.insert(*t, targets);
                 }
             }
         }
@@ -1206,14 +1220,17 @@ pub fn disassemble_executable(
         } = operand
         {
             site_target.insert(*site, *target);
-            if let Some(desc_off) = resolve_site(exe, *site)
-                && let std::collections::btree_map::Entry::Vacant(slot) =
+            if let Some(desc_off) = resolve_site(exe, *site) {
+                table_sites.push((addr, desc_off));
+                if let std::collections::btree_map::Entry::Vacant(slot) =
                     table_kinds.entry(desc_off)
-            {
-                slot.insert(TableKind::Frame);
-                if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
-                    for &exit in &frame.exits {
-                        work.push(exit);
+                {
+                    slot.insert(TableKind::Frame);
+                    if let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off) {
+                        for &exit in &frame.exits {
+                            work.push(exit);
+                        }
+                        table_targets.insert(desc_off, frame.exits);
                     }
                 }
             }
@@ -1221,7 +1238,17 @@ pub fn disassemble_executable(
         match (entry.flow, operand) {
             (Flow::FallThrough, _) => work.push(next),
             (Flow::Stop, _) => {}
-            (Flow::Jump, DecodedOperand::RelTarget(t)) => work.push(*t),
+            (Flow::Jump, DecodedOperand::RelTarget(t)) => {
+                // A jump landing on an entry prologue looks like a tail
+                // call, which would make its target a function start. Only
+                // a candidate here: the walk has not finished, and whether
+                // the boundary is real is decided once it has (see the cut
+                // filter below).
+                if code.get(*t as usize) == Some(&syntax.entry_opcode) {
+                    tail_jump_targets.insert(*t);
+                }
+                work.push(*t);
+            }
             (Flow::Branch, DecodedOperand::RelTarget(t)) => {
                 work.push(*t);
                 work.push(next);
@@ -1248,14 +1275,164 @@ pub fn disassemble_executable(
     // all get an `F<n>` label + render — their exits become label
     // candidates automatically when [`table_code_labels`] walks
     // `table_kinds` below, without a separate candidate set
-    // (docs/formats.md (image-inspectability principle)).
+    // (docs/formats.md (image-inspectability principle)). Their exits are
+    // recorded for the cut filter here too, without a site: a descriptor no
+    // site resolved to is reachable under some context this walk cannot
+    // name, so its exits are real code edges all the same.
     let region = parse_frames_region(exe);
     if let Some(region) = &region {
         for &desc_off in &region.directory {
             if let std::collections::btree_map::Entry::Vacant(slot) = table_kinds.entry(desc_off) {
                 slot.insert(TableKind::Frame);
             }
+            if let std::collections::btree_map::Entry::Vacant(slot) = table_targets.entry(desc_off)
+                && let Some(frame) = parse_frame_descriptor(&exe.tables, desc_off)
+            {
+                slot.insert(frame.exits);
+            }
         }
+    }
+
+    // Promote the tail-jump candidates that name a real function start.
+    //
+    // A function reached ONLY by a tail jump is named by nothing else in a
+    // pure image: it has no relocation, no call, and images carry no
+    // function table. Folded into its caller's region it renders as a bare
+    // local label, which is lossy in BOTH widths — a symbol site's width is
+    // the linker's to choose and a local label's is the assembler's, so a
+    // far site re-narrows on reassembly, and a narrowed site, shorter in
+    // text than the far relocation the object held, shifts the reassembled
+    // object's layout under every other jump spanning it and flips their
+    // widths too. Rendering it as a root avoids both, because symbol form
+    // restores the OBJECT layout: a symbol operand always reassembles far
+    // (which is why the `far_mnemonic` display below prints a
+    // linker-narrowed site in its far form), and the linker then re-derives
+    // the same narrowing. That is what makes dis → asm → link byte-exact.
+    //
+    // The entry byte is a necessary signal — the linker rejects a function
+    // blob that does not open with one — but not a sufficient one, since a
+    // dialect may let that byte stand inside a body as an ordinary
+    // instruction. Splitting a body there would be worse than the fold it
+    // avoids: the halves become separate functions, ordered by the linker's
+    // own discovery rather than by the text, so any edge that ran across
+    // the invented boundary now runs between two independently placed
+    // functions. Where the edge was a local label it cannot even be spelled
+    // (it degrades to `.byte`, which the linker then rejects); where it was
+    // a fall-through it silently lands somewhere else.
+    //
+    // So promote only across a genuine CUT of the discovered code:
+    //
+    //   * nothing falls through INTO it, and the region it opens does not
+    //     fall out of its own END (it finishes on a stop or a resolved
+    //     jump). Both are the same layout dependency, one boundary apart.
+    //   * no local-label edge crosses it in either direction.
+    //   * every table it could divide stays whole: a table's SITES and its
+    //     code entries must all land in one region. A table is stored per
+    //     function and belongs to exactly one, so a boundary between two of
+    //     its references leaves the text describing a table tied to two
+    //     functions — which the assembler rejects outright — and a boundary
+    //     between a reference and an entry leaves the entry spelled as some
+    //     other region's label. Both refusals happen before anything runs.
+    //
+    // A real tail-jump callee passes all three: its caller ends in the
+    // jump, the jump itself renders symbolically rather than as a crossing
+    // label, and the callee ends the way any function does. Declining costs
+    // only the fold, which is what the renderer did before promotion
+    // existed.
+    if !tail_jump_targets.is_empty() {
+        // The successor and label edges the walk above followed:
+        // `continue_edges` mirrors the `work.push(next)` arms (everything
+        // but a resolved jump and a stop), and `rel_edges` collects the
+        // relative operands whose rendering depends on the region holding
+        // them.
+        let mut continue_edges: Vec<(u32, u32)> = Vec::new();
+        let mut rel_edges: Vec<(u32, Flow, u32)> = Vec::new();
+        for d in instrs.values() {
+            let Body::Instr { mnemonic, operand } = &d.body else {
+                continue;
+            };
+            let flow = syntax.by_mnemonic(mnemonic).unwrap().flow;
+            if let DecodedOperand::RelTarget(t) = operand {
+                rel_edges.push((d.addr, flow, *t));
+            }
+            let resolved_jump =
+                flow == Flow::Jump && matches!(operand, DecodedOperand::RelTarget(_));
+            if flow != Flow::Stop && !resolved_jump {
+                continue_edges.push((d.addr, d.addr + d.len));
+            }
+        }
+
+        // Every address one table ties together: the instructions that
+        // reach it and the code it can select. A match table has only the
+        // former (its rows are symbol patterns, not addresses) and a
+        // directory descriptor no site resolved to has only the latter —
+        // both still pin the table to one function, so both are collected
+        // under the same key and weighed as one set.
+        let mut table_addrs: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (key, targets) in &table_targets {
+            table_addrs.entry(*key).or_default().extend(targets);
+        }
+        for &(site, key) in &table_sites {
+            table_addrs.entry(key).or_default().push(site);
+        }
+        // A descriptor no site named is reachable under a context this walk
+        // cannot resolve, so which region owns it cannot be established at
+        // all — only that its exits agree with each other, which is the
+        // weaker half of the rule and can miss a descriptor whose exits sit
+        // on the far side of a boundary from its owner. Where ownership is
+        // unknowable, no boundary is safe to invent.
+        let unowned_table = table_targets.iter().any(|(key, targets)| {
+            !targets.is_empty() && !table_sites.iter().any(|&(_, k)| k == *key)
+        });
+
+        let mut cuts: BTreeSet<u32> = tail_jump_targets
+            .into_iter()
+            .filter(|t| *t < len && !roots.contains(t))
+            .collect();
+        // Declining one candidate turns edges that pointed at it into
+        // local labels, and moves the end of whatever region preceded it —
+        // either can disqualify another candidate, so shrink to a fixpoint.
+        // Monotone (the set only loses members), so it ends.
+        loop {
+            let doomed = cuts.iter().copied().find(|&t| {
+                // Where the region `t` opens ends: the next boundary above
+                // it, which is itself a moving target while the set shrinks.
+                let end = roots
+                    .range(t + 1..)
+                    .next()
+                    .into_iter()
+                    .chain(cuts.range(t + 1..).next())
+                    .min()
+                    .copied()
+                    .unwrap_or(len);
+                continue_edges
+                    .iter()
+                    .any(|&(addr, next)| next == t || (addr >= t && addr < end && next >= end))
+                    || rel_edges.iter().any(|&(addr, flow, target)| {
+                        // A call renders by name, and a jump onto a root renders
+                        // in symbol form; neither depends on the region holding
+                        // it. Only a local label does.
+                        let symbolic = flow == Flow::Call
+                            || (flow == Flow::Jump
+                                && (roots.contains(&target) || cuts.contains(&target)));
+                        !symbolic && ((addr < t && target >= t) || (addr >= t && target <= t))
+                    })
+                    || unowned_table
+                    || table_addrs.values().any(|addrs| {
+                        // One region must hold the whole set. An address ON
+                        // the boundary is already outside it: that is the
+                        // opened region's root, which the text spells as a
+                        // function name, never as a label a table can name.
+                        addrs.contains(&t)
+                            || (addrs.iter().any(|&x| x < t) && addrs.iter().any(|&x| x > t))
+                    })
+            });
+            match doomed {
+                Some(t) => cuts.remove(&t),
+                None => break,
+            };
+        }
+        roots.extend(cuts);
     }
 
     let roots: Vec<u32> = roots.into_iter().filter(|&r| r < len).collect();
@@ -2800,6 +2977,104 @@ START:  nop
             crate::linker::link(&syntax, &[obj2], &[], crate::linker::LinkOptions::default())
                 .unwrap();
         assert_eq!(out2.executable.code, out.executable.code);
+    }
+
+    #[test]
+    fn jump_only_callee_stays_a_root_so_its_site_keeps_symbol_form() {
+        // `g` is reached ONLY by main's tail jump — never called, never the
+        // entry — so nothing but the jump itself marks it as a function.
+        // The boundary at `g` is a genuine cut (main ends in the jump, and
+        // the jump renders symbolically), so `g` stays a root and the site
+        // keeps the symbol form whose width belongs to the linker; folded
+        // into main's region it would become a local label, whose width
+        // belongs to the assembler.
+        let syntax = test_syntax();
+        let src = ".func main\n        jmp @g\n.func g\n        stop\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        // Relaxation disabled: main = [ent][jmp<i32>] = 6 bytes, so g sits
+        // at 6; the far jump ends at 6 too, displacement 6 − 6 = 0.
+        let opts = crate::linker::LinkOptions {
+            relax: false,
+            ..Default::default()
+        };
+        let out = crate::linker::link(&syntax, &[obj], &[], opts.clone()).unwrap();
+        assert_eq!(
+            out.executable.code,
+            vec![0x0E, 0x20, 0, 0, 0, 0, 0x0E, 0x02]
+        );
+        let text = disassemble_executable(&syntax, &out.executable, None);
+        let obj2 = assemble(&syntax, 0x7E, &text, false).unwrap();
+        let out2 = crate::linker::link(&syntax, &[obj2], &[], opts).unwrap();
+        assert_eq!(out2.executable.code, out.executable.code, "{text}");
+        assert!(text.contains(".func func_0006"), "{text}");
+        assert!(text.contains("jmp     @func_0006"), "{text}");
+    }
+
+    #[test]
+    fn an_entry_byte_in_a_body_that_cuts_cleanly_still_reads_as_a_function_start() {
+        // What the cut filter deliberately does NOT rescue, pinned so the
+        // residue stays visible: here the entry byte stands inside a body,
+        // but the boundary it opens is a genuine cut — nothing falls into
+        // it, no local edge spans it — so it is indistinguishable from a
+        // function start and is promoted. The text describes the same
+        // program either way (the halves are independent, so re-ordering
+        // them is harmless); only the bytes can differ, because the site's
+        // width authority moves from the assembler to the linker.
+        //
+        // The ambiguity is not removable: a pure image records no function
+        // boundaries at all. What the filter does remove is every case
+        // where splitting would change the program or produce text that
+        // will not link, which is the class worth paying for.
+        let syntax = test_syntax();
+        let src = ".func main\n        jmp L1\nL1:     ent\n        stop\n";
+        let obj = assemble(&syntax, 0x7E, src, false).unwrap();
+        let out = crate::linker::link(&syntax, &[obj], &[], crate::linker::LinkOptions::default())
+            .unwrap();
+        let text = disassemble_executable(&syntax, &out.executable, None);
+        assert!(text.contains(".func func_0003"), "{text}");
+        assert!(text.contains("jmp     @func_0003"), "{text}");
+    }
+
+    #[test]
+    fn a_body_entry_byte_that_does_not_cut_is_left_folded() {
+        // The three ways a boundary fails to be a cut. Images are built
+        // here rather than assembled because the fixture's `br` is the
+        // unpaired-RelI8 traversal opcode, which assembler tests may not
+        // use; the rendering decision is what these pin, and the round-trip
+        // law over the same three shapes is pinned against a real dialect
+        // in the post-machine crate's link tests.
+        let syntax = test_syntax();
+        for (name, code) in [
+            // Fall-through into the entry byte at 6 (`nop` at 5 runs into
+            // it): splitting here would leave the first half running off
+            // its end into whatever the linker ordered next.
+            (
+                "fall-through",
+                vec![0x0E, 0x22, 0x02, 0x30, 0x01, 0x01, 0x0E, 0x02],
+            ),
+            // A branch below the entry byte at 5 targeting 7, above it:
+            // after a split the target is outside its region and can only
+            // be spelled as raw bytes.
+            (
+                "forward edge",
+                vec![0x0E, 0x22, 0x04, 0x30, 0x00, 0x0E, 0x01, 0x01, 0x02],
+            ),
+            // …and the mirror image: a branch above the entry byte at 4
+            // targeting 1, below it.
+            (
+                "backward edge",
+                vec![0x0E, 0x01, 0x30, 0x00, 0x0E, 0x22, 0xFA, 0x02],
+            ),
+        ] {
+            let exe = Executable::code_only(0x7E, 0, code);
+            let text = disassemble_executable(&syntax, &exe, None);
+            assert_eq!(text.matches(".func").count(), 1, "{name}:\n{text}");
+            assert!(!text.contains('@'), "{name}: no invented root:\n{text}");
+            assert!(
+                text.contains("ent"),
+                "{name}: the fold keeps the byte inline:\n{text}"
+            );
+        }
     }
 
     #[test]

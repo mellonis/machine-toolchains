@@ -14,7 +14,7 @@
 ;   prog: 0=' '  1='+'  2='-'  3='<'  4='>'  5='.'  6='['  7=']'  8='H'
 ;   data, out: byte values 0..126  (127 capped: index 0x7F is the match
 ;              wildcard in the compact symbol family — see docs/formats.md
-;              (the .tma dialect))
+;              (the compact symbol family))
 ;   cnt:  0=' '  1='*'
 ;
 ; Vector notation, one element per tape [prog, data, out, cnt]:

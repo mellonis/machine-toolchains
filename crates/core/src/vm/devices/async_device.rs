@@ -9,6 +9,11 @@ use crate::vm::trap::DeviceFault;
 
 /// One device transaction, as the bus sees it (minus the device index —
 /// a device object IS one device).
+///
+/// Deliberately exhaustive — no `#[non_exhaustive]`: a device must execute
+/// every command it is sent; an unknown command silently ignored would
+/// corrupt the tape contract. Protocol growth is a compile-visible,
+/// semver-visible event (docs/core.md (the tape and device bus)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceCmd {
     MoveLeft,
@@ -17,7 +22,10 @@ pub enum DeviceCmd {
     Write { index: u32 },
 }
 
-/// The data half of a completed transaction.
+/// The data half of a completed transaction. Exhaustive on the same
+/// contract as [`DeviceCmd`] (docs/core.md (the tape and device bus)):
+/// every consumer handles every case, so protocol growth is
+/// compile-visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceReply {
     Ok,
@@ -29,7 +37,10 @@ pub enum DeviceReply {
 /// `None` means "price me at the `TactProfile` model cost"; `Some(n)` is
 /// the device's own measurement (a real device's wait is real machine
 /// time). The whole transaction's cost arrives as this one number —
-/// `Pending` samples never tick the tact counter.
+/// `Pending` samples never tick the tact counter. Exhaustive on the same
+/// contract as [`DeviceCmd`] (docs/core.md (the tape and device bus)):
+/// every consumer handles every case, so protocol growth is
+/// compile-visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevicePoll {
     Pending,

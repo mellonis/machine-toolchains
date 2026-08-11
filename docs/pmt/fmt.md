@@ -78,6 +78,31 @@ foo() {
 `999999999:` overflows it and hangs at one space. Both commands land on
 the command column regardless.
 
+The command column is a function of the body alone — its own indent
+depth and its own widest inline label — never of the header line above
+it. Whatever the header writes (bare, `export`, `volatile`, or both) is
+invisible to this computation, so a `volatile main() { … }` body aligns
+identically to the same body under a bare `main() { … }`:
+
+```c
+main() {
+ 1: right;
+    check(1, 2);
+ 2: mark;
+}
+```
+
+```c
+volatile main() {
+ 1: right;
+    check(1, 2);
+ 2: mark;
+}
+```
+
+Both put `right`/`check`/`mark` on column 4 — the extra 9 characters
+`volatile ` adds to the header line change nothing below it.
+
 ## Comma groups
 
 A statement's comma group (`cmd, cmd, cmd;`) keeps the author's own line
@@ -157,14 +182,42 @@ a comment dangling before a body's closing brace prints at the body's
 indent; block-comment interiors are reprinted verbatim, untouched.
 
 A trailing comment (same line as the statement it follows) gets one
-space before its `//` by default. When the author aligned a run of two
-or more trailing comments in a column, fmt keeps them aligned — the
-column is recomputed from the reformatted code (the longest line in the
-run, plus one space), so the alignment survives even though the code
-around it reflowed. If keeping a comment aligned would push its line
-past 80 characters, that one line falls back to a single space instead
-(and may then be reported by `line-too-long`); the rest of the run stays
-aligned.
+space before its `//` by default. When the author aligned a **run** of
+two or more trailing comments in a column — a maximal sequence of
+consecutive statements that each carry one, unbroken by a blank line or
+by a statement with none — fmt keeps them aligned: the column is
+recomputed from the reformatted code (the longest line in the run, plus
+one space), so the alignment survives even though the code around it
+reflowed. If keeping a comment aligned would push its line past 80
+characters, that one line falls back to a single space instead (and may
+then be reported by `line-too-long`); the rest of the run stays aligned.
+
+That one fallen-back line is then excluded from the run's own
+aligned-or-ragged verdict — the check that decides whether the *next*
+`pmt fmt` pass keeps the run aligned at all. Its column, once it falls
+back, need not equal the rest of the run's, and re-reading it on a
+second pass would make an aligned run look ragged and flip the whole
+run to one-space-per-comment; excluding it is what keeps the layout
+stable under repeated formatting. Verified on a three-comment run
+aligned in source, whose third comment is too long to keep aligned:
+
+```c
+main() {
+ 1: right;       // a
+    check(1, 3); // b
+ 3: left; // a comment long enough that keeping it aligned would overflow eighty columns
+}
+```
+
+The first two comments land on one shared column; the third, unable to
+join it without crossing 80 characters, falls back to a single space at
+its own line's width — and a second `pmt fmt` pass over that exact
+output reproduces it byte for byte, because the fallback line's
+mismatched column plays no part in re-deciding whether the first two are
+still "aligned." Like the command column above, a trailing-comment run's
+alignment is computed from the body's statements alone: the same example
+under `volatile main() { … }` instead of `main() { … }` reformats to the
+identical columns.
 
 Because the aligned-or-ragged verdict is read off the author's source
 columns, `pmt fmt`'s output is **not** a pure function of the token

@@ -362,7 +362,7 @@ fn dogfood_stdlib_and_goldens_are_already_fmt_clean() {
 }
 
 /// A comment inside a `use` path list prints in place, not relocated below
-/// the statement (docs/pmt/fmt.md (interior comments)).
+/// the statement (docs/pmt/fmt.md (comments inside a use list)).
 #[test]
 fn interior_use_list_comments_print_in_place() {
     let src = "use std::goToEnd, // walk right\n\

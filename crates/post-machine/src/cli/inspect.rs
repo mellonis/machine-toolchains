@@ -26,7 +26,7 @@ code view: addresses + raw bytes, not reassembleable.
 
 pub(super) fn dis(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(DIS_USAGE.into(), String::new()));
     }
     let listing = args.flag("--listing");
@@ -259,12 +259,22 @@ pub(super) fn tape_block(raw: &[String]) -> Result<CliOutput, String> {
         Some("new") => tape_new(&raw[1..]),
         Some("set") => tape_set(&raw[1..]),
         Some("show") => tape_show(&raw[1..]),
+        // An unrecognized dashed token at the group level gets the same
+        // treatment `Args::positionals` gives a leaf: `--help`/`-h` are
+        // the one exception, since a group with no action name still
+        // answers those with its bare usage, same as no args at all.
+        Some(tok) if tok.starts_with('-') && tok != "-" && tok != "--help" && tok != "-h" => {
+            Err(format!("unknown flag `{tok}`"))
+        }
         _ => Ok(CliOutput::ok(TAPE_USAGE.into(), String::new())),
     }
 }
 
 fn tape_build(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(TAPE_USAGE.into(), String::new()));
+    }
     let head: i64 = match args.value("--head")? {
         Some(text) => text.parse().map_err(|_| format!("bad --head `{text}`"))?,
         None => 0,
@@ -307,6 +317,9 @@ fn tape_build(raw: &[String]) -> Result<CliOutput, String> {
 /// rather than to index labels (docs/pmt/cli.md (tape-block)).
 fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(TAPE_USAGE.into(), String::new()));
+    }
     let from = args.value("--from")?;
     let out = args.value("-o")?.unwrap_or_else(|| "blank.pmt".into());
     let edits = collect_edits(&mut args)?;
@@ -363,6 +376,9 @@ fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
 /// is a plain copy (docs/pmt/cli.md (tape-block)).
 fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(TAPE_USAGE.into(), String::new()));
+    }
     let out = args.value("-o")?;
     let in_place = args.flag("--in-place");
     let edits = collect_edits(&mut args)?;
@@ -403,6 +419,9 @@ fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
 
 fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(TAPE_USAGE.into(), String::new()));
+    }
     let dense = args.flag("--dense");
     let separated = args.flag("--separated");
     let inputs = args.positionals()?;
@@ -454,6 +473,10 @@ a .ir.json file already holds exactly one column.
 pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
         Some("graph") => ir_graph(&raw[1..]),
+        // See the matching arm on `tape_block` above.
+        Some(tok) if tok.starts_with('-') && tok != "-" && tok != "--help" && tok != "-h" => {
+            Err(format!("unknown flag `{tok}`"))
+        }
         _ => Ok(CliOutput::ok(IR_USAGE.into(), String::new())),
     }
 }
@@ -515,6 +538,9 @@ fn compile_for_inspection(
 
 fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(IR_USAGE.into(), String::new()));
+    }
     let filter = args.value("--function")?;
     let variant = take_variant(&mut args)?;
     // -O0 then -O1, exactly as `pmt compile` resolves them: the later

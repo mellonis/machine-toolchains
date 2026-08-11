@@ -587,7 +587,7 @@ impl Parser<'_> {
     /// being parsed, tagging each with that index. Called at the top of each
     /// list-loop iteration and once more before the closer with
     /// `index = entries.len()`, which is how a comment after the last entry
-    /// gets a home (docs/pmt/fmt.md (interior comments)).
+    /// gets a home (docs/pmt/fmt.md (comments inside a use list)).
     fn interior_comments(&mut self, index: usize, out: &mut Vec<(usize, Comment)>) {
         while self.cpos < self.comments.len() && self.comments[self.cpos].sig_index <= self.pos {
             out.push((index, self.comments[self.cpos].comment.clone()));
@@ -1039,7 +1039,7 @@ impl Parser<'_> {
                             // it once the `;` has been consumed would also
                             // claim a comment that follows the statement —
                             // e.g. one documenting the *next* `use`
-                            // (docs/pmt/fmt.md (interior comments)).
+                            // (docs/pmt/fmt.md (comments inside a use list)).
                             self.interior_comments(paths.len(), &mut interior);
                             self.bump();
                             break;

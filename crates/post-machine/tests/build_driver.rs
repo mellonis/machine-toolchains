@@ -114,6 +114,29 @@ fn argv_mode_refines_undeclared_external_resolved_by_a_sibling() {
     assert!(err.contains("treated as errors"), "{err}");
 }
 
+/// On the PLAIN path (no `-Werror`) the compile stage's rendered warning
+/// must reach the user even though a later stage — the link, here — fails:
+/// the same `lone.pmc` shape warns at compile (undeclared external) and
+/// then fails to link (the external stays genuinely unresolved), and both
+/// must survive to the caller. Failing mutation: an early-returning `?` on
+/// the link (or a write after it) that drops the warnings already rendered
+/// into the driver's local buffer.
+#[test]
+fn argv_mode_flushes_rendered_warnings_when_the_link_fails() {
+    let dir = scratch("argv_warn_then_link_fail");
+    let lone = dir.join("lone.pmc");
+    fs::write(&lone, "main() { @missing(); }").unwrap();
+    let err = execute(&args(&["build", lone.to_str().unwrap()])).unwrap_err();
+    assert!(
+        err.contains("undeclared"),
+        "the compile-stage warning must survive a failing link: {err}"
+    );
+    assert!(
+        err.contains("unresolved symbols"),
+        "the link error itself must still be reported: {err}"
+    );
+}
+
 #[test]
 fn mixing_files_and_target_names_is_an_error() {
     let dir = scratch("argv_mixing");
@@ -382,6 +405,87 @@ fn werror_flag_overrides_a_manifest_profile_that_disables_it() {
         "-Werror flag must override the manifest profile's werror: false"
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("treated as errors"));
+}
+
+/// The manifest-mode twin of `argv_mode_flushes_rendered_warnings_when_
+/// the_link_fails`: `build_one_target` has its OWN early-return sites
+/// around the link and the writes after it, separate from argv mode's, so
+/// each path needs its own proof. `lone.pmc`'s bare `@missing()` is
+/// reachable from `main`, warns at compile, and stays genuinely
+/// unresolved at link — on the plain path both must reach the user.
+#[test]
+fn manifest_mode_flushes_rendered_warnings_when_the_link_fails() {
+    let dir = scratch("manifest_warn_then_link_fail");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lone.pmc"), "main() { @missing(); }").unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "targets": { "lone": { "sources": ["src/lone.pmc"] } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "lone"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undeclared"),
+        "the compile-stage warning must survive a failing link: {stderr}"
+    );
+    assert!(
+        stderr.contains("unresolved symbols"),
+        "the link error itself must still be reported: {stderr}"
+    );
+}
+
+/// The RUN-LEG twin of the two `flushes_rendered_warnings` tests above:
+/// `run_target` has its own early-return sites (now unified behind
+/// `run_once`, docs/pmt/project.md (run block)), separate from the
+/// build's own. `dead()` is exported but never called from `main`, so it
+/// is unreachable and the linker drops it — the build itself SUCCEEDS
+/// with only the compile-time undeclared-external warning surviving.
+/// `--run`'s declared `tape-block` names a file that does not exist, so
+/// `run_once`'s `execute_run` call fails; the build's warning must still
+/// reach the user. Failing mutation: `run_once`'s error returned bare
+/// (unprefixed) from `run_target`.
+#[test]
+fn build_run_flushes_rendered_warnings_when_the_run_leg_fails() {
+    let dir = scratch("manifest_warn_then_run_leg_fail");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/orphan.pmc"),
+        "main() { mark; }\nexport dead() { @missing(); }",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        r#"{ "project": {
+            "targets": { "orphan": { "sources": ["src/orphan.pmc"],
+                "run": { "tape-block": "nope.pmt" } } }
+        } }"#,
+    )
+    .unwrap();
+
+    let out = pmt()
+        .args(["build", "--run", "orphan"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undeclared"),
+        "the compile-stage warning must survive a failing run leg: {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot read") && stderr.contains("nope.pmt"),
+        "the run-leg error itself must still be reported: {stderr}"
+    );
 }
 
 /// `pmt build --run TARGET` builds then runs the target's `run` block,

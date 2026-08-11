@@ -10,7 +10,7 @@ const LSP_USAGE: &str = "USAGE: tmt lsp\n\nRun the LSP server for .tmc and .tma 
 
 pub(super) fn lsp(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(LSP_USAGE.into(), String::new()));
     }
     let rest = args.positionals()?;

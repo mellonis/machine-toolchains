@@ -6,7 +6,9 @@ use mtc_core::linker::LinkOptions;
 use mtc_core::vm::{ArchRegistry, InfiniteTape, Machine, Outcome, RunOptions, RunStats};
 use mtc_post_machine::arch::Pm1;
 use mtc_post_machine::arch::opcodes::*;
-use mtc_post_machine::asm::{assemble, disassemble_executable, link};
+use mtc_post_machine::asm::{
+    assemble, disassemble_executable, disassemble_executable_with_map, link,
+};
 
 const SPEC_SAMPLE: &str = "\
 .func goToEnd
@@ -170,4 +172,309 @@ fn tail_call_layout_round_trips_through_disassembly() {
     let obj2 = assemble(&text, false).unwrap();
     let out2 = link(&[obj2], &[], LinkOptions::default()).unwrap();
     assert_eq!(out2.executable.code, out.executable.code);
+}
+
+fn no_relax() -> LinkOptions {
+    LinkOptions {
+        relax: false,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn jump_only_callee_keeps_its_own_func_under_both_link_widths() {
+    // `target` is reached ONLY by main's tail jump — never called, never
+    // the entry. Its site's width is the linker's to choose, so the
+    // disassembly has to keep it a symbol site: rendered as a local label
+    // inside main it would become the assembler's choice instead, and a
+    // link that held the site far would not survive reassembly.
+    let src = "\
+.func main
+        jmp     @target
+.func target
+        stp
+";
+    // Objects: main = [ENT][JMP <hole>] (6 bytes), target = [ENT][STP].
+    // Relaxation off, main first: target sits at 6, the far site ends at 6,
+    // so its displacement is 0. Relaxation on, the site narrows to 2 bytes:
+    // target moves to 3, the short site ends at 3, displacement 0 again.
+    for (opts, expected, synthesized) in [
+        (
+            no_relax(),
+            vec![ENT, JMP, 0, 0, 0, 0, ENT, STP],
+            "func_0006",
+        ),
+        (
+            LinkOptions::default(),
+            vec![ENT, JMP_S, 0, ENT, STP],
+            "func_0003",
+        ),
+    ] {
+        let obj = assemble(src, true).unwrap();
+        let out = link(&[obj], &[], opts.clone()).unwrap();
+        assert_eq!(out.executable.code, expected);
+
+        // Map-less (the synthesis the round-trip law runs on) and with the
+        // map (the debugger view) must both reproduce the image.
+        let mapless = disassemble_executable(&out.executable);
+        let mapped = disassemble_executable_with_map(&out.executable, &out.map);
+        for text in [&mapless, &mapped] {
+            let out2 = link(&[assemble(text, false).unwrap()], &[], opts.clone()).unwrap();
+            assert_eq!(out2.executable.code, out.executable.code, "{text}");
+        }
+
+        // …and both keep the boundary that makes that work.
+        assert!(
+            mapless.contains(&format!(".func {synthesized}")),
+            "{mapless}"
+        );
+        assert!(
+            mapless.contains(&format!("jmp     @{synthesized}")),
+            "{mapless}"
+        );
+        assert!(mapped.contains(".func target"), "{mapped}");
+        assert!(mapped.contains("jmp     @target"), "{mapped}");
+    }
+}
+
+#[test]
+fn a_folded_tail_jump_would_shift_the_reassembled_object_layout() {
+    // The same fold is lossy even where the tail-jump site itself narrows
+    // cleanly, because a folded site is 2 bytes of text where the object
+    // held a 5-byte relocation. Every jump spanning it shrinks by 3 on
+    // reassembly, and one sitting just past the signed-byte boundary flips
+    // width — so the loss lands on an unrelated instruction, under a
+    // default link. PAD is tuned to put `jm` exactly there.
+    const PAD: usize = 120;
+    let mut src = String::from(".func main\n        jm      LEND\n");
+    for _ in 0..PAD {
+        src.push_str("        nop\n");
+    }
+    src.push_str(
+        "        jnm     L2
+        jmp     @tail
+L2:     nop
+LEND:   stp
+.func tail
+        stp
+",
+    );
+
+    // main's object blob, far site and both branches resolved by the
+    // assembler's own fixpoint: ent(1) + jm(5) + PAD nops + jnm.s(2) +
+    // jmp<hole>(5) + nop(1) + stp(1). `jm` reaches LEND at 6 + PAD + 8 =
+    // 134 from its end at 6 — displacement 128, one past the signed byte,
+    // so it is far and stays far. Linking narrows the tail-jump site to 2
+    // bytes, which pulls LEND back to 131: `jm`'s displacement becomes 125
+    // and would now fit a byte, but a linked jump never changes width.
+    let mut expected = vec![ENT, JM];
+    expected.extend(125i32.to_le_bytes());
+    expected.extend(std::iter::repeat_n(NOP, PAD));
+    expected.extend([JNM_S, 2, JMP_S, 2, NOP, STP, ENT, STP]);
+
+    let obj = assemble(&src, false).unwrap();
+    let out = link(&[obj], &[], LinkOptions::default()).unwrap();
+    assert_eq!(out.executable.code, expected);
+    assert_eq!(out.report.relaxed_calls, 1); // the tail-jump site
+
+    let text = disassemble_executable(&out.executable);
+    let out2 = link(
+        &[assemble(&text, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(out2.executable.code, out.executable.code, "{text}");
+
+    let tail = format!("func_{:04X}", PAD + 12);
+    assert!(text.contains(&format!(".func {tail}")), "{text}");
+    assert!(text.contains(&format!("jmp     @{tail}")), "{text}");
+}
+
+#[test]
+fn an_entry_byte_in_a_body_is_promoted_only_across_a_control_flow_cut() {
+    // `ent` is a landing pad that executes as a no-op, so an image can
+    // legally hold one inside a body — where it is indistinguishable from a
+    // function prologue, since an image records no function boundaries. A
+    // jump onto one is therefore promoted to a root only when the boundary
+    // it opens is a genuine cut of the code. These four are not, and each
+    // would break in its own way if it were split: the halves become
+    // separate functions the linker orders by discovery, so the program can
+    // change, and a local edge that spanned the boundary is left with no
+    // way to name its target at all.
+    for (name, src) in [
+        // Fall-through into the entry byte. Split, `main` runs off its end
+        // into whatever was ordered next — here `helper`'s `ret`, which
+        // turns a clean stop into a stack underflow.
+        (
+            "fall-through",
+            "\
+.func main
+        call    helper
+        jnm     L2
+        jmp     L1
+L2:     nop
+L1:     ent
+        stp
+.func helper
+        ret
+",
+        ),
+        // A branch from above the boundary to below it — the minimal
+        // witness: one function, one branch, one `ent`.
+        (
+            "forward edge",
+            "\
+.func main
+        jnm     L3
+        jmp     L1
+L1:     ent
+L3:     nop
+        stp
+",
+        ),
+        // …and from below the boundary back above it.
+        (
+            "backward edge",
+            "\
+.func main
+        call    helper
+LBACK:  nop
+        jmp     L1
+L1:     ent
+        jm      LBACK
+        stp
+.func helper
+        ret
+",
+        ),
+        // No edge crosses the boundary going in, but the region it opens
+        // leaves by falling out of its own end — the same layout
+        // dependency one boundary later. Split, that fall-out lands on
+        // whatever the linker ordered next instead of on `helper`.
+        (
+            "fall-out",
+            "\
+.func main
+        call    helper
+        jmp     L1
+L1:     ent
+        wr      1
+.func helper
+        jm      L9
+        ret
+L9:     wr      0
+        stp
+",
+        ),
+    ] {
+        for opts in [LinkOptions::default(), no_relax()] {
+            let out = link(&[assemble(src, false).unwrap()], &[], opts.clone()).unwrap();
+            let text = disassemble_executable(&out.executable);
+            // The text must still link at all — a cross-region edge falls
+            // back to `.byte`, which assembles and then fails to link.
+            let out2 = link(&[assemble(&text, false).unwrap()], &[], opts).unwrap();
+            assert_eq!(out2.executable.code, out.executable.code, "{name}:\n{text}");
+        }
+    }
+}
+
+#[test]
+fn a_declined_boundary_keeps_the_program_it_described() {
+    // The fall-through shape above, run rather than compared: the harm a
+    // wrongly invented boundary does is not byte drift but a different
+    // program. `main` marks, falls past `L2`, and stops; if the split
+    // happened it would fall into `helper`'s `ret` instead and underflow.
+    let src = "\
+.func main
+        call    helper
+        jnm     L2
+        jmp     L1
+L2:     wr      1
+L1:     ent
+        stp
+.func helper
+        rgt
+        ret
+";
+    let out = link(
+        &[assemble(src, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    let text = disassemble_executable(&out.executable);
+    let out2 = link(
+        &[assemble(&text, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+
+    let reg = registry();
+    let mut outcomes = Vec::new();
+    for exe in [&out.executable, &out2.executable] {
+        // Blank tape, head 0: helper steps right, the unmatched cell sends
+        // `jnm` to L2, which marks cell 1, then the `ent` no-op and `stp`.
+        let mut tape = InfiniteTape::from_cells([], 0, 0);
+        let machine = Machine::from_executable(exe, &reg).unwrap();
+        let result = machine.run(&mut tape, RunOptions::default());
+        outcomes.push((result.outcome, tape.marked_cells()));
+    }
+    assert_eq!(outcomes[0], (Outcome::Stopped, vec![1]));
+    assert_eq!(outcomes[1], outcomes[0]);
+}
+
+#[test]
+fn a_promoted_boundary_keeps_the_program_it_described_too() {
+    // The residue, pinned rather than asserted: an `ent` inside a body
+    // whose boundary IS a genuine cut is indistinguishable from a function
+    // start, so it is promoted, and the re-linked image can differ in
+    // bytes — the site's width authority moves to the linker and the
+    // invented function may be ordered elsewhere. What must NOT differ is
+    // the program. The halves are independent (nothing crosses the
+    // boundary, and the region ends on `stp`), so re-ordering them is
+    // free — this test is what makes that claim checkable.
+    let src = "\
+.func main
+        call    helper
+        jmp     L1
+L1:     ent
+        rgt
+        wr      1
+        stp
+.func helper
+        rgt
+        wr      1
+        ret
+";
+    let out = link(
+        &[assemble(src, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    let text = disassemble_executable(&out.executable);
+    let out2 = link(
+        &[assemble(&text, false).unwrap()],
+        &[],
+        LinkOptions::default(),
+    )
+    .unwrap();
+    // The boundary really was promoted — without this the test could pass
+    // vacuously if a future rule declined it.
+    assert_eq!(text.matches(".func").count(), 3, "{text}");
+
+    let reg = registry();
+    let mut observed = Vec::new();
+    for exe in [&out.executable, &out2.executable] {
+        // Blank tape, head 0: helper steps right and marks cell 1; the
+        // promoted region steps right again and marks cell 2, then stops.
+        let mut tape = InfiniteTape::from_cells([], 0, 0);
+        let machine = Machine::from_executable(exe, &reg).unwrap();
+        let result = machine.run(&mut tape, RunOptions::default());
+        observed.push((result.outcome, tape.head(), tape.marked_cells()));
+    }
+    assert_eq!(observed[0], (Outcome::Stopped, 2, vec![1, 2]));
+    assert_eq!(observed[1], observed[0], "{text}");
 }

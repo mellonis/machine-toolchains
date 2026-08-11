@@ -116,7 +116,7 @@ L001E:  lft
 The input tape reads `*** **` — three marks (representing 2), a blank, two
 marks (representing 1) — and `run` reports the final tape `****`: four
 marks, representing 3 = 2 + 1. `compile`/`link` (`-o`) both accept `-v` to
-render their stage reports; `tape build`/`run --tape-block` build and
+render their stage reports; `tape-block build`/`run --tape-block` build and
 consume `.pmt` snapshots; `dis` shows the linked `.pmx` with real function
 names resolved from the `.pmx.map` sidecar that `link` wrote alongside it.
 Full flag reference: `docs/pmt/cli.md`.

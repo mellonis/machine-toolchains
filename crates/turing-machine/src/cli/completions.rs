@@ -19,7 +19,7 @@ and fish are recognized but not yet implemented).
 
 pub(super) fn completions(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(COMPLETIONS_USAGE.into(), String::new()));
     }
     let inputs = args.positionals()?;

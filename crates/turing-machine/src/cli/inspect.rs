@@ -30,7 +30,7 @@ code view: addresses + raw bytes, not reassembleable.
 
 pub(super) fn dis(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
-    if args.flag("--help") {
+    if args.help() {
         return Ok(CliOutput::ok(DIS_USAGE.into(), String::new()));
     }
     let listing = args.flag("--listing");
@@ -490,6 +490,13 @@ pub(super) fn tape_block(raw: &[String]) -> Result<CliOutput, String> {
         Some("new") => tape_new(&raw[1..]),
         Some("set") => tape_set(&raw[1..]),
         Some("show") => tape_show(&raw[1..]),
+        // An unrecognized dashed token at the group level gets the same
+        // treatment `Args::positionals` gives a leaf: `--help`/`-h` are
+        // the one exception, since a group with no action name still
+        // answers those with its bare usage, same as no args at all.
+        Some(tok) if tok.starts_with('-') && tok != "-" && tok != "--help" && tok != "-h" => {
+            Err(format!("unknown flag `{tok}`"))
+        }
         _ => Ok(CliOutput::ok(TAPE_USAGE.into(), String::new())),
     }
 }
@@ -503,6 +510,9 @@ pub(super) fn tape_block(raw: &[String]) -> Result<CliOutput, String> {
 /// their keys must be contiguous from 0 (docs/tmt/cli.md (tape-block)).
 fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(TAPE_USAGE.into(), String::new()));
+    }
     let from = args.value("--from")?;
     let out = args.value("-o")?.unwrap_or_else(|| "blank.tmt".into());
     let edits = collect_edits(&mut args)?;
@@ -555,6 +565,9 @@ fn tape_new(raw: &[String]) -> Result<CliOutput, String> {
 /// name (docs/tmt/cli.md (tape-block)).
 fn tape_set(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(TAPE_USAGE.into(), String::new()));
+    }
     let out = args.value("-o")?;
     let in_place = args.flag("--in-place");
     let from = args.value("--from")?;
@@ -638,12 +651,19 @@ pub(super) fn ir(raw: &[String]) -> Result<CliOutput, String> {
     match raw.first().map(String::as_str) {
         Some("graph") => ir_graph(&raw[1..]),
         Some("footprints") => ir_footprints(&raw[1..]),
+        // See the matching arm on `tape_block` above.
+        Some(tok) if tok.starts_with('-') && tok != "-" && tok != "--help" && tok != "-h" => {
+            Err(format!("unknown flag `{tok}`"))
+        }
         _ => Ok(CliOutput::ok(IR_USAGE.into(), String::new())),
     }
 }
 
 fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(IR_USAGE.into(), String::new()));
+    }
     let filter = args.value("--function")?;
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
@@ -693,6 +713,9 @@ fn ir_graph(raw: &[String]) -> Result<CliOutput, String> {
 /// rejected before either world's report is built.
 fn ir_footprints(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(IR_USAGE.into(), String::new()));
+    }
     let filter = args.value("--function")?;
     let inputs = args.positionals()?;
     let [input] = inputs.as_slice() else {
@@ -767,6 +790,9 @@ fn duplicate_world_name(program: &IrProgram) -> Option<&str> {
 
 fn tape_show(raw: &[String]) -> Result<CliOutput, String> {
     let mut args = Args::new(raw);
+    if args.help() {
+        return Ok(CliOutput::ok(TAPE_USAGE.into(), String::new()));
+    }
     let dense = args.flag("--dense");
     let separated = args.flag("--separated");
     let inputs = args.positionals()?;
