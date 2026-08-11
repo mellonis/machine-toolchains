@@ -489,8 +489,9 @@ fn dis_spec() -> CommandSpec {
 /// `tape new` takes no positional at all — the template is sized from
 /// `--from`. Every `tape`/`ir` child spec below carries a `--help` flag,
 /// same as any leaf — those parsers all consume `args.help()` before
-/// anything else. None of them carry `-h`: the alias is root-only, and
-/// no leaf spec anywhere in this registry models it either.
+/// anything else. None of them carry `-h`: the CLI answers it everywhere
+/// as an alias of `--help`, but no spec in this registry models the
+/// alias — completion offers the canonical spelling only.
 /// The repeatable keyed edit flags, shared by `tape-block new` and `set`.
 fn edit_flags() -> Vec<FlagSpec> {
     vec![
