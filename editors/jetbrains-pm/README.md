@@ -22,7 +22,7 @@ see the `.pma` checklist below for its own manual walkthrough.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.3. It has been tested against `pmt` 0.2.0; on
+- This plugin is version 0.1.3. It has been tested against `pmt` 0.3.0; on
   startup it runs `pmt --version` and shows a warning notification (not a
   hard failure) if the binary reports something older, or an error
   notification if the binary can't be found at all. The plugin's own
