@@ -1323,12 +1323,18 @@ fn run_pmt_stdin(fmt_args: &[&str], stdin_data: &str) -> std::process::Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to spawn pmt");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin_data.as_bytes())
-        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    // A child that rejects its arguments exits without ever reading
+    // stdin; the write then sees a broken pipe. That is the behavior
+    // under test for the rejection cases, not a harness failure.
+    if let Err(e) = stdin.write_all(stdin_data.as_bytes()) {
+        assert_eq!(
+            e.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "writing pmt's stdin: {e}"
+        );
+    }
+    drop(stdin);
     child.wait_with_output().expect("failed to wait on pmt")
 }
 
