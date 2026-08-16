@@ -47,6 +47,14 @@ pub enum AdapterEvent {
     Terminated,
     /// The debuggee's process-equivalent exit code is known.
     Exited { code: i32 },
+    /// The adapter is ready to receive configuration requests
+    /// (`setBreakpoints`, `configurationDone`, …). The framework never
+    /// pushes this on its own — an adapter decides its own readiness
+    /// point (e.g. once a `launch` has loaded a program successfully) and
+    /// pushes it from `handle`. A failed `launch` must never claim
+    /// readiness, which an automatic post-`initialize` emission could not
+    /// tell apart from a successful one.
+    Initialized,
 }
 
 /// Whether the adapter's session is presently advancing on its own.
@@ -306,6 +314,7 @@ fn to_protocol_event(event: AdapterEvent) -> (&'static str, Value) {
         ),
         AdapterEvent::Terminated => ("terminated", Value::Null),
         AdapterEvent::Exited { code } => ("exited", serde_json::json!({ "exitCode": code })),
+        AdapterEvent::Initialized => ("initialized", Value::Null),
     }
 }
 
@@ -493,6 +502,65 @@ mod tests {
         assert!(is_success(&outputs[0]));
         assert!(is_success(&outputs[1]));
         assert!(!is_success(&outputs[2]), "post-disconnect request");
+        assert_eq!(exit_code, 0);
+    }
+
+    /// An adapter that pushes `AdapterEvent::Initialized` from `handle`
+    /// itself, on `initialize` — proving the framework never emits this
+    /// event on its own (a separate adapter, `FakeAdapter`, never pushes
+    /// it and every other `FakeAdapter`-driven test stays silent on it),
+    /// and that a pushed `Initialized` translates to the wire shape a
+    /// real client expects: a bodyless `initialized` event, `body`
+    /// entirely absent (not `null`) via the existing `Value::Null`
+    /// omission rule.
+    struct InitializingAdapter;
+
+    impl DebugAdapter for InitializingAdapter {
+        fn handle(
+            &mut self,
+            command: &str,
+            _arguments: &Value,
+            out: &mut Vec<AdapterEvent>,
+        ) -> Result<Value, String> {
+            match command {
+                "initialize" => {
+                    out.push(AdapterEvent::Initialized);
+                    Ok(Value::Null)
+                }
+                "disconnect" => Ok(Value::Null),
+                _ => Err(unsupported_command(command)),
+            }
+        }
+
+        fn tick(&mut self, _out: &mut Vec<AdapterEvent>) -> RunState {
+            RunState::Stopped
+        }
+
+        fn run_state(&self) -> RunState {
+            RunState::Stopped
+        }
+    }
+
+    #[test]
+    fn an_event_pushed_from_handle_translates_to_a_bodyless_initialized_event() {
+        let mut adapter = InitializingAdapter;
+        let (outputs, exit_code) = run_session(
+            &[
+                request(1, "initialize", Value::Null),
+                request(2, "disconnect", Value::Null),
+            ],
+            &mut adapter,
+        );
+
+        // initialize response, the pushed initialized event, disconnect
+        // response — in push order, each with the next seq.
+        assert_eq!(outputs.len(), 3);
+        assert!(is_success(&outputs[0]));
+        assert_eq!(
+            outputs[1],
+            json!({"seq": 2, "type": "event", "event": "initialized"})
+        );
+        assert!(is_success(&outputs[2]));
         assert_eq!(exit_code, 0);
     }
 
