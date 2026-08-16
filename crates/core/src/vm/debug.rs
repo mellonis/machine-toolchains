@@ -114,6 +114,27 @@ impl<'a> DebugSession<'a> {
         self.core.mf()
     }
 
+    /// The match register (docs/core.md (registers)): `mf()` is the
+    /// boolean view of this SAME one register (`mr() != 0`).
+    pub fn mr(&self) -> u32 {
+        self.core.mr()
+    }
+
+    /// Sets the match flag — `set_mf`/`set_mr` are two views onto the SAME
+    /// one register (docs/core.md (registers)): this writes `mr = 1` for
+    /// `true`, `mr = 0` for `false`. A subsequent check-shaped instruction
+    /// simply reads whatever was written last; no latch micro-op re-runs.
+    pub fn set_mf(&mut self, mf: bool) {
+        self.core.set_mf(mf);
+    }
+
+    /// Sets the match register directly (docs/core.md (registers)) — the
+    /// general-value counterpart of `set_mf`, writing the SAME one
+    /// register: `mf()` afterwards reports `mr() != 0`.
+    pub fn set_mr(&mut self, mr: u32) {
+        self.core.set_mr(mr);
+    }
+
     /// The frame register (0 = the identity composite; non-zero = the
     /// active composite INDEX inside a framed call) — the frames profile's
     /// counterpart to `mf()`. On a base-profile session it stays 0. Note:
@@ -208,34 +229,58 @@ impl<'a> DebugSession<'a> {
     }
 
     pub fn continue_(&mut self, device: &mut dyn Tape) -> DebugEvent {
-        self.run_until(device, None, None)
+        self.continue_tapes(&mut [device])
+    }
+
+    /// Multi-tape `continue_` (docs/core.md (DebugSession)): the
+    /// device-set analog, mirroring `continue_` exactly.
+    pub fn continue_tapes(&mut self, devices: &mut [&mut dyn Tape]) -> DebugEvent {
+        self.run_until_tapes(devices, None, None)
     }
 
     pub fn run_steps(&mut self, device: &mut dyn Tape, budget: u64) -> DebugEvent {
-        self.run_until(device, None, Some(budget))
+        self.run_steps_tapes(&mut [device], budget)
+    }
+
+    /// Multi-tape `run_steps` (docs/core.md (DebugSession)): the
+    /// device-set analog, mirroring `run_steps` exactly.
+    pub fn run_steps_tapes(&mut self, devices: &mut [&mut dyn Tape], budget: u64) -> DebugEvent {
+        self.run_until_tapes(devices, None, Some(budget))
     }
 
     pub fn step_over(&mut self, device: &mut dyn Tape) -> DebugEvent {
+        self.step_over_tapes(&mut [device])
+    }
+
+    /// Multi-tape `step_over` (docs/core.md (DebugSession)): the
+    /// device-set analog, mirroring `step_over` exactly.
+    pub fn step_over_tapes(&mut self, devices: &mut [&mut dyn Tape]) -> DebugEvent {
         let depth0 = self.stack.depth();
         if let Some(done) = self.gate() {
             return done;
         }
-        let event = self.advance(&mut [&mut *device]);
+        let event = self.advance(devices);
         if self.stack.depth() > depth0
             && let StepEvent::Retired = event
         {
-            return self.run_until(device, Some(depth0), None);
+            return self.run_until_tapes(devices, Some(depth0), None);
         }
         self.settle(event, PauseCause::Step)
     }
 
     pub fn step_out(&mut self, device: &mut dyn Tape) -> DebugEvent {
+        self.step_out_tapes(&mut [device])
+    }
+
+    /// Multi-tape `step_out` (docs/core.md (DebugSession)): the
+    /// device-set analog, mirroring `step_out` exactly.
+    pub fn step_out_tapes(&mut self, devices: &mut [&mut dyn Tape]) -> DebugEvent {
         let target = self.stack.depth().checked_sub(1);
         let Some(target) = target else {
             // already at the outermost frame: stepping out = run to end
-            return self.continue_(device);
+            return self.continue_tapes(devices);
         };
-        self.run_until(device, Some(target), None)
+        self.run_until_tapes(devices, Some(target), None)
     }
 
     /// Shared engine: run until (a) depth ≤ `until_depth`, (b) a
@@ -243,9 +288,9 @@ impl<'a> DebugSession<'a> {
     /// runs dry, or (e) the program finishes/traps. Breakpoints are not
     /// checked before the first instruction of a resume (a paused-at-
     /// breakpoint session must move past it).
-    fn run_until(
+    fn run_until_tapes(
         &mut self,
-        device: &mut dyn Tape,
+        devices: &mut [&mut dyn Tape],
         until_depth: Option<usize>,
         mut budget: Option<u64>,
     ) -> DebugEvent {
@@ -259,7 +304,7 @@ impl<'a> DebugSession<'a> {
             return DebugEvent::Paused(PauseCause::Manual);
         }
         loop {
-            let event = self.advance(&mut [&mut *device]);
+            let event = self.advance(devices);
             match event {
                 StepEvent::Retired => {
                     if let Some(target) = until_depth
@@ -494,5 +539,133 @@ mod tests {
             DebugEvent::Paused(PauseCause::Trap(Trap::StackUnderflow))
         );
         assert_eq!(s.ip(), 0);
+    }
+
+    #[test]
+    fn mr_and_set_mr_expose_the_general_register() {
+        let mut s = session(&[0x01, 0x02]);
+        assert_eq!(s.mr(), 0);
+        assert!(!s.mf());
+        s.set_mr(5);
+        assert_eq!(s.mr(), 5);
+        assert!(s.mf()); // mf() is the mr() != 0 view
+        s.set_mf(false);
+        assert_eq!(s.mr(), 0); // set_mf/set_mr write the SAME one register
+    }
+
+    #[test]
+    fn set_mf_flips_what_a_check_shaped_instruction_reads() {
+        // nop; jm +1 (0x09, taken when mf); halt; stop
+        let code = &[0x01, 0x09, 0x01, 0x00, 0x00, 0x00, 0x03, 0x02];
+
+        // The tape's marked head cell would naturally latch mf=true on the
+        // first step; set_mf(false) overrides it, so the jm falls through
+        // to the halt instead of jumping over it.
+        let mut s = session(code);
+        let mut tape = InfiniteTape::from_cells([true], 0, 0);
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Paused(PauseCause::Step));
+        assert!(s.mf()); // the initial-mark latch set it, naturally
+        s.set_mf(false);
+        assert!(!s.mf());
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Paused(PauseCause::Step));
+        assert_eq!(s.ip(), 6); // fell through to the halt
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Finished(Outcome::Halted));
+
+        // Symmetric case: a blank tape naturally latches mf=false;
+        // set_mf(true) overrides it, so the jm now jumps over the halt.
+        let mut s = session(code);
+        let mut tape = InfiniteTape::new();
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Paused(PauseCause::Step));
+        assert!(!s.mf());
+        s.set_mf(true);
+        assert!(s.mf());
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Paused(PauseCause::Step));
+        assert_eq!(s.ip(), 7); // jumped over the halt
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Finished(Outcome::Stopped));
+    }
+
+    #[test]
+    fn poke_under_the_head_leaves_mf_unchanged_mid_session() {
+        // right+latch; stop
+        let mut s = session(&[0x06, 0x02]);
+        let mut tape = InfiniteTape::from_cells([false, true], 0, 0);
+        assert_eq!(s.step_in(&mut tape), DebugEvent::Paused(PauseCause::Step));
+        assert!(s.mf()); // right onto the marked cell latched mf=true
+        let head = tape.head();
+        tape.poke(head, 0).unwrap(); // poke the cell UNDER the head
+        assert!(s.mf()); // poke never touches core state, so mf is untouched
+    }
+
+    #[test]
+    fn continue_tapes_drives_two_devices_like_continue() {
+        // nop; brk; nop; stop
+        let mut s = session(&[0x01, 0x04, 0x01, 0x02]);
+        let mut t0 = InfiniteTape::new();
+        let mut t1 = InfiniteTape::new();
+        let mut devs: [&mut dyn super::Tape; 2] = [&mut t0, &mut t1];
+        assert_eq!(
+            s.continue_tapes(&mut devs),
+            DebugEvent::Paused(PauseCause::Brk)
+        );
+        assert_eq!(s.ip(), 2); // paused AFTER the brk instruction retired
+        assert_eq!(
+            s.continue_tapes(&mut devs),
+            DebugEvent::Finished(Outcome::Stopped)
+        );
+    }
+
+    #[test]
+    fn run_steps_tapes_budget_pauses_manual() {
+        let mut s = session(&[0x01, 0x01, 0x01, 0x02]);
+        let mut t0 = InfiniteTape::new();
+        let mut t1 = InfiniteTape::new();
+        let mut devs: [&mut dyn super::Tape; 2] = [&mut t0, &mut t1];
+        assert_eq!(
+            s.run_steps_tapes(&mut devs, 2),
+            DebugEvent::Paused(PauseCause::Manual)
+        );
+        assert_eq!(s.stats().steps, 2);
+        assert_eq!(
+            s.run_steps_tapes(&mut devs, 10),
+            DebugEvent::Finished(Outcome::Stopped)
+        );
+    }
+
+    #[test]
+    fn step_over_tapes_runs_the_call_to_completion() {
+        // 0: call +2 -> 7; 5: nop; 6: stop; 7: ent; 8: nop; 9: ret
+        let code = &[0x0A, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02, 0x0E, 0x01, 0x0B];
+        let mut s = session(code);
+        let mut t0 = InfiniteTape::new();
+        let mut t1 = InfiniteTape::new();
+        let mut devs: [&mut dyn super::Tape; 2] = [&mut t0, &mut t1];
+        assert_eq!(
+            s.step_over_tapes(&mut devs),
+            DebugEvent::Paused(PauseCause::Step)
+        );
+        assert_eq!(s.ip(), 5); // back on the nop after the call
+        assert_eq!(s.depth(), 0);
+    }
+
+    #[test]
+    fn step_out_tapes_returns_to_the_caller() {
+        // 0: call +2 -> 7; 5: nop; 6: stop; 7: ent; 8: nop; 9: ret
+        let code = &[0x0A, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02, 0x0E, 0x01, 0x0B];
+        let mut s = session(code);
+        let mut t0 = InfiniteTape::new();
+        let mut t1 = InfiniteTape::new();
+        let mut devs: [&mut dyn super::Tape; 2] = [&mut t0, &mut t1];
+        assert_eq!(
+            s.step_in_tapes(&mut devs),
+            DebugEvent::Paused(PauseCause::Step)
+        );
+        assert_eq!(s.ip(), 7); // paused at the callee's ent
+        assert_eq!(s.depth(), 1);
+        assert_eq!(
+            s.step_out_tapes(&mut devs),
+            DebugEvent::Paused(PauseCause::Step)
+        );
+        assert_eq!(s.depth(), 0);
+        assert_eq!(s.ip(), 5);
     }
 }
