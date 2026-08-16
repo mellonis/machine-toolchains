@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use mtc_turing_machine::cli::execute;
 
@@ -8,11 +9,22 @@ fn args(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
+/// A fresh, per-call scratch directory under `CARGO_TARGET_TMPDIR`, named
+/// uniquely by process id + an atomic counter (the `lint_programs.rs`
+/// pattern). A bare per-test-name subdirectory is unique across call sites
+/// within one process but NOT across processes: two concurrent test
+/// invocations sharing the same `CARGO_TARGET_TMPDIR` would resolve it to
+/// the same directory, and the `remove_dir_all` below would delete the
+/// other invocation's in-flight build artifacts. The remove still matters
+/// with unique names — `CARGO_TARGET_TMPDIR` persists across runs and pids
+/// recycle, so a stale artifact from an earlier pass could otherwise
+/// satisfy a file-existence assertion after the code that writes it has
+/// broken.
 fn scratch(name: &str) -> PathBuf {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    // CARGO_TARGET_TMPDIR persists across `cargo test` runs, so a stale
-    // artifact from an earlier pass could satisfy a file-existence
-    // assertion after the code that writes it has broken. Start clean.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("build-{name}-{}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
