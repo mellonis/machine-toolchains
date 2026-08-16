@@ -222,6 +222,16 @@ fn tail_merge_still_fires_in_the_volatile_column() {
     assert_eq!(count(&volatile_without(src, "tail-merge"), "wr"), 2);
 }
 
+#[test]
+fn tail_sink_still_fires_in_the_volatile_column() {
+    // Both arms' trailing `right; right;` are the same instruction
+    // whichever arm ran — sinking them into the shared join drops the
+    // duplicate static copy without touching any executed access.
+    let src = "main() {\n    check(1, 2);\n1:  mark;\n    right;\n    right;\n    goto 3;\n2:  left;\n    right;\n    right;\n3:  unmark;\n}\n";
+    assert_eq!(count_moves(&volatile(src)), 3, "{}", volatile(src));
+    assert_eq!(count_moves(&volatile_without(src, "tail-sink")), 5);
+}
+
 // ----------------------------------------------------------- drift guard
 
 #[test]

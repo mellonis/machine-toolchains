@@ -494,6 +494,28 @@ fn tail_merge_shares_the_stp_exactly_as_the_spec_promises() {
 }
 
 #[test]
+fn tail_sink_shares_the_common_suffix_and_preserves() {
+    // Both arms' trailing `right; right;` are the same instruction on
+    // either path — sinking them past the join shrinks the object while
+    // every tape observable stays exactly what -O0 produces.
+    let src = "main() {\n    check(1, 2);\n1:  mark;\n    right;\n    right;\n    goto 3;\n2:  left;\n    right;\n    right;\n3:  unmark;\n}\n";
+    let (o0, o1) = assert_equivalent(src, TAPES);
+    assert!(o1 < o0, "sinking must shrink: {o0} -> {o1}");
+}
+
+#[test]
+fn tail_sink_leaves_a_third_check_edge_into_the_join_untouched() {
+    // A dynamically-reachable bypass: when the first `right` lands on a
+    // blank cell, the outer check jumps straight to the join (label 5),
+    // never touching A/B's suffix. If tail-sink ever sank A/B's `right;
+    // right;` into the join anyway, the bypass path would pick up two
+    // moves it never performed at -O0 — an observable divergence in
+    // final head position on exactly the tapes that take the blank arm.
+    let src = "main() {\n    right;\n    check(1, 5);\n1:  right;\n    check(2, 3);\n2:  mark;\n    right;\n    right;\n    goto 5;\n3:  left;\n    right;\n    right;\n    goto 5;\n5:  unmark;\n}\n";
+    assert_equivalent(src, TAPES);
+}
+
+#[test]
 fn flagship_is_untouched_by_the_6b_passes() {
     // FLAGSHIP must not move under the tail-call/tail-merge passes: no
     // calls, no duplicate blocks, no empty-return adjacency (b0 ends

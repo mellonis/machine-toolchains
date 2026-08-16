@@ -50,6 +50,7 @@ pub mod jump_threading;
 pub mod move_elim;
 pub mod tail_call;
 pub mod tail_merge;
+pub mod tail_sink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
@@ -96,6 +97,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("jump-threading", jump_threading::run),
     ("cell-state", cell_state::run),
     ("branch-fold", branch_fold::run),
+    ("tail-sink", tail_sink::run),
     ("tail-call", tail_call::run),
     ("tail-merge", tail_merge::run),
     ("dce", dce::run),
@@ -152,11 +154,17 @@ pub fn pass_names() -> Vec<&'static str> {
 ///   access, so eliminating the pair drops two accesses — sound or not,
 ///   that is exactly what a volatile build must never do.
 ///
-/// The remaining six only rewire control flow between accesses they leave
-/// untouched (`check-fold`, `jump-threading`, `tail-call`, `tail-merge`,
-/// `inline`) or delete code that never runs (`dce`), so they keep running
-/// in the volatile column. Every verdict here, gated and clean alike, is
-/// pinned by a test in tests/gated_passes.rs.
+/// The remaining seven only rewire control flow between accesses they
+/// leave untouched (`check-fold`, `jump-threading`, `tail-call`,
+/// `tail-merge`, `inline`) or delete or relocate code that never adds,
+/// drops, merges, splits, or reorders an access on any executed path
+/// (`dce`, `tail-sink`), so they keep running in the volatile column.
+/// `tail-sink` sinks an arm-suffix shared by both jump preds of a join
+/// block down into that join: every path still performs the exact same
+/// accesses in the exact same order, whichever arm it took to get there —
+/// only the static copy count shrinks, never the dynamic access sequence.
+/// Every verdict here, gated and clean alike, is pinned by a test in
+/// tests/gated_passes.rs.
 pub fn gated_pass_names() -> &'static [&'static str] {
     &["cell-state", "branch-fold", "fuse-tape-ops", "move-elim"]
 }
