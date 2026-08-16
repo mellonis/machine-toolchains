@@ -8,6 +8,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 pub mod asm;
 #[cfg(feature = "std")]
+pub mod dap;
+#[cfg(feature = "std")]
 pub mod diagnostics;
 #[cfg(feature = "std")]
 pub mod formats;
