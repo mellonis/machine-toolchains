@@ -33,20 +33,33 @@ pub trait Tape {
     /// itself faults, so a caller (a DAP adapter setting a variable, say)
     /// never leaves the head displaced by a failed probe. `pos` is in the
     /// same coordinate space `head()` reports.
+    ///
+    /// On a wrap-bounded tape (e.g. `AnnularTape`) a `pos` outside the
+    /// ring can never be landed on: walking one lap returns to the
+    /// starting head position without ever equalling `pos`. That lap
+    /// closing is the failure signal — it means the head is already back
+    /// where it started, so `poke` returns
+    /// `Err(DeviceFault::PositionUnreachable { pos })` directly, with no
+    /// separate walk-back needed.
     fn poke(&mut self, pos: i64, index: u32) -> Result<(), DeviceFault> {
         let origin = self.head();
-        while self.head() < pos {
-            self.right();
-        }
-        while self.head() > pos {
-            self.left();
+        while self.head() != pos {
+            if self.head() < pos {
+                self.right();
+            } else {
+                self.left();
+            }
+            if self.head() == origin {
+                return Err(DeviceFault::PositionUnreachable { pos });
+            }
         }
         let result = self.write(index);
-        while self.head() < origin {
-            self.right();
-        }
-        while self.head() > origin {
-            self.left();
+        while self.head() != origin {
+            if self.head() < origin {
+                self.right();
+            } else {
+                self.left();
+            }
         }
         result
     }
@@ -55,7 +68,7 @@ pub trait Tape {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::devices::{InfiniteTape, StrictTape};
+    use crate::vm::devices::{AnnularTape, InfiniteTape, StrictTape};
 
     #[test]
     fn poke_writes_the_target_cell_and_restores_head() {
@@ -78,5 +91,20 @@ mod tests {
         // strict-cell violation.
         assert_eq!(tape.poke(4, 0), Err(DeviceFault::StrictCellViolation));
         assert_eq!(tape.head(), -2); // restored despite the fault
+    }
+
+    #[test]
+    fn poke_out_of_range_on_an_annular_tape_reports_unreachable_and_restores_head() {
+        // AnnularTape's head() is always in 0..size — a pos outside that
+        // ring can never be landed on by walking left()/right().
+        let mut tape = AnnularTape::new(4);
+        tape.right();
+        tape.right(); // head at 2, away from 0 to make the restore visible
+        assert_eq!(tape.head(), 2);
+        assert_eq!(
+            tape.poke(100, 1),
+            Err(DeviceFault::PositionUnreachable { pos: 100 })
+        );
+        assert_eq!(tape.head(), 2); // head restored despite the failed walk
     }
 }

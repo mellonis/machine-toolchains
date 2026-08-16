@@ -3,9 +3,20 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceFault {
-    IndexOutsideAlphabet { index: u32 },
+    IndexOutsideAlphabet {
+        index: u32,
+    },
     StrictCellViolation,
-    NoSuchDevice { dev: u8 },
+    NoSuchDevice {
+        dev: u8,
+    },
+    /// `Tape::poke`'s target `pos` is not reachable by walking `left()`/
+    /// `right()` from the head's starting position — a full lap returned
+    /// to the start without ever landing on `pos` (a wrap-bounded tape,
+    /// e.g. `AnnularTape`, polled with a `pos` outside its ring).
+    PositionUnreachable {
+        pos: i64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
