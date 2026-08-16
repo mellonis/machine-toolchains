@@ -29,9 +29,11 @@ Goals, in one line each:
 
 1. TM: dispatch-target threading inside `jump_threading` (#32).
 2. PM: `move_elim` — inverse-move-pair elimination with MF reasoning.
-3. TM: `dead_rows` widening to wildcard-aware vector dominance.
+3. TM: `dead_rows` identical-effect subsumption (scope corrected by C2 —
+   see the corrections block in §3).
 4. PM: `tail_sink` — identical arm suffixes sink past the `check` join.
-5. Both: inline threshold tuning via a measured sweep.
+5. Both: inline threshold tuning via a measured sweep (axes corrected by
+   C3).
 
 **Deferred to its own round:** dead-write elimination via liveness — the
 survey's "real missing pass". It needs the read-set substrate (the
@@ -81,6 +83,27 @@ definition of being the unoptimized floor.
 **R3 — inline tuning is a measured sweep with a mechanical decision
 rule** (§9), not a constant bump and not a size-neutral-only rule.
 
+**Corrections C1–C3, ruled 2026-08-16 after the code reading that opened
+plan-writing.** Three of the spec's assumptions did not survive contact
+with the implementation; each correction was approved explicitly:
+
+- **C1** — the trampoline is a codegen artifact, not an IR edge: a rule's
+  transition already names its destination state directly, and state-level
+  forwarder threading with cycle protection already exists in
+  `jump_threading`. §5 is amended to the hint-based mechanism (the
+  `dispatch_select` precedent); `TM_IR_VERSION` bumps 2 → 3. R2's spirit
+  stands: the decision lives in the pass.
+- **C2** — the spec'd `dead_rows` widening is vacuous: the pass already
+  does full vector dominance with wildcards, and same-band is *provably*
+  the whole sound subset for pairwise dead-row cover (a coverer has ≥
+  wildcards, so it is never in an earlier band; a later-band coverer
+  cannot kill a row that fires first). Item 3 is replaced by
+  **identical-effect subsumption** (§6).
+- **C3** — the sweep's call-site policy axis does not exist: PM already
+  inlines any-size callees at a single call site (`ops ≤ 6 OR single
+  site`), and TM already inlines eligible leaf callees at every site
+  (`leaf ∧ rules ≤ 6`). §9 is amended to a cap-only sweep.
+
 ## 4. Born-under contracts
 
 Every pass born or extended in this round starts life under three
@@ -110,54 +133,79 @@ reached through a table entry is invisible to it. On the flagship run of
 executed `jmp` each (~5% of total steps); hand-written `.tma` names
 destinations directly in `.targets` and pays nothing.
 
-**The extension.** Teach the pass that a dispatch-table entry is one more
-kind of edge it may retarget:
+**The mechanism (as corrected by C1).** In the IR a rule's transition
+already names its destination state; the stub exists only in codegen's
+emission. The fix is therefore a lowering hint, exactly the
+`dispatch_select`/`IrDispatch` precedent:
 
-- A dispatch entry whose rule is bare gets retargeted at the destination
-  state's body. Chains (`A → B → C` where B is itself bare) follow to a
-  fixpoint with a visited set; a bare self-loop or goto-cycle is left
-  untouched (an intentional infinite loop must not spin the pass).
-- A rule carrying a `debugger` lowers to a `brk`+`jmp` stub — not bare,
-  excluded by construction. This is contract 4.1 restated for table
-  entries.
-- Trap targets and synthesized trap rows are not bare jumps and are never
-  touched.
+- `IrRule` gains a serialized `direct: bool` field (serde-default
+  `false`; `TM_IR_VERSION` 2 → 3). `validate_world` enforces that
+  `direct` appears only on a **bare** rule: `write == None ∧ moves ==
+  None ∧ !debugger ∧ transition == Goto`.
+- `jump_threading` (after its existing forwarder-state resolution, which
+  already collapses chains and preserves cycles) marks every bare rule
+  `direct = true`, counting newly-marked rules as its changes.
+- Codegen, seeing `direct`, emits the destination *state's* label as the
+  dispatch-table entry (and as the `jm` target in the `Branch` arm) and
+  skips emitting the rule's stub block entirely.
+- A rule carrying a `debugger` is not bare — its stub keeps the `brk`.
+  This is contract §4.1 restated for table entries. Trap transitions and
+  synthesized rows are not `Goto` and are never marked.
 
-**Downstream interplay.** Orphaned stubs fall to `dce`. `dispatch_select`
-runs after `jump_threading` and sees final targets, so its `jm` lowering
-benefits. The composition engine is label-agnostic — threading happens in
-IR, before `.targets`/`.exits` are emitted — and the everything-matrix
-(`-O0`/`-O1` × mono/frames/hybrid, trap kinds included) is the standing
-proof. The `.rept` re-detection emitter's assemble-both self-check guards
-the changed `-S` text; the flagship's pinned `-S` fixture regenerates
-with the change documented in the ledger.
+**Downstream interplay.** No orphan cleanup is needed — the stub is
+simply not emitted. `dispatch_select` composes: its `Branch` arm consumes
+the same hint. The composition engine is label-agnostic (the hint is
+resolved before `.targets`/`.exits` are emitted), and the
+everything-matrix (`-O0`/`-O1` × mono/frames/hybrid, trap kinds included)
+is the standing proof. The `.rept` re-detection emitter's assemble-both
+self-check guards the changed `-S` text; the flagship's pinned `-S`
+fixture regenerates with the change documented in the ledger. `-O0` and
+`--fno-jump-threading` builds never set the hint, so their emitted text
+is untouched.
 
 **Flags.** No new pass name: `--fno-jump-threading` switches the new
 behavior off with the old.
 
-## 6. TM: `dead_rows` vector-dominance widening (item 3)
+## 6. TM: `dead_rows` identical-effect subsumption (item 3, as corrected by C2)
 
-**Today** the pass removes a match row only when an earlier row in the
-same band covers it. **The widening:** row R dies when a single
-earlier-evaluated row S dominates it vectorwise — for every tape k,
-`S[k]` is the wildcard or equals a concrete `R[k]`.
+**Why the original item dissolved.** The pass already computes full
+vector dominance with wildcards; its same-band restriction is a proof,
+not a limitation (see C2 in §3). What remains sound and useful is the
+*other* direction: deleting a more-specific row that a later covering row
+would handle **identically**.
 
-**The band-order trap.** "Earlier" means **match-evaluation order, not
-source order**. Band dispatch keeps exact/partial rows after a catch-all
-reachable — the same fact that keeps the `unreachable-rule` compile
-warning deliberately narrow — so dominance may only be claimed where band
-priority proves S is actually evaluated before R. The implementation
-derives the precise evaluation-order model from the `mtc` lowering
-(`docs/tmt/isa.md`) and pins it with tests, including the mandatory
-negative: an exact row after a catch-all survives.
+**The rule.** Within one state, delete row R when a later-evaluated row W
+exists such that:
 
-**Lint relationship, intentional asymmetry.** The compile warning stays
-narrow (author-facing, low false positives); the optimizer removes the
-strictly wider provable set. Both docs state the asymmetry.
+1. W covers R cell-wise (per tape: wildcard, or the same concrete index);
+2. W's effect on R's inputs is identical to R's — per tape, the
+   normalized write cells are equal (`None` normalizes to all-`Keep`),
+   *or* R's pattern cell is `Index(a)` and one side writes `Keep` while
+   the other writes `Index(a)` (writing the matched symbol back equals
+   keeping it, on exactly R's inputs); normalized moves equal (`None` =
+   all-`Stay`); transitions equal;
+3. neither R nor W carries `debugger` (deleting R would elide R's
+   reachable pause; W carrying one would *add* a pause on R's inputs);
+4. **no intermediate capture**: every row M strictly between R and W in
+   the emitted evaluation order is disjoint from R's pattern (some tape
+   has different concrete indices) — otherwise R's inputs would fall to
+   M, not W, after the deletion.
 
-**Contracts.** Removed rows never fired: no volatile interaction, no
-`brk` question — their action blocks are unreachable code and fall to
-`dce`. No new flag; `--fno-dead-rows` covers the widening.
+**Evaluation order without drift.** The emitted order is codegen's
+re-banding (`[exact, sorted] ++ [partial, source] ++ [catch-all,
+source]`). The pass must use the *same* order codegen uses, so the
+banding computation is extracted into one shared helper both call —
+duplicating it would invite silent divergence.
+
+**Effect.** Match tables shrink (fewer rows for `mtc` to walk, smaller
+images) and two-row shapes surface for `dispatch_select`. Deleting R
+makes W fire on R's inputs — observably identical by construction, which
+is precisely what the equivalence matrix re-verifies.
+
+**Contracts.** Condition 3 is the `brk` barrier; volatile bands are
+untouched (the dynamic access sequence on R's inputs is identical under
+W). No new flag; `--fno-dead-rows` covers the subsumption. The module's
+union-cover "recorded trigger" note stays as is.
 
 ## 7. PM: `move_elim` (item 2)
 
@@ -229,8 +277,12 @@ guard consequences as `move_elim`.
 
 ## 9. Inline threshold sweep (item 5)
 
-**Current constants, both sides:** callee ≤ 6 ops/rows, single call site
-only. Both were chosen conservatively, not measured.
+**Current policies (as corrected by C3):** PM inlines a callee when
+`ops ≤ INLINE_MAX_OPS (= 6)` **or** it has a single call site
+module-wide (any size); TM inlines a **leaf** routine when
+`rules ≤ INLINE_MAX_RULES (= 6)`, at every call site. The caps were
+chosen conservatively, not measured; the policy structures are not under
+test in this round.
 
 **Harness.** One `#[ignore]`d measurement harness per the house explicit-
 run convention, in-tree so it is repeatable. It compiles the corpus at
@@ -241,13 +293,11 @@ the baseline comparison). Corpus: the UTM flagship on the pinned
 golden programs on their committed inputs. Metrics per configuration:
 total executed steps, image bytes, instruction count.
 
-**Axes, kept small:** size cap ∈ {6, 12, 24} × call-site policy ∈
-{single-site only, multi-site for callees within the cap} — six
-configurations per side, PM and TM swept independently (per-crate
-constants; TM's `inline` remains the sound superset of the engine
-collapse under every configuration). Multi-site inlining often nets zero
-size growth for tiny callees: once all sites are inlined the callee falls
-to `dce`.
+**Axes (cap-only, per C3):** size cap ∈ {6, 12, 24}, PM and TM swept
+independently — six configurations total. Each side's existing policy
+structure (PM's single-site escape, TM's leaf-only constraint and
+every-site splicing) stays untouched; TM's `inline` remains the sound
+superset of the engine collapse under every configuration.
 
 **Decision rule (mechanical, ruled R3):** pick the configuration with the
 best corpus-wide step total, subject to image growth ≤ 5% over the
@@ -290,11 +340,15 @@ aggressive swept configuration.
   (`-O0`/`-O1` × mono/frames/hybrid incl. trap kinds) remains the
   behavioral proof.
 - **Per-pass targeted tests:**
-  - threading: bare rule, chain, cycle guard, debugger-rule exclusion,
-    trap rows untouched;
-  - `dead_rows`: vector-dominance positives, the band-order negative
-    (exact row after a catch-all survives), wildcard asymmetry (S
-    concrete where R is wildcard does not dominate);
+  - threading: bare rule marked, debugger rule not marked, non-`Goto`
+    transitions not marked, `validate_world` rejects `direct` on a
+    non-bare rule; codegen consumption — `.targets` names the state
+    label, the stub block is absent, the `Branch` arm's `jm` targets the
+    state label, `-O0` text byte-unchanged;
+  - `dead_rows` subsumption: the plain positive, the
+    Keep/`Index(matched)` write-equivalence positive, the
+    differing-effect negative, the intermediate-capture negative, the
+    debugger-on-either-row negative;
   - `move_elim`: both proofs positive, kept-pair negative (uncoupled +
     immediate MF read);
   - `tail_sink`: suffix shapes, the `brk` scan stop, threshold boundary,
@@ -318,7 +372,9 @@ aggressive swept configuration.
   extension, the `dead_rows` dominance widening with the band-order rule
   and the lint asymmetry note, the tuned inline constants.
 - CHANGELOG rides the next release cut per house convention; this round
-  ships on master only.
+  ships on master only. The cut's version block declares **TM IR 3**
+  (the `direct` rule field, C1); every other version space is unchanged
+  by this round.
 - #76 and #32 close when the round merges; the deferred dead-write-
   elimination pass gets its own issue at close, linking the read-set
   substrate follow-up.
