@@ -957,6 +957,73 @@ fn foutline_folds_the_shared_chains_and_is_inert_off() {
     );
 }
 
+/// Two 7-state exit-free chains whose escapes DIFFER on round 1 — the 'a'
+/// chain escapes through the empty forwarder `fwd`, the 'b' chain escapes
+/// straight to `mid` — so `outline` does not fold them on its first pass
+/// (different junctions, different canonical keys). `jump-threading` then
+/// retargets `fwd`'s inbound reference straight to `mid` in the SAME round,
+/// marking that now-retargeted bare rule `direct` (dispatch-target
+/// threading). On round 2 the two chains' junctions coincide and `outline`
+/// folds them — hoisting a region whose escape rule already carries
+/// `direct: true`. `build_routine` must clear the hint when it rewrites that
+/// escape to a `return`, or the synthesized routine fails IR validation
+/// (`direct` on a non-bare `Return` rule).
+const OUTLINE_ESCAPE_THREADED_BEFORE_THE_FOLD: &str = "\
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state pick {
+    ['a'] -> move [>] goto a1;
+    [*]   -> move [>] goto b1;
+  }
+  state a1 { [*] -> move [>] goto a2; }
+  state a2 { [*] -> move [>] goto a3; }
+  state a3 { [*] -> move [>] goto a4; }
+  state a4 { [*] -> move [>] goto a5; }
+  state a5 { [*] -> move [>] goto a6; }
+  state a6 { [*] -> move [>] goto a7; }
+  state a7 {
+    ['a'] -> goto fwd;
+    [*]   -> move [<] goto a1;
+  }
+  state b1 { [*] -> move [>] goto b2; }
+  state b2 { [*] -> move [>] goto b3; }
+  state b3 { [*] -> move [>] goto b4; }
+  state b4 { [*] -> move [>] goto b5; }
+  state b5 { [*] -> move [>] goto b6; }
+  state b6 { [*] -> move [>] goto b7; }
+  state b7 {
+    ['a'] -> goto mid;
+    [*]   -> move [<] goto b1;
+  }
+  state fwd { [*] -> goto mid; }
+  state mid { [*] -> stop; }
+}";
+
+#[test]
+fn outline_clears_direct_on_an_escape_threaded_before_the_fold() {
+    // A clean compile is the whole assertion: pre-fix, `build_routine` clones
+    // the `direct`-marked escape rule verbatim, rewrites its transition to
+    // `Return`, and leaves the hint set — an IR invariant violation that
+    // panics under `debug_assertions` (or hits codegen's `unreachable!` in
+    // release). Compiling here at `-O1` with `--foutline` must not panic.
+    let out = object_of_ex(
+        OUTLINE_ESCAPE_THREADED_BEFORE_THE_FOLD,
+        OptLevel::O1,
+        &[],
+        true,
+    );
+    let fired: Vec<&str> = out.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(
+        fired.contains(&"outline"),
+        "premise: outline must fire on this fixture: {fired:?}"
+    );
+    assert!(
+        out.ir.worlds.iter().any(|w| w.name.contains(".outline")),
+        "the hoisted routine is present"
+    );
+}
+
 // ── THE PHASE-6b MILESTONE: the full "everything × everything" matrix ─────────
 
 /// Compile the embedded stdlib SOURCE at `level` (both `brk`-stripped), for the

@@ -436,12 +436,19 @@ fn build_routine(w: &IrWorld, members: &[u32], name: &str) -> IrWorld {
         st.id = l as u32;
         for r in &mut st.rules {
             match &r.transition {
-                IrTransition::Goto { state } => {
-                    r.transition = match local.get(state) {
-                        Some(&ln) => IrTransition::Goto { state: ln },
-                        None => IrTransition::Return, // escape → the routine returns
-                    };
-                }
+                IrTransition::Goto { state } => match local.get(state) {
+                    Some(&ln) => r.transition = IrTransition::Goto { state: ln },
+                    None => {
+                        // Escape → the routine returns. `direct` (the
+                        // dispatch-target-threading hint, jump_threading.rs)
+                        // is valid only on a bare `Goto`; clear it here so a
+                        // `direct`-marked escape doesn't survive as an
+                        // invalid `Return`. `jump_threading` re-marks any
+                        // surviving bare `goto` in a later round.
+                        r.transition = IrTransition::Return;
+                        r.direct = false;
+                    }
+                },
                 _ => unreachable!("region states are exit-free"),
             }
         }
