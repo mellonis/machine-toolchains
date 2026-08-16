@@ -15,6 +15,7 @@
 //! the do-no-harm floor (`-O1` with every pass disabled reproduces `-O0`
 //! byte-for-byte), and per-pass fixtures added as passes land.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -995,11 +996,21 @@ fn stdlib_object_bytes(level: OptLevel) -> Vec<u8> {
 ///
 /// **Part B — the stdlib DO-NO-HARM floor.** The embedded standard library is
 /// a second, DISTINCT kind of evidence. Its routines are hand-written to be
-/// already-optimal, so `-O1` finds nothing to change: the compiled stdlib
-/// object is BYTE-IDENTICAL at `-O0` and `-O1`. That is a do-no-harm
+/// already-optimal, so `-O1` changes nothing a HUMAN could have written
+/// differently: the one exception is dispatch-target threading
+/// (`jump_threading`'s `direct` marking — docs/tmt/optimizer.md
+/// (dispatch-target threading)), which fires universally on any bare rule
+/// behind a dispatch table and removes a pure codegen artifact (a stub block
+/// that only ever contained a `jmp`) no `.tmc` source can avoid by being
+/// better-written. So the floor is now two checks instead of one byte
+/// comparison: every fired pass names `jump-threading` (no OTHER pass finds
+/// slack in the source), and the object strictly SHRINKS (the stub removal is
+/// pure overhead, never a behavior change — the stdlib's full behavioral 2×3
+/// matrix, next, is what actually proves that). This is a do-no-harm
 /// confirmation (the optimizer runs the stdlib as its first live workload and
-/// leaves it untouched), NOT a pass exercise — no stdlib routine drives a
-/// pass. The stdlib's full behavioral 2×3 matrix (every routine × O0/O1 × the
+/// finds only the one universal codegen win), NOT a pass exercise — no
+/// stdlib routine is written to specifically DRIVE a pass. The stdlib's full
+/// behavioral 2×3 matrix (every routine × O0/O1 × the
 /// three mechs — 132 runs, derivation-first) already lives in
 /// `stdlib_golden.rs`; this milestone deliberately does NOT re-run it. It
 /// asserts the do-no-harm floor once here and lets the golden file own the
@@ -1131,14 +1142,39 @@ fn everything_matrix_is_green() {
         );
     }
 
-    // Part B — the stdlib do-no-harm floor: already-optimal source, so `-O1`
-    // leaves the compiled object byte-identical to `-O0`. The behavioral 2×3
-    // matrix over every routine lives in stdlib_golden.rs (132 runs) and is
-    // NOT re-run here.
+    // Part B — the stdlib do-no-harm floor (see the milestone doc above): the
+    // only pass that may find slack in the already-optimal source is
+    // dispatch-target threading, and its effect strictly shrinks the object.
+    // The behavioral 2×3 matrix over every routine lives in stdlib_golden.rs
+    // (132 runs) and is NOT re-run here.
+    let stdlib_o1 = compile(
+        stdlib::SOURCE,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            strip_debugger: true,
+            ..Default::default()
+        },
+    )
+    .expect("the embedded stdlib compiles");
+    let fired: HashSet<&str> = stdlib_o1
+        .report
+        .opt
+        .changes
+        .iter()
+        .map(|c| c.pass)
+        .collect();
     assert_eq!(
-        stdlib_object_bytes(OptLevel::O0),
-        stdlib_object_bytes(OptLevel::O1),
-        "the embedded stdlib is already-optimal: -O1 leaves it byte-identical \
-         to -O0 (do-no-harm; behavioral coverage lives in stdlib_golden.rs)"
+        fired,
+        HashSet::from(["jump-threading"]),
+        "only dispatch-target threading may find slack in the already-optimal \
+         stdlib source: {fired:?}"
+    );
+    let o0_bytes = stdlib_object_bytes(OptLevel::O0);
+    let o1_bytes = stdlib_o1.object.to_bytes();
+    assert!(
+        o1_bytes.len() < o0_bytes.len(),
+        "dispatch-target threading must shrink the stdlib object: {} -> {}",
+        o0_bytes.len(),
+        o1_bytes.len()
     );
 }
