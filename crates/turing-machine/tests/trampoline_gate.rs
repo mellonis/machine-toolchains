@@ -252,9 +252,9 @@ fn o0_flagship_still_pays_them() {
     assert!(count > 0);
 }
 
-/// The round's #32 measurements table: executed `jmp`/`djmp`/`jm`,
-/// trampolines, steps, image bytes, and instruction count at `-O0` and
-/// `-O1`, alongside the hand-written twin built the way
+/// The dispatch-target-threading measurements table: executed
+/// `jmp`/`djmp`/`jm`, trampolines, steps, image bytes, and instruction
+/// count at `-O0` and `-O1`, alongside the hand-written twin built the way
 /// `tests/golden_programs.rs` builds it. Not an assertion — a report.
 /// `cargo test -p mtc-turing-machine --test trampoline_gate measurements -- --ignored --nocapture`
 #[test]
