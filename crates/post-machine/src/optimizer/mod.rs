@@ -47,6 +47,7 @@ pub mod dce;
 pub mod fuse_tape_ops;
 pub mod inline;
 pub mod jump_threading;
+pub mod move_elim;
 pub mod tail_call;
 pub mod tail_merge;
 
@@ -98,6 +99,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("tail-call", tail_call::run),
     ("tail-merge", tail_merge::run),
     ("dce", dce::run),
+    ("move-elim", move_elim::run),
     ("fuse-tape-ops", fuse_tape_ops::run),
 ];
 
@@ -145,6 +147,10 @@ pub fn pass_names() -> Vec<&'static str> {
 /// - `fuse-tape-ops` — folds `wr x` + move into `wrl`/`wrr`, which skips
 ///   the intermediate latch read of the written cell: two transactions
 ///   become one.
+/// - `move-elim` — deletes an adjacent inverse move pair (`rgt; lft` or
+///   `lft; rgt`). A move on a volatile band is itself an observable
+///   access, so eliminating the pair drops two accesses — sound or not,
+///   that is exactly what a volatile build must never do.
 ///
 /// The remaining six only rewire control flow between accesses they leave
 /// untouched (`check-fold`, `jump-threading`, `tail-call`, `tail-merge`,
@@ -152,7 +158,7 @@ pub fn pass_names() -> Vec<&'static str> {
 /// in the volatile column. Every verdict here, gated and clean alike, is
 /// pinned by a test in tests/gated_passes.rs.
 pub fn gated_pass_names() -> &'static [&'static str] {
-    &["cell-state", "branch-fold", "fuse-tape-ops"]
+    &["cell-state", "branch-fold", "fuse-tape-ops", "move-elim"]
 }
 
 /// Run the enabled pipeline to a change-fixpoint (round-capped). `-O0`

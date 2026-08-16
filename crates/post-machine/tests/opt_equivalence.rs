@@ -115,6 +115,68 @@ fn cell_state_shrinks_and_preserves() {
 }
 
 #[test]
+fn move_elim_covers_both_proofs_and_the_kept_case() {
+    // Three functions isolate the three shapes cleanly — one function
+    // each, so every pair's OWN entry fact is genuinely Uncoupled (the
+    // function-local seed in dataflow::block_entry_facts) regardless of
+    // call order in main; inline is disabled so a spliced leaf callee
+    // never merges these blocks into one, which would let an earlier
+    // sub-case's write couple a later one's entry fact.
+    //
+    // `coupled()` starts with a write, so its pair's own fact is
+    // Coupled — proof 1. `mf_dead()` starts Uncoupled but its pair is
+    // immediately followed by a write that re-latches before any read —
+    // proof 2. `kept()` starts Uncoupled with a `debugger` (an
+    // observer) right after its pair, so mf_dead_after refuses and the
+    // pair stays.
+    let src = "\
+coupled() {
+    mark;
+    right;
+    left;
+}
+mfDead() {
+    right;
+    left;
+    unmark;
+}
+kept() {
+    right;
+    left;
+    debugger;
+}
+main() {
+    @coupled();
+    @mfDead();
+    @kept();
+    mark;
+}
+";
+    let o0 = build(src, OptLevel::O0);
+    let out1 = compile(
+        src,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            disabled_passes: vec!["inline".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let o1 = link(&[out1.object], &[], LinkOptions::default())
+        .unwrap()
+        .executable;
+    for (cells, head) in TAPES {
+        let r0 = run_tape(&o0, cells, *head);
+        let r1 = run_tape(&o1, cells, *head);
+        assert_eq!(r0, r1, "tape {cells:?}/{head}");
+    }
+    // Derivation: coupled()'s pair (proof 1) and mfDead()'s pair
+    // (proof 2) both go — 4 fewer move bytes (2 pairs, 1 byte each for
+    // `rgt`/`lft`) than -O0; kept()'s pair survives untouched.
+    assert_eq!((o0.code.len(), o1.code.len()), (27, 23));
+}
+
+#[test]
 fn brk_barrier_blocks_elimination() {
     let (o0, o1) = assert_equivalent("main() { mark; debugger; mark; }", TAPES);
     assert_eq!(o0, o1, "no elimination across an observability barrier");
