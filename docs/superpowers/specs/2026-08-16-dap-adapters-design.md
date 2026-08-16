@@ -90,7 +90,10 @@ One internal launch struct, two config shapes:
   prebuilt artifacts used as-is. A sidecar without line info degrades
   honestly: breakpoints answer `verified: false` with a
   "build with -g" message; stepping falls back to instruction
-  granularity.
+  granularity. A hand-assembled program's `-g` line table carries the
+  assembly's own lines, so breakpoints and stepping in the `.pma`/
+  `.tma` file itself work for free — the compiled path's source remap
+  (`remap_debug_lines`) is what redirects them to `.pmc`/`.tmc` lines.
 - **Tape resolution** reuses the `run`/`build --run` rules, shared, not
   reimplemented: TM requires a tape block (no empty-tape default — a TM
   launch without one is a clean launch-time error); PM defaults to the
@@ -102,10 +105,31 @@ One internal launch struct, two config shapes:
 ## 5. Protocol surface and the run loop
 
 **v1 commands:** `initialize`, `launch`, `setBreakpoints`,
-`configurationDone`, `threads`, `stackTrace`, `scopes`, `variables`,
-`setVariable`, `continue`, `next`, `stepIn`, `stepOut`, `pause`,
-`disconnect`. **v1 events:** `initialized`, `stopped`, `output`,
-`terminated`, `exited`.
+`setInstructionBreakpoints`, `configurationDone`, `threads`,
+`stackTrace`, `scopes`, `variables`, `setVariable`, `continue`, `next`,
+`stepIn`, `stepOut`, `pause`, `disassemble`, `disconnect`.
+**v1 events:** `initialized`, `stopped`, `output`, `terminated`,
+`exited`. **v1 capabilities declared:** `supportsSetVariable`,
+`supportsSteppingGranularity`, `supportsDisassembleRequest`,
+`supportsInstructionBreakpoints` (everything else false).
+
+**Stepping granularity.** `DebugSession` steps instructions; DAP's
+default `next`/`stepIn` means "advance one source line". Line
+granularity therefore repeats the underlying session step until the
+address's mapped source line changes — honestly interrupted by any
+breakpoint, `brk`, or trap encountered on the way (that pause wins and
+reports its own reason). `granularity: "instruction"` — which VS Code
+sends automatically when its Disassembly view is focused — maps to a
+single session step. `stepOut` is depth-based either way. A `-g`-less
+build is instruction-granularity throughout.
+
+**The Disassembly view.** `disassemble` renders instruction ranges via
+the same core `listing_line` renderer `dis` and `run --trace` already
+use, with sidecar label resolution; stack frames carry
+`instructionPointerReference`, so the client's Disassembly view
+highlights the current instruction and tracks every step.
+`setInstructionBreakpoints` maps the view's breakpoint gutter directly
+onto the session's address breakpoints.
 
 **The run loop — one extra thread, total.** A reader thread owns stdin,
 decoding framed messages onto an `std::sync::mpsc` channel (no new
@@ -236,7 +260,13 @@ LSP4IJ/platform support there.
   (poke visible on re-read, the `StrictTape` failed-set path,
   unknown-glyph rejection, MF/MR set + `IP` rejected);
   line-breakpoint verification incl. `-g`-less degradation;
-  step in/over/out against a known call shape; `stopOnEntry`; the
+  step in/over/out against a known call shape; line-vs-instruction
+  granularity (a line step collapses several instructions; an
+  instruction step advances exactly one; a breakpoint mid-line-step
+  wins and reports its own reason); `disassemble` payloads matching
+  `listing_line` output with the frame's
+  `instructionPointerReference` resolvable in them;
+  `setInstructionBreakpoints` round-trip; `stopOnEntry`; the
   trace stream; termination summary + exit codes across
   `stp`/`hlt`/trap programs.
 - **Target-mode launch:** a manifest-fixture test proving the injected
