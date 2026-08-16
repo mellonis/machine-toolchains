@@ -34,9 +34,10 @@ fn golden_dir() -> &'static Path {
 }
 
 /// Compile `pmc` at `-O1` with `inline_cap: Some(cap)`, link against the
-/// SHIPPED embedded stdlib object (cap-independent — Task 8's plumbing
-/// note: `stdlib::object()` is cached and never sees this override, which
-/// is why the stdlib SOURCE gets its own corpus entry below).
+/// SHIPPED embedded stdlib object (cap-independent — the cap plumbing
+/// deliberately leaves the embedded stdlib object uncapped:
+/// `stdlib::object()` is cached and never sees this override, which is why
+/// the stdlib SOURCE gets its own corpus entry below).
 fn build(pmc: &str, cap: usize) -> Executable {
     let source = fs::read_to_string(golden_dir().join(pmc)).expect("golden source");
     let out = compile(

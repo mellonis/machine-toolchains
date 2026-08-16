@@ -40,7 +40,8 @@ fn tmc_example_path() -> PathBuf {
 /// (routine)): prog 9 symbols, data/out 127 each, cnt 2.
 const WIDTHS: [u32; 4] = [9, 127, 127, 2];
 
-/// The spec-pinned sweep program (spec §9 (inline threshold sweep)).
+/// The sweep program pinned by the round's ruled inline-threshold decision
+/// rule.
 const PROGRAM: &str = "++[>+++<-]>.";
 
 /// bf source → prog-tape symbol indices, plus the `'H'` sentinel (index 8)

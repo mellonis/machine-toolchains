@@ -16,7 +16,7 @@ use mtc_turing_machine::optimizer::OptLevel;
 
 /// A conditional (Table-dispatch) state with one bare rule (`-> goto s1`)
 /// and one payload rule (`write ['1'] goto s2`) — the `conditional()` codegen
-/// path this round's Task 3 changes.
+/// path the dispatch-target-threading emission changes.
 const BARE: &str = "\
 alphabet a { '_', '1' }
 machine {
