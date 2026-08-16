@@ -29,12 +29,24 @@
 //!    as dead (a latch-free, read-free cycle never reads MF on that path
 //!    either).
 //!
-//! Both proofs are evaluated once per pair, at the pair's own position,
-//! using the fact BEFORE it. After a pair is eliminated the scan
-//! continues with that SAME pre-pair fact (the pair is gone, so nothing
-//! it would have latched is available to later ops). One pair per scan
-//! position; the fixpoint driver in optimizer/mod.rs reruns the pass for
-//! cascades an earlier deletion exposes.
+//! Both proofs are evaluated at the pair's own position, using the fact
+//! BEFORE it — but `block_entry_facts` and `mf_dead_after`'s forward walk
+//! are each computed once, function-wide, at the top of `run()`, reading
+//! the ops as they stood when `run()` was CALLED. A single call therefore
+//! deletes AT MOST ONE pair — the first sound one found, in block then
+//! position order — and returns immediately: the same one-application
+//! discipline `tail_sink::run()` uses (tail_sink.rs). Deleting more than
+//! one pair per call risks a cross-block circularity two pairs in
+//! different blocks could license each other on a snapshot neither of
+//! their deletions has actually happened against yet: pair A deleted as
+//! MF-dead, relying on pair B's own leading op as the re-latch witness;
+//! pair B deleted as already-`Coupled`, where that coupling fact was
+//! produced by pair A. Each proof holds against the pre-deletion IR in
+//! isolation, but applying both AT ONCE would leave neither witness
+//! standing. The fixpoint driver in optimizer/mod.rs reruns the pass with
+//! FRESH facts after every deletion, so each decision is always checked
+//! against the IR as it actually stands, and a run with no cascades still
+//! converges in as many rounds as it has pairs.
 //!
 //! # Gated in the volatile column
 //!
@@ -105,8 +117,13 @@ pub fn run(f: &mut IrFunction) -> u32 {
         .enumerate()
         .map(|(i, b)| (b.id, i))
         .collect();
-    let mut deletions: Vec<(usize, usize)> = Vec::new(); // (block idx, op idx of pair start)
-    for (bi, b) in f.blocks.iter().enumerate() {
+
+    // Find the FIRST sound deletion, in block then position order, and stop
+    // — see the module doc for why a call may license only one (the
+    // cross-block circularity a batch of deletions checked against one
+    // stale snapshot risks).
+    let mut found: Option<(usize, usize)> = None; // (block idx, op idx of pair start)
+    'search: for (bi, b) in f.blocks.iter().enumerate() {
         let Some(&entry) = entry_facts.get(&b.id) else {
             continue; // unreachable block
         };
@@ -117,22 +134,20 @@ pub fn run(f: &mut IrFunction) -> u32 {
                 let sound = matches!(fact, Fact::Coupled(_))
                     || mf_dead_after(f, &index, bi, i + 2, &mut HashSet::new());
                 if sound {
-                    deletions.push((bi, i));
-                    // Skip past the eliminated pair; the scan continues
-                    // with the PRE-pair fact (the pair is gone).
-                    i += 2;
-                    continue;
+                    found = Some((bi, i));
+                    break 'search;
                 }
             }
             fact = transfer_op(fact, &b.ops[i]);
             i += 1;
         }
     }
-    let n = deletions.len() as u32;
-    for (bi, i) in deletions.into_iter().rev() {
-        f.blocks[bi].ops.drain(i..=i + 1);
-    }
-    n
+
+    let Some((bi, i)) = found else {
+        return 0;
+    };
+    f.blocks[bi].ops.drain(i..=i + 1);
+    1
 }
 
 #[cfg(test)]
@@ -221,5 +236,45 @@ mod tests {
     fn lft_rgt_order_also_matches() {
         let f = opt_fn("f() { mark; left; right; check(1, 2); 1: mark(!); 2: unmark(!); }");
         assert_eq!(f.blocks[0].ops, vec![IrOp::Wr { index: 1, line: 1 }]);
+    }
+
+    #[test]
+    fn a_cross_block_pair_no_longer_licenses_the_pair_it_depends_on() {
+        // The circularity the final review caught: block 0's pair escapes
+        // through `goto 2` into block 1, whose OWN leading `rgt` is the
+        // re-latch witness `mf_dead_after` finds for block 0's pair (proof
+        // 2). Block 1's own pair, in turn, only reaches `Coupled` at its
+        // entry because block 0's pair ran (proof 1) — the two would
+        // license each other if a single `run()` deleted both from one
+        // stale pre-deletion snapshot. One call now deletes AT MOST ONE
+        // pair: block 0's pair goes (still sound on its own), block 1's
+        // does NOT — recomputed fresh, block 1's entry fact is `Uncoupled`
+        // once block 0 is actually empty, and its own pair sits right
+        // before the `check` that reads MF, so neither proof licenses it.
+        // A second `run()` call converges at zero further deletions.
+        let src = "\
+main() {
+    right;
+    left;
+    goto 2;
+2:  right;
+    left;
+    check(3, !);
+3:  unmark;
+}
+";
+        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let f = &mut ir.functions[0];
+        assert_eq!(run(f), 1, "exactly one pair per call");
+        crate::ir::validate_function(f).unwrap();
+        assert!(f.blocks[0].ops.is_empty(), "block 0's pair is gone");
+        assert_eq!(
+            f.blocks[1].ops,
+            vec![IrOp::Rgt { line: 5 }, IrOp::Lft { line: 6 }],
+            "block 1's pair MUST survive: deleting it too would leave the \
+             `check` reading MF with no tape op left in the function to \
+             have latched it"
+        );
+        assert_eq!(run(f), 0, "converged: nothing further to delete");
     }
 }
