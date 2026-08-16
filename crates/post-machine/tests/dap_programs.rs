@@ -55,15 +55,31 @@ fn write_pmx(dir: &Path, name: &str, pma_source: &str) -> PathBuf {
 /// `launch` a real `LineIndex` so the stepping/breakpoint tests have source
 /// lines to work against.
 fn write_pmc_debug(dir: &Path, name: &str, pmc_source: &str) -> PathBuf {
-    let out = compile(
-        pmc_source,
-        CompileOptions {
-            debug_info: true,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    let linked = link(&[out.object], &[], LinkOptions::default()).unwrap();
+    write_pmc_debug_multi(dir, name, &[pmc_source])
+}
+
+/// `write_pmc_debug`'s multi-compilation-unit sibling: compiles EACH source
+/// in `pmc_sources` separately (its own file, its own line numbering
+/// restarting at 1) and links them together — the shape needed to build a
+/// fixture where two DIFFERENT functions happen to share a line number
+/// (each source's numbering is independent, unlike two functions in one
+/// file, which can never collide).
+fn write_pmc_debug_multi(dir: &Path, name: &str, pmc_sources: &[&str]) -> PathBuf {
+    let objects: Vec<_> = pmc_sources
+        .iter()
+        .map(|source| {
+            compile(
+                source,
+                CompileOptions {
+                    debug_info: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .object
+        })
+        .collect();
+    let linked = link(&objects, &[], LinkOptions::default()).unwrap();
     let path = dir.join(format!("{name}.pmx"));
     fs::write(&path, linked.executable.to_bytes()).unwrap();
     let mut map_path = path.clone().into_os_string();
@@ -902,6 +918,91 @@ fn step_in_and_step_out_behave_depth_wise_around_a_call() {
     adapter.handle("continue", &Value::Null, &mut out).unwrap();
     let finished = drive_to_pause_or_done(&mut adapter);
     match finished.as_slice() {
+        [
+            AdapterEvent::Output { .. },
+            AdapterEvent::Terminated,
+            AdapterEvent::Exited { code },
+        ] => {
+            assert_eq!(*code, 2);
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+}
+
+/// Two SEPARATE compilation units, each with its own line numbering
+/// restarting at 1: `main`'s `halt` (its own file's line 2) and
+/// `callee`'s `right`/`ret` (that file's line 2 too) collide on the SAME
+/// number in DIFFERENT functions. `callee` must be `export`ed to resolve
+/// as an external symbol at link time.
+const RETURN_CALLER_PMC: &str = "main() {@callee();\n    halt;\n}\n";
+const RETURN_CALLEE_PMC: &str = "export callee() {\n    right(!);\n}\n";
+
+/// The regression this covers: comparing ONLY the resolved line number
+/// (not the function it belongs to) while walking a line-granularity step
+/// would read `callee`'s `ret` returning straight into `main`'s `halt` —
+/// same line number, different function — as "no change", and keep
+/// walking straight through `halt` to program termination inside a SINGLE
+/// `stepIn` call, instead of stopping the instant execution left `callee`.
+#[test]
+fn line_step_compares_function_identity_not_just_the_line_number() {
+    let dir = scratch("cross-fn-line");
+    let program = write_pmc_debug_multi(
+        &dir,
+        "return-collide",
+        &[RETURN_CALLER_PMC, RETURN_CALLEE_PMC],
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    // Walk to callee's line-2 `right` in three single steps — `main`'s
+    // `ent` -> the call (line 1) -> callee's `ent` (unmapped) -> callee's
+    // `right` (line 2) — each landing on a position distinct enough that
+    // any comparison, line-only or full, agrees they differ.
+    for _ in 0..3 {
+        let mut step_out = Vec::new();
+        adapter
+            .handle("stepIn", &Value::Null, &mut step_out)
+            .unwrap();
+        assert_eq!(
+            step_out,
+            vec![AdapterEvent::Stopped {
+                reason: "step",
+                description: None,
+            }]
+        );
+    }
+
+    // The critical step: retiring `right` then `ret` returns DIRECTLY to
+    // `main`'s `halt` — also line 2, but a different function. The fix
+    // must stop here, reporting exactly one "step" pause with the
+    // program still running, not swallow `halt` and finish it.
+    let mut final_step = Vec::new();
+    adapter
+        .handle("stepIn", &Value::Null, &mut final_step)
+        .unwrap();
+    assert_eq!(
+        final_step,
+        vec![AdapterEvent::Stopped {
+            reason: "step",
+            description: None,
+        }],
+        "must stop back in main, not swallow halt and finish the program"
+    );
+    assert_eq!(adapter.run_state(), RunState::Stopped);
+
+    // Sanity: the program is genuinely still paused (about to execute
+    // `halt`, not already finished) — one more continue finishes it
+    // normally.
+    adapter.handle("continue", &Value::Null, &mut out).unwrap();
+    let done = drive_to_pause_or_done(&mut adapter);
+    match done.as_slice() {
         [
             AdapterEvent::Output { .. },
             AdapterEvent::Terminated,

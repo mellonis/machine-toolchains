@@ -443,15 +443,21 @@ impl PmDapAdapter {
     }
 
     /// `next` (`StepKind::Over`) / `stepIn` (`StepKind::Into`): granularity
-    /// (spec §5) toggles between two shapes over the SAME underlying
-    /// session primitive (`step_over`/`step_in`) — `"instruction"` stops
-    /// after exactly one session step; anything else (the default, and
-    /// DAP's own default `"statement"`) repeats session steps until
-    /// `LineIndex::resolve(ip).line` changes from the line steps started on,
-    /// treating a transition into unmapped code (`Some` -> `None`) as a
-    /// change too, so stepping never silently swallows a function with no
-    /// `-g` data. A breakpoint/`brk`/trap interrupt wins over BOTH shapes
-    /// and reports its own reason instead of the line's.
+    /// toggles between two shapes over the SAME underlying session
+    /// primitive (`step_over`/`step_in`) — `"instruction"` stops after
+    /// exactly one session step; anything else (the default, and DAP's
+    /// own default `"statement"`) repeats session steps until
+    /// `LineIndex::resolve(ip)` differs from the position stepping started
+    /// on, treating a transition into unmapped code (`Some` -> `None`) as
+    /// a change too, so stepping never silently swallows a function with
+    /// no `-g` data. The comparison is the WHOLE resolved position —
+    /// function name AND line, not the line alone: two different
+    /// functions can restart their line numbering at the same number
+    /// (reachable once a second compilation unit, e.g. the stdlib, is
+    /// linked in), and a line-only comparison would read stepping straight
+    /// into such a function as "no change" and keep walking past it. A
+    /// breakpoint/`brk`/trap interrupt wins over BOTH shapes and reports
+    /// its own reason instead of the line's.
     ///
     /// The two granularities need this adapter-level loop for the SAME
     /// reason `source_breakpoints`/`instruction_breakpoints` exist as their
@@ -481,13 +487,17 @@ impl PmDapAdapter {
             .as_mut()
             .expect("session and tape are set together");
 
-        let start_line = if instruction_granularity {
+        // The walk's position: function name (owned, to avoid tying this
+        // binding to `self.line_index`'s borrow across the loop) plus the
+        // resolved line, if any — see the doc comment above for why the
+        // name is part of the comparison, not just the line.
+        let start_position: Option<(String, Option<u32>)> = if instruction_granularity {
             None
         } else {
             self.line_index
                 .as_ref()
                 .and_then(|idx| idx.resolve(session.ip()))
-                .and_then(|(_, l)| l)
+                .map(|(name, line)| (name.to_string(), line))
         };
 
         let outcome = loop {
@@ -507,12 +517,12 @@ impl PmDapAdapter {
             if instruction_granularity {
                 break StepOutcome::Stop("step", None);
             }
-            let now_line = self
+            let now_position: Option<(String, Option<u32>)> = self
                 .line_index
                 .as_ref()
                 .and_then(|idx| idx.resolve(ip))
-                .and_then(|(_, l)| l);
-            if now_line != start_line {
+                .map(|(name, line)| (name.to_string(), line));
+            if now_position != start_position {
                 break StepOutcome::Stop("step", None);
             }
         };
@@ -521,11 +531,13 @@ impl PmDapAdapter {
     }
 
     /// `stepOut`: depth-based via `step_out_tapes`'s single-tape sibling
-    /// `step_out` — ALWAYS one call, granularity does not apply (spec §5):
-    /// "step out of the current call" already names its own stopping point
-    /// (the caller, one depth up), so there is no separate line-vs-
-    /// instruction shape to choose between the way there is for
-    /// `next`/`stepIn`.
+    /// `step_out` — ALWAYS one call, granularity does not apply: "step out
+    /// of the current call" already names its own stopping point (the
+    /// caller, one depth up), so there is no separate line-vs-instruction
+    /// shape to choose between the way there is for `next`/`stepIn`. At the
+    /// outermost frame (depth 0) `step_out` has no caller to return to —
+    /// `DebugSession::step_out` falls back to running to completion in that
+    /// case, not an error, and this handler inherits that behavior as-is.
     fn handle_step_out(&mut self, out: &mut Vec<AdapterEvent>) -> Result<Value, String> {
         self.ensure_can_step()?;
         let session = self.session.as_mut().expect("checked by ensure_can_step");
