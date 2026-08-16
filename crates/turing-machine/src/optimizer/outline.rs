@@ -472,6 +472,7 @@ fn trampoline(w: &mut IrWorld, root: u32, routine_name: &str, junction: u32) {
             then: IrThen::Goto { state: junction },
         },
         synthesized: false,
+        direct: false,
         line: 0,
     }];
     w.states[pos].dispatch = IrDispatch::Table;

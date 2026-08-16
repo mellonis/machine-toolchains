@@ -870,7 +870,7 @@ to the callee.
 
 ### The `.tmc` state-graph IR
 
-`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 2`. The
+`tmt compile --emit-ir` writes the state-graph IR: `TM_IR_VERSION = 3`. The
 form follows the model — a Turing world is a set of states, each a
 priority-ordered list of classical match rows, so the document is a graph of
 states rather than a CFG of basic blocks. `tmt ir graph` renders one of its
@@ -878,7 +878,7 @@ worlds as a diagram (`docs/tmt/cli.md`).
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "worlds": [
     {
       "name": "main",

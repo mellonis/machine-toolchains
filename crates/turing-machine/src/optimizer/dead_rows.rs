@@ -235,6 +235,7 @@ machine {
             debugger: false,
             transition: IrTransition::TrapRead,
             synthesized: true,
+            direct: false,
             line: 0,
         };
         m.states[0].rules.insert(0, trap);
@@ -302,6 +303,7 @@ machine {
             debugger: true,
             transition: IrTransition::Halt,
             synthesized: false,
+            direct: false,
             line: 0,
         };
         m.states[0].rules.push(brk_dup);
