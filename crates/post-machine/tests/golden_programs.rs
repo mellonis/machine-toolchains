@@ -103,7 +103,98 @@ fn cases() -> Vec<(&'static str, &'static str, Vec<bool>, i64, TapeSnapshot)> {
                 alphabet: None,
             },
         ),
+        // sum2.pmc is the same instruction sequence as sum.pmc in the
+        // comma-group syntax — same input, same derivation, same golden
+        // file; the case asserts the restyled port behaves identically.
+        (
+            "sum2.pmc",
+            "sum.expected.pmt",
+            vec![true, true, true, false, true, true],
+            0,
+            TapeSnapshot {
+                origin: 0,
+                cells: vec![1, 1, 1, 1],
+                head: 0,
+                alphabet: None,
+            },
+        ),
+        // ty2: one step left off the marks, stop — the snapshot span
+        // grows to cover the head resting on the blank at -1.
+        (
+            "ty2.pmc",
+            "ty2.expected.pmt",
+            vec![true, true, true],
+            0,
+            TapeSnapshot {
+                origin: -1,
+                cells: vec![0, 1, 1, 1],
+                head: -1,
+                alphabet: None,
+            },
+        ),
+        // ex000001: unary increment of the n+1-marks number under the
+        // head — [1,1,1] (two) becomes [1,1,1,1] (three), head returned
+        // to the first mark.
+        (
+            "ex000001.pmc",
+            "ex000001.expected.pmt",
+            vec![true, true, true],
+            0,
+            TapeSnapshot {
+                origin: 0,
+                cells: vec![1, 1, 1, 1],
+                head: 0,
+                alphabet: None,
+            },
+        ),
+        // ex000002: sum across an arbitrary gap — one (2 marks) plus two
+        // (3 marks) across a 3-blank gap is three (4 marks), head on the
+        // first mark. Exercises the walk-the-second-number-left loop
+        // over a wider gap than sum.pmc's single blank.
+        (
+            "ex000002.pmc",
+            "ex000002.expected.pmt",
+            vec![true, true, false, false, false, true, true, true],
+            0,
+            TapeSnapshot {
+                origin: 0,
+                cells: vec![1, 1, 1, 1],
+                head: 0,
+                alphabet: None,
+            },
+        ),
     ]
+}
+
+/// test1.pmc (the 2007 codegen smoke test) deliberately never
+/// terminates: left, right, jump back. The historic artifact's meaning
+/// is the loop itself, so the port's contract is the step-limit trap
+/// with the tape left untouched — at any cap the head sits on -1 or 0
+/// depending on parity, so the head is not asserted.
+#[test]
+fn test1_loops_until_the_step_limit() {
+    for opt in [OptLevel::O0, OptLevel::O1] {
+        let mut registry = ArchRegistry::new();
+        registry.register(Box::new(Pm1));
+        let machine = Machine::from_executable(&build("test1.pmc", opt), &registry).expect("loads");
+        let mut tape = InfiniteTape::from_cells([false; 0], 0, 0);
+        let result = machine.run(
+            &mut tape,
+            RunOptions {
+                limits: RunLimits {
+                    max_steps: Some(1_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            result.outcome,
+            Outcome::Trapped(mtc_core::vm::Trap::StepLimit),
+            "at {opt:?}"
+        );
+        assert!(tape.marked_cells().is_empty(), "at {opt:?}");
+    }
 }
 
 #[test]

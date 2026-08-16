@@ -1,0 +1,37 @@
+// Port of the historic ex000002.bin («Почти компилятор, интерпретатор»,
+// the Test-PostMachine v5.0 era, 2006): "сложение чисел, которые
+// находятся на любом расстоянии друг от друга" — sums two unary numbers
+// separated by an arbitrary gap. Hand-decoded from the 32-bit-word image
+// (same encoding as ex000001.pmc); the 23 numbered instructions below
+// mirror the original 1:1. The algorithm walks the second number
+// leftward one cell per pass (unmark its right end, mark the cell left
+// of its left end) until it touches the first number, fills the seam,
+// trims one mark off the right end (the n+1 convention's extra mark),
+// and returns the head to the first mark. Strict-clean: every mark
+// lands on a cell just proven blank, every unmark on one proven marked.
+// Same bounded-belt caveat as ex000001.pmc.
+main() {
+     1: right(2);
+     2: check(1, 3);
+     3: right(4);
+     4: check(5, 3);
+     5: right(6);
+     6: check(5, 7);
+     7: left(8);
+     8: unmark(9);
+     9: left(10);
+    10: check(9, 11);
+    11: left(12);
+    12: check(13, 14);
+    13: right(16);
+    14: right(15);
+    15: mark(6);
+    16: mark(17);
+    17: right(18);
+    18: check(17, 19);
+    19: left(20);
+    20: unmark(21);
+    21: left(22);
+    22: check(21, 23);
+    23: right(!);
+}

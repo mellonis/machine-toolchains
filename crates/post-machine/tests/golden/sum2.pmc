@@ -1,0 +1,34 @@
+// Port of the historic Sum2.pms (Delphi generation A, Compiller/): the
+// same instruction sequence as Sum.pms, restyled in the comma-group,
+// fall-through syntax — the original's `right, if(1, _)` line is a direct
+// ancestor of the `.pmc` comma group below. The original's `_` arm (fall
+// through to the next statement) has no `.pmc` equivalent, so the check
+// names the next line's label explicitly. Same tape contract as sum.pmc:
+// numbers are n+1 marks, input "a gap b" with the head on a's first mark,
+// output one section a+b. The local functions deliberately shadow
+// std::goToEnd/goToBegin — the original carried its own algorithms.
+goToEnd() {
+    1: right, check(1, 2);
+    2: left;
+}
+
+goToBegin() {
+    1: left, check(1, 2);
+    2: right;
+}
+
+main() {
+    @goToEnd();
+    right;
+    right;
+    @goToEnd();
+    unmark;
+    left;
+    @goToBegin();
+    left;
+    mark;
+    @goToEnd();
+    unmark;
+    left;
+    @goToBegin();
+}

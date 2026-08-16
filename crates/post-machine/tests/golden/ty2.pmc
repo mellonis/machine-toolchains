@@ -1,0 +1,6 @@
+// Port of the historic Ty2.pms (Delphi generation A, Compiller/): a
+// single instruction — step left, stop. The smallest surviving
+// Generation A program, preserved for the record.
+main() {
+    1: left(!);
+}
