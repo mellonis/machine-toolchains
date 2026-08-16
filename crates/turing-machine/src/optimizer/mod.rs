@@ -37,10 +37,16 @@
 //! the band's access sequence — no dropping idempotent or dead writes, no
 //! fusing or splitting write+move shapes, no value propagation through its
 //! reads. Today every pass in this pipeline preserves per-band access
-//! sequences (`dead-rows` removes only rows that never fire, so the dynamic
-//! sequence is unchanged), so nothing gates on the flag; any future pass
-//! that reasons about values or motion must consult `IrTape::volatile`
-//! (docs/tmt/optimizer.md (volatile barrier)).
+//! sequences: most passes' deletions only ever remove a row that never
+//! fires, so the dynamic sequence is unchanged; `dead-rows`'s
+//! identical-effect subsumption is the one exception that can remove a row
+//! that DOES fire, and it is the one pass that consults `IrTape::volatile`
+//! directly (crate::optimizer::dead_rows (volatile barrier)) — its
+//! write-equality fold narrows to literal equality on a volatile tape, so
+//! the row it keeps always emits the identical instruction the deleted row
+//! would have. Any OTHER future pass that reasons about values or motion
+//! must consult the flag the same way (docs/tmt/optimizer.md (volatile
+//! barrier)).
 //!
 //! # Invariant re-check
 //!

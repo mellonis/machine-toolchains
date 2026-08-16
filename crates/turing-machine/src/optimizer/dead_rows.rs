@@ -64,8 +64,76 @@
 //! rows can flip codegen's straight-line classification or expose the two-row
 //! branch shape — that is fine: later passes and codegen see the new shape, and
 //! the fixpoint reruns.
+//!
+//! # Identical-effect subsumption
+//!
+//! Same-band cover (above) proves a row can NEVER fire — dead code. A second,
+//! independent check proves a row's EFFECT is redundant even where it DOES
+//! fire: row `R` is deleted when a later-emitted row `W` covers it (the same
+//! cell-wise relation, now compared across the FULL emitted order — codegen's
+//! order (crate::codegen `emitted_row_order`), not source order, and bands no
+//! longer matter, because the claim isn't "R never wins", it's "R's win is
+//! indistinguishable from W's win") and:
+//!
+//!   1. **normalized effect equality** — a `None` write/`moves` normalizes to
+//!      all-`Keep`/all-`Stay` first, then each tape compares with a `Keep ≡
+//!      Index(a)` rule: on a tape where `R` matches the CONCRETE symbol `a`,
+//!      writing `a` back and keeping are the same net effect (the cell can
+//!      only hold `a` at the moment `R` fires there). The rule does NOT apply
+//!      on a tape where `R` itself is a wildcard — there Keep and `write a`
+//!      differ across the inputs `R` matches, so only literal write equality
+//!      counts. Transitions compare by `==`; the `direct` flag is a codegen
+//!      lowering hint (which label a dispatch entry names), never part of the
+//!      effect;
+//!   2. **no debugger, no synthesized** on either row — a `brk` or a
+//!      compiler-synthesized trap row is never folded into another row's
+//!      identity;
+//!   3. **no intermediate capture** — every row strictly between `R` and `W`
+//!      in EMITTED order is pattern-disjoint from `R` (some tape where both
+//!      are concrete and differ). If an intermediate row could match one of
+//!      `R`'s inputs, deleting `R` would hand that input to the intermediate,
+//!      not to `W` — soundness needs the row that actually serves `R`'s
+//!      inputs post-deletion to be `W` itself.
+//!
+//! Cover and effect equality both compose transitively along a subsumption
+//! chain (`R` folded into `W`, `W` in turn folded into `W'` in the same pass
+//! run): if `W` covers `R`, cover forces `R` concrete with the same index
+//! everywhere `W` is concrete, so a row disjoint from `W` is also disjoint
+//! from `R`, and effect equality chains the same way through the shared
+//! reference index. Deleting a whole chain in one call is therefore sound —
+//! the pass does not special-case it, the proof just holds. This runs AFTER
+//! same-band cover has already removed every provably-unreachable row, so
+//! only rows the match engine can actually select are ever considered.
+//!
+//! **The volatile barrier** (docs/tmt/language.md (volatile tapes),
+//! optimizer/mod.rs (volatile barrier)) narrows rule 1 on a volatile tape:
+//! the `Keep ≡ Index(a)` fold is withheld there, and only LITERAL write
+//! equality counts. `Keep` and `write a` share a net cell VALUE when `R`
+//! matches `a`, but codegen emits no `wrmv` write micro-op at all for an
+//! all-`Keep` action while `Index(a)` always does (crate::codegen — "an
+//! all-keep write with an all-stay move emits nothing") — on a device band
+//! the write OPERATION, not just the value it leaves behind, is externally
+//! observable, so folding them would drop or add a bus transaction the
+//! external world can see. Literal equality (both `Keep`, or both the same
+//! `Index`) keeps the emitted instruction identical either way, so deleting
+//! `R` changes nothing about the band's access sequence even there.
+//!
+//! **The `dispatch_select` interaction.** A [`crate::ir::IrDispatch::Branch`]-
+//! flagged state is codegen's committed two-row `jm` shape (`branch()`
+//! indexes `st.rules[0]`/`st.rules[1]` unconditionally); same-band cover can
+//! never reach one (the selective and catch-all rows are always in different
+//! bands), but this cross-band check could — a state whose selective row
+//! happens to become effect-identical to its catch-all only AFTER
+//! `dispatch_select` already flagged it (a later fixpoint round, e.g.
+//! `jump_threading` retargeting one of the two `Goto`s onto the other) would
+//! otherwise lose a row while still carrying the `Branch` flag, corrupting
+//! that invariant. Subsumption is skipped entirely on a non-`Table` state; the
+//! `Table`-flagged case this pass exists for cannot be reached that way
+//! anyway, since `dead_rows` always runs, in the SAME round, before
+//! `dispatch_select` ever sees the state.
 
-use crate::ir::{IrCell, IrWorld};
+use crate::codegen::emitted_row_order;
+use crate::ir::{IrCell, IrDispatch, IrMove, IrRule, IrState, IrWorld, IrWrite};
 
 /// A row's dispatch band, mirroring codegen's classification (crate::codegen
 /// `conditional`): all-concrete is `Exact`, all-wildcard is `CatchAll`, a mix is
@@ -97,8 +165,126 @@ fn covers(w: &[IrCell], r: &[IrCell]) -> bool {
     })
 }
 
+/// Whether `rw` (row `r`'s write cell on some tape) and `ww` (the comparison
+/// row's write cell on the same tape) have the SAME net effect there, given
+/// `r`'s own match cell on that tape and whether the tape is `volatile`.
+/// Literal equality always counts. When the tape is NOT volatile and `r`'s
+/// match cell is the CONCRETE symbol `a`, `Keep` also counts equal to
+/// `Index(a)` — writing `a` back is indistinguishable from keeping when the
+/// cell can only hold `a` at the moment this write fires. On a volatile tape
+/// that fold is withheld (docs/tmt/optimizer.md (volatile barrier)): only
+/// literal equality counts, because `Keep` and `Index(a)` emit different
+/// instructions (no `wrmv` write vs. one), and on a device band the write
+/// OPERATION is externally observable even when the value it leaves behind
+/// would be the same.
+fn wr_eq(rw: IrWrite, ww: IrWrite, r_cell: &IrCell, volatile: bool) -> bool {
+    if rw == ww {
+        return true;
+    }
+    if volatile {
+        return false;
+    }
+    let IrCell::Index { index: a } = *r_cell else {
+        return false;
+    };
+    matches!(
+        (rw, ww),
+        (IrWrite::Keep, IrWrite::Index { index }) | (IrWrite::Index { index }, IrWrite::Keep)
+            if index == a
+    )
+}
+
+/// Whether rows `r` and `w` have the same effect: an identical transition
+/// (`==`; `direct` is a lowering hint, never part of the effect), and per
+/// tape, the same write (normalized `None` to all-`Keep`, compared via
+/// [`wr_eq`] with that tape's `volatile[k]`) and the same move (normalized
+/// `None` to all-`Stay`, compared literally — a move has no keep-like
+/// shorthand to fold, volatile or not).
+fn effect_eq(r: &IrRule, w: &IrRule, volatile: &[bool]) -> bool {
+    if r.transition != w.transition {
+        return false;
+    }
+    (0..volatile.len()).all(|k| {
+        let rw = r.write.as_ref().map_or(IrWrite::Keep, |v| v[k]);
+        let ww = w.write.as_ref().map_or(IrWrite::Keep, |v| v[k]);
+        let rm = r.moves.as_ref().map_or(IrMove::Stay, |v| v[k]);
+        let wm = w.moves.as_ref().map_or(IrMove::Stay, |v| v[k]);
+        wr_eq(rw, ww, &r.pattern[k], volatile[k]) && rm == wm
+    })
+}
+
+/// Whether `a` and `b` are pattern-disjoint: some tape where both are
+/// concrete and differ, so no input can match both rows.
+fn pattern_disjoint(a: &[IrCell], b: &[IrCell]) -> bool {
+    a.iter()
+        .zip(b)
+        .any(|(x, y)| matches!((x, y), (IrCell::Index { index: p }, IrCell::Index { index: q }) if p != q))
+}
+
+/// Identical-effect subsumption (docs/tmt/optimizer.md (row subsumption)):
+/// delete emitted-earlier row `R` when a later row `W` covers it with
+/// identical effect and no row between them, in emitted order, can capture
+/// `R`'s inputs. Walks [`emitted_row_order`] — the SAME order codegen's
+/// match/dispatch table uses — not source order. `volatile[k]` gates the
+/// write-equality fold on tape `k` (see the module doc's volatile-barrier
+/// section). Skipped entirely on a `Branch`-flagged state (the module doc's
+/// `dispatch_select` interaction section) — codegen's two-row `jm` lowering
+/// there is not proof against losing a row.
+fn subsume_identical_effect(st: &mut IrState, volatile: &[bool]) -> u32 {
+    if st.dispatch != IrDispatch::Table {
+        return 0;
+    }
+    let order = emitted_row_order(st);
+    // `dead[k]` is written only for the CURRENT outer position; every
+    // candidate `j` searched below sits at a later position and so is always
+    // still `false` here — a `W` this call ALSO ends up deleting (folded
+    // itself into a still-later `W'`) is used freely, not guarded against.
+    // That is deliberate, not an oversight: the module doc's chain-soundness
+    // paragraph is exactly the argument for why using such a `W` is sound.
+    let mut dead = vec![false; st.rules.len()];
+    for (pos_i, &i) in order.iter().enumerate() {
+        if st.rules[i].debugger || st.rules[i].synthesized {
+            continue;
+        }
+        let subsumed = ((pos_i + 1)..order.len()).any(|pos_j| {
+            let j = order[pos_j];
+            if st.rules[j].debugger || st.rules[j].synthesized {
+                return false;
+            }
+            if !covers(&st.rules[j].pattern, &st.rules[i].pattern) {
+                return false;
+            }
+            if !effect_eq(&st.rules[i], &st.rules[j], volatile) {
+                return false;
+            }
+            // No row strictly between R and this W may capture R's inputs —
+            // otherwise deleting R would hand those inputs to the
+            // intermediate row, not to W.
+            !order[(pos_i + 1)..pos_j]
+                .iter()
+                .any(|&m| !pattern_disjoint(&st.rules[m].pattern, &st.rules[i].pattern))
+        });
+        if subsumed {
+            dead[i] = true;
+        }
+    }
+    let before = st.rules.len();
+    if dead.iter().any(|&d| d) {
+        let mut k = 0;
+        st.rules.retain(|_| {
+            let kept = !dead[k];
+            k += 1;
+            kept
+        });
+    }
+    (before - st.rules.len()) as u32
+}
+
 pub fn run(w: &mut IrWorld) -> u32 {
     let mut deleted = 0u32;
+    // Hoisted out of the `&mut w.states` loop below (borrow-checker
+    // friendly) — `w.tapes` itself is never mutated by this pass.
+    let volatile: Vec<bool> = w.tapes.iter().map(|t| t.volatile).collect();
     for st in &mut w.states {
         let n = st.rules.len();
         // Walk top-down with an accumulated cover set: a row is dead iff an
@@ -127,6 +313,12 @@ pub fn run(w: &mut IrWorld) -> u32 {
             });
         }
         deleted += (before - st.rules.len()) as u32;
+
+        // Identical-effect subsumption (docs/tmt/optimizer.md (row
+        // subsumption)): delete emitted-earlier row R when a later row W
+        // covers it with identical effect and no row between them can
+        // capture R's inputs.
+        deleted += subsume_identical_effect(st, &volatile);
     }
     deleted
 }
@@ -261,13 +453,17 @@ machine {
         // catch-all `[*]` (the alphabet is exactly {0,1}), but no SINGLE row
         // does, so the catch-all survives — union cover is not computed. (They
         // are also in different bands; either way it must not be deleted.)
+        // `['a']` writes `'_'` — a DIFFERENT effect than the catch-all's keep —
+        // so identical-effect subsumption (which would otherwise legitimately
+        // fold `['a']` into an effect-identical catch-all) stays out of this
+        // test's way; it has its own tests above.
         let mut ir = ir_of(
             "alphabet ab { '_', 'a' }
 machine {
   tape t: ab;
   entry state s {
     ['_'] -> stop;
-    ['a'] -> halt;
+    ['a'] -> write ['_'] halt;
     [*]   -> halt;
   }
 }",
@@ -365,5 +561,240 @@ machine {
         let done_id = m.states.iter().find(|st| st.name == "done").unwrap().id;
         assert_eq!(s.rules[0].transition, IrTransition::Goto { state: done_id });
         validate_world(m).unwrap();
+    }
+
+    #[test]
+    fn a_specific_row_with_identical_effect_is_subsumed_by_the_catch_all() {
+        // ['0'] -> write ['1'] goto t;  [*] -> write ['1'] goto t;
+        // The exact row dies; the catch-all serves its inputs identically.
+        let mut ir = ir_of(
+            "alphabet ab { '_', '0', '1' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> write ['1'] goto t;
+    [*]   -> write ['1'] goto t;
+  }
+  state t { [*] -> stop; }
+}",
+        );
+        let m = &mut ir.worlds[0];
+        assert_eq!(m.states[0].rules.len(), 2);
+        assert_eq!(
+            run(m),
+            1,
+            "the exact row is subsumed by the identical-effect catch-all"
+        );
+        assert_eq!(m.states[0].rules.len(), 1);
+        assert_eq!(
+            m.states[0].rules[0].pattern,
+            vec![IrCell::Wildcard],
+            "the surviving row is the catch-all"
+        );
+        validate_world(m).unwrap();
+    }
+
+    #[test]
+    fn keep_vs_writing_the_matched_symbol_back_counts_as_identical() {
+        // ['0'] -> write ['0'] goto t;  [*] -> goto t;   (write None = keep)
+        // R writes its own matched symbol; W keeps. Identical on R's inputs.
+        let mut ir = ir_of(
+            "alphabet ab { '_', '0' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> write ['0'] goto t;
+    [*]   -> goto t;
+  }
+  state t { [*] -> stop; }
+}",
+        );
+        let m = &mut ir.worlds[0];
+        assert_eq!(
+            run(m),
+            1,
+            "writing the matched symbol back counts as identical to keep"
+        );
+        assert_eq!(m.states[0].rules.len(), 1);
+        validate_world(m).unwrap();
+    }
+
+    #[test]
+    fn differing_effect_survives() {
+        // ['0'] -> write ['1'] goto t;  [*] -> goto t;   — R stays.
+        let mut ir = ir_of(
+            "alphabet ab { '_', '0', '1' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> write ['1'] goto t;
+    [*]   -> goto t;
+  }
+  state t { [*] -> stop; }
+}",
+        );
+        let m = &mut ir.worlds[0];
+        assert_eq!(run(m), 0, "a differing write effect blocks subsumption");
+        assert_eq!(m.states[0].rules.len(), 2);
+    }
+
+    #[test]
+    fn an_intermediate_overlapping_row_blocks_subsumption() {
+        // Emitted order R(exact), M(partial overlapping R), W(catch-all), all
+        // three targeting `t`: R and W share an identical write effect, but M
+        // sits between them with a DIFFERENT write effect and overlaps R's
+        // input (matches `['0', *]`, so it captures R's `['0', '0']`).
+        // Deleting R would hand its input to M — not W — so R must stay.
+        let mut ir = ir_of(
+            "alphabet ab { '_', '0', '1', '2' }
+machine {
+  tape x: ab;
+  tape y: ab;
+  entry state s {
+    ['0', '0'] -> write ['1', '1'] goto t;
+    ['0', *]   -> write ['2', '2'] goto t;
+    [*, *]     -> write ['1', '1'] goto t;
+  }
+  state t { [*, *] -> stop; }
+}",
+        );
+        let m = &mut ir.worlds[0];
+        assert_eq!(m.states[0].rules.len(), 3);
+        assert_eq!(
+            run(m),
+            0,
+            "the overlapping intermediate row blocks the exact row's subsumption"
+        );
+        assert_eq!(m.states[0].rules.len(), 3);
+    }
+
+    #[test]
+    fn debugger_on_either_row_blocks_subsumption() {
+        // R carries `debugger`: its brk must fire, so it is never folded into
+        // another row's identity even with an identical effect available later.
+        let mut ir_r = ir_of(
+            "alphabet ab { '_', '0' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> debugger goto t;
+    [*]   -> goto t;
+  }
+  state t { [*] -> stop; }
+}",
+        );
+        let m_r = &mut ir_r.worlds[0];
+        assert_eq!(run(m_r), 0, "R's debugger blocks subsumption");
+        assert_eq!(m_r.states[0].rules.len(), 2);
+
+        // W carries `debugger`: a later row's pause is likewise never used as
+        // an earlier row's silent stand-in.
+        let mut ir_w = ir_of(
+            "alphabet ab { '_', '0' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> goto t;
+    [*]   -> debugger goto t;
+  }
+  state t { [*] -> stop; }
+}",
+        );
+        let m_w = &mut ir_w.worlds[0];
+        assert_eq!(run(m_w), 0, "W's debugger blocks subsumption");
+        assert_eq!(m_w.states[0].rules.len(), 2);
+    }
+
+    #[test]
+    fn dead_rows_same_band_cover_still_works() {
+        // The pre-existing same-band-cover behavior, pinned unchanged now
+        // that identical-effect subsumption runs in the same pass: `[a,*,*]`
+        // covers `[a,b,*]` (same partial band) and deletes it; the surviving
+        // selective row and the catch-all `stop` have different transitions,
+        // so the NEW subsumption logic does not fold them together too.
+        let mut ir = ir_of(
+            "alphabet abc { '_', 'a', 'b' }
+machine {
+  tape x: abc;
+  tape y: abc;
+  tape z: abc;
+  entry state s {
+    ['a', *, *]   -> move [>, ., .] goto s;
+    ['a', 'b', *] -> move [>, ., .] goto s;
+    [*, *, *]     -> stop;
+  }
+}",
+        );
+        let m = &mut ir.worlds[0];
+        assert_eq!(m.states[0].rules.len(), 3);
+        assert_eq!(run(m), 1, "only the shadowed partial row is deleted");
+        assert_eq!(m.states[0].rules.len(), 2);
+        assert_eq!(
+            m.states[0].rules[0].pattern,
+            vec![sym(1), IrCell::Wildcard, IrCell::Wildcard]
+        );
+        assert_eq!(
+            m.states[0].rules[1].pattern,
+            vec![IrCell::Wildcard, IrCell::Wildcard, IrCell::Wildcard]
+        );
+        validate_world(m).unwrap();
+    }
+
+    #[test]
+    fn volatile_tape_blocks_the_keep_equals_matched_write_fold() {
+        // Same shape as `keep_vs_writing_the_matched_symbol_back_counts_as_identical`,
+        // but on a `volatile tape`: `Keep` and `write ['0']` emit different
+        // instructions (no `wrmv` write vs. one), and on a device band the
+        // write OPERATION is observable even when it would leave the same
+        // value behind — so the fold is withheld and R survives.
+        let mut ir = ir_of(
+            "alphabet ab { '_', '0' }
+machine {
+  volatile tape n: ab;
+  entry state s {
+    ['0'] -> write ['0'] goto t;
+    [*]   -> goto t;
+  }
+  state t { [*] -> stop; }
+}",
+        );
+        let m = &mut ir.worlds[0];
+        assert_eq!(
+            run(m),
+            0,
+            "a volatile tape withholds the Keep-equals-matched-write fold"
+        );
+        assert_eq!(m.states[0].rules.len(), 2);
+    }
+
+    #[test]
+    fn a_branch_flagged_state_is_left_untouched_even_with_identical_effect() {
+        // `dispatch_select`'s committed two-row `jm` shape (Branch): codegen
+        // indexes `st.rules[0]`/`st.rules[1]` unconditionally, so subsumption
+        // must never touch it even when the two rows are effect-identical
+        // (constructed directly — no `.tmc` source authors the flag; this
+        // exact shape WOULD be subsumed under the default `Table` dispatch,
+        // per `a_specific_row_with_identical_effect_is_subsumed_by_the_catch_all`'s
+        // sibling case).
+        let mut ir = ir_of(
+            "alphabet ab { '_', '0' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> goto t;
+    [*]   -> goto t;
+  }
+  state t { [*] -> stop; }
+}",
+        );
+        let m = &mut ir.worlds[0];
+        m.states[0].dispatch = IrDispatch::Branch;
+        assert_eq!(
+            run(m),
+            0,
+            "a Branch-flagged state is never touched by subsumption"
+        );
+        assert_eq!(m.states[0].rules.len(), 2);
+        assert_eq!(m.states[0].dispatch, IrDispatch::Branch);
     }
 }
