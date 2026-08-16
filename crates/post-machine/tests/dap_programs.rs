@@ -112,11 +112,24 @@ fn stp_program_runs_to_completion_and_exits_0() {
     adapter
         .handle("launch", &launch_args(&program, false), &mut out)
         .unwrap();
+    assert_eq!(
+        out,
+        vec![AdapterEvent::Initialized],
+        "a successful launch reports readiness for configuration"
+    );
+
+    out.clear();
     adapter
         .handle("configurationDone", &Value::Null, &mut out)
         .unwrap();
-    assert!(out.is_empty(), "no stopOnEntry: no event expected yet");
+    // No stopOnEntry: configurationDone itself starts the run — no
+    // stopped event, no explicit continue needed.
+    assert!(out.is_empty());
+    assert_eq!(adapter.run_state(), RunState::Running);
 
+    // A `continue` while already Running stays legal (idempotent) — a
+    // client that sends one anyway (as this test's earlier shape did) is
+    // not punished for it.
     adapter.handle("continue", &Value::Null, &mut out).unwrap();
     assert_eq!(adapter.run_state(), RunState::Running);
 
@@ -231,10 +244,7 @@ fn stop_on_entry_yields_stopped_entry_before_any_step() {
     adapter
         .handle("launch", &launch_args(&program, true), &mut launch_out)
         .unwrap();
-    assert!(
-        launch_out.is_empty(),
-        "no event expected from launch itself"
-    );
+    assert_eq!(launch_out, vec![AdapterEvent::Initialized]);
 
     let mut configured_out = Vec::new();
     adapter
@@ -264,6 +274,40 @@ fn stop_on_entry_yields_stopped_entry_before_any_step() {
         }
         other => panic!("unexpected event sequence: {other:?}"),
     }
+}
+
+/// A single ordered event stream, the shape a real client actually
+/// observes (both requests answered over the same connection): the
+/// launch-time `initialized` event must precede the `stopOnEntry`
+/// pause it makes possible — `setBreakpoints`/`configurationDone` are
+/// only legal for a client once it has seen `initialized`, so a
+/// `stopped` event arriving first (or `initialized` arriving late)
+/// would be a real protocol violation, not just a cosmetic ordering
+/// nit.
+#[test]
+fn launch_initialized_event_precedes_any_stopped_event() {
+    let dir = scratch("entry-order");
+    let program = write_pmx(&dir, "stp", STP_PROGRAM);
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    assert_eq!(
+        out,
+        vec![
+            AdapterEvent::Initialized,
+            AdapterEvent::Stopped {
+                reason: "entry",
+                description: None,
+            },
+        ]
+    );
 }
 
 #[test]

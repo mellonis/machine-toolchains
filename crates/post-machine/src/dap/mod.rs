@@ -76,11 +76,12 @@ pub struct PmDapAdapter {
     line_index: Option<LineIndex>,
     launch_opts: Option<LaunchOpts>,
     /// The loop-facing run state (`DebugAdapter::run_state`): `Running`
-    /// only between a `continue` and the next pause/finish, `Done` once
-    /// termination events have been pushed or `disconnect` was handled.
-    /// Distinct from the underlying `DebugSession`'s own `finished()` —
-    /// a trap pause leaves the session privately finished one call before
-    /// this adapter reports `Done` (see `tick`'s `Finished` arm).
+    /// between a `configurationDone` (or `continue`) and the next
+    /// pause/finish, `Done` once termination events have been pushed or
+    /// `disconnect` was handled. Distinct from the underlying
+    /// `DebugSession`'s own `finished()` — a trap pause leaves the
+    /// session privately finished one call before this adapter reports
+    /// `Done` (see `tick`'s `Finished` arm).
     run_state: RunState,
 }
 
@@ -101,7 +102,17 @@ impl PmDapAdapter {
         }
     }
 
-    fn handle_launch(&mut self, arguments: &Value) -> Result<Value, String> {
+    /// `Initialized` fires here — not from `initialize` itself — because
+    /// readiness-for-configuration is genuinely gated on a program having
+    /// loaded: a failed `launch` returns `Err` before this point and
+    /// never claims readiness, which an automatic post-`initialize`
+    /// emission (fired before any program exists to configure against)
+    /// could not distinguish from a successful one.
+    fn handle_launch(
+        &mut self,
+        arguments: &Value,
+        out: &mut Vec<AdapterEvent>,
+    ) -> Result<Value, String> {
         let program = arguments
             .get("program")
             .and_then(Value::as_str)
@@ -141,13 +152,19 @@ impl PmDapAdapter {
         });
         self.run_state = RunState::Stopped;
 
+        out.push(AdapterEvent::Initialized);
         Ok(Value::Null)
     }
 
-    /// `stopOnEntry` fires here, not at `launch`: the client is only
-    /// guaranteed ready to receive events once configuration is done.
-    /// Without it, `configurationDone` leaves the session paused,
-    /// awaiting an explicit `continue`.
+    /// Mirrors the real client sequence (`launch` → `initialized` →
+    /// configuration requests → `configurationDone` → run): without
+    /// `stopOnEntry`, `configurationDone` is what starts the program —
+    /// it moves straight to `Running`, no explicit `continue` needed (a
+    /// later `continue` while already `Running` stays legal — see
+    /// `handle_continue` — so a client that sends one anyway is not
+    /// punished). With `stopOnEntry`, the session stays paused at the
+    /// entry instruction instead, reporting `stopped("entry")`; an
+    /// explicit `continue` is what starts it from there.
     fn handle_configuration_done(&mut self, out: &mut Vec<AdapterEvent>) -> Result<Value, String> {
         let launch_opts = self
             .launch_opts
@@ -158,6 +175,8 @@ impl PmDapAdapter {
                 reason: "entry",
                 description: None,
             });
+        } else {
+            self.run_state = RunState::Running;
         }
         Ok(Value::Null)
     }
@@ -241,7 +260,7 @@ impl DebugAdapter for PmDapAdapter {
             // / `supportsInstructionBreakpoints` join once the features
             // they name land in later tasks.
             "initialize" => Ok(json!({"supportsConfigurationDoneRequest": true})),
-            "launch" => self.handle_launch(arguments),
+            "launch" => self.handle_launch(arguments, out),
             "configurationDone" => self.handle_configuration_done(out),
             "threads" => Ok(json!({"threads": [{"id": 1, "name": "machine"}]})),
             "continue" => self.handle_continue(),
