@@ -602,6 +602,16 @@ fn lsp_spec() -> CommandSpec {
     }
 }
 
+/// Same shape as `lsp_spec()`: no positional, `--help` only — `dap`
+/// hands stdio straight to the DAP server loop exactly like `lsp` does.
+fn dap_spec() -> CommandSpec {
+    CommandSpec {
+        path: strings(&["dap"]),
+        positional: Positional::None,
+        flags: vec![FlagSpec::boolean("--help", "show subcommand help")],
+    }
+}
+
 fn completions_spec() -> CommandSpec {
     CommandSpec {
         path: strings(&["completions"]),
@@ -631,6 +641,7 @@ fn top_level_help(name: &str) -> &'static str {
         "tape-block" => "build/new/set/show .pmt tape-block snapshots",
         "ir" => "render --emit-ir JSON (ir graph -> Mermaid)",
         "lsp" => "run the LSP server on stdio",
+        "dap" => "run the DAP debug-adapter server on stdio",
         "completions" => "emit a shell completion script (zsh; bash/fish follow-on)",
         _ => "",
     }
@@ -680,9 +691,9 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 }
 
 /// The registry describing master's real, currently-dispatched CLI
-/// surface: 12 top-level subcommands (`compile`/`asm`/`link`/`build`/
-/// `lint`/`fmt`/`dis`/`tape`/`run`/`ir`/`lsp`, `tape` and `ir` nested)
-/// plus `completions` itself.
+/// surface: 13 top-level subcommands (`compile`/`asm`/`link`/`build`/
+/// `lint`/`fmt`/`dis`/`tape`/`run`/`ir`/`lsp`/`dap`, `tape` and `ir`
+/// nested) plus `completions` itself.
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
@@ -699,6 +710,7 @@ pub fn registry() -> Registry {
         run_spec(),
         ir_graph_spec(),
         lsp_spec(),
+        dap_spec(),
         completions_spec(),
     ];
     let root = root_spec(&commands);
@@ -768,6 +780,7 @@ mod tests {
                 "run",
                 "ir",
                 "lsp",
+                "dap",
                 "completions"
             ]
         );

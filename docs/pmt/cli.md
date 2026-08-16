@@ -25,6 +25,7 @@ SUBCOMMANDS:
   tape-block   build/new/set/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
+  dap          run the DAP debug-adapter server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
@@ -763,6 +764,28 @@ a prior `shutdown`, or if the client disconnects without sending
 either. See `docs/lsp.md` for the capabilities table, editor wiring
 samples, and the configuration and materialized-standard-library
 details.
+
+## `pmt dap`
+
+```
+USAGE: pmt dap
+
+Run the DAP debug-adapter server for a .pmx program on stdio until the client disconnects.
+Exit code: 0 after a clean disconnect, 1 on transport EOF before one.
+```
+
+Runs the Debug Adapter Protocol server on stdio, mirroring `pmt lsp`'s
+role: the other subcommand that hands real stdio to library code, every
+protocol frame going over stdin/stdout. This first surface covers the v1
+session lifecycle (`initialize`/`disconnect`), program-mode `launch` (a
+prebuilt `.pmx` executable named by `"program"`, an optional `.pmt` tape
+snapshot named by `"tape"` — the empty tape is PM's default), `stopOnEntry`,
+`configurationDone`, `threads`, and run control (`continue`/`pause`).
+Termination renders a summary `output` event (the same steps/tacts
+numbers `pmt run` prints) followed by `terminated` and `exited`, with the
+same 0/2/3 exit-code mapping as `pmt run`'s stopped/halted/trapped
+outcomes. Breakpoints, stepping granularity, the disassembly view, and
+the stack/scopes/variables surface land in later work.
 
 ## `pmt completions`
 

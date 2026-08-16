@@ -6,6 +6,7 @@
 // path itself must be nameable from outside `cli`, not just the function.
 pub(crate) mod build;
 mod completions;
+mod dap;
 mod driver;
 mod fmt;
 mod inspect;
@@ -49,6 +50,7 @@ SUBCOMMANDS:
   tape-block   build/new/set/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
+  dap          run the DAP debug-adapter server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
@@ -86,6 +88,7 @@ pub fn execute_with(
         Some("ir") => inspect::ir(&args[1..]),
         Some("run") => run::run(&args[1..], trace_out),
         Some("lsp") => lsp::lsp(&args[1..]),
+        Some("dap") => dap::dap(&args[1..]),
         Some("completions") => completions::completions(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }
