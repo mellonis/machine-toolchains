@@ -418,6 +418,45 @@ per-instance duplication a graft produces. Because inlining binds a call
 at compile time, a library meant to stay interposable should be built
 with `--fno-inline`.
 
+**The inline-cap sweep.** `INLINE_MAX_RULES`, the six-row ceiling above,
+was re-measured against the hand-written universal Turing machine's
+compiled `.tmc` twin on its spec-pinned run, plus the embedded standard
+library's own source (both delimited and bare namespaces), compiled at
+caps 6, 12, and 24:
+
+```
+cap       total steps    total bytes   total instrs
+6                 189           7171           1279
+12                189           7623           1399
+24                189           7623           1399
+```
+
+Bytes grow 7,171 → 7,623 between cap 6 and cap 12 — a 6.30% image-size
+increase, enough on its own to disqualify a wider cap regardless of what
+the step column shows — and cap 24 lands on the identical byte count, so
+it inherits the same disqualification. `INLINE_MAX_RULES` stays at 6. The
+step column is separately uninformative here: the flagship declares no
+`routine` blocks at all — every behaviour lives directly in `machine`
+states — and this pass only ever considers routine worlds, so the
+flagship is structurally inert to it at any cap; all of the measured
+growth comes from the standard library entry, which has no `machine`
+block and so never contributes a step count either way.
+
+The "total bytes" column carries the same mixed-basis caveat the `.pmc`
+optimizer's own sweep does: the flagship's entry measures the linked,
+relaxed executable, while the library-only entry — compiled but never
+linked, with no entry point to link against — measures the unlinked
+object's byte count before relaxation. Cap-over-cap deltas within one
+entry are still valid; the column just isn't uniformly "linked image
+bytes" across both.
+
+One coupling is worth stating for whoever bakes a wider cap in a future
+round: `outline`'s own minimum subgraph size and `inline`'s ceiling are
+kept disjoint by a compile-time assertion, not just by convention —
+raising `INLINE_MAX_RULES` past `outline`'s threshold without raising the
+threshold in the same change fails the crate's own build, not just a
+test.
+
 ### outline
 
 The inverse of `inline`: where `inline` dissolves a call, `outline`
@@ -721,6 +760,131 @@ Requiring the forwarder's row to be free of a `debugger` is this pass's
 share of the brk barrier. A forwarder-shaped row carrying one is a pause
 point, and threading through it would elide the pause — so as far as
 this pass is concerned, such a state is simply not a forwarder.
+
+**Dispatch-target threading.** After forwarder retargeting settles, this
+pass marks every remaining **bare** row `direct`: a row with no write, no
+move, no `debugger`, whose transition is a plain `goto` — the same four
+conjuncts a whole-state forwarder needs, minus the requirement that the
+row's own pattern be a wildcard, so a bare row with a concrete match cell
+qualifies too. `direct` is a lowering hint, not a graph rewrite; it lives
+on the row and is set only here — lowering always produces `direct:
+false`, so seeing it `true` in an IR document is proof this pass ran.
+
+Codegen consumes the hint at emission time, in both places a dispatch
+entry can name a bare row's target. In the ordinary table (`.targets`)
+form, a `direct` row's entry names its `goto` destination's own state
+label directly, and no one-`jmp` stub block is minted for it at all:
+
+```tmc
+alphabet a { '_', '1' }
+machine {
+  tape t: a;
+  entry state s0 {
+    ['_'] -> goto s1;
+    ['1'] -> write ['1'] goto s2;
+  }
+  state s1 { [*] -> write ['1'] stop; }
+  state s2 { [*] -> stop; }
+}
+```
+
+```
+$ tmt compile -O1 -S -o o1.tma bare.tmc
+$ cat o1.tma
+.section tables
+T0:     .row    [0]
+        .row    [1]
+D0:     .targets s1, s0__1
+.section code
+.routine main, tapes=1, alpha=(2)
+.func main
+        rd
+        mtc     T0
+        djmp    D0
+s0__1:
+        wrmv    [1], [.]
+        jmp     s2
+s1:
+        wrmv    [1], [.]
+        stp
+s2:
+        stp
+```
+
+`D0`'s first target is `s1` itself — the bare `['_'] -> goto s1;` row's
+own destination — where the undirected build mints a one-instruction
+stub `s0__0: jmp s1` and points the table at that instead:
+
+```
+$ tmt compile -O1 --fno-jump-threading -S -o o1nj.tma bare.tmc
+$ cat o1nj.tma
+.section tables
+T0:     .row    [0]
+        .row    [1]
+D0:     .targets s0__0, s0__1
+.section code
+.routine main, tapes=1, alpha=(2)
+.func main
+        rd
+        mtc     T0
+        djmp    D0
+s0__0:
+        jmp     s1
+s0__1:
+        wrmv    [1], [.]
+        jmp     s2
+s1:
+        wrmv    [1], [.]
+        stp
+s2:
+        stp
+```
+
+The `Branch` (`jm`) lowering — the one `dispatch-select` produces for a
+two-row selective-then-catch-all state — consumes the same hint on its
+selective row, threading the `jm` operand straight to the state instead
+of a minted `scan__m` stub:
+
+```tmc
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state scan {
+    ['a'] -> goto other;
+    [*]   -> stop;
+  }
+  state other { [*] -> stop; }
+}
+```
+
+```
+$ tmt compile -O1 -S -o bd.tma branch-direct.tmc
+$ cat bd.tma
+.section tables
+T0:     .row    [1]
+.section code
+.routine main, tapes=1, alpha=(2)
+.func main
+        rd
+        mtc     T0
+        jm      other
+        stp
+other:
+        stp
+```
+
+The catch-all row's own `direct` flag, if it has one, is never consulted
+here — its fall-through block is never a `jm`/`djmp` target in the first
+place, so there is nothing there to thread.
+
+At `-O0`, or with `--fno-jump-threading`, no marking ever happens, so
+codegen always falls back to minting a stub for every dispatch target —
+the mechanism is purely a compile-time choice between two equally correct
+lowerings; nothing about `-O0` output changes shape because of it. On the
+hand-written brainfuck universal Turing machine's compiled `.tmc` twin,
+threading every dispatch target this way is what takes an executed
+trampoline count of 23 at `-O0` down to 0 at `-O1` — every post-dispatch
+stub the unoptimized build pays for, gone.
 
 ### tail-call
 
@@ -1047,6 +1211,143 @@ at least one row always survives.
 A dead row carrying a `debugger` is deleted like any other, on the same
 logic `dce` uses: a row an earlier same-band row always shadows can
 never match, so its pause could never have fired.
+
+**Row subsumption.** Same-band cover above proves a row can never fire —
+dead code. A second, independent check proves a row's *effect* is
+redundant even where it does fire: row `R` is deleted when a
+later-emitted row `W` covers it — the same cell-wise relation, now
+compared across the full emitted order rather than within one band,
+because the claim here isn't "`R` never wins", it's "`R`'s win is
+indistinguishable from `W`'s" — and three further conditions hold.
+
+The first is effect equality: `R`'s and `W`'s transitions compare equal,
+and their writes compare equal tape by tape after normalizing an absent
+write/move to all-keep/all-stay, under one refinement — on a tape where
+`R`'s own pattern cell is the concrete symbol `a`, writing `a` back and
+keeping count as the same effect, since the cell can only hold `a` at the
+moment `R` fires there. That refinement does not apply on a tape where
+`R`'s cell is a wildcard, where keep and "write `a`" genuinely differ
+across the inputs `R` matches, so only literal equality counts there.
+
+```tmc
+alphabet ab { '_', '0', '1' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> write ['1'] goto t;
+    [*]   -> write ['1'] goto t;
+  }
+  state t { [*] -> stop; }
+}
+```
+
+```
+$ tmt compile -O1 -v --emit-ir=lowered -o lowered.tmo row-subsumption.tmc
+opt: 2 round(s)
+  dead-rows main: 1 change(s)
+$ tmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    S0["s"]
+    S1["t"]
+    T_stp(("stp"))
+    S0 -->|"[1] w[2]"| S1
+    S0 -->|"[*] w[2]"| S1
+    S1 -->|"[*]"| T_stp
+```
+
+```
+$ tmt compile -O1 --emit-ir=after:dead-rows -o dr.tmo row-subsumption.tmc
+$ tmt ir graph dr.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    S0["s"]
+    S1["t"]
+    T_stp(("stp"))
+    S0 -->|"[*] w[2]"| S1
+    S1 -->|"[*]"| T_stp
+```
+
+Both rows write `'1'` outright, so literal equality alone already
+subsumes `['0']` into the catch-all. The keep-versus-write refinement
+covers the subtler case, where the specific row keeps the value it read
+back implicitly instead of naming it:
+
+```tmc
+alphabet ab { '_', '0' }
+machine {
+  tape n: ab;
+  entry state s {
+    ['0'] -> write ['0'] goto t;
+    [*]   -> goto t;
+  }
+  state t { [*] -> stop; }
+}
+```
+
+```
+$ tmt compile -O1 --emit-ir=after:dead-rows -o dr2.tmo row-subsumption-keep.tmc
+$ tmt ir graph dr2.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    S0["s"]
+    S1["t"]
+    T_stp(("stp"))
+    S0 -->|"[*]"| S1
+    S1 -->|"[*]"| T_stp
+```
+
+`['0'] -> write ['0']` and `[*] -> ` (an implicit keep) leave the same
+cell value on the only input `['0']` matches, so the specific row folds
+into the catch-all here too.
+
+The second condition is that neither row carries a `debugger` or is a
+compiler-synthesized trap row — an observable pause, or a hole a real
+rule never authored, is never folded into another row's identity. The
+third is no intermediate capture: every row strictly between `R` and `W`
+in emitted order must be pattern-disjoint from `R`, so that the input
+`R` used to serve is provably handed to `W` and not to something in
+between once `R` is gone.
+
+**The volatile refinement.** On a `volatile tape`
+(`docs/tmt/language.md (volatile tapes)`), the keep-equals-matched-write
+fold above is withheld, and only literal write equality counts. Keep and
+`write a` leave the same cell *value* behind when `R` matches `a`, but
+codegen emits no `wrmv` write micro-op at all for an all-keep action,
+while a concrete write always emits one — on a device band the write
+*operation*, not just the value it leaves behind, is externally
+observable, so folding the two together would drop or add a bus
+transaction the outside world could see. Literal equality — both keep,
+or both the identical concrete write — keeps the emitted instruction the
+same either way, so that half of the rule stays sound on every tape,
+volatile or not. Run the keep-versus-write example above with `tape n`
+declared `volatile` and `dead-rows` never fires:
+
+```
+$ tmt compile -O1 -v -o volatile.tmo row-subsumption-volatile.tmc
+opt: 2 round(s)
+  jump-threading main: 1 change(s)
+  dispatch-select main: 1 change(s)
+```
+
+**The `dispatch-select` interaction.** A state already flagged `Branch`
+by `dispatch-select` is codegen's committed two-row `jm` shape, which
+indexes both rows unconditionally; same-band cover can never reach one,
+since the selective and catch-all rows always land in different bands,
+but this cross-band check could, if a later fixpoint round made the two
+rows effect-identical only *after* the flag was set. Subsumption is
+therefore a no-op on any state that is not still in the plain table
+form — a guard that costs nothing in practice, since `dead-rows` always
+runs, in the same round, before `dispatch-select` ever sees the state.
 
 ### dispatch-select
 

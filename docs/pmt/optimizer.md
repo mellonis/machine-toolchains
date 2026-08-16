@@ -9,10 +9,11 @@ from the graph the optimizer handed back.
 
 There are two levels. `-O0`, the default, runs no pass at all. `-O1`
 runs the whole pipeline: one program-level pass, `inline`, at the start
-of every round, then eight per-function passes in a fixed order —
+of every round, then ten per-function passes in a fixed order —
 `check-fold`, `jump-threading`, `cell-state`, `branch-fold`,
-`tail-call`, `tail-merge`, `dce`, `fuse-tape-ops`. Those nine names,
-hyphenated exactly as written, are what `--fno-<pass>` and
+`tail-sink`, `tail-call`, `tail-merge`, `dce`, `move-elim`,
+`fuse-tape-ops`. Those eleven names, hyphenated exactly as written, are
+what `--fno-<pass>` and
 `--emit-ir=after:<pass>` accept. The `--release` preset is
 `-O1 --strip-debugger` and `--debug` is `-g -O0`, so `--release` implies
 an optimized build and `--debug` an unoptimized one
@@ -236,8 +237,8 @@ column per name from the program's volatile bit
 build; it is simply not optimized on any assumption about what the tape
 will answer.
 
-**The gated set** is `cell-state`, `branch-fold`, and `fuse-tape-ops`.
-The dividing line is what a pass believes about the tape:
+**The gated set** is `cell-state`, `branch-fold`, `fuse-tape-ops`, and
+`move-elim`. The dividing line is what a pass believes about the tape:
 
 - `cell-state` drops idempotent and dead writes. Both rules delete a
   write the source asked for, and the idempotent rule additionally reads
@@ -250,12 +251,17 @@ The dividing line is what a pass believes about the tape:
 - `fuse-tape-ops` folds `wr x` plus a move into `wrl`/`wrr`, which skips
   the intermediate latch read of the written cell: two device
   transactions become one.
+- `move-elim` deletes an inverse move pair (`rgt; lft` or `lft; rgt`).
+  Each half of the pair is a device access on a volatile band regardless
+  of which soundness proof licensed the deletion, so dropping the pair
+  drops two accesses the outside world could have observed between them.
 
-The remaining six keep running. Five of them only rewire control flow
-between accesses they leave untouched (`check-fold`, `jump-threading`,
-`tail-call`, `tail-merge`, `inline`) and `dce` deletes code that never
-runs. Note `check-fold` is NOT the same shape as `branch-fold` despite
-the neighbouring names: it rewrites `Check{k, k}` into `Goto{k}`, a test
+The remaining seven keep running. Six of them only rewire control flow,
+or relocate already-identical code, between accesses they leave
+untouched (`check-fold`, `jump-threading`, `tail-sink`, `tail-call`,
+`tail-merge`, `inline`) and `dce` deletes code that never runs. Note
+`check-fold` is NOT the same shape as `branch-fold` despite the
+neighbouring names: it rewrites `Check{k, k}` into `Goto{k}`, a test
 whose two arms already name one block, and consults nothing about the
 tape at all.
 
@@ -488,6 +494,39 @@ $ pmt dis inline.pmx
 Because inlining binds a call at compile time, a library meant to stay
 fully interposable should be built with `--fno-inline`
 (`docs/pmt/language.md (optimization)`).
+
+**The inline-cap sweep.** `INLINE_MAX_OPS`, the six-op ceiling above, was
+re-measured against a corpus of golden programs (each on its committed
+inputs), a non-terminating program run to a fixed step budget, and the
+embedded standard library's own source, compiled and run at caps 6, 12,
+and 24:
+
+```
+cap       total steps    total bytes   total instrs
+6                1231            259            191
+12               1231            259            191
+24               1231            259            191
+```
+
+Every column is flat across the swept range: no corpus member's compiled
+code differs at all between cap 6 and cap 24, so there is no step win to
+buy at a wider cap and the constant stays at `INLINE_MAX_OPS = 6`. The
+flatness is a fact about the corpus, not a blind spot in the pass: every
+routine the standard library exports is 2–4 ops, already well under the
+cap-6 threshold, and every golden program either declares no local
+callees at all or declares one with exactly one call site, which this
+pass's single-call-site exception admits irrespective of any cap. Nothing
+in the corpus falls in the 7–24-op range a wider cap would have to reach.
+
+One caveat on the "total bytes" column for anyone re-running or
+extending this sweep: it mixes two bases. A golden program's own entry
+measures the linked, relaxed executable's code size, while a
+library-only entry with no `main` to link against — the standard library
+source, compiled but never linked — measures the unlinked object's own
+byte count before relaxation. Cap-over-cap deltas within one entry are
+still valid (each entry's own basis stays constant across every cap
+compared), but the column is not uniformly "linked image bytes" end to
+end.
 
 ### check-fold
 
@@ -787,6 +826,164 @@ flowchart TD
 `mark` writes 1, so MF is 1 and the marked arm is the only one
 reachable; `B2` survives one snapshot and is then dropped.
 
+### tail-sink
+
+**Tail sinking** is the suffix-level dual of `tail-merge`'s whole-block
+dedup below: where `tail-merge` collapses two blocks that are identical
+end to end, `tail-sink` handles the more common partial case, where two
+`check` arms differ at the front — the code that made them worth
+branching on — but converge on identical trailing ops. Only that shared
+suffix moves, out of each arm and onto the front of the block the two
+arms join into; nothing sinks past a point where the arms still
+disagree, since that would mean choosing which arm's now-earlier ops to
+keep.
+
+A block `J` qualifies as the join when it has exactly two predecessors
+that reach it by a `goto` or a fall-through edge, those two are distinct
+from each other and from `J` itself, and no other edge reaches `J` — not
+a `check` arm, and not `J` being the function's own entry, which is
+modelled as one such "other" edge on the entry block so a function's
+first block can never qualify. A third way to reach `J`, even a `check`
+arm that never fires at runtime, means some execution could observe `J`
+without having executed the sunk suffix, so it has to be ruled out
+statically rather than left to chance.
+
+```c
+main() {
+    check(1, 2);
+ 1: mark;
+    right;
+    right;
+    goto 3;
+ 2: left;
+    right;
+    right;
+ 3: unmark;
+}
+```
+
+```
+$ pmt compile -O1 -v --emit-ir=lowered -o lowered.pmo tail-sink.pmc
+opt: 2 round(s)
+  tail-sink main: 2 change(s)
+$ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    B0["(empty)"]
+    B1["1:<br/>wr 1<br/>rgt<br/>rgt"]
+    B2["2:<br/>lft<br/>rgt<br/>rgt"]
+    B3["3:<br/>wr 0<br/>ret"]
+    B0 -->|MF| B1
+    B0 -->|!MF| B2
+    B1 -->|goto| B3
+    B2 --> B3
+```
+
+```
+$ pmt compile -O1 --emit-ir=after:tail-sink -o sunk.pmo tail-sink.pmc
+$ pmt ir graph sunk.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    B0["(empty)"]
+    B1["1:<br/>wr 1"]
+    B2["2:<br/>lft"]
+    B3["3:<br/>rgt<br/>rgt<br/>wr 0<br/>ret"]
+    B0 -->|MF| B1
+    B0 -->|!MF| B2
+    B1 -->|goto| B3
+    B2 --> B3
+```
+
+The two `rgt`s common to both arms are cut from `B1` and `B2` and
+spliced onto the front of `B3`; a suffix has to be at least two ops long
+to sink; a one-op match is left alone, since a single relocated op saves
+nothing a fall-through wasn't already giving away for free.
+
+**Fall-through layout is untouched.** This pass only moves ops between
+existing blocks — it never adds, removes, reorders, or retargets a block
+or a terminator — so the physical layout codegen chooses is exactly what
+it would have been anyway, and which terminators codegen elides as
+fall-through is decided the same way it always was. One consequence is
+visible in the assembly: `B2`'s fall-through into `B3` still costs
+nothing, but `B1` now has to jump over `B2` to reach the relocated
+suffix, so of the two arms, at most one ever pays for the jump the sink
+introduced.
+
+```
+$ pmt compile -O1 -S -o opt.pma tail-sink.pmc
+$ cat opt.pma
+.func main
+        jnm     L2
+        wr      1
+        jmp     L3
+L2:
+        lft
+L3:
+        rgt
+        rgt
+        wr      0
+        stp
+```
+
+A `debugger` stops the upward scan on whichever arm carries it: the
+comparison walks from the end of both arms and halts, without counting
+the pair at that position, as soon as either side's op is a `brk` — a
+breakpoint never sinks, even when both arms carry an identical one, and
+nothing before it may sink past it either, since a debugger attached
+there must still see it fire from its own arm.
+
+```c
+main() {
+    check(1, 2);
+ 1: debugger;
+    right;
+    right;
+    goto 3;
+ 2: debugger;
+    right;
+    right;
+ 3: unmark;
+}
+```
+
+```
+$ pmt compile -O1 -v --emit-ir=after:tail-sink -o brk.pmo tail-sink-brk.pmc
+opt: 2 round(s)
+  tail-sink main: 2 change(s)
+$ pmt ir graph brk.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    B0["(empty)"]
+    B1["1:<br/>brk"]
+    B2["2:<br/>brk"]
+    B3["3:<br/>rgt<br/>rgt<br/>wr 0<br/>ret"]
+    B0 -->|MF| B1
+    B0 -->|!MF| B2
+    B1 -->|goto| B3
+    B2 --> B3
+```
+
+Only the two `rgt`s past each `brk` sink; the breakpoint itself stays
+exactly where its own arm had it.
+
+Because no access is ever added, dropped, merged, split, or reordered on
+any executed path — only two static copies of the identical instruction
+become one, and every path still performs the same sequence of accesses
+in the same order it always did — `tail-sink` is **not** in the gated
+set above: it runs the same in the volatile column as the ordinary one.
+A `wr 1` writes 1 whether MF took the marked or the blank arm to reach
+it, so replacing two static copies with one dynamic execution changes
+nothing a device on the other end of the tape could observe.
+
 ### tail-call
 
 A call in tail position — the last op of a block that returns — becomes
@@ -1061,6 +1258,158 @@ $ diff plain.pma opt.pma
 Dead *functions* are not this pass's business — the linker drops
 whatever no surviving call site reaches (`docs/core.md (linking)`).
 
+### move-elim
+
+**Move elimination** deletes an immediately adjacent inverse move pair —
+`rgt` then `lft`, or `lft` then `rgt` — that provably makes no observable
+difference to the run. Two independent proofs each license the deletion
+on their own; either one is enough.
+
+The first proof applies wherever the MF-coupling invariant already holds
+just before the pair: by that invariant, MF already equals "the cell
+under the head is marked" going in, and the pair steps the head away and
+straight back to that same cell with no write in between, so it re-latches
+MF from the identical cell it started at. Post-pair MF, and everything
+that reads MF afterward, comes out the same whether the pair ran or not.
+
+```c
+main() {
+    mark;
+    right;
+    left;
+    @g();
+}
+
+g() {
+    right;
+    left;
+    unmark;
+}
+```
+
+```
+$ pmt compile -O1 -v --fno-inline --emit-ir=lowered -o lowered.pmo move-elim.pmc
+opt: 2 round(s)
+  move-elim main: 1 change(s)
+  move-elim g: 1 change(s)
+$ pmt ir graph lowered.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    B0["wr 1<br/>rgt<br/>lft<br/>call @g<br/>ret"]
+```
+
+```
+$ pmt compile -O1 --fno-inline --emit-ir=after:move-elim -o elim.pmo move-elim.pmc
+$ pmt ir graph elim.ir.json --function main
+```
+
+```mermaid
+%% main
+flowchart TD
+    B0["wr 1<br/>call @g<br/>ret"]
+```
+
+`main`'s pair is coupled by the `mark` in front of it, so it goes —
+that's the first proof. `g`, called with `--fno-inline` so the example
+shows a real function boundary, opens with the pair before any tape
+instruction has run in it:
+
+```
+$ pmt ir graph lowered.ir.json --function g
+```
+
+```mermaid
+%% g
+flowchart TD
+    B0["rgt<br/>lft<br/>wr 0<br/>ret"]
+```
+
+```
+$ pmt ir graph elim.ir.json --function g
+```
+
+```mermaid
+%% g
+flowchart TD
+    B0["wr 0<br/>ret"]
+```
+
+`g`'s pair still goes, on the second proof: MF is *not* proven at the
+function's entry, so the pair's own re-latch would, on an `Uncoupled`
+path, actually change what MF holds — but the `unmark` immediately after
+it re-latches MF from scratch before anything ever reads it, so the
+value the pair would have latched is dead on arrival. `mf_dead_after`
+walks forward from just past the pair to decide this: a later tape
+instruction (a move or a `wr`) ends the walk successfully, since the next
+latch moots the pair's own; a `check` terminator, a `call`, or a `brk` is
+a possible reader and ends the walk unsuccessfully; `ret`/`hlt` end the
+function with nothing left to read; a `goto` or fall-through continues
+the walk into the successor, with a revisited block treated as dead (a
+latch-free, read-free cycle never reads MF on that path either).
+
+Either proof is evaluated once, at the pair's own position, from the
+dataflow fact just before it — never from what a *later* pass might learn.
+A `brk` sitting between the pair and the next read blocks the second
+proof exactly as a `call` does, since it is itself a possible observer of
+MF:
+
+```c
+g() {
+    right;
+    left;
+    debugger;
+    unmark;
+}
+main() {
+    @g();
+}
+```
+
+```
+$ pmt compile -O1 -v --fno-inline -o /dev/null brk-block.pmc
+opt: 1 round(s)
+```
+
+No pass fires at all — the `brk` is both a barrier the pair may not cross
+and a possible reader stopping `mf_dead_after`'s walk, so with the pair
+`Uncoupled` at `g`'s entry and no proof available, it stays.
+
+**Volatile builds gate this pass.** Each half of an inverse pair is a
+move, and a move is a tape access — on a `volatile tape` (under Volatile
+builds above) every access is externally observable, so
+deleting the pair drops *two* device transactions the outside world could
+have seen between them, regardless of which proof licensed the deletion.
+`volatile main` keeps both:
+
+```c
+volatile main() {
+    right;
+    left;
+    unmark;
+}
+```
+
+```
+$ pmt build -O1 move-elim-v.pmc -o v.pmx && pmt dis v.pmx
+.func main
+        rgt
+        lft
+        wr      0
+        stp
+```
+
+against the ordinary column's one instruction for the same body:
+
+```
+$ pmt build -O1 move-elim-plain.pmc -o plain.pmx && pmt dis plain.pmx
+.func main
+        wr      0
+        stp
+```
+
 ### fuse-tape-ops
 
 Fuses an adjacent write-then-move pair into the single instruction PM-1
@@ -1141,7 +1490,7 @@ stays the single-file command's job (`docs/pmt/cli.md (build)`).
 ### `--fno-<pass>`
 
 Disables one pass for the whole compile, and is repeatable — the names
-are the nine in the roster above. Two things it is good for: isolating a
+are the eleven in the roster above. Two things it is good for: isolating a
 pass while reading IR, as several examples on this page do, and turning
 off `inline` for a library that must stay interposable.
 
