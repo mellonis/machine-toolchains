@@ -288,6 +288,33 @@ fn straight_block(w: &IrWorld, st: &IrState, options: CodegenOptions) -> Block {
     }
 }
 
+/// A state's rows in emitted (match-table) order: row indices, not rows —
+/// callers pair each index back with its own row data. The classification
+/// mirrors the match-table discipline (docs/tmt/isa.md (match and
+/// dispatch)): exact rows (every cell concrete) sorted by the SAME key
+/// codegen's table emission sorts by, then partial rows (a mix of concrete
+/// and wildcard cells) in source order, then the catch-all rows (every cell
+/// a wildcard) in source order. Shared by `conditional` (which mints each
+/// row's dispatch target) and the `dead_rows` optimizer pass (which reasons
+/// about which row wins when several could match — docs/tmt/optimizer.md
+/// (row subsumption)).
+pub(crate) fn emitted_row_order(st: &IrState) -> Vec<usize> {
+    let mut exact: Vec<usize> = Vec::new();
+    let mut partial: Vec<usize> = Vec::new();
+    let mut catch_all: Vec<usize> = Vec::new();
+    for (k, r) in st.rules.iter().enumerate() {
+        if r.pattern.iter().all(|c| matches!(c, IrCell::Index { .. })) {
+            exact.push(k);
+        } else if r.pattern.iter().all(|c| matches!(c, IrCell::Wildcard)) {
+            catch_all.push(k);
+        } else {
+            partial.push(k);
+        }
+    }
+    exact.sort_by(|&a, &b| cmp_row(&st.rules[a].pattern, &st.rules[b].pattern));
+    exact.into_iter().chain(partial).chain(catch_all).collect()
+}
+
 /// A conditional state's match/dispatch table plus one block per rule (the
 /// dispatch targets), in source (row) order. The table's rows and `.targets`
 /// are ordered per the match-table discipline (docs/tmt/isa.md (match and
@@ -304,13 +331,10 @@ fn conditional(
         .map(|k| fresh(used, &format!("{}__{k}", st.name)))
         .collect();
 
-    // Classify + order the rows: sorted exact, then partial (source order),
-    // then catch-all (source order) — each carrying its target.
-    let mut exact: Vec<(Vec<IrCell>, String)> = Vec::new();
-    let mut partial: Vec<(Vec<IrCell>, String)> = Vec::new();
-    let mut catch_all: Vec<(Vec<IrCell>, String)> = Vec::new();
-    for (k, r) in st.rules.iter().enumerate() {
-        let cells = r.pattern.clone();
+    let mut rows = Vec::new();
+    let mut targets = Vec::new();
+    for k in emitted_row_order(st) {
+        let r = &st.rules[k];
         // A `direct`-threaded bare rule names its Goto destination's own
         // label as the dispatch target and skips the minted stub entirely
         // (docs/tmt/optimizer.md (dispatch-target threading)).
@@ -322,20 +346,7 @@ fn conditional(
         } else {
             rule_labels[k].clone()
         };
-        if cells.iter().all(|c| matches!(c, IrCell::Index { .. })) {
-            exact.push((cells, tgt));
-        } else if cells.iter().all(|c| matches!(c, IrCell::Wildcard)) {
-            catch_all.push((cells, tgt));
-        } else {
-            partial.push((cells, tgt));
-        }
-    }
-    exact.sort_by(|a, b| cmp_row(&a.0, &b.0));
-
-    let mut rows = Vec::new();
-    let mut targets = Vec::new();
-    for (cells, tgt) in exact.into_iter().chain(partial).chain(catch_all) {
-        rows.push(cells);
+        rows.push(r.pattern.clone());
         targets.push(tgt);
     }
 
