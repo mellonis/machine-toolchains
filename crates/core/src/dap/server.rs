@@ -276,16 +276,25 @@ fn flush_events(
     }
 }
 
-/// Translates one [`AdapterEvent`] to its DAP event name and body,
-/// carrying exactly the fields the variant names — no invented fields
-/// (e.g. no assumed `threadId`) belong at this layer.
+/// Translates one [`AdapterEvent`] to its DAP event name and body. Most
+/// fields pass through exactly as the variant names them; `stopped` is
+/// the one exception, stamped with the framework-wide single-thread
+/// model's constants (`threadId: 1`, `allThreadsStopped: true`) — every
+/// DAP session this crate serves models the debuggee as exactly one
+/// thread, so this is a commitment of the shared server loop, not
+/// per-arch data, and `AdapterEvent` itself carries no thread id for an
+/// adapter to have supplied one anyway.
 fn to_protocol_event(event: AdapterEvent) -> (&'static str, Value) {
     match event {
         AdapterEvent::Stopped {
             reason,
             description,
         } => {
-            let mut body = serde_json::json!({ "reason": reason });
+            let mut body = serde_json::json!({
+                "reason": reason,
+                "threadId": 1,
+                "allThreadsStopped": true,
+            });
             if let Some(description) = description {
                 body["description"] = Value::String(description);
             }
@@ -641,6 +650,8 @@ mod tests {
         assert!(is_success(&outputs[2]));
         assert_eq!(outputs[3]["type"], json!("event"));
         assert_eq!(outputs[3]["event"], json!("stopped"));
+        assert_eq!(outputs[3]["body"]["threadId"], json!(1));
+        assert_eq!(outputs[3]["body"]["allThreadsStopped"], json!(true));
 
         let pause_at = adapter
             .calls
