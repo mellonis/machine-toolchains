@@ -202,9 +202,18 @@ images) and two-row shapes surface for `dispatch_select`. Deleting R
 makes W fire on R's inputs — observably identical by construction, which
 is precisely what the equivalence matrix re-verifies.
 
-**Contracts.** Condition 3 is the `brk` barrier; volatile bands are
-untouched (the dynamic access sequence on R's inputs is identical under
-W). No new flag; `--fno-dead-rows` covers the subsumption. The module's
+**Contracts.** Condition 3 is the `brk` barrier. **Volatile refinement
+(ruled at implementation, superseding this spec's earlier blanket
+claim):** the plain identical-effect case (byte-equal writes/moves) is
+volatile-safe — the dynamic access sequence on R's inputs is identical
+under W — but the `Keep ≡ Index(a)` fold is NOT: `Keep` emits no write
+instruction while `Index(a)` emits one, and on a volatile band that
+write is an observable bus transaction. The fold is therefore gated
+per-tape on `IrTape::volatile`; literal equality keeps folding
+everywhere. Additionally, states already lowered to the
+`IrDispatch::Branch` shape are skipped whole (deleting a row would
+break the two-row invariant `codegen::branch()` indexes by). No new
+flag; `--fno-dead-rows` covers the subsumption. The module's
 union-cover "recorded trigger" note stays as is.
 
 ## 7. PM: `move_elim` (item 2)
