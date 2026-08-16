@@ -1,8 +1,9 @@
 //! `-O1` pass driver for the TM IR. One module per pass; a pass is either
 //! per-world, `fn(&mut IrWorld) -> u32` (PIPELINE), or program-level,
-//! `fn(&mut IrProgram) -> u32` (PROGRAM_PIPELINE — cross-world, run at round
-//! start). Each pass returns its change count; the driver loops the pipelines
-//! to a change-fixpoint, round-capped at [`MAX_ROUNDS`].
+//! `fn(&mut IrProgram, &OptOptions) -> u32` (PROGRAM_PIPELINE — cross-world,
+//! run at round start; `inline` reads [`OptOptions::inline_cap`], `outline`
+//! reads no cap). Each pass returns its change count; the driver loops the
+//! pipelines to a change-fixpoint, round-capped at [`MAX_ROUNDS`].
 //!
 //! The pipelines are the growth points: each optimizer pass registers itself
 //! into one of them. The program-level [`PROGRAM_PIPELINE`] runs `inline` then
@@ -139,6 +140,10 @@ pub struct OptOptions {
     /// subgraphs into a routine rather than splicing), so it runs only when
     /// the caller opts in — otherwise it would fight `inline` for a fixpoint.
     pub outline: bool,
+    /// Override `inline`'s rule-count cap (`inline::INLINE_MAX_RULES` when
+    /// `None`). A measurement knob for the optimizer sweep, not CLI surface —
+    /// no flag, no completions entry. `outline` reads no cap.
+    pub inline_cap: Option<usize>,
 }
 
 /// One pass's effect on one world in one round (`tmt -v` material).
@@ -181,7 +186,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("dispatch-select", dispatch_select::run),
 ];
 
-type ProgramPassFn = fn(&mut IrProgram) -> u32;
+type ProgramPassFn = fn(&mut IrProgram, &OptOptions) -> u32;
 
 /// Program-level passes (cross-world), run at round start. `inline` splices
 /// small full-passthrough leaf callees into their call sites; `outline`
@@ -241,7 +246,7 @@ pub fn optimize(
             if !program_pass_enabled(name, options) {
                 continue;
             }
-            let n = pass(ir);
+            let n = pass(ir, options);
             // Re-check the world invariants after EVERY pass, not only when it
             // reported a change: a pass that returns 0 but still corrupted the
             // graph must fail here, at the pass that broke it, rather than deep

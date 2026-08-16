@@ -1,6 +1,7 @@
 //! `-O1` pass driver. One module per pass; a pass is either per-function,
 //! `fn(&mut IrFunction) -> u32` (PIPELINE), or program-level,
-//! `fn(&mut IrProgram) -> u32` (PROGRAM_PIPELINE — currently `inline`).
+//! `fn(&mut IrProgram, &OptOptions) -> u32` (PROGRAM_PIPELINE — currently
+//! `inline`, which reads [`OptOptions::inline_cap`]).
 //!
 //! # The equivalence contract (internal — read before touching a pass)
 //!
@@ -66,6 +67,10 @@ pub struct OptOptions {
     pub disabled: HashSet<String>,
     /// Capture an IR snapshot after each pass that changed something.
     pub capture: bool,
+    /// Override `inline`'s size cap (`inline::INLINE_MAX_OPS` when `None`).
+    /// A measurement knob for the optimizer sweep, not CLI surface — no
+    /// flag, no completions entry.
+    pub inline_cap: Option<usize>,
 }
 
 /// One pass's effect on one function in one round (`pmt -v` material).
@@ -105,7 +110,7 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("fuse-tape-ops", fuse_tape_ops::run),
 ];
 
-type ProgramPassFn = fn(&mut IrProgram) -> u32;
+type ProgramPassFn = fn(&mut IrProgram, &OptOptions) -> u32;
 
 /// Program-level passes (cross-function), run at round start.
 const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[("inline", inline::run)];
@@ -188,7 +193,7 @@ pub fn optimize(
             if options.disabled.contains(*name) {
                 continue;
             }
-            let n = pass(ir);
+            let n = pass(ir, options);
             #[cfg(debug_assertions)]
             for f in &ir.functions {
                 if let Err(e) = crate::ir::validate_function(f) {

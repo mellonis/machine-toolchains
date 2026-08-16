@@ -316,6 +316,10 @@ pub struct CompileOptions {
     pub capture_ir: bool,
     /// Which build columns to emit (default: both).
     pub columns: VariantColumns,
+    /// Override `inline`'s size cap (`None` = the shipped constant). A
+    /// measurement knob for the optimizer sweep, not CLI surface — no flag,
+    /// no completions entry.
+    pub inline_cap: Option<usize>,
 }
 
 /// Structured stage report — `pmt -v` renders it; the library never
@@ -667,6 +671,7 @@ fn build_column(
             level: options.opt_level,
             disabled: disabled.clone(),
             capture,
+            inline_cap: options.inline_cap,
         },
         snapshots,
     );
@@ -1559,6 +1564,69 @@ mod tests {
         assert_eq!(o0.object, o1.object);
         assert_eq!(o1.report.opt.rounds, 1);
         assert!(o1.report.opt.changes.is_empty());
+    }
+
+    #[test]
+    fn inline_cap_widens_what_the_program_pass_admits() {
+        // An 8-op callee called from two sites: default (`None`) keeps the
+        // shipped `INLINE_MAX_OPS` cap (6), so the call survives (the
+        // single-call-site escape doesn't fire at two sites); `Some(12)`
+        // widens the size arm and both calls splice away. End-to-end
+        // through `compile()`, proving `CompileOptions.inline_cap` actually
+        // reaches `OptOptions.inline_cap` — `optimizer::inline::run` is
+        // tested directly in optimizer/inline.rs; this pins the
+        // compiler-level plumbing on top of it. Eight IDENTICAL moves, not
+        // an out-and-back sequence: an adjacent inverse pair (`right;
+        // left;`) is exactly what `move-elim` deletes, which would shrink
+        // this callee below the cap across -O1's later rounds regardless
+        // of the override under test and defeat the fixture.
+        let src = "big() { right; right; right; right; right; right; right; right; } \
+                   main() { @big(); @big(); }";
+
+        let default_out = compile(
+            src,
+            CompileOptions {
+                opt_level: OptLevel::O1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let main = default_out
+            .ir
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .unwrap();
+        assert!(
+            main.blocks
+                .iter()
+                .flat_map(|b| &b.ops)
+                .any(|op| matches!(op, crate::ir::IrOp::Call { name, .. } if name == "big")),
+            "default cap keeps the call to the oversize, multiply-called callee"
+        );
+
+        let widened_out = compile(
+            src,
+            CompileOptions {
+                opt_level: OptLevel::O1,
+                inline_cap: Some(12),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let main = widened_out
+            .ir
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .unwrap();
+        assert!(
+            main.blocks.iter().all(|b| b
+                .ops
+                .iter()
+                .all(|op| !matches!(op, crate::ir::IrOp::Call { .. }))),
+            "CompileOptions.inline_cap: Some(12) reaches the optimizer and admits the callee"
+        );
     }
 
     #[test]

@@ -72,6 +72,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use super::OptOptions;
 use crate::ir::{
     IrCell, IrDispatch, IrProgram, IrRule, IrState, IrThen, IrTransition, IrWorld, IrWorldKind,
 };
@@ -94,7 +95,10 @@ struct Region {
     key: Vec<u8>,
 }
 
-pub fn run(ir: &mut IrProgram) -> u32 {
+/// `_options` is unused: `outline` reads no cap (`inline_cap` only widens
+/// `inline`'s size arm). The parameter exists to match the program-pass
+/// signature shared with `inline` (optimizer/mod.rs).
+pub fn run(ir: &mut IrProgram, _options: &OptOptions) -> u32 {
     let orig_len = ir.worlds.len();
     let mut new_worlds: Vec<IrWorld> = Vec::new();
     let mut changes = 0u32;
@@ -523,7 +527,7 @@ mod tests {
         // so they fold into ONE routine and both roots become trampolines.
         let mut ir = ir_of(&two_chain_program(7, "mid", "mid"));
         let before = ir.worlds.len();
-        assert_eq!(run(&mut ir), 1, "one group hoisted");
+        assert_eq!(run(&mut ir, &OptOptions::default()), 1, "one group hoisted");
         assert_eq!(ir.worlds.len(), before + 1, "one routine synthesized");
 
         let routine = ir
@@ -575,7 +579,11 @@ mod tests {
         // `mid`. Different junctions → different canonical keys → NO fold.
         let mut ir = ir_of(&two_chain_program(7, "mid", "alt"));
         let before = ir.worlds.len();
-        assert_eq!(run(&mut ir), 0, "differing junctions never fold");
+        assert_eq!(
+            run(&mut ir, &OptOptions::default()),
+            0,
+            "differing junctions never fold"
+        );
         assert_eq!(ir.worlds.len(), before, "no routine synthesized");
     }
 
@@ -584,7 +592,11 @@ mod tests {
         // Two identical chains, but only 6 states each (< OUTLINE_MIN_STATES) —
         // below threshold, so they are left as written.
         let mut ir = ir_of(&two_chain_program(6, "mid", "mid"));
-        assert_eq!(run(&mut ir), 0, "sub-threshold groups do not fold");
+        assert_eq!(
+            run(&mut ir, &OptOptions::default()),
+            0,
+            "sub-threshold groups do not fold"
+        );
     }
 
     #[test]
@@ -598,7 +610,11 @@ mod tests {
             "  state a3 { [*] -> debugger move [>] goto a4; }\n",
         );
         let mut ir = ir_of(&src);
-        assert_eq!(run(&mut ir), 0, "a brk in a region blocks the fold");
+        assert_eq!(
+            run(&mut ir, &OptOptions::default()),
+            0,
+            "a brk in a region blocks the fold"
+        );
         assert!(
             ir.worlds
                 .iter()
@@ -620,7 +636,7 @@ mod tests {
             .find(|w| w.name == "main")
             .unwrap();
         main.tapes[0].volatile = true;
-        let changed = run(&mut program);
+        let changed = run(&mut program, &OptOptions::default());
         assert!(changed > 0, "premise: outline must fire on this fixture");
         let synthesized = program
             .worlds

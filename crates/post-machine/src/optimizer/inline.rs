@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use super::OptOptions;
 use crate::ir::{IrBlock, IrFunction, IrOp, IrProgram, IrTerm};
 
 const INLINE_MAX_OPS: usize = 6;
@@ -24,8 +25,9 @@ fn op_count(f: &IrFunction) -> usize {
     f.blocks.iter().map(|b| b.ops.len()).sum()
 }
 
-pub fn run(ir: &mut IrProgram) -> u32 {
+pub fn run(ir: &mut IrProgram, options: &OptOptions) -> u32 {
     // Candidate set is fixed from the pre-pass program state.
+    let cap = options.inline_cap.unwrap_or(INLINE_MAX_OPS);
     let mut call_counts: HashMap<&str, u32> = HashMap::new();
     for f in &ir.functions {
         for b in &f.blocks {
@@ -46,7 +48,7 @@ pub fn run(ir: &mut IrProgram) -> u32 {
             // main's Return means stp — splicing it would erase the machine stop.
             f.name != "main"
                 && is_leaf_without_brk(f)
-                && (op_count(f) <= INLINE_MAX_OPS
+                && (op_count(f) <= cap
                     || call_counts.get(f.name.as_str()).copied().unwrap_or(0) == 1)
         })
         .map(|f| (f.name.clone(), f.clone()))
@@ -146,8 +148,12 @@ mod tests {
     use crate::parser::parse;
 
     fn inlined(src: &str) -> IrProgram {
+        inlined_with(src, &OptOptions::default())
+    }
+
+    fn inlined_with(src: &str, options: &OptOptions) -> IrProgram {
         let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
-        run(&mut ir);
+        run(&mut ir, options);
         for f in &ir.functions {
             crate::ir::validate_function(f).unwrap();
         }
@@ -247,6 +253,51 @@ mod tests {
                 .ops
                 .iter()
                 .any(|op| matches!(op, IrOp::Call { name, .. } if name == "main"))
+        );
+    }
+
+    #[test]
+    fn the_cap_override_admits_a_larger_callee() {
+        // An 8-op callee (> INLINE_MAX_OPS = 6) called from TWO sites, so the
+        // single-call-site escape never fires: at the default cap the call
+        // survives at both sites; `inline_cap: Some(12)` widens the size arm
+        // and both splice away.
+        let src = "big() { right; right; right; right; left; left; left; left; } \
+                   main() { @big(); @big(); }";
+
+        let default_ir = inlined(src);
+        let main = default_ir
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .unwrap();
+        assert_eq!(
+            main.blocks
+                .iter()
+                .flat_map(|b| &b.ops)
+                .filter(|op| matches!(op, IrOp::Call { name, .. } if name == "big"))
+                .count(),
+            2,
+            "default cap keeps both calls to the oversize, multiply-called callee"
+        );
+
+        let widened_ir = inlined_with(
+            src,
+            &OptOptions {
+                inline_cap: Some(12),
+                ..Default::default()
+            },
+        );
+        let main = widened_ir
+            .functions
+            .iter()
+            .find(|f| f.name == "main")
+            .unwrap();
+        assert!(
+            main.blocks
+                .iter()
+                .all(|b| b.ops.iter().all(|op| !matches!(op, IrOp::Call { .. }))),
+            "inline_cap: Some(12) admits the 8-op callee at both call sites"
         );
     }
 }

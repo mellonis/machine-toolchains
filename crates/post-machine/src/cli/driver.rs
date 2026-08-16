@@ -233,6 +233,7 @@ fn build_one_target(
         // Settled below, once the inputs have been scanned for the
         // program's volatile bit.
         columns: VariantColumns::Both,
+        inline_cap: None,
     };
     if flags.o0 {
         options.opt_level = OptLevel::O0;
@@ -446,6 +447,7 @@ fn argv_compile_options(flags: &Flags) -> CompileOptions {
         capture_ir: false,
         // Settled by `columns_for` once the inputs have been scanned.
         columns: VariantColumns::Both,
+        inline_cap: None,
     };
     if flags.o0 {
         options.opt_level = OptLevel::O0;
