@@ -32,8 +32,10 @@ pub enum MessageKind {
     Request {
         command: String,
         /// Raw request payload. Defaults to `Value::Null` when the field
-        /// is absent (several DAP requests, e.g. `threads`, carry none).
-        #[serde(default)]
+        /// is absent on the wire (several DAP requests, e.g. `threads`,
+        /// carry none) and is omitted entirely (not emitted as `null`)
+        /// when encoding, matching reference DAP implementations.
+        #[serde(default, skip_serializing_if = "Value::is_null")]
         arguments: Value,
     },
     Response {
@@ -45,14 +47,18 @@ pub enum MessageKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
         /// Raw response payload. Defaults to `Value::Null` when the
-        /// field is absent (several DAP responses carry no body).
-        #[serde(default)]
+        /// field is absent on the wire (several DAP responses, e.g. a
+        /// bare `next` response, carry none) and is omitted entirely
+        /// (not emitted as `null`) when encoding, matching reference DAP
+        /// implementations — this is the sole encode path for a failed
+        /// `response_to`, so every error response stays field-accurate.
+        #[serde(default, skip_serializing_if = "Value::is_null")]
         body: Value,
     },
     Event {
         event: String,
         /// Raw event payload; see the `arguments`/`body` note above.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Value::is_null")]
         body: Value,
     },
 }
@@ -61,7 +67,7 @@ impl ProtocolMessage {
     /// Builds a response to the request numbered `request_seq`, itself
     /// numbered `seq`. `Ok(body)` encodes success with that body;
     /// `Err(message)` encodes failure (`success: false`, `message` set,
-    /// body `Value::Null`).
+    /// no `body` field on the wire — `Value::Null` is omitted on encode).
     pub fn response_to(
         request_seq: u64,
         seq: u64,
@@ -175,7 +181,6 @@ mod tests {
                 "success": false,
                 "command": "evaluate",
                 "message": "unknown expression",
-                "body": null,
             })
         );
     }
