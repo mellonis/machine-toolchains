@@ -60,6 +60,11 @@ fn is_inverse_pair(a: &IrOp, b: &IrOp) -> bool {
 /// considered removed), every reachable path re-latches MF (a tape op)
 /// before any MF read (a `Check` terminator), observation (`Brk`), or
 /// opaque reader (`Call`).
+///
+/// Checking only the first op suffices: every `IrOp` variant either
+/// re-latches or blocks, so the match below is exhaustive over the whole
+/// enum — a future variant added to `IrOp` fails to compile here rather
+/// than silently falling through unclassified.
 fn mf_dead_after(
     f: &IrFunction,
     index: &HashMap<u32, usize>,
