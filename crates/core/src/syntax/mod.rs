@@ -5,10 +5,12 @@
 //! contract the VM core keeps for opcodes and the assembler for
 //! dialects). Handles are `Rc`-based — single-threaded by design.
 
+mod ast;
 mod builder;
 mod green;
 mod red;
 
+pub use ast::{AstNode, child, children, token};
 pub use builder::{Checkpoint, TreeBuilder};
 pub use green::{GreenElement, GreenNode, GreenToken, SyntaxKind};
 pub use red::{SyntaxElement, SyntaxNode, SyntaxToken, TextRange};
