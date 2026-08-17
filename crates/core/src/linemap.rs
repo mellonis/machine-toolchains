@@ -41,6 +41,16 @@ struct FunctionEntry {
 pub struct SourceLoc<'a> {
     pub function: &'a str,
     pub line: Option<u32>,
+    /// The function's FIRST mapped line, regardless of `addr` — `None`
+    /// only when the function has no line entries at all. The anchor for
+    /// consumers that must render a sourced position for an address
+    /// BEFORE the first mapped instruction (linker-synthesized preludes):
+    /// the native-debugger prologue convention points such addresses at
+    /// the function's opening line rather than dropping the source.
+    /// `line` itself stays `None` there deliberately — stepping compares
+    /// raw (function, line) pairs and must see the unmapped prefix as
+    /// its own position.
+    pub function_first_line: Option<u32>,
     pub source: Option<&'a str>,
 }
 
@@ -128,6 +138,7 @@ impl LineIndex {
         Some(SourceLoc {
             function: f.name.as_str(),
             line,
+            function_first_line: f.lines.first().map(|&(_, line)| line),
             source: f.source.as_deref(),
         })
     }
@@ -227,6 +238,7 @@ mod tests {
             Some(SourceLoc {
                 function: "main",
                 line: Some(5),
+                function_first_line: Some(1),
                 source: None
             })
         );
@@ -235,9 +247,25 @@ mod tests {
             Some(SourceLoc {
                 function: "helper",
                 line: Some(12),
+                function_first_line: Some(10),
                 source: None
             })
         );
+    }
+
+    #[test]
+    fn function_first_line_is_carried_regardless_of_addr() {
+        let idx = LineIndex::new(&sample_map());
+        // `prologue`'s unmapped prefix: no line for the address itself,
+        // but the function's first mapped line is available as the
+        // prologue-convention anchor.
+        let pre = idx.resolve(35).unwrap();
+        assert_eq!(pre.line, None);
+        assert_eq!(pre.function_first_line, Some(20));
+        // A function with no line entries at all carries neither.
+        let bare = idx.resolve(32).unwrap();
+        assert_eq!(bare.line, None);
+        assert_eq!(bare.function_first_line, None);
     }
 
     #[test]

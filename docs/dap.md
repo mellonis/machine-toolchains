@@ -324,6 +324,17 @@ embedded stdlib, a pre-provenance sidecar) still carries
 `name`/`line`/`instructionPointerReference`, exactly as before — it is
 usable in the Disassembly view, just not openable as a file.
 
+A frame's `line` follows the native-debugger prologue convention: an
+address inside a function but *before* its first line-mapped
+instruction — the linker-synthesized prelude at a program's entry, for
+one — renders at the function's opening line, so the frame stays
+sourced and focusable. Only a function with provenance but *no* line
+entries at all (a composition-engine mono stamp's shape) reports
+`line: 0`, and such a frame deliberately omits its `source` object too:
+DAP permits line 0 solely on a sourceless frame — lines are 1-based
+otherwise — and a real client turns a sourced line 0 into editor line
+-1 and crashes.
+
 Resolution back from a sidecar's stored (typically relative) path to
 the absolute one handed to the client anchors at the sidecar's own
 directory and is purely lexical, the same policy the emission side uses
