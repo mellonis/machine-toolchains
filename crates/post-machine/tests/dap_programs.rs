@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{Value, json};
 
 use mtc_core::dap::server::{AdapterEvent, DebugAdapter, RunState};
+use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
 use mtc_core::linker::LinkOptions;
 use mtc_post_machine::asm::{assemble, link};
 use mtc_post_machine::dap::PmDapAdapter;
@@ -1011,5 +1012,494 @@ fn line_step_compares_function_identity_not_just_the_line_number() {
             assert_eq!(*code, 2);
         }
         other => panic!("unexpected event sequence: {other:?}"),
+    }
+}
+
+// ---- state surface: stack, scopes, variables, setVariable, disassemble,
+// trace -----------------------------------------------------------------
+
+/// Looks up a scope's `variablesReference` by name from a `scopes`
+/// response body — never hardcodes the adapter's private handle constants.
+fn scope_ref(scopes_response: &Value, name: &str) -> i64 {
+    scopes_response["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == name)
+        .unwrap_or_else(|| panic!("no '{name}' scope in {scopes_response:?}"))["variablesReference"]
+        .as_i64()
+        .unwrap()
+}
+
+/// Looks up a variable's own `variablesReference` (for expanding into its
+/// children) by name from a `variables` response body.
+fn variable_ref(variables_response: &Value, name: &str) -> i64 {
+    variables_response["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap_or_else(|| panic!("no '{name}' variable in {variables_response:?}"))
+        ["variablesReference"]
+        .as_i64()
+        .unwrap()
+}
+
+/// Looks up a variable's `value` by exact name from a `variables` response
+/// body.
+fn variable_value<'a>(variables_response: &'a Value, name: &str) -> &'a str {
+    variables_response["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap_or_else(|| panic!("no '{name}' variable in {variables_response:?}"))["value"]
+        .as_str()
+        .unwrap()
+}
+
+#[test]
+fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
+    let dir = scratch("stack-trace");
+    let program = write_pmc_debug(&dir, "callstep", CALLSTEP_PMC);
+    let call_line = line_of(CALLSTEP_PMC, "@callee()");
+    let halt_line = line_of(CALLSTEP_PMC, "halt;");
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+    adapter
+        .handle(
+            "setBreakpoints",
+            &json!({"breakpoints": [{"line": call_line}]}),
+            &mut out,
+        )
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    drive_to_pause_or_done(&mut adapter); // stops right before the call
+
+    // stepIn: retires the call, landing on callee's (unmapped) entry —
+    // now `main`'s return address (right after the call) is on the stack.
+    let mut step_out = Vec::new();
+    adapter
+        .handle("stepIn", &Value::Null, &mut step_out)
+        .unwrap();
+
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frames = trace["stackFrames"].as_array().unwrap();
+    assert_eq!(trace["totalFrames"], json!(2));
+    assert_eq!(frames.len(), 2);
+
+    // Frame 0: current position, inside `callee`, at its unmapped entry.
+    assert_eq!(frames[0]["name"], json!("callee"));
+    assert_eq!(frames[0]["line"], json!(0));
+    assert_eq!(frames[0]["id"], json!(0));
+    assert!(
+        frames[0]["instructionPointerReference"]
+            .as_str()
+            .unwrap()
+            .starts_with("0x")
+    );
+
+    // Frame 1: the return address, back in `main`, right after the call —
+    // which the fixture's own layout puts exactly at `halt`'s address.
+    assert_eq!(frames[1]["name"], json!("main"));
+    assert_eq!(frames[1]["line"], json!(halt_line));
+    assert_eq!(frames[1]["id"], json!(1));
+}
+
+/// A small tape block carrying a non-default alphabet (`"_"` blank,
+/// `"#"` mark) — proves `variables` renders the LAUNCH tape block's own
+/// glyphs, not PM-1's CLI-default `" "`/`"*"` pair.
+fn write_tape_block(dir: &Path, name: &str) -> PathBuf {
+    let block = TapeBlockFile {
+        alphabet: vec!["_".to_string(), "#".to_string()],
+        tapes: vec![TapeSnapshot {
+            origin: 0,
+            cells: vec![0],
+            head: 0,
+            alphabet: None,
+        }],
+    };
+    let path = dir.join(format!("{name}.pmt"));
+    fs::write(&path, block.to_bytes().unwrap()).unwrap();
+    path
+}
+
+#[test]
+fn tape_window_marks_the_head_and_renders_glyphs_from_the_launch_alphabet() {
+    let dir = scratch("tape-window");
+    let program = write_pmx(&dir, "stp", STP_PROGRAM);
+    let tape = write_tape_block(&dir, "stp");
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    let args = json!({
+        "program": program.to_str().unwrap(),
+        "tape": tape.to_str().unwrap(),
+        "stopOnEntry": true,
+    });
+    adapter.handle("launch", &args, &mut out).unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    let scopes = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let tapes_ref = scope_ref(&scopes, "Tapes");
+    let tapes_vars = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tapes_ref}),
+            &mut out,
+        )
+        .unwrap();
+    let tape0_ref = variable_ref(&tapes_vars, "tape 0");
+
+    let window = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tape0_ref}),
+            &mut out,
+        )
+        .unwrap();
+    let cells = window["variables"].as_array().unwrap();
+    assert_eq!(cells.len(), 17); // head ± 8
+
+    // Head sits at position 0 (blank tape): marked, glyph '_' (the launch
+    // block's own blank glyph, not PM-1's CLI-default ' ').
+    assert_eq!(variable_value(&window, "» [0]"), "'_'");
+    // A neighboring cell, unmarked.
+    assert_eq!(variable_value(&window, "[1]"), "'_'");
+    assert!(
+        !cells.iter().any(|c| c["name"] == "» [1]"),
+        "only the head cell carries the marker"
+    );
+}
+
+#[test]
+fn set_variable_on_a_tape_cell_is_visible_on_re_read_and_after_termination() {
+    let dir = scratch("set-cell");
+    let program = write_pmx(&dir, "stp", STP_PROGRAM);
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    let scopes = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let tapes_ref = scope_ref(&scopes, "Tapes");
+    let tapes_vars = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tapes_ref}),
+            &mut out,
+        )
+        .unwrap();
+    let tape0_ref = variable_ref(&tapes_vars, "tape 0");
+
+    // No tape block was launched: alphabet is unknown, so the cell's
+    // glyph is its raw index — poke index 1 onto the head cell.
+    let set_response = adapter
+        .handle(
+            "setVariable",
+            &json!({"variablesReference": tape0_ref, "name": "» [0]", "value": "1"}),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(set_response["value"], json!("'1'"));
+
+    let reread = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tape0_ref}),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(variable_value(&reread, "» [0]"), "'1'");
+
+    // Run the (otherwise tape-untouching) program to completion; the poke
+    // must still be visible afterward — `variables` stays queryable once
+    // the session is `Done`.
+    adapter.handle("continue", &Value::Null, &mut out).unwrap();
+    let events = drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Done);
+    match events.as_slice() {
+        [
+            AdapterEvent::Output { .. },
+            AdapterEvent::Terminated,
+            AdapterEvent::Exited { code },
+        ] => {
+            assert_eq!(*code, 0);
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+
+    let post_termination = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tape0_ref}),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(variable_value(&post_termination, "» [0]"), "'1'");
+}
+
+#[test]
+fn strict_cells_launch_fails_a_same_value_poke_with_the_fault_text() {
+    let dir = scratch("strict-cells");
+    let program = write_pmx(&dir, "stp", STP_PROGRAM);
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    let args = json!({
+        "program": program.to_str().unwrap(),
+        "strictCells": true,
+        "stopOnEntry": true,
+    });
+    adapter.handle("launch", &args, &mut out).unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    let scopes = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let tapes_ref = scope_ref(&scopes, "Tapes");
+    let tapes_vars = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tapes_ref}),
+            &mut out,
+        )
+        .unwrap();
+    let tape0_ref = variable_ref(&tapes_vars, "tape 0");
+
+    // The head cell is blank (index 0); poking the SAME value it already
+    // holds is a strict-cell violation.
+    let err = adapter
+        .handle(
+            "setVariable",
+            &json!({"variablesReference": tape0_ref, "name": "» [0]", "value": "0"}),
+            &mut out,
+        )
+        .unwrap_err();
+    assert!(err.contains("StrictCellViolation"), "got: {err}");
+}
+
+#[test]
+fn set_variable_on_ip_is_rejected() {
+    let dir = scratch("set-ip");
+    let program = write_pmx(&dir, "stp", STP_PROGRAM);
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    let scopes = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let registers_ref = scope_ref(&scopes, "Registers");
+    let err = adapter
+        .handle(
+            "setVariable",
+            &json!({"variablesReference": registers_ref, "name": "IP", "value": "0x0"}),
+            &mut out,
+        )
+        .unwrap_err();
+    assert!(err.contains("read-only"), "got: {err}");
+}
+
+/// `jm` jumps to `TAKEN` when MF is set, falls through to `stp` otherwise —
+/// a blank tape starts with MF false (docs/core.md (initial mark latch)),
+/// so an untouched launch takes the fall-through (`stp`, exit 0); flipping
+/// MF via `setVariable` before `continue` must flip which arm runs
+/// (`hlt` via `TAKEN`, exit 2).
+const MF_CHECK_PROGRAM: &str = "\
+.func main
+        jm      TAKEN
+        stp
+TAKEN:  hlt
+";
+
+#[test]
+fn mf_set_flips_a_following_checks_arm() {
+    let dir = scratch("mf-baseline");
+    let program = write_pmx(&dir, "mfcheck", MF_CHECK_PROGRAM);
+
+    // Baseline: MF starts false on a blank tape, so `jm` does not jump.
+    let mut baseline = PmDapAdapter::new();
+    let mut out = Vec::new();
+    baseline
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+    baseline
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let events = drive_to_pause_or_done(&mut baseline);
+    match events.as_slice() {
+        [
+            AdapterEvent::Output { .. },
+            AdapterEvent::Terminated,
+            AdapterEvent::Exited { code },
+        ] => {
+            assert_eq!(*code, 0, "MF false: falls through to stp");
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+
+    // Flipped: setVariable(MF, true) before continuing must take `jm`.
+    let mut flipped = PmDapAdapter::new();
+    let mut out = Vec::new();
+    flipped
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    flipped
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    // `stopOnEntry` pauses BEFORE any step (module doc), so the entry
+    // instruction (`ent`) has not retired yet — its own first-step initial
+    // mark latch (docs/core.md (initial mark latch)) would otherwise
+    // overwrite an MF set now the instant it runs. Step past it first
+    // (instruction granularity: this raw `.pma` fixture carries no `-g`
+    // map, so line granularity's "until the mapped line changes" loop
+    // never sees a change and would run to completion in one call).
+    flipped
+        .handle("stepIn", &json!({"granularity": "instruction"}), &mut out)
+        .unwrap();
+    let scopes = flipped.handle("scopes", &Value::Null, &mut out).unwrap();
+    let registers_ref = scope_ref(&scopes, "Registers");
+    let set_response = flipped
+        .handle(
+            "setVariable",
+            &json!({"variablesReference": registers_ref, "name": "MF", "value": "true"}),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(set_response["value"], json!("true"));
+
+    flipped.handle("continue", &Value::Null, &mut out).unwrap();
+    let events = drive_to_pause_or_done(&mut flipped);
+    match events.as_slice() {
+        [
+            AdapterEvent::Output { .. },
+            AdapterEvent::Terminated,
+            AdapterEvent::Exited { code },
+        ] => {
+            assert_eq!(*code, 2, "MF true: jm takes the branch to hlt");
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+}
+
+#[test]
+fn disassemble_renders_listing_line_text_and_the_top_frames_reference_resolves_within_it() {
+    let dir = scratch("disassemble");
+    let program = write_pmc_debug(&dir, "callstep", CALLSTEP_PMC);
+    let call_line = line_of(CALLSTEP_PMC, "@callee()");
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+    adapter
+        .handle(
+            "setBreakpoints",
+            &json!({"breakpoints": [{"line": call_line}]}),
+            &mut out,
+        )
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    drive_to_pause_or_done(&mut adapter); // stopped right before the call
+
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let top_ref = trace["stackFrames"][0]["instructionPointerReference"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let disassembly = adapter
+        .handle(
+            "disassemble",
+            &json!({"memoryReference": top_ref, "instructionCount": 2}),
+            &mut out,
+        )
+        .unwrap();
+    let instructions = disassembly["instructions"].as_array().unwrap();
+    assert_eq!(instructions.len(), 2);
+    // The top frame's own reference resolves within the window: at
+    // `instructionOffset` 0 (the default), it is the FIRST entry.
+    assert_eq!(instructions[0]["address"], json!(top_ref));
+    let text = instructions[0]["instruction"].as_str().unwrap();
+    assert!(text.contains("call"), "got: {text}");
+}
+
+/// Three instructions beyond the implicit `.func` entry, none of which
+/// terminate the run — every one of them retires as a counted `Step`
+/// (docs/core.md (timing model)), so `stats().steps` ends at 3 and a
+/// traced run must emit exactly 3 trace-format `Output` events.
+const TRACE_PROGRAM: &str = "\
+.func main
+        nop
+        nop
+        stp
+";
+
+#[test]
+fn trace_true_streams_one_output_event_per_retired_instruction() {
+    let dir = scratch("trace");
+    let program = write_pmx(&dir, "trace", TRACE_PROGRAM);
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    let args = json!({
+        "program": program.to_str().unwrap(),
+        "trace": true,
+        "stopOnEntry": false,
+    });
+    adapter.handle("launch", &args, &mut out).unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    let events = drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Done);
+
+    let trace_lines: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Output { category, output } if *category == "console" => Some(output),
+            _ => None,
+        })
+        .filter(|line| line.contains("; MF="))
+        .collect();
+    assert_eq!(
+        trace_lines.len(),
+        3,
+        "expected one trace line per retired (counted) instruction, got: {events:?}"
+    );
+
+    // The termination summary must still be present, alongside the trace
+    // lines, not replaced by them.
+    match events.last_chunk::<2>() {
+        Some([AdapterEvent::Terminated, AdapterEvent::Exited { code }]) => {
+            assert_eq!(*code, 0);
+        }
+        other => panic!("expected the run to end in Terminated/Exited, got: {other:?}"),
     }
 }

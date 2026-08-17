@@ -1,15 +1,19 @@
 //! `PmDapAdapter`: the PM-1 half of the Debug Adapter Protocol surface
 //! (mtc_core::dap), serving `pmt dap`. This covers program-mode launch,
 //! the v1 lifecycle commands, run control (`continue`/`pause`),
-//! termination, source/instruction breakpoints, and stepping
-//! (`next`/`stepIn`/`stepOut` at line or instruction granularity); a
-//! later task extends the same struct with stack/scopes/variables.
+//! termination, source/instruction breakpoints, stepping
+//! (`next`/`stepIn`/`stepOut` at line or instruction granularity), and
+//! the state surface: stack/scopes/variables, `setVariable`,
+//! `disassemble`, and the opt-in `"trace": true` per-instruction output
+//! stream.
 //!
-//! Program mode (the only launch shape this skeleton implements): the
+//! Program mode (the only launch shape this adapter implements): the
 //! `launch` request names a prebuilt `.pmx` executable (`"program"`) and
 //! an optional `.pmt` tape snapshot (`"tape"`) — PM defaults to the empty
-//! tape when none is given. Target-mode launch (build-in-process from a
-//! project manifest target) is a later task.
+//! tape when none is given. `"strictCells": bool` (default false) wraps
+//! the tape in the strict-cells decorator, the same semantics `pmt run
+//! --strict-cells` gives a plain run. Target-mode launch (build-in-process
+//! from a project manifest target) is a later task.
 //!
 //! Lifetime shape: `Machine`/`DebugSession` borrow the `&dyn Arch` they
 //! were built against, not the struct that holds them — so keeping the
@@ -23,12 +27,29 @@
 //! `Machine::with_arch` — checked against the executable's own `arch`
 //! byte first — is exactly `Machine::from_executable`'s outcome for any
 //! real `.pmx` this adapter is handed.
+//!
+//! `tape` is `Box<dyn Tape>`, not the concrete `InfiniteTape`, so
+//! `"strictCells"` can wrap it without a second field or an enum — every
+//! session-driving call already goes through `DebugSession`'s `&mut dyn
+//! Tape` parameter regardless.
+//!
+//! `variablesReference` handle scheme (DAP's per-scope/per-container
+//! integer handle; `0` is DAP's own "no children" sentinel and is never
+//! issued by this adapter): `SCOPE_REGISTERS` and `SCOPE_TAPES` are the
+//! two scopes `scopes` always answers (machine state is global —
+//! identical for any selected frame, so `scopes`/`variables` do not
+//! thread the requested frame id through at all); `TAPE_WINDOW_BASE + n`
+//! is tape `n`'s own head±8 cell window, reached by expanding its entry
+//! inside the Tapes scope. PM-1 has exactly one tape, so only
+//! `TAPE_WINDOW_BASE` itself is ever issued; a TM adapter reusing this
+//! scheme would issue `TAPE_WINDOW_BASE + 1`, `+ 2`, … for its other tapes.
 
 use std::collections::BTreeSet;
 use std::fs;
 
 use serde_json::{Value, json};
 
+use mtc_core::asm::listing_line;
 use mtc_core::dap::server::{AdapterEvent, DebugAdapter, RunState};
 use mtc_core::formats::ARCH_PM1;
 use mtc_core::formats::executable::Executable;
@@ -36,10 +57,22 @@ use mtc_core::formats::tapeblock::TapeBlockFile;
 use mtc_core::linemap::LineIndex;
 use mtc_core::linker::MapFile;
 use mtc_core::vm::{
-    DebugEvent, DebugSession, InfiniteTape, Machine, Outcome, PauseCause, RunOptions,
+    DebugEvent, DebugSession, InfiniteTape, Machine, Outcome, PauseCause, RunOptions, StrictTape,
+    Tape,
 };
 
 use crate::arch::Pm1;
+use crate::asm::pm1_syntax;
+
+/// Fixed `variablesReference` handles — see the module doc for the full
+/// scheme.
+const SCOPE_REGISTERS: i64 = 1;
+const SCOPE_TAPES: i64 = 2;
+const TAPE_WINDOW_BASE: i64 = 100;
+
+/// Half-width of the tape variables window (`TAPE_WINDOW_BASE`): head±8,
+/// 17 cells total.
+const TAPE_WINDOW_RADIUS: i64 = 8;
 
 /// Per-tick step slice `tick` drives the session through
 /// (`session.run_steps(tape, BUDGET)`): sub-millisecond on any program
@@ -48,7 +81,9 @@ use crate::arch::Pm1;
 /// (`mtc_core::dap::server::run`) instead of waiting for a long or
 /// non-terminating run to yield on its own. Deliberately unbounded
 /// otherwise — the CLI's step cap does not apply to an interactive
-/// session with a human `pause` button.
+/// session with a human `pause` button. Also the per-tick slice `tick`
+/// drives through under `"trace": true` (`run_traced`), for the same
+/// responsiveness reason.
 const BUDGET: u64 = 10_000;
 
 /// The one `Pm1` arch instance every launched machine borrows (see the
@@ -77,6 +112,18 @@ enum StepKind {
 enum StepOutcome {
     Stop(&'static str, Option<String>),
     Finished(Outcome),
+}
+
+/// `step_traced`'s stopping rule — the trace-mode analog of the two
+/// shapes `session.step_in`/`step_over`'s fast-forward give the untraced
+/// path: exactly one retired instruction, or "keep going while depth
+/// stays above this target" (the `step_over`/`step_out` fast-forward
+/// shape, mirroring `DebugSession::run_until_tapes`'s own `until_depth`
+/// gate).
+#[derive(Clone, Copy)]
+enum StopWhen {
+    OneInstruction,
+    DepthAtMost(usize),
 }
 
 /// Every `DebugEvent` shape that is NOT a bare `Step` pause converts to a
@@ -121,26 +168,144 @@ fn parse_instruction_reference(reference: &str) -> Option<u32> {
     u32::from_str_radix(digits, 16).ok()
 }
 
+/// The label-resolve closure `drive_traced`'s PM twin uses (`cli/run.rs`):
+/// a call site's exact target names its function; any other resolved
+/// address names `function.label`. Shared by the trace renderer and
+/// `disassemble`, which both walk `listing_line` over the same code image.
+fn resolve_label(map: Option<&MapFile>, target: u32) -> Option<String> {
+    let m = map?;
+    m.functions.iter().find_map(|f| {
+        if f.start == target {
+            return Some(f.name.clone());
+        }
+        f.labels
+            .iter()
+            .find(|(_, a)| *a == target)
+            .map(|(l, _)| format!("{}.{l}", f.name))
+    })
+}
+
+/// One `"trace": true` output line, byte-format matching `pmt run
+/// --trace`'s (`drive_traced`, `cli/run.rs`): the `listing_line` text
+/// (or a synthetic line for a fetch beyond the code image) plus the
+/// post-instruction `MF`/head suffix.
+fn trace_output_line(code: &[u8], map: Option<&MapFile>, ip: u32, mf: bool, head: i64) -> String {
+    let syntax = pm1_syntax();
+    let resolve = |target: u32| resolve_label(map, target);
+    let line = if (ip as usize) < code.len() {
+        listing_line(&syntax, code, ip, &resolve).0
+    } else {
+        format!("  {ip:04x}:  <beyond code image>")
+    };
+    format!("{line}  ; MF={} head={}", u8::from(mf), head)
+}
+
+/// Reads the `pos`±`TAPE_WINDOW_RADIUS` window around the tape's current
+/// head, restoring the head to where it started (the same walk-and-restore
+/// discipline `Tape::poke` uses, since `Tape` exposes no positional read).
+/// Returns `(position, raw cell index)` pairs, ascending by position.
+fn tape_window(tape: &mut dyn Tape) -> Vec<(i64, u32)> {
+    let origin = tape.head();
+    for _ in 0..TAPE_WINDOW_RADIUS {
+        tape.left();
+    }
+    let span = TAPE_WINDOW_RADIUS * 2 + 1;
+    let mut cells = Vec::with_capacity(span as usize);
+    for i in 0..span {
+        cells.push((origin - TAPE_WINDOW_RADIUS + i, tape.read()));
+        if i < span - 1 {
+            tape.right();
+        }
+    }
+    for _ in 0..TAPE_WINDOW_RADIUS {
+        tape.left();
+    }
+    cells
+}
+
+/// A cell's rendered glyph: the launch tape block's alphabet where known
+/// (a cell whose index falls outside that alphabet's declared range still
+/// falls back to the raw index, rather than failing), the raw index as a
+/// string otherwise (no tape block was given at launch).
+fn glyph_for(alphabet: &Option<Vec<String>>, index: u32) -> String {
+    alphabet
+        .as_ref()
+        .and_then(|a| a.get(index as usize))
+        .cloned()
+        .unwrap_or_else(|| index.to_string())
+}
+
+/// `variables`' rendering of a glyph, quoted (`'x'`) so a blank glyph
+/// (PM-1's is a literal space) still renders visibly.
+fn quote_glyph(glyph: &str) -> String {
+    format!("'{glyph}'")
+}
+
+/// The inverse of `quote_glyph`, tolerant of an unquoted value too — a
+/// `setVariable` client may echo back exactly what `variables` rendered
+/// (quoted) or a user-typed bare glyph (unquoted); both round-trip.
+fn unquote_glyph(value: &str) -> &str {
+    value
+        .strip_prefix('\'')
+        .and_then(|v| v.strip_suffix('\''))
+        .unwrap_or(value)
+}
+
+/// A tape-window variable's `name` (`"[3]"`, or `"» [3]"` under the head)
+/// back to its position — the inverse of the format `handle_variables`
+/// renders, so `setVariable` can recover which cell a client named.
+fn parse_cell_name(name: &str) -> Option<i64> {
+    let trimmed = name.strip_prefix("» ").unwrap_or(name);
+    trimmed.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+}
+
+fn readonly_var(name: &str, value: String) -> Value {
+    json!({
+        "name": name,
+        "value": value,
+        "variablesReference": 0,
+        "presentationHint": {"attributes": ["readOnly"]},
+    })
+}
+
+fn writable_var(name: &str, value: String) -> Value {
+    json!({"name": name, "value": value, "variablesReference": 0})
+}
+
 /// The `launch` request's program-mode arguments, kept for the lifetime
 /// of the session (`stopOnEntry` is consulted once, at
 /// `configurationDone`; `program`/`tape` are carried for future tasks —
-/// e.g. a termination summary naming the program).
+/// e.g. a termination summary naming the program; `trace` is read on
+/// every `tick`/step to choose the traced code path).
 struct LaunchOpts {
     #[allow(dead_code)] // carried for later tasks (e.g. re-launch, summaries)
     program: String,
     #[allow(dead_code)]
     tape: Option<String>,
     stop_on_entry: bool,
+    trace: bool,
 }
 
 /// The PM-1 debug adapter. Nothing is populated before a successful
-/// `launch`; the four launch/session fields are `None` until then and
-/// `Some` for the rest of the session's life (program mode never
-/// re-launches in place — a second `launch` simply overwrites them).
+/// `launch`; the launch/session fields are `None` until then and `Some`
+/// for the rest of the session's life (program mode never re-launches in
+/// place — a second `launch` simply overwrites them).
 pub struct PmDapAdapter {
     session: Option<DebugSession<'static>>,
-    tape: Option<InfiniteTape>,
+    tape: Option<Box<dyn Tape>>,
     line_index: Option<LineIndex>,
+    /// The launched executable's code image — retained (not just used to
+    /// build `Machine`/`session`) because `disassemble` and the trace
+    /// renderer both need to re-decode it after launch.
+    code: Option<Vec<u8>>,
+    /// The sidecar map itself, not just the `LineIndex` built from it:
+    /// `disassemble`/trace label resolution needs `MapFunction::labels`,
+    /// which `LineIndex` does not carry (it only indexes lines).
+    map: Option<MapFile>,
+    /// The launch tape block's glyph table, `None` when no `"tape"` was
+    /// given (the default empty tape carries no alphabet) — `variables`
+    /// falls back to raw indices in that case (module doc).
+    alphabet: Option<Vec<String>>,
     launch_opts: Option<LaunchOpts>,
     /// The loop-facing run state (`DebugAdapter::run_state`): `Running`
     /// between a `configurationDone` (or `continue`) and the next
@@ -155,10 +320,11 @@ pub struct PmDapAdapter {
     /// each request kind can REPLACE only its own list (DAP semantics —
     /// `setBreakpoints`/`setInstructionBreakpoints` are independent
     /// breakpoint kinds). Also consulted directly by the stepping loop
-    /// (`handle_step`): `step_in`/`step_over`'s raw per-instruction path
-    /// never checks `DebugSession`'s own breakpoint set (only the
-    /// `continue`-shaped motions do — docs/core.md (DebugSession)), so a
-    /// breakpoint hit mid-line has to be noticed here instead.
+    /// (`handle_step`) and the traced motions (`step_traced`/`run_traced`):
+    /// `step_in`/`step_over`'s raw per-instruction path never checks
+    /// `DebugSession`'s own breakpoint set (only the `continue`-shaped
+    /// motions do — docs/core.md (DebugSession)), so a breakpoint hit
+    /// mid-line has to be noticed here instead.
     source_breakpoints: BTreeSet<u32>,
     /// Addresses added on behalf of `setInstructionBreakpoints` — see
     /// `source_breakpoints` for why this is a separate set and why the
@@ -178,6 +344,9 @@ impl PmDapAdapter {
             session: None,
             tape: None,
             line_index: None,
+            code: None,
+            map: None,
+            alphabet: None,
             launch_opts: None,
             run_state: RunState::Stopped,
             source_breakpoints: BTreeSet::new(),
@@ -209,6 +378,14 @@ impl PmDapAdapter {
             .get("stopOnEntry")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let trace = arguments
+            .get("trace")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let strict_cells = arguments
+            .get("strictCells")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         let bytes = fs::read(&program).map_err(|e| format!("cannot read {program}: {e}"))?;
         let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{program}: {e}"))?;
@@ -221,17 +398,27 @@ impl PmDapAdapter {
         let machine = Machine::with_arch(&PM1, exe.code.clone(), exe.entry)
             .map_err(|e| format!("{program}: {e}"))?;
 
-        let tape = build_tape(tape_path.as_deref())?;
+        let (tape, alphabet) = build_tape(tape_path.as_deref())?;
+        let tape: Box<dyn Tape> = if strict_cells {
+            Box::new(StrictTape::new(tape))
+        } else {
+            Box::new(tape)
+        };
         let session = machine.debug(RunOptions::default());
-        let line_index = sidecar_map(&program).map(|map| LineIndex::new(&map));
+        let map = sidecar_map(&program);
+        let line_index = map.as_ref().map(LineIndex::new);
 
         self.session = Some(session);
         self.tape = Some(tape);
         self.line_index = line_index;
+        self.code = Some(exe.code.clone());
+        self.map = map;
+        self.alphabet = alphabet;
         self.launch_opts = Some(LaunchOpts {
             program,
             tape: tape_path,
             stop_on_entry,
+            trace,
         });
         self.run_state = RunState::Stopped;
         // A re-launch overwrites the session (module doc), so any
@@ -442,6 +629,94 @@ impl PmDapAdapter {
         }
     }
 
+    fn is_traced(&self) -> bool {
+        self.launch_opts.as_ref().is_some_and(|o| o.trace)
+    }
+
+    /// One retired instruction, `"trace": true`'s atomic primitive: the
+    /// only session motion that exposes one instruction at a time is
+    /// `step_in`, so every traced code path (`tick`'s `run_traced`,
+    /// `next`/`stepIn`/`stepOut`'s `step_traced`) is built on repeated
+    /// calls to this. Pushes one `Output` line — byte-format matching
+    /// `pmt run --trace` — but ONLY when `session.stats().steps` actually
+    /// advanced: a terminal instruction (`stp`/`hlt`/a trap) retires
+    /// without incrementing `steps` (docs/core.md (timing model) —
+    /// `CoreEvent::Stopped`/`Halted`/`Trapped` skip the `steps += 1` arm
+    /// `CoreEvent::Step`/`Break` take), so gating on the delta is what
+    /// keeps a traced run's total `Output` count exactly equal to
+    /// `stats().steps` rather than one line too many.
+    fn step_once_traced(&mut self, out: &mut Vec<AdapterEvent>) -> DebugEvent {
+        let code = self
+            .code
+            .as_ref()
+            .expect("trace requires code, set at launch");
+        let map = self.map.as_ref();
+        let session = self.session.as_mut().expect("trace requires a session");
+        let tape = self.tape.as_deref_mut().expect("trace requires a tape");
+        let ip = session.ip();
+        let steps_before = session.stats().steps;
+        let event = session.step_in(tape);
+        if session.stats().steps > steps_before {
+            let mf = session.mf();
+            let head = tape.head();
+            out.push(AdapterEvent::Output {
+                category: "console",
+                output: trace_output_line(code, map, ip, mf, head),
+            });
+        }
+        event
+    }
+
+    /// `step_in`(`OneInstruction`)/`step_over`/`step_out`
+    /// (`DepthAtMost(target)`)'s traced replacement, built on
+    /// `step_once_traced`. `DepthAtMost` reimplements
+    /// `DebugSession::run_until_tapes`'s own depth gate — trace mode needs
+    /// the per-instruction visibility that primitive doesn't expose — and,
+    /// like the untraced loop this parallels, checks the adapter-tracked
+    /// breakpoint sets on every retired instruction's next address: this
+    /// whole path is built on raw `step_in`, which (like `step_over`'s own
+    /// per-instruction advance) never consults `DebugSession`'s internal
+    /// breakpoint set.
+    fn step_traced(&mut self, stop_when: StopWhen, out: &mut Vec<AdapterEvent>) -> DebugEvent {
+        loop {
+            let event = self.step_once_traced(out);
+            let DebugEvent::Paused(PauseCause::Step) = event else {
+                return event;
+            };
+            let session = self.session.as_ref().expect("checked by step_once_traced");
+            let ip = session.ip();
+            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+                return DebugEvent::Paused(PauseCause::Breakpoint(ip));
+            }
+            match stop_when {
+                StopWhen::OneInstruction => return DebugEvent::Paused(PauseCause::Step),
+                StopWhen::DepthAtMost(target) if session.depth() <= target => {
+                    return DebugEvent::Paused(PauseCause::Step);
+                }
+                StopWhen::DepthAtMost(_) => {}
+            }
+        }
+    }
+
+    /// `run_steps`'s traced replacement, `tick`'s own budgeted analog of
+    /// `step_traced` (a bounded slice, not a depth gate, so `next`'s
+    /// call-skipping fast-forward and `continue`'s run share nothing but
+    /// `step_once_traced`).
+    fn run_traced(&mut self, budget: u64, out: &mut Vec<AdapterEvent>) -> DebugEvent {
+        for _ in 0..budget {
+            let event = self.step_once_traced(out);
+            let DebugEvent::Paused(PauseCause::Step) = event else {
+                return event;
+            };
+            let session = self.session.as_ref().expect("checked by step_once_traced");
+            let ip = session.ip();
+            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+                return DebugEvent::Paused(PauseCause::Breakpoint(ip));
+            }
+        }
+        DebugEvent::Paused(PauseCause::Manual)
+    }
+
     /// `next` (`StepKind::Over`) / `stepIn` (`StepKind::Into`): granularity
     /// toggles between two shapes over the SAME underlying session
     /// primitive (`step_over`/`step_in`) — `"instruction"` stops after
@@ -470,7 +745,10 @@ impl PmDapAdapter {
     /// `continue`-shaped path, so a breakpoint inside a stepped-over call
     /// still surfaces as `DebugEvent::Paused(PauseCause::Breakpoint(_))`
     /// directly from `session.step_over` itself — `nonstep_outcome` handles
-    /// that case uniformly with the loop's own check.
+    /// that case uniformly with the loop's own check. Under `"trace": true`
+    /// the same shape runs through `step_traced` instead, which
+    /// reimplements `step_over`'s "retire one, then fast-forward only if
+    /// that one was a call" structure by hand (see its own doc comment).
     fn handle_step(
         &mut self,
         arguments: &Value,
@@ -480,12 +758,7 @@ impl PmDapAdapter {
         self.ensure_can_step()?;
         let instruction_granularity =
             arguments.get("granularity").and_then(Value::as_str) == Some("instruction");
-
-        let session = self.session.as_mut().expect("checked by ensure_can_step");
-        let tape = self
-            .tape
-            .as_mut()
-            .expect("session and tape are set together");
+        let traced = self.is_traced();
 
         // The walk's position: function name (owned, to avoid tying this
         // binding to `self.line_index`'s borrow across the loop) plus the
@@ -494,23 +767,62 @@ impl PmDapAdapter {
         let start_position: Option<(String, Option<u32>)> = if instruction_granularity {
             None
         } else {
+            let ip = self
+                .session
+                .as_ref()
+                .expect("checked by ensure_can_step")
+                .ip();
             self.line_index
                 .as_ref()
-                .and_then(|idx| idx.resolve(session.ip()))
+                .and_then(|idx| idx.resolve(ip))
                 .map(|(name, line)| (name.to_string(), line))
         };
 
         let outcome = loop {
-            let event = match kind {
-                StepKind::Over => session.step_over(tape),
-                StepKind::Into => session.step_in(tape),
+            let event = if traced {
+                match kind {
+                    StepKind::Into => self.step_traced(StopWhen::OneInstruction, out),
+                    StepKind::Over => {
+                        let depth0 = self
+                            .session
+                            .as_ref()
+                            .expect("checked by ensure_can_step")
+                            .depth();
+                        match self.step_once_traced(out) {
+                            DebugEvent::Paused(PauseCause::Step) => {
+                                let session =
+                                    self.session.as_ref().expect("checked by ensure_can_step");
+                                if session.depth() > depth0 {
+                                    self.step_traced(StopWhen::DepthAtMost(depth0), out)
+                                } else {
+                                    DebugEvent::Paused(PauseCause::Step)
+                                }
+                            }
+                            other => other,
+                        }
+                    }
+                }
+            } else {
+                let session = self.session.as_mut().expect("checked by ensure_can_step");
+                let tape = self
+                    .tape
+                    .as_deref_mut()
+                    .expect("session and tape are set together");
+                match kind {
+                    StepKind::Over => session.step_over(tape),
+                    StepKind::Into => session.step_in(tape),
+                }
             };
             if let Some(outcome) = nonstep_outcome(event) {
                 break outcome;
             }
             // A bare `Step` pause: decide whether to report it now or keep
             // stepping.
-            let ip = session.ip();
+            let ip = self
+                .session
+                .as_ref()
+                .expect("checked by ensure_can_step")
+                .ip();
             if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
                 break StepOutcome::Stop("breakpoint", None);
             }
@@ -537,15 +849,28 @@ impl PmDapAdapter {
     /// shape to choose between the way there is for `next`/`stepIn`. At the
     /// outermost frame (depth 0) `step_out` has no caller to return to —
     /// `DebugSession::step_out` falls back to running to completion in that
-    /// case, not an error, and this handler inherits that behavior as-is.
+    /// case, not an error, and this handler inherits that behavior as-is
+    /// (the traced path's analog: `run_traced` with no depth gate at all).
     fn handle_step_out(&mut self, out: &mut Vec<AdapterEvent>) -> Result<Value, String> {
         self.ensure_can_step()?;
-        let session = self.session.as_mut().expect("checked by ensure_can_step");
-        let tape = self
-            .tape
-            .as_mut()
-            .expect("session and tape are set together");
-        let event = session.step_out(tape);
+        let event = if self.is_traced() {
+            let depth = self
+                .session
+                .as_ref()
+                .expect("checked by ensure_can_step")
+                .depth();
+            match depth.checked_sub(1) {
+                Some(target) => self.step_traced(StopWhen::DepthAtMost(target), out),
+                None => self.run_traced(u64::MAX, out),
+            }
+        } else {
+            let session = self.session.as_mut().expect("checked by ensure_can_step");
+            let tape = self
+                .tape
+                .as_deref_mut()
+                .expect("session and tape are set together");
+            session.step_out(tape)
+        };
         let outcome = nonstep_outcome(event).unwrap_or(StepOutcome::Stop("step", None));
         self.apply_step_outcome(outcome, out);
         Ok(Value::Null)
@@ -598,6 +923,307 @@ impl PmDapAdapter {
         out.push(AdapterEvent::Exited { code });
         self.run_state = RunState::Done;
     }
+
+    /// `stackTrace`: frame 0 is the current `ip()`; older frames come from
+    /// `session.stack()` (return addresses, oldest call first), reversed so
+    /// the most recent call is frame 1 — the natural top-to-bottom call
+    /// stack order. Every frame resolves through the sidecar map the same
+    /// way a breakpoint line does. Available in any run state (including
+    /// after termination) — the session object outlives the run.
+    fn handle_stack_trace(&self) -> Result<Value, String> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| "stackTrace before launch".to_string())?;
+        let mut frames = vec![self.frame_json(0, session.ip())];
+        for (i, &addr) in session.stack().iter().rev().enumerate() {
+            frames.push(self.frame_json((i + 1) as i64, addr));
+        }
+        let total = frames.len();
+        Ok(json!({"stackFrames": frames, "totalFrames": total}))
+    }
+
+    /// One `stackTrace` frame: a resolvable address names its containing
+    /// function and (if mapped) source line; an unresolvable one (no
+    /// sidecar, or an address outside every function) falls back to its
+    /// hex address as the name, line 0. `instructionPointerReference` is
+    /// always the hex address, resolvable regardless — `disassemble`'s
+    /// `memoryReference` argument.
+    fn frame_json(&self, id: i64, addr: u32) -> Value {
+        let (name, line) = match self.line_index.as_ref().and_then(|idx| idx.resolve(addr)) {
+            Some((name, line)) => (name.to_string(), line.unwrap_or(0)),
+            None => (format!("0x{addr:04x}"), 0),
+        };
+        json!({
+            "id": id,
+            "name": name,
+            "line": line,
+            "column": 0,
+            "instructionPointerReference": format!("0x{addr:x}"),
+        })
+    }
+
+    /// `scopes`: identical for any frame id (machine state is global), so
+    /// the requested `frameId` is not even inspected beyond the session
+    /// having launched.
+    fn handle_scopes(&self) -> Result<Value, String> {
+        if self.session.is_none() {
+            return Err("scopes before launch".to_string());
+        }
+        Ok(json!({"scopes": [
+            {"name": "Registers", "variablesReference": SCOPE_REGISTERS, "expensive": false},
+            {"name": "Tapes", "variablesReference": SCOPE_TAPES, "expensive": false},
+        ]}))
+    }
+
+    /// `variables`, dispatched on the requested `variablesReference` — see
+    /// the module doc for the handle scheme. Available in any run state,
+    /// same as `stackTrace` — a poked cell must stay readable after the
+    /// program terminates (that's how the poke's persistence is proven,
+    /// rather than by a snapshot API `dyn Tape` doesn't expose).
+    fn handle_variables(&mut self, arguments: &Value) -> Result<Value, String> {
+        let reference = arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "variables requires a variablesReference".to_string())?;
+        if self.session.is_none() {
+            return Err("variables before launch".to_string());
+        }
+        match reference {
+            SCOPE_REGISTERS => {
+                let session = self.session.as_ref().expect("checked above");
+                let stats = session.stats();
+                Ok(json!({"variables": [
+                    readonly_var("IP", format!("0x{:x}", session.ip())),
+                    writable_var("MF", session.mf().to_string()),
+                    readonly_var("steps", stats.steps.to_string()),
+                    readonly_var("core tacts", stats.core_tacts.to_string()),
+                    readonly_var("stall tacts", stats.stall_tacts.to_string()),
+                ]}))
+            }
+            SCOPE_TAPES => {
+                let tape = self.tape.as_deref().expect("checked above");
+                Ok(json!({"variables": [{
+                    "name": "tape 0",
+                    "value": format!("head {}", tape.head()),
+                    "variablesReference": TAPE_WINDOW_BASE,
+                }]}))
+            }
+            TAPE_WINDOW_BASE => {
+                let alphabet = self.alphabet.clone();
+                let tape = self.tape.as_deref_mut().expect("checked above");
+                let head_pos = tape.head();
+                let cells = tape_window(tape);
+                let vars: Vec<Value> = cells
+                    .into_iter()
+                    .map(|(pos, idx)| {
+                        let marker = if pos == head_pos { "» " } else { "" };
+                        json!({
+                            "name": format!("{marker}[{pos}]"),
+                            "value": quote_glyph(&glyph_for(&alphabet, idx)),
+                            "variablesReference": 0,
+                        })
+                    })
+                    .collect();
+                Ok(json!({"variables": vars}))
+            }
+            other => Err(format!("unknown variablesReference {other}")),
+        }
+    }
+
+    /// `setVariable` — ruled to set only while genuinely stopped (paused),
+    /// not merely "not currently running" (excludes `Done` too: the
+    /// program has nothing left to run the effect through, even though the
+    /// tape stays readable via `variables`).
+    fn handle_set_variable(&mut self, arguments: &Value) -> Result<Value, String> {
+        if self.session.is_none() {
+            return Err("setVariable before launch".to_string());
+        }
+        if self.run_state != RunState::Stopped {
+            return Err("cannot set a variable: the program is not stopped".to_string());
+        }
+        let reference = arguments
+            .get("variablesReference")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "setVariable requires a variablesReference".to_string())?;
+        let name = arguments
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "setVariable requires a name".to_string())?;
+        let value = arguments
+            .get("value")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "setVariable requires a value".to_string())?;
+
+        match reference {
+            SCOPE_REGISTERS => self.set_register_variable(name, value),
+            TAPE_WINDOW_BASE => self.set_tape_variable(name, value),
+            other => Err(format!("cannot set a variable in scope {other}")),
+        }
+    }
+
+    /// `MF` is the one writable register (`DebugSession::set_mf`); `IP`
+    /// and the read-only stat trio are rejected by name — overwriting `IP`
+    /// can desynchronize the return stack, deferred until wanted.
+    fn set_register_variable(&mut self, name: &str, value: &str) -> Result<Value, String> {
+        match name {
+            "MF" => {
+                let mf = match value {
+                    "true" => true,
+                    "false" => false,
+                    other => return Err(format!("MF must be 'true' or 'false', got '{other}'")),
+                };
+                let session = self.session.as_mut().expect("checked by caller");
+                session.set_mf(mf);
+                Ok(json!({"value": mf.to_string()}))
+            }
+            "IP" | "steps" | "core tacts" | "stall tacts" => Err(format!("{name} is read-only")),
+            other => Err(format!("unknown register '{other}'")),
+        }
+    }
+
+    /// A tape cell via `Tape::poke` — a `StrictTape`-launched session
+    /// surfaces its fault text directly (`{fault:?}` — `DeviceFault` has
+    /// no `Display`, matching this crate's existing fault-rendering
+    /// convention); an unknown glyph is rejected before ever touching the
+    /// tape, naming the legal glyphs.
+    fn set_tape_variable(&mut self, name: &str, value: &str) -> Result<Value, String> {
+        let pos =
+            parse_cell_name(name).ok_or_else(|| format!("cannot parse cell name '{name}'"))?;
+        let index = self.glyph_to_index(unquote_glyph(value))?;
+        let tape = self.tape.as_deref_mut().expect("checked by caller");
+        tape.poke(pos, index)
+            .map_err(|fault| format!("{fault:?}"))?;
+        Ok(json!({"value": quote_glyph(&glyph_for(&self.alphabet, index))}))
+    }
+
+    /// The reverse of `glyph_for`: a known alphabet requires an exact
+    /// glyph match; an unknown alphabet (raw-index mode) accepts a decimal
+    /// index within the tape's own `alphabet_size()`. Either way, an
+    /// unrecognized value is rejected naming every legal glyph — never
+    /// silently clamped or defaulted.
+    fn glyph_to_index(&self, glyph: &str) -> Result<u32, String> {
+        if let Some(alphabet) = &self.alphabet {
+            return alphabet
+                .iter()
+                .position(|g| g == glyph)
+                .map(|i| i as u32)
+                .ok_or_else(|| {
+                    format!(
+                        "unknown glyph '{glyph}'; legal glyphs: {}",
+                        alphabet
+                            .iter()
+                            .map(|g| format!("'{g}'"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                });
+        }
+        let size = self.tape.as_deref().map(|t| t.alphabet_size()).unwrap_or(0);
+        glyph
+            .parse::<u32>()
+            .ok()
+            .filter(|i| *i < size)
+            .ok_or_else(|| {
+                let legal: Vec<String> = (0..size).map(|i| i.to_string()).collect();
+                format!(
+                    "unknown glyph '{glyph}'; legal glyphs: {}",
+                    legal.join(", ")
+                )
+            })
+    }
+
+    /// `disassemble`: renders `instructionCount` `listing_line` entries
+    /// starting at `memoryReference` (+ byte `offset`, folded in first),
+    /// shifted by `instructionOffset` instructions. `instructionOffset >=
+    /// 0` (the common case — every frame's own `instructionPointerReference`
+    /// at offset 0 included) walks forward from the base address directly,
+    /// never needing to know where in the code image it falls. A negative
+    /// offset needs a full linear ordinal index from address 0 first
+    /// (mirrors `listing_executable`'s own linear walk) since instructions
+    /// are variable-length and there is no way to know how many bytes
+    /// "N instructions back" spans without decoding forward from a known
+    /// boundary. Once decoding runs off the end of the code image (either
+    /// direction), remaining entries answer a marked `<out of range>`
+    /// placeholder rather than truncating the response short.
+    fn handle_disassemble(&self, arguments: &Value) -> Result<Value, String> {
+        let code = self
+            .code
+            .as_ref()
+            .ok_or_else(|| "disassemble before launch".to_string())?;
+        let reference = arguments
+            .get("memoryReference")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "disassemble requires a memoryReference".to_string())?;
+        let base = parse_instruction_reference(reference)
+            .ok_or_else(|| format!("invalid memoryReference: {reference}"))?;
+        let byte_offset = arguments.get("offset").and_then(Value::as_i64).unwrap_or(0);
+        let base = (i64::from(base) + byte_offset).max(0) as u32;
+        let instruction_offset = arguments
+            .get("instructionOffset")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let instruction_count = arguments
+            .get("instructionCount")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "disassemble requires instructionCount".to_string())?;
+        if instruction_count < 0 {
+            return Err("instructionCount must not be negative".to_string());
+        }
+
+        let syntax = pm1_syntax();
+        let map = self.map.as_ref();
+        let resolve = |target: u32| resolve_label(map, target);
+
+        let start_addr = if instruction_offset >= 0 {
+            let mut addr = base;
+            for _ in 0..instruction_offset {
+                if (addr as usize) >= code.len() {
+                    break;
+                }
+                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
+                addr += ilen.max(1);
+            }
+            Some(addr)
+        } else {
+            let mut addrs = Vec::new();
+            let mut addr = 0u32;
+            let len = code.len() as u32;
+            while addr < len {
+                addrs.push(addr);
+                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
+                addr += ilen.max(1);
+            }
+            addrs.iter().position(|&a| a == base).and_then(|idx| {
+                let ord = idx as i64 + instruction_offset;
+                (ord >= 0).then(|| addrs[ord as usize])
+            })
+        };
+
+        let mut instructions = Vec::new();
+        let mut addr = start_addr;
+        for _ in 0..instruction_count {
+            match addr {
+                Some(a) if (a as usize) < code.len() => {
+                    let (line, ilen) = listing_line(&syntax, code, a, &resolve);
+                    instructions.push(json!({
+                        "address": format!("0x{a:x}"),
+                        "instruction": line,
+                    }));
+                    addr = Some(a + ilen.max(1));
+                }
+                _ => {
+                    instructions.push(json!({
+                        "address": "0x0",
+                        "instruction": "<out of range>",
+                        "presentationHint": "invalid",
+                    }));
+                    addr = None;
+                }
+            }
+        }
+        Ok(json!({"instructions": instructions}))
+    }
 }
 
 impl DebugAdapter for PmDapAdapter {
@@ -608,12 +1234,12 @@ impl DebugAdapter for PmDapAdapter {
         out: &mut Vec<AdapterEvent>,
     ) -> Result<Value, String> {
         match command {
-            // `supportsSetVariable` / `supportsDisassembleRequest` join once
-            // stack/scopes/variables land in a later task.
             "initialize" => Ok(json!({
                 "supportsConfigurationDoneRequest": true,
                 "supportsSteppingGranularity": true,
                 "supportsInstructionBreakpoints": true,
+                "supportsSetVariable": true,
+                "supportsDisassembleRequest": true,
             })),
             "launch" => self.handle_launch(arguments, out),
             "configurationDone" => self.handle_configuration_done(out),
@@ -625,6 +1251,11 @@ impl DebugAdapter for PmDapAdapter {
             "next" => self.handle_step(arguments, out, StepKind::Over),
             "stepIn" => self.handle_step(arguments, out, StepKind::Into),
             "stepOut" => self.handle_step_out(out),
+            "stackTrace" => self.handle_stack_trace(),
+            "scopes" => self.handle_scopes(),
+            "variables" => self.handle_variables(arguments),
+            "setVariable" => self.handle_set_variable(arguments),
+            "disassemble" => self.handle_disassemble(arguments),
             "disconnect" => {
                 self.run_state = RunState::Done;
                 Ok(Value::Null)
@@ -634,12 +1265,16 @@ impl DebugAdapter for PmDapAdapter {
     }
 
     fn tick(&mut self, out: &mut Vec<AdapterEvent>) -> RunState {
-        let event = match (&mut self.session, &mut self.tape) {
-            (Some(session), Some(tape)) => session.run_steps(tape, BUDGET),
-            _ => {
-                self.run_state = RunState::Done;
-                return RunState::Done;
-            }
+        if self.session.is_none() || self.tape.is_none() {
+            self.run_state = RunState::Done;
+            return RunState::Done;
+        }
+        let event = if self.is_traced() {
+            self.run_traced(BUDGET, out)
+        } else {
+            let session = self.session.as_mut().expect("checked above");
+            let tape = self.tape.as_deref_mut().expect("checked above");
+            session.run_steps(tape, BUDGET)
         };
         match event {
             // Budget exhaustion, DebugSession's only `Manual` cause
@@ -668,11 +1303,11 @@ impl DebugAdapter for PmDapAdapter {
                 self.run_state = RunState::Stopped;
             }
             DebugEvent::Paused(PauseCause::Step) => {
-                // run_steps's own loop never surfaces a bare Step (only
-                // budget exhaustion, a breakpoint, a brk, or a trap end
-                // one of its iterations) — kept for exhaustiveness against
-                // future PauseCause growth, mapped the same as a manual
-                // step would be.
+                // Neither `run_steps` nor `run_traced` surfaces a bare Step
+                // on its own (only budget exhaustion, a breakpoint, a brk,
+                // or a trap end one of their iterations) — kept for
+                // exhaustiveness against future `PauseCause` growth, mapped
+                // the same as a manual step would be.
                 out.push(AdapterEvent::Stopped {
                     reason: "step",
                     description: None,
@@ -690,19 +1325,25 @@ impl DebugAdapter for PmDapAdapter {
 }
 
 /// Program-mode tape resolution: PM defaults to the empty tape when no
-/// `"tape"` argument is given; otherwise loads a `.pmt` block the same
+/// `"tape"` argument is given (alphabet `None` — `variables` falls back
+/// to raw indices, module doc); otherwise loads a `.pmt` block the same
 /// way `pmt run --tape-block` does (a per-tape glyph table wins over the
-/// block's shared fallback).
-fn build_tape(tape_path: Option<&str>) -> Result<InfiniteTape, String> {
+/// block's shared fallback) and reports that effective alphabet.
+fn build_tape(tape_path: Option<&str>) -> Result<(InfiniteTape, Option<Vec<String>>), String> {
     let Some(path) = tape_path else {
-        return Ok(InfiniteTape::new());
+        return Ok((InfiniteTape::new(), None));
     };
     let bytes = fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     let file = TapeBlockFile::from_bytes(&bytes).map_err(|e| format!("{path}: {e}"))?;
     let [snapshot] = file.tapes.as_slice() else {
         return Err(format!("{path}: PM-1 blocks hold exactly one tape"));
     };
-    InfiniteTape::from_snapshot(snapshot).map_err(|e| format!("{path}: {e:?}"))
+    let tape = InfiniteTape::from_snapshot(snapshot).map_err(|e| format!("{path}: {e:?}"))?;
+    let alphabet = snapshot
+        .alphabet
+        .clone()
+        .unwrap_or_else(|| file.alphabet.clone());
+    Ok((tape, Some(alphabet)))
 }
 
 /// `<program>.map` sidecar discovery — a standalone copy of
@@ -724,12 +1365,29 @@ mod tests {
 
     #[test]
     fn build_tape_defaults_to_empty_when_no_tape_path_is_given() {
-        let tape = build_tape(None).unwrap();
+        let (tape, alphabet) = build_tape(None).unwrap();
         assert_eq!(tape.head(), 0);
+        assert_eq!(alphabet, None);
     }
 
     #[test]
     fn sidecar_map_is_none_for_a_missing_file() {
         assert!(sidecar_map("/definitely/not/a/real/path.pmx").is_none());
+    }
+
+    #[test]
+    fn parse_cell_name_round_trips_the_rendered_format() {
+        assert_eq!(parse_cell_name("[3]"), Some(3));
+        assert_eq!(parse_cell_name("» [3]"), Some(3));
+        assert_eq!(parse_cell_name("[-5]"), Some(-5));
+        assert_eq!(parse_cell_name("nonsense"), None);
+    }
+
+    #[test]
+    fn quote_and_unquote_glyph_round_trip() {
+        assert_eq!(quote_glyph(" "), "' '");
+        assert_eq!(unquote_glyph("' '"), " ");
+        // A bare, unquoted value passes through unchanged.
+        assert_eq!(unquote_glyph("*"), "*");
     }
 }
