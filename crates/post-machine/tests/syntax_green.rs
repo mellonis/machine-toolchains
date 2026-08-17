@@ -150,3 +150,161 @@ FILE@0..20
 ";
     assert_eq!(dump(src), expected);
 }
+
+/// `"main() {\n  right;\n}\n"` — m=0..4 `(`=4..5 `)`=5..6 sp=6..7 `{`=7..8
+/// `\n  `=8..11 right=11..16 `;`=16..17 `\n`=17..18 `}`=18..19 `\n`=19..20;
+/// total 20. A bare STATEMENT/ITEM pair with no doc run and no label.
+#[test]
+fn function_statement_golden() {
+    let src = "main() {\n  right;\n}\n";
+    let expected = "\
+FILE@0..20
+  FUNCTION@0..19
+    IDENT@0..4 \"main\"
+    L_PAREN@4..5 \"(\"
+    R_PAREN@5..6 \")\"
+    WHITESPACE@6..7 \" \"
+    L_BRACE@7..8 \"{\"
+    WHITESPACE@8..11 \"\\n  \"
+    STATEMENT@11..17
+      ITEM@11..16
+        IDENT@11..16 \"right\"
+      SEMI@16..17 \";\"
+    WHITESPACE@17..18 \"\\n\"
+    R_BRACE@18..19 \"}\"
+  WHITESPACE@19..20 \"\\n\"
+";
+    assert_eq!(dump(src), expected);
+}
+
+/// `"? doc\nmain() {\n1: right;\n}\n"` — `?`-line=0..5 `\n`=5..6 main=6..10
+/// `(`=10..11 `)`=11..12 sp=12..13 `{`=13..14 `\n`=14..15 `1`=15..16
+/// `:`=16..17 sp=17..18 right=18..23 `;`=23..24 `\n`=24..25 `}`=25..26
+/// `\n`=26..27; total 27. Exercises DOC_RUN (FUNCTION's retro-open wraps
+/// it) and LABEL (STATEMENT's retro-open wraps it) in one golden.
+#[test]
+fn doc_run_label_golden() {
+    let src = "? doc\nmain() {\n1: right;\n}\n";
+    let expected = "\
+FILE@0..27
+  FUNCTION@0..26
+    DOC_RUN@0..5
+      DOC_LINE@0..5 \"? doc\"
+    WHITESPACE@5..6 \"\\n\"
+    IDENT@6..10 \"main\"
+    L_PAREN@10..11 \"(\"
+    R_PAREN@11..12 \")\"
+    WHITESPACE@12..13 \" \"
+    L_BRACE@13..14 \"{\"
+    WHITESPACE@14..15 \"\\n\"
+    STATEMENT@15..24
+      LABEL@15..17
+        NUMBER@15..16 \"1\"
+        COLON@16..17 \":\"
+      WHITESPACE@17..18 \" \"
+      ITEM@18..23
+        IDENT@18..23 \"right\"
+      SEMI@23..24 \";\"
+    WHITESPACE@24..25 \"\\n\"
+    R_BRACE@25..26 \"}\"
+  WHITESPACE@26..27 \"\\n\"
+";
+    assert_eq!(dump(src), expected);
+}
+
+/// `"export f() {\ng() {\n1: 2: right, mark;\n}\ncheck(1, !);\n}\n"` — a
+/// composed shape exercising every instrumented construct the two
+/// bare goldens above don't reach: the `export` prefix inside
+/// FUNCTION's extent (the reason `fn_cp`/`g_checkpoint` exists at
+/// all), a nested FUNCTION (the recursive `g_start_at` path), stacked
+/// LABELs (two folds retro-wrapped by one STATEMENT), a comma-group
+/// ITEM pair (the separating `,` stays outside both items, at
+/// STATEMENT level), and a `check` ITEM's two CHECK_ARMs. Byte map:
+/// export=0..6, ws=6..7, f=7..8, `(`=8..9, `)`=9..10, ws=10..11,
+/// `{`=11..12, `\n`=12..13, g=13..14, `(`=14..15, `)`=15..16,
+/// ws=16..17, `{`=17..18, `\n`=18..19, `1`=19..20, `:`=20..21,
+/// ws=21..22, `2`=22..23, `:`=23..24, ws=24..25, right=25..30,
+/// `,`=30..31, ws=31..32, mark=32..36, `;`=36..37, `\n`=37..38,
+/// `}`=38..39, `\n`=39..40, check=40..45, `(`=45..46, `1`=46..47,
+/// `,`=47..48, ws=48..49, `!`=49..50, `)`=50..51, `;`=51..52,
+/// `\n`=52..53, `}`=53..54, `\n`=54..55; total 55.
+#[test]
+fn composed_export_nested_labels_check_golden() {
+    let src = "export f() {\ng() {\n1: 2: right, mark;\n}\ncheck(1, !);\n}\n";
+    let expected = "\
+FILE@0..55
+  FUNCTION@0..54
+    IDENT@0..6 \"export\"
+    WHITESPACE@6..7 \" \"
+    IDENT@7..8 \"f\"
+    L_PAREN@8..9 \"(\"
+    R_PAREN@9..10 \")\"
+    WHITESPACE@10..11 \" \"
+    L_BRACE@11..12 \"{\"
+    WHITESPACE@12..13 \"\\n\"
+    FUNCTION@13..39
+      IDENT@13..14 \"g\"
+      L_PAREN@14..15 \"(\"
+      R_PAREN@15..16 \")\"
+      WHITESPACE@16..17 \" \"
+      L_BRACE@17..18 \"{\"
+      WHITESPACE@18..19 \"\\n\"
+      STATEMENT@19..37
+        LABEL@19..21
+          NUMBER@19..20 \"1\"
+          COLON@20..21 \":\"
+        WHITESPACE@21..22 \" \"
+        LABEL@22..24
+          NUMBER@22..23 \"2\"
+          COLON@23..24 \":\"
+        WHITESPACE@24..25 \" \"
+        ITEM@25..30
+          IDENT@25..30 \"right\"
+        COMMA@30..31 \",\"
+        WHITESPACE@31..32 \" \"
+        ITEM@32..36
+          IDENT@32..36 \"mark\"
+        SEMI@36..37 \";\"
+      WHITESPACE@37..38 \"\\n\"
+      R_BRACE@38..39 \"}\"
+    WHITESPACE@39..40 \"\\n\"
+    STATEMENT@40..52
+      ITEM@40..51
+        IDENT@40..45 \"check\"
+        L_PAREN@45..46 \"(\"
+        CHECK_ARM@46..47
+          NUMBER@46..47 \"1\"
+        COMMA@47..48 \",\"
+        WHITESPACE@48..49 \" \"
+        CHECK_ARM@49..50
+          BANG@49..50 \"!\"
+        R_PAREN@50..51 \")\"
+      SEMI@51..52 \";\"
+    WHITESPACE@52..53 \"\\n\"
+    R_BRACE@53..54 \"}\"
+  WHITESPACE@54..55 \"\\n\"
+";
+    assert_eq!(dump(src), expected);
+}
+
+/// Error parity between `parse_cst` and `parse_green` over a few invalid
+/// inputs: both walk the same grammar with the same sink-optional
+/// `Parser`, so a divergence here would mean a green-only early return
+/// slipped in somewhere. `CompileError` already derives `PartialEq`, so
+/// the errors are compared directly (no derive added by this plan).
+#[test]
+fn error_parity_with_parse_cst() {
+    use mtc_post_machine::lexer::{LexMode, lex_with};
+    use mtc_post_machine::parser::parse_cst;
+    // Unterminated function body; a bare `use` with no path; a missing
+    // `;` after a command; a doc run with nothing bound to it.
+    for src in ["main() {", "use ;", "main() { right }", "? dangling\n"] {
+        let old = lex_with(src, LexMode::WithComments)
+            .and_then(|t| parse_cst(&t).map(|_| ()))
+            .expect_err("sample must be invalid .pmc");
+        let new = parse_green(src)
+            .map(|_| ())
+            .expect_err("sample must be invalid .pmc");
+        assert_eq!(old, new, "error parity for {src:?}");
+    }
+}

@@ -644,7 +644,6 @@ impl Parser<'_> {
     /// green checkpoint for a later [`Self::g_start_at`] — for
     /// productions that only learn their node kind after parsing a
     /// prefix. `None` when `sink` is `None`.
-    #[allow(dead_code)] // consumed by the function/statement instrumentation (a later task)
     fn g_checkpoint(&mut self) -> Option<Checkpoint> {
         self.sink.as_mut().map(|sink| {
             sink.flush(self.pos);
@@ -654,7 +653,6 @@ impl Parser<'_> {
 
     /// Open a green node retroactively at a checkpoint taken by
     /// [`Self::g_checkpoint`]. No-op when either is `None`.
-    #[allow(dead_code)] // consumed by the function/statement instrumentation (a later task)
     fn g_start_at(&mut self, cp: Option<Checkpoint>, kind: PmcKind) {
         if let (Some(sink), Some(cp)) = (&mut self.sink, cp) {
             sink.start_at(cp, kind);
@@ -1004,11 +1002,22 @@ impl Parser<'_> {
             // loop's own dispatch conditions exactly, so classifying
             // "true" here guarantees the fallthrough function-parsing
             // code below is what actually runs next.
+            // The green checkpoint for the FUNCTION node this run (if any)
+            // binds to, or — with no run — for the header token about to
+            // be consumed (`volatile`/`export`/name): taken here, before
+            // either, so `g_start_at` below retro-wraps whichever prefix
+            // was actually present (mirrors `FunctionCst::span`'s start
+            // rule). Unused whenever this token turns out to start a
+            // `use`/`namespace` item instead — harmless, a fresh
+            // checkpoint is taken every loop iteration.
+            let fn_cp = self.g_checkpoint();
             let doc_run = if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
+                self.g_flush_start(PmcKind::DocRun);
                 let (run, first_span) = self.doc_run()?;
+                self.g_finish();
                 if !self.next_is_top_level_function_start(terminator) {
                     return Err(CompileError {
                         span: first_span,
@@ -1350,6 +1359,11 @@ impl Parser<'_> {
                 .as_ref()
                 .map(|t| t.span().start)
                 .or(export_start);
+            // The header is confirmed now (a function IS what follows):
+            // retro-open FUNCTION at `fn_cp`, so it wraps the doc run
+            // (if any) and/or the `volatile`/`export` tokens already
+            // emitted above. `function` closes it after the `}`.
+            self.g_start_at(fn_cp, PmcKind::Function);
             let mut f = self.function(header_start, doc_run)?;
             // The literal keyword presence — unlike `exported` below, this
             // does NOT
@@ -1417,6 +1431,15 @@ impl Parser<'_> {
     // undocumented) — this function only stores it, it never collects one
     // itself (the caller owns the "what comes next" dispatch a run's
     // dangling check depends on).
+    //
+    // Green FUNCTION node: opened by the CALLER (`g_start_at` at a
+    // checkpoint taken before either call site invokes this method) and
+    // closed HERE, right after the closing `}` is bumped — the one
+    // `Ok` exit this loop has. Both call sites call `g_start_at`
+    // unconditionally, immediately before invoking this method, so the
+    // open/close pair always balances; a future third call site (or a
+    // second `Ok` exit added here) must preserve both halves of that
+    // contract or the green builder mis-nests.
     fn function(
         &mut self,
         header_start: Option<Pos>,
@@ -1493,6 +1516,13 @@ impl Parser<'_> {
                     "`}` to close the function body",
                 ));
             }
+            // The green checkpoint for whichever body construct follows —
+            // a nested FUNCTION (with this run, if any, bound to it) or a
+            // labeled STATEMENT — taken once, before either is known.
+            // Exactly one of the two `g_start_at` calls below ever
+            // consumes it in a given iteration; the other path's checkpoint
+            // just goes unused, same as `top_items`'s `fn_cp`.
+            let cp = self.g_checkpoint();
             // Doc/attention run (docs/pmt/language.md (doc lines)): a `?`/`!`
             // line at body item position starts a run that must bind to
             // the NEXT nested function definition — anything else next
@@ -1502,7 +1532,9 @@ impl Parser<'_> {
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
+                self.g_flush_start(PmcKind::DocRun);
                 let (run, first_span) = self.doc_run()?;
+                self.g_finish();
                 if !self.next_is_nested_function_start() {
                     return Err(CompileError {
                         span: first_span,
@@ -1539,6 +1571,7 @@ impl Parser<'_> {
                 // Nested definitions can never carry a leading `export`
                 // (`NestedExport` bars it above), so the extent always
                 // starts at the name token.
+                self.g_start_at(cp, PmcKind::Function);
                 let child = self.function(None, doc_run)?;
                 if nested_names.contains(&child.name) {
                     return Err(CompileError {
@@ -1579,9 +1612,11 @@ impl Parser<'_> {
                     break;
                 };
                 let (n, written) = (*n, written.clone());
+                self.g_flush_start(PmcKind::Label);
                 self.bump();
                 let colon = self.peek().clone();
                 self.expect(&TokenKind::Colon, "`:` after a label number")?;
+                self.g_finish();
                 if !seen_labels.insert(n) {
                     return Err(Self::err_at(&tok, CompileErrorKind::DuplicateLabel(n)));
                 }
@@ -1625,9 +1660,17 @@ impl Parser<'_> {
                         self.cpos += 1;
                     }
                 }
+                // FUNCTION was retro-opened by the caller (top level:
+                // `top_items`; nested: the `g_start_at` above) at a
+                // checkpoint taken before this call — closing it here,
+                // right after the `}` bump, is the one shared exit for
+                // both call sites.
+                self.g_finish();
                 break;
             }
+            self.g_start_at(cp, PmcKind::Statement);
             let stmt = self.statement(labels, last_colon_line)?;
+            self.g_finish();
             // `statement` set `prev_end_line` to the `;` line.
             let blank_before = stmt_line > stmt_saved + 1;
             body.push(BodyItem {
@@ -1670,8 +1713,11 @@ impl Parser<'_> {
         // A comment between the label and the first command (rare) rides
         // the first item's leading; the common case leaves it empty.
         let leading = self.drain_pending_comments();
+        self.g_flush_start(PmcKind::Item);
+        let first_item = self.item(false)?;
+        self.g_finish();
         let mut items = vec![CommaItem {
-            item: self.item(false)?,
+            item: first_item,
             leading,
             // The first entry's `newline_before` is always false (fmt
             // design doc, "Comma-group layout").
@@ -1728,8 +1774,14 @@ impl Parser<'_> {
             // comments were just drained.
             let item_start_line = self.peek().line;
             let newline_before = item_start_line > last_item_end_line;
+            // The comma just bumped above stays outside both ITEM nodes,
+            // at STATEMENT level — `g_flush_start` opens ITEM only now,
+            // at this item's own first token.
+            self.g_flush_start(PmcKind::Item);
+            let item = self.item(true)?;
+            self.g_finish();
             items.push(CommaItem {
-                item: self.item(true)?,
+                item,
                 leading,
                 newline_before,
             });
@@ -1846,9 +1898,13 @@ impl Parser<'_> {
                 "check" => {
                     self.bump();
                     self.expect(&TokenKind::LParen, "`(` after `check`")?;
+                    self.g_flush_start(PmcKind::CheckArm);
                     let (marked, marked_span, marked_written) = self.check_arm()?;
+                    self.g_finish();
                     self.expect(&TokenKind::Comma, "`,` between check arms")?;
+                    self.g_flush_start(PmcKind::CheckArm);
                     let (blank, blank_span, blank_written) = self.check_arm()?;
+                    self.g_finish();
                     let rparen = self.peek().clone();
                     self.expect(&TokenKind::RParen, "`)`")?;
                     Ok(Item::Check {
