@@ -1,8 +1,9 @@
-//! Red layer: position-carrying cursors over a green tree. A
-//! `SyntaxNode` is a cheap-to-clone `Rc` handle knowing its absolute
-//! byte range, parent, and children; red nodes are created on demand
-//! while walking, never stored in the green tree. Equality is
-//! positional identity: the same green node at the same offset.
+//! Red layer — docs/core.md (syntax tree). Position-carrying cursors
+//! over a green tree. A `SyntaxNode` is a cheap-to-clone `Rc` handle
+//! knowing its absolute byte range, parent, and children; red nodes are
+//! created on demand while walking, never stored in the green tree.
+//! Equality is positional identity: the same green node at the same
+//! offset.
 
 use std::rc::Rc;
 

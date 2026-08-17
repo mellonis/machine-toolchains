@@ -1,9 +1,10 @@
-//! Green layer of the syntax framework: immutable, structure-shared
-//! value trees. A green tree owns its exact source text and knows
-//! nothing about absolute positions — the red layer (`red.rs`) adds
-//! offsets on top. Whitespace and comments are ordinary tokens; there
-//! is no side-channel trivia storage, so the lossless contract is one
-//! law: the root's `text()` equals the source, byte for byte.
+//! Green layer of the syntax framework — docs/core.md (syntax tree).
+//! Immutable, structure-shared value trees. A green tree owns its exact
+//! source text and knows nothing about absolute positions — the red
+//! layer (`red.rs`) adds offsets on top. Whitespace and comments are
+//! ordinary tokens; there is no side-channel trivia storage, so the
+//! lossless contract is one law: the root's `text()` equals the source,
+//! byte for byte.
 //!
 //! Language-agnostic: kinds are opaque `u16`s owned by the language
 //! crates, mirroring how `vm::Arch` owns its opcodes.

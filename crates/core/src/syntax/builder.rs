@@ -1,8 +1,9 @@
-//! `TreeBuilder`: the emission surface a recursive-descent parser
-//! drives. `start_node`/`finish_node` bracket children in document
-//! order; `checkpoint` + `start_node_at` retro-wrap an already-emitted
-//! prefix once the parser knows the enclosing kind. Balance errors are
-//! panics: an unbalanced build is a parser bug, never an input error.
+//! `TreeBuilder` — docs/core.md (syntax tree). The emission surface a
+//! recursive-descent parser drives. `start_node`/`finish_node` bracket
+//! children in document order; `checkpoint` + `start_node_at` retro-wrap
+//! an already-emitted prefix once the parser knows the enclosing kind.
+//! Balance errors are panics: an unbalanced build is a parser bug, never
+//! an input error.
 
 use std::rc::Rc;
 

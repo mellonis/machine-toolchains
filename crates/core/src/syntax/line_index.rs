@@ -1,8 +1,9 @@
-//! Byte-offset → line/column conversion for diagnostics. Lines are
-//! 1-based; columns are 1-based CHARACTER counts — the convention the
-//! lexers' tokens already carry (`Token.len` is chars), so spans built
-//! through a `LineIndex` are byte-identical to lexer-built spans. Span
-//! parity across the front-end migrations is a test-pinned contract.
+//! Byte-offset → line/column conversion for diagnostics — docs/core.md
+//! (syntax tree). Lines are 1-based; columns are 1-based CHARACTER
+//! counts — the convention the lexers' tokens already carry
+//! (`Token.len` is chars), so spans built through a `LineIndex` are
+//! byte-identical to lexer-built spans. Span parity across the
+//! front-end migrations is a test-pinned contract.
 
 use crate::diagnostics::Span;
 

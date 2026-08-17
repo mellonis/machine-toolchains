@@ -1,7 +1,8 @@
-//! The typed-view contract: a view is a zero-copy wrapper over a
-//! `SyntaxNode` of a known kind. Concrete views live in the language
-//! crates; core owns only the casting contract, the declaration macro,
-//! and the child/token lookup helpers views are written with.
+//! The typed-view contract — docs/core.md (syntax tree). A view is a
+//! zero-copy wrapper over a `SyntaxNode` of a known kind. Concrete
+//! views live in the language crates; core owns only the casting
+//! contract, the declaration macro, and the child/token lookup helpers
+//! views are written with.
 
 use super::green::SyntaxKind;
 use super::red::{SyntaxElement, SyntaxNode, SyntaxToken};
