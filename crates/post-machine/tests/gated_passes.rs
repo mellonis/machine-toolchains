@@ -143,6 +143,20 @@ fn fuse_tape_ops_keeps_write_and_move_as_two_transactions() {
     );
 }
 
+/// move-elim is GATED: `right; left;` after a write re-couples MF on a
+/// real tape but is two observable transactions on a volatile one.
+const MOVE_PAIR: &str =
+    "main() {\n    mark;\n    right;\n    left;\n    check(1, !);\n1:  unmark;\n}\n";
+
+fn count_moves(listing: &str) -> usize {
+    count(listing, "lft") + count(listing, "rgt")
+}
+
+#[test]
+fn move_elim_is_gated() {
+    assert!(count_moves(&normal(MOVE_PAIR)) < count_moves(&volatile(MOVE_PAIR)));
+}
+
 #[test]
 fn branch_fold_does_not_predict_the_check_from_a_written_value() {
     // `mark; check(...)`: the normal column folds the branch because a
@@ -206,6 +220,16 @@ fn tail_merge_still_fires_in_the_volatile_column() {
     let src = "main() { 1: check(2, 3); 2: mark, right(!); 3: mark, right(!); }";
     assert_eq!(count(&volatile(src), "wr"), 1, "{}", volatile(src));
     assert_eq!(count(&volatile_without(src, "tail-merge"), "wr"), 2);
+}
+
+#[test]
+fn tail_sink_still_fires_in_the_volatile_column() {
+    // Both arms' trailing `right; right;` are the same instruction
+    // whichever arm ran — sinking them into the shared join drops the
+    // duplicate static copy without touching any executed access.
+    let src = "main() {\n    check(1, 2);\n1:  mark;\n    right;\n    right;\n    goto 3;\n2:  left;\n    right;\n    right;\n3:  unmark;\n}\n";
+    assert_eq!(count_moves(&volatile(src)), 3, "{}", volatile(src));
+    assert_eq!(count_moves(&volatile_without(src, "tail-sink")), 5);
 }
 
 // ----------------------------------------------------------- drift guard

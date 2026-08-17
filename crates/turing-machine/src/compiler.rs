@@ -2044,6 +2044,10 @@ pub struct CompileOptions {
     /// stamped assembly codegen produced (docs/tmt/cli.md (compile)). Implied
     /// when `-g` is set — the debug line map cannot survive the rewrite.
     pub stamped_asm: bool,
+    /// Override `inline`'s rule-count cap (`None` = the shipped constant). A
+    /// measurement knob for the optimizer sweep, not CLI surface — no flag,
+    /// no completions entry.
+    pub inline_cap: Option<usize>,
 }
 
 /// Structured stage report — `tmt -v` renders it; the library never prints
@@ -2147,6 +2151,7 @@ pub fn compile(source: &str, options: CompileOptions) -> Result<CompileOutput, C
             disabled: options.disabled_passes.iter().cloned().collect(),
             capture: options.capture_ir,
             outline: options.outline,
+            inline_cap: options.inline_cap,
         },
         &mut ir_snapshots,
     );
@@ -4096,6 +4101,80 @@ machine {
         .unwrap();
         assert_eq!(plain.object, outlined.object);
         assert_eq!(plain.tma, outlined.tma);
+    }
+
+    #[test]
+    fn inline_cap_widens_what_the_program_pass_admits() {
+        // `big` is a leaf routine with 8 rows across an 8-state chain
+        // (> INLINE_MAX_RULES = 6). Default (`None`) keeps the shipped cap,
+        // so the call survives; `Some(12)` widens the size arm and it
+        // splices. End-to-end through `compile()`, proving
+        // `CompileOptions.inline_cap` actually reaches
+        // `OptOptions.inline_cap` — `optimizer::inline::run` is tested
+        // directly in optimizer/inline.rs; this pins the compiler-level
+        // plumbing, mirroring `foutline_threads_through_...` above.
+        let src = "\
+alphabet ab { '_', 'a' }
+routine big(tape t: ab) {
+  entry state s0 { [*] -> move [>] goto s1; }
+  state s1 { [*] -> move [>] goto s2; }
+  state s2 { [*] -> move [>] goto s3; }
+  state s3 { [*] -> move [>] goto s4; }
+  state s4 { [*] -> move [>] goto s5; }
+  state s5 { [*] -> move [>] goto s6; }
+  state s6 { [*] -> move [>] goto s7; }
+  state s7 { [*] -> return; }
+}
+machine {
+  tape t: ab;
+  entry state m { [*] -> call big(t = t) then done; }
+  state done     { [*] -> stop; }
+}";
+
+        let default_out = compile(
+            src,
+            CompileOptions {
+                opt_level: OptLevel::O1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let main = default_out
+            .ir
+            .worlds
+            .iter()
+            .find(|w| w.name == "main")
+            .unwrap();
+        assert!(
+            main.states.iter().flat_map(|s| &s.rules).any(|r| matches!(
+                &r.transition,
+                crate::ir::IrTransition::CallThen { target, .. } if target == "big"
+            )),
+            "default cap keeps the call to the oversize leaf callee"
+        );
+
+        let widened_out = compile(
+            src,
+            CompileOptions {
+                opt_level: OptLevel::O1,
+                inline_cap: Some(12),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let main = widened_out
+            .ir
+            .worlds
+            .iter()
+            .find(|w| w.name == "main")
+            .unwrap();
+        assert!(
+            main.states
+                .iter()
+                .flat_map(|s| &s.rules)
+                .all(|r| !matches!(&r.transition, crate::ir::IrTransition::CallThen { .. })),
+            "CompileOptions.inline_cap: Some(12) reaches the optimizer and admits the callee"
+        );
     }
 
     #[test]

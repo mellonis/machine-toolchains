@@ -756,6 +756,7 @@ mod tests {
             debugger: false,
             transition,
             synthesized: false,
+            direct: false,
             line: 0,
         }
     }

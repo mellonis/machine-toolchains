@@ -90,6 +90,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::OptOptions;
 use crate::ir::{
     IrCell, IrMove, IrProgram, IrRule, IrTapeBinding, IrThen, IrTransition, IrWorld, IrWorldKind,
     IrWrite,
@@ -148,8 +149,9 @@ fn is_full_passthrough(binding: &[IrTapeBinding], caller: &IrWorld, callee: &IrW
         })
 }
 
-pub fn run(ir: &mut IrProgram) -> u32 {
+pub fn run(ir: &mut IrProgram, options: &OptOptions) -> u32 {
     let entry = ir.entry_world;
+    let cap = options.inline_cap.unwrap_or(INLINE_MAX_RULES);
     // Fix the candidate set from the pre-pass state (clone the eligible
     // routines): a routine mutated as a caller must not change its own
     // candidacy mid-pass.
@@ -161,7 +163,7 @@ pub fn run(ir: &mut IrProgram) -> u32 {
             w.kind == IrWorldKind::Routine
                 && Some(*i) != entry
                 && is_leaf(w)
-                && rule_count(w) <= INLINE_MAX_RULES
+                && rule_count(w) <= cap
         })
         .map(|(_, w)| (w.name.clone(), w.clone()))
         .collect();
@@ -348,7 +350,11 @@ machine {
   state done     { [*] -> stop; }
 }",
         );
-        assert_eq!(run(&mut ir), 1, "the one full-passthrough call inlines");
+        assert_eq!(
+            run(&mut ir, &OptOptions::default()),
+            1,
+            "the one full-passthrough call inlines"
+        );
         let main = world(&ir, "main");
         assert!(!any_callthen(main), "the call was spliced away");
         validate_world(main).unwrap();
@@ -369,7 +375,7 @@ machine {
   state done     { [*, *] -> stop; }
 }",
         );
-        assert_eq!(run(&mut ir), 1);
+        assert_eq!(run(&mut ir, &OptOptions::default()), 1);
         let main = world(&ir, "main");
         assert!(!any_callthen(main));
         // Every row is now arity-2; the spliced 'a'-row keeps 'a' on tape 0 and
@@ -424,6 +430,7 @@ machine {
                             then: IrThen::Goto { state: 1 },
                         },
                         synthesized: false,
+                        direct: false,
                         line: 0,
                     }],
                     dispatch: IrDispatch::Table,
@@ -439,6 +446,7 @@ machine {
                         debugger: false,
                         transition: IrTransition::Stop,
                         synthesized: false,
+                        direct: false,
                         line: 0,
                     }],
                     dispatch: IrDispatch::Table,
@@ -464,6 +472,7 @@ machine {
                     debugger: false,
                     transition: IrTransition::Return,
                     synthesized: false,
+                    direct: false,
                     line: 0,
                 }],
                 dispatch: IrDispatch::Table,
@@ -476,7 +485,11 @@ machine {
             worlds: vec![machine, routine],
             entry_world: Some(0),
         };
-        assert_eq!(run(&mut ir), 1, "the bindless call inlines");
+        assert_eq!(
+            run(&mut ir, &OptOptions::default()),
+            1,
+            "the bindless call inlines"
+        );
         let main = world(&ir, "main");
         assert!(!any_callthen(main));
         // The routine's `return` became a goto to `done` (the call's then).
@@ -529,6 +542,7 @@ machine {
                             then: IrThen::Goto { state: 1 },
                         },
                         synthesized: false,
+                        direct: false,
                         line: 0,
                     }],
                     dispatch: IrDispatch::Table,
@@ -544,6 +558,7 @@ machine {
                         debugger: false,
                         transition: IrTransition::Stop,
                         synthesized: false,
+                        direct: false,
                         line: 0,
                     }],
                     dispatch: IrDispatch::Table,
@@ -569,6 +584,7 @@ machine {
                     debugger: false,
                     transition: IrTransition::Return,
                     synthesized: false,
+                    direct: false,
                     line: 0,
                 }],
                 dispatch: IrDispatch::Table,
@@ -582,7 +598,7 @@ machine {
             entry_world: Some(0),
         };
         assert_eq!(
-            run(&mut ir),
+            run(&mut ir, &OptOptions::default()),
             0,
             "the mismatched bindless call is not inlined"
         );
@@ -607,7 +623,7 @@ machine {
   state done     { [*] -> stop; }
 }",
         );
-        run(&mut ir);
+        run(&mut ir, &OptOptions::default());
         let main = world(&ir, "main");
         assert!(
             main.states.iter().flat_map(|s| &s.rules).any(|r| matches!(
@@ -640,7 +656,7 @@ machine {
   state done     { [*] -> stop; }
 }",
         );
-        run(&mut ir);
+        run(&mut ir, &OptOptions::default());
         assert!(
             any_callthen(world(&ir, "main")),
             "the oversize callee is not inlined"
@@ -669,6 +685,7 @@ machine {
                 debugger: false,
                 transition: IrTransition::Stop,
                 synthesized: false,
+                direct: false,
                 line: 0,
             }],
             dispatch: IrDispatch::Table,
@@ -704,6 +721,7 @@ machine {
                         then: IrThen::Return,
                     },
                     synthesized: false,
+                    direct: false,
                     line: 0,
                 }],
                 dispatch: IrDispatch::Table,
@@ -716,7 +734,11 @@ machine {
             worlds: vec![machine, routine],
             entry_world: Some(0),
         };
-        assert_eq!(run(&mut ir), 0, "the entry world is not spliced");
+        assert_eq!(
+            run(&mut ir, &OptOptions::default()),
+            0,
+            "the entry world is not spliced"
+        );
         assert!(any_callthen(world(&ir, "r")), "the call to main survives");
     }
 
@@ -753,6 +775,7 @@ machine {
                             then: IrThen::Goto { state: 1 },
                         },
                         synthesized: false,
+                        direct: false,
                         line: 0,
                     }],
                     dispatch: IrDispatch::Table,
@@ -768,6 +791,7 @@ machine {
                         debugger: false,
                         transition: IrTransition::Stop,
                         synthesized: false,
+                        direct: false,
                         line: 0,
                     }],
                     dispatch: IrDispatch::Table,
@@ -798,6 +822,7 @@ machine {
                     debugger: false,
                     transition: IrTransition::Return,
                     synthesized: false,
+                    direct: false,
                     line: 0,
                 }],
                 dispatch: IrDispatch::Table,
@@ -810,7 +835,7 @@ machine {
             worlds: vec![machine, routine],
             entry_world: Some(0),
         };
-        let changed = run(&mut ir);
+        let changed = run(&mut ir, &OptOptions::default());
         assert!(changed > 0, "premise: inline must fire on this fixture");
         let main = world(&ir, "main");
         assert!(!any_callthen(main), "the call was spliced away");
@@ -862,7 +887,11 @@ machine {
   state done     { [*] -> stop; }
 }",
         );
-        assert_eq!(run(&mut ir), 2, "both call sites inline");
+        assert_eq!(
+            run(&mut ir, &OptOptions::default()),
+            2,
+            "both call sites inline"
+        );
         let main = world(&ir, "main");
         assert!(!any_callthen(main), "both calls were spliced away");
 
@@ -893,7 +922,7 @@ machine {
   state done     { [*] -> stop; }
 }",
         );
-        assert_eq!(run(&mut ir), 1);
+        assert_eq!(run(&mut ir, &OptOptions::default()), 1);
         let main = world(&ir, "main");
         assert!(!any_callthen(main), "the call was spliced away");
         assert_names_pairwise_distinct(main);
@@ -911,6 +940,57 @@ machine {
             spliced.name, "s_1",
             "the spliced entry is freshened to exactly `s_1`"
         );
+        validate_world(main).unwrap();
+    }
+
+    #[test]
+    fn the_cap_override_admits_a_larger_callee() {
+        // `big` is a leaf routine with 8 rows across an 8-state chain
+        // (> INLINE_MAX_RULES = 6). TM's condition has no single-call-site
+        // escape (unlike PM's): at the default cap the call survives; at
+        // `inline_cap: Some(12)` it splices.
+        let src = "alphabet ab { '_', 'a' }
+routine big(tape t: ab) {
+  entry state s0 { [*] -> move [>] goto s1; }
+  state s1 { [*] -> move [>] goto s2; }
+  state s2 { [*] -> move [>] goto s3; }
+  state s3 { [*] -> move [>] goto s4; }
+  state s4 { [*] -> move [>] goto s5; }
+  state s5 { [*] -> move [>] goto s6; }
+  state s6 { [*] -> move [>] goto s7; }
+  state s7 { [*] -> return; }
+}
+machine {
+  tape t: ab;
+  entry state m { [*] -> call big(t = t) then done; }
+  state done     { [*] -> stop; }
+}";
+
+        let mut default_ir = ir_of(src);
+        assert_eq!(
+            run(&mut default_ir, &OptOptions::default()),
+            0,
+            "default cap keeps the oversize callee"
+        );
+        assert!(
+            any_callthen(world(&default_ir, "main")),
+            "the call to the 8-rule callee survives at the default cap"
+        );
+
+        let mut widened_ir = ir_of(src);
+        assert_eq!(
+            run(
+                &mut widened_ir,
+                &OptOptions {
+                    inline_cap: Some(12),
+                    ..Default::default()
+                },
+            ),
+            1,
+            "inline_cap: Some(12) admits the 8-rule callee"
+        );
+        let main = world(&widened_ir, "main");
+        assert!(!any_callthen(main), "the call was spliced away");
         validate_world(main).unwrap();
     }
 }

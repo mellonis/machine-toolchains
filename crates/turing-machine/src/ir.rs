@@ -59,7 +59,10 @@ use crate::parser::{BindingArg, BindingValue, Continuation, MapArrow, MoveDir, S
 /// (the `dispatch_select` pass's output). Both are internal — no released
 /// artifact carries them — but the version contract moves with ANY serialized
 /// shape change regardless.
-pub const TM_IR_VERSION: u32 = 2;
+///
+/// Version 3 adds the [`IrRule::direct`] lowering hint (the `jump_threading`
+/// pass's output). Internal — no released artifact carries it.
+pub const TM_IR_VERSION: u32 = 3;
 
 /// A whole compiled module: its emitted worlds plus the index (into `worlds`)
 /// of the `machine` block — the program entry — or `None` for a library.
@@ -170,6 +173,12 @@ pub struct IrRule {
     /// trap transition may appear ONLY on a synthesized row (validated).
     #[serde(default, skip_serializing_if = "is_false")]
     pub synthesized: bool,
+    /// Lowering hint (the `jump_threading` pass's output — never set by
+    /// lowering): this bare rule's dispatch entry names its `Goto`
+    /// destination state directly and no stub block is emitted
+    /// (docs/tmt/optimizer.md (dispatch-target threading)).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub direct: bool,
     /// Source line the row derives from; `0` if unknown.
     pub line: u32,
 }
@@ -685,6 +694,9 @@ fn lower_rule(
         debugger: r.debugger,
         transition,
         synthesized,
+        // Never set by lowering — only the `jump_threading` optimizer pass
+        // sets this hint.
+        direct: false,
         line: r.span.start.line,
     })
 }
@@ -933,7 +945,7 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
         }
     };
     for st in &w.states {
-        for r in &st.rules {
+        for (k, r) in st.rules.iter().enumerate() {
             if r.pattern.len() != arity {
                 return Err(format!(
                     "{}: state {} has a width-{} pattern (arity {})",
@@ -984,6 +996,17 @@ pub fn validate_world(w: &IrWorld) -> Result<(), String> {
                 return Err(format!(
                     "{}: state {} carries a trap on a non-synthesized row",
                     w.name, st.id
+                ));
+            }
+            if r.direct
+                && !(r.write.is_none()
+                    && r.moves.is_none()
+                    && !r.debugger
+                    && matches!(r.transition, IrTransition::Goto { .. }))
+            {
+                return Err(format!(
+                    "{}: state {} rule {}: `direct` on a non-bare rule",
+                    w.name, st.id, k
                 ));
             }
             match &r.transition {
@@ -1120,7 +1143,7 @@ machine {
         let (ir, _) = lower_of(A1);
         let json = ir.to_json();
         assert_eq!(IrProgram::from_json(&json).unwrap(), ir);
-        assert!(json.contains("\"version\": 2"), "{json}");
+        assert!(json.contains("\"version\": 3"), "{json}");
     }
 
     /// The serde tags are the frozen wire contract. Build one program that
@@ -1173,6 +1196,7 @@ machine {
                                     then: IrThen::Goto { state: 0 },
                                 },
                                 synthesized: false,
+                                direct: false,
                                 line: 1,
                             },
                             IrRule {
@@ -1182,6 +1206,7 @@ machine {
                                 debugger: false,
                                 transition: IrTransition::TrapRead,
                                 synthesized: true,
+                                direct: false,
                                 line: 2,
                             },
                         ],
@@ -1218,6 +1243,7 @@ machine {
                                     target: "r2".into(),
                                 },
                                 synthesized: false,
+                                direct: false,
                                 line: 1,
                             },
                             IrRule {
@@ -1227,6 +1253,7 @@ machine {
                                 debugger: false,
                                 transition: IrTransition::Return,
                                 synthesized: false,
+                                direct: false,
                                 line: 2,
                             },
                         ],
@@ -1665,5 +1692,49 @@ machine {
         m.states[0].rules[0].transition = IrTransition::TrapRead;
         m.states[0].rules[0].synthesized = false;
         assert!(validate_world(&m).is_err());
+    }
+
+    #[test]
+    fn direct_is_rejected_on_a_non_bare_rule() {
+        let (ir, _) = lower_of(A1);
+        let mut m = world(&ir, "main").clone();
+        // Rule 0 (`['b'] -> write ['a'] move [>] goto scan;`) carries a
+        // write and a move — not a bare rule.
+        m.states[0].rules[0].direct = true;
+        let err = validate_world(&m).unwrap_err();
+        assert!(err.contains("direct"), "{err}");
+    }
+
+    #[test]
+    fn direct_round_trips_and_defaults_false() {
+        let (ir, _) = lower_of(A1);
+        // Lowering never sets `direct` — absent from the wire form, and a
+        // program deserialized without it comes back false.
+        let json = ir.to_json();
+        assert!(!json.contains("\"direct\""), "{json}");
+        let back = IrProgram::from_json(&json).unwrap();
+        assert_eq!(back, ir);
+        assert!(
+            back.worlds
+                .iter()
+                .all(|w| w.states.iter().all(|s| s.rules.iter().all(|r| !r.direct))),
+            "{back:?}"
+        );
+
+        // A bare rule (no write, no moves, no debugger, a `Goto`) with
+        // `direct` set round-trips to_json/from_json unchanged.
+        let mut with_direct = ir.clone();
+        let rule = &mut with_direct.worlds[0].states[0].rules[0];
+        rule.write = None;
+        rule.moves = None;
+        rule.debugger = false;
+        rule.transition = IrTransition::Goto { state: 0 };
+        rule.direct = true;
+        validate_world(&with_direct.worlds[0]).unwrap();
+
+        let json2 = with_direct.to_json();
+        assert!(json2.contains("\"direct\": true"), "{json2}");
+        let back2 = IrProgram::from_json(&json2).unwrap();
+        assert_eq!(back2, with_direct);
     }
 }

@@ -15,6 +15,7 @@
 //! the do-no-harm floor (`-O1` with every pass disabled reproduces `-O0`
 //! byte-for-byte), and per-pass fixtures added as passes land.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -956,6 +957,73 @@ fn foutline_folds_the_shared_chains_and_is_inert_off() {
     );
 }
 
+/// Two 7-state exit-free chains whose escapes DIFFER on round 1 — the 'a'
+/// chain escapes through the empty forwarder `fwd`, the 'b' chain escapes
+/// straight to `mid` — so `outline` does not fold them on its first pass
+/// (different junctions, different canonical keys). `jump-threading` then
+/// retargets `fwd`'s inbound reference straight to `mid` in the SAME round,
+/// marking that now-retargeted bare rule `direct` (dispatch-target
+/// threading). On round 2 the two chains' junctions coincide and `outline`
+/// folds them — hoisting a region whose escape rule already carries
+/// `direct: true`. `build_routine` must clear the hint when it rewrites that
+/// escape to a `return`, or the synthesized routine fails IR validation
+/// (`direct` on a non-bare `Return` rule).
+const OUTLINE_ESCAPE_THREADED_BEFORE_THE_FOLD: &str = "\
+alphabet ab { '_', 'a' }
+machine {
+  tape t: ab;
+  entry state pick {
+    ['a'] -> move [>] goto a1;
+    [*]   -> move [>] goto b1;
+  }
+  state a1 { [*] -> move [>] goto a2; }
+  state a2 { [*] -> move [>] goto a3; }
+  state a3 { [*] -> move [>] goto a4; }
+  state a4 { [*] -> move [>] goto a5; }
+  state a5 { [*] -> move [>] goto a6; }
+  state a6 { [*] -> move [>] goto a7; }
+  state a7 {
+    ['a'] -> goto fwd;
+    [*]   -> move [<] goto a1;
+  }
+  state b1 { [*] -> move [>] goto b2; }
+  state b2 { [*] -> move [>] goto b3; }
+  state b3 { [*] -> move [>] goto b4; }
+  state b4 { [*] -> move [>] goto b5; }
+  state b5 { [*] -> move [>] goto b6; }
+  state b6 { [*] -> move [>] goto b7; }
+  state b7 {
+    ['a'] -> goto mid;
+    [*]   -> move [<] goto b1;
+  }
+  state fwd { [*] -> goto mid; }
+  state mid { [*] -> stop; }
+}";
+
+#[test]
+fn outline_clears_direct_on_an_escape_threaded_before_the_fold() {
+    // A clean compile is the whole assertion: pre-fix, `build_routine` clones
+    // the `direct`-marked escape rule verbatim, rewrites its transition to
+    // `Return`, and leaves the hint set — an IR invariant violation that
+    // panics under `debug_assertions` (or hits codegen's `unreachable!` in
+    // release). Compiling here at `-O1` with `--foutline` must not panic.
+    let out = object_of_ex(
+        OUTLINE_ESCAPE_THREADED_BEFORE_THE_FOLD,
+        OptLevel::O1,
+        &[],
+        true,
+    );
+    let fired: Vec<&str> = out.report.opt.changes.iter().map(|c| c.pass).collect();
+    assert!(
+        fired.contains(&"outline"),
+        "premise: outline must fire on this fixture: {fired:?}"
+    );
+    assert!(
+        out.ir.worlds.iter().any(|w| w.name.contains(".outline")),
+        "the hoisted routine is present"
+    );
+}
+
 // ── THE PHASE-6b MILESTONE: the full "everything × everything" matrix ─────────
 
 /// Compile the embedded stdlib SOURCE at `level` (both `brk`-stripped), for the
@@ -995,11 +1063,21 @@ fn stdlib_object_bytes(level: OptLevel) -> Vec<u8> {
 ///
 /// **Part B — the stdlib DO-NO-HARM floor.** The embedded standard library is
 /// a second, DISTINCT kind of evidence. Its routines are hand-written to be
-/// already-optimal, so `-O1` finds nothing to change: the compiled stdlib
-/// object is BYTE-IDENTICAL at `-O0` and `-O1`. That is a do-no-harm
+/// already-optimal, so `-O1` changes nothing a HUMAN could have written
+/// differently: the one exception is dispatch-target threading
+/// (`jump_threading`'s `direct` marking — docs/tmt/optimizer.md
+/// (dispatch-target threading)), which fires universally on any bare rule
+/// behind a dispatch table and removes a pure codegen artifact (a stub block
+/// that only ever contained a `jmp`) no `.tmc` source can avoid by being
+/// better-written. So the floor is now two checks instead of one byte
+/// comparison: every fired pass names `jump-threading` (no OTHER pass finds
+/// slack in the source), and the object strictly SHRINKS (the stub removal is
+/// pure overhead, never a behavior change — the stdlib's full behavioral 2×3
+/// matrix, next, is what actually proves that). This is a do-no-harm
 /// confirmation (the optimizer runs the stdlib as its first live workload and
-/// leaves it untouched), NOT a pass exercise — no stdlib routine drives a
-/// pass. The stdlib's full behavioral 2×3 matrix (every routine × O0/O1 × the
+/// finds only the one universal codegen win), NOT a pass exercise — no
+/// stdlib routine is written to specifically DRIVE a pass. The stdlib's full
+/// behavioral 2×3 matrix (every routine × O0/O1 × the
 /// three mechs — 132 runs, derivation-first) already lives in
 /// `stdlib_golden.rs`; this milestone deliberately does NOT re-run it. It
 /// asserts the do-no-harm floor once here and lets the golden file own the
@@ -1131,14 +1209,39 @@ fn everything_matrix_is_green() {
         );
     }
 
-    // Part B — the stdlib do-no-harm floor: already-optimal source, so `-O1`
-    // leaves the compiled object byte-identical to `-O0`. The behavioral 2×3
-    // matrix over every routine lives in stdlib_golden.rs (132 runs) and is
-    // NOT re-run here.
+    // Part B — the stdlib do-no-harm floor (see the milestone doc above): the
+    // only pass that may find slack in the already-optimal source is
+    // dispatch-target threading, and its effect strictly shrinks the object.
+    // The behavioral 2×3 matrix over every routine lives in stdlib_golden.rs
+    // (132 runs) and is NOT re-run here.
+    let stdlib_o1 = compile(
+        stdlib::SOURCE,
+        CompileOptions {
+            opt_level: OptLevel::O1,
+            strip_debugger: true,
+            ..Default::default()
+        },
+    )
+    .expect("the embedded stdlib compiles");
+    let fired: HashSet<&str> = stdlib_o1
+        .report
+        .opt
+        .changes
+        .iter()
+        .map(|c| c.pass)
+        .collect();
     assert_eq!(
-        stdlib_object_bytes(OptLevel::O0),
-        stdlib_object_bytes(OptLevel::O1),
-        "the embedded stdlib is already-optimal: -O1 leaves it byte-identical \
-         to -O0 (do-no-harm; behavioral coverage lives in stdlib_golden.rs)"
+        fired,
+        HashSet::from(["jump-threading"]),
+        "only dispatch-target threading may find slack in the already-optimal \
+         stdlib source: {fired:?}"
+    );
+    let o0_bytes = stdlib_object_bytes(OptLevel::O0);
+    let o1_bytes = stdlib_o1.object.to_bytes();
+    assert!(
+        o1_bytes.len() < o0_bytes.len(),
+        "dispatch-target threading must shrink the stdlib object: {} -> {}",
+        o0_bytes.len(),
+        o1_bytes.len()
     );
 }

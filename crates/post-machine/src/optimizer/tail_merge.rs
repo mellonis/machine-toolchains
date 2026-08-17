@@ -8,7 +8,11 @@
 
 use crate::ir::{IrFunction, IrOp, IrTerm};
 
-fn same_op(a: &IrOp, b: &IrOp) -> bool {
+/// Structural identity ignoring source line: two ops are the same
+/// instruction if they'd assemble to the same opcode+operand. Shared with
+/// tail-sink (optimizer/tail_sink.rs), which compares arm-suffix ops by the
+/// same rule — one identity definition for both passes.
+pub(super) fn same_op(a: &IrOp, b: &IrOp) -> bool {
     match (a, b) {
         (IrOp::Lft { .. }, IrOp::Lft { .. })
         | (IrOp::Rgt { .. }, IrOp::Rgt { .. })

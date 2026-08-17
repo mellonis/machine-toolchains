@@ -1,6 +1,7 @@
 //! `-O1` pass driver. One module per pass; a pass is either per-function,
 //! `fn(&mut IrFunction) -> u32` (PIPELINE), or program-level,
-//! `fn(&mut IrProgram) -> u32` (PROGRAM_PIPELINE — currently `inline`).
+//! `fn(&mut IrProgram, &OptOptions) -> u32` (PROGRAM_PIPELINE — currently
+//! `inline`, which reads [`OptOptions::inline_cap`]).
 //!
 //! # The equivalence contract (internal — read before touching a pass)
 //!
@@ -47,8 +48,10 @@ pub mod dce;
 pub mod fuse_tape_ops;
 pub mod inline;
 pub mod jump_threading;
+pub mod move_elim;
 pub mod tail_call;
 pub mod tail_merge;
+pub mod tail_sink;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptLevel {
@@ -64,6 +67,10 @@ pub struct OptOptions {
     pub disabled: HashSet<String>,
     /// Capture an IR snapshot after each pass that changed something.
     pub capture: bool,
+    /// Override `inline`'s size cap (`inline::INLINE_MAX_OPS` when `None`).
+    /// A measurement knob for the optimizer sweep, not CLI surface — no
+    /// flag, no completions entry.
+    pub inline_cap: Option<usize>,
 }
 
 /// One pass's effect on one function in one round (`pmt -v` material).
@@ -95,13 +102,15 @@ const PIPELINE: &[(&str, PassFn)] = &[
     ("jump-threading", jump_threading::run),
     ("cell-state", cell_state::run),
     ("branch-fold", branch_fold::run),
+    ("tail-sink", tail_sink::run),
     ("tail-call", tail_call::run),
     ("tail-merge", tail_merge::run),
     ("dce", dce::run),
+    ("move-elim", move_elim::run),
     ("fuse-tape-ops", fuse_tape_ops::run),
 ];
 
-type ProgramPassFn = fn(&mut IrProgram) -> u32;
+type ProgramPassFn = fn(&mut IrProgram, &OptOptions) -> u32;
 
 /// Program-level passes (cross-function), run at round start.
 const PROGRAM_PIPELINE: &[(&str, ProgramPassFn)] = &[("inline", inline::run)];
@@ -145,14 +154,24 @@ pub fn pass_names() -> Vec<&'static str> {
 /// - `fuse-tape-ops` — folds `wr x` + move into `wrl`/`wrr`, which skips
 ///   the intermediate latch read of the written cell: two transactions
 ///   become one.
+/// - `move-elim` — deletes an adjacent inverse move pair (`rgt; lft` or
+///   `lft; rgt`). A move on a volatile band is itself an observable
+///   access, so eliminating the pair drops two accesses — sound or not,
+///   that is exactly what a volatile build must never do.
 ///
-/// The remaining six only rewire control flow between accesses they leave
-/// untouched (`check-fold`, `jump-threading`, `tail-call`, `tail-merge`,
-/// `inline`) or delete code that never runs (`dce`), so they keep running
-/// in the volatile column. Every verdict here, gated and clean alike, is
-/// pinned by a test in tests/gated_passes.rs.
+/// The remaining seven only rewire control flow between accesses they
+/// leave untouched (`check-fold`, `jump-threading`, `tail-call`,
+/// `tail-merge`, `inline`) or delete or relocate code that never adds,
+/// drops, merges, splits, or reorders an access on any executed path
+/// (`dce`, `tail-sink`), so they keep running in the volatile column.
+/// `tail-sink` sinks an arm-suffix shared by both jump preds of a join
+/// block down into that join: every path still performs the exact same
+/// accesses in the exact same order, whichever arm it took to get there —
+/// only the static copy count shrinks, never the dynamic access sequence.
+/// Every verdict here, gated and clean alike, is pinned by a test in
+/// tests/gated_passes.rs.
 pub fn gated_pass_names() -> &'static [&'static str] {
-    &["cell-state", "branch-fold", "fuse-tape-ops"]
+    &["cell-state", "branch-fold", "fuse-tape-ops", "move-elim"]
 }
 
 /// Run the enabled pipeline to a change-fixpoint (round-capped). `-O0`
@@ -174,7 +193,7 @@ pub fn optimize(
             if options.disabled.contains(*name) {
                 continue;
             }
-            let n = pass(ir);
+            let n = pass(ir, options);
             #[cfg(debug_assertions)]
             for f in &ir.functions {
                 if let Err(e) = crate::ir::validate_function(f) {

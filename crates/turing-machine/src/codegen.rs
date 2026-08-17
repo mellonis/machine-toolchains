@@ -288,6 +288,33 @@ fn straight_block(w: &IrWorld, st: &IrState, options: CodegenOptions) -> Block {
     }
 }
 
+/// A state's rows in emitted (match-table) order: row indices, not rows —
+/// callers pair each index back with its own row data. The classification
+/// mirrors the match-table discipline (docs/tmt/isa.md (match and
+/// dispatch)): exact rows (every cell concrete) sorted by the SAME key
+/// codegen's table emission sorts by, then partial rows (a mix of concrete
+/// and wildcard cells) in source order, then the catch-all rows (every cell
+/// a wildcard) in source order. Shared by `conditional` (which mints each
+/// row's dispatch target) and the `dead_rows` optimizer pass (which reasons
+/// about which row wins when several could match — docs/tmt/optimizer.md
+/// (row subsumption)).
+pub(crate) fn emitted_row_order(st: &IrState) -> Vec<usize> {
+    let mut exact: Vec<usize> = Vec::new();
+    let mut partial: Vec<usize> = Vec::new();
+    let mut catch_all: Vec<usize> = Vec::new();
+    for (k, r) in st.rules.iter().enumerate() {
+        if r.pattern.iter().all(|c| matches!(c, IrCell::Index { .. })) {
+            exact.push(k);
+        } else if r.pattern.iter().all(|c| matches!(c, IrCell::Wildcard)) {
+            catch_all.push(k);
+        } else {
+            partial.push(k);
+        }
+    }
+    exact.sort_by(|&a, &b| cmp_row(&st.rules[a].pattern, &st.rules[b].pattern));
+    exact.into_iter().chain(partial).chain(catch_all).collect()
+}
+
 /// A conditional state's match/dispatch table plus one block per rule (the
 /// dispatch targets), in source (row) order. The table's rows and `.targets`
 /// are ordered per the match-table discipline (docs/tmt/isa.md (match and
@@ -304,28 +331,22 @@ fn conditional(
         .map(|k| fresh(used, &format!("{}__{k}", st.name)))
         .collect();
 
-    // Classify + order the rows: sorted exact, then partial (source order),
-    // then catch-all (source order) — each carrying its target.
-    let mut exact: Vec<(Vec<IrCell>, String)> = Vec::new();
-    let mut partial: Vec<(Vec<IrCell>, String)> = Vec::new();
-    let mut catch_all: Vec<(Vec<IrCell>, String)> = Vec::new();
-    for (k, r) in st.rules.iter().enumerate() {
-        let cells = r.pattern.clone();
-        let tgt = rule_labels[k].clone();
-        if cells.iter().all(|c| matches!(c, IrCell::Index { .. })) {
-            exact.push((cells, tgt));
-        } else if cells.iter().all(|c| matches!(c, IrCell::Wildcard)) {
-            catch_all.push((cells, tgt));
-        } else {
-            partial.push((cells, tgt));
-        }
-    }
-    exact.sort_by(|a, b| cmp_row(&a.0, &b.0));
-
     let mut rows = Vec::new();
     let mut targets = Vec::new();
-    for (cells, tgt) in exact.into_iter().chain(partial).chain(catch_all) {
-        rows.push(cells);
+    for k in emitted_row_order(st) {
+        let r = &st.rules[k];
+        // A `direct`-threaded bare rule names its Goto destination's own
+        // label as the dispatch target and skips the minted stub entirely
+        // (docs/tmt/optimizer.md (dispatch-target threading)).
+        let tgt = if r.direct {
+            let IrTransition::Goto { state } = r.transition else {
+                unreachable!("validate_world: direct implies Goto");
+            };
+            w.states[state as usize].name.clone()
+        } else {
+            rule_labels[k].clone()
+        };
+        rows.push(r.pattern.clone());
         targets.push(tgt);
     }
 
@@ -336,10 +357,13 @@ fn conditional(
         targets,
     };
 
+    // A `direct` rule's dispatch entry names its destination directly (above),
+    // so it needs no stub block at all — only the non-direct rules lay one out.
     let blocks: Vec<Block> = st
         .rules
         .iter()
         .enumerate()
+        .filter(|(_, r)| !r.direct)
         .map(|(k, r)| Block {
             label: rule_labels[k].clone(),
             force_label: true,
@@ -467,10 +491,25 @@ fn branch(
     let selective = &st.rules[0];
     let catch_all = &st.rules[1];
 
-    // The hit block is reached only through `jm`, so it always prints its label
-    // (like a dispatch target); the catch-all block is reached by fall-through
-    // and needs no printed label.
-    let hit_label = fresh(used, &format!("{}__m", st.name));
+    // A `direct`-threaded selective rule names its Goto destination's own
+    // label as the `jm` target (mirrors `conditional`'s dispatch-target
+    // threading — docs/tmt/optimizer.md (dispatch-target threading)), so no
+    // hit block is minted for it at all. The catch-all's fall-through block
+    // is never a jump target — it is reached only by falling out of the
+    // head, never by `jm`/`djmp` — so a `direct` flag on it (jump_threading
+    // marks every bare rule, regardless of dispatch role) has nothing to
+    // thread and is not consulted here.
+    let hit_label = if selective.direct {
+        let IrTransition::Goto { state } = selective.transition else {
+            unreachable!("validate_world: direct implies Goto");
+        };
+        w.states[state as usize].name.clone()
+    } else {
+        // The hit block is reached only through `jm`, so it always prints its
+        // label (like a dispatch target); the catch-all block is reached by
+        // fall-through and needs no printed label.
+        fresh(used, &format!("{}__m", st.name))
+    };
     let fall_label = fresh(used, &format!("{}__c", st.name));
 
     // A match-only table: one row (the selective pattern), empty targets so
@@ -508,14 +547,19 @@ fn branch(
         term: term_of(w, catch_all),
         term_line: catch_all.line,
     };
-    let hit = Block {
-        label: hit_label,
-        force_label: true,
-        body: rule_body(selective, options),
-        term: term_of(w, selective),
-        term_line: selective.line,
-    };
-    (table, vec![head, fall, hit])
+    // The hit block is skipped entirely for a `direct` selective rule (its
+    // dispatch entry above already names the destination state directly).
+    let mut blocks = vec![head, fall];
+    if !selective.direct {
+        blocks.push(Block {
+            label: hit_label,
+            force_label: true,
+            body: rule_body(selective, options),
+            term: term_of(w, selective),
+            term_line: selective.line,
+        });
+    }
+    (table, blocks)
 }
 
 /// A rule's body: an optional `brk` (unless stripped) then an optional fused
@@ -714,6 +758,16 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
         .filter(|b| b.force_label)
         .map(|b| b.label.as_str())
         .collect();
+    // Every `.targets` entry is a `djmp` destination and must resolve against
+    // a printed label. Normally guaranteed for free by each stub block's own
+    // `force_label: true` above, but a `direct`-threaded entry (docs/tmt/
+    // optimizer.md (dispatch-target threading)) names another state's own
+    // block directly, which is not otherwise force-printed.
+    for t in &p.tables {
+        for tgt in &t.targets {
+            printed.insert(tgt.as_str());
+        }
+    }
     for (i, b) in p.blocks.iter().enumerate() {
         let goto_target = match &b.term {
             Term::Goto(t) => Some(t.as_str()),
@@ -727,6 +781,14 @@ fn emit_func(w: &IrWorld, p: &WorldPlan, e: &mut Emitter) {
             && next_label(i) != Some(t)
         {
             printed.insert(t);
+        }
+        // `jm` never elides (`Term::JumpIfMatch`'s doc), so its target always
+        // needs a printed label — a `direct`-threaded selective rule's target
+        // is another state's own block, which the table-targets loop above
+        // does not cover (the Branch form's match-only table carries no
+        // `.targets` list at all).
+        if let Term::JumpIfMatch(t) = &b.term {
+            printed.insert(t.as_str());
         }
     }
 

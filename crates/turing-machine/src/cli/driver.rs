@@ -269,6 +269,7 @@ fn build_one_target(
         // control even if one existed.
         outline: flags.outline,
         stamped_asm: false,
+        inline_cap: None,
     };
     if flags.o0 {
         options.opt_level = OptLevel::O0;
@@ -477,6 +478,7 @@ fn argv_compile_options(flags: &Flags) -> CompileOptions {
         capture_ir: false,
         outline: flags.outline,
         stamped_asm: false, // --stamped-asm is a compile-only emit knob
+        inline_cap: None,
     };
     if flags.o0 {
         options.opt_level = OptLevel::O0;
