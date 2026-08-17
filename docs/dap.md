@@ -423,6 +423,12 @@ an adapter error. `disconnect` always succeeds and ends the session;
 there is no `restart` and no `attach` (the debuggee has no external
 process to attach to — it exists only inside this adapter's own memory).
 
+A client that vanishes without `disconnect` — a crash or kill closing
+the pipe — ends the session too, even mid-run: with the transport gone
+nothing can observe further execution, so the server stops advancing the
+debuggee and exits with the transport-EOF process code rather than
+ticking on unobserved.
+
 ## Wiring a client
 
 Both `editors/vscode-pm/` and `editors/vscode-tm/` contribute a
