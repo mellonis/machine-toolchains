@@ -1100,6 +1100,9 @@ every tape, `setVariable`, `disassemble`, and the opt-in `"trace"` output
 stream. Termination renders a summary `output` event (the same steps/tacts
 numbers `tmt run` prints) followed by `terminated` and `exited`, with the
 same 0/2/3 exit-code mapping as `tmt run`'s stopped/halted/trapped outcomes.
+See `docs/dap.md` for the full launch-config schema, the closed
+output-events list, the writable-state contract, and the degradation
+rules.
 
 ## `tmt completions`
 

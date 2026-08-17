@@ -30,7 +30,11 @@ Each CLI also runs a Language Server Protocol server on stdio — `pmt lsp`
 for `.pmc` and `.pma`, `tmt lsp` for `.tmc` and `.tma` — wired into any
 LSP-capable editor, and backed by the same compiler, assembler, and linter
 the CLI uses. The ready-made editor integrations live under `editors/`; see
-`docs/lsp.md` for capabilities and wiring.
+`docs/lsp.md` for capabilities and wiring. Each CLI also runs a Debug
+Adapter Protocol server on stdio — `pmt dap`, `tmt dap` — debugging a
+built executable at source or instruction granularity with tapes and
+registers in the variables view; see `docs/dap.md` for the launch
+schema and protocol surface.
 
 ## Build
 
@@ -288,6 +292,9 @@ that cover what they hold in common.
   both toolchains.
 - `docs/lsp.md` — the language-server framework and its per-language
   services: capabilities, editor wiring, and configuration.
+- `docs/dap.md` — the debug-adapter framework and its two adapters:
+  launch config, the protocol surface, breakpoints and stepping, the
+  writable-state contract, and degradation without `-g`.
 - `docs/history.md` — where both designs come from.
 
 The full design behind the Post-machine half was written up as a spec, now
