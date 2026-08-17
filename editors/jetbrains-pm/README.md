@@ -10,9 +10,13 @@ document symbols, and formatting — over the standard Language Server
 Protocol. Nothing here is a reimplementation; every answer comes from the
 same compiler, assembler, linter, and formatter the `pmt` command-line
 tool uses. Syntax coloring comes from a bundled TextMate grammar, shared
-byte-for-byte with the VS Code extension. `.pma` support is syntax
-highlighting plus the full `pmt lsp` surface plus run configurations —
-see the `.pma` checklist below for its own manual walkthrough.
+byte-for-byte with the VS Code extension. Debugging rides the same
+thin-client pattern: the plugin registers `pmt dap` as an LSP4IJ debug
+adapter server, and the IDE's own debugger UI (gutter breakpoints,
+stepping, variables) talks to it over the Debug Adapter Protocol.
+`.pma` support is syntax highlighting plus the full `pmt lsp` surface
+plus run configurations and breakpoints — see the `.pma` checklist below
+for its own manual walkthrough.
 
 ## Requirements
 
@@ -22,11 +26,14 @@ see the `.pma` checklist below for its own manual walkthrough.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.3. It has been tested against `pmt` 0.3.0; on
+- This plugin is version 0.2.0. It has been tested against `pmt` 0.3.0; on
   startup it runs `pmt --version` and shows a warning notification (not a
   hard failure) if the binary reports something older, or an error
   notification if the binary can't be found at all. The plugin's own
   version number and the tested `pmt` version are independent numbers.
+- Debugging specifically needs a `pmt` with the `dap` subcommand, which
+  postdates the 0.3.0 release — until the next release, build the binary
+  from current sources (next section) rather than from the release tag.
 - Built and verified against **LSP4IJ 0.20.1** on an IntelliJ Platform
   2024.3 baseline (IntelliJ IDEA Community works — no Ultimate-only APIs
   are used).
@@ -87,11 +94,11 @@ which JDK `JAVA_HOME` points at — Gradle auto-provisions JDK 17 via the
 building under a JetBrains-bundled JBR newer than 17 (JBR 25); other
 JDKs as `JAVA_HOME` are untested.
 
-`buildPlugin` produces `build/distributions/pmc-0.1.3.zip`. Install it:
+`buildPlugin` produces `build/distributions/pmc-0.2.0.zip`. Install it:
 
 1. Settings → Plugins → the ⚙ (gear) icon in the top-right of the
    Plugins page → **Install Plugin from Disk…**
-2. Pick `build/distributions/pmc-0.1.3.zip`.
+2. Pick `build/distributions/pmc-0.2.0.zip`.
 3. Restart the IDE when prompted.
 
 This works on Community editions — the plugin is built against the
@@ -103,7 +110,7 @@ IntelliJ Platform Community baseline and uses no Ultimate-only APIs.
 
 | Field | Default | Meaning |
 |---|---|---|
-| pmt binary path | `pmt` | Path (or bare command resolved on `PATH`) to the `pmt` binary. The plugin launches it as `pmt lsp` for the language server, and reuses the same path for run configurations (below). |
+| pmt binary path | `pmt` | Path (or bare command resolved on `PATH`) to the `pmt` binary. The plugin launches it as `pmt lsp` for the language server, and reuses the same path for run configurations, target listing, and the `pmt dap` debug adapter (below). |
 | Lint allow-list (comma-separated) | *(empty)* | Lint codes to suppress, forwarded to the server and kept live as you edit the setting — no IDE or server restart needed. This list is union-merged with any `pmt.json` project file the server discovers for the open document — either source suppressing a code is enough to suppress it, and neither can un-suppress a code the other disables. See `docs/pmt/lint.md` in this repository for the rule catalog and the `pmt.json` schema. |
 
 Changing the allow-list and applying the settings page pushes the new list
@@ -128,44 +135,77 @@ no artifact tracking):
 
 | Field | Meaning |
 |---|---|
-| Subcommand | One of `compile`, `lint`, `run`, selected from a fixed dropdown. |
-| Arguments | Free-form, shell-quoting-aware (parsed like a program-arguments field, so quoted strings and spaces behave as expected) — appended after the subcommand verbatim. |
+| Subcommand | One of `build`, `compile`, `lint`, `run`, selected from a fixed dropdown. |
+| Target | `build` only: a target name from the `pmt.json` project manifest. Editable combo; the **Refresh** button fills it by running `pmt build --list-targets` in the working directory (the driver's own nearest-ancestor manifest discovery starts there), and the status line under it reports how many targets were found and how many declare a run block. Leave blank to build source files passed via Arguments instead (the driver's argv mode). |
+| Run the target after building | `build` only: adds `--run`, so the built target immediately runs against its manifest-declared tape. Manifest-mode only — the driver rejects `--run` when sources are passed instead of a target, with its own message. |
+| Arguments | Free-form, shell-quoting-aware (parsed like a program-arguments field, so quoted strings and spaces behave as expected) — appended after the subcommand (and, for `build`, after the target) verbatim. |
 | Working directory | Defaults to the project's base directory. |
 
 Output streams to the Run tool window's console, including the process's
 exit code on completion.
 
-The dropdown deliberately does not offer `link` or `build` — building a
-runnable `.pmx` by hand needs a `pmt compile` step followed by a `pmt
-link` step, and this run-configuration type doesn't model a multi-step
-pipeline (same scope line VS Code's task provider draws: see
+The `build` subcommand is the manifest-backed way to produce (and with
+`--run`, immediately execute) a `.pmx`: one configuration per target
+replaces the previous README revision's Shell-Script recipe. The dropdown
+still does not offer `link` — a hand-rolled compile-then-link pipeline is
+exactly what a `pmt.json` target already models (`docs/pmt/project.md`),
+so declare one and `build` it; failing that, run `pmt link` from a
+terminal (same scope line VS Code's task provider draws: see
 `editors/vscode-pm/README.md`'s "Custom pipelines" section for the
-equivalent gap there). Produce a `.pmo`/`.pmx` with `pmt compile`/`pmt
-link` from a terminal (or a `compile`-subcommand run configuration for
-the compile half), then point a `run`-subcommand configuration at the
-resulting `.pmx`. For a project manifest's declared targets, a Shell
-Script configuration running `pmt build <target>` is the better fit — see
-"Building a target" below.
+equivalent gap there).
 
-## Building a target
+## Debugging
 
-The plugin ships no build integration — LSP features arrive through the
-server, and builds run as ordinary IDE run configurations.
+The plugin registers **pmt dap** as a debug adapter server with LSP4IJ's
+DAP support, which bridges it into the IDE debugger: breakpoints in the
+gutter of `.pmc`/`.pma` files, stepping, pause, threads/variables views.
+The adapter is the same editor-agnostic `pmt dap` stdio server the VS
+Code extension uses; what the machine-level debug surface looks like
+(registers, tape scopes, stepping granularity, disassembly) is documented
+in this repository's `docs/dap.md`.
 
-To add one: **Run → Edit Configurations → + → Shell Script**, set
-*Script text* to `pmt build <target>` and *Working directory* to the
-directory holding your `pmt.json`. Add `--run` to build and then run the
-target. `pmt build --list-targets` prints the declared target names, and
-marks the runnable ones.
+To debug:
+
+1. Set a breakpoint in a `.pmc` (or `.pma`) file.
+2. **Run → Edit Configurations… → + → Debug Adapter Protocol → DAP**,
+   pick server **pmt dap** on the *Server* tab. The *Command* field may
+   be left blank — the plugin then launches `<binary path from the
+   settings page> dap`. Set the working directory to the directory
+   holding your `pmt.json` (defaults to the project root).
+3. On the *Configuration* tab pick one of the two launch templates and
+   edit it in place:
+   - **pmt: launch target** — `"target"` names a manifest target, built
+     in process with debug info forced on (the same driver `pmt build`
+     uses), then debugged. The manifest is discovered walking up from
+     the working directory; an optional `"project"` key overrides the
+     walk's starting point.
+   - **pmt: launch program** — `"program"` points at a prebuilt `.pmx`,
+     used as-is (build it with debug info — `pmt build --debug`, or
+     `pmt compile -g` + `pmt link` — or source breakpoints answer
+     unverified and stepping only stops at function boundaries);
+     `"tape"` optionally points at a `.pmt` tape snapshot (omit for the
+     empty tape). `${workspaceFolder}` in these paths resolves to the
+     configuration's working directory.
+   - Both shapes accept `"stopOnEntry"` (break before the first
+     instruction) and `"trace"` (per-instruction trace lines in the
+     debug console, matching `pmt run --trace`).
+4. Start the configuration with the **Debug** action.
+
+The two launch templates carry inert `type`/`request`/`name` keys so the
+JSON is copy-pasteable to and from a VS Code `launch.json` — the adapter
+reads only its own arguments.
 
 ## Manifest validation
 
-`pmt.json` has a bundled JSON Schema, but JetBrains maps schemas through
-its own settings rather than a plugin contribution. To enable it:
-**Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema
-Mappings → +**, point *Schema file or URL* at
-`editors/schemas/pmt.schema.json` from this repository, select schema
-version *Draft-07*, and add a file-path pattern of `pmt.json`.
+Since plugin 0.2.0 the bundled `pmt.json` JSON Schema (Draft-07, single-
+sourced from `editors/schemas/`) is contributed automatically: any file
+named `pmt.json` validates and completes against it, and the schema shows
+in the editor's bottom-right schema switcher. The contribution sits
+behind an optional dependency on the IDE's JSON plugin, which every
+JetBrains IDE bundles; if you had added the manual mapping a previous
+README revision described (**Settings → Languages & Frameworks → Schemas
+and DTDs → JSON Schema Mappings**), remove it — two mappings for the same
+file make the IDE ask which to use.
 
 ## Manual test checklist
 
@@ -274,7 +314,8 @@ main() {
       returns before continuing.
 - [ ] **Run-config smoke**: produce a `.pmx` first — from a terminal (or
       a `compile`-subcommand run configuration plus a terminal `pmt link`
-      call, per the run-configurations gap noted above), e.g.:
+      call; the manifest-backed `build` subcommand gets its own checklist
+      below), e.g.:
       ```sh
       pmt compile check.pmc -o check.pmo
       pmt link check.pmo -o check.pmx
@@ -384,6 +425,65 @@ UNUSED: nop
       opening and editing `.pma` documents never perturbed the `.pmc`
       service, per `docs/lsp.md`'s "one process, two independent language
       services."
+
+### Target-build & debug checklist
+
+New in plugin 0.2.0, never yet observed at runtime — the run-config
+`build` subcommand and the whole DAP bridge below are compile-verified
+only. Needs a `pmt` built from current sources (the `dap` subcommand
+postdates 0.3.0). In the scratch project from the `.pmc` checklist above,
+add a `pmt.json` next to `check.pmc`:
+
+```json
+{
+  "project": {
+    "targets": {
+      "check": {
+        "sources": ["check.pmc"],
+        "run": { "tape": " * *" }
+      }
+    }
+  }
+}
+```
+
+(Schema reference: `docs/pmt/project.md`.)
+
+- [ ] **Manifest schema**: with the `pmt.json` from above open, confirm
+      the bottom-right schema widget shows the bundled `pmt` schema and
+      that an unknown key (e.g. `"bogus": 1` inside the target) gets a
+      validation warning; remove it after.
+- [ ] **Target listing**: add a `pmt` run configuration, subcommand
+      `build`. Press **Refresh** next to the Target field — the combo
+      fills with `check` and the status line reports one target. Break
+      the manifest (temporarily rename the `sources` key), refresh again,
+      and confirm the driver's own error lands in the status line instead
+      of the list silently emptying; restore the manifest.
+- [ ] **Build**: select target `check` and run the configuration.
+      Confirm the console shows the driver's build output and exit code 0,
+      and a `.pmx` appears where the manifest's output settings put it.
+- [ ] **Build --run**: check *Run the target after building* and run
+      again. Confirm the build is followed by the run's tape output in
+      the same console session.
+- [ ] **Breakpoint + launch target**: set a gutter breakpoint on an
+      executable `.pmc` line in `check.pmc`. Create the DAP run
+      configuration per the Debugging section (server **pmt dap**,
+      command blank, template *pmt: launch target* with `"target":
+      "check"`), start it with Debug, and confirm the session stops on
+      the breakpoint with the editor line highlighted.
+- [ ] **Machine state**: while stopped, confirm the variables view shows
+      the machine scopes `docs/dap.md` describes (registers; tape), and
+      that stepping advances the highlighted line.
+- [ ] **stopOnEntry + program mode**: switch the launch JSON to the
+      *pmt: launch program* template pointing at the `.pmx` built above
+      (keep `"stopOnEntry": true`, drop `"tape"` for the empty-tape
+      default), restart, and confirm the session stops before the first
+      instruction.
+- [ ] **Blank-command fallback**: confirm the *Command* field of the DAP
+      configuration is still blank and the session nevertheless launched
+      the settings-page binary (the fallback documented in the Debugging
+      section) — then set an explicit command `pmt dap` and confirm that
+      still works too.
 
 ## License
 

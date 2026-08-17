@@ -1192,11 +1192,30 @@ fn line_step_compares_function_identity_not_just_the_line_number() {
         .unwrap();
 
     // Walk forward at line granularity until genuinely inside `mark`'s OWN
-    // MAPPED code (depth 1 AND a known source line — skips past the `call`
-    // instruction itself and mark's own unmapped entry marker, both of
-    // which also register as depth-1 stops along the way). Bounded, since
-    // the exact number of preceding line-steps depends on the compiled
-    // layout, not something this test hardcodes.
+    // MAPPED code — at or past its first line-mapped ADDRESS, read from
+    // the sidecar (the frame's rendered line can no longer discriminate:
+    // the prologue convention makes even mark's unmapped entry marker
+    // report the function's opening line). Skips past the `call`
+    // instruction itself and that entry marker, both of which also
+    // register as depth-1 stops along the way. Bounded, since the exact
+    // number of preceding line-steps depends on the compiled layout, not
+    // something this test hardcodes.
+    let mut map_path = program.clone().into_os_string();
+    map_path.push(".map");
+    let map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+    let mark_first_mapped = map["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"].as_str().unwrap().contains("mark"))
+        .and_then(|f| f["lines"][0][0].as_u64())
+        .expect("fixture must map mark's rule line");
+    let frame_ip = |trace: &Value| -> u64 {
+        let raw = trace["stackFrames"][0]["instructionPointerReference"]
+            .as_str()
+            .unwrap();
+        u64::from_str_radix(raw.trim_start_matches("0x"), 16).unwrap()
+    };
     let mut steps_taken = 0;
     loop {
         let mut step_out = Vec::new();
@@ -1215,7 +1234,7 @@ fn line_step_compares_function_identity_not_just_the_line_number() {
         let trace = adapter
             .handle("stackTrace", &Value::Null, &mut out)
             .unwrap();
-        if trace["totalFrames"] == json!(2) && trace["stackFrames"][0]["line"] != json!(0) {
+        if trace["totalFrames"] == json!(2) && frame_ip(&trace) >= mark_first_mapped {
             break;
         }
     }
@@ -2631,5 +2650,78 @@ fn frames_carry_source_objects_and_breakpoints_filter_by_file() {
     assert_eq!(
         frame["source"]["path"],
         json!(dir.join("a.tmc").to_str().unwrap())
+    );
+}
+
+/// The entry frame sits at an address BEFORE `main`'s first line-mapped
+/// instruction (the linker-synthesized prelude at offset 0). Per the
+/// native-debugger prologue convention the frame renders at the
+/// function's OPENING line and stays sourced — never a sourced
+/// `line: 0`, which DAP forbids and a real client turns into editor
+/// line -1 (docs/dap.md (source provenance)).
+#[test]
+fn entry_frame_before_first_mapped_line_uses_the_functions_opening_line() {
+    let dir = scratch("line0-prologue");
+    let program = write_tmc_debug_with_sources(&dir, "line0-prologue", &[("a.tmc", CALLSTEP_TMC)]);
+    let tape = write_two_tape_block(&dir, "line0-prologue", 1, 0);
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["name"], json!("main"));
+    assert_eq!(
+        frame["line"],
+        json!(line_of(CALLSTEP_TMC, "entry state scan"))
+    );
+    assert_eq!(frame["source"]["name"], json!("a.tmc"));
+}
+
+/// A frame in a function with NO mapped lines at all (the shape a
+/// composition-engine mono stamp produces: provenance without a line
+/// table) must stay SOURCELESS — DAP allows `line: 0` only on a frame
+/// without a `source` object (docs/dap.md (source provenance)).
+#[test]
+fn frame_in_a_function_with_no_mapped_lines_stays_sourceless() {
+    let dir = scratch("line0-bare");
+    let program = write_tmc_debug_with_sources(&dir, "line0-bare", &[("a.tmc", CALLSTEP_TMC)]);
+    let tape = write_two_tape_block(&dir, "line0-bare", 1, 0);
+
+    // Hand-edit the sidecar into the no-lines shape while keeping the
+    // provenance: every function loses its line table.
+    let mut map_path = program.clone().into_os_string();
+    map_path.push(".map");
+    let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+    for f in map["functions"].as_array_mut().unwrap() {
+        f["lines"] = json!([]);
+    }
+    fs::write(&map_path, map.to_string()).unwrap();
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["name"], json!("main"));
+    assert_eq!(frame["line"], json!(0));
+    assert!(
+        frame.get("source").is_none(),
+        "a frame with no known line must not carry a source object \
+         (DAP: line 0 is only legal sourceless), got: {frame}"
     );
 }

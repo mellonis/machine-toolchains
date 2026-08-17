@@ -324,6 +324,17 @@ embedded stdlib, a pre-provenance sidecar) still carries
 `name`/`line`/`instructionPointerReference`, exactly as before — it is
 usable in the Disassembly view, just not openable as a file.
 
+A frame's `line` follows the native-debugger prologue convention: an
+address inside a function but *before* its first line-mapped
+instruction — the linker-synthesized prelude at a program's entry, for
+one — renders at the function's opening line, so the frame stays
+sourced and focusable. Only a function with provenance but *no* line
+entries at all (a composition-engine mono stamp's shape) reports
+`line: 0`, and such a frame deliberately omits its `source` object too:
+DAP permits line 0 solely on a sourceless frame — lines are 1-based
+otherwise — and a real client turns a sourced line 0 into editor line
+-1 and crashes.
+
 Resolution back from a sidecar's stored (typically relative) path to
 the absolute one handed to the client anchors at the sidecar's own
 directory and is purely lexical, the same policy the emission side uses
@@ -423,13 +434,25 @@ an adapter error. `disconnect` always succeeds and ends the session;
 there is no `restart` and no `attach` (the debuggee has no external
 process to attach to — it exists only inside this adapter's own memory).
 
+A client that vanishes without `disconnect` — a crash or kill closing
+the pipe — ends the session too, even mid-run: with the transport gone
+nothing can observe further execution, so the server stops advancing the
+debuggee and exits with the transport-EOF process code rather than
+ticking on unobserved.
+
 ## Wiring a client
 
 Both `editors/vscode-pm/` and `editors/vscode-tm/` contribute a
 `pmt`/`tmt` debugger type resolving the same binary the language client
 already uses, launched as `pmt dap`/`tmt dap` on stdio — no separate
-binary-resolution setting. Each extension's README carries a full
-walkthrough; the two launch shapes look like this from `launch.json`:
+binary-resolution setting. The JetBrains pair (`editors/jetbrains-pm/`,
+`editors/jetbrains-tm/`) consumes the same servers through LSP4IJ's DAP
+support: each plugin registers its adapter as a debug adapter server,
+which bridges it into the IDE's own debugger framework — gutter
+breakpoints, stepping, and the variables view — with the same two launch
+shapes offered as editable JSON templates. Each extension's and plugin's
+README carries a full walkthrough; the two launch shapes look like this
+from a VS Code `launch.json`:
 
 ```json
 {

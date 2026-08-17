@@ -10,7 +10,10 @@ symbols, and formatting — over the standard Language Server Protocol.
 Nothing here is a reimplementation; every answer comes from the same
 compiler, assembler, linter, and formatter the `tmt` command-line tool
 uses. Syntax coloring comes from bundled TextMate grammars, shared
-byte-for-byte with the VS Code extension.
+byte-for-byte with the VS Code extension. Debugging rides the same
+thin-client pattern: the plugin registers `tmt dap` as an LSP4IJ debug
+adapter server, and the IDE's own debugger UI (gutter breakpoints,
+stepping, variables) talks to it over the Debug Adapter Protocol.
 
 One `tmt lsp` process serves both languages. The server routes each open
 document to its own language service by file extension, so a `.tmc` file
@@ -24,12 +27,15 @@ and a `.tma` file coexist in one session without perturbing each other.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.1.0, targeting `tmt` 0.3.0 as its tested
+- This plugin is version 0.2.0, targeting `tmt` 0.3.0 as its tested
   floor: on startup it runs `tmt --version` and shows a warning
   notification (not a hard failure) if the binary reports something
   older, or an error notification if the binary can't be found at all.
   The plugin's own version number and the `tmt` floor version are
   independent numbers.
+- Debugging specifically needs a `tmt` with the `dap` subcommand, which
+  postdates the 0.3.0 release — until the next release, build the binary
+  from current sources (next section) rather than from the release tag.
 - Built against **LSP4IJ 0.20.1** on an IntelliJ Platform 2024.3
   baseline — the Gradle build resolves and compiles against both pinned
   versions, which demonstrates API compatibility; the build target is
@@ -97,11 +103,11 @@ jvmToolchain(17) }` in `build.gradle.kts`), regardless of which JDK
 building under a JetBrains-bundled JBR newer than 17 (JBR 25); other
 JDKs as `JAVA_HOME` are untested.
 
-`buildPlugin` produces `build/distributions/tmc-0.1.0.zip`. Install it:
+`buildPlugin` produces `build/distributions/tmc-0.2.0.zip`. Install it:
 
 1. Settings → Plugins → the ⚙ (gear) icon in the top-right of the Plugins
    page → **Install Plugin from Disk…**
-2. Pick `build/distributions/tmc-0.1.0.zip`.
+2. Pick `build/distributions/tmc-0.2.0.zip`.
 3. Restart the IDE when prompted.
 
 The plugin is built against the IntelliJ Platform Community baseline and
@@ -115,7 +121,7 @@ observed in a running IDE.
 
 | Field | Default | Meaning |
 |---|---|---|
-| tmt binary path | `tmt` | Path (or bare command resolved on `PATH`) to the `tmt` binary. The plugin launches it as `tmt lsp` for the language server, and reuses the same path for run configurations (below). |
+| tmt binary path | `tmt` | Path (or bare command resolved on `PATH`) to the `tmt` binary. The plugin launches it as `tmt lsp` for the language server, and reuses the same path for run configurations, target listing, and the `tmt dap` debug adapter (below). |
 | Lint allow-list (comma-separated) | *(empty)* | Lint codes to suppress, forwarded to the server and kept live as you edit the setting — no IDE or server restart needed. This list is union-merged with any `tmt.json` project file the server discovers for the open document — either source suppressing a code is enough to suppress it, and neither can un-suppress a code the other disables. |
 | Opt-in lint rules (comma-separated) | *(empty)* | Lint codes to *enable* — the totality lints, off by default (`state-may-trap` is the one that ships). IDE-side only: `tmt.json` carries `lint.allow` and nothing else, so an opt-in rule is enabled per-IDE or per-invocation (`tmt lint --warn CODE`), never per-project. |
 
@@ -144,44 +150,77 @@ no artifact tracking):
 
 | Field | Meaning |
 |---|---|
-| Subcommand | One of `compile`, `asm`, `lint`, `run`, selected from a fixed dropdown. |
-| Arguments | Free-form, shell-quoting-aware (parsed like a program-arguments field, so quoted strings and spaces behave as expected) — appended after the subcommand verbatim. |
+| Subcommand | One of `build`, `compile`, `asm`, `lint`, `run`, selected from a fixed dropdown. |
+| Target | `build` only: a target name from the `tmt.json` project manifest. Editable combo; the **Refresh** button fills it by running `tmt build --list-targets` in the working directory (the driver's own nearest-ancestor manifest discovery starts there), and the status line under it reports how many targets were found and how many declare a run block. Leave blank to build source files passed via Arguments instead (the driver's argv mode). |
+| Run the target after building | `build` only: adds `--run`, so the built target immediately runs against its manifest-declared `.tmt` tape. Manifest-mode only — the driver rejects `--run` when sources are passed instead of a target — and only for targets whose run block declares a tape: TM-1 has no empty-tape default, so a target without one cannot be `--run` (that gating too is the driver's, with its own message). |
+| Arguments | Free-form, shell-quoting-aware (parsed like a program-arguments field, so quoted strings and spaces behave as expected) — appended after the subcommand (and, for `build`, after the target) verbatim. `--call-mech` here overrides a target's committed lowering per invocation, the one link-side flag manifest mode accepts. |
 | Working directory | Defaults to the project's base directory. |
 
 Output streams to the Run tool window's console, including the process's
 exit code on completion.
 
-The dropdown deliberately does not offer `link` or `build` — building a
-runnable `.tmx` by hand needs a `tmt compile` (or `tmt asm`) step followed
-by a `tmt link` step, and this run-configuration type doesn't model a
-multi-step pipeline (the same scope line VS Code's task provider draws:
-see `editors/vscode-tm/README.md`'s "Custom pipelines" section for the
-equivalent gap there). Produce a `.tmo`/`.tmx` from a terminal (or a
-`compile`/`asm`-subcommand run configuration for that half), then point a
-`run`-subcommand configuration at the resulting `.tmx` with the
-`--tape-block` its program expects. For a project manifest's declared
-targets, a Shell Script configuration running `tmt build <target>` is the
-better fit — see "Building a target" below.
+The `build` subcommand is the manifest-backed way to produce (and with
+`--run`, immediately execute) a `.tmx`: one configuration per target
+replaces the previous README revision's Shell-Script recipe. The dropdown
+still does not offer `link` — a hand-rolled compile-then-link pipeline is
+exactly what a `tmt.json` target already models (`docs/tmt/project.md`),
+so declare one and `build` it; failing that, run `tmt link` from a
+terminal (the same scope line VS Code's task provider draws: see
+`editors/vscode-tm/README.md`'s "Custom pipelines" section for the
+equivalent gap there).
 
-## Building a target
+## Debugging
 
-The plugin ships no build integration — LSP features arrive through the
-server, and builds run as ordinary IDE run configurations.
+The plugin registers **tmt dap** as a debug adapter server with LSP4IJ's
+DAP support, which bridges it into the IDE debugger: breakpoints in the
+gutter of `.tmc`/`.tma` files, stepping, pause, threads/variables views.
+The adapter is the same editor-agnostic `tmt dap` stdio server the VS
+Code extension uses; what the machine-level debug surface looks like
+(registers, per-tape scopes, stepping granularity, disassembly) is
+documented in this repository's `docs/dap.md`.
 
-To add one: **Run → Edit Configurations → + → Shell Script**, set
-*Script text* to `tmt build <target>` and *Working directory* to the
-directory holding your `tmt.json`. Add `--run` to build and then run the
-target. `tmt build --list-targets` prints the declared target names, and
-marks the runnable ones.
+To debug:
+
+1. Set a breakpoint in a `.tmc` (or `.tma`) file.
+2. **Run → Edit Configurations… → + → Debug Adapter Protocol → DAP**,
+   pick server **tmt dap** on the *Server* tab. The *Command* field may
+   be left blank — the plugin then launches `<binary path from the
+   settings page> dap`. Set the working directory to the directory
+   holding your `tmt.json` (defaults to the project root).
+3. On the *Configuration* tab pick one of the two launch templates and
+   edit it in place:
+   - **tmt: launch target** — `"target"` names a manifest target, built
+     in process with debug info forced on (the same driver `tmt build`
+     uses), then debugged against the target's manifest-declared tape.
+     The manifest is discovered walking up from the working directory;
+     an optional `"project"` key overrides the walk's starting point.
+   - **tmt: launch program** — `"program"` points at a prebuilt `.tmx`,
+     used as-is (build it with debug info — `tmt build --debug`, or
+     `tmt compile -g` + `tmt link` — or source breakpoints answer
+     unverified and stepping only stops at function boundaries);
+     `"tape"` is **required** and points at a `.tmt` tape snapshot —
+     TM-1 has no empty-tape default. `${workspaceFolder}` in these
+     paths resolves to the configuration's working directory.
+   - Both shapes accept `"stopOnEntry"` (break before the first
+     instruction) and `"trace"` (per-instruction trace lines in the
+     debug console, matching `tmt run --trace`).
+4. Start the configuration with the **Debug** action.
+
+The two launch templates carry inert `type`/`request`/`name` keys so the
+JSON is copy-pasteable to and from a VS Code `launch.json` — the adapter
+reads only its own arguments.
 
 ## Manifest validation
 
-`tmt.json` has a bundled JSON Schema, but JetBrains maps schemas through
-its own settings rather than a plugin contribution. To enable it:
-**Settings → Languages & Frameworks → Schemas and DTDs → JSON Schema
-Mappings → +**, point *Schema file or URL* at
-`editors/schemas/tmt.schema.json` from this repository, select schema
-version *Draft-07*, and add a file-path pattern of `tmt.json`.
+Since plugin 0.2.0 the bundled `tmt.json` JSON Schema (Draft-07, single-
+sourced from `editors/schemas/`) is contributed automatically: any file
+named `tmt.json` validates and completes against it, and the schema shows
+in the editor's bottom-right schema switcher. The contribution sits
+behind an optional dependency on the IDE's JSON plugin, which every
+JetBrains IDE bundles; if you had added the manual mapping a previous
+README revision described (**Settings → Languages & Frameworks → Schemas
+and DTDs → JSON Schema Mappings**), remove it — two mappings for the same
+file make the IDE ask which to use.
 
 ## Known limitation — Cmd+hover underlines the whole file
 
@@ -452,6 +491,76 @@ L_step: mov     [>, ., .]
       IDE session. Confirm its diagnostics are still live — opening and
       editing `.tma` documents never perturbed the `.tmc` service. One
       process, two independent language services.
+
+### Target-build & debug checklist
+
+New in plugin 0.2.0, never yet observed at runtime — the run-config
+`build` subcommand and the whole DAP bridge below are compile-verified
+only. Needs a `tmt` built from current sources (the `dap` subcommand
+postdates 0.3.0). In the scratch project from the `.tmc` checklist
+above, mint an input tape and add a `tmt.json` next to `check.tmc`:
+
+```sh
+tmt tape-block new --from check.tmc -o check-in.tmt
+```
+
+```json
+{
+  "project": {
+    "targets": {
+      "check": {
+        "sources": ["check.tmc"],
+        "run": { "tape": "check-in.tmt" }
+      }
+    }
+  }
+}
+```
+
+(Schema reference: `docs/tmt/project.md`; fill the tape's cells per
+`docs/tmt/cli.md`'s `tape-block` section if `check.tmc` expects specific
+input.)
+
+- [ ] **Manifest schema**: with the `tmt.json` from above open, confirm
+      the bottom-right schema widget shows the bundled `tmt` schema and
+      that an unknown key (e.g. `"bogus": 1` inside the target) gets a
+      validation warning; remove it after.
+- [ ] **Target listing**: add a `tmt` run configuration, subcommand
+      `build`. Press **Refresh** next to the Target field — the combo
+      fills with `check` and the status line reports one target with a
+      run block. Break the manifest (temporarily rename the `sources`
+      key), refresh again, and confirm the driver's own error lands in
+      the status line instead of the list silently emptying; restore the
+      manifest.
+- [ ] **Build**: select target `check` and run the configuration.
+      Confirm the console shows the driver's build output and exit code
+      0, and a `.tmx` appears where the manifest's output settings put
+      it.
+- [ ] **Build --run**: check *Run the target after building* and run
+      again. Confirm the build is followed by the run against
+      `check-in.tmt` in the same console session. Then temporarily drop
+      the target's `run` block and confirm the driver's own
+      not-runnable error surfaces in the console (TM-1 has no
+      empty-tape default); restore it.
+- [ ] **Breakpoint + launch target**: set a gutter breakpoint on an
+      executable `.tmc` line in `check.tmc`. Create the DAP run
+      configuration per the Debugging section (server **tmt dap**,
+      command blank, template *tmt: launch target* with `"target":
+      "check"`), start it with Debug, and confirm the session stops on
+      the breakpoint with the editor line highlighted.
+- [ ] **Machine state**: while stopped, confirm the variables view shows
+      the machine scopes `docs/dap.md` describes (registers; one scope
+      per tape), and that stepping advances the highlighted line.
+- [ ] **stopOnEntry + program mode**: switch the launch JSON to the
+      *tmt: launch program* template pointing at the `.tmx` built above
+      and `check-in.tmt` (keep `"stopOnEntry": true` — and keep
+      `"tape"`: program mode requires it), restart, and confirm the
+      session stops before the first instruction.
+- [ ] **Blank-command fallback**: confirm the *Command* field of the DAP
+      configuration is still blank and the session nevertheless launched
+      the settings-page binary (the fallback documented in the Debugging
+      section) — then set an explicit command `tmt dap` and confirm that
+      still works too.
 
 ## License
 

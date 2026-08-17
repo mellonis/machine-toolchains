@@ -168,14 +168,18 @@ pub fn run(
 
     loop {
         let next = if adapter.run_state() == RunState::Running {
-            // While running, a disconnected channel is treated the same
-            // as "nothing pending right now" (`Empty`), not as a reason
-            // to stop: the debuggee may still have useful ticking left
-            // to do even after the client's input has ended. Only the
-            // blocking `recv` below — reached once the adapter is no
-            // longer running — treats a disconnected channel as the
-            // session actually ending.
-            rx.try_recv().ok()
+            // While running, only an *empty* channel means "nothing
+            // pending right now" — a *disconnected* one means the client
+            // is gone (EOF or a malformed frame), and with the transport
+            // dead every event write is best-effort-discarded, so nothing
+            // can observe further ticking. End the session exactly as the
+            // blocking `recv` below does, instead of leaving the process
+            // spinning unobserved.
+            match rx.try_recv() {
+                Ok(payload) => Some(payload),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
         } else {
             match rx.recv() {
                 Ok(payload) => Some(payload),
@@ -569,6 +573,13 @@ mod tests {
 
     // ---- ScriptedRunAdapter: proves the try_recv/tick alternation ---
 
+    /// Sentinel the shared tick counter jumps to when the scripted run
+    /// concludes (the pause-observing tick), letting a `GatedReader`
+    /// chunk wait for "the run has concluded" rather than a tick count —
+    /// the count of ticks before that point depends on scheduling and
+    /// can overshoot any fixed threshold.
+    const RUN_CONCLUDED_TICKS: usize = usize::MAX / 2;
+
     /// An adapter that goes `Running` on `launch` and refuses to stop
     /// ticking until it has actually seen a `pause` request — removing
     /// any timing race between the gated reader delivering that request
@@ -627,6 +638,7 @@ mod tests {
                     reason: "step",
                     description: None,
                 });
+                self.ticks.store(RUN_CONCLUDED_TICKS, Ordering::SeqCst);
                 RunState::Stopped
             } else {
                 RunState::Running
@@ -652,7 +664,11 @@ mod tests {
     /// bytes are structurally unable to reach the reader-thread's mpsc
     /// channel before the threshold is met — this is what makes the
     /// mid-run pause test's ordering proof deterministic rather than a
-    /// timing race.
+    /// timing race. An empty chunk is a *gated EOF*: `read()` still
+    /// waits for its threshold, then returns 0 — letting a test hold
+    /// the transport open (channel connected) until the adapter has
+    /// reached a known point, since the loop treats a disconnected
+    /// channel as session-ending even mid-run.
     struct GatedReader {
         chunks: std::collections::VecDeque<(usize, Vec<u8>)>,
         ticks: Arc<AtomicUsize>,
@@ -701,6 +717,10 @@ mod tests {
         // The pause request's bytes cannot enter the channel until at
         // least 2 tick() calls have completed.
         chunks.push_back((2, framed_bytes(&[request(3, "pause", Value::Null)])));
+        // Hold EOF back until the run has concluded (the pause-observing
+        // tick jumps the counter to the sentinel), so the stopped event
+        // is emitted before the loop can see the transport end.
+        chunks.push_back((RUN_CONCLUDED_TICKS, Vec::new()));
 
         let reader = GatedReader {
             chunks,
@@ -741,5 +761,35 @@ mod tests {
 
         // No disconnect was ever sent; the loop ends via reader EOF.
         assert_eq!(exit_code, 1);
+    }
+
+    #[test]
+    fn reader_eof_while_running_ends_the_session_instead_of_spinning() {
+        // A client that dies without `disconnect` mid-run: the input
+        // carries initialize + launch and then EOFs, while the adapter
+        // (never seeing a pause) would tick forever. The loop must
+        // observe the disconnected channel and end with the EOF exit
+        // code instead of spinning unobserved.
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let mut adapter = ScriptedRunAdapter::new(Arc::clone(&ticks));
+        let input = std::io::Cursor::new(framed_bytes(&[
+            request(1, "initialize", Value::Null),
+            request(2, "launch", Value::Null),
+        ]));
+
+        let handle = thread::spawn(move || {
+            let mut output = Vec::new();
+            run(input, &mut output, &mut adapter)
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handle.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "run() kept ticking after client EOF instead of ending the session"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(handle.join().expect("run thread must not panic"), 1);
     }
 }

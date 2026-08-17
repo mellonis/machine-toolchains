@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "ru.mellonis"
-version = "0.1.3"
+version = "0.2.0"
 
 kotlin {
     // Pinned, not just "any JDK 17+": the IntelliJ Platform Gradle Plugin
@@ -35,6 +35,9 @@ dependencies {
         // as of implementation (verified via the plugin's updates API).
         plugin("com.redhat.devtools.lsp4ij:0.20.1")
         bundledPlugin("org.jetbrains.plugins.textmate")
+        // JSON schema contribution (pmt.json) — optional at runtime, the
+        // extension lives behind an optional depends in plugin.xml.
+        bundledPlugin("com.intellij.modules.json")
     }
 }
 
@@ -50,5 +53,11 @@ tasks.processResources {
     from("../grammars") {
         include("pma.tmLanguage.json")
         into("textmate/pma")
+    }
+    // Same single-sourcing as the grammars: the manifest JSON Schema's
+    // one home is editors/schemas/, riding into the jar at build.
+    from("../schemas") {
+        include("pmt.schema.json")
+        into("schemas")
     }
 }

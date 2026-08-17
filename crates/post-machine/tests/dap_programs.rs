@@ -1096,11 +1096,12 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
     assert_eq!(trace["totalFrames"], json!(2));
     assert_eq!(frames.len(), 2);
 
-    // Frame 0: current position, inside `callee`, at its unmapped entry.
-    // Frame ids are the bare depth (dap/mod.rs's module doc, "Handle
-    // stability").
+    // Frame 0: current position, inside `callee`, at its unmapped entry —
+    // rendered at the function's OPENING line per the prologue
+    // convention (docs/dap.md (source provenance)). Frame ids are the
+    // bare depth (dap/mod.rs's module doc, "Handle stability").
     assert_eq!(frames[0]["name"], json!("callee"));
-    assert_eq!(frames[0]["line"], json!(0));
+    assert_eq!(frames[0]["line"], json!(line_of(CALLSTEP_PMC, "right(!)")));
     assert_eq!(frames[0]["id"], json!(0));
     assert!(
         frames[0]["instructionPointerReference"]
@@ -2329,4 +2330,46 @@ fn a_provenance_free_map_keeps_the_global_line_table() {
         )
         .unwrap();
     assert_eq!(response["breakpoints"][0]["verified"], json!(true));
+}
+
+/// A frame in a function with NO mapped lines at all (provenance without
+/// a line table) must stay SOURCELESS — DAP allows `line: 0` only on a
+/// frame without a `source` object, and a real client hard-crashes
+/// mapping a sourced frame's line 0 to editor line -1
+/// (docs/dap.md (source provenance)). Mirrors the TM suite's test.
+#[test]
+fn frame_in_a_function_with_no_mapped_lines_stays_sourceless() {
+    let dir = scratch("line0-bare");
+    let program =
+        write_pmc_debug_with_sources(&dir, "line0-bare", &[(Some("app.pmc"), CALLSTEP_PMC)]);
+
+    // Hand-edit the sidecar into the no-lines shape while keeping the
+    // provenance: every function loses its line table.
+    let mut map_path = program.clone().into_os_string();
+    map_path.push(".map");
+    let mut map: Value = serde_json::from_str(&fs::read_to_string(&map_path).unwrap()).unwrap();
+    for f in map["functions"].as_array_mut().unwrap() {
+        f["lines"] = json!([]);
+    }
+    fs::write(&map_path, map.to_string()).unwrap();
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["name"], json!("main"));
+    assert_eq!(frame["line"], json!(0));
+    assert!(
+        frame.get("source").is_none(),
+        "a frame with no known line must not carry a source object \
+         (DAP: line 0 is only legal sourceless), got: {frame}"
+    );
 }

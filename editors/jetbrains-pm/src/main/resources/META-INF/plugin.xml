@@ -3,33 +3,49 @@
     <name>PMC (Post machine toolchain)</name>
     <vendor>mellonis</vendor>
     <description>Language support for .pmc via pmt lsp (LSP4IJ): diagnostics,
-        completions, navigation, formatting, semantic tokens; pmt run configurations.</description>
+        completions, navigation, formatting, semantic tokens; pmt run
+        configurations with manifest-target builds; PM-1 debugging via
+        pmt dap (LSP4IJ DAP).</description>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.redhat.devtools.lsp4ij</depends>
     <depends>org.jetbrains.plugins.textmate</depends>
+    <depends optional="true" config-file="pmc-json.xml">com.intellij.modules.json</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <fileType name="PMC" implementationClass="ru.mellonis.pmc.PmcFileType"
-                  fieldName="INSTANCE" extensions="pmc"/>
+                  fieldName="INSTANCE" language="pmc" extensions="pmc"/>
         <fileType name="PMA" implementationClass="ru.mellonis.pmc.PmaFileType"
-                  fieldName="INSTANCE" extensions="pma"/>
+                  fieldName="INSTANCE" language="pma" extensions="pma"/>
         <textmate.bundleProvider implementation="ru.mellonis.pmc.PmcTextMateBundleProvider"/>
         <!--
-          A plugin-registered fileType otherwise pre-empts TextMate's own
+          A plugin-registered fileType pre-empts TextMate's own
           file-name-pattern-based coloring for the same extension (LSP4IJ's
-          Developer Guide, "File type mapping" vs "File name pattern
-          mapping": "using File type will override and disable the syntax
-          coloration with TextMate"). Wiring TextMate's own highlighter onto
-          our fileType by name keeps the fileType (needed below for
-          fileTypeMapping) while restoring the coloring. Precedent: this is
-          exactly how other LSP4IJ + TextMate + custom-fileType plugins
-          (e.g. the BAML JetBrains plugin) resolve the same conflict.
+          Developer Guide: "using File type will override and disable the
+          syntax coloration with TextMate"), so coloring must be wired onto
+          our fileTypes explicitly (the fileTypes are needed below for
+          fileTypeMapping). The provider is our own, not the TextMate
+          plugin's: theirs resolves through the platform's file-TYPE-keyed
+          highlighter lookup, which never finds a foreign plugin's file
+          type and silently falls back to plain text — see the provider
+          class for the working file-NAME-based path.
         -->
         <editorHighlighterProvider filetype="PMC"
-                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+                                    implementationClass="ru.mellonis.pmc.PmcTextMateEditorHighlighterProvider"/>
         <editorHighlighterProvider filetype="PMA"
-                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+                                    implementationClass="ru.mellonis.pmc.PmcTextMateEditorHighlighterProvider"/>
+        <!--
+          Newer platforms build a non-language file type's editor
+          highlighter from the file-type-keyed syntaxHighlighter lookup and
+          never consult editorHighlighterProvider on that path — both
+          registrations are needed to color on old and new platforms alike.
+        -->
+        <syntaxHighlighter key="PMC" factoryClass="ru.mellonis.pmc.PmcSyntaxHighlighterProvider"/>
+        <syntaxHighlighter key="PMA" factoryClass="ru.mellonis.pmc.PmcSyntaxHighlighterProvider"/>
+        <lang.syntaxHighlighterFactory language="pmc"
+                                        implementationClass="ru.mellonis.pmc.PmcLangSyntaxHighlighterFactory"/>
+        <lang.syntaxHighlighterFactory language="pma"
+                                        implementationClass="ru.mellonis.pmc.PmcLangSyntaxHighlighterFactory"/>
         <notificationGroup id="ru.mellonis.pmc" displayType="BALLOON"/>
         <postStartupActivity implementation="ru.mellonis.pmc.PmtVersionCheck"/>
         <applicationService serviceImplementation="ru.mellonis.pmc.PmtSettings"/>
@@ -45,5 +61,7 @@
         <fileTypeMapping fileType="PMA" serverId="pmtLsp" languageId="pma"/>
         <semanticTokensColorsProvider serverId="pmtLsp"
                 class="ru.mellonis.pmc.PmtSemanticTokensColorsProvider"/>
+        <debugAdapterServer id="pmtDap" name="pmt dap"
+                factoryClass="ru.mellonis.pmc.PmtDebugAdapterServerFactory"/>
     </extensions>
 </idea-plugin>

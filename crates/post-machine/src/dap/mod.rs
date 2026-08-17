@@ -1242,14 +1242,20 @@ impl PmDapAdapter {
     /// `memoryReference` argument.
     fn frame_json(&self, id: i64, addr: u32) -> Value {
         let loc = self.line_index.as_ref().and_then(|idx| idx.resolve(addr));
-        let (name, line) = match &loc {
-            Some(loc) => (loc.function.to_string(), loc.line.unwrap_or(0)),
-            None => (format!("0x{addr:04x}"), 0),
+        // An address before the function's first mapped instruction (a
+        // linker-synthesized prelude) renders at the function's OPENING
+        // line — the native-debugger prologue convention — so the frame
+        // stays sourced and focusable. Only a function with no mapped
+        // lines at all leaves `frame_line` empty.
+        let frame_line = loc.as_ref().and_then(|l| l.line.or(l.function_first_line));
+        let name = match &loc {
+            Some(loc) => loc.function.to_string(),
+            None => format!("0x{addr:04x}"),
         };
         let mut frame = json!({
             "id": id,
             "name": name,
-            "line": line,
+            "line": frame_line.unwrap_or(0),
             "column": 0,
             "instructionPointerReference": format!("0x{addr:x}"),
         });
@@ -1258,8 +1264,12 @@ impl PmDapAdapter {
         // object, which is what lets the client focus the frame and
         // highlight the line in the editor. Attached only when the
         // resolved file actually exists — a moved tree degrades to
-        // today's sourceless frame instead of a dead editor tab.
+        // today's sourceless frame instead of a dead editor tab — AND
+        // only when a real line was emitted above: DAP's `line: 0` is
+        // legal solely on a sourceless frame (1-based lines otherwise),
+        // and a client maps a sourced line 0 to editor line -1.
         if let Some(path) = loc
+            .filter(|_| frame_line.is_some())
             .and_then(|loc| loc.source)
             .and_then(|raw| self.resolved_source(raw))
         {
