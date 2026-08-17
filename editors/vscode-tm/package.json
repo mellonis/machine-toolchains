@@ -86,7 +86,7 @@
             },
             "program": {
               "type": "string",
-              "description": "Program-mode launch: path to a prebuilt .tmx executable, used as-is. Mutually exclusive with `target`. Build it with `tmt compile -g`/`tmt link` (or `tmt build --debug`) first — without debug info, breakpoints and stepping fall back to instruction granularity."
+              "description": "Program-mode launch: path to a prebuilt .tmx executable, used as-is. Mutually exclusive with `target`. Build it with `tmt compile -g`/`tmt link` (or `tmt build --debug`) first — without debug info, source breakpoints answer unverified and default-granularity stepping only stops at function boundaries (request granularity: \"instruction\" to step one instruction at a time regardless)."
             },
             "tape": {
               "type": "string",
@@ -100,7 +100,7 @@
             "trace": {
               "type": "boolean",
               "default": false,
-              "description": "Stream a per-instruction trace line to the Debug Console as stderr output, matching `tmt run --trace`."
+              "description": "Stream a per-instruction trace line to the Debug Console as console-category output, matching `tmt run --trace`."
             }
           },
           "oneOf": [

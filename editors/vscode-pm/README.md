@@ -213,16 +213,21 @@ Build the `.pmx` with `-g` first (`pmt compile -g` / `pmt link`, or
 `pmt build --debug`) — target mode injects `-g` for you, but program
 mode debugs whatever executable you hand it: without debug info, a
 source breakpoint answers unverified (with a "build with -g" message
-instead of a squiggle-free stop) and stepping falls back to
-instruction granularity instead of resolving against `.pmc` source
-lines.
+instead of a squiggle-free stop), and default-granularity (line/
+statement) stepping only stops at function boundaries instead of
+`.pmc` source lines — a single-function program with no calls runs to
+completion (or to a breakpoint) on the very first step. Request
+`"granularity": "instruction"` explicitly to step one instruction at a
+time regardless of debug info.
 
 Both modes share two more options: `"stopOnEntry": true` breaks before
 the first instruction runs, instead of running to the first breakpoint
 (or to completion); `"trace": true` streams a per-instruction trace
-line to the Debug Console as `stderr` output, the same lines `pmt run
---trace` prints. Program mode additionally accepts `"strictCells":
-true`, the same semantics as `pmt run --strict-cells`.
+line to the Debug Console as `console`-category output, the same lines
+`pmt run --trace` prints (build diagnostics, streamed separately in
+target mode, are the only `stderr`-category output this adapter
+emits). Program mode additionally accepts `"strictCells": true`, the
+same semantics as `pmt run --strict-cells`.
 
 The session supports source and instruction breakpoints, step
 in/over/out, a Variables view over the machine's registers and tape

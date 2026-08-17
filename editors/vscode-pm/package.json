@@ -82,7 +82,7 @@
             },
             "program": {
               "type": "string",
-              "description": "Program-mode launch: path to a prebuilt .pmx executable, used as-is. Mutually exclusive with `target`. Build it with `pmt compile -g`/`pmt link` (or `pmt build --debug`) first — without debug info, breakpoints and stepping fall back to instruction granularity."
+              "description": "Program-mode launch: path to a prebuilt .pmx executable, used as-is. Mutually exclusive with `target`. Build it with `pmt compile -g`/`pmt link` (or `pmt build --debug`) first — without debug info, source breakpoints answer unverified and default-granularity stepping only stops at function boundaries (request granularity: \"instruction\" to step one instruction at a time regardless)."
             },
             "tape": {
               "type": "string",
@@ -101,7 +101,7 @@
             "trace": {
               "type": "boolean",
               "default": false,
-              "description": "Stream a per-instruction trace line to the Debug Console as stderr output, matching `pmt run --trace`."
+              "description": "Stream a per-instruction trace line to the Debug Console as console-category output, matching `pmt run --trace`."
             }
           },
           "oneOf": [
