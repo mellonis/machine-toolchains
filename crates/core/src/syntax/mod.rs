@@ -7,6 +7,8 @@
 
 mod builder;
 mod green;
+mod red;
 
 pub use builder::{Checkpoint, TreeBuilder};
 pub use green::{GreenElement, GreenNode, GreenToken, SyntaxKind};
+pub use red::{SyntaxElement, SyntaxNode, SyntaxToken, TextRange};
