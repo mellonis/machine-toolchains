@@ -4,6 +4,7 @@
 //! the resulting tree.
 
 mod emit;
+mod extract;
 mod kinds;
 mod layout;
 mod views;

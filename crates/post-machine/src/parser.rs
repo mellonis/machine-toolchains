@@ -2037,6 +2037,119 @@ impl Parser<'_> {
     }
 }
 
+/// Retokenization reuse shim (`crate::syntax::extract::sig_tokens`'s
+/// counterpart): re-parse one already-extracted `.pmc` item from a green
+/// tree's own retokenized `ITEM` node through the SAME production the
+/// original parse used, so an extraction and the original parse can
+/// never disagree on what an item means. Lives here, not in
+/// `crate::syntax::extract`, so it can build a bare `Parser` and reach
+/// the private [`Parser::item`] production directly. `in_group` selects
+/// the same grammar path `Parser::item` already branches on
+/// (docs/pmt/language.md: `goto` is illegal, and a non-trailing
+/// successor is illegal, only INSIDE a comma group) — the caller
+/// supplies it because a lone `ITEM` node carries no memory of its own
+/// former comma-group position. `expect`s on error: extraction only
+/// ever runs on a tree that already parsed once, so a failure here is a
+/// bug in the retokenization, not a malformed program.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "wired into extract_function in the next task of this plan; \
+                   exercised today only by crate::syntax::extract's own tests"
+    )
+)]
+pub(crate) fn reparse_item(tokens: &[Token], in_group: bool) -> Item {
+    Parser {
+        tokens,
+        pos: 0,
+        namespaces: HashSet::new(),
+        declared_fns: HashSet::new(),
+        comments: Vec::new(),
+        cpos: 0,
+        prev_end_line: 0,
+        sink: None,
+    }
+    .item(in_group)
+    .expect("reparse_item: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a `DOC_RUN` node's own `DocLine`/
+/// `AttentionLine` tokens: converts each into the [`DocRunItem`] shape
+/// [`Parser::doc_run`] builds, WITHOUT that production's run-binding
+/// logic — the `DocLineOrder` ordering check, the duplicate-
+/// `[deprecated]` check, and the "what follows must be a declaration"
+/// rule the caller of `doc_run` enforces are all properties of the
+/// ORIGINAL parse, already validated once; an isolated retokenized
+/// `DOC_RUN` slice has nothing left to validate, only to convert.
+/// Attention attributes are still decoded through [`Parser::parse_attr`],
+/// the exact helper `doc_run` itself calls, so `[deprecated]` decodes
+/// identically either way. `blank_before` is recomputed the same way
+/// `doc_run` computes it, from a fresh `prev_end_line: 0` — matching the
+/// isolated slice's own start, not the original file position (nothing
+/// downstream reads `blank_before` off a reduced [`FnDoc`], so this is
+/// cosmetic fidelity, not load-bearing).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "wired into extract_function in the next task of this plan; \
+                   exercised today only by crate::syntax::extract's own tests"
+    )
+)]
+pub(crate) fn reparse_doc_items(tokens: &[Token]) -> Vec<DocRunItem> {
+    let mut p = Parser {
+        tokens,
+        pos: 0,
+        namespaces: HashSet::new(),
+        declared_fns: HashSet::new(),
+        comments: Vec::new(),
+        cpos: 0,
+        prev_end_line: 0,
+        sink: None,
+    };
+    let mut items = Vec::new();
+    loop {
+        let t = p.peek().clone();
+        match &t.kind {
+            TokenKind::DocLine(text) => {
+                let text = text.clone();
+                p.bump();
+                let blank_before = t.line > p.prev_end_line + 1;
+                p.prev_end_line = t.line;
+                items.push(DocRunItem {
+                    blank_before,
+                    kind: DocRunKind::Doc {
+                        text,
+                        span: t.span(),
+                    },
+                });
+            }
+            TokenKind::AttentionLine(text) => {
+                let text = text.clone();
+                p.bump();
+                let attr = Parser::parse_attr(&text, &t);
+                let blank_before = t.line > p.prev_end_line + 1;
+                p.prev_end_line = t.line;
+                items.push(DocRunItem {
+                    blank_before,
+                    kind: DocRunKind::Attention {
+                        attr,
+                        text,
+                        span: t.span(),
+                    },
+                });
+            }
+            TokenKind::Eof => break,
+            _ => unreachable!(
+                "reparse_doc_items: extraction only ever feeds a DOC_RUN's own tokens \
+                 (DocLine/AttentionLine) plus the synthetic trailing Eof"
+            ),
+        }
+    }
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
