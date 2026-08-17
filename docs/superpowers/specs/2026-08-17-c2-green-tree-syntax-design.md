@@ -108,7 +108,7 @@ distinctions become *derivations over tokens* (§5.1), not stored fields.
 `SyntaxNode` cursors: parent pointer + absolute text offset, computed on
 demand from the green tree. Every node and token knows its byte range.
 
-Diagnostics keep today's line/col `Span` as the currency. A `LineIndex`
+Diagnostics keep today's line/col `Span` as the currency. A `TextLineIndex`
 (built once per file from the source text) converts byte offsets to `Span`.
 **Span parity is an explicit test surface**: pinned spans throughout the
 existing suites must come out identical through the new path (§6.1d).
@@ -146,8 +146,13 @@ PM first on the branch, then TM; identical shape.
 
 Each crate declares its `SyntaxKind` enum (`#[repr(u16)]`, converted at the
 core boundary) covering every token kind and every node kind. The
-**existing lexers are reused** — the green builder consumes the
-`WithComments` stream. The comment-free lex mode dies at that crate's
+**existing lexers are unchanged**: a per-crate layout pass
+reconstructs each token's verbatim text and the whitespace gaps
+between tokens from the source (token start positions are exact;
+ends are derived per kind and validated by a
+concatenation-equals-source invariant), and green emission is woven
+into the existing parser behind an optional sink — same grammar walk,
+same errors, with the C1-CST-building half deleted at cutover. The comment-free lex mode dies at that crate's
 cutover: one parser, one mode; the compiler simply never looks at trivia
 through views. Behavior-neutral — the compiler ignores what it previously
 never received.
