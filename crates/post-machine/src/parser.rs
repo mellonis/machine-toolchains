@@ -1,15 +1,18 @@
 //! `.pmc` recursive-descent parser (docs/pmt/language.md): tokens → AST.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use mtc_core::diagnostics::{Pos, Span};
+use mtc_core::syntax::{Checkpoint, GreenNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
     AttrCst, BodyItem, BodyKind, CommaItem, Cst, DocRunItem, DocRunKind, FunctionCst, NamespaceCst,
     StatementCst, TopItem, TopKind, TrailingComment, UseCst, UsePath,
 };
-use crate::lexer::{Comment, Token, TokenKind};
+use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
+use crate::syntax::{self, GreenSink, PmcKind};
 
 /// docs/pmt/language.md: words that cannot name a function.
 pub const RESERVED: [&str; 8] = [
@@ -327,7 +330,7 @@ pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
             sig.push(t.clone());
         }
     }
-    let items = Parser {
+    let (items, _sink) = Parser {
         tokens: &sig,
         pos: 0,
         namespaces: HashSet::new(),
@@ -335,9 +338,52 @@ pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
         comments,
         cpos: 0,
         prev_end_line: 0,
+        sink: None,
     }
     .file()?;
     Ok(Cst { items })
+}
+
+/// source → green syntax tree (docs/core.md (syntax tree)). Runs the
+/// SAME grammar walk as [`parse_cst`] with a green sink attached:
+/// identical acceptance, identical errors — the sink only mirrors
+/// token consumption and node boundaries alongside the unchanged
+/// parser logic. The C1 CST built alongside is discarded; the
+/// compiler's [`parse`] path never sets a sink and is unaffected.
+pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    let entries = syntax::layout(source, &tokens);
+    let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
+    let mut comments: Vec<CommentAt> = Vec::new();
+    for t in &tokens {
+        if let TokenKind::Comment(c) = &t.kind {
+            comments.push(CommentAt {
+                comment: c.clone(),
+                line: t.line,
+                col: t.col,
+                sig_index: sig.len(),
+            });
+        } else {
+            sig.push(t.clone());
+        }
+    }
+    let eof_pos = sig.len() - 1;
+    let mut sink = GreenSink::new(entries);
+    sink.start(PmcKind::File);
+    let (_items, sink) = Parser {
+        tokens: &sig,
+        pos: 0,
+        namespaces: HashSet::new(),
+        declared_fns: HashSet::new(),
+        comments,
+        cpos: 0,
+        prev_end_line: 0,
+        sink: Some(sink),
+    }
+    .file()?;
+    Ok(sink
+        .expect("parse_green always seeds a sink before calling file()")
+        .into_tree(eof_pos))
 }
 
 /// Copy a CST into the flat `Program` the compiler consumes — exactly the
@@ -525,6 +571,40 @@ struct Parser<'a> {
     cpos: usize,
     /// End line of the last emitted CST element, for `blank_before`.
     prev_end_line: u32,
+    /// Green-tree emission, when this walk is [`parse_green`]'s rather
+    /// than [`parse_cst`]'s: `bump()` mirrors every consumed token into
+    /// it, and the `g_*` helpers below bracket node boundaries. `None`
+    /// on every other path — those helpers are then no-ops, so the CST
+    /// walk is byte-identical whether or not a sink is attached.
+    sink: Option<GreenSink>,
+}
+
+/// Map a significant `TokenKind` to its green-tree kind — the sink's
+/// counterpart to `TokenKind`, since `PmcKind`'s token variants mirror
+/// it 1:1 (`crate::syntax::kinds` doc). Called only from `bump()`,
+/// which never bumps `Eof`, and only over the sig stream, which never
+/// carries `Comment` (`parse_cst`/`parse_green` split it out up front)
+/// — both are unreachable here.
+fn sig_kind(kind: &TokenKind) -> PmcKind {
+    match kind {
+        TokenKind::Ident(_) => PmcKind::Ident,
+        TokenKind::Number(_, _) => PmcKind::Number,
+        TokenKind::At => PmcKind::At,
+        TokenKind::Bang => PmcKind::Bang,
+        TokenKind::Comma => PmcKind::Comma,
+        TokenKind::Semi => PmcKind::Semi,
+        TokenKind::Colon => PmcKind::Colon,
+        TokenKind::ColonColon => PmcKind::ColonColon,
+        TokenKind::LParen => PmcKind::LParen,
+        TokenKind::RParen => PmcKind::RParen,
+        TokenKind::LBrace => PmcKind::LBrace,
+        TokenKind::RBrace => PmcKind::RBrace,
+        TokenKind::DocLine(_) => PmcKind::DocLine,
+        TokenKind::AttentionLine(_) => PmcKind::AttentionLine,
+        TokenKind::Comment(_) | TokenKind::Eof => {
+            unreachable!("comments are stripped from the significant stream; Eof is never bumped")
+        }
+    }
 }
 
 impl Parser<'_> {
@@ -535,7 +615,49 @@ impl Parser<'_> {
 
     fn bump(&mut self) {
         if !matches!(self.tokens[self.pos].kind, TokenKind::Eof) {
+            if let Some(sink) = &mut self.sink {
+                sink.token(self.pos, sig_kind(&self.tokens[self.pos].kind));
+            }
             self.pos += 1;
+        }
+    }
+
+    /// Open a green node, flushing the upcoming token's trivia into the
+    /// PARENT first — the trivia-placement rule: a node starts at its
+    /// first significant token, so whitespace/comments before it belong
+    /// to whatever is still open. No-op when `sink` is `None`.
+    fn g_flush_start(&mut self, kind: PmcKind) {
+        if let Some(sink) = &mut self.sink {
+            sink.flush(self.pos);
+            sink.start(kind);
+        }
+    }
+
+    /// Close the innermost open green node. No-op when `sink` is `None`.
+    fn g_finish(&mut self) {
+        if let Some(sink) = &mut self.sink {
+            sink.finish();
+        }
+    }
+
+    /// Flush the upcoming token's trivia into the parent, then mark a
+    /// green checkpoint for a later [`Self::g_start_at`] — for
+    /// productions that only learn their node kind after parsing a
+    /// prefix. `None` when `sink` is `None`.
+    #[allow(dead_code)] // consumed by the function/statement instrumentation (a later task)
+    fn g_checkpoint(&mut self) -> Option<Checkpoint> {
+        self.sink.as_mut().map(|sink| {
+            sink.flush(self.pos);
+            sink.checkpoint()
+        })
+    }
+
+    /// Open a green node retroactively at a checkpoint taken by
+    /// [`Self::g_checkpoint`]. No-op when either is `None`.
+    #[allow(dead_code)] // consumed by the function/statement instrumentation (a later task)
+    fn g_start_at(&mut self, cp: Option<Checkpoint>, kind: PmcKind) {
+        if let (Some(sink), Some(cp)) = (&mut self.sink, cp) {
+            sink.start_at(cp, kind);
         }
     }
 
@@ -613,9 +735,12 @@ impl Parser<'_> {
         None
     }
 
-    /// The whole file is the `ns == []` namespace level.
-    fn file(mut self) -> Result<Vec<TopItem>, CompileError> {
-        self.top_items(&[], None).map(|(items, _, _)| items)
+    /// The whole file is the `ns == []` namespace level. Hands back the
+    /// (possibly `None`) green sink alongside the items: `self` is
+    /// consumed by value, so this is the only place it can escape.
+    fn file(mut self) -> Result<(Vec<TopItem>, Option<GreenSink>), CompileError> {
+        let (items, _, _) = self.top_items(&[], None)?;
+        Ok((items, self.sink))
     }
 
     /// Collects a doc/attention run (docs/pmt/language.md (doc lines))
@@ -968,6 +1093,7 @@ impl Parser<'_> {
                 )
             {
                 let use_line = t.line;
+                self.g_flush_start(PmcKind::UseDecl);
                 self.bump();
                 let mut paths: Vec<UsePath> = Vec::new();
                 let mut interior: Vec<(usize, Comment)> = Vec::new();
@@ -982,6 +1108,7 @@ impl Parser<'_> {
                     if RESERVED.contains(&name.as_str()) {
                         return Err(Self::expected(&t, "an imported function name"));
                     }
+                    self.g_flush_start(PmcKind::UsePath);
                     let mut path = vec![name.clone()];
                     let path_start = t.span().start;
                     let mut path_end = t.span().end;
@@ -1017,6 +1144,7 @@ impl Parser<'_> {
                     } else {
                         None
                     };
+                    self.g_finish(); // UsePath — the alias, if any, is its last token
                     paths.push(UsePath {
                         path,
                         alias,
@@ -1050,6 +1178,7 @@ impl Parser<'_> {
                         _ => return Err(Self::expected(&sep, "`,` or `;`")),
                     }
                 }
+                self.g_finish(); // UseDecl — closes right after the `;`
                 // The whole `use` list's trailing comment rides the node.
                 let trailing = self.take_trailing(semi_line);
                 let use_span = Span {
@@ -1096,6 +1225,7 @@ impl Parser<'_> {
             {
                 let ns_saved = self.prev_end_line;
                 let ns_line = t.line;
+                self.g_flush_start(PmcKind::Namespace);
                 self.bump(); // `namespace`
                 let name_tok = self.peek().clone();
                 let TokenKind::Ident(name) = &name_tok.kind else {
@@ -1154,6 +1284,10 @@ impl Parser<'_> {
                 }
                 let (child_items, close_trailing, close_span) =
                     self.top_items(&child, Some(&TokenKind::RBrace))?;
+                // The recursive `top_items` call above already bumped the
+                // closing `}` into the still-open NAMESPACE node; close it
+                // now that its full span — including that `}` — is emitted.
+                self.g_finish(); // Namespace
                 // `top_items` set `prev_end_line` to the closing `}` line
                 // (or its close_trailing comment's last line).
                 let blank_before = ns_line > ns_saved + 1;

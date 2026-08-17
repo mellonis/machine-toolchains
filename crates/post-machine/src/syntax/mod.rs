@@ -3,8 +3,10 @@
 //! pass, and green emission for the existing parser. Views arrive in
 //! a later migration step.
 
+mod emit;
 mod kinds;
 mod layout;
 
+pub use emit::GreenSink;
 pub use kinds::{PmcKind, kind_name};
 pub use layout::{SigLayout, layout};
