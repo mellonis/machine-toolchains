@@ -16,7 +16,7 @@ private const val PMT_RUN_TYPE_ID = "PmtRun"
 class PmtRunConfigurationType : ConfigurationTypeBase(
     PMT_RUN_TYPE_ID,
     "pmt",
-    "Run a pmt subcommand (compile, lint, run) against a file or object.",
+    "Run a pmt subcommand (build, compile, lint, run) against a manifest target, file, or object.",
     AllIcons.RunConfigurations.Application,
 ) {
     init {

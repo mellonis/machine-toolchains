@@ -7,6 +7,7 @@ import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.configurations.LocatableConfigurationBase
 import com.intellij.execution.configurations.RunConfigurationOptions
 import com.intellij.execution.configurations.RunProfileState
+import com.intellij.execution.configurations.RuntimeConfigurationError
 import com.intellij.execution.process.OSProcessHandler
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessTerminatedListener
@@ -17,14 +18,21 @@ import com.intellij.openapi.util.JDOMExternalizerUtil
 import com.intellij.util.execution.ParametersListUtil
 import org.jdom.Element
 
-/** compile | lint | run — the `pmt` subcommands offered by the preset combo. */
-val PMT_SUBCOMMANDS = listOf("compile", "lint", "run")
+/** build | compile | lint | run — the `pmt` subcommands offered by the preset combo. */
+val PMT_SUBCOMMANDS = listOf("build", "compile", "lint", "run")
 
 /**
  * A thin `pmt <subcommand> <args>` process wrapper — no build-system
  * ambitions (no compile-before-run graph, no artifact tracking). Runs
  * `PmtSettings.instance.state.pmtPath <subcommand> <parsed args>` in
  * [workingDirectory] and streams output to the run console.
+ *
+ * The `build` subcommand additionally carries a manifest [target] and the
+ * [runAfterBuild] flag, assembling `pmt build [--run] <target> <args>` —
+ * the driver resolves the target against the nearest-ancestor `pmt.json`
+ * from the working directory. A blank target with sources passed via
+ * [arguments] is the driver's argv mode; `--run` is manifest-mode-only
+ * and the driver rejects it there with its own message.
  */
 class PmtRunConfiguration(project: Project, factory: ConfigurationFactory, name: String) :
     LocatableConfigurationBase<RunConfigurationOptions>(project, factory, name) {
@@ -32,13 +40,30 @@ class PmtRunConfiguration(project: Project, factory: ConfigurationFactory, name:
     var subcommand: String = PMT_SUBCOMMANDS.last()
     var arguments: String = ""
     var workingDirectory: String = project.basePath ?: ""
+    var target: String = ""
+    var runAfterBuild: Boolean = false
 
     override fun getConfigurationEditor(): SettingsEditor<PmtRunConfiguration> = PmtRunSettingsEditor()
+
+    override fun checkConfiguration() {
+        if (subcommand == "build" && target.isBlank() && ParametersListUtil.parse(arguments).isEmpty()) {
+            throw RuntimeConfigurationError(
+                "Set a target (or pass source files in Arguments) for the build subcommand.")
+        }
+    }
 
     override fun getState(executor: Executor, environment: ExecutionEnvironment): RunProfileState =
         object : CommandLineState(environment) {
             override fun startProcess(): ProcessHandler {
                 val commandLine = GeneralCommandLine(PmtSettings.instance.state.pmtPath, subcommand)
+                if (subcommand == "build") {
+                    if (runAfterBuild) {
+                        commandLine.addParameter("--run")
+                    }
+                    if (target.isNotBlank()) {
+                        commandLine.addParameter(target)
+                    }
+                }
                 val parsedArgs = ParametersListUtil.parse(arguments)
                 if (parsedArgs.isNotEmpty()) {
                     commandLine.addParameters(parsedArgs)
@@ -57,6 +82,8 @@ class PmtRunConfiguration(project: Project, factory: ConfigurationFactory, name:
         JDOMExternalizerUtil.writeField(element, "subcommand", subcommand)
         JDOMExternalizerUtil.writeField(element, "arguments", arguments)
         JDOMExternalizerUtil.writeField(element, "workingDirectory", workingDirectory)
+        JDOMExternalizerUtil.writeField(element, "target", target)
+        JDOMExternalizerUtil.writeField(element, "runAfterBuild", runAfterBuild.toString())
     }
 
     override fun readExternal(element: Element) {
@@ -64,5 +91,7 @@ class PmtRunConfiguration(project: Project, factory: ConfigurationFactory, name:
         JDOMExternalizerUtil.readField(element, "subcommand")?.let { subcommand = it }
         JDOMExternalizerUtil.readField(element, "arguments")?.let { arguments = it }
         JDOMExternalizerUtil.readField(element, "workingDirectory")?.let { workingDirectory = it }
+        JDOMExternalizerUtil.readField(element, "target")?.let { target = it }
+        JDOMExternalizerUtil.readField(element, "runAfterBuild")?.let { runAfterBuild = it.toBoolean() }
     }
 }

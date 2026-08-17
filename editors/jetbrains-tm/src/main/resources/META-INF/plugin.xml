@@ -3,31 +3,49 @@
     <name>TMC (Turing machine toolchain)</name>
     <vendor>mellonis</vendor>
     <description>Language support for .tmc and .tma via tmt lsp (LSP4IJ): diagnostics,
-        completions, navigation, formatting, semantic tokens; tmt run configurations.</description>
+        completions, navigation, formatting, semantic tokens; tmt run
+        configurations with manifest-target builds; TM-1 debugging via
+        tmt dap (LSP4IJ DAP).</description>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.redhat.devtools.lsp4ij</depends>
     <depends>org.jetbrains.plugins.textmate</depends>
+    <depends optional="true" config-file="tmc-json.xml">com.intellij.modules.json</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <fileType name="TMC" implementationClass="ru.mellonis.tmc.TmcFileType"
-                  fieldName="INSTANCE" extensions="tmc"/>
+                  fieldName="INSTANCE" language="tmc" extensions="tmc"/>
         <fileType name="TMA" implementationClass="ru.mellonis.tmc.TmaFileType"
-                  fieldName="INSTANCE" extensions="tma"/>
+                  fieldName="INSTANCE" language="tma" extensions="tma"/>
         <textmate.bundleProvider implementation="ru.mellonis.tmc.TmcTextMateBundleProvider"/>
         <!--
-          A plugin-registered fileType otherwise pre-empts TextMate's own
+          A plugin-registered fileType pre-empts TextMate's own
           file-name-pattern-based coloring for the same extension (LSP4IJ's
-          Developer Guide, "File type mapping" vs "File name pattern
-          mapping": "using File type will override and disable the syntax
-          coloration with TextMate"). Wiring TextMate's own highlighter onto
-          our fileType by name keeps the fileType (needed below for
-          fileTypeMapping) while restoring the coloring.
+          Developer Guide: "using File type will override and disable the
+          syntax coloration with TextMate"), so coloring must be wired onto
+          our fileTypes explicitly (the fileTypes are needed below for
+          fileTypeMapping). The provider is our own, not the TextMate
+          plugin's: theirs resolves through the platform's file-TYPE-keyed
+          highlighter lookup, which never finds a foreign plugin's file
+          type and silently falls back to plain text — see the provider
+          class for the working file-NAME-based path.
         -->
         <editorHighlighterProvider filetype="TMC"
-                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+                                    implementationClass="ru.mellonis.tmc.TmcTextMateEditorHighlighterProvider"/>
         <editorHighlighterProvider filetype="TMA"
-                                    implementationClass="org.jetbrains.plugins.textmate.language.syntax.highlighting.TextMateEditorHighlighterProvider"/>
+                                    implementationClass="ru.mellonis.tmc.TmcTextMateEditorHighlighterProvider"/>
+        <!--
+          Newer platforms build a non-language file type's editor
+          highlighter from the file-type-keyed syntaxHighlighter lookup and
+          never consult editorHighlighterProvider on that path — both
+          registrations are needed to color on old and new platforms alike.
+        -->
+        <syntaxHighlighter key="TMC" factoryClass="ru.mellonis.tmc.TmcSyntaxHighlighterProvider"/>
+        <syntaxHighlighter key="TMA" factoryClass="ru.mellonis.tmc.TmcSyntaxHighlighterProvider"/>
+        <lang.syntaxHighlighterFactory language="tmc"
+                                        implementationClass="ru.mellonis.tmc.TmcLangSyntaxHighlighterFactory"/>
+        <lang.syntaxHighlighterFactory language="tma"
+                                        implementationClass="ru.mellonis.tmc.TmcLangSyntaxHighlighterFactory"/>
         <notificationGroup id="ru.mellonis.tmc" displayType="BALLOON"/>
         <postStartupActivity implementation="ru.mellonis.tmc.TmtVersionCheck"/>
         <applicationService serviceImplementation="ru.mellonis.tmc.TmtSettings"/>
@@ -43,5 +61,7 @@
         <fileTypeMapping fileType="TMA" serverId="tmtLsp" languageId="tma"/>
         <semanticTokensColorsProvider serverId="tmtLsp"
                 class="ru.mellonis.tmc.TmtSemanticTokensColorsProvider"/>
+        <debugAdapterServer id="tmtDap" name="tmt dap"
+                factoryClass="ru.mellonis.tmc.TmtDebugAdapterServerFactory"/>
     </extensions>
 </idea-plugin>

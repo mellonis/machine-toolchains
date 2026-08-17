@@ -445,8 +445,14 @@ ticking on unobserved.
 Both `editors/vscode-pm/` and `editors/vscode-tm/` contribute a
 `pmt`/`tmt` debugger type resolving the same binary the language client
 already uses, launched as `pmt dap`/`tmt dap` on stdio — no separate
-binary-resolution setting. Each extension's README carries a full
-walkthrough; the two launch shapes look like this from `launch.json`:
+binary-resolution setting. The JetBrains pair (`editors/jetbrains-pm/`,
+`editors/jetbrains-tm/`) consumes the same servers through LSP4IJ's DAP
+support: each plugin registers its adapter as a debug adapter server,
+which bridges it into the IDE's own debugger framework — gutter
+breakpoints, stepping, and the variables view — with the same two launch
+shapes offered as editable JSON templates. Each extension's and plugin's
+README carries a full walkthrough; the two launch shapes look like this
+from a VS Code `launch.json`:
 
 ```json
 {

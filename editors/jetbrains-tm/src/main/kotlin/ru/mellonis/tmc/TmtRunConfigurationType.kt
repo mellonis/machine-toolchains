@@ -16,7 +16,7 @@ private const val TMT_RUN_TYPE_ID = "TmtRun"
 class TmtRunConfigurationType : ConfigurationTypeBase(
     TMT_RUN_TYPE_ID,
     "tmt",
-    "Run a tmt subcommand (compile, asm, lint, run) against a file or object.",
+    "Run a tmt subcommand (build, compile, asm, lint, run) against a manifest target, file, or object.",
     AllIcons.RunConfigurations.Application,
 ) {
     init {
