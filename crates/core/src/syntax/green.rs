@@ -41,7 +41,7 @@ impl GreenToken {
     }
 
     /// Length in BYTES (offsets across the framework are byte offsets;
-    /// line/col conversion happens in `LineIndex`).
+    /// line/col conversion happens in `TextLineIndex`).
     pub fn text_len(&self) -> u32 {
         self.text.len() as u32
     }
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn text_len_counts_bytes_not_chars() {
-        // Offsets across the framework are byte offsets; `LineIndex`
+        // Offsets across the framework are byte offsets; `TextLineIndex`
         // owns the char-column conversion.
         let t = GreenToken::new(IDENT, "λ");
         assert_eq!(t.text_len(), 2);
