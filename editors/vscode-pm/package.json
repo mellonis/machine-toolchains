@@ -65,6 +65,10 @@
         "run": { "type": "boolean", "description": "Run the target after building; `build` only." }
       }
     }],
+    "breakpoints": [
+      { "language": "pmc" },
+      { "language": "pma" }
+    ],
     "debuggers": [{
       "type": "pmt",
       "label": "PM-1 (pmt)",

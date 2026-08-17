@@ -69,6 +69,10 @@
         "run": { "type": "boolean", "description": "Run the target after building; `build` only." }
       }
     }],
+    "breakpoints": [
+      { "language": "tmc" },
+      { "language": "tma" }
+    ],
     "debuggers": [{
       "type": "tmt",
       "label": "TM-1 (tmt)",
