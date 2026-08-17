@@ -43,6 +43,7 @@ struct NodeData {
     green: Rc<GreenNode>,
     parent: Option<SyntaxNode>,
     offset: u32,
+    index: u32,
 }
 
 /// Positional identity: the same green node at the same offset.
@@ -63,6 +64,7 @@ impl SyntaxNode {
             green,
             parent: None,
             offset: 0,
+            index: 0,
         }))
     }
 
@@ -89,19 +91,24 @@ impl SyntaxNode {
     /// All children — nodes and tokens — in document order.
     pub fn children_with_tokens(&self) -> impl Iterator<Item = SyntaxElement> + '_ {
         let mut offset = self.0.offset;
+        let mut index = 0u32;
         self.0.green.children().iter().map(move |c| {
             let at = offset;
+            let idx = index;
             offset += c.text_len();
+            index += 1;
             match c {
                 GreenElement::Node(n) => SyntaxElement::Node(SyntaxNode(Rc::new(NodeData {
                     green: n.clone(),
                     parent: Some(self.clone()),
                     offset: at,
+                    index: idx,
                 }))),
                 GreenElement::Token(t) => SyntaxElement::Token(SyntaxToken {
                     green: t.clone(),
                     parent: self.clone(),
                     offset: at,
+                    index: idx,
                 }),
             }
         })
@@ -114,6 +121,74 @@ impl SyntaxNode {
             SyntaxElement::Token(_) => None,
         })
     }
+
+    /// Parent chain, nearest first; does not include `self`.
+    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode> + '_ {
+        std::iter::successors(self.parent(), SyntaxNode::parent)
+    }
+
+    /// The element immediately before this node among its parent's
+    /// children, tokens included.
+    pub fn prev_sibling_or_token(&self) -> Option<SyntaxElement> {
+        let parent = self.parent()?;
+        let idx = self.0.index as usize;
+        if idx == 0 {
+            return None;
+        }
+        parent.children_with_tokens().nth(idx - 1)
+    }
+
+    /// The element immediately after this node among its parent's
+    /// children, tokens included.
+    pub fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
+        let parent = self.parent()?;
+        parent.children_with_tokens().nth(self.0.index as usize + 1)
+    }
+
+    /// First token of the subtree, in document order.
+    pub fn first_token(&self) -> Option<SyntaxToken> {
+        self.children_with_tokens().find_map(|e| match e {
+            SyntaxElement::Token(t) => Some(t),
+            SyntaxElement::Node(n) => n.first_token(),
+        })
+    }
+
+    /// Last token of the subtree, in document order.
+    pub fn last_token(&self) -> Option<SyntaxToken> {
+        let mut result = None;
+        for e in self.children_with_tokens() {
+            let candidate = match e {
+                SyntaxElement::Token(t) => Some(t),
+                SyntaxElement::Node(n) => n.last_token(),
+            };
+            if candidate.is_some() {
+                result = candidate;
+            }
+        }
+        result
+    }
+
+    /// Every token of the subtree, document order, all depths.
+    pub fn descendant_tokens(&self) -> impl Iterator<Item = SyntaxToken> {
+        let mut stack: Vec<SyntaxElement> = self
+            .children_with_tokens()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        std::iter::from_fn(move || {
+            loop {
+                match stack.pop()? {
+                    SyntaxElement::Token(t) => return Some(t),
+                    SyntaxElement::Node(n) => {
+                        let mut children: Vec<SyntaxElement> = n.children_with_tokens().collect();
+                        children.reverse();
+                        stack.extend(children);
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +196,7 @@ pub struct SyntaxToken {
     green: Rc<GreenToken>,
     parent: SyntaxNode,
     offset: u32,
+    index: u32,
 }
 
 impl PartialEq for SyntaxToken {
@@ -146,6 +222,24 @@ impl SyntaxToken {
 
     pub fn parent(&self) -> SyntaxNode {
         self.parent.clone()
+    }
+
+    /// The element immediately before this token among its parent's
+    /// children, tokens included.
+    pub fn prev_sibling_or_token(&self) -> Option<SyntaxElement> {
+        let idx = self.index as usize;
+        if idx == 0 {
+            return None;
+        }
+        self.parent.children_with_tokens().nth(idx - 1)
+    }
+
+    /// The element immediately after this token among its parent's
+    /// children, tokens included.
+    pub fn next_sibling_or_token(&self) -> Option<SyntaxElement> {
+        self.parent
+            .children_with_tokens()
+            .nth(self.index as usize + 1)
     }
 }
 
@@ -313,5 +407,46 @@ mod tests {
         ]
         .join("\n");
         assert_eq!(dump, expected);
+    }
+
+    #[test]
+    fn ancestors_walk_to_the_root() {
+        let root = sample();
+        let list = root.children().next().expect("LIST child");
+        let chain: Vec<SyntaxKind> = list.ancestors().map(|n| n.kind()).collect();
+        assert_eq!(chain, vec![ROOT]);
+        assert!(root.ancestors().next().is_none());
+    }
+
+    #[test]
+    fn sibling_queries_walk_both_ways() {
+        let root = sample();
+        let list = root.children().next().expect("LIST child");
+        // sample(): ROOT > [LIST, WS("\n")]
+        let next = list.next_sibling_or_token().expect("has next");
+        assert_eq!(next.kind(), WS);
+        assert!(matches!(
+            next,
+            SyntaxElement::Token(ref t) if t.text() == "\n"
+        ));
+        let SyntaxElement::Token(ws) = next else {
+            unreachable!()
+        };
+        let prev = ws.prev_sibling_or_token().expect("has prev");
+        assert_eq!(prev.kind(), LIST);
+        assert!(list.prev_sibling_or_token().is_none());
+    }
+
+    #[test]
+    fn token_edges_and_descendant_tokens() {
+        let root = sample();
+        // sample() text: "f λx\n" — tokens f, " ", "λx" inside LIST; "\n" in ROOT.
+        assert_eq!(root.first_token().expect("first").text(), "f");
+        assert_eq!(root.last_token().expect("last").text(), "\n");
+        let texts: Vec<String> = root
+            .descendant_tokens()
+            .map(|t| t.text().to_string())
+            .collect();
+        assert_eq!(texts, vec!["f", " ", "λx", "\n"]);
     }
 }

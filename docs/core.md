@@ -892,6 +892,12 @@ A free `debug_dump` function renders an indented tree dump for
 debugging and golden tests; core knows no kind names, so the caller
 supplies a kind-to-name function.
 
+Red cursors support navigation primitives — `ancestors`, sibling queries
+(`prev_sibling_or_token`, `next_sibling_or_token`), token edges
+(`first_token`, `last_token`), and descendant iteration (`descendant_tokens`)
+— enabling efficient traversals from any node. Core interprets no kinds
+throughout these operations, leaving semantic meaning to language consumers.
+
 Handles are `Rc`-based and single-threaded, matching the front ends
 that will use them.
 
