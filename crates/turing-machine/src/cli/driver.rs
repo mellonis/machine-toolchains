@@ -156,13 +156,7 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
         ));
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let Some((manifest_path, manifest)) =
-        crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
-    else {
-        return Err(
-            "no tmt.json with a `project` section found from the current directory upward".into(),
-        );
-    };
+    let (manifest_path, manifest) = discover_project(&cwd)?;
     let root = manifest_path
         .parent()
         .expect("tmt.json has a parent")
@@ -182,16 +176,7 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
 
     for name in requested {
         if !manifest.targets.contains_key(name) {
-            return Err(format!(
-                "no target `{name}` in {} (targets: {})",
-                manifest_path.display(),
-                manifest
-                    .targets
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            return Err(unknown_target_error(&manifest_path, &manifest, name));
         }
     }
     let selected: Vec<&str> = if requested.is_empty() {
@@ -227,6 +212,175 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
         return run_target(&root, output, name, target.run.as_ref(), stderr);
     }
     Ok(CliOutput::ok(String::new(), stderr))
+}
+
+/// Discovers the nearest ancestor `tmt.json` with a `project` section
+/// starting from `start` (docs/tmt/project.md (discovery)) — shared by
+/// `manifest_mode` (CLI, always the process's own `current_dir`) and
+/// [`build_target_for_launch`] (the DAP seam, an explicit override or
+/// that same fallback), so the two callers can never drift on the
+/// "no manifest found" wording.
+fn discover_project(start: &Path) -> Result<(PathBuf, crate::project::Manifest), String> {
+    crate::project::discover_manifest(start)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "no tmt.json with a `project` section found from the current directory upward".into()
+        })
+}
+
+/// The "no such target" error text, shared by `manifest_mode`'s
+/// per-request validation loop and [`build_target_for_launch`]'s single
+/// lookup — one wording, never two.
+fn unknown_target_error(
+    manifest_path: &Path,
+    manifest: &crate::project::Manifest,
+    name: &str,
+) -> String {
+    format!(
+        "no target `{name}` in {} (targets: {})",
+        manifest_path.display(),
+        manifest
+            .targets
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// [`build_target_for_launch`]'s answer: everything a DAP `launch`
+/// handler needs to start a session against a manifest target, without
+/// reaching back into `crate::project` itself — the built executable's
+/// absolute path (already written, sidecar `.map` included), its
+/// rendered compile warnings ONE STRING PER DIAGNOSTIC (this crate's
+/// thin-renderer rule preserved: data, not printing — the caller turns
+/// each line into its own `Output` event), and the target's own `run`
+/// block's resolved tape PATH (root-relative, docs/tmt/project.md (run
+/// block), through the exact rule `tmt build --run` uses — `run_once`,
+/// this file).
+///
+/// Unlike PM's `DapTargetBuild` (`crates/post-machine/src/cli/driver.rs`),
+/// the tape is NOT loaded here — only its path is resolved. TM-1's tape
+/// validation (band count, then per-tape alphabet cardinality) needs the
+/// launched executable's OWN tape header, which exists only once
+/// `crate::dap`'s `finish_launch` has read the `.tmx` this function just
+/// wrote — so loading happens there, through the exact same `build_tapes`
+/// helper program mode already uses (`dap/mod.rs`), never a second tape-
+/// loading copy.
+#[derive(Debug)]
+pub(crate) struct DapTargetBuild {
+    pub output: PathBuf,
+    pub diagnostics: Vec<String>,
+    pub tape_path: String,
+}
+
+/// tmt dap target-mode launch (`crate::dap`): builds ONE named manifest
+/// target IN PROCESS — the same manifest-mode path `tmt build TARGET`
+/// already runs (`build_one_target`, shared, not duplicated), carved out
+/// from behind `manifest_mode`'s cwd-only discovery and its declared flag
+/// surface, neither of which a launch request has any use for. Mirrors
+/// PM's `build_target_for_launch` closely; see [`DapTargetBuild`] for the
+/// one shape difference (a resolved tape PATH, not a loaded tape).
+///
+/// `project_dir` substitutes for the CLI's own `current_dir()` as
+/// [`discover_project`]'s starting point — `None` falls back to it,
+/// matching every other `discover_manifest` call site in this crate.
+/// `force_debug_info` is the caller's decision, not this function's
+/// default: the DAP adapter always passes `true` (a debug session
+/// without line maps is crippled), but the seam itself stays a faithful
+/// `-g`-optional build so a same-crate test can prove the forcing
+/// actually overrides the manifest's own profile rather than merely
+/// agreeing with it by coincidence.
+///
+/// Scope deliberately narrower than a full `tmt build TARGET` run: only
+/// `-g` is force-overridable here — opt level, `--strip-debugger`,
+/// `-Werror`, and `--call-mech` still come from the resolved profile /
+/// manifest declaration as declared (`build_one_target`'s own
+/// `flags.call_mech.or_else(|| manifest.effective_call_mech(target))`
+/// chain applies unchanged — this seam never sets `flags.call_mech`,
+/// so the target's own committed lowering wins, exactly as `tmt build
+/// TARGET` resolves it), since a launch request has no flag surface for
+/// any of them. The target's `run` block's `max-steps`/`max-tacts` are
+/// deliberately NOT adopted, mirroring PM: those bound a batch `tmt run`,
+/// whereas a debug session runs interactively under its own per-tick
+/// budget.
+///
+/// TM-specific contract — the tape-only run-block rule
+/// (docs/tmt/project.md (run block)): unlike PM, a TM-1 launch has no
+/// empty-tape default (`tmt run` itself requires `--tape-block`), so a
+/// target with no `run` block, or a `run` block that declares no `tape`,
+/// cannot be launched. Enforced through [`run_block_tape_path`] — the
+/// SAME function [`run_once`] calls for `tmt build --run` — so a target
+/// that CLI itself refuses to run fails a dap launch through the exact
+/// same guard conditions, not a second copy of them.
+pub(crate) fn build_target_for_launch(
+    project_dir: Option<&Path>,
+    target_name: &str,
+    force_debug_info: bool,
+) -> Result<DapTargetBuild, String> {
+    let cwd;
+    let start: &Path = match project_dir {
+        Some(p) => p,
+        None => {
+            cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            &cwd
+        }
+    };
+    let (manifest_path, manifest) = discover_project(start)?;
+    let root = manifest_path
+        .parent()
+        .expect("tmt.json has a parent")
+        .to_path_buf();
+    let target = manifest
+        .targets
+        .get(target_name)
+        .ok_or_else(|| unknown_target_error(&manifest_path, &manifest, target_name))?;
+
+    let flags = Flags {
+        debug_preset: false,
+        release_preset: false,
+        o0: false,
+        o1: false,
+        debug_info: force_debug_info,
+        strip_debugger: false,
+        outline: false,
+        werror: false,
+        disabled_passes: Vec::new(),
+        no_relax: false,
+        nostdlib: false,
+        keep_objects: false,
+        search_dirs: Vec::new(),
+        lib_names: Vec::new(),
+        out: None,
+        entry: None,
+        call_mech: None,
+        run: false,
+        list_targets: false,
+        verbose: false,
+    };
+    let (output, diagnostics) = build_one_target(&root, &manifest, target_name, target, &flags)?;
+    // One line per diagnostic is `render_warnings`' own contract (every
+    // diagnostic is exactly one `writeln!`, `verbose: false` above keeps
+    // `render_opt_report`'s multi-line entries out of this string
+    // entirely) — splitting on newlines here recovers that structure
+    // without a second, Vec-returning rendering path in `build.rs`.
+    let diagnostics: Vec<String> = diagnostics
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    // The tape-only run-block rule (this function's own doc comment):
+    // delegates to the shared `run_block_tape_path` helper — see its own
+    // doc comment.
+    let (tape_path, _spec) =
+        run_block_tape_path(&root, target_name, target.run.as_ref(), "a dap launch")?;
+
+    Ok(DapTargetBuild {
+        output,
+        diagnostics,
+        tape_path,
+    })
 }
 
 /// Builds one target: compile/assemble/load its effective sources with
@@ -435,22 +589,9 @@ fn run_once(
     name: &str,
     run: Option<&crate::project::RunSpec>,
 ) -> Result<CliOutput, String> {
-    let Some(spec) = run else {
-        return Err(format!(
-            "target `{name}` declares no `run` block: --run needs one with a `tape`"
-        ));
-    };
-    let Some(raw_tape) = spec.tape.clone() else {
-        return Err(format!(
-            "target `{name}`'s run block declares no `tape`: tmt run needs a .tmt snapshot"
-        ));
-    };
+    let (tape_path, spec) = run_block_tape_path(root, name, run, "tmt build --run")?;
     let settings = super::run::RunSettings {
-        tape: Some(
-            root.join(crate::project::normalize_rel(&raw_tape)?)
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        tape: Some(tape_path),
         // The manifest `run` block declares no save target, matching PM's
         // driver: `--save-tape-block` is a `tmt run` flag, not a target key.
         save: None,
@@ -460,6 +601,43 @@ fn run_once(
         trace: false,
     };
     super::run::execute_run(output, &settings, &mut std::io::sink())
+}
+
+/// The tape-only run-block rule (docs/tmt/project.md (run block)):
+/// TM-1 has no empty-tape default, so a target either declares no `run`
+/// block, or one that declares no `tape`, cannot proceed — both are hard
+/// errors naming the target. Shared by `run_once` (`tmt build --run`)
+/// and `build_target_for_launch` (the DAP target-mode seam,
+/// `dap/mod.rs`) so the two callers can never drift on the guard
+/// CONDITIONS; `caller` supplies only the per-invocation phrase naming
+/// who needed the tape (`"tmt build --run"` / `"a dap launch"`), so the
+/// two callers' messages read naturally without a second copy of the
+/// guard logic itself. On success, resolves the declared `tape` path
+/// manifest-relative (root-relative, not the process cwd) and hands back
+/// the resolved `&RunSpec` too, so a caller needing its other fields
+/// (`run_once`'s own `no_step_limit`/`max_steps`/`max_tacts`) doesn't
+/// have to re-derive `Some(spec)` from `run` a second time.
+fn run_block_tape_path<'a>(
+    root: &Path,
+    target_name: &str,
+    run: Option<&'a crate::project::RunSpec>,
+    caller: &str,
+) -> Result<(String, &'a crate::project::RunSpec), String> {
+    let Some(spec) = run else {
+        return Err(format!(
+            "target `{target_name}` declares no `run` block: {caller} needs one with a `tape`"
+        ));
+    };
+    let Some(raw_tape) = spec.tape.clone() else {
+        return Err(format!(
+            "target `{target_name}`'s run block declares no `tape`: {caller} needs a .tmt snapshot"
+        ));
+    };
+    let tape_path = root
+        .join(crate::project::normalize_rel(&raw_tape)?)
+        .to_string_lossy()
+        .into_owned();
+    Ok((tape_path, spec))
 }
 
 /// Compile options for argv mode: exactly `tmt compile`'s preset/flag
@@ -672,5 +850,158 @@ fn defined_names(objects: &[ObjectFile], libraries: &[ObjectFile]) -> HashSet<St
 fn refine_reports(reports: &mut [(PathBuf, CompileReport)], defined: &HashSet<String>) {
     for (_, report) in reports.iter_mut() {
         crate::compiler::refine_undeclared(&mut report.diagnostics, defined);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mtc_core::formats::tapeblock::{TapeBlockFile, TapeSnapshot};
+    use mtc_core::linemap::LineIndex;
+    use mtc_core::linker::MapFile;
+
+    // ---- build_target_for_launch (the DAP target-mode seam) ------------
+
+    /// A fresh, per-call scratch directory under the OS temp dir, unique
+    /// by process id + an atomic counter — this is an in-crate `#[cfg(test)]`
+    /// module, not a `tests/*.rs` integration binary, so `CARGO_TARGET_TMPDIR`
+    /// is not set here; mirrors `project.rs`'s own `unique_tmp_dir` for the
+    /// same reason (and PM's identical driver.rs test helper).
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "tmt-driver-test-{label}-{}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A minimal single-tape fixture: one mapped instruction line (line 7,
+    /// the `write`/`stop` rule) for `LineIndex::address_for_line` to probe.
+    const FIXTURE_TMC: &str = "\
+alphabet ab { '_', 'a' }
+
+machine {
+  tape main: ab;
+
+  entry state scan {
+    [*] -> write ['a'] stop;
+  }
+}
+";
+
+    fn write_fixture_tape(dir: &Path, name: &str) {
+        let block = TapeBlockFile {
+            alphabet: vec!["_".to_string(), "a".to_string()],
+            tapes: vec![TapeSnapshot {
+                origin: 0,
+                cells: vec![0],
+                head: 0,
+                alphabet: None,
+            }],
+        };
+        fs::write(dir.join(format!("{name}.tmt")), block.to_bytes().unwrap()).unwrap();
+    }
+
+    /// The negative control the forcing claim needs (mirrors PM's own
+    /// `force_debug_info_overrides_a_manifest_profile_that_disables_it`):
+    /// a test that merely asserts "launching with `force_debug_info: true`
+    /// produces a line map" would pass even if the parameter were entirely
+    /// ignored and `-g` came from elsewhere. Pinning `false` first, against
+    /// a manifest whose OWN debug profile disables `-g`, proves the seam is
+    /// a faithful pass-through by default — and only then does flipping to
+    /// `true` on the exact same fixture prove the flag is what closes the
+    /// gap, not a coincidence of the default profile.
+    #[test]
+    fn force_debug_info_overrides_a_manifest_profile_that_disables_it() {
+        let dir = unique_tmp_dir("force-debug-info");
+        fs::write(dir.join("app.tmc"), FIXTURE_TMC).unwrap();
+        write_fixture_tape(&dir, "app");
+        fs::write(
+            dir.join("tmt.json"),
+            r#"{ "project": {
+                "profiles": { "debug": { "debug-info": false } },
+                "targets": { "app": {
+                    "sources": ["app.tmc"],
+                    "run": { "tape": "app.tmt" }
+                } }
+            } }"#,
+        )
+        .unwrap();
+
+        let line_is_mapped = |built: &DapTargetBuild| {
+            let map_text = fs::read_to_string(sidecar_path(&built.output)).unwrap();
+            let map = MapFile::from_json(&map_text).unwrap();
+            LineIndex::new(&map).address_for_line(7).is_some()
+        };
+
+        let built = build_target_for_launch(Some(&dir), "app", false).unwrap();
+        assert!(
+            !line_is_mapped(&built),
+            "force_debug_info: false must leave the manifest's own -g-less profile in force"
+        );
+
+        // Same fixture, same manifest — only the seam's own parameter
+        // changes.
+        let built = build_target_for_launch(Some(&dir), "app", true).unwrap();
+        assert!(
+            line_is_mapped(&built),
+            "force_debug_info: true must inject -g even though the manifest profile disabled it"
+        );
+    }
+
+    #[test]
+    fn build_target_for_launch_reports_an_unknown_target_by_name() {
+        let dir = unique_tmp_dir("unknown-target");
+        fs::write(dir.join("app.tmc"), FIXTURE_TMC).unwrap();
+        fs::write(
+            dir.join("tmt.json"),
+            r#"{ "project": { "targets": { "app": { "sources": ["app.tmc"] } } } }"#,
+        )
+        .unwrap();
+
+        let err = build_target_for_launch(Some(&dir), "nosuch", true).unwrap_err();
+        assert!(err.contains("nosuch"), "{err}");
+        assert!(err.contains("app"), "{err}");
+    }
+
+    /// TM-specific: a target with no `run` block cannot launch — there is
+    /// no empty-tape default (module doc on `build_target_for_launch`).
+    #[test]
+    fn build_target_for_launch_rejects_a_target_with_no_run_block() {
+        let dir = unique_tmp_dir("no-run-block");
+        fs::write(dir.join("app.tmc"), FIXTURE_TMC).unwrap();
+        fs::write(
+            dir.join("tmt.json"),
+            r#"{ "project": { "targets": { "app": { "sources": ["app.tmc"] } } } }"#,
+        )
+        .unwrap();
+
+        let err = build_target_for_launch(Some(&dir), "app", true).unwrap_err();
+        assert!(err.contains("app"), "{err}");
+        assert!(err.contains("run"), "{err}");
+    }
+
+    /// TM-specific: a target whose `run` block declares no `tape` is the
+    /// other half of the same rule.
+    #[test]
+    fn build_target_for_launch_rejects_a_run_block_with_no_tape() {
+        let dir = unique_tmp_dir("no-tape");
+        fs::write(dir.join("app.tmc"), FIXTURE_TMC).unwrap();
+        fs::write(
+            dir.join("tmt.json"),
+            r#"{ "project": { "targets": { "app": {
+                "sources": ["app.tmc"],
+                "run": { "max-steps": 10 }
+            } } } }"#,
+        )
+        .unwrap();
+
+        let err = build_target_for_launch(Some(&dir), "app", true).unwrap_err();
+        assert!(err.contains("app"), "{err}");
+        assert!(err.contains("tape"), "{err}");
     }
 }

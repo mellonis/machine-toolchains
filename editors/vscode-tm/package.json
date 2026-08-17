@@ -12,7 +12,7 @@
   "engines": { "vscode": "^1.91.0" },
   "categories": ["Programming Languages"],
   "main": "./out/extension.js",
-  "activationEvents": ["onLanguage:tmc", "onLanguage:tma", "onTaskType:tmt"],
+  "activationEvents": ["onLanguage:tmc", "onLanguage:tma", "onTaskType:tmt", "onDebug"],
   "contributes": {
     "languages": [{
       "id": "tmc", "extensions": [".tmc"], "aliases": ["TMC"],
@@ -68,6 +68,76 @@
         "target": { "type": "string", "description": "Target name; `build` only." },
         "run": { "type": "boolean", "description": "Run the target after building; `build` only." }
       }
+    }],
+    "debuggers": [{
+      "type": "tmt",
+      "label": "TM-1 (tmt)",
+      "languages": ["tmc", "tma"],
+      "configurationAttributes": {
+        "launch": {
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "Target-mode launch: a target name from the tmt.json project manifest. Built in process (the same driver `tmt build TARGET` uses) with debug info forced on regardless of the target's own profile. The tape comes from the target's own run block — a target with no run block, or a run block with no tape, fails to launch. Mutually exclusive with `program`."
+            },
+            "project": {
+              "type": "string",
+              "description": "Target mode only: where to start the tmt.json discovery walk (its own nearest-ancestor default otherwise — normally the workspace root)."
+            },
+            "program": {
+              "type": "string",
+              "description": "Program-mode launch: path to a prebuilt .tmx executable, used as-is. Mutually exclusive with `target`. Build it with `tmt compile -g`/`tmt link` (or `tmt build --debug`) first — without debug info, source breakpoints answer unverified and default-granularity stepping only stops at function boundaries (request granularity: \"instruction\" to step one instruction at a time regardless)."
+            },
+            "tape": {
+              "type": "string",
+              "description": "Program mode only, and REQUIRED there: path to a .tmt tape snapshot. TM-1 has no empty-tape default (unlike PM-1's pmt), so program-mode launch fails without one."
+            },
+            "stopOnEntry": {
+              "type": "boolean",
+              "default": false,
+              "description": "Break before the first instruction runs, instead of running to the first breakpoint (or to completion)."
+            },
+            "trace": {
+              "type": "boolean",
+              "default": false,
+              "description": "Stream a per-instruction trace line to the Debug Console as console-category output, matching `tmt run --trace`."
+            }
+          },
+          "oneOf": [
+            { "required": ["target"] },
+            { "required": ["program", "tape"] }
+          ]
+        }
+      },
+      "initialConfigurations": [{
+        "name": "tmt: launch target",
+        "type": "tmt",
+        "request": "launch",
+        "target": "main",
+        "stopOnEntry": true
+      }],
+      "configurationSnippets": [{
+        "label": "tmt: Launch target",
+        "description": "Build and debug a tmt.json manifest target in process.",
+        "body": {
+          "name": "tmt: launch target",
+          "type": "tmt",
+          "request": "launch",
+          "target": "${1:main}",
+          "stopOnEntry": true
+        }
+      }, {
+        "label": "tmt: Launch program",
+        "description": "Debug a prebuilt .tmx executable against a tape snapshot.",
+        "body": {
+          "name": "tmt: launch program",
+          "type": "tmt",
+          "request": "launch",
+          "program": "^\"\\${workspaceFolder}/${1:main.tmx}\"",
+          "tape": "^\"\\${workspaceFolder}/${2:main.tmt}\"",
+          "stopOnEntry": true
+        }
+      }]
     }]
   },
   "scripts": {

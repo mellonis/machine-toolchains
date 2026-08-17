@@ -26,4 +26,88 @@ pub trait Tape {
     fn write(&mut self, index: u32) -> Result<(), DeviceFault>;
     /// Current head position (annular tapes: the current index).
     fn head(&self) -> i64;
+
+    /// Direct positional write (docs/core.md (the tape and device bus)):
+    /// walks the head to `pos` via `left()`/`right()`, writes `index`, then
+    /// walks the head back to where it started — including when the write
+    /// itself faults, so a caller (a DAP adapter setting a variable, say)
+    /// never leaves the head displaced by a failed probe. `pos` is in the
+    /// same coordinate space `head()` reports. The tape-cell half of a DAP
+    /// adapter's writable-state contract, including the strict-fault and
+    /// no-relatch edge behaviors, is documented user-facing at docs/dap.md
+    /// (writable state).
+    ///
+    /// On a wrap-bounded tape (e.g. `AnnularTape`) a `pos` outside the
+    /// ring can never be landed on: walking one lap returns to the
+    /// starting head position without ever equalling `pos`. That lap
+    /// closing is the failure signal — it means the head is already back
+    /// where it started, so `poke` returns
+    /// `Err(DeviceFault::PositionUnreachable { pos })` directly, with no
+    /// separate walk-back needed.
+    fn poke(&mut self, pos: i64, index: u32) -> Result<(), DeviceFault> {
+        let origin = self.head();
+        while self.head() != pos {
+            if self.head() < pos {
+                self.right();
+            } else {
+                self.left();
+            }
+            if self.head() == origin {
+                return Err(DeviceFault::PositionUnreachable { pos });
+            }
+        }
+        let result = self.write(index);
+        while self.head() != origin {
+            if self.head() < origin {
+                self.right();
+            } else {
+                self.left();
+            }
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::devices::{AnnularTape, InfiniteTape, StrictTape};
+
+    #[test]
+    fn poke_writes_the_target_cell_and_restores_head() {
+        let mut tape = InfiniteTape::new(); // head at 0
+        assert_eq!(tape.poke(3, 1), Ok(()));
+        assert_eq!(tape.head(), 0); // head restored to where it started
+        while tape.head() < 3 {
+            tape.right();
+        }
+        assert_eq!(tape.read(), 1); // the poked cell actually got written
+    }
+
+    #[test]
+    fn poke_restores_head_even_when_the_write_faults() {
+        let mut tape = StrictTape::new(InfiniteTape::new()); // head at 0, blank
+        tape.left();
+        tape.left(); // head at -2, away from the poke target
+        assert_eq!(tape.head(), -2);
+        // pos 4 is blank; writing 0 there (== its current value) is a
+        // strict-cell violation.
+        assert_eq!(tape.poke(4, 0), Err(DeviceFault::StrictCellViolation));
+        assert_eq!(tape.head(), -2); // restored despite the fault
+    }
+
+    #[test]
+    fn poke_out_of_range_on_an_annular_tape_reports_unreachable_and_restores_head() {
+        // AnnularTape's head() is always in 0..size — a pos outside that
+        // ring can never be landed on by walking left()/right().
+        let mut tape = AnnularTape::new(4);
+        tape.right();
+        tape.right(); // head at 2, away from 0 to make the restore visible
+        assert_eq!(tape.head(), 2);
+        assert_eq!(
+            tape.poke(100, 1),
+            Err(DeviceFault::PositionUnreachable { pos: 100 })
+        );
+        assert_eq!(tape.head(), 2); // head restored despite the failed walk
+    }
 }

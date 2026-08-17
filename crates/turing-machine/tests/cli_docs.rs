@@ -12,9 +12,10 @@
 //!    silently going undocumented.
 //!
 //! Two invocation shapes, both dictated by the real parser:
-//!  - `lsp` is probed as `lsp --help` and NEVER bare — a bare `tmt lsp`
-//!    hands real stdio to the server loop and would block this test
-//!    process forever waiting for a client that never connects;
+//!  - `lsp` and `dap` are probed as `lsp --help`/`dap --help` and NEVER
+//!    bare — a bare `tmt lsp`/`tmt dap` hands real stdio to their
+//!    respective server loops and would block this test process forever
+//!    waiting for a client that never connects;
 //!  - `tape` and `ir` are probed BARE: their nested actions answer
 //!    `--help` too (`tmt tape new --help` prints usage, same as any leaf),
 //!    but every action in a group renders that group's ONE shared usage
@@ -58,6 +59,7 @@ fn quoted_blocks() -> Vec<(Option<&'static str>, Vec<&'static str>)> {
         (Some("lint"), vec!["lint", "--help"]),
         (Some("fmt"), vec!["fmt", "--help"]),
         (Some("lsp"), vec!["lsp", "--help"]),
+        (Some("dap"), vec!["dap", "--help"]),
         (Some("completions"), vec!["completions", "--help"]),
     ]
 }

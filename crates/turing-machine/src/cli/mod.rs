@@ -15,7 +15,12 @@
 // path itself must be nameable from outside `cli`, not just the function.
 pub(crate) mod build;
 mod completions;
-mod driver;
+mod dap;
+// `pub(crate)`: `crate::dap::TmDapAdapter`'s target-mode `launch` calls
+// `driver::build_target_for_launch` directly — the DAP seam this crate's
+// `dap` module carves the manifest build path down to (docs/tmt/cli.md
+// (build)), not a duplicate of it.
+pub(crate) mod driver;
 mod fmt;
 mod inspect;
 mod lint;
@@ -58,6 +63,7 @@ SUBCOMMANDS:
   lint         hygiene findings over .tmc and .tma sources
   fmt          canonical formatting for .tmc and .tma sources
   lsp          run the LSP server for .tmc and .tma on stdio
+  dap          run the DAP debug-adapter server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
@@ -96,6 +102,7 @@ pub fn execute_with(
         Some("lint") => lint::lint(&args[1..]),
         Some("fmt") => fmt::fmt(&args[1..]),
         Some("lsp") => lsp::lsp(&args[1..]),
+        Some("dap") => dap::dap(&args[1..]),
         Some("completions") => completions::completions(&args[1..]),
         Some(other) => Err(format!("unknown subcommand `{other}`\n\n{USAGE}")),
     }

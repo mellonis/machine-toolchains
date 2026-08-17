@@ -30,6 +30,7 @@ SUBCOMMANDS:
   lint         hygiene findings over .tmc and .tma sources
   fmt          canonical formatting for .tmc and .tma sources
   lsp          run the LSP server for .tmc and .tma on stdio
+  dap          run the DAP debug-adapter server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `tmt <SUBCOMMAND> --help` for details. `tmt --version` prints the version.
@@ -1064,6 +1065,44 @@ when it matches neither. The process exit code follows the LSP lifecycle:
 without a prior `shutdown`, or if the client disconnects without sending
 either. `docs/lsp.md` has the capabilities table, the configuration
 channels, and editor wiring.
+
+## `tmt dap`
+
+```
+USAGE: tmt dap
+
+Run the DAP debug-adapter server for a .tmx program on stdio until the client disconnects.
+Exit code: 0 after a clean disconnect, 1 on transport EOF before one.
+```
+
+Runs the Debug Adapter Protocol server on stdio, mirroring `tmt lsp`'s role:
+the other subcommand that hands real stdio to library code, every protocol
+frame going over stdin/stdout. Two `launch` shapes are recognized, named by
+which of `"program"`/`"target"` the request's arguments carry (giving
+exactly one is required):
+
+- **Program mode** names a prebuilt `.tmx` executable (`"program"`) and a
+  `.tmt` tape snapshot (`"tape"`) — unlike `pmt dap`, TM-1 has no
+  empty-tape default (the same rule `tmt run` itself enforces), so `"tape"`
+  is mandatory in this mode.
+- **Target mode** names a `tmt.json` manifest target (`"target"`, an
+  optional `"project"` path override) and builds it in process through the
+  same path `tmt build TARGET` runs, always with debug info forced on. The
+  tape comes from the target's own `run` block; a target with no `run`
+  block, or one whose `run` block declares no `tape`, cannot be launched —
+  the same rule `tmt build --run` itself enforces.
+
+Both modes cover the full v1 session lifecycle (`initialize`/`disconnect`),
+`stopOnEntry`, `configurationDone`, run control (`continue`/`pause`),
+source and instruction breakpoints, stepping at line or instruction
+granularity, the stack/scopes/variables surface over TM-1's registers and
+every tape, `setVariable`, `disassemble`, and the opt-in `"trace"` output
+stream. Termination renders a summary `output` event (the same steps/tacts
+numbers `tmt run` prints) followed by `terminated` and `exited`, with the
+same 0/2/3 exit-code mapping as `tmt run`'s stopped/halted/trapped outcomes.
+See `docs/dap.md` for the full launch-config schema, the closed
+output-events list, the writable-state contract, and the degradation
+rules.
 
 ## `tmt completions`
 

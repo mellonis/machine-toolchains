@@ -258,7 +258,12 @@ fn parse_profile(text: &str) -> Result<TactProfile, String> {
 /// Initial tape + the alphabet used for rendering/saving: a loaded block
 /// brings its own glyphs (PM-1 blocks hold exactly one tape); otherwise
 /// the arch defaults.
-fn initial_tape(
+///
+/// `pub(super)`, not private: `cli/driver.rs`'s `build_target_for_launch`
+/// (the DAP target-mode launch seam) resolves a manifest target's `run`
+/// block through this SAME function rather than a second copy of the
+/// tape/tape-block/head rules.
+pub(super) fn initial_tape(
     block: Option<&str>,
     inline: Option<&str>,
     head: i64,

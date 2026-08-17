@@ -369,6 +369,22 @@ fixed instruction budget. Breakpoints are addresses; a session paused at
 one is not re-paused by resuming past it. The session also exposes IP,
 MF, FR, depth, the stack, and stats between commands.
 
+`MF`/`MR` are two views onto the SAME one register: `mr()` reads it as
+the general `u32` value (`mf()` is `mr() != 0`), and `set_mf`/`set_mr`
+write it either way — a check-shaped instruction reading it afterward
+sees whatever was written last, with no latch micro-op re-running.
+`continue_`, `run_steps`, `step_over`, and `step_out` each have a
+multi-device `_tapes` sibling (mirroring `step_in`/`step_in_tapes`),
+taking `devices: &mut [&mut dyn Tape]` instead of a single tape — the
+single-device methods are thin wrappers over the `_tapes` ones for a
+one-element slice. `Tape::poke(pos, index)` is a direct positional write
+(`docs/dap.md` (writable state)): it walks the head to `pos`, writes,
+then walks back to where it started — including when the write itself
+faults, so a caller (a debug adapter setting a variable, say) never
+leaves the head displaced by a failed probe. On a wrap-bounded tape a
+`pos` the walk can never land on reports `DeviceFault::PositionUnreachable`
+instead of looping forever.
+
 Pause causes (`PauseCause`): `Step` (a stepping command completed),
 `Breakpoint(addr)` (about to execute the instruction at `addr`), `Brk`
 (a **debug break** instruction just retired — see below), `Manual` (an

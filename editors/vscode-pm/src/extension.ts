@@ -38,7 +38,19 @@ export async function activate(context: vscode.ExtensionContext) {
     watcher,
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.invalidate()),
     vscode.tasks.registerTaskProvider('pmt', provider),
+    // Same `pmtPath` the language client and the task provider above
+    // already resolved (`pmt.path`, read once at activation) — 'dap' is
+    // `pmt`'s other stdio-server subcommand, alongside 'lsp'.
+    vscode.debug.registerDebugAdapterDescriptorFactory('pmt', new PmtDebugAdapterDescriptorFactory(pmtPath)),
   );
+}
+
+class PmtDebugAdapterDescriptorFactory implements vscode.DebugAdapterDescriptorFactory {
+  constructor(private readonly pmtPath: string) {}
+
+  createDebugAdapterDescriptor(): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+    return new vscode.DebugAdapterExecutable(this.pmtPath, ['dap']);
+  }
 }
 
 export function deactivate(): Thenable<void> | undefined {

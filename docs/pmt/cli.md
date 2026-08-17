@@ -25,6 +25,7 @@ SUBCOMMANDS:
   tape-block   build/new/set/show .pmt tape-block snapshots
   ir           render --emit-ir JSON (ir graph -> Mermaid)
   lsp          run the LSP server on stdio
+  dap          run the DAP debug-adapter server on stdio
   completions  emit a shell completion script (zsh; bash/fish follow-on)
 
 Run `pmt <SUBCOMMAND> --help` for details. `pmt --version` prints the version.
@@ -763,6 +764,41 @@ a prior `shutdown`, or if the client disconnects without sending
 either. See `docs/lsp.md` for the capabilities table, editor wiring
 samples, and the configuration and materialized-standard-library
 details.
+
+## `pmt dap`
+
+```
+USAGE: pmt dap
+
+Run the DAP debug-adapter server for a .pmx program on stdio until the client disconnects.
+Exit code: 0 after a clean disconnect, 1 on transport EOF before one.
+```
+
+Runs the Debug Adapter Protocol server on stdio, mirroring `pmt lsp`'s
+role: the other subcommand that hands real stdio to library code, every
+protocol frame going over stdin/stdout. Two `launch` shapes are
+recognized, named by which of `"program"`/`"target"` the request's
+arguments carry (giving exactly one is required):
+
+- **Program mode** names a prebuilt `.pmx` executable (`"program"`) and
+  an optional `.pmt` tape snapshot (`"tape"` — the empty tape is PM's
+  default); `"strictCells": true` mirrors `pmt run --strict-cells`.
+- **Target mode** names a `pmt.json` manifest target (`"target"`, an
+  optional `"project"` path override) and builds it in process through
+  the same path `pmt build TARGET` runs, always with debug info forced
+  on. The tape comes from the target's own `run` settings.
+
+Both modes cover the full v1 session lifecycle (`initialize`/
+`disconnect`), `stopOnEntry`, `configurationDone`, run control
+(`continue`/`pause`), source and instruction breakpoints, stepping at
+line or instruction granularity, the stack/scopes/variables surface over
+PM-1's registers and its tape, `setVariable`, `disassemble`, and the
+opt-in `"trace"` output stream. Termination renders a summary `output`
+event (the same steps/tacts numbers `pmt run` prints) followed by
+`terminated` and `exited`, with the same 0/2/3 exit-code mapping as
+`pmt run`'s stopped/halted/trapped outcomes. See `docs/dap.md` for the
+full launch-config schema, the closed output-events list, the
+writable-state contract, and the degradation rules.
 
 ## `pmt completions`
 
