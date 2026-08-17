@@ -148,13 +148,10 @@ fn find_first_sound_pair(f: &IrFunction) -> Option<(usize, usize)> {
 
 pub fn run(f: &mut IrFunction) -> u32 {
     let mut changes = 0;
-    loop {
-        // Recompute facts on the CURRENT cfg every iteration — see the
-        // module doc: a scan's decisions must never rest on a snapshot a
-        // sibling deletion in this same call has already invalidated.
-        let Some((bi, i)) = find_first_sound_pair(f) else {
-            break;
-        };
+    // Recompute facts on the CURRENT cfg every iteration — see the
+    // module doc: a scan's decisions must never rest on a snapshot a
+    // sibling deletion in this same call has already invalidated.
+    while let Some((bi, i)) = find_first_sound_pair(f) {
         f.blocks[bi].ops.drain(i..=i + 1);
         changes += 1;
     }
