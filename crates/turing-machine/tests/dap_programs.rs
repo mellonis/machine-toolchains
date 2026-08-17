@@ -1952,3 +1952,352 @@ fn trace_true_names_the_faulting_instruction_exactly_once_across_the_two_phase_t
         other => panic!("unexpected event sequence: {other:?}"),
     }
 }
+
+// ---- target-mode launch (cli::driver::build_target_for_launch) --------
+
+/// Writes a one-target manifest project into `dir`: `tmt.json` with
+/// `project` set to `project_body` verbatim (the whole object after
+/// `"project":`) plus `app.tmc` holding `source`. Mirrors PM's
+/// `write_target_project` (`crates/post-machine/tests/dap_programs.rs`).
+fn write_target_project(dir: &Path, source: &str, project_body: &str) {
+    fs::write(dir.join("app.tmc"), source).unwrap();
+    fs::write(
+        dir.join("tmt.json"),
+        format!(r#"{{ "project": {project_body} }}"#),
+    )
+    .unwrap();
+}
+
+fn launch_target_args(dir: &Path, target: &str, stop_on_entry: bool) -> Value {
+    json!({
+        "target": target,
+        "project": dir.to_str().unwrap(),
+        "stopOnEntry": stop_on_entry,
+    })
+}
+
+/// A minimal single-tape `.tmt` block over the `{_, a}` alphabet the
+/// target fixtures below all share — satisfies the tape-only run-block
+/// rule for tests that need SOME valid tape but don't care about its
+/// content (mirrors nothing in PM, which has no such rule to satisfy).
+fn write_plain_target_tape(dir: &Path, name: &str) -> PathBuf {
+    let block = TapeBlockFile {
+        alphabet: vec!["_".to_string(), "a".to_string()],
+        tapes: vec![TapeSnapshot {
+            origin: 0,
+            cells: vec![0],
+            head: 0,
+            alphabet: None,
+        }],
+    };
+    let path = dir.join(format!("{name}.tmt"));
+    fs::write(&path, block.to_bytes().unwrap()).unwrap();
+    path
+}
+
+/// A tape block with a non-default alphabet (`"_"`/`"#"`) and a SECOND
+/// cell so the block's own glyph at index 1 (`"#"`) is distinguishable
+/// from any default/coincidental rendering — mirrors PM's
+/// `write_target_tape_block`, proving the `tape-block` load path
+/// (root-relative resolution + per-tape alphabet) rather than a
+/// coincidence.
+fn write_target_tape_block(dir: &Path, name: &str) -> PathBuf {
+    let block = TapeBlockFile {
+        alphabet: vec!["_".to_string(), "#".to_string()],
+        tapes: vec![TapeSnapshot {
+            origin: 0,
+            cells: vec![0, 1],
+            head: 0,
+            alphabet: None,
+        }],
+    };
+    let path = dir.join(format!("{name}.tmt"));
+    fs::write(&path, block.to_bytes().unwrap()).unwrap();
+    path
+}
+
+const TARGET_APP_TMC: &str = "\
+alphabet ab { '_', 'a' }
+
+machine {
+  tape main: ab;
+
+  entry state scan {
+    [*] -> write ['a'] stop;
+  }
+}
+";
+
+/// The manifest's own debug profile disables `-g`; the adapter must
+/// still force it — proven the way `dap_programs.rs` proves anything
+/// -g-dependent: a source breakpoint on a mapped line answers
+/// `verified: true`. If the seam's `force_debug_info` parameter were
+/// ignored, this line would be `verified: false`.
+#[test]
+fn target_launch_forces_debug_info_so_breakpoints_verify() {
+    let dir = scratch("target-force-g");
+    write_plain_target_tape(&dir, "app");
+    write_target_project(
+        &dir,
+        TARGET_APP_TMC,
+        r#"{
+            "profiles": { "debug": { "debug-info": false } },
+            "targets": { "app": {
+                "sources": ["app.tmc"],
+                "run": { "tape": "app.tmt" }
+            } }
+        }"#,
+    );
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("initialize", &Value::Null, &mut out)
+        .unwrap();
+    adapter
+        .handle("launch", &launch_target_args(&dir, "app", true), &mut out)
+        .unwrap();
+    assert_eq!(
+        out,
+        vec![AdapterEvent::Initialized],
+        "no diagnostics on this fixture — launch reports readiness only"
+    );
+
+    out.clear();
+    let write_line = line_of(TARGET_APP_TMC, "write");
+    let result = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({"breakpoints": [{"line": write_line}]}),
+            &mut out,
+        )
+        .unwrap();
+    let breakpoints = result["breakpoints"].as_array().unwrap();
+    assert_eq!(
+        breakpoints[0]["verified"],
+        json!(true),
+        "forced -g must yield a usable line map even though the manifest \
+         profile turned debug-info off: {breakpoints:?}"
+    );
+}
+
+/// An unused `use` import warns `unused-import` at compile time without
+/// failing the build — the warning must reach the client as its own
+/// `stderr` `Output` event, emitted before `Initialized`.
+#[test]
+fn target_launch_streams_build_warnings_as_stderr_output_before_initialized() {
+    let dir = scratch("target-warnings");
+    write_plain_target_tape(&dir, "app");
+    write_target_project(
+        &dir,
+        &format!("use std::binaryNumbersBare::plusOne;\n\n{TARGET_APP_TMC}"),
+        r#"{ "targets": { "app": {
+            "sources": ["app.tmc"],
+            "run": { "tape": "app.tmt" }
+        } } }"#,
+    );
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_target_args(&dir, "app", false), &mut out)
+        .unwrap();
+
+    match out.as_slice() {
+        [
+            AdapterEvent::Output { category, output },
+            AdapterEvent::Initialized,
+        ] => {
+            assert_eq!(*category, "stderr");
+            assert!(output.contains("unused import"), "got: {output}");
+            assert!(output.contains("plusOne"), "got: {output}");
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+}
+
+/// The target's `run` block's `tape` must become the session's initial
+/// tape, resolved manifest-relative (root-relative, not the process cwd)
+/// — proven by reading back the block's own `"#"` glyph on `[1]` through
+/// the ordinary `variables` path.
+#[test]
+fn target_launch_loads_the_tape_block_from_the_targets_run_settings() {
+    let dir = scratch("target-tape");
+    write_target_tape_block(&dir, "app");
+    write_target_project(
+        &dir,
+        TARGET_APP_TMC,
+        r#"{ "targets": { "app": {
+            "sources": ["app.tmc"],
+            "run": { "tape": "app.tmt" }
+        } } }"#,
+    );
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_target_args(&dir, "app", true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    let scopes = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let tapes_ref = scope_ref(&scopes, "Tapes");
+    let tapes_vars = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tapes_ref}),
+            &mut out,
+        )
+        .unwrap();
+    let tape0_ref = variable_ref(&tapes_vars, "tape 0");
+    let window = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tape0_ref}),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(variable_value(&window, "» [0]"), "'_'");
+    assert_eq!(variable_value(&window, "[1]"), "'#'");
+}
+
+#[test]
+fn target_launch_with_a_bad_target_name_fails_without_touching_state() {
+    let dir = scratch("target-bad-name");
+    write_plain_target_tape(&dir, "app");
+    write_target_project(
+        &dir,
+        TARGET_APP_TMC,
+        r#"{ "targets": { "app": {
+            "sources": ["app.tmc"],
+            "run": { "tape": "app.tmt" }
+        } } }"#,
+    );
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    let err = adapter
+        .handle(
+            "launch",
+            &launch_target_args(&dir, "nosuch", false),
+            &mut out,
+        )
+        .unwrap_err();
+    assert!(err.contains("nosuch"), "got: {err}");
+    assert!(out.is_empty());
+}
+
+/// TM-specific: a target with no `run` block at all cannot launch — there
+/// is no empty-tape default for TM-1 to fall back on (module doc, the
+/// tape-only run-block rule). The failure must be clean: no diagnostics,
+/// no `Initialized`.
+#[test]
+fn target_without_a_run_block_fails_cleanly() {
+    let dir = scratch("target-no-run-block");
+    write_target_project(
+        &dir,
+        TARGET_APP_TMC,
+        r#"{ "targets": { "app": { "sources": ["app.tmc"] } } }"#,
+    );
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    let err = adapter
+        .handle("launch", &launch_target_args(&dir, "app", false), &mut out)
+        .unwrap_err();
+    assert!(err.contains("app"), "got: {err}");
+    assert!(err.contains("run"), "got: {err}");
+    assert!(
+        out.is_empty(),
+        "a clean launch failure must push nothing, got: {out:?}"
+    );
+}
+
+/// TM-specific: a target WITH a `run` block that declares no `tape` is
+/// the other half of the same rule — `tmt build --run` itself refuses
+/// this shape (`run_once`, `cli/driver.rs`); a dap launch must refuse it
+/// the same clean way.
+#[test]
+fn target_run_block_without_a_tape_fails_cleanly() {
+    let dir = scratch("target-no-tape");
+    write_target_project(
+        &dir,
+        TARGET_APP_TMC,
+        r#"{ "targets": { "app": {
+            "sources": ["app.tmc"],
+            "run": { "max-steps": 10 }
+        } } }"#,
+    );
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    let err = adapter
+        .handle("launch", &launch_target_args(&dir, "app", false), &mut out)
+        .unwrap_err();
+    assert!(err.contains("app"), "got: {err}");
+    assert!(err.contains("tape"), "got: {err}");
+    assert!(
+        out.is_empty(),
+        "a clean launch failure must push nothing, got: {out:?}"
+    );
+}
+
+#[test]
+fn launch_rejects_program_and_target_together() {
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    let args = json!({"program": "x.tmx", "tape": "x.tmt", "target": "app"});
+    let err = adapter.handle("launch", &args, &mut out).unwrap_err();
+    assert!(
+        err.contains("program") && err.contains("target"),
+        "got: {err}"
+    );
+    assert!(out.is_empty());
+}
+
+// ---- Done-guard: configurationDone/continue after termination ---------
+
+/// A repeat `configurationDone` or `continue` after the program has
+/// already finished must answer the standing rejection WITHOUT re-running
+/// `finish()`'s termination events a second time (`handle_configuration_done`/
+/// `handle_continue`'s own `RunState::Done` guards) — mirrors PM's own
+/// carried-scope test (Task 10 review ruling: this gap was untested in
+/// BOTH adapters).
+#[test]
+fn configuration_done_and_continue_after_done_reject_without_reemitting_termination() {
+    let dir = scratch("done-guard");
+    let program = write_tmx(&dir, "stp", STP_TMA, LinkOptions::default());
+    let tape = write_one_tape_block(&dir, "stp", 2, 0);
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, false), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Done);
+
+    out.clear();
+    let err = adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap_err();
+    assert!(err.contains("already finished"), "got: {err}");
+    assert!(
+        out.is_empty(),
+        "a rejected configurationDone must not push events, got: {out:?}"
+    );
+
+    let err = adapter
+        .handle("continue", &Value::Null, &mut out)
+        .unwrap_err();
+    assert!(err.contains("already finished"), "got: {err}");
+    assert!(
+        out.is_empty(),
+        "a rejected continue must not push events, got: {out:?}"
+    );
+}

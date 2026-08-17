@@ -1844,3 +1844,46 @@ fn launch_rejects_program_and_target_together() {
     );
     assert!(out.is_empty());
 }
+
+// ---- Done-guard: configurationDone/continue after termination ---------
+
+/// A repeat `configurationDone` or `continue` after the program has
+/// already finished must answer the standing rejection WITHOUT re-running
+/// `finish()`'s termination events a second time (`handle_configuration_done`/
+/// `handle_continue`'s own `RunState::Done` guards) — carried scope from
+/// Task 10's review (the gap was untested in BOTH adapters).
+#[test]
+fn configuration_done_and_continue_after_done_reject_without_reemitting_termination() {
+    let dir = scratch("done-guard");
+    let program = write_pmx(&dir, "stp", STP_PROGRAM);
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Done);
+
+    out.clear();
+    let err = adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap_err();
+    assert!(err.contains("already finished"), "got: {err}");
+    assert!(
+        out.is_empty(),
+        "a rejected configurationDone must not push events, got: {out:?}"
+    );
+
+    let err = adapter
+        .handle("continue", &Value::Null, &mut out)
+        .unwrap_err();
+    assert!(err.contains("already finished"), "got: {err}");
+    assert!(
+        out.is_empty(),
+        "a rejected continue must not push events, got: {out:?}"
+    );
+}

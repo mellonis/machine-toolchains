@@ -2,11 +2,34 @@
 //! (mtc_core::dap), serving `tmt dap`. This is the TM mirror of
 //! `mtc_post_machine::dap::PmDapAdapter` — same v1 lifecycle, run control,
 //! termination, breakpoints, stepping, and state surface — over TM-1's
-//! multi-tape, table-dispatched model. **This task covers program mode
-//! only**; target mode (building a manifest target in process, the PM
-//! adapter's `handle_launch_target`) is out of this task's scope and left
-//! for a later one — `handle_launch` therefore has no `"program"`/`"target"`
-//! dispatch at all, unlike its PM sibling.
+//! multi-tape, table-dispatched model, plus PM's two `launch` shapes
+//! (`handle_launch` dispatches on which of `"program"`/`"target"` the
+//! arguments carry, mirroring PM exactly):
+//!
+//! - **Program mode**: a prebuilt `.tmx` (`"program"`) plus a mandatory
+//!   `.tmt` tape snapshot (`"tape"` — see the tape-required bullet below).
+//! - **Target mode**: names a manifest target (`"target": "<name>"`) and
+//!   an optional `"project"` path override (the discovery walk's starting
+//!   point — `cli::driver::build_target_for_launch`'s own `current_dir`
+//!   fallback otherwise). The target builds IN PROCESS, through that same
+//!   `cli::driver` seam `tmt build TARGET` itself runs — never shelling
+//!   out — always with `-g` forced regardless of the target's resolved
+//!   profile. Its compile warnings stream as `stderr`-category `Output`
+//!   events, one per diagnostic line, BEFORE `Initialized`; a failed
+//!   build (or a failed tape load, module doc: the tape-only run-block
+//!   rule below) fails the `launch` request with the driver's rendered
+//!   error text — a failed target launch pushes nothing at all. Target
+//!   mode has no `"tape"`/`"strictCells"` arguments of its own — the tape
+//!   comes from the target's own `run` block, resolved through
+//!   `cli::driver::build_target_for_launch` exactly as `tmt build --run`
+//!   resolves it. **The tape-only run-block rule** (docs/tmt/project.md
+//!   (run block)): unlike PM, TM-1 has no empty-tape default (the next
+//!   bullet), so a target with no `run` block, or one whose `run` block
+//!   declares no `tape`, is a launch-time error — the same two guards
+//!   `tmt build --run` itself enforces via `run_once` (`cli/driver.rs`),
+//!   never a phantom `Initialized`.
+//!
+//! Both modes share `"stopOnEntry"`/`"trace"`.
 //!
 //! ## TM specifics and deliberate deviations from the PM mirror
 //!
@@ -105,6 +128,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -456,10 +480,29 @@ impl TmDapAdapter {
         }
     }
 
-    /// Program mode only (module doc) — a TM `"target"` argument is not
-    /// recognized in this task; unlike `PmDapAdapter::handle_launch` there
-    /// is no mode dispatch here.
+    /// Dispatches on which of `"program"`/`"target"` the arguments carry
+    /// (module doc) — the two are mutually exclusive, checked explicitly
+    /// rather than letting `"target"` silently win, mirroring
+    /// `PmDapAdapter::handle_launch` exactly.
     fn handle_launch(
+        &mut self,
+        arguments: &Value,
+        out: &mut Vec<AdapterEvent>,
+    ) -> Result<Value, String> {
+        let has_program = arguments.get("program").and_then(Value::as_str).is_some();
+        let has_target = arguments.get("target").and_then(Value::as_str).is_some();
+        match (has_program, has_target) {
+            (true, true) => Err(
+                "launch: 'program' and 'target' are mutually exclusive — name exactly one"
+                    .to_string(),
+            ),
+            (_, true) => self.handle_launch_target(arguments, out),
+            _ => self.handle_launch_program(arguments, out),
+        }
+    }
+
+    /// Program mode: a prebuilt `.tmx` used as-is (module doc).
+    fn handle_launch_program(
         &mut self,
         arguments: &Value,
         out: &mut Vec<AdapterEvent>,
@@ -494,6 +537,63 @@ impl TmDapAdapter {
             ResolvedLaunch {
                 program,
                 tape_path,
+                tapes,
+                alphabets,
+                stop_on_entry,
+                trace,
+            },
+            out,
+        )
+    }
+
+    /// Target mode (module doc): builds `"target"` IN PROCESS through
+    /// `cli::driver::build_target_for_launch`, always forcing `-g`. The
+    /// tape-only run-block rule (module doc) surfaces here as
+    /// `build_target_for_launch` returning `Err` before ANY event ever
+    /// reaches `out` — no diagnostics, no `Initialized`, the same "no
+    /// phantom initialization" contract program mode's own error paths
+    /// already prove. Order past that point deliberately loads the tape
+    /// BEFORE pushing diagnostics: a malformed `run`-declared tape file
+    /// (a failure `build_target_for_launch` itself cannot see — module
+    /// doc on `DapTargetBuild`) then also pushes nothing, rather than
+    /// leaving stray `Output` events in `out` ahead of a failed launch.
+    fn handle_launch_target(
+        &mut self,
+        arguments: &Value,
+        out: &mut Vec<AdapterEvent>,
+    ) -> Result<Value, String> {
+        let target_name = arguments
+            .get("target")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "launch requires a 'target' name".to_string())?;
+        let project = arguments
+            .get("project")
+            .and_then(Value::as_str)
+            .map(Path::new);
+        let stop_on_entry = arguments
+            .get("stopOnEntry")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let trace = arguments
+            .get("trace")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let built = crate::cli::driver::build_target_for_launch(project, target_name, true)?;
+        let (tapes, alphabets) = build_tapes(&built.tape_path)?;
+
+        for line in built.diagnostics {
+            out.push(AdapterEvent::Output {
+                category: "stderr",
+                output: line,
+            });
+        }
+
+        let program = built.output.to_string_lossy().into_owned();
+        self.finish_launch(
+            ResolvedLaunch {
+                program,
+                tape_path: built.tape_path,
                 tapes,
                 alphabets,
                 stop_on_entry,
