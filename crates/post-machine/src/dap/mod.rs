@@ -65,43 +65,21 @@
 //! `TAPE_WINDOW_BASE` itself is ever issued; a TM adapter reusing this
 //! scheme would issue `TAPE_WINDOW_BASE + 1`, `+ 2`, … for its other tapes.
 //!
-//! **Generation salt.** Every base above, and every stack-frame `id`
-//! `stackTrace` hands back, is additionally salted by the current stop:
-//! `salted(base) = stop_generation * GENERATION_STRIDE + base`, where
-//! `stop_generation` starts at `0` and is incremented by exactly one on
-//! every `Stopped` event — `push_stopped` is the ONLY function allowed to
-//! push one, so the increment can never be skipped or duplicated at a call
-//! site (every `AdapterEvent::Stopped` push in this module goes through
-//! it). The reason: VS Code (and DAP clients generally) cache a scope's or
-//! frame's children by the exact integer handle across stops; without the
-//! salt this adapter's handles were the SAME fixed constants every time
-//! (`SCOPE_REGISTERS` forever `1`, frame 0's `id` forever `0`), so after a
-//! step the client saw an "unchanged" reference and kept rendering the
-//! PREVIOUS stop's cached values in the Variables/Call Stack panels
-//! instead of asking again — live-observed in VS Code, invisible to this
-//! crate's own tests (which always re-request `scopes`/`stackTrace` fresh
-//! rather than diffing across two stops). Salting forces a new integer
-//! every stop, busting the cache. Decoding (`handle_variables`/
-//! `handle_set_variable`) is deliberately the inverse of only the salt,
-//! not a match on the whole value: `base = raw % GENERATION_STRIDE` — ANY
-//! generation dispatches on its base, not just the current one, because a
-//! client may still be holding a reference from the stop just before this
-//! one (an in-flight request racing a new stop) and that reference must
-//! still resolve LIVE data, not be rejected as stale. Stack-frame ids get
-//! the same salt for the same cache-busting reason even though nothing in
-//! this adapter currently decodes one back (`scopes`'s own dispatch takes
-//! no `arguments` at all, so a frame id is never read here) — a future
-//! frame-scoped feature reading one back must decode it the same way
-//! (`% GENERATION_STRIDE`), and an unsalted `id` sitting next to salted
-//! `variablesReference`s would read as an oversight, not a decision.
-//! `GENERATION_STRIDE` (4096) sits comfortably above every base this
-//! adapter or its TM sibling ever issues (`TAPE_WINDOW_BASE + n` tops out
-//! at `100 + 255` — a TM-1 tape count is a `u8` — well under the stride),
-//! so the modulus recovers the base exactly regardless of which
-//! generation produced it. `stop_generation` is never reset on a re-launch
-//! (`finish_launch`) — zeroing it would reissue generation-1 handles a
-//! client may still have cached from the PRIOR session, exactly the
-//! staleness this salt exists to prevent.
+//! **Handle stability.** Every handle above, and every stack-frame `id`
+//! `stackTrace` hands back, is issued as the bare constant, identical
+//! across stops. That is the DAP contract working as intended: a
+//! `variablesReference` is only valid while the session is paused, and a
+//! client re-fetches scopes and variables on every stop (VS Code
+//! discards its variable model on the `continued` event). An earlier
+//! revision salted every handle with a per-stop generation to bust a
+//! suspected client-side cache — the stale-Variables report that
+//! motivated it was actually the missing frame `source` object (with no
+//! openable source, VS Code never auto-focused the stopped frame and so
+//! never asked for its scopes at all — docs/dap.md (source
+//! provenance)); once frames carried sources, the salt had nothing left
+//! to do, and stable handles are what let a client correlate its own
+//! view state across stops. A reference a client held from a PRIOR stop
+//! is therefore simply the current reference and resolves live data.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -129,17 +107,6 @@ use crate::asm::pm1_syntax;
 const SCOPE_REGISTERS: i64 = 1;
 const SCOPE_TAPES: i64 = 2;
 const TAPE_WINDOW_BASE: i64 = 100;
-
-/// The generation-salt stride (module doc's "Generation salt" section) —
-/// every base constant above is multiplied into this stride's next slot
-/// per stop, so `base = raw % GENERATION_STRIDE` recovers it regardless of
-/// which generation produced the raw value.
-const GENERATION_STRIDE: i64 = 4096;
-
-// A TM-1 tape count is a `u8`, so `TAPE_WINDOW_BASE + n` tops out at
-// `100 + 255` — the widest base either adapter ever issues. Pins the
-// module doc's "comfortably above every base" claim.
-const _: () = assert!(TAPE_WINDOW_BASE + 255 < GENERATION_STRIDE);
 
 /// Half-width of the tape variables window (`TAPE_WINDOW_BASE`): head±8,
 /// 17 cells total.
@@ -465,13 +432,6 @@ pub struct PmDapAdapter {
     /// `source_breakpoints` for why this is a separate set and why the
     /// stepping loop consults both.
     instruction_breakpoints: BTreeSet<u32>,
-    /// The current stop's generation, salted into every issued
-    /// `variablesReference`/frame `id` (module doc's "Generation salt"
-    /// section). Starts at `0`; incremented by exactly one per `Stopped`
-    /// event, ONLY by `push_stopped`. Deliberately never reset by
-    /// `finish_launch` — see that section for why a re-launch must not
-    /// zero it.
-    stop_generation: u64,
 }
 
 impl Default for PmDapAdapter {
@@ -494,29 +454,18 @@ impl PmDapAdapter {
             run_state: RunState::Stopped,
             source_breakpoints: BTreeMap::new(),
             instruction_breakpoints: BTreeSet::new(),
-            stop_generation: 0,
         }
     }
 
-    /// Salts a handle-scheme base constant with the CURRENT stop
-    /// generation (module doc's "Generation salt" section) — every site
-    /// that issues a `variablesReference` or stack-frame `id` goes through
-    /// this instead of emitting the bare constant.
-    fn salted(&self, base: i64) -> i64 {
-        self.stop_generation as i64 * GENERATION_STRIDE + base
-    }
-
-    /// The ONE place allowed to push an `AdapterEvent::Stopped` — every
-    /// call site in this module goes through it instead of pushing the
-    /// event directly, so `stop_generation`'s increment can never be
-    /// skipped or duplicated (module doc's "Generation salt" section).
+    /// The ONE place that pushes an `AdapterEvent::Stopped` — a single
+    /// funnel keeps every stop's event shape (and anything a stop must
+    /// ever do uniformly) at one site instead of eight.
     fn push_stopped(
         &mut self,
         out: &mut Vec<AdapterEvent>,
         reason: &'static str,
         description: Option<String>,
     ) {
-        self.stop_generation += 1;
         out.push(AdapterEvent::Stopped {
             reason,
             description,
@@ -720,11 +669,6 @@ impl PmDapAdapter {
         // matching a new address and firing a phantom breakpoint.
         self.source_breakpoints.clear();
         self.instruction_breakpoints.clear();
-        // `stop_generation` is deliberately NOT reset here — module doc's
-        // "Generation salt" section: zeroing it on a re-launch would
-        // reissue generation-1 handles a client may still have cached from
-        // the PRIOR session, recreating the exact staleness this salt
-        // exists to prevent.
 
         out.push(AdapterEvent::Initialized);
         Ok(Value::Null)
@@ -1282,9 +1226,9 @@ impl PmDapAdapter {
             .session
             .as_ref()
             .ok_or_else(|| "stackTrace before launch".to_string())?;
-        let mut frames = vec![self.frame_json(self.salted(0), session.ip())];
+        let mut frames = vec![self.frame_json(0, session.ip())];
         for (i, &addr) in session.stack().iter().rev().enumerate() {
-            frames.push(self.frame_json(self.salted((i + 1) as i64), addr));
+            frames.push(self.frame_json((i + 1) as i64, addr));
         }
         let total = frames.len();
         Ok(json!({"stackFrames": frames, "totalFrames": total}))
@@ -1392,8 +1336,8 @@ impl PmDapAdapter {
             return Err("scopes before launch".to_string());
         }
         Ok(json!({"scopes": [
-            {"name": "Registers", "variablesReference": self.salted(SCOPE_REGISTERS), "expensive": false},
-            {"name": "Tapes", "variablesReference": self.salted(SCOPE_TAPES), "expensive": false},
+            {"name": "Registers", "variablesReference": SCOPE_REGISTERS, "expensive": false},
+            {"name": "Tapes", "variablesReference": SCOPE_TAPES, "expensive": false},
         ]}))
     }
 
@@ -1403,19 +1347,13 @@ impl PmDapAdapter {
     /// program terminates (that's how the poke's persistence is proven,
     /// rather than by a snapshot API `dyn Tape` doesn't expose).
     fn handle_variables(&mut self, arguments: &Value) -> Result<Value, String> {
-        let raw_reference = arguments
+        let reference = arguments
             .get("variablesReference")
             .and_then(Value::as_i64)
             .ok_or_else(|| "variables requires a variablesReference".to_string())?;
         if self.session.is_none() {
             return Err("variables before launch".to_string());
         }
-        // Decode: dispatch on the base only, ANY generation (module doc's
-        // "Generation salt" section) — a stale reference must still
-        // resolve live data. The error arm below echoes `raw_reference`,
-        // not this decoded value, so an unrecognized handle is reported
-        // exactly as the client sent it.
-        let reference = raw_reference % GENERATION_STRIDE;
         match reference {
             SCOPE_REGISTERS => {
                 let session = self.session.as_ref().expect("checked above");
@@ -1433,7 +1371,7 @@ impl PmDapAdapter {
                 Ok(json!({"variables": [{
                     "name": "tape 0",
                     "value": format!("head {}", tape.head()),
-                    "variablesReference": self.salted(TAPE_WINDOW_BASE),
+                    "variablesReference": TAPE_WINDOW_BASE,
                 }]}))
             }
             TAPE_WINDOW_BASE => {
@@ -1454,7 +1392,7 @@ impl PmDapAdapter {
                     .collect();
                 Ok(json!({"variables": vars}))
             }
-            _ => Err(format!("unknown variablesReference {raw_reference}")),
+            _ => Err(format!("unknown variablesReference {reference}")),
         }
     }
 
@@ -1469,7 +1407,7 @@ impl PmDapAdapter {
         if self.run_state != RunState::Stopped {
             return Err("cannot set a variable: the program is not stopped".to_string());
         }
-        let raw_reference = arguments
+        let reference = arguments
             .get("variablesReference")
             .and_then(Value::as_i64)
             .ok_or_else(|| "setVariable requires a variablesReference".to_string())?;
@@ -1482,13 +1420,10 @@ impl PmDapAdapter {
             .and_then(Value::as_str)
             .ok_or_else(|| "setVariable requires a value".to_string())?;
 
-        // Decode: same rule as `handle_variables` — dispatch on the base,
-        // ANY generation.
-        let reference = raw_reference % GENERATION_STRIDE;
         match reference {
             SCOPE_REGISTERS => self.set_register_variable(name, value),
             TAPE_WINDOW_BASE => self.set_tape_variable(name, value),
-            _ => Err(format!("cannot set a variable in scope {raw_reference}")),
+            _ => Err(format!("cannot set a variable in scope {reference}")),
         }
     }
 

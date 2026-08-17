@@ -1347,14 +1347,13 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
 
     // See `step_in_and_step_out_behave_depth_wise_around_a_call`'s own
     // comment: a bound call site's callee copy is named `mark.<digest>`.
-    // Frame ids are salted by the current stop generation (dap/mod.rs's
-    // module doc, "Handle-scheme generation salt") — decode via `% 4096`
-    // to recover the depth, the only part this fixture cares about.
+    // Frame ids are the bare depth (dap/mod.rs's module doc, "Handle
+    // stability").
     assert!(
         frames[0]["name"].as_str().unwrap().starts_with("mark"),
         "got: {frames:?}"
     );
-    assert_eq!(frames[0]["id"].as_i64().unwrap() % 4096, 0);
+    assert_eq!(frames[0]["id"], json!(0));
     assert!(
         frames[0]["instructionPointerReference"]
             .as_str()
@@ -1367,22 +1366,21 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
     // label inside it, not a separate `MapFunction`, so the return frame's
     // name is `main`, not `scan`.
     assert_eq!(frames[1]["name"], json!("main"));
-    assert_eq!(frames[1]["id"].as_i64().unwrap() % 4096, 1);
+    assert_eq!(frames[1]["id"], json!(1));
 }
 
-/// Pins `dap/mod.rs`'s generation salt (module doc, "Handle-scheme
-/// generation salt"): two consecutive stops must issue DIFFERENT
-/// `variablesReference`/frame-id handles even though the underlying
-/// scopes/frame are otherwise identical — this is what busts VS Code's
-/// per-reference cache, which otherwise rendered a prior stop's
-/// Variables/Call Stack values after a step (live-observed in VS Code).
-/// Both stops' handles must still decode (`% 4096`) to the SAME base, and
-/// a STALE reference from the first stop must still resolve live data at
-/// the second — a client may briefly still hold one, and it must never be
-/// rejected as merely old. Mirrors PM's own pinning test.
+/// Pins `dap/mod.rs`'s stable handle scheme (module doc, "Handle
+/// stability"): two consecutive stops issue IDENTICAL
+/// `variablesReference`/frame-id handles — per DAP they are only valid
+/// while paused and a client re-fetches on every stop, so stability is
+/// what lets it correlate its own view state — and a reference held from
+/// the first stop resolves live data at the second (it IS the current
+/// reference). Replaces the retired per-stop generation salt, whose
+/// stale-Variables motivation turned out to be the missing frame
+/// `source` (docs/dap.md (source provenance)).
 #[test]
-fn stop_generation_salts_handles_across_stops_while_stale_references_still_resolve() {
-    let dir = scratch("stop-generation");
+fn handles_are_stable_across_stops_and_prior_stop_references_resolve() {
+    let dir = scratch("stable-handles");
     let program = write_tmx(&dir, "stp", STP_TMA, LinkOptions::default()); // ent + stp
     let tape = write_one_tape_block(&dir, "stp", 2, 0);
 
@@ -1394,7 +1392,7 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
     adapter
         .handle("configurationDone", &Value::Null, &mut out)
         .unwrap();
-    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 1
+    assert_eq!(adapter.run_state(), RunState::Stopped); // first stop
 
     let scopes1 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
     let registers1 = scope_ref(&scopes1, "Registers");
@@ -1406,11 +1404,11 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
 
     // Instruction-granularity `stepIn`: retires `ent` only, landing on
     // `stp` (not yet executed) — still genuinely `Stopped`, a second
-    // `Stopped` event, generation 2.
+    // `Stopped` event.
     adapter
         .handle("stepIn", &json!({"granularity": "instruction"}), &mut out)
         .unwrap();
-    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 2
+    assert_eq!(adapter.run_state(), RunState::Stopped); // second stop
 
     let scopes2 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
     let registers2 = scope_ref(&scopes2, "Registers");
@@ -1420,20 +1418,13 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
         .unwrap();
     let frame2 = trace2["stackFrames"][0]["id"].as_i64().unwrap();
 
-    // Different raw handles across the two stops...
-    assert_ne!(
-        registers1, registers2,
-        "Registers scope ref must change across stops"
-    );
-    assert_ne!(tapes1, tapes2, "Tapes scope ref must change across stops");
-    assert_ne!(frame1, frame2, "frame 0's id must change across stops");
-    // ...decoding to the SAME base every time.
-    assert_eq!(registers1 % 4096, registers2 % 4096);
-    assert_eq!(tapes1 % 4096, tapes2 % 4096);
-    assert_eq!(frame1 % 4096, frame2 % 4096);
+    // Identical handles across the two stops.
+    assert_eq!(registers1, registers2);
+    assert_eq!(tapes1, tapes2);
+    assert_eq!(frame1, frame2);
 
-    // A STALE (generation-1) reference must still resolve live data at
-    // generation 2, not error as stale.
+    // A reference held from the first stop resolves live data at the
+    // second — trivially, being the same handle.
     let stale_tapes = adapter
         .handle(
             "variables",
@@ -1445,7 +1436,7 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
         stale_tapes["variables"]
             .as_array()
             .is_some_and(|v| !v.is_empty()),
-        "a stale-generation reference must still resolve, got: {stale_tapes:?}"
+        "a prior-stop reference must still resolve, got: {stale_tapes:?}"
     );
 }
 

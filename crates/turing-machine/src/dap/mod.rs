@@ -127,31 +127,13 @@
 //! `disassemble` — mirrors `PmDapAdapter` structurally; only the
 //! per-instruction/per-register plumbing changes shape for multiple tapes.
 //!
-//! **Handle-scheme generation salt** (shared, unchanged, from
-//! `PmDapAdapter`'s module doc — see its "Generation salt" section for the
-//! full reasoning): every `variablesReference` this adapter issues —
-//! `SCOPE_REGISTERS`, `SCOPE_TAPES`, and `TAPE_WINDOW_BASE + n` for each of
-//! its tapes — and every stack-frame `id` `stackTrace` hands back are
-//! salted by the current `stop_generation` (`salted`, incremented by
-//! exactly one per `Stopped` event through the shared `push_stopped`
-//! choke point — every `AdapterEvent::Stopped` push in this module goes
-//! through it). Without the salt, a step or pause left the handles
-//! genuinely IDENTICAL to the previous stop's even though the underlying
-//! scopes/frames had moved, and VS Code's own per-reference cache kept
-//! rendering the prior stop's Variables/Call Stack values instead of
-//! re-requesting them — live-observed in VS Code. Decoding
-//! (`handle_variables`/`handle_set_variable`) accepts ANY generation
-//! (`base = raw % GENERATION_STRIDE`) rather than only the current one, so
-//! a reference a client still holds from the stop just before this one
-//! keeps resolving live data instead of erroring as stale. Frame ids get
-//! the same salt for the same cache-busting reason even though nothing in
-//! this adapter decodes one back (`scopes`'s dispatch takes no `arguments`
-//! at all). `GENERATION_STRIDE` stays comfortably above every base either
-//! adapter issues: `TAPE_WINDOW_BASE + n` tops out at `100 + 255` (a TM-1
-//! tape count is a `u8`), still under the 4096 stride. `stop_generation`
-//! is never reset by `finish_launch` on a re-launch — zeroing it would
-//! reissue generation-1 handles a client may still have cached from the
-//! PRIOR session, exactly the staleness this salt exists to prevent.
+//! **Handle stability** (shared, unchanged, from `PmDapAdapter`'s module
+//! doc — see its "Handle stability" section for the full reasoning):
+//! every `variablesReference` this adapter issues — `SCOPE_REGISTERS`,
+//! `SCOPE_TAPES`, and `TAPE_WINDOW_BASE + n` for each of its tapes — and
+//! every stack-frame `id` `stackTrace` hands back are the bare
+//! constants, identical across stops; a reference a client held from a
+//! prior stop is simply the current reference and resolves live data.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -180,15 +162,6 @@ use crate::asm::tm1_syntax;
 const SCOPE_REGISTERS: i64 = 1;
 const SCOPE_TAPES: i64 = 2;
 const TAPE_WINDOW_BASE: i64 = 100;
-
-/// The generation-salt stride (module doc's "Handle-scheme generation
-/// salt" section). Mirrors `PmDapAdapter::GENERATION_STRIDE`.
-const GENERATION_STRIDE: i64 = 4096;
-
-// A TM-1 tape count is a `u8`, so `TAPE_WINDOW_BASE + n` tops out at
-// `100 + 255` — the widest base either adapter ever issues. Pins the
-// module doc's "comfortably above every base" claim.
-const _: () = assert!(TAPE_WINDOW_BASE + 255 < GENERATION_STRIDE);
 
 /// Half-width of a tape variables window (`TAPE_WINDOW_BASE + n`): head±8,
 /// 17 cells total. Same radius PM uses.
@@ -531,11 +504,6 @@ pub struct TmDapAdapter {
     /// Addresses added on behalf of `setInstructionBreakpoints`. Mirrors
     /// `PmDapAdapter::instruction_breakpoints`.
     instruction_breakpoints: BTreeSet<u32>,
-    /// The current stop's generation, salted into every issued
-    /// `variablesReference`/frame `id`. Mirrors
-    /// `PmDapAdapter::stop_generation` exactly — never reset by
-    /// `finish_launch`.
-    stop_generation: u64,
 }
 
 impl Default for TmDapAdapter {
@@ -560,17 +528,10 @@ impl TmDapAdapter {
             run_state: RunState::Stopped,
             source_breakpoints: BTreeMap::new(),
             instruction_breakpoints: BTreeSet::new(),
-            stop_generation: 0,
         }
     }
 
-    /// Salts a handle-scheme base constant with the CURRENT stop
-    /// generation. Mirrors `PmDapAdapter::salted` exactly.
-    fn salted(&self, base: i64) -> i64 {
-        self.stop_generation as i64 * GENERATION_STRIDE + base
-    }
-
-    /// The ONE place allowed to push an `AdapterEvent::Stopped`. Mirrors
+    /// The ONE place that pushes an `AdapterEvent::Stopped`. Mirrors
     /// `PmDapAdapter::push_stopped` exactly.
     fn push_stopped(
         &mut self,
@@ -578,7 +539,6 @@ impl TmDapAdapter {
         reason: &'static str,
         description: Option<String>,
     ) {
-        self.stop_generation += 1;
         out.push(AdapterEvent::Stopped {
             reason,
             description,
@@ -789,10 +749,6 @@ impl TmDapAdapter {
         self.run_state = RunState::Stopped;
         self.source_breakpoints.clear();
         self.instruction_breakpoints.clear();
-        // `stop_generation` is deliberately NOT reset here — module doc's
-        // "Handle-scheme generation salt" section: zeroing it on a
-        // re-launch would reissue generation-1 handles a client may still
-        // have cached from the PRIOR session.
 
         out.push(AdapterEvent::Initialized);
         Ok(Value::Null)
@@ -1235,9 +1191,9 @@ impl TmDapAdapter {
             .session
             .as_ref()
             .ok_or_else(|| "stackTrace before launch".to_string())?;
-        let mut frames = vec![self.frame_json(self.salted(0), session.ip())];
+        let mut frames = vec![self.frame_json(0, session.ip())];
         for (i, &addr) in session.stack().iter().rev().enumerate() {
-            frames.push(self.frame_json(self.salted((i + 1) as i64), addr));
+            frames.push(self.frame_json((i + 1) as i64, addr));
         }
         let total = frames.len();
         Ok(json!({"stackFrames": frames, "totalFrames": total}))
@@ -1322,8 +1278,8 @@ impl TmDapAdapter {
             return Err("scopes before launch".to_string());
         }
         Ok(json!({"scopes": [
-            {"name": "Registers", "variablesReference": self.salted(SCOPE_REGISTERS), "expensive": false},
-            {"name": "Tapes", "variablesReference": self.salted(SCOPE_TAPES), "expensive": false},
+            {"name": "Registers", "variablesReference": SCOPE_REGISTERS, "expensive": false},
+            {"name": "Tapes", "variablesReference": SCOPE_TAPES, "expensive": false},
         ]}))
     }
 
@@ -1333,19 +1289,13 @@ impl TmDapAdapter {
     /// deviation from PM's dispatch: the Tapes scope lists every tape, not
     /// one, and the tape-window arm is a RANGE match, not a single constant.
     fn handle_variables(&mut self, arguments: &Value) -> Result<Value, String> {
-        let raw_reference = arguments
+        let reference = arguments
             .get("variablesReference")
             .and_then(Value::as_i64)
             .ok_or_else(|| "variables requires a variablesReference".to_string())?;
         if self.session.is_none() {
             return Err("variables before launch".to_string());
         }
-        // Decode: dispatch on the base only, ANY generation (module doc's
-        // "Handle-scheme generation salt" section) — a stale reference
-        // must still resolve live data. The error arm below echoes
-        // `raw_reference`, not this decoded value, so an unrecognized
-        // handle is reported exactly as the client sent it.
-        let reference = raw_reference % GENERATION_STRIDE;
         if reference == SCOPE_REGISTERS {
             let session = self.session.as_ref().expect("checked above");
             let stats = session.stats();
@@ -1370,7 +1320,7 @@ impl TmDapAdapter {
                     json!({
                         "name": format!("tape {i}"),
                         "value": format!("head {}", t.head()),
-                        "variablesReference": self.salted(TAPE_WINDOW_BASE + i as i64),
+                        "variablesReference": TAPE_WINDOW_BASE + i as i64,
                     })
                 })
                 .collect();
@@ -1394,7 +1344,7 @@ impl TmDapAdapter {
                 .collect();
             return Ok(json!({"variables": vars}));
         }
-        Err(format!("unknown variablesReference {raw_reference}"))
+        Err(format!("unknown variablesReference {reference}"))
     }
 
     /// A `variablesReference` in the tape-window range back to which tape
@@ -1419,7 +1369,7 @@ impl TmDapAdapter {
         if self.run_state != RunState::Stopped {
             return Err("cannot set a variable: the program is not stopped".to_string());
         }
-        let raw_reference = arguments
+        let reference = arguments
             .get("variablesReference")
             .and_then(Value::as_i64)
             .ok_or_else(|| "setVariable requires a variablesReference".to_string())?;
@@ -1432,16 +1382,13 @@ impl TmDapAdapter {
             .and_then(Value::as_str)
             .ok_or_else(|| "setVariable requires a value".to_string())?;
 
-        // Decode: same rule as `handle_variables` — dispatch on the base,
-        // ANY generation.
-        let reference = raw_reference % GENERATION_STRIDE;
         if reference == SCOPE_REGISTERS {
             return self.set_register_variable(name, value);
         }
         if let Some(idx) = self.tape_window_index(reference) {
             return self.set_tape_variable(idx, name, value);
         }
-        Err(format!("cannot set a variable in scope {raw_reference}"))
+        Err(format!("cannot set a variable in scope {reference}"))
     }
 
     /// `MR` is the one writable register (`DebugSession::set_mr`); `IP`,
