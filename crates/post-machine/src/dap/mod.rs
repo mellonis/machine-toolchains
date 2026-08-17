@@ -637,14 +637,23 @@ impl PmDapAdapter {
     /// only session motion that exposes one instruction at a time is
     /// `step_in`, so every traced code path (`tick`'s `run_traced`,
     /// `next`/`stepIn`/`stepOut`'s `step_traced`) is built on repeated
-    /// calls to this. Pushes one `Output` line — byte-format matching
-    /// `pmt run --trace` — but ONLY when `session.stats().steps` actually
-    /// advanced: a terminal instruction (`stp`/`hlt`/a trap) retires
-    /// without incrementing `steps` (docs/core.md (timing model) —
-    /// `CoreEvent::Stopped`/`Halted`/`Trapped` skip the `steps += 1` arm
-    /// `CoreEvent::Step`/`Break` take), so gating on the delta is what
-    /// keeps a traced run's total `Output` count exactly equal to
-    /// `stats().steps` rather than one line too many.
+    /// calls to this. Pushes one `Output` line per call — byte-format
+    /// matching `pmt run --trace` (`drive_traced`, `cli/run.rs`), which
+    /// writes unconditionally on every `step_in` call including the one
+    /// that retires a terminal `stp`/`hlt` or the one that traps
+    /// (`trace_streams_lines_with_post_state_into_the_writer` asserts the
+    /// terminal `stp` line; `traced_trap_prints_the_faulting_line_exactly_once`
+    /// asserts the faulting line is present) — EXCEPT when the session was
+    /// *already* finished before this very call: `drive_traced` never
+    /// calls `step_in` again once it observes a trap pause, so that state
+    /// never arises there, but this adapter's two-phase trap flow does
+    /// reach it (a further client `continue` after the `stopped("exception")`
+    /// pause calls this again to reach `Finished`) — `DebugSession::step_in`
+    /// short-circuits via its internal `gate()` in that case, retiring
+    /// nothing and reporting the SAME faulting address again, which would
+    /// otherwise print the fault line twice. `session.finished()` (checked
+    /// BEFORE the call, since the call itself may set it) is the signal:
+    /// `None` beforehand means a real instruction is about to retire.
     fn step_once_traced(&mut self, out: &mut Vec<AdapterEvent>) -> DebugEvent {
         let code = self
             .code
@@ -653,10 +662,10 @@ impl PmDapAdapter {
         let map = self.map.as_ref();
         let session = self.session.as_mut().expect("trace requires a session");
         let tape = self.tape.as_deref_mut().expect("trace requires a tape");
+        let already_finished = session.finished().is_some();
         let ip = session.ip();
-        let steps_before = session.stats().steps;
         let event = session.step_in(tape);
-        if session.stats().steps > steps_before {
+        if !already_finished {
             let mf = session.mf();
             let head = tape.head();
             out.push(AdapterEvent::Output {
@@ -1200,26 +1209,34 @@ impl PmDapAdapter {
             })
         };
 
+        // `cursor` tracks a plain address, never `Option` past this point:
+        // an out-of-range row still needs A rendered address (VS Code's
+        // Disassembly view scrolls by prefetching windows past the loaded
+        // code, so identical placeholder addresses across rows is a real
+        // scenario, not a hypothetical one). Once `in_range` goes false it
+        // STAYS false — a one-byte step can never land back on a genuine
+        // instruction boundary — and every subsequent row's address is the
+        // previous row's plus one byte, so the whole response is strictly
+        // increasing and every address is distinct, in range or not.
+        let mut cursor = start_addr.unwrap_or(base);
+        let mut in_range = start_addr.is_some();
         let mut instructions = Vec::new();
-        let mut addr = start_addr;
         for _ in 0..instruction_count {
-            match addr {
-                Some(a) if (a as usize) < code.len() => {
-                    let (line, ilen) = listing_line(&syntax, code, a, &resolve);
-                    instructions.push(json!({
-                        "address": format!("0x{a:x}"),
-                        "instruction": line,
-                    }));
-                    addr = Some(a + ilen.max(1));
-                }
-                _ => {
-                    instructions.push(json!({
-                        "address": "0x0",
-                        "instruction": "<out of range>",
-                        "presentationHint": "invalid",
-                    }));
-                    addr = None;
-                }
+            if in_range && (cursor as usize) < code.len() {
+                let (line, ilen) = listing_line(&syntax, code, cursor, &resolve);
+                instructions.push(json!({
+                    "address": format!("0x{cursor:x}"),
+                    "instruction": line,
+                }));
+                cursor += ilen.max(1);
+            } else {
+                in_range = false;
+                instructions.push(json!({
+                    "address": format!("0x{cursor:x}"),
+                    "instruction": "<out of range>",
+                    "presentationHint": "invalid",
+                }));
+                cursor = cursor.wrapping_add(1);
             }
         }
         Ok(json!({"instructions": instructions}))

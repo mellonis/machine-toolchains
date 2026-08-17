@@ -1449,10 +1449,12 @@ fn disassemble_renders_listing_line_text_and_the_top_frames_reference_resolves_w
     assert!(text.contains("call"), "got: {text}");
 }
 
-/// Three instructions beyond the implicit `.func` entry, none of which
-/// terminate the run — every one of them retires as a counted `Step`
-/// (docs/core.md (timing model)), so `stats().steps` ends at 3 and a
-/// traced run must emit exactly 3 trace-format `Output` events.
+/// Three instructions beyond the implicit `.func` entry: `ent`, `nop`,
+/// `nop`, `stp` — FOUR `step_in` calls total. `pmt run --trace` prints one
+/// line per `step_in` call unconditionally, terminal instruction included
+/// (`trace_streams_lines_with_post_state_into_the_writer`,
+/// `cli_programs.rs`), so a traced run here must emit exactly four
+/// trace-format `Output` events, the last one naming `stp`.
 const TRACE_PROGRAM: &str = "\
 .func main
         nop
@@ -1460,8 +1462,23 @@ const TRACE_PROGRAM: &str = "\
         stp
 ";
 
+/// Extracts every trace-format (`"; MF="`-suffixed) console `Output` line,
+/// in emission order.
+fn trace_lines(events: &[AdapterEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Output { category, output } if *category == "console" => {
+                Some(output.as_str())
+            }
+            _ => None,
+        })
+        .filter(|line| line.contains("; MF="))
+        .collect()
+}
+
 #[test]
-fn trace_true_streams_one_output_event_per_retired_instruction() {
+fn trace_true_streams_one_output_event_per_step_in_call_including_the_terminal_one() {
     let dir = scratch("trace");
     let program = write_pmx(&dir, "trace", TRACE_PROGRAM);
 
@@ -1480,18 +1497,20 @@ fn trace_true_streams_one_output_event_per_retired_instruction() {
     let events = drive_to_pause_or_done(&mut adapter);
     assert_eq!(adapter.run_state(), RunState::Done);
 
-    let trace_lines: Vec<&String> = events
-        .iter()
-        .filter_map(|e| match e {
-            AdapterEvent::Output { category, output } if *category == "console" => Some(output),
-            _ => None,
-        })
-        .filter(|line| line.contains("; MF="))
-        .collect();
+    let lines = trace_lines(&events);
+    // ent, nop, nop, stp — the terminal `stp` line included, matching
+    // `run --trace`'s own per-`step_in`-call count exactly (the "steps+1"
+    // shape: `stats().steps` itself would read 3, since a terminal
+    // instruction retires without incrementing it).
     assert_eq!(
-        trace_lines.len(),
-        3,
-        "expected one trace line per retired (counted) instruction, got: {events:?}"
+        lines.len(),
+        4,
+        "expected one trace line per step_in call including the terminal one, got: {events:?}"
+    );
+    assert!(
+        lines.last().unwrap().contains("stp"),
+        "the last trace line must name the terminal instruction, got: {:?}",
+        lines.last()
     );
 
     // The termination summary must still be present, alongside the trace
@@ -1502,4 +1521,109 @@ fn trace_true_streams_one_output_event_per_retired_instruction() {
         }
         other => panic!("expected the run to end in Terminated/Exited, got: {other:?}"),
     }
+}
+
+#[test]
+fn trace_true_names_the_faulting_instruction_exactly_once_across_the_two_phase_trap_flow() {
+    let dir = scratch("trace-trap");
+    // `ret` on an empty return stack traps StackUnderflow — `ent` retires
+    // normally first (mirrors `TRAP_PROGRAM` above).
+    let program = write_pmx(&dir, "trap", TRAP_PROGRAM);
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    let args = json!({
+        "program": program.to_str().unwrap(),
+        "trace": true,
+        "stopOnEntry": false,
+    });
+    adapter.handle("launch", &args, &mut out).unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    // First phase: traps, pauses (does not yet finish).
+    let first = drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Stopped);
+    let first_lines = trace_lines(&first);
+    // ent, then the faulting ret — exactly two lines, the second naming it.
+    assert_eq!(first_lines.len(), 2, "got: {first:?}");
+    assert!(
+        first_lines[1].contains("ret"),
+        "the last line of the first phase must name the faulting instruction, got: {first_lines:?}"
+    );
+
+    // Second phase: a further continue reaches Finished/Done. The
+    // already-finished session must NOT re-emit the fault line — the
+    // underlying `step_in` short-circuits with no new retirement, and
+    // `step_once_traced` must recognize that rather than re-render the
+    // same faulting address a second time.
+    adapter.handle("continue", &Value::Null, &mut out).unwrap();
+    let second = drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Done);
+    assert!(
+        trace_lines(&second).is_empty(),
+        "the second phase must not re-emit the fault line, got: {second:?}"
+    );
+    match second.as_slice() {
+        [
+            AdapterEvent::Output { .. },
+            AdapterEvent::Terminated,
+            AdapterEvent::Exited { code },
+        ] => {
+            assert_eq!(*code, 3);
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+}
+
+#[test]
+fn disassemble_past_the_code_image_advances_placeholder_addresses_monotonically() {
+    let dir = scratch("disassemble-oob");
+    let program = write_pmx(&dir, "stp", STP_PROGRAM); // tiny: ent + stp only
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    // Ask for far more instructions than the tiny program has — most rows
+    // fall past the code image.
+    let disassembly = adapter
+        .handle(
+            "disassemble",
+            &json!({"memoryReference": "0x0", "instructionCount": 10}),
+            &mut out,
+        )
+        .unwrap();
+    let instructions = disassembly["instructions"].as_array().unwrap();
+    assert_eq!(instructions.len(), 10);
+
+    let addresses: Vec<u32> = instructions
+        .iter()
+        .map(|entry| {
+            let addr = entry["address"].as_str().unwrap();
+            u32::from_str_radix(addr.trim_start_matches("0x"), 16).unwrap()
+        })
+        .collect();
+    // Strictly increasing across the whole window, in-range rows and
+    // out-of-range placeholder rows alike — no two rows share an address.
+    for pair in addresses.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "addresses must strictly increase, got: {addresses:?}"
+        );
+    }
+    // At least one row is genuinely out of range (a 2-instruction program
+    // cannot fill 10 rows) and is marked as such.
+    assert!(
+        instructions
+            .iter()
+            .any(|entry| entry["presentationHint"] == json!("invalid")),
+        "expected at least one out-of-range row, got: {instructions:?}"
+    );
 }
