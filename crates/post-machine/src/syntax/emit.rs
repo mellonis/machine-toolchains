@@ -46,6 +46,7 @@ impl GreenSink {
     pub fn token(&mut self, pos: usize, kind: PmcKind) {
         self.flush(pos);
         let text = std::mem::take(&mut self.entries[pos].text);
+        debug_assert!(!text.is_empty(), "significant token {pos} emitted twice");
         self.builder.token(kind.into(), &text);
     }
 

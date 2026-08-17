@@ -174,6 +174,19 @@ mod tests {
     }
 
     #[test]
+    fn no_trailing_newline_eof_trivia_is_empty() {
+        // No trailing whitespace at all after the last significant token
+        // (`}`) — the Eof entry's `trivia_before` schedule is empty, and
+        // the concatenation law still holds with nothing left over.
+        let src = "main() { right; }";
+        let entries = layout_of(src);
+        assert_eq!(concat(&entries), src);
+        let eof = entries.last().expect("eof entry");
+        assert_eq!(eof.text, "");
+        assert!(eof.trivia_before.is_empty());
+    }
+
+    #[test]
     fn eof_entry_carries_trailing_trivia() {
         let src = "main() { right; }\n// tail\n";
         let entries = layout_of(src);

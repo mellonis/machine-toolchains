@@ -287,6 +287,96 @@ FILE@0..55
     assert_eq!(dump(src), expected);
 }
 
+/// `"! caution\nmain() { right; }\n"` — an attention-only run (no `?`
+/// block at all — legal per the run grammar, "at most two contiguous
+/// blocks... at least one line total"), pinning ATTENTION_LINE emission
+/// and the DOC_RUN wrap through `parse_green` end to end (previously
+/// only DOC_LINE had a golden). Byte map: `!`=0..1, ` caution`=1..9 (the
+/// whole ATTENTION_LINE token runs to end of line per the layout's
+/// doc/attention end-of-line rule, so the token is `"! caution"`@0..9),
+/// `\n`=9..10, main=10..14, `(`=14..15, `)`=15..16, ws=16..17, `{`=17..18,
+/// ws=18..19, right=19..24, `;`=24..25, ws=25..26, `}`=26..27, `\n`=27..28;
+/// total 28.
+#[test]
+fn attention_only_doc_run_golden() {
+    let src = "! caution\nmain() { right; }\n";
+    let expected = "\
+FILE@0..28
+  FUNCTION@0..27
+    DOC_RUN@0..9
+      ATTENTION_LINE@0..9 \"! caution\"
+    WHITESPACE@9..10 \"\\n\"
+    IDENT@10..14 \"main\"
+    L_PAREN@14..15 \"(\"
+    R_PAREN@15..16 \")\"
+    WHITESPACE@16..17 \" \"
+    L_BRACE@17..18 \"{\"
+    WHITESPACE@18..19 \" \"
+    STATEMENT@19..25
+      ITEM@19..24
+        IDENT@19..24 \"right\"
+      SEMI@24..25 \";\"
+    WHITESPACE@25..26 \" \"
+    R_BRACE@26..27 \"}\"
+  WHITESPACE@27..28 \"\\n\"
+";
+    assert_eq!(dump(src), expected);
+}
+
+/// `"main() {\n? d\nf() { right; }\nleft;\n}\n"` — a nested function
+/// carrying its OWN doc run, exercising the body-item loop's checkpoint
+/// (taken once per iteration, before either a doc run or a nested
+/// definition is known — parser.rs's body-item loop): the checkpoint's
+/// own `flush` lands the `\n` after the outer `{` in the OUTER
+/// FUNCTION (the still-open parent at that point), then the nested
+/// FUNCTION is retro-opened at that same checkpoint, so it wraps the
+/// DOC_RUN that follows — same retro-open shape `doc_run_label_golden`
+/// exercises at top level, one level deeper. Byte map: main=0..4,
+/// `(`=4..5, `)`=5..6, ws=6..7, `{`=7..8, `\n`=8..9, `? d`=9..12 (one
+/// DOC_LINE token, end-of-line rule), `\n`=12..13, f=13..14, `(`=14..15,
+/// `)`=15..16, ws=16..17, `{`=17..18, ws=18..19, right=19..24, `;`=24..25,
+/// ws=25..26, `}`=26..27, `\n`=27..28, left=28..32, `;`=32..33, `\n`=33..34,
+/// `}`=34..35, `\n`=35..36; total 36.
+#[test]
+fn nested_function_own_doc_run_golden() {
+    let src = "main() {\n? d\nf() { right; }\nleft;\n}\n";
+    let expected = "\
+FILE@0..36
+  FUNCTION@0..35
+    IDENT@0..4 \"main\"
+    L_PAREN@4..5 \"(\"
+    R_PAREN@5..6 \")\"
+    WHITESPACE@6..7 \" \"
+    L_BRACE@7..8 \"{\"
+    WHITESPACE@8..9 \"\\n\"
+    FUNCTION@9..27
+      DOC_RUN@9..12
+        DOC_LINE@9..12 \"? d\"
+      WHITESPACE@12..13 \"\\n\"
+      IDENT@13..14 \"f\"
+      L_PAREN@14..15 \"(\"
+      R_PAREN@15..16 \")\"
+      WHITESPACE@16..17 \" \"
+      L_BRACE@17..18 \"{\"
+      WHITESPACE@18..19 \" \"
+      STATEMENT@19..25
+        ITEM@19..24
+          IDENT@19..24 \"right\"
+        SEMI@24..25 \";\"
+      WHITESPACE@25..26 \" \"
+      R_BRACE@26..27 \"}\"
+    WHITESPACE@27..28 \"\\n\"
+    STATEMENT@28..33
+      ITEM@28..32
+        IDENT@28..32 \"left\"
+      SEMI@32..33 \";\"
+    WHITESPACE@33..34 \"\\n\"
+    R_BRACE@34..35 \"}\"
+  WHITESPACE@35..36 \"\\n\"
+";
+    assert_eq!(dump(src), expected);
+}
+
 /// Error parity between `parse_cst` and `parse_green` over a few invalid
 /// inputs: both walk the same grammar with the same sink-optional
 /// `Parser`, so a divergence here would mean a green-only early return
@@ -327,14 +417,15 @@ fn corpus() -> Vec<(std::path::PathBuf, String)> {
             }
         }
     }
-    // 9 files at the time of writing: 7 golden programs
+    // 10 files at the time of writing: 7 golden programs
     // (tests/golden/{ex000001,ex000002,sum,sum2,test1,ty,ty2}.pmc), 1
-    // lint fixture (tests/lint/unused_labels.pmc), and the embedded
-    // stdlib (src/stdlib/std.pmc). The floor below is `>= 9` rather than
-    // `== 9` so a future fixture doesn't need this comment touched, only
+    // lint fixture (tests/lint/unused_labels.pmc), the embedded stdlib
+    // (src/stdlib/std.pmc), and the rich-shape syntax fixture
+    // (tests/syntax/rich.pmc). The floor below is `>= 10` rather than
+    // `== 10` so a future fixture doesn't need this comment touched, only
     // the count restated if it drifts meaningfully.
     assert!(
-        files.len() >= 9,
+        files.len() >= 10,
         "corpus unexpectedly small: {} files — did the walk break?",
         files.len()
     );
