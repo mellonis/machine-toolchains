@@ -2,7 +2,7 @@
   "name": "tmc",
   "displayName": "TMC (Turing machine toolchain)",
   "description": "Language support for .tmc via tmt lsp: diagnostics, completions, navigation, formatting, semantic tokens.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "mellonis",
   "license": "GPL-3.0-or-later",
   "repository": {

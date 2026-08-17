@@ -22,7 +22,7 @@ private const val NOTIFICATION_GROUP_ID = "ru.mellonis.tmc"
  * required server capability lands. The VS Code extension carries the
  * same constant under the same name; the two must move together.
  */
-private const val MIN_TESTED_TMT = "0.3.0"
+private const val MIN_TESTED_TMT = "0.4.0"
 private const val VERSION_CHECK_TIMEOUT_SECONDS = 5L
 private val VERSION_LINE = Regex("""tmt (\d+)\.(\d+)\.(\d+)""")
 

@@ -9,7 +9,7 @@ import {
 // a thin client and an older server simply answers less. Bump this in the
 // same commit that raises the extension's own version whenever a newly
 // required server capability lands.
-const MIN_TESTED_TMT = '0.3.0';
+const MIN_TESTED_TMT = '0.4.0';
 let client: LanguageClient | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
