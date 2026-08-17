@@ -213,6 +213,16 @@ pub struct LinkOptions {
     /// The bound-call lowering mechanism the composition engine applies
     /// (see [`CallMech`]); it selects the image `link` emits.
     pub call_mech: CallMech,
+    /// Per-input source provenance for the map sidecar (docs/formats.md
+    /// (map sidecar)): one entry per input, indexed through the user
+    /// objects then the libraries — the same order function origins are
+    /// counted in. Each string is stored **verbatim** into every reached
+    /// function that input supplied ([`MapFunction::source`]); the linker
+    /// applies no path policy of its own, so a caller that wants
+    /// sidecar-relative paths computes them before linking. Empty (the
+    /// default) stamps nothing; a non-empty vector shorter than the input
+    /// list leaves the uncovered tail without provenance.
+    pub sources: Vec<Option<String>>,
 }
 
 impl Default for LinkOptions {
@@ -221,6 +231,7 @@ impl Default for LinkOptions {
             relax: true,
             entry: None,
             call_mech: CallMech::Hybrid,
+            sources: Vec::new(),
         }
     }
 }
@@ -238,6 +249,16 @@ pub struct MapFunction {
     pub labels: Vec<(String, u32)>,
     /// (absolute code offset, source line); empty without `-g` objects.
     pub lines: Vec<(u32, u32)>,
+    /// The source file the function's defining input was built from,
+    /// verbatim as the caller supplied it via [`LinkOptions::sources`] —
+    /// the build drivers store it relative to the sidecar's own directory
+    /// (docs/formats.md (map sidecar)). `None` (and omitted from the
+    /// JSON, so pre-provenance sidecars round-trip unchanged) when the
+    /// link ran without provenance — objects loaded from disk have no
+    /// known source. A composition-engine mono stamp inherits the origin
+    /// of the routine it specializes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// One virtual tape of a composite binding, decoded to the sparse
@@ -491,11 +512,23 @@ pub fn link(
     dropped.sort();
     dropped.dedup();
 
+    // Source provenance (docs/formats.md (map sidecar)): layout emits one
+    // map record per `order` entry in sequence, so the two are parallel;
+    // each function takes its origin input's caller-supplied source string
+    // verbatim. A mono stamp's `origin` is the specialized routine's, so
+    // stamps inherit its provenance without a special case.
+    let mut functions = built.functions;
+    if !options.sources.is_empty() {
+        for (mf, f) in functions.iter_mut().zip(&order) {
+            mf.source = options.sources.get(f.origin).cloned().flatten();
+        }
+    }
+
     Ok(LinkOutput {
         executable,
         map: MapFile {
             arch,
-            functions: built.functions,
+            functions,
             bindings,
         },
         report: LinkReport {
@@ -584,6 +617,7 @@ mod tests {
                 end: 7,
                 labels: vec![("X".into(), 3)],
                 lines: vec![(1, 2), (3, 4)],
+                source: None,
             }],
             bindings: Vec::new(),
         };
@@ -595,9 +629,19 @@ mod tests {
             !json.contains("bindings"),
             "empty bindings must not serialize"
         );
+        // A provenance-less function omits `source` the same way, so a
+        // pre-provenance sidecar's byte shape is preserved — and parses
+        // back with the serde default (docs/formats.md (map sidecar)).
+        assert!(!json.contains("source"), "absent source must not serialize");
         let back = MapFile::from_json(&json).unwrap();
         assert_eq!(back, map);
         assert!(MapFile::from_json("{not json").is_err());
+
+        let mut with_source = map;
+        with_source.functions[0].source = Some("../src/main.pmc".to_string());
+        let json = with_source.to_json();
+        assert!(json.contains("\"source\": \"../src/main.pmc\""));
+        assert_eq!(MapFile::from_json(&json).unwrap(), with_source);
     }
 
     #[test]
@@ -610,6 +654,7 @@ mod tests {
                 end: 10,
                 labels: vec![],
                 lines: vec![],
+                source: None,
             }],
             bindings: vec![MapBinding {
                 index: 1,

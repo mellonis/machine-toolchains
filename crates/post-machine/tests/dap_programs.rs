@@ -2057,3 +2057,252 @@ fn configuration_done_and_continue_after_done_reject_without_reemitting_terminat
         "a rejected continue must not push events, got: {out:?}"
     );
 }
+
+// ---- source provenance: frame `source` objects and the per-file
+// breakpoint filter (docs/dap.md (source provenance)) -------------------
+
+/// `write_pmc_debug_multi`'s provenance sibling: writes each source AS A
+/// REAL FILE into `dir` first (a frame's `source` object is attached only
+/// when the resolved file exists), compiles each with debug info, and
+/// links with per-unit `sources` naming those files relative to the
+/// sidecar's directory — exactly the shape `pmt build` emits
+/// (docs/formats.md (map sidecar)). A `None` file skips both the write
+/// and the provenance, standing in for a prebuilt-object input.
+fn write_pmc_debug_with_sources(dir: &Path, name: &str, units: &[(Option<&str>, &str)]) -> PathBuf {
+    let mut objects = Vec::new();
+    let mut sources = Vec::new();
+    for (file, text) in units {
+        if let Some(file) = file {
+            fs::write(dir.join(file), text).unwrap();
+        }
+        objects.push(
+            compile(
+                text,
+                CompileOptions {
+                    debug_info: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .object,
+        );
+        sources.push(file.map(str::to_string));
+    }
+    let linked = link(
+        &objects,
+        &[],
+        LinkOptions {
+            sources,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let path = dir.join(format!("{name}.pmx"));
+    fs::write(&path, linked.executable.to_bytes()).unwrap();
+    let mut map_path = path.clone().into_os_string();
+    map_path.push(".map");
+    fs::write(&map_path, linked.map.to_json()).unwrap();
+    path
+}
+
+/// Steps into the program until frame 0 resolves to `function`, bounded —
+/// a fixture change that makes the function unreachable fails the test
+/// instead of hanging it.
+fn step_into_function(adapter: &mut PmDapAdapter, function: &str) -> Value {
+    for _ in 0..20 {
+        let mut step_out = Vec::new();
+        adapter
+            .handle("stepIn", &Value::Null, &mut step_out)
+            .unwrap();
+        let trace = adapter
+            .handle("stackTrace", &Value::Null, &mut step_out)
+            .unwrap();
+        if trace["stackFrames"][0]["name"] == json!(function) {
+            return trace;
+        }
+    }
+    panic!("never stepped into `{function}`");
+}
+
+#[test]
+fn frames_carry_source_objects_for_provenanced_functions_only() {
+    let dir = scratch("frame-source");
+    let program = write_pmc_debug_with_sources(
+        &dir,
+        "provenance",
+        &[
+            (Some("app.pmc"), RETURN_CALLER_PMC),
+            // No file, no provenance — a prebuilt-object stand-in.
+            (None, RETURN_CALLEE_PMC),
+        ],
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    // At the entry stop, frame 0 is `main` — provenanced, so it carries
+    // the `source` object with the file leaf and the ABSOLUTE resolved
+    // path (the sidecar stores `app.pmc` relative to its own directory).
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["name"], json!("main"));
+    assert_eq!(frame["source"]["name"], json!("app.pmc"));
+    assert_eq!(
+        frame["source"]["path"],
+        json!(dir.join("app.pmc").to_str().unwrap())
+    );
+
+    // Inside `callee` — no provenance, no `source` key at all; the caller
+    // frame behind it keeps its own.
+    let trace = step_into_function(&mut adapter, "callee");
+    let frames = trace["stackFrames"].as_array().unwrap();
+    assert!(
+        frames[0].get("source").is_none(),
+        "an unprovenanced function must not invent a source: {trace}"
+    );
+    assert_eq!(frames[1]["source"]["name"], json!("app.pmc"));
+}
+
+#[test]
+fn a_missing_source_file_omits_the_frame_source_object() {
+    let dir = scratch("frame-source-missing");
+    let program = write_pmc_debug_with_sources(
+        &dir,
+        "moved-tree",
+        &[
+            (Some("app.pmc"), RETURN_CALLER_PMC),
+            (None, RETURN_CALLEE_PMC),
+        ],
+    );
+    // The tree "moves": the source disappears while the map still names it.
+    fs::remove_file(dir.join("app.pmc")).unwrap();
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["name"], json!("main"));
+    assert!(
+        frame.get("source").is_none(),
+        "a dead path must degrade to a sourceless frame: {trace}"
+    );
+}
+
+#[test]
+fn set_breakpoints_filters_by_the_request_file() {
+    let dir = scratch("bp-file-filter");
+    // Both units carry a line 2 (`halt;` and `right(!);`) — the collision
+    // the per-file filter exists to split.
+    let program = write_pmc_debug_with_sources(
+        &dir,
+        "collide",
+        &[
+            (Some("a.pmc"), RETURN_CALLER_PMC),
+            (Some("b.pmc"), RETURN_CALLEE_PMC),
+        ],
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+
+    let plant = |adapter: &mut PmDapAdapter, file: &str| -> Value {
+        adapter
+            .handle(
+                "setBreakpoints",
+                &json!({
+                    "source": {"path": dir.join(file).to_str().unwrap()},
+                    "breakpoints": [{"line": 2}],
+                }),
+                &mut Vec::new(),
+            )
+            .unwrap()
+    };
+
+    let in_a = plant(&mut adapter, "a.pmc");
+    let in_b = plant(&mut adapter, "b.pmc");
+    assert_eq!(in_a["breakpoints"][0]["verified"], json!(true));
+    assert_eq!(in_b["breakpoints"][0]["verified"], json!(true));
+    assert_ne!(
+        in_a["breakpoints"][0]["instructionReference"],
+        in_b["breakpoints"][0]["instructionReference"],
+        "the same line number in two files must plant at two addresses"
+    );
+
+    // A file the map never names: unverified, with the foreign-file
+    // message — NOT a silent fall-through to the global table.
+    let foreign = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({
+                "source": {"path": dir.join("elsewhere.pmc").to_str().unwrap()},
+                "breakpoints": [{"line": 2}],
+            }),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(foreign["breakpoints"][0]["verified"], json!(false));
+    assert!(
+        foreign["breakpoints"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no code in this program comes from this file"),
+        "got: {foreign}"
+    );
+
+    // The planted b.pmc breakpoint is live: the run pauses inside
+    // `callee`, proving the filter picked the right unit's address.
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Stopped);
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    assert_eq!(trace["stackFrames"][0]["name"], json!("callee"));
+}
+
+#[test]
+fn a_provenance_free_map_keeps_the_global_line_table() {
+    let dir = scratch("bp-global-fallback");
+    let program = write_pmc_debug(&dir, "legacy", CALLSTEP_PMC);
+    let call_line = line_of(CALLSTEP_PMC, "@callee()");
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+    // The request names a file, but the map carries no provenance at all —
+    // the pre-provenance global behavior applies, so the line verifies.
+    let response = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({
+                "source": {"path": dir.join("whatever.pmc").to_str().unwrap()},
+                "breakpoints": [{"line": call_line}],
+            }),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(response["breakpoints"][0]["verified"], json!(true));
+}

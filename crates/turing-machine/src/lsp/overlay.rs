@@ -1513,11 +1513,7 @@ machine {
         crate::asm::link(
             &objects,
             &libraries,
-            mtc_core::linker::LinkOptions {
-                relax: true,
-                entry: None,
-                call_mech: mtc_core::linker::CallMech::default(),
-            },
+            mtc_core::linker::LinkOptions::default(),
         )
         .expect("this fixture's link set must actually link, not just resolve names");
 
@@ -1754,11 +1750,7 @@ machine {
         crate::asm::link(
             &objects,
             &libraries,
-            mtc_core::linker::LinkOptions {
-                relax: true,
-                entry: None,
-                call_mech: mtc_core::linker::CallMech::default(),
-            },
+            mtc_core::linker::LinkOptions::default(),
         )
         .expect("this fixture's link set must actually link, not just resolve names");
 

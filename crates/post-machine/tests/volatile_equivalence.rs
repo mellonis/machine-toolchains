@@ -439,7 +439,8 @@ fn volatile_keeps_the_strict_cell_fault() {
 /// that lands on disk carries both — so a build mixing a pre-compiled
 /// two-column `.pmo` with an in-memory source runs BOTH rules at once.
 /// The image it produces must equal the one built entirely from disk
-/// objects, byte for byte, sidecar included.
+/// objects, byte for byte — and the sidecar too, up to the source
+/// provenance only the source-compiled path can know.
 #[test]
 fn in_memory_and_on_disk_paths_agree() {
     let dir = scratch("volatile_mixed_paths");
@@ -510,10 +511,34 @@ fn in_memory_and_on_disk_paths_agree() {
         fs::read(&disk).unwrap(),
         "the in-memory column rule must not change the image"
     );
+    // The sidecars agree modulo source provenance, which the mixed build
+    // splits BY DESIGN (docs/formats.md (map sidecar)): the in-memory
+    // `.pmc` unit stamps its file, the prebuilt `.pmo` has no source to
+    // name — and the all-object disk link stamps nothing.
+    let mut mem_map =
+        mtc_core::linker::MapFile::from_json(&fs::read_to_string(dir.join("mem.pmx.map")).unwrap())
+            .unwrap();
+    let disk_map = mtc_core::linker::MapFile::from_json(
+        &fs::read_to_string(dir.join("disk.pmx.map")).unwrap(),
+    )
+    .unwrap();
+    let provenance: Vec<(&str, Option<&str>)> = mem_map
+        .functions
+        .iter()
+        .map(|f| (f.name.as_str(), f.source.as_deref()))
+        .collect();
     assert_eq!(
-        fs::read_to_string(dir.join("mem.pmx.map")).unwrap(),
-        fs::read_to_string(dir.join("disk.pmx.map")).unwrap(),
-        "nor the debug sidecar"
+        provenance,
+        vec![("main", Some("app.pmc")), ("util", None)],
+        "the mixed build stamps exactly its source-compiled unit"
+    );
+    assert!(disk_map.functions.iter().all(|f| f.source.is_none()));
+    for f in &mut mem_map.functions {
+        f.source = None;
+    }
+    assert_eq!(
+        mem_map, disk_map,
+        "nor (modulo provenance) the debug sidecar"
     );
 
     // And the agreed image really is the gated one: the same build with a

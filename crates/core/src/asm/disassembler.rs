@@ -3112,6 +3112,7 @@ START:  nop
                 end: 9,
                 labels: vec![],
                 lines: vec![],
+                source: None,
             }],
             bindings: vec![],
         };
@@ -3181,6 +3182,7 @@ START:  nop
                 end: 7,
                 labels: vec![("L1".into(), 1)],
                 lines: vec![],
+                source: None,
             }],
             bindings: vec![],
         };

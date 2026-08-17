@@ -103,9 +103,9 @@
 //! client may still have cached from the PRIOR session, exactly the
 //! staleness this salt exists to prevent.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -168,6 +168,14 @@ static PM1: Pm1 = Pm1;
 const UNMAPPED_BREAKPOINT_MESSAGE: &str =
     "no code at this line — build with -g and place the breakpoint on an executable line";
 
+/// `handle_set_breakpoints`'s answer when the map DOES carry source
+/// provenance but none of its files is the one this request names — the
+/// per-file filter (docs/dap.md (breakpoints and stepping)) then has no
+/// line table to search, and falling back to the global one would plant
+/// breakpoints from an unrelated file's identical line numbers.
+const FOREIGN_SOURCE_BREAKPOINT_MESSAGE: &str =
+    "no code in this program comes from this file (per the map sidecar's source records)";
+
 /// `next`'s underlying primitive steps OVER a call (runs it to completion
 /// before reporting); `stepIn`'s steps INTO one (lands on the callee's
 /// first instruction). `handle_step` is the one loop parameterized by this.
@@ -175,6 +183,20 @@ const UNMAPPED_BREAKPOINT_MESSAGE: &str =
 enum StepKind {
     Over,
     Into,
+}
+
+/// How a `setBreakpoints` request's file constrains the line search
+/// (docs/dap.md (breakpoints and stepping)). `Global` — no provenance in
+/// the map (or no file in the request): every function's lines are
+/// searched, the pre-provenance behavior. `File` — the request's file
+/// matched a map source record; only that file's lines are searched, so
+/// identical line numbers across compilation units cannot collide.
+/// `Foreign` — the map HAS provenance but names no file matching the
+/// request: nothing is searched, and the un-verified answer says why.
+enum SourceFilter {
+    Global,
+    File(String),
+    Foreign,
 }
 
 /// What a stepping request settled on, once its underlying `DebugSession`
@@ -393,6 +415,12 @@ pub struct PmDapAdapter {
     /// `disassemble`/trace label resolution needs `MapFunction::labels`,
     /// which `LineIndex` does not carry (it only indexes lines).
     map: Option<MapFile>,
+    /// The sidecar's directory, lexically absolutized at launch — the
+    /// anchor the map's relative `source` entries resolve against, both
+    /// for the `source` objects frames carry and for matching a
+    /// `setBreakpoints` request's file (docs/formats.md (map sidecar)).
+    /// `None` until a launch discovers a sidecar.
+    map_dir: Option<PathBuf>,
     /// The launch tape block's glyph table. Program mode only: `None`
     /// when no `"tape"` was given (the default empty tape carries no
     /// alphabet) — `variables` falls back to raw indices in that case
@@ -420,13 +448,19 @@ pub struct PmDapAdapter {
     /// `setBreakpoints`, kept separately from `instruction_breakpoints` so
     /// each request kind can REPLACE only its own list (DAP semantics —
     /// `setBreakpoints`/`setInstructionBreakpoints` are independent
-    /// breakpoint kinds). Also consulted directly by the stepping loop
-    /// (`handle_step`) and the traced motions (`step_traced`/`run_traced`):
-    /// `step_in`/`step_over`'s raw per-instruction path never checks
-    /// `DebugSession`'s own breakpoint set (only the `continue`-shaped
-    /// motions do — docs/core.md (DebugSession)), so a breakpoint hit
-    /// mid-line has to be noticed here instead.
-    source_breakpoints: BTreeSet<u32>,
+    /// breakpoint kinds). Bucketed per source file — DAP's own contract
+    /// is per-source replacement ("clears all previous breakpoints in
+    /// that source"), which matters once the map's provenance lets two
+    /// files hold breakpoints at once (docs/dap.md (breakpoints and
+    /// stepping)): the key is the matched map source record, or `""` for
+    /// a request resolved against the global table. Also consulted
+    /// directly by the stepping loop (`handle_step`) and the traced
+    /// motions (`step_traced`/`run_traced`): `step_in`/`step_over`'s raw
+    /// per-instruction path never checks `DebugSession`'s own breakpoint
+    /// set (only the `continue`-shaped motions do — docs/core.md
+    /// (DebugSession)), so a breakpoint hit mid-line has to be noticed
+    /// here instead.
+    source_breakpoints: BTreeMap<String, BTreeSet<u32>>,
     /// Addresses added on behalf of `setInstructionBreakpoints` — see
     /// `source_breakpoints` for why this is a separate set and why the
     /// stepping loop consults both.
@@ -454,10 +488,11 @@ impl PmDapAdapter {
             line_index: None,
             code: None,
             map: None,
+            map_dir: None,
             alphabet: None,
             launch_opts: None,
             run_state: RunState::Stopped,
-            source_breakpoints: BTreeSet::new(),
+            source_breakpoints: BTreeMap::new(),
             instruction_breakpoints: BTreeSet::new(),
             stop_generation: 0,
         }
@@ -653,12 +688,24 @@ impl PmDapAdapter {
         let session = machine.debug(RunOptions::default());
         let map = sidecar_map(&program);
         let line_index = map.as_ref().map(LineIndex::new);
+        // The anchor for the map's relative `source` entries: the
+        // sidecar sits next to the executable, so its directory is the
+        // program's — absolutized here (lexically, docs/formats.md (map
+        // sidecar)) because the frames' `source` objects hand the editor
+        // absolute paths.
+        let map_dir = map.as_ref().and_then(|_| {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            Path::new(&program)
+                .parent()
+                .map(|dir| mtc_core::source_path::lexical_absolute(&cwd, dir))
+        });
 
         self.session = Some(session);
         self.tape = Some(tape);
         self.line_index = line_index;
         self.code = Some(exe.code.clone());
         self.map = map;
+        self.map_dir = map_dir;
         self.alphabet = alphabet;
         self.launch_opts = Some(LaunchOpts {
             program,
@@ -756,18 +803,41 @@ impl PmDapAdapter {
     /// planted address — both for a real client's UI and so this crate's own
     /// tests can recover an address without any extra introspection surface.
     fn handle_set_breakpoints(&mut self, arguments: &Value) -> Result<Value, String> {
-        let Some(session) = self.session.as_mut() else {
+        if self.session.is_none() {
             return Err("setBreakpoints before launch".to_string());
-        };
+        }
+        // Resolved before the session borrow below (a `&self` method call
+        // cannot overlap it). See `breakpoint_source_filter` for the
+        // per-file rule.
+        let source_filter = self.breakpoint_source_filter(arguments);
+        let session = self.session.as_mut().expect("checked above");
         let requested = arguments
             .get("breakpoints")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
 
-        for addr in std::mem::take(&mut self.source_breakpoints) {
-            if !self.instruction_breakpoints.contains(&addr) {
-                session.remove_breakpoint(addr);
+        // DAP's per-source REPLACE contract: this request's list is the
+        // whole new set for ITS bucket — the matched file, or the one
+        // global bucket (`""`) when the search is global. A `Foreign`
+        // request owns no bucket: it can plant nothing, so it clears
+        // nothing. An address is removed from the session only when no
+        // other bucket (and no instruction breakpoint) still holds it.
+        let bucket = match &source_filter {
+            SourceFilter::Global => Some(String::new()),
+            SourceFilter::File(raw) => Some(raw.clone()),
+            SourceFilter::Foreign => None,
+        };
+        if let Some(key) = &bucket {
+            for addr in self.source_breakpoints.remove(key).unwrap_or_default() {
+                let still_owned = self.instruction_breakpoints.contains(&addr)
+                    || self
+                        .source_breakpoints
+                        .values()
+                        .any(|set| set.contains(&addr));
+                if !still_owned {
+                    session.remove_breakpoint(addr);
+                }
             }
         }
 
@@ -780,19 +850,29 @@ impl PmDapAdapter {
                 }));
                 continue;
             };
-            match self
-                .line_index
-                .as_ref()
-                .and_then(|idx| idx.address_for_line(line))
-            {
+            let planted = match &source_filter {
+                SourceFilter::Foreign => None,
+                SourceFilter::Global => self
+                    .line_index
+                    .as_ref()
+                    .and_then(|idx| idx.address_for_line(line, None)),
+                SourceFilter::File(raw) => self
+                    .line_index
+                    .as_ref()
+                    .and_then(|idx| idx.address_for_line(line, Some(raw))),
+            };
+            match planted {
                 Some(addr) => {
                     session.add_breakpoint(addr);
-                    self.source_breakpoints.insert(addr);
+                    self.source_breakpoints
+                        .entry(bucket.clone().unwrap_or_default())
+                        .or_default()
+                        .insert(addr);
                     let resolved_line = self
                         .line_index
                         .as_ref()
                         .and_then(|idx| idx.resolve(addr))
-                        .and_then(|(_, l)| l)
+                        .and_then(|loc| loc.line)
                         .unwrap_or(line);
                     results.push(json!({
                         "verified": true,
@@ -801,10 +881,15 @@ impl PmDapAdapter {
                     }));
                 }
                 None => {
+                    let message = if matches!(source_filter, SourceFilter::Foreign) {
+                        FOREIGN_SOURCE_BREAKPOINT_MESSAGE
+                    } else {
+                        UNMAPPED_BREAKPOINT_MESSAGE
+                    };
                     results.push(json!({
                         "verified": false,
                         "line": line,
-                        "message": UNMAPPED_BREAKPOINT_MESSAGE,
+                        "message": message,
                     }));
                 }
             }
@@ -831,7 +916,11 @@ impl PmDapAdapter {
             .unwrap_or_default();
 
         for addr in std::mem::take(&mut self.instruction_breakpoints) {
-            if !self.source_breakpoints.contains(&addr) {
+            let still_owned = self
+                .source_breakpoints
+                .values()
+                .any(|set| set.contains(&addr));
+            if !still_owned {
                 session.remove_breakpoint(addr);
             }
         }
@@ -943,7 +1032,7 @@ impl PmDapAdapter {
             };
             let session = self.session.as_ref().expect("checked by step_once_traced");
             let ip = session.ip();
-            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+            if self.source_breakpoint_at(ip) || self.instruction_breakpoints.contains(&ip) {
                 return DebugEvent::Paused(PauseCause::Breakpoint(ip));
             }
             match stop_when {
@@ -968,7 +1057,7 @@ impl PmDapAdapter {
             };
             let session = self.session.as_ref().expect("checked by step_once_traced");
             let ip = session.ip();
-            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+            if self.source_breakpoint_at(ip) || self.instruction_breakpoints.contains(&ip) {
                 return DebugEvent::Paused(PauseCause::Breakpoint(ip));
             }
         }
@@ -1036,7 +1125,7 @@ impl PmDapAdapter {
             self.line_index
                 .as_ref()
                 .and_then(|idx| idx.resolve(ip))
-                .map(|(name, line)| (name.to_string(), line))
+                .map(|loc| (loc.function.to_string(), loc.line))
         };
 
         let outcome = loop {
@@ -1084,7 +1173,7 @@ impl PmDapAdapter {
                 .as_ref()
                 .expect("checked by ensure_can_step")
                 .ip();
-            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+            if self.source_breakpoint_at(ip) || self.instruction_breakpoints.contains(&ip) {
                 break StepOutcome::Stop("breakpoint", None);
             }
             if instruction_granularity {
@@ -1094,7 +1183,7 @@ impl PmDapAdapter {
                 .line_index
                 .as_ref()
                 .and_then(|idx| idx.resolve(ip))
-                .map(|(name, line)| (name.to_string(), line));
+                .map(|loc| (loc.function.to_string(), loc.line));
             if now_position != start_position {
                 break StepOutcome::Stop("step", None);
             }
@@ -1208,17 +1297,91 @@ impl PmDapAdapter {
     /// always the hex address, resolvable regardless — `disassemble`'s
     /// `memoryReference` argument.
     fn frame_json(&self, id: i64, addr: u32) -> Value {
-        let (name, line) = match self.line_index.as_ref().and_then(|idx| idx.resolve(addr)) {
-            Some((name, line)) => (name.to_string(), line.unwrap_or(0)),
+        let loc = self.line_index.as_ref().and_then(|idx| idx.resolve(addr));
+        let (name, line) = match &loc {
+            Some(loc) => (loc.function.to_string(), loc.line.unwrap_or(0)),
             None => (format!("0x{addr:04x}"), 0),
         };
-        json!({
+        let mut frame = json!({
             "id": id,
             "name": name,
             "line": line,
             "column": 0,
             "instructionPointerReference": format!("0x{addr:x}"),
-        })
+        });
+        // Source provenance (docs/dap.md (source provenance)): a frame
+        // whose function record names its file gets a DAP `source`
+        // object, which is what lets the client focus the frame and
+        // highlight the line in the editor. Attached only when the
+        // resolved file actually exists — a moved tree degrades to
+        // today's sourceless frame instead of a dead editor tab.
+        if let Some(path) = loc
+            .and_then(|loc| loc.source)
+            .and_then(|raw| self.resolved_source(raw))
+        {
+            frame["source"] = source_json(&path);
+        }
+        frame
+    }
+
+    /// A map `source` entry resolved to the absolute file the editor
+    /// should open: relative entries anchor at the sidecar's directory
+    /// (docs/formats.md (map sidecar)), and a file that does not exist
+    /// resolves to `None` — the caller then omits provenance rather than
+    /// handing the client a dead path.
+    fn resolved_source(&self, raw: &str) -> Option<PathBuf> {
+        let path = self.map_source_path(raw)?;
+        fs::metadata(&path).is_ok().then_some(path)
+    }
+
+    /// Whether ANY source-breakpoint bucket holds `addr` — the stepping
+    /// loop's view, which does not care which file planted a breakpoint,
+    /// only that one exists at the position just reached.
+    fn source_breakpoint_at(&self, addr: u32) -> bool {
+        self.source_breakpoints
+            .values()
+            .any(|set| set.contains(&addr))
+    }
+
+    /// The same resolution without the existence gate — the breakpoint
+    /// filter compares identities, and `source_identity` already treats
+    /// a missing file gracefully (lexical fallback).
+    fn map_source_path(&self, raw: &str) -> Option<PathBuf> {
+        let dir = self.map_dir.as_ref()?;
+        Some(mtc_core::source_path::lexical_absolute(dir, Path::new(raw)))
+    }
+
+    /// Classifies a `setBreakpoints` request's file against the map's
+    /// source records — see [`SourceFilter`]. Identity is
+    /// [`source_identity`]'s: canonicalized when the file exists (so a
+    /// symlinked workspace still matches), lexical otherwise.
+    fn breakpoint_source_filter(&self, arguments: &Value) -> SourceFilter {
+        if !self.line_index.as_ref().is_some_and(LineIndex::has_sources) {
+            return SourceFilter::Global;
+        }
+        let Some(request_path) = arguments
+            .get("source")
+            .and_then(|s| s.get("path"))
+            .and_then(Value::as_str)
+        else {
+            return SourceFilter::Global;
+        };
+        let request = source_identity(Path::new(request_path));
+        let raws = self
+            .map
+            .as_ref()
+            .map(|map| map.functions.iter().filter_map(|f| f.source.as_deref()))
+            .into_iter()
+            .flatten();
+        for raw in raws {
+            let Some(resolved) = self.map_source_path(raw) else {
+                continue;
+            };
+            if source_identity(&resolved) == request {
+                return SourceFilter::File(raw.to_string());
+            }
+        }
+        SourceFilter::Foreign
     }
 
     /// `scopes`: identical for any frame id (machine state is global), so
@@ -1639,6 +1802,32 @@ fn sidecar_map(program: &str) -> Option<MapFile> {
     fs::read_to_string(sidecar)
         .ok()
         .and_then(|text| MapFile::from_json(&text).ok())
+}
+
+/// The DAP `source` object for a resolved provenance path
+/// (docs/dap.md (source provenance)): `name` is the display leaf, `path`
+/// the absolute file the editor opens.
+fn source_json(path: &Path) -> Value {
+    json!({
+        "name": path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string()),
+        "path": path.display().to_string(),
+    })
+}
+
+/// One file's identity for the breakpoint filter: canonicalized when the
+/// file exists — a debug session compares paths from two independent
+/// producers (the editor's request and the sidecar's records), and on a
+/// symlinked tree those legitimately spell one file two ways — with the
+/// purely lexical form as the fallback for a path that cannot be
+/// canonicalized (docs/dap.md (source provenance)).
+fn source_identity(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        mtc_core::source_path::lexical_absolute(&cwd, path)
+    })
 }
 
 #[cfg(test)]

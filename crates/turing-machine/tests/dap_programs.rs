@@ -2507,3 +2507,122 @@ fn configuration_done_and_continue_after_done_reject_without_reemitting_terminat
         "a rejected continue must not push events, got: {out:?}"
     );
 }
+
+// ---- source provenance (docs/dap.md (source provenance)) — mirrors the
+// PM suite's provenance tests over the TM fixture pair ------------------
+
+/// `write_tmc_debug_multi`'s provenance sibling: writes each source AS A
+/// REAL FILE into `dir` first (a frame's `source` object is attached only
+/// when the resolved file exists) and links with per-unit `sources`
+/// naming those files relative to the sidecar's directory — the shape
+/// `tmt build` emits (docs/formats.md (map sidecar)).
+fn write_tmc_debug_with_sources(dir: &Path, name: &str, units: &[(&str, &str)]) -> PathBuf {
+    let mut objects = Vec::new();
+    let mut sources = Vec::new();
+    for (file, text) in units {
+        fs::write(dir.join(file), text).unwrap();
+        objects.push(
+            compile(
+                text,
+                CompileOptions {
+                    debug_info: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .object,
+        );
+        sources.push(Some((*file).to_string()));
+    }
+    let linked = link(
+        &objects,
+        &[],
+        LinkOptions {
+            sources,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let path = dir.join(format!("{name}.tmx"));
+    fs::write(&path, linked.executable.to_bytes()).unwrap();
+    let mut map_path = path.clone().into_os_string();
+    map_path.push(".map");
+    fs::write(&map_path, linked.map.to_json()).unwrap();
+    path
+}
+
+#[test]
+fn frames_carry_source_objects_and_breakpoints_filter_by_file() {
+    let dir = scratch("provenance");
+    let program = write_tmc_debug_with_sources(
+        &dir,
+        "provenance",
+        &[("a.tmc", RETURN_CALLER_TMC), ("b.tmc", RETURN_CALLEE_TMC)],
+    );
+    let tape = write_one_tape_block(&dir, "provenance", 3, 1);
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, true), &mut out)
+        .unwrap();
+
+    // Line 1 is unmapped in both files; the snapping rule plants each
+    // request at ITS OWN file's first mapped line — two different
+    // addresses for the same requested line number.
+    let plant = |adapter: &mut TmDapAdapter, file: &str| -> Value {
+        adapter
+            .handle(
+                "setBreakpoints",
+                &json!({
+                    "source": {"path": dir.join(file).to_str().unwrap()},
+                    "breakpoints": [{"line": 1}],
+                }),
+                &mut Vec::new(),
+            )
+            .unwrap()
+    };
+    let in_a = plant(&mut adapter, "a.tmc");
+    let in_b = plant(&mut adapter, "b.tmc");
+    assert_eq!(in_a["breakpoints"][0]["verified"], json!(true));
+    assert_eq!(in_b["breakpoints"][0]["verified"], json!(true));
+    assert_ne!(
+        in_a["breakpoints"][0]["instructionReference"],
+        in_b["breakpoints"][0]["instructionReference"],
+        "each file must snap line 1 to its own first mapped line"
+    );
+
+    let foreign = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({
+                "source": {"path": dir.join("elsewhere.tmc").to_str().unwrap()},
+                "breakpoints": [{"line": 1}],
+            }),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(foreign["breakpoints"][0]["verified"], json!(false));
+    assert!(
+        foreign["breakpoints"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no code in this program comes from this file"),
+        "got: {foreign}"
+    );
+
+    // The entry frame belongs to a.tmc's machine world — its `source`
+    // object carries the file leaf and the ABSOLUTE resolved path.
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["source"]["name"], json!("a.tmc"));
+    assert_eq!(
+        frame["source"]["path"],
+        json!(dir.join("a.tmc").to_str().unwrap())
+    );
+}
