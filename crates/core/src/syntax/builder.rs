@@ -46,6 +46,16 @@ impl TreeBuilder {
         self.children.push(GreenElement::Node(node));
     }
 
+    /// Mark the current position for a later [`start_node_at`](Self::start_node_at).
+    ///
+    /// The checkpoint is only valid until the frame it was taken in is
+    /// closed: a `finish_node` that folds children at or below the
+    /// checkpoint's position invalidates it, and `start_node_at` cannot
+    /// detect that misuse — a checkpoint referring to an already-folded
+    /// position just wraps nothing (it opens a new frame at the current,
+    /// unrelated end of `children`) instead of failing loudly. A
+    /// checkpoint must be consumed by `start_node_at` before the frame it
+    /// was taken in finishes.
     pub fn checkpoint(&self) -> Checkpoint {
         Checkpoint(self.children.len())
     }

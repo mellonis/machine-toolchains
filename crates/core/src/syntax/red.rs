@@ -18,7 +18,7 @@ pub struct TextRange {
 
 impl TextRange {
     pub fn new(start: u32, end: u32) -> TextRange {
-        debug_assert!(start <= end);
+        assert!(start <= end);
         TextRange { start, end }
     }
 
@@ -45,6 +45,10 @@ struct NodeData {
     offset: u32,
 }
 
+/// Positional identity: the same green node at the same offset.
+/// Meaningful within one tree — but note that two nodes from
+/// *different* trees that happen to share a green `Rc` (structure
+/// sharing) at equal offsets compare equal too.
 impl PartialEq for SyntaxNode {
     fn eq(&self, other: &SyntaxNode) -> bool {
         self.0.offset == other.0.offset && Rc::ptr_eq(&self.0.green, &other.0.green)
@@ -167,6 +171,46 @@ impl SyntaxElement {
     }
 }
 
+/// Render an indented tree dump for debugging and golden tests. Core
+/// knows no kind names — the caller supplies them.
+pub fn debug_dump(node: &SyntaxNode, kind_name: &dyn Fn(SyntaxKind) -> String) -> String {
+    let mut out = String::new();
+    dump_node(node, kind_name, 0, &mut out);
+    out
+}
+
+fn dump_node(
+    node: &SyntaxNode,
+    kind_name: &dyn Fn(SyntaxKind) -> String,
+    depth: usize,
+    out: &mut String,
+) {
+    let range = node.text_range();
+    out.push_str(&"  ".repeat(depth));
+    out.push_str(&format!(
+        "{}@{}..{}\n",
+        kind_name(node.kind()),
+        range.start,
+        range.end
+    ));
+    for e in node.children_with_tokens() {
+        match e {
+            SyntaxElement::Node(n) => dump_node(&n, kind_name, depth + 1, out),
+            SyntaxElement::Token(t) => {
+                let range = t.text_range();
+                out.push_str(&"  ".repeat(depth + 1));
+                out.push_str(&format!(
+                    "{}@{}..{} {:?}\n",
+                    kind_name(t.kind()),
+                    range.start,
+                    range.end,
+                    t.text()
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +285,33 @@ mod tests {
             cursor = e.text_range().end;
         }
         assert_eq!(cursor, root.text_range().end);
+    }
+
+    fn fake_kind_name(kind: SyntaxKind) -> String {
+        match kind {
+            ROOT => "ROOT",
+            WS => "WS",
+            IDENT => "IDENT",
+            LIST => "LIST",
+            _ => unreachable!("sample() uses only the fake kinds above"),
+        }
+        .to_owned()
+    }
+
+    #[test]
+    fn debug_dump_renders_an_indented_tree() {
+        let root = sample();
+        let dump = debug_dump(&root, &fake_kind_name);
+        let expected = [
+            "ROOT@0..6",
+            "  LIST@0..5",
+            "    IDENT@0..1 \"f\"",
+            "    WS@1..2 \" \"",
+            "    IDENT@2..5 \"λx\"",
+            "  WS@5..6 \"\\n\"",
+            "",
+        ]
+        .join("\n");
+        assert_eq!(dump, expected);
     }
 }

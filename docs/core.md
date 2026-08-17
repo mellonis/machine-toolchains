@@ -880,10 +880,17 @@ zero-copy wrapper over a node of a known kind, declared with the
 lookup helpers. Concrete views live in the language crates.
 
 Positions are byte offsets (`TextRange`, half-open). Diagnostics keep
-the toolchains' line/column `Span` as their currency: a `LineIndex`
-built from the source converts byte offsets to 1-based lines and
-1-based **character** columns — the same counting the lexers use, so
-spans built either way are identical.
+the toolchains' line/column `Span` as their currency: a
+`TextLineIndex` built from the source converts byte offsets to
+1-based lines and 1-based **character** columns — the same counting
+the lexers use, so spans agree for the single-line tokens the lexers
+produce. For a token spanning multiple lines (a block comment), the
+`TextLineIndex` path yields the true multi-line end where the lexer's
+own span does not.
+
+A free `debug_dump` function renders an indented tree dump for
+debugging and golden tests; core knows no kind names, so the caller
+supplies a kind-to-name function.
 
 Handles are `Rc`-based and single-threaded, matching the front ends
 that will use them.
