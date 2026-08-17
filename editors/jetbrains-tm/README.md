@@ -27,15 +27,12 @@ and a `.tma` file coexist in one session without perturbing each other.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.2.0, targeting `tmt` 0.3.0 as its tested
+- This plugin is version 0.2.0, targeting `tmt` 0.4.0 as its tested
   floor: on startup it runs `tmt --version` and shows a warning
   notification (not a hard failure) if the binary reports something
   older, or an error notification if the binary can't be found at all.
   The plugin's own version number and the `tmt` floor version are
   independent numbers.
-- Debugging specifically needs a `tmt` with the `dap` subcommand, which
-  postdates the 0.3.0 release — until the next release, build the binary
-  from current sources (next section) rather than from the release tag.
 - Built against **LSP4IJ 0.20.1** on an IntelliJ Platform 2024.3
   baseline — the Gradle build resolves and compiles against both pinned
   versions, which demonstrates API compatibility; the build target is
@@ -494,10 +491,10 @@ L_step: mov     [>, ., .]
 
 ### Target-build & debug checklist
 
-New in plugin 0.2.0, never yet observed at runtime — the run-config
-`build` subcommand and the whole DAP bridge below are compile-verified
-only. Needs a `tmt` built from current sources (the `dap` subcommand
-postdates 0.3.0). In the scratch project from the `.tmc` checklist
+New in plugin 0.2.0 — the run-config `build` subcommand and the whole
+DAP bridge below. Needs a `tmt` at 0.4.0 or newer (the release that
+introduced the `dap` subcommand). In the scratch project from the
+`.tmc` checklist
 above, mint an input tape and add a `tmt.json` next to `check.tmc`:
 
 ```sh

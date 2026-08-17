@@ -26,14 +26,11 @@ for its own manual walkthrough.
   sideload this plugin (below) — a sideloaded plugin does not auto-install
   its own plugin dependencies, so skipping this step leaves the IDE unable
   to load the plugin at all.
-- This plugin is version 0.2.0. It has been tested against `pmt` 0.3.0; on
+- This plugin is version 0.2.0. It has been tested against `pmt` 0.4.0; on
   startup it runs `pmt --version` and shows a warning notification (not a
   hard failure) if the binary reports something older, or an error
   notification if the binary can't be found at all. The plugin's own
   version number and the tested `pmt` version are independent numbers.
-- Debugging specifically needs a `pmt` with the `dap` subcommand, which
-  postdates the 0.3.0 release — until the next release, build the binary
-  from current sources (next section) rather than from the release tag.
 - Built and verified against **LSP4IJ 0.20.1** on an IntelliJ Platform
   2024.3 baseline (IntelliJ IDEA Community works — no Ultimate-only APIs
   are used).
@@ -428,10 +425,10 @@ UNUSED: nop
 
 ### Target-build & debug checklist
 
-New in plugin 0.2.0, never yet observed at runtime — the run-config
-`build` subcommand and the whole DAP bridge below are compile-verified
-only. Needs a `pmt` built from current sources (the `dap` subcommand
-postdates 0.3.0). In the scratch project from the `.pmc` checklist above,
+New in plugin 0.2.0 — the run-config `build` subcommand and the whole
+DAP bridge below. Needs a `pmt` at 0.4.0 or newer (the release that
+introduced the `dap` subcommand). In the scratch project from the
+`.pmc` checklist above,
 add a `pmt.json` next to `check.pmc`:
 
 ```json

@@ -16,7 +16,7 @@ tasks below — see the Tasks section for the one gap (`compile`) that's
 
 - A `pmt` binary reachable on `PATH`, or pointed to with the `pmt.path`
   setting (below).
-- This extension is version 0.1.3. It has been tested against `pmt` 0.3.0;
+- This extension is version 0.2.0. It has been tested against `pmt` 0.4.0;
   on activation it runs `pmt --version` and shows a warning (not a hard
   failure) if the binary reports something older. The extension's own
   version number and the tested `pmt` version are independent numbers.

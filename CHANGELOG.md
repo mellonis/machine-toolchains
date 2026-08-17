@@ -7,6 +7,124 @@ dialects, the IR encodings, the container formats, and the
 project-manifest schemas — stating `unchanged` where nothing moved, so
 the blocks double as a compatibility matrix across releases.
 
+## [0.4.0] - 2026-08-17
+
+The debugging release. Both toolchains gain a Debug Adapter Protocol
+server — `pmt dap` and `tmt dap` — turning the engine's existing
+`DebugSession` into something an editor drives: breakpoints in the
+gutter, stepping at line or instruction granularity, machine state in
+the variables view, a disassembly view for the code between the lines.
+Both editor plugin pairs ship as its clients, and the optimizer on each
+side picks up a round of motion and value passes.
+
+| Version space | This release | Previous |
+|---|---|---|
+| Toolchain crates (`mtc-core`, `mtc-post-machine`, `mtc-turing-machine`) | **0.4.0** | 0.3.0 |
+| `.pmc` language | 0.4 — unchanged | 0.4 |
+| PM-1 `.pma` dialect | 0.3 — unchanged | 0.3 |
+| `.tmc` language | 0.1 — unchanged | 0.1 |
+| TM-1 `.tma` dialect | 0.3 — unchanged | 0.3 |
+| PM IR encoding (JSON) | 4 — unchanged | 4 |
+| TM IR encoding (JSON) | **3** — the `direct` lowering hint on rules | 2 |
+| Container formats (MO / MX / MT) | 3 / 2 / 2 — unchanged | 3 / 2 / 2 |
+| `pmt.json` project-manifest schema | 0.2 — unchanged | 0.2 |
+| `tmt.json` project-manifest schema | 0.2 — unchanged | 0.2 |
+
+The map sidecar (a JSON companion, not a numbered container) gains one
+optional per-function field, `source` — additive and
+backward-compatible; pre-provenance sidecars keep parsing and keep
+their old behavior.
+
+### Debugging over DAP
+
+- **`pmt dap` / `tmt dap`**: a stdio Debug Adapter Protocol server on
+  each toolchain, editor-agnostic, built on a new architecture-neutral
+  server loop in the core (the same framing the LSP servers use, plus a
+  run/drain alternation so a running machine keeps advancing between
+  client requests). `docs/dap.md` is the reference.
+- **Two launch modes.** Target mode names a project-manifest target and
+  builds it in process through the same driver `build` uses, with debug
+  info forced on; program mode takes a prebuilt executable and (for
+  TM-1, required; for PM-1, optional) a tape snapshot. `stopOnEntry`
+  and a per-instruction `trace` stream are common to both.
+- **Breakpoints**: source breakpoints resolve through the map's line
+  table with the same snapping rule breakpoints have always had, answer
+  verified/unverified honestly, and — when the map carries source
+  provenance — are filtered per file, so two translation units sharing
+  a line number can no longer capture each other's requests. DAP's
+  per-source REPLACE semantics are honored per file and independently
+  per breakpoint kind; instruction breakpoints need no map at all.
+- **Stepping**: line granularity walks instructions until the resolved
+  (function, line) position changes, function identity included;
+  instruction granularity steps exactly one; step-in/over/out follow
+  call depth, mirroring the engine debugger's own controls.
+- **State**: registers and per-tape scopes in the variables view, tape
+  cells and writable flags editable through `setVariable` (instruction
+  pointers stay read-only, as does TM-1's frame register), and the
+  debuggee's stopped/halted/trapped outcome reported as the same exit
+  codes `run` uses.
+- **The disassembly view**: `disassemble` serves strictly positional
+  windows around any address — the head of the address space pads with
+  placeholders rather than sliding the window, which is what keeps a
+  client's address arithmetic honest.
+- **Source provenance.** Builds record, per function, the source file
+  it came from; the adapters attach a DAP `source` object to every
+  frame whose provenance resolves to a file that exists, which is what
+  lets an editor focus the file and highlight the line on every stop.
+  Frames at an address before the function's first line-mapped
+  instruction render at the function's opening line (the
+  native-debugger prologue convention); a function with provenance but
+  no line table at all stays sourceless — never a sourced line 0,
+  which the protocol forbids and a real client punishes.
+- **Lifecycle honesty**: a client that vanishes without `disconnect`
+  mid-run ends the session instead of leaving the server ticking
+  unobserved at full CPU with a dead transport.
+
+### The optimizer motion/value round
+
+- **PM-1, two new passes.** `move-elim` cancels inverse move pairs
+  proven equivalent under the match-flag dataflow, converging within a
+  single optimization run; `tail-sink` deduplicates arm suffixes past a
+  check join. Both obey the standing equivalence contract and the
+  `brk` observability barrier.
+- **TM-1.** `dead_rows` learns identical-effect subsumption across
+  bands; `jump_threading` marks bare-goto rules *direct* and codegen
+  emits their dispatch targets without the intermediate stub states —
+  the lowering hint that moves the TM IR encoding to version 3; the
+  default-off `outline` clears its direct hint on escape rewrites.
+- **Tuned inlining.** The inline cap is now an explicit option on the
+  compile surface, and the shipped defaults were chosen by a sweep
+  harness over the example corpus rather than by feel.
+
+### Editor integration
+
+- **VS Code**: both extensions contribute a debugger type launching the
+  same binary the language client resolves, with launch configuration
+  schemas, initial configurations and snippets for both launch modes,
+  breakpoint support in all four languages, and the workspace folder as
+  the adapter's working directory.
+- **JetBrains**, plugins at 0.2.0: run configurations gain the `build`
+  subcommand with a manifest-target picker fed by `build
+  --list-targets` and a run-after-build toggle; the DAP servers
+  register with LSP4IJ's debugger bridge (gutter breakpoints, stepping,
+  variables, editable launch templates); the bundled project-manifest
+  JSON Schemas attach to `pmt.json`/`tmt.json` automatically; and
+  TextMate syntax coloring in the IDE actually works now — the file
+  types became language file types colored through the plugin's own
+  highlighter providers, replacing a borrowed registration that could
+  never resolve a foreign file type and rendered plain text.
+- All four plugins move to 0.2.0 with their tested-binary floors at
+  0.4.0.
+
+### Fixes
+
+- PM-1's move-elimination converges within one optimizer invocation
+  instead of leaving work for a hypothetical second run.
+- The core builds again without the standard library (the `no_std` VM
+  gate) after the source-path helper landed std-only.
+- The Delphi-era example programs the project descends from join the
+  golden corpus as derivation-first tests.
+
 ## [0.3.0] - 2026-08-11
 
 The release that turns a Post-machine toolchain into a toolchain
