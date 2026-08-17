@@ -21,5 +21,6 @@ pub mod linemap;
 pub mod linker;
 #[cfg(feature = "std")]
 pub mod lsp;
+#[cfg(feature = "std")]
 pub mod source_path;
 pub mod vm;
