@@ -309,10 +309,10 @@ pub(crate) struct DapTargetBuild {
 /// (docs/tmt/project.md (run block)): unlike PM, a TM-1 launch has no
 /// empty-tape default (`tmt run` itself requires `--tape-block`), so a
 /// target with no `run` block, or a `run` block that declares no `tape`,
-/// cannot be launched. These are the exact two guards [`run_once`]
-/// already applies to `tmt build --run` — a target that CLI itself
-/// refuses to run fails a dap launch the same clean way, one wording
-/// shared rather than a second copy of it.
+/// cannot be launched. Enforced through [`run_block_tape_path`] — the
+/// SAME function [`run_once`] calls for `tmt build --run` — so a target
+/// that CLI itself refuses to run fails a dap launch through the exact
+/// same guard conditions, not a second copy of them.
 pub(crate) fn build_target_for_launch(
     project_dir: Option<&Path>,
     target_name: &str,
@@ -371,21 +371,10 @@ pub(crate) fn build_target_for_launch(
         .collect();
 
     // The tape-only run-block rule (this function's own doc comment):
-    // mirrors `run_once`'s own two guards exactly.
-    let Some(spec) = &target.run else {
-        return Err(format!(
-            "target `{target_name}` declares no `run` block: a dap launch needs one with a `tape`"
-        ));
-    };
-    let Some(raw_tape) = spec.tape.clone() else {
-        return Err(format!(
-            "target `{target_name}`'s run block declares no `tape`: a dap launch needs a .tmt snapshot"
-        ));
-    };
-    let tape_path = root
-        .join(crate::project::normalize_rel(&raw_tape)?)
-        .to_string_lossy()
-        .into_owned();
+    // delegates to the shared `run_block_tape_path` helper — see its own
+    // doc comment.
+    let (tape_path, _spec) =
+        run_block_tape_path(&root, target_name, target.run.as_ref(), "a dap launch")?;
 
     Ok(DapTargetBuild {
         output,
@@ -600,22 +589,9 @@ fn run_once(
     name: &str,
     run: Option<&crate::project::RunSpec>,
 ) -> Result<CliOutput, String> {
-    let Some(spec) = run else {
-        return Err(format!(
-            "target `{name}` declares no `run` block: --run needs one with a `tape`"
-        ));
-    };
-    let Some(raw_tape) = spec.tape.clone() else {
-        return Err(format!(
-            "target `{name}`'s run block declares no `tape`: tmt run needs a .tmt snapshot"
-        ));
-    };
+    let (tape_path, spec) = run_block_tape_path(root, name, run, "tmt build --run")?;
     let settings = super::run::RunSettings {
-        tape: Some(
-            root.join(crate::project::normalize_rel(&raw_tape)?)
-                .to_string_lossy()
-                .into_owned(),
-        ),
+        tape: Some(tape_path),
         // The manifest `run` block declares no save target, matching PM's
         // driver: `--save-tape-block` is a `tmt run` flag, not a target key.
         save: None,
@@ -625,6 +601,43 @@ fn run_once(
         trace: false,
     };
     super::run::execute_run(output, &settings, &mut std::io::sink())
+}
+
+/// The tape-only run-block rule (docs/tmt/project.md (run block)):
+/// TM-1 has no empty-tape default, so a target either declares no `run`
+/// block, or one that declares no `tape`, cannot proceed — both are hard
+/// errors naming the target. Shared by `run_once` (`tmt build --run`)
+/// and `build_target_for_launch` (the DAP target-mode seam,
+/// `dap/mod.rs`) so the two callers can never drift on the guard
+/// CONDITIONS; `caller` supplies only the per-invocation phrase naming
+/// who needed the tape (`"tmt build --run"` / `"a dap launch"`), so the
+/// two callers' messages read naturally without a second copy of the
+/// guard logic itself. On success, resolves the declared `tape` path
+/// manifest-relative (root-relative, not the process cwd) and hands back
+/// the resolved `&RunSpec` too, so a caller needing its other fields
+/// (`run_once`'s own `no_step_limit`/`max_steps`/`max_tacts`) doesn't
+/// have to re-derive `Some(spec)` from `run` a second time.
+fn run_block_tape_path<'a>(
+    root: &Path,
+    target_name: &str,
+    run: Option<&'a crate::project::RunSpec>,
+    caller: &str,
+) -> Result<(String, &'a crate::project::RunSpec), String> {
+    let Some(spec) = run else {
+        return Err(format!(
+            "target `{target_name}` declares no `run` block: {caller} needs one with a `tape`"
+        ));
+    };
+    let Some(raw_tape) = spec.tape.clone() else {
+        return Err(format!(
+            "target `{target_name}`'s run block declares no `tape`: {caller} needs a .tmt snapshot"
+        ));
+    };
+    let tape_path = root
+        .join(crate::project::normalize_rel(&raw_tape)?)
+        .to_string_lossy()
+        .into_owned();
+    Ok((tape_path, spec))
 }
 
 /// Compile options for argv mode: exactly `tmt compile`'s preset/flag

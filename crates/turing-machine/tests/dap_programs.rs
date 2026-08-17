@@ -2116,6 +2116,43 @@ fn target_launch_streams_build_warnings_as_stderr_output_before_initialized() {
     }
 }
 
+/// The ordering leg `handle_launch_target`'s own doc comment claims: the
+/// tape loads BEFORE diagnostics are pushed to `out`, specifically so a
+/// failure past a successful (diagnostic-producing) build still pushes
+/// nothing. This fixture builds cleanly — with a warning, so
+/// `built.diagnostics` is non-empty — but its declared `run` tape is
+/// garbage bytes, so `build_tapes` fails on the SAME launch after the
+/// build already succeeded. If diagnostics were pushed first (PM's
+/// literal order), `out` would carry the warning `Output` event despite
+/// the overall launch failing; proving `out.is_empty()` here is the
+/// proof that isn't the case.
+#[test]
+fn target_launch_with_a_malformed_declared_tape_fails_cleanly_before_any_diagnostic_leaks() {
+    let dir = scratch("target-malformed-tape");
+    fs::write(dir.join("app.tmt"), b"not a real tape block").unwrap();
+    write_target_project(
+        &dir,
+        &format!("use std::binaryNumbersBare::plusOne;\n\n{TARGET_APP_TMC}"),
+        r#"{ "targets": { "app": {
+            "sources": ["app.tmc"],
+            "run": { "tape": "app.tmt" }
+        } } }"#,
+    );
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    let err = adapter
+        .handle("launch", &launch_target_args(&dir, "app", false), &mut out)
+        .unwrap_err();
+    assert!(!err.is_empty(), "got: {err}");
+    assert!(
+        out.is_empty(),
+        "a launch failure after a successful (diagnostic-producing) build \
+         must still push nothing — the tape loads BEFORE diagnostics are \
+         pushed, not after; got: {out:?}"
+    );
+}
+
 /// The target's `run` block's `tape` must become the session's initial
 /// tape, resolved manifest-relative (root-relative, not the process cwd)
 /// — proven by reading back the block's own `"#"` glyph on `[1]` through

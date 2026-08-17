@@ -740,10 +740,10 @@ fn root_spec(commands: &[CommandSpec]) -> CommandSpec {
 
 /// The registry describing the real, currently-dispatched `tmt` surface:
 /// twelve top-level subcommands (`compile`/`asm`/`link`/`build`/`dis`/
-/// `run`/`tape`/`ir`/`lint`/`fmt`/`lsp`/`dap`, `tape` and `ir` nested) plus
-/// `completions` itself. Absent, permanently: `tape build`, which is
-/// PM-1-only glyph-pattern sugar (`cli/inspect.rs` says why TM-1 has no
-/// analogue).
+/// `run`/`tape-block`/`ir`/`lint`/`fmt`/`lsp`/`dap`, `tape-block` and `ir`
+/// nested) plus `completions` itself. Absent, permanently: `tape-block
+/// build`, which is PM-1-only glyph-pattern sugar (`cli/inspect.rs` says
+/// why TM-1 has no analogue).
 pub fn registry() -> Registry {
     let commands = vec![
         compile_spec(),
