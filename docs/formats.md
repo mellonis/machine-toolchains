@@ -741,6 +741,38 @@ rules: an explicit `--map` wins over the `FILE.pmx.map` beside the
 executable, and a missing or unparsable sidecar is silently ignored by
 plain `dis`/`run`, but an unparsable *explicit* `--map` is an error).
 
+### Source provenance
+
+A function record may additionally carry a `source` key naming the file
+its defining input was built from:
+
+```json
+{ "name": "main", "start": 0, "end": 18,
+  "labels": [], "lines": [], "source": "../src/main.pmc" }
+```
+
+The field is optional both ways: a record without it parses (so every
+pre-provenance sidecar stays readable), and a function whose file is
+unknown simply omits it. Only the build drivers can know it — `pmt
+build`/`tmt build` compile and assemble their inputs in-process, so each
+compiled (`.pmc`/`.tmc`) and assembled (`.pma`/`.tma`) unit stamps its
+functions with its own path, while a prebuilt object input, a linked
+library, and the embedded stdlib carry none. Plain `pmt link`/`tmt link`
+over object files never writes the field: an object records no source
+path, and a `.pmo`/`.tmo` is not a file a debugger could open. A
+specialized mono-stamp copy inherits the provenance of the routine it
+specializes.
+
+The stored path is relative to the sidecar's **own directory** whenever
+the two share a root (falling back to absolute otherwise), so a build
+tree can be moved or archived wholesale and the correlation survives.
+Both the emission and a consumer's resolution back to an absolute file
+are purely lexical — paths are joined and `.`/`..`-folded as strings,
+never resolved through the filesystem — the same identity policy the LSP
+cross-file overlay documents in `docs/lsp.md`, with the same caveat: a
+symlinked tree can present one file under two spellings. The debug
+adapters are the primary consumer (`docs/dap.md`).
+
 ### Sidecar bindings
 
 A frames-profile image adds a `bindings` array — one record per composite in
