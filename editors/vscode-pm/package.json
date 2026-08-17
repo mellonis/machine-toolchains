@@ -12,7 +12,7 @@
   "engines": { "vscode": "^1.91.0" },
   "categories": ["Programming Languages"],
   "main": "./out/extension.js",
-  "activationEvents": ["onLanguage:pmc", "onLanguage:pma", "onTaskType:pmt"],
+  "activationEvents": ["onLanguage:pmc", "onLanguage:pma", "onTaskType:pmt", "onDebug"],
   "contributes": {
     "languages": [{
       "id": "pmc", "extensions": [".pmc"], "aliases": ["PMC"],
@@ -64,6 +64,81 @@
         "target": { "type": "string", "description": "Target name; `build` only." },
         "run": { "type": "boolean", "description": "Run the target after building; `build` only." }
       }
+    }],
+    "debuggers": [{
+      "type": "pmt",
+      "label": "PM-1 (pmt)",
+      "languages": ["pmc", "pma"],
+      "configurationAttributes": {
+        "launch": {
+          "properties": {
+            "target": {
+              "type": "string",
+              "description": "Target-mode launch: a target name from the pmt.json project manifest. Built in process (the same driver `pmt build TARGET` uses) with debug info forced on regardless of the target's own profile. Mutually exclusive with `program`."
+            },
+            "project": {
+              "type": "string",
+              "description": "Target mode only: where to start the pmt.json discovery walk (its own nearest-ancestor default otherwise — normally the workspace root)."
+            },
+            "program": {
+              "type": "string",
+              "description": "Program-mode launch: path to a prebuilt .pmx executable, used as-is. Mutually exclusive with `target`. Build it with `pmt compile -g`/`pmt link` (or `pmt build --debug`) first — without debug info, breakpoints and stepping fall back to instruction granularity."
+            },
+            "tape": {
+              "type": "string",
+              "description": "Program mode only: path to a .pmt tape snapshot. Omit for the empty tape."
+            },
+            "strictCells": {
+              "type": "boolean",
+              "default": false,
+              "description": "Program mode only: wrap the tape in the strict-cells decorator (same semantics as `pmt run --strict-cells`)."
+            },
+            "stopOnEntry": {
+              "type": "boolean",
+              "default": false,
+              "description": "Break before the first instruction runs, instead of running to the first breakpoint (or to completion)."
+            },
+            "trace": {
+              "type": "boolean",
+              "default": false,
+              "description": "Stream a per-instruction trace line to the Debug Console as stderr output, matching `pmt run --trace`."
+            }
+          },
+          "oneOf": [
+            { "required": ["target"] },
+            { "required": ["program"] }
+          ]
+        }
+      },
+      "initialConfigurations": [{
+        "name": "pmt: launch target",
+        "type": "pmt",
+        "request": "launch",
+        "target": "main",
+        "stopOnEntry": true
+      }],
+      "configurationSnippets": [{
+        "label": "pmt: Launch target",
+        "description": "Build and debug a pmt.json manifest target in process.",
+        "body": {
+          "name": "pmt: launch target",
+          "type": "pmt",
+          "request": "launch",
+          "target": "${1:main}",
+          "stopOnEntry": true
+        }
+      }, {
+        "label": "pmt: Launch program",
+        "description": "Debug a prebuilt .pmx executable against a tape snapshot.",
+        "body": {
+          "name": "pmt: launch program",
+          "type": "pmt",
+          "request": "launch",
+          "program": "^\"\\${workspaceFolder}/${1:main.pmx}\"",
+          "tape": "^\"\\${workspaceFolder}/${2:main.pmt}\"",
+          "stopOnEntry": true
+        }
+      }]
     }]
   },
   "scripts": {

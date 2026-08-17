@@ -67,9 +67,9 @@ Reload the window (or restart VS Code) after installing or upgrading.
 `pmt.path` is read once, at activation — the extension does not watch
 it for live changes. After editing it, reload the window (Command
 Palette → **Developer: Reload Window**) for the new path to take
-effect, both for the language server and for the auto-provided tasks
-above. `pmt.lint.allow` has no such caveat — it pushes live, as the
-table says.
+effect, for the language server, the auto-provided tasks above, and
+debug sessions (below) alike. `pmt.lint.allow` has no such caveat — it
+pushes live, as the table says.
 
 ## Tasks
 
@@ -167,6 +167,68 @@ of being reinterpreted by a shell. Swap the `link`/`run` arguments for
 whatever the program under test actually needs — additional `.pmo` inputs,
 `--tape-block`, `--max-steps`, and so on are all documented in
 `docs/pmt/cli.md` in this repository.
+
+## Debugging
+
+The `pmt` debugger type this extension contributes launches `pmt dap` —
+the same binary, resolved the same way as the language server and the
+tasks above — as a Debug Adapter Protocol server on stdio. It supports
+two launch shapes, matching `pmt dap`'s own two modes.
+
+**Target mode** builds a `pmt.json` manifest target in process (the
+same driver `pmt build TARGET` uses) and always forces debug info on,
+regardless of the target's own profile — nothing to remember. This is
+what **Run and Debug → create a launch.json** offers by default:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "pmt: launch target",
+      "type": "pmt",
+      "request": "launch",
+      "target": "main",
+      "stopOnEntry": true
+    }
+  ]
+}
+```
+
+**Program mode** debugs a prebuilt `.pmx` as-is, against an optional
+`.pmt` tape snapshot (omit `tape` for the empty tape):
+
+```json
+{
+  "name": "pmt: launch program",
+  "type": "pmt",
+  "request": "launch",
+  "program": "${workspaceFolder}/main.pmx",
+  "tape": "${workspaceFolder}/main.pmt",
+  "stopOnEntry": true
+}
+```
+
+Build the `.pmx` with `-g` first (`pmt compile -g` / `pmt link`, or
+`pmt build --debug`) — target mode injects `-g` for you, but program
+mode debugs whatever executable you hand it: without debug info, a
+source breakpoint answers unverified (with a "build with -g" message
+instead of a squiggle-free stop) and stepping falls back to
+instruction granularity instead of resolving against `.pmc` source
+lines.
+
+Both modes share two more options: `"stopOnEntry": true` breaks before
+the first instruction runs, instead of running to the first breakpoint
+(or to completion); `"trace": true` streams a per-instruction trace
+line to the Debug Console as `stderr` output, the same lines `pmt run
+--trace` prints. Program mode additionally accepts `"strictCells":
+true`, the same semantics as `pmt run --strict-cells`.
+
+The session supports source and instruction breakpoints, step
+in/over/out, a Variables view over the machine's registers and tape
+(including editing a value via `setVariable`), and VS Code's built-in
+**Open Disassembly View** — right-click a stack frame, or run it from
+the Command Palette.
 
 ## Manual test checklist
 
@@ -333,6 +395,44 @@ UNUSED: nop
       opening and editing `.pma` documents never perturbed the `.pmc`
       service, per `docs/lsp.md`'s "one process, two independent language
       services."
+
+### Debug session
+
+Not yet walked by hand — live verification of the `pmt` debugger type
+is the maintainer's step.
+
+Create a scratch `pmt.json` and `debug.pmc` in the same folder:
+
+```json
+{ "project": { "targets": { "main": { "sources": ["debug.pmc"] } } } }
+```
+
+```pmc
+main() {
+    right;
+    mark;
+    right;
+    mark;
+}
+```
+
+- [ ] **Launch, breakpoint, tape, setVariable, disassembly, step**: add
+      a "pmt: launch target" configuration (Run and Debug → create a
+      launch.json, or the **pmt: Launch target** snippet) with `target:
+      "main"` and `stopOnEntry: true`, then press F5. Confirm the
+      session stops before the first instruction. Set a source
+      breakpoint on the second `mark;` line and **Continue**; confirm
+      it stops there with a "breakpoint" reason (not "entry"). Open the
+      Variables view, expand the **Tapes** scope, and confirm cell `[1]`
+      already reads `'*'` (the first `mark`) while the current cell —
+      named `» [2]` — still reads blank. Edit cell `[3]`'s value there
+      (`setVariable`, off the head's path so it can't interact with the
+      next step) to `*` and confirm the tape view updates to match
+      immediately. Right-click the stack frame (or use the Command
+      Palette) and **Open Disassembly View**; confirm PM-1 instructions
+      (`ent`/`rgt`/`wr`/`stp`) with addresses are listed. **Step Over**
+      once — this is the program's last statement, so confirm it runs to
+      completion and the session terminates cleanly.
 
 ## License
 

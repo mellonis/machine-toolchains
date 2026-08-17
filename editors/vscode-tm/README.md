@@ -75,9 +75,9 @@ a list that also serves `.tmc` files, and vice versa.
 
 `tmt.path` is read once, at activation — the extension does not watch it for
 live changes. After editing it, reload the window (Command Palette →
-**Developer: Reload Window**) for the new path to take effect, both for the
-language server and for the auto-provided tasks. `tmt.lint.allow` and
-`tmt.lint.warn` have no such caveat — they push live.
+**Developer: Reload Window**) for the new path to take effect, for the
+language server, the auto-provided tasks, and debug sessions (below) alike.
+`tmt.lint.allow` and `tmt.lint.warn` have no such caveat — they push live.
 
 ## Tasks
 
@@ -173,6 +173,76 @@ documented in `docs/tmt/cli.md` in this repository.
 The tasks use `"type": "process"` rather than `"shell"` — `args` go to `tmt`
 verbatim, as the extension's own tasks do, so glyph arguments reach `tmt`
 exactly as written instead of being reinterpreted by a shell.
+
+## Debugging
+
+The `tmt` debugger type this extension contributes launches `tmt dap` —
+the same binary, resolved the same way as the language server and the
+tasks above — as a Debug Adapter Protocol server on stdio. It supports
+two launch shapes, matching `tmt dap`'s own two modes.
+
+**Target mode** builds a `tmt.json` manifest target in process (the
+same driver `tmt build TARGET` uses) and always forces debug info on,
+regardless of the target's own profile — nothing to remember. The
+target's tape comes from its own `run` block, resolved exactly as
+`tmt build --run` resolves it — a target with no `run` block, or one
+whose `run` block declares no `tape`, fails to launch. This is what
+**Run and Debug → create a launch.json** offers by default:
+
+```json
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "tmt: launch target",
+      "type": "tmt",
+      "request": "launch",
+      "target": "main",
+      "stopOnEntry": true
+    }
+  ]
+}
+```
+
+**Program mode** debugs a prebuilt `.tmx` as-is, against a `.tmt` tape
+snapshot:
+
+```json
+{
+  "name": "tmt: launch program",
+  "type": "tmt",
+  "request": "launch",
+  "program": "${workspaceFolder}/main.tmx",
+  "tape": "${workspaceFolder}/main.tmt",
+  "stopOnEntry": true
+}
+```
+
+`tape` is **required** in program mode — unlike `pmt`, TM-1 has no
+empty-tape default (`tmt run` itself requires `--tape-block`), so a
+program-mode launch with no `tape` fails cleanly rather than
+substituting one.
+
+Build the `.tmx` with `-g` first (`tmt compile -g` / `tmt link`, or
+`tmt build --debug`) — target mode injects `-g` for you, but program
+mode debugs whatever executable you hand it: without debug info, a
+source breakpoint answers unverified (with a "build with -g" message
+instead of a squiggle-free stop) and stepping falls back to
+instruction granularity instead of resolving against `.tmc` source
+lines.
+
+Both modes share two more options: `"stopOnEntry": true` breaks before
+the first instruction runs, instead of running to the first breakpoint
+(or to completion); `"trace": true` streams a per-instruction trace
+line to the Debug Console as `stderr` output, the same lines `tmt run
+--trace` prints. There is no `strictCells` option here — `tmt run` has
+no `--strict-cells` flag for this adapter to mirror.
+
+The session supports source and instruction breakpoints, step
+in/over/out, a Variables view over the machine's registers and every
+tape (including editing a value via `setVariable`), and VS Code's
+built-in **Open Disassembly View** — right-click a stack frame, or run
+it from the Command Palette.
 
 ## Manual test checklist
 
@@ -433,6 +503,54 @@ L_step: mov     [>, ., .]
       window/session. Confirm its diagnostics are still live — opening and
       editing `.tma` documents never perturbed the `.tmc` service. One
       process, two independent language services.
+
+### Debug session
+
+Not yet walked by hand — live verification of the `tmt` debugger type
+is the maintainer's step, same as the rest of this checklist.
+
+Create a scratch `debug.tmc`, tape block, and `tmt.json` in the same
+folder:
+
+```tmc
+alphabet marks { '_', 'x' }
+
+machine {
+  tape work: marks;
+
+  entry state go {
+    [*] -> write ['x'] move [>] goto step;
+  }
+
+  state step { [*] -> write ['x'] stop; }
+}
+```
+
+```sh
+tmt tape-block new --from debug.tmc -o debug.tmt
+```
+
+```json
+{ "project": { "targets": { "main": { "sources": ["debug.tmc"], "run": { "tape": "debug.tmt" } } } } }
+```
+
+- [ ] **Launch, breakpoint, tape, setVariable, disassembly, step**: add
+      a "tmt: launch target" configuration (Run and Debug → create a
+      launch.json, or the **tmt: Launch target** snippet) with `target:
+      "main"` and `stopOnEntry: true`, then press F5. Confirm the
+      session stops before the first instruction. Set a source
+      breakpoint on the `state step { ... }` line and **Continue**;
+      confirm it stops there with a "breakpoint" reason (not "entry").
+      Open the Variables view, expand the **Tapes** scope, and expand
+      `tape 0`; confirm cell `[0]` already reads `'x'` (from `go`'s
+      write) while the current cell — named `» [1]` — still reads `'_'`.
+      Edit `[1]`'s value there (`setVariable`) to `x` and confirm the
+      tape view updates to match immediately. Right-click the stack
+      frame (or use the Command Palette) and **Open Disassembly View**;
+      confirm TM-1 instructions (`ent`/`wrmv`/`stp`) with addresses are
+      listed. **Step Over** once — this is the program's last rule, so
+      confirm it runs to completion and the session terminates cleanly
+      (no crash on the already-marked, edited cell).
 
 ## License
 

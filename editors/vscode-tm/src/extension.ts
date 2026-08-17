@@ -48,7 +48,19 @@ export async function activate(context: vscode.ExtensionContext) {
     watcher,
     vscode.workspace.onDidChangeWorkspaceFolders(() => provider.invalidate()),
     vscode.tasks.registerTaskProvider('tmt', provider),
+    // Same `tmtPath` the language client and the task provider above
+    // already resolved (`tmt.path`, read once at activation) — 'dap' is
+    // `tmt`'s other stdio-server subcommand, alongside 'lsp'.
+    vscode.debug.registerDebugAdapterDescriptorFactory('tmt', new TmtDebugAdapterDescriptorFactory(tmtPath)),
   );
+}
+
+class TmtDebugAdapterDescriptorFactory implements vscode.DebugAdapterDescriptorFactory {
+  constructor(private readonly tmtPath: string) {}
+
+  createDebugAdapterDescriptor(): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+    return new vscode.DebugAdapterExecutable(this.tmtPath, ['dap']);
+  }
 }
 
 export function deactivate(): Thenable<void> | undefined {
