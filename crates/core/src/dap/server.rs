@@ -13,7 +13,10 @@
 //! envelope, the `initialize`/`disconnect` lifecycle bookends every DAP
 //! session shares, and how to turn an [`AdapterEvent`] into a protocol
 //! event. It carries zero knowledge of any particular machine
-//! architecture.
+//! architecture. The run-loop shape (the `tick`/reader-thread
+//! alternation, the two exit-code spaces) and the single-thread model
+//! `AdapterEvent::Stopped` stamps here are documented user-facing at
+//! docs/dap.md.
 
 use std::sync::mpsc;
 use std::thread;

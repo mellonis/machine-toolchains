@@ -4,7 +4,8 @@
 //! termination, breakpoints, stepping, and state surface — over TM-1's
 //! multi-tape, table-dispatched model, plus PM's two `launch` shapes
 //! (`handle_launch` dispatches on which of `"program"`/`"target"` the
-//! arguments carry, mirroring PM exactly):
+//! arguments carry, mirroring PM exactly). The user-facing contract both
+//! adapters implement is documented at docs/dap.md.
 //!
 //! - **Program mode**: a prebuilt `.tmx` (`"program"`) plus a mandatory
 //!   `.tmt` tape snapshot (`"tape"` — see the tape-required bullet below).
@@ -918,10 +919,11 @@ impl TmDapAdapter {
         DebugEvent::Paused(PauseCause::Manual)
     }
 
-    /// `next`/`stepIn`. Mirrors `PmDapAdapter::handle_step` exactly — the
-    /// function-identity tuple comparison (name AND line, not line alone)
-    /// applies unchanged; only the untraced branch's session calls become
-    /// the `_tapes` siblings over a freshly assembled device slice.
+    /// `next`/`stepIn` (docs/dap.md (stepping granularity) for the
+    /// user-facing contract). Mirrors `PmDapAdapter::handle_step` exactly —
+    /// the function-identity tuple comparison (name AND line, not line
+    /// alone) applies unchanged; only the untraced branch's session calls
+    /// become the `_tapes` siblings over a freshly assembled device slice.
     fn handle_step(
         &mut self,
         arguments: &Value,

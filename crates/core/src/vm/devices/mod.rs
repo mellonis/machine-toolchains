@@ -32,7 +32,10 @@ pub trait Tape {
     /// walks the head back to where it started — including when the write
     /// itself faults, so a caller (a DAP adapter setting a variable, say)
     /// never leaves the head displaced by a failed probe. `pos` is in the
-    /// same coordinate space `head()` reports.
+    /// same coordinate space `head()` reports. The tape-cell half of a DAP
+    /// adapter's writable-state contract, including the strict-fault and
+    /// no-relatch edge behaviors, is documented user-facing at docs/dap.md
+    /// (writable state).
     ///
     /// On a wrap-bounded tape (e.g. `AnnularTape`) a `pos` outside the
     /// ring can never be landed on: walking one lap returns to the

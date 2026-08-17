@@ -6,7 +6,9 @@
 //! address should a breakpoint on this line plant at"
 //! ([`LineIndex::address_for_line`]). Both are sorted-vector binary
 //! searches — no hash maps, since a `MapFile`'s function and line tables
-//! are small and read-only once loaded.
+//! are small and read-only once loaded. The degradation this produces
+//! without `-g` debug info is documented user-facing at docs/dap.md
+//! (stepping granularity, breakpoints and stepping).
 
 use crate::linker::MapFile;
 

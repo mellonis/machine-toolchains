@@ -5,7 +5,9 @@
 //! (`next`/`stepIn`/`stepOut` at line or instruction granularity), and
 //! the state surface: stack/scopes/variables, `setVariable`,
 //! `disassemble`, and the opt-in `"trace": true` per-instruction output
-//! stream.
+//! stream. The user-facing contract this module implements — the launch
+//! schema, the closed output-events list, the writable-state contract,
+//! and the degradation rules without `-g` — is documented at docs/dap.md.
 //!
 //! Two `launch` shapes, dispatched on which of `"program"`/`"target"` the
 //! arguments carry (`handle_launch`), sharing everything past that point
@@ -888,12 +890,15 @@ impl PmDapAdapter {
         DebugEvent::Paused(PauseCause::Manual)
     }
 
-    /// `next` (`StepKind::Over`) / `stepIn` (`StepKind::Into`): granularity
-    /// toggles between two shapes over the SAME underlying session
-    /// primitive (`step_over`/`step_in`) — `"instruction"` stops after
-    /// exactly one session step; anything else (the default, and DAP's
-    /// own default `"statement"`) repeats session steps until
-    /// `LineIndex::resolve(ip)` differs from the position stepping started
+    /// `next` (`StepKind::Over`) / `stepIn` (`StepKind::Into`): the user-
+    /// facing granularity contract, including the without-`-g` degradation
+    /// this loop produces, is documented at docs/dap.md (stepping
+    /// granularity). Granularity toggles between two shapes over the SAME
+    /// underlying session primitive (`step_over`/`step_in`) —
+    /// `"instruction"` stops after exactly one session step; anything else
+    /// (the default, and DAP's own default `"statement"`) repeats session
+    /// steps until `LineIndex::resolve(ip)` differs from the position
+    /// stepping started
     /// on, treating a transition into unmapped code (`Some` -> `None`) as
     /// a change too, so stepping never silently swallows a function with
     /// no `-g` data. The comparison is the WHOLE resolved position —

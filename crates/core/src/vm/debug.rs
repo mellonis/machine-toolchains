@@ -124,13 +124,17 @@ impl<'a> DebugSession<'a> {
     /// one register (docs/core.md (registers)): this writes `mr = 1` for
     /// `true`, `mr = 0` for `false`. A subsequent check-shaped instruction
     /// simply reads whatever was written last; no latch micro-op re-runs.
+    /// The writable half of a DAP adapter's flag-register contract
+    /// (docs/dap.md (writable state)).
     pub fn set_mf(&mut self, mf: bool) {
         self.core.set_mf(mf);
     }
 
     /// Sets the match register directly (docs/core.md (registers)) — the
     /// general-value counterpart of `set_mf`, writing the SAME one
-    /// register: `mf()` afterwards reports `mr() != 0`.
+    /// register: `mf()` afterwards reports `mr() != 0`. TM-1's DAP adapter
+    /// exposes this as its writable `MR` register (docs/dap.md
+    /// (writable state)).
     pub fn set_mr(&mut self, mr: u32) {
         self.core.set_mr(mr);
     }

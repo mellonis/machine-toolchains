@@ -2,7 +2,9 @@
 //! on stdio until the client disconnects. Mirrors `cli/lsp.rs`'s shape —
 //! the only other place real stdio is handed to library code
 //! (docs/pmt/cli.md (thin-renderer rule)); the server loop itself writes
-//! protocol frames straight to the writer it is given.
+//! protocol frames straight to the writer it is given. The launch schema
+//! and protocol surface `PmDapAdapter` answers are documented at
+//! docs/dap.md.
 
 use super::{Args, CliOutput};
 

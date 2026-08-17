@@ -1,7 +1,9 @@
 //! Content-Length message framing, layered over `std::io::BufRead`/
 //! `Write` so callers can supply stdio, sockets, or in-memory buffers
 //! interchangeably. Frames exactly one payload per read/write call;
-//! envelope parsing lives above this layer (docs/lsp.md).
+//! envelope parsing lives above this layer — the JSON-RPC one for the
+//! language servers (docs/lsp.md), the `seq`/`type`-tagged one for the
+//! debug adapters (docs/dap.md).
 
 use std::io::{BufRead, Write};
 
