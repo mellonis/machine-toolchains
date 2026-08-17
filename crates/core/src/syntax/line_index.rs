@@ -1,10 +1,9 @@
-//! Byte-offset → line/column conversion for diagnostics — docs/core.md
-//! (syntax tree). Lines are 1-based; columns are 1-based CHARACTER
-//! counts — the convention the lexers' tokens already carry
-//! (`Token.len` is chars), so spans built through a `TextLineIndex`
-//! are byte-identical to lexer-built spans for the single-line tokens
-//! the lexers produce. Span parity across the front-end migrations is
-//! a test-pinned contract.
+//! Byte-offset → line/column conversion for diagnostics — docs/core.md (syntax tree).
+//! Lines are 1-based; columns are 1-based CHARACTER counts — the convention
+//! the lexers' tokens already carry (`Token.len` is chars), so spans built
+//! through a `TextLineIndex` are byte-identical to lexer-built spans for the
+//! single-line tokens the lexers produce. Span parity across the front-end
+//! migrations is a test-pinned contract.
 //!
 //! Deliberate tradeoffs at this toolchain's file scale: the index owns
 //! a full copy of the source text (so callers don't have to keep the

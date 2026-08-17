@@ -51,11 +51,13 @@ impl TreeBuilder {
     /// The checkpoint is only valid until the frame it was taken in is
     /// closed: a `finish_node` that folds children at or below the
     /// checkpoint's position invalidates it, and `start_node_at` cannot
-    /// detect that misuse — a checkpoint referring to an already-folded
-    /// position just wraps nothing (it opens a new frame at the current,
-    /// unrelated end of `children`) instead of failing loudly. A
-    /// checkpoint must be consumed by `start_node_at` before the frame it
-    /// was taken in finishes.
+    /// detect that misuse. A stale checkpoint — one whose position was
+    /// folded past by a later `finish_node` — is only partially detected:
+    /// positions past the current children length panic loudly, but a
+    /// position that happens to still be in range silently wraps whatever
+    /// now sits there (the folded node, or nothing when it lands exactly
+    /// at the current end). Consume a checkpoint before the frame it was
+    /// taken in is finished.
     pub fn checkpoint(&self) -> Checkpoint {
         Checkpoint(self.children.len())
     }
