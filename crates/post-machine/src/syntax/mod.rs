@@ -4,5 +4,7 @@
 //! a later migration step.
 
 mod kinds;
+mod layout;
 
 pub use kinds::{PmcKind, kind_name};
+pub use layout::{SigLayout, layout};
