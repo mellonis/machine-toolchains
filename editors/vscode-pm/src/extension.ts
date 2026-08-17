@@ -48,8 +48,16 @@ export async function activate(context: vscode.ExtensionContext) {
 class PmtDebugAdapterDescriptorFactory implements vscode.DebugAdapterDescriptorFactory {
   constructor(private readonly pmtPath: string) {}
 
-  createDebugAdapterDescriptor(): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
-    return new vscode.DebugAdapterExecutable(this.pmtPath, ['dap']);
+  createDebugAdapterDescriptor(
+    session: vscode.DebugSession,
+  ): vscode.ProviderResult<vscode.DebugAdapterDescriptor> {
+    // Run the adapter with the workspace folder as its cwd so relative
+    // `program`/`tape` paths in launch.json resolve against the project,
+    // not against whatever directory VS Code itself was launched from.
+    const cwd =
+      session.workspaceFolder?.uri.fsPath ??
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    return new vscode.DebugAdapterExecutable(this.pmtPath, ['dap'], cwd ? { cwd } : undefined);
   }
 }
 
