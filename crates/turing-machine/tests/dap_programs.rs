@@ -1347,11 +1347,14 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
 
     // See `step_in_and_step_out_behave_depth_wise_around_a_call`'s own
     // comment: a bound call site's callee copy is named `mark.<digest>`.
+    // Frame ids are salted by the current stop generation (dap/mod.rs's
+    // module doc, "Handle-scheme generation salt") — decode via `% 4096`
+    // to recover the depth, the only part this fixture cares about.
     assert!(
         frames[0]["name"].as_str().unwrap().starts_with("mark"),
         "got: {frames:?}"
     );
-    assert_eq!(frames[0]["id"], json!(0));
+    assert_eq!(frames[0]["id"].as_i64().unwrap() % 4096, 0);
     assert!(
         frames[0]["instructionPointerReference"]
             .as_str()
@@ -1364,7 +1367,86 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
     // label inside it, not a separate `MapFunction`, so the return frame's
     // name is `main`, not `scan`.
     assert_eq!(frames[1]["name"], json!("main"));
-    assert_eq!(frames[1]["id"], json!(1));
+    assert_eq!(frames[1]["id"].as_i64().unwrap() % 4096, 1);
+}
+
+/// Pins `dap/mod.rs`'s generation salt (module doc, "Handle-scheme
+/// generation salt"): two consecutive stops must issue DIFFERENT
+/// `variablesReference`/frame-id handles even though the underlying
+/// scopes/frame are otherwise identical — this is what busts VS Code's
+/// per-reference cache, which otherwise rendered a prior stop's
+/// Variables/Call Stack values after a step (live-observed in VS Code).
+/// Both stops' handles must still decode (`% 4096`) to the SAME base, and
+/// a STALE reference from the first stop must still resolve live data at
+/// the second — a client may briefly still hold one, and it must never be
+/// rejected as merely old. Mirrors PM's own pinning test.
+#[test]
+fn stop_generation_salts_handles_across_stops_while_stale_references_still_resolve() {
+    let dir = scratch("stop-generation");
+    let program = write_tmx(&dir, "stp", STP_TMA, LinkOptions::default()); // ent + stp
+    let tape = write_one_tape_block(&dir, "stp", 2, 0);
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, true), &mut out) // stopOnEntry
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 1
+
+    let scopes1 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let registers1 = scope_ref(&scopes1, "Registers");
+    let tapes1 = scope_ref(&scopes1, "Tapes");
+    let trace1 = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame1 = trace1["stackFrames"][0]["id"].as_i64().unwrap();
+
+    // Instruction-granularity `stepIn`: retires `ent` only, landing on
+    // `stp` (not yet executed) — still genuinely `Stopped`, a second
+    // `Stopped` event, generation 2.
+    adapter
+        .handle("stepIn", &json!({"granularity": "instruction"}), &mut out)
+        .unwrap();
+    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 2
+
+    let scopes2 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let registers2 = scope_ref(&scopes2, "Registers");
+    let tapes2 = scope_ref(&scopes2, "Tapes");
+    let trace2 = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame2 = trace2["stackFrames"][0]["id"].as_i64().unwrap();
+
+    // Different raw handles across the two stops...
+    assert_ne!(
+        registers1, registers2,
+        "Registers scope ref must change across stops"
+    );
+    assert_ne!(tapes1, tapes2, "Tapes scope ref must change across stops");
+    assert_ne!(frame1, frame2, "frame 0's id must change across stops");
+    // ...decoding to the SAME base every time.
+    assert_eq!(registers1 % 4096, registers2 % 4096);
+    assert_eq!(tapes1 % 4096, tapes2 % 4096);
+    assert_eq!(frame1 % 4096, frame2 % 4096);
+
+    // A STALE (generation-1) reference must still resolve live data at
+    // generation 2, not error as stale.
+    let stale_tapes = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tapes1}),
+            &mut out,
+        )
+        .unwrap();
+    assert!(
+        stale_tapes["variables"]
+            .as_array()
+            .is_some_and(|v| !v.is_empty()),
+        "a stale-generation reference must still resolve, got: {stale_tapes:?}"
+    );
 }
 
 #[test]
@@ -1762,6 +1844,93 @@ fn disassemble_renders_listing_line_text_and_the_top_frames_reference_resolves_w
     assert_eq!(instructions[0]["address"], json!(top_ref));
     let text = instructions[0]["instruction"].as_str().unwrap();
     assert!(text.contains("call"), "got: {text}");
+}
+
+/// VS Code's real Disassembly-view request shape: a large negative
+/// `instructionOffset` relative to the current frame's `memoryReference`.
+/// Before the clamp fix (`dap/mod.rs`'s `handle_disassemble`) this walked
+/// the linear ordinal index negative and answered `None` for the window
+/// start — an all-`<out of range>` response, the real code included.
+/// Reuses `CALLSTEP_TMC`'s call-site fixture (`mark` compiles before
+/// `main`, so the call site is not at address 0) specifically so the
+/// reference row lands PAST index 0 — proving the window genuinely SHIFTS
+/// to the image start, not merely that row 0 happens to coincide with the
+/// reference. Mirrors PM's own test.
+#[test]
+fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
+    let dir = scratch("disassemble-neg-offset");
+    let program = write_tmc_debug(&dir, "callstep", CALLSTEP_TMC);
+    let tape = write_two_tape_block(&dir, "callstep", 1, 0);
+    let call_line = line_of(CALLSTEP_TMC, "call mark");
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, false), &mut out)
+        .unwrap();
+    adapter
+        .handle(
+            "setBreakpoints",
+            &json!({"breakpoints": [{"line": call_line}]}),
+            &mut out,
+        )
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    drive_to_pause_or_done(&mut adapter);
+
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let top_ref = trace["stackFrames"][0]["instructionPointerReference"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        top_ref, "0x0",
+        "fixture must place the call site past the image start"
+    );
+
+    let disassembly = adapter
+        .handle(
+            "disassemble",
+            &json!({
+                "memoryReference": top_ref,
+                "instructionOffset": -50,
+                "instructionCount": 100,
+            }),
+            &mut out,
+        )
+        .unwrap();
+    let instructions = disassembly["instructions"].as_array().unwrap();
+    assert_eq!(instructions.len(), 100);
+
+    // The window shifted to the image start rather than failing outright.
+    assert_eq!(instructions[0]["address"], json!("0x0"));
+    assert_ne!(
+        instructions[0]["instruction"],
+        json!("<out of range>"),
+        "the first row must be real code, not an invalid placeholder, got: {instructions:?}"
+    );
+    assert!(instructions[0]["presentationHint"].is_null());
+
+    // The reference address itself resolves to real code somewhere PAST
+    // row 0, proving the shift rather than a coincidental match.
+    let ref_row = instructions
+        .iter()
+        .position(|entry| entry["address"] == json!(top_ref))
+        .unwrap_or_else(|| {
+            panic!("reference address {top_ref} missing from the window: {instructions:?}")
+        });
+    assert!(
+        ref_row > 0,
+        "expected the reference row past index 0 (proving the shift), got index {ref_row}"
+    );
+    assert_ne!(
+        instructions[ref_row]["instruction"],
+        json!("<out of range>")
+    );
 }
 
 #[test]
