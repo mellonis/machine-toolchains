@@ -1613,70 +1613,70 @@ impl PmDapAdapter {
         let map = self.map.as_ref();
         let resolve = |target: u32| resolve_label(map, target);
 
-        let start_addr = if instruction_offset >= 0 {
-            let mut addr = base;
-            for _ in 0..instruction_offset {
-                if (addr as usize) >= code.len() {
-                    break;
-                }
-                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
-                addr += ilen.max(1);
-            }
-            Some(addr)
-        } else {
-            let mut addrs = Vec::new();
-            let mut addr = 0u32;
-            let len = code.len() as u32;
-            while addr < len {
-                addrs.push(addr);
-                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
-                addr += ilen.max(1);
-            }
-            // Clamp rather than fail past the image start: VS Code's real
-            // Disassembly-view request shape is an offset like `-50` from
-            // a frame near address 0 (module doc references the live
-            // report), which used to walk `ord` negative and answer `None`
-            // — an all-`<out of range>` window, the real code included.
-            // Clamping to the image start instead shifts the window when
-            // fewer instructions exist before the reference than asked
-            // for; VS Code locates the reference row by address and
-            // tolerates the shift. `None` stays reserved for the ONE case
-            // clamping cannot fix: the reference address itself was never
-            // found in the index (an invalid `memoryReference`).
-            addrs.iter().position(|&a| a == base).and_then(|idx| {
-                let ord = (idx as i64 + instruction_offset).max(0) as usize;
-                addrs.get(ord).copied()
-            })
+        // The whole instruction index, decoded once — both window
+        // directions need ordinal arithmetic over it.
+        let mut addrs = Vec::new();
+        let mut addr = 0u32;
+        let len = code.len() as u32;
+        while addr < len {
+            addrs.push(addr);
+            let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
+            addr += ilen.max(1);
+        }
+
+        // A `memoryReference` that is not an instruction boundary at all
+        // (never issued by this adapter — a client-side invention) gets an
+        // all-invalid window anchored at the raw address, one byte per row.
+        let Some(idx) = addrs.iter().position(|&a| a == base) else {
+            let instructions: Vec<Value> = (0..instruction_count)
+                .map(|i| {
+                    json!({
+                        "address": format!("0x{:x}", u64::from(base) + i as u64),
+                        "instruction": "<out of range>",
+                        "presentationHint": "invalid",
+                    })
+                })
+                .collect();
+            return Ok(json!({"instructions": instructions}));
         };
 
-        // `cursor` tracks a plain address, never `Option` past this point:
-        // an out-of-range row still needs A rendered address (VS Code's
-        // Disassembly view scrolls by prefetching windows past the loaded
-        // code, so identical placeholder addresses across rows is a real
-        // scenario, not a hypothetical one). Once `in_range` goes false it
-        // STAYS false — a one-byte step can never land back on a genuine
-        // instruction boundary — and every subsequent row's address is the
-        // previous row's plus one byte, so the whole response is strictly
-        // increasing and every address is distinct, in range or not.
-        let mut cursor = start_addr.unwrap_or(base);
-        let mut in_range = start_addr.is_some();
+        // The window is strictly POSITIONAL: row `i` is instruction
+        // ordinal `idx + instructionOffset + i`, never shifted — VS
+        // Code's Disassembly view learns a new reference's memory address
+        // from the row at index `-instructionOffset` of the response, so
+        // a window slid to the image start would teach it a wrong address
+        // for every reference within `-instructionOffset` instructions of
+        // the entry (the live symptom: the current-instruction marker
+        // pinned to one late address forever). Ordinals outside the image
+        // pad with `<out of range>` placeholders instead (docs/dap.md
+        // (the Disassembly view)): before ordinal 0 the placeholder
+        // addresses are NEGATIVE (`ord - 1`, so `-1` itself — the one
+        // value clients treat as a skip-me sentinel — never appears),
+        // past the last instruction they continue one byte at a time from
+        // the code end. Addresses are strictly increasing and distinct
+        // across the whole response either way.
         let mut instructions = Vec::new();
-        for _ in 0..instruction_count {
-            if in_range && (cursor as usize) < code.len() {
-                let (line, ilen) = listing_line(&syntax, code, cursor, &resolve);
+        for i in 0..instruction_count {
+            let ord = idx as i64 + instruction_offset + i;
+            if ord < 0 {
                 instructions.push(json!({
-                    "address": format!("0x{cursor:x}"),
-                    "instruction": line,
-                }));
-                cursor += ilen.max(1);
-            } else {
-                in_range = false;
-                instructions.push(json!({
-                    "address": format!("0x{cursor:x}"),
+                    "address": format!("-0x{:x}", 1 - ord),
                     "instruction": "<out of range>",
                     "presentationHint": "invalid",
                 }));
-                cursor = cursor.wrapping_add(1);
+            } else if let Some(&at) = addrs.get(ord as usize) {
+                let (line, _) = listing_line(&syntax, code, at, &resolve);
+                instructions.push(json!({
+                    "address": format!("0x{at:x}"),
+                    "instruction": line,
+                }));
+            } else {
+                let past = ord as u64 - addrs.len() as u64;
+                instructions.push(json!({
+                    "address": format!("0x{:x}", u64::from(len) + past),
+                    "instruction": "<out of range>",
+                    "presentationHint": "invalid",
+                }));
             }
         }
         Ok(json!({"instructions": instructions}))

@@ -1536,52 +1536,56 @@ impl TmDapAdapter {
         let map = self.map.as_ref();
         let resolve = |target: u32| resolve_label(map, target);
 
-        let start_addr = if instruction_offset >= 0 {
-            let mut addr = base;
-            for _ in 0..instruction_offset {
-                if (addr as usize) >= code.len() {
-                    break;
-                }
-                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
-                addr += ilen.max(1);
-            }
-            Some(addr)
-        } else {
-            let mut addrs = Vec::new();
-            let mut addr = 0u32;
-            let len = code.len() as u32;
-            while addr < len {
-                addrs.push(addr);
-                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
-                addr += ilen.max(1);
-            }
-            // Clamp rather than fail past the image start — see
-            // `PmDapAdapter::handle_disassemble`'s doc comment.
-            addrs.iter().position(|&a| a == base).and_then(|idx| {
-                let ord = (idx as i64 + instruction_offset).max(0) as usize;
-                addrs.get(ord).copied()
-            })
+        // The whole instruction index, decoded once; the window is then
+        // strictly POSITIONAL — row `i` is instruction ordinal
+        // `idx + instructionOffset + i`, out-of-image ordinals padded
+        // with placeholders. Mirrors `PmDapAdapter::handle_disassemble`
+        // exactly, including WHY sliding the window instead would break
+        // VS Code's reference-address learning (its doc comment).
+        let mut addrs = Vec::new();
+        let mut addr = 0u32;
+        let len = code.len() as u32;
+        while addr < len {
+            addrs.push(addr);
+            let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
+            addr += ilen.max(1);
+        }
+
+        let Some(idx) = addrs.iter().position(|&a| a == base) else {
+            let instructions: Vec<Value> = (0..instruction_count)
+                .map(|i| {
+                    json!({
+                        "address": format!("0x{:x}", u64::from(base) + i as u64),
+                        "instruction": "<out of range>",
+                        "presentationHint": "invalid",
+                    })
+                })
+                .collect();
+            return Ok(json!({"instructions": instructions}));
         };
 
-        let mut cursor = start_addr.unwrap_or(base);
-        let mut in_range = start_addr.is_some();
         let mut instructions = Vec::new();
-        for _ in 0..instruction_count {
-            if in_range && (cursor as usize) < code.len() {
-                let (line, ilen) = listing_line(&syntax, code, cursor, &resolve);
+        for i in 0..instruction_count {
+            let ord = idx as i64 + instruction_offset + i;
+            if ord < 0 {
                 instructions.push(json!({
-                    "address": format!("0x{cursor:x}"),
-                    "instruction": line,
-                }));
-                cursor += ilen.max(1);
-            } else {
-                in_range = false;
-                instructions.push(json!({
-                    "address": format!("0x{cursor:x}"),
+                    "address": format!("-0x{:x}", 1 - ord),
                     "instruction": "<out of range>",
                     "presentationHint": "invalid",
                 }));
-                cursor = cursor.wrapping_add(1);
+            } else if let Some(&at) = addrs.get(ord as usize) {
+                let (line, _) = listing_line(&syntax, code, at, &resolve);
+                instructions.push(json!({
+                    "address": format!("0x{at:x}"),
+                    "instruction": line,
+                }));
+            } else {
+                let past = ord as u64 - addrs.len() as u64;
+                instructions.push(json!({
+                    "address": format!("0x{:x}", u64::from(len) + past),
+                    "instruction": "<out of range>",
+                    "presentationHint": "invalid",
+                }));
             }
         }
         Ok(json!({"instructions": instructions}))

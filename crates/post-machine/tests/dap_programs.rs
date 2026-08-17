@@ -1531,17 +1531,27 @@ fn disassemble_renders_listing_line_text_and_the_top_frames_reference_resolves_w
 
 /// VS Code's real Disassembly-view request shape: a large negative
 /// `instructionOffset` relative to the current frame's `memoryReference`.
-/// Before the clamp fix (`dap/mod.rs`'s `handle_disassemble`) this walked
-/// the linear ordinal index negative and answered `None` for the window
-/// start — an all-`<out of range>` response, the real code included, even
-/// though every requested row easily fits inside the actual image. Reuses
-/// `CALLSTEP_PMC`'s call-site fixture (not a program starting at 0x0)
-/// specifically so the reference row lands PAST index 0 — proving the
-/// window genuinely SHIFTS to the image start, not merely that row 0
-/// happens to coincide with the reference in a trivial one-instruction
-/// program.
+/// Parses a disassemble row address of either sign for the monotonicity
+/// checks below (`"0x1f"` / `"-0x2"`).
+fn parse_row_address(s: &str) -> i128 {
+    match s.strip_prefix("-0x") {
+        Some(hex) => -i128::from_str_radix(hex, 16).unwrap(),
+        None => i128::from_str_radix(s.strip_prefix("0x").unwrap(), 16).unwrap(),
+    }
+}
+
+/// The POSITIONAL window contract (docs/dap.md (the Disassembly view)):
+/// row `i` of the response is instruction ordinal
+/// `idx + instructionOffset + i` — VS Code learns a new reference's
+/// memory address from the row at index `-instructionOffset`, so a
+/// window slid to the image start (the first, wrong fix here) teaches it
+/// one late address for EVERY reference near the entry, and the
+/// Disassembly view's current-instruction marker pins there forever (the
+/// live pow2 symptom). Ordinals before the image pad with negative-
+/// address placeholders (never `-1`, the client's skip-me sentinel);
+/// addresses stay strictly increasing and distinct across the window.
 #[test]
-fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
+fn disassemble_negative_offset_pads_the_head_and_keeps_the_anchor_positional() {
     let dir = scratch("disassemble-neg-offset");
     let program = write_pmc_debug(&dir, "callstep", CALLSTEP_PMC);
     let call_line = line_of(CALLSTEP_PMC, "@callee()");
@@ -1571,8 +1581,8 @@ fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
         .unwrap()
         .to_string();
     // `callee` compiles before `main` in the code image (declaration
-    // order), so the call site is genuinely past the image start — the
-    // precondition this test's whole point rests on.
+    // order), so the call site is genuinely past the image start — a
+    // window that clamps instead of pads would visibly misplace it.
     assert_ne!(
         top_ref, "0x0",
         "fixture must place the call site past the image start"
@@ -1592,31 +1602,53 @@ fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
     let instructions = disassembly["instructions"].as_array().unwrap();
     assert_eq!(instructions.len(), 100);
 
-    // The window shifted to the image start rather than failing outright.
-    assert_eq!(instructions[0]["address"], json!("0x0"));
-    assert_ne!(
-        instructions[0]["instruction"],
-        json!("<out of range>"),
-        "the first row must be real code, not an invalid placeholder, got: {instructions:?}"
+    // THE anchor contract: the reference's own row sits exactly at index
+    // `-instructionOffset`, as real code.
+    assert_eq!(
+        instructions[50]["address"],
+        json!(top_ref),
+        "the anchor row must sit at index -instructionOffset: {instructions:?}"
     );
-    assert!(instructions[0]["presentationHint"].is_null());
+    assert_ne!(instructions[50]["instruction"], json!("<out of range>"));
 
-    // The reference address itself resolves to real code somewhere PAST
-    // row 0, proving the shift rather than a coincidental match.
-    let ref_row = instructions
-        .iter()
-        .position(|entry| entry["address"] == json!(top_ref))
-        .unwrap_or_else(|| {
-            panic!("reference address {top_ref} missing from the window: {instructions:?}")
-        });
+    // Head padding: the fixture has far fewer than 50 instructions before
+    // the call site, so row 0 is an out-of-image placeholder with a
+    // NEGATIVE address; every row before the first real one is invalid,
+    // every row from there to the anchor is real code.
+    assert_eq!(instructions[0]["instruction"], json!("<out of range>"));
     assert!(
-        ref_row > 0,
-        "expected the reference row past index 0 (proving the shift), got index {ref_row}"
+        instructions[0]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with('-'),
+        "head placeholders carry negative addresses: {instructions:?}"
     );
-    assert_ne!(
-        instructions[ref_row]["instruction"],
-        json!("<out of range>")
+    let first_real = instructions
+        .iter()
+        .position(|entry| entry["instruction"] != json!("<out of range>"))
+        .expect("real code appears in the window");
+    assert_eq!(instructions[first_real]["address"], json!("0x0"));
+    assert!(
+        instructions[..first_real]
+            .iter()
+            .all(|e| e["presentationHint"] == json!("invalid")),
+        "everything before the first real row is padding"
     );
+    assert!(
+        instructions[first_real..=50]
+            .iter()
+            .all(|e| e["instruction"] != json!("<out of range>")),
+        "everything from the image start to the anchor is real code"
+    );
+
+    // Addresses are strictly increasing and distinct across the whole
+    // window, and `-1` — the one value clients skip — never appears.
+    let parsed: Vec<i128> = instructions
+        .iter()
+        .map(|e| parse_row_address(e["address"].as_str().unwrap()))
+        .collect();
+    assert!(parsed.windows(2).all(|w| w[0] < w[1]), "{parsed:?}");
+    assert!(!parsed.contains(&-1));
 }
 
 /// Three instructions beyond the implicit `.func` entry: `ent`, `nop`,

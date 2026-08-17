@@ -278,13 +278,25 @@ the same underlying set a source breakpoint's resolved address is
 planted into, so a breakpoint set through either request pauses
 execution identically, regardless of which surface set it.
 
-A window that runs past either end of the code image does not truncate
-the response short: the remaining rows carry a placeholder
-(`instruction: "<out of range>"`, `presentationHint: "invalid"`) at a
-strictly increasing, never-repeating address, since a client's
-Disassembly view routinely prefetches windows past the loaded code and a
-repeated placeholder address across rows would be a real, visible glitch
-rather than a hypothetical one.
+The response window is strictly **positional**: row `i` is the
+instruction `instructionOffset + i` places from the referenced one,
+never shifted or truncated. That is a client contract, not a nicety — a
+client learns a previously unseen reference's memory address from the
+row at index `-instructionOffset` of the response, so an adapter that
+slides a head-overflowing window to the image start teaches it a wrong
+address for every reference within `-instructionOffset` instructions of
+the entry, and the view's current-instruction marker pins to one late
+address no matter where execution actually is. Positions the image has
+no instruction for carry a placeholder instead (`instruction:
+"<out of range>"`, `presentationHint: "invalid"`): past the last
+instruction the placeholder addresses continue one byte at a time from
+the code end, and *before* the first instruction they are negative —
+skipping `-1` itself, the one value clients treat as an
+ignore-this-row sentinel. Placeholder or real, every address in a
+response is strictly increasing and never repeats, since a Disassembly
+view routinely prefetches windows past the loaded code and a repeated
+address across rows would be a real, visible glitch rather than a
+hypothetical one.
 
 ## Assembly-line debugging
 
