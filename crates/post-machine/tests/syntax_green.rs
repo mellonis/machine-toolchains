@@ -308,3 +308,67 @@ fn error_parity_with_parse_cst() {
         assert_eq!(old, new, "error parity for {src:?}");
     }
 }
+
+/// Every .pmc file in the crate (test programs, lint fixtures, the
+/// embedded stdlib) — the corpus for the lossless law. Walked
+/// explicitly so a future fixture is picked up automatically.
+fn corpus() -> Vec<(std::path::PathBuf, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("readable dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "pmc") {
+                let text = std::fs::read_to_string(&path).expect("readable .pmc");
+                files.push((path, text));
+            }
+        }
+    }
+    // 9 files at the time of writing: 7 golden programs
+    // (tests/golden/{ex000001,ex000002,sum,sum2,test1,ty,ty2}.pmc), 1
+    // lint fixture (tests/lint/unused_labels.pmc), and the embedded
+    // stdlib (src/stdlib/std.pmc). The floor below is `>= 9` rather than
+    // `== 9` so a future fixture doesn't need this comment touched, only
+    // the count restated if it drifts meaningfully.
+    assert!(
+        files.len() >= 9,
+        "corpus unexpectedly small: {} files — did the walk break?",
+        files.len()
+    );
+    files
+}
+
+/// The lossless law over the whole corpus: every real `.pmc` file in the
+/// crate round-trips through `parse_green` byte-for-byte, not just the
+/// hand-picked golden fixtures above.
+#[test]
+fn corpus_lossless_law() {
+    for (path, source) in corpus() {
+        let tree = parse_green(&source)
+            .unwrap_or_else(|e| panic!("{}: green parse failed: {e:?}", path.display()));
+        let root = SyntaxNode::new_root(tree);
+        assert_eq!(root.text(), source, "{}: text law", path.display());
+    }
+}
+
+/// Acceptance parity between `parse_cst` and `parse_green` over the same
+/// corpus: every file the C1 pipeline accepts, the green parser accepts
+/// too, and vice versa. All corpus files are valid `.pmc`, so this is
+/// expected to be `old_ok == new_ok == true` throughout — the assertion
+/// still holds the general shape so a future invalid fixture is caught
+/// the same way.
+#[test]
+fn corpus_acceptance_parity() {
+    use mtc_post_machine::lexer::{LexMode, lex_with};
+    use mtc_post_machine::parser::parse_cst;
+    for (path, source) in corpus() {
+        let old_ok = lex_with(&source, LexMode::WithComments)
+            .and_then(|t| parse_cst(&t).map(|_| ()))
+            .is_ok();
+        let new_ok = parse_green(&source).is_ok();
+        assert_eq!(old_ok, new_ok, "{}: acceptance parity", path.display());
+    }
+}
