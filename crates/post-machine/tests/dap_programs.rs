@@ -1627,3 +1627,220 @@ fn disassemble_past_the_code_image_advances_placeholder_addresses_monotonically(
         "expected at least one out-of-range row, got: {instructions:?}"
     );
 }
+
+// ---- target-mode launch (cli::driver::build_target_for_launch) --------
+
+/// Writes a one-target manifest project into `dir`: `pmt.json` with
+/// `project` set to `project_body` verbatim (the whole object after
+/// `"project":`) plus `app.pmc` holding `source`. Each target-mode test
+/// below needs a different corner of the schema (profile override, run
+/// block, …), so the whole project body is the parameter.
+fn write_target_project(dir: &Path, source: &str, project_body: &str) {
+    fs::write(dir.join("app.pmc"), source).unwrap();
+    fs::write(
+        dir.join("pmt.json"),
+        format!(r#"{{ "project": {project_body} }}"#),
+    )
+    .unwrap();
+}
+
+fn launch_target_args(dir: &Path, target: &str, stop_on_entry: bool) -> Value {
+    json!({
+        "target": target,
+        "project": dir.to_str().unwrap(),
+        "stopOnEntry": stop_on_entry,
+    })
+}
+
+/// The manifest's own debug profile disables `-g`; the adapter must
+/// still force it — proven the way `dap_programs.rs` proves anything
+/// -g-dependent: a source breakpoint on a mapped line answers
+/// `verified: true`. If the seam's `force_debug_info` parameter were
+/// ignored, this line would be `verified: false` (`UNMAPPED_BREAKPOINT_MESSAGE`).
+#[test]
+fn target_launch_forces_debug_info_so_breakpoints_verify() {
+    let dir = scratch("target-force-g");
+    let source = "main() {\n    mark;\n    halt;\n}\n";
+    write_target_project(
+        &dir,
+        source,
+        r#"{
+            "profiles": { "debug": { "debug-info": false } },
+            "targets": { "app": { "sources": ["app.pmc"] } }
+        }"#,
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("initialize", &Value::Null, &mut out)
+        .unwrap();
+    adapter
+        .handle("launch", &launch_target_args(&dir, "app", true), &mut out)
+        .unwrap();
+    assert_eq!(
+        out,
+        vec![AdapterEvent::Initialized],
+        "no diagnostics on this fixture — launch reports readiness only"
+    );
+
+    out.clear();
+    let mark_line = line_of(source, "mark");
+    let result = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({"breakpoints": [{"line": mark_line}]}),
+            &mut out,
+        )
+        .unwrap();
+    let breakpoints = result["breakpoints"].as_array().unwrap();
+    assert_eq!(
+        breakpoints[0]["verified"],
+        json!(true),
+        "forced -g must yield a usable line map even though the manifest \
+         profile turned debug-info off: {breakpoints:?}"
+    );
+}
+
+/// A private, never-called function warns `unused-function` at compile
+/// time without failing the build — the warning must reach the client as
+/// its own `stderr` `Output` event, emitted before `Initialized`.
+#[test]
+fn target_launch_streams_build_warnings_as_stderr_output_before_initialized() {
+    let dir = scratch("target-warnings");
+    write_target_project(
+        &dir,
+        "main() {\n    halt;\n}\n\nhelper() {\n    mark;\n}\n",
+        r#"{ "targets": { "app": { "sources": ["app.pmc"] } } }"#,
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_target_args(&dir, "app", false), &mut out)
+        .unwrap();
+
+    match out.as_slice() {
+        [
+            AdapterEvent::Output { category, output },
+            AdapterEvent::Initialized,
+        ] => {
+            assert_eq!(*category, "stderr");
+            assert!(output.contains("unused function"), "got: {output}");
+            assert!(output.contains("helper"), "got: {output}");
+        }
+        other => panic!("unexpected event sequence: {other:?}"),
+    }
+}
+
+/// A tape block with a non-default alphabet (`"_"`/`"#"`, mirroring
+/// `write_tape_block` above) and a SECOND cell so the block's own glyph
+/// at index 1 (`"#"`) is distinguishable from `DEFAULT_GLYPHS`'s `"*"`
+/// — the inline-tape branch of `run`/`build --run`'s tape resolution
+/// (`"tape": " *"`) would ALSO render a marked cell as `'*'` even if
+/// block loading were entirely broken, so a test meant to prove the
+/// `tape-block` branch (root-relative path resolution +
+/// `TapeSnapshot::alphabet`/block-alphabet fallback) has to use a block
+/// whose own glyphs a coincidence can't produce.
+fn write_target_tape_block(dir: &Path, name: &str) -> PathBuf {
+    let block = TapeBlockFile {
+        alphabet: vec!["_".to_string(), "#".to_string()],
+        tapes: vec![TapeSnapshot {
+            origin: 0,
+            cells: vec![0, 1],
+            head: 0,
+            alphabet: None,
+        }],
+    };
+    let path = dir.join(format!("{name}.pmt"));
+    fs::write(&path, block.to_bytes().unwrap()).unwrap();
+    path
+}
+
+/// The target's `run` block's `tape-block` must become the session's
+/// initial tape, resolved manifest-relative (root-relative, not the
+/// process cwd — `cli::driver::build_target_for_launch`'s own
+/// `root.join(normalize_rel(..))` step, the one line in the seam's tape
+/// resolution that is not a pure pass-through of `run.rs`'s rules) —
+/// proven by reading back the block's own `"#"` glyph on `[1]` through
+/// the ordinary `variables` path: a wrong-alphabet OR a wrong-path
+/// failure both surface as a mismatch here, exactly as
+/// `tape_window_marks_the_head_and_renders_glyphs_from_the_launch_alphabet`
+/// proves program mode's own `"tape"` argument.
+#[test]
+fn target_launch_loads_the_tape_block_from_the_targets_run_settings() {
+    let dir = scratch("target-tape");
+    write_target_tape_block(&dir, "app");
+    write_target_project(
+        &dir,
+        "main() {\n    halt;\n}\n",
+        r#"{ "targets": { "app": {
+            "sources": ["app.pmc"],
+            "run": { "tape-block": "app.pmt" }
+        } } }"#,
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_target_args(&dir, "app", true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    let scopes = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
+    let tapes_ref = scope_ref(&scopes, "Tapes");
+    let tapes_vars = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tapes_ref}),
+            &mut out,
+        )
+        .unwrap();
+    let tape0_ref = variable_ref(&tapes_vars, "tape 0");
+    let window = adapter
+        .handle(
+            "variables",
+            &json!({"variablesReference": tape0_ref}),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(variable_value(&window, "» [0]"), "'_'");
+    assert_eq!(variable_value(&window, "[1]"), "'#'");
+}
+
+#[test]
+fn target_launch_with_a_bad_target_name_fails_without_touching_state() {
+    let dir = scratch("target-bad-name");
+    write_target_project(
+        &dir,
+        "main() { halt; }",
+        r#"{ "targets": { "app": { "sources": ["app.pmc"] } } }"#,
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    let err = adapter
+        .handle(
+            "launch",
+            &launch_target_args(&dir, "nosuch", false),
+            &mut out,
+        )
+        .unwrap_err();
+    assert!(err.contains("nosuch"), "got: {err}");
+    assert!(out.is_empty());
+}
+
+#[test]
+fn launch_rejects_program_and_target_together() {
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    let args = json!({"program": "x.pmx", "target": "app"});
+    let err = adapter.handle("launch", &args, &mut out).unwrap_err();
+    assert!(
+        err.contains("program") && err.contains("target"),
+        "got: {err}"
+    );
+    assert!(out.is_empty());
+}

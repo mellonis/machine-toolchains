@@ -7,13 +7,32 @@
 //! `disassemble`, and the opt-in `"trace": true` per-instruction output
 //! stream.
 //!
-//! Program mode (the only launch shape this adapter implements): the
-//! `launch` request names a prebuilt `.pmx` executable (`"program"`) and
-//! an optional `.pmt` tape snapshot (`"tape"`) — PM defaults to the empty
-//! tape when none is given. `"strictCells": bool` (default false) wraps
-//! the tape in the strict-cells decorator, the same semantics `pmt run
-//! --strict-cells` gives a plain run. Target-mode launch (build-in-process
-//! from a project manifest target) is a later task.
+//! Two `launch` shapes, dispatched on which of `"program"`/`"target"` the
+//! arguments carry (`handle_launch`), sharing everything past that point
+//! through `finish_launch`:
+//!
+//! - **Program mode**: names a prebuilt `.pmx` executable (`"program"`)
+//!   and an optional `.pmt` tape snapshot (`"tape"`) — PM defaults to the
+//!   empty tape when none is given. `"strictCells": bool` (default
+//!   false) wraps the tape in the strict-cells decorator, the same
+//!   semantics `pmt run --strict-cells` gives a plain run.
+//! - **Target mode**: names a manifest target (`"target": "<name>"`) and
+//!   an optional `"project"` path override (the discovery walk's
+//!   starting point — `cli::driver::build_target_for_launch`'s own
+//!   `current_dir` fallback otherwise). The target builds IN PROCESS,
+//!   through that same `cli::driver` seam `pmt build TARGET` itself
+//!   runs — never shelling out — always with `-g` forced regardless of
+//!   the target's resolved profile (a debug session without line maps is
+//!   crippled). Its compile warnings stream as `stderr`-category
+//!   `Output` events, one per diagnostic line, BEFORE `Initialized`; a
+//!   failed build fails the `launch` request with the driver's rendered
+//!   error text (module-wide rule: a failed launch must never claim
+//!   readiness). The tape comes from the target's own `run` settings,
+//!   resolved through the exact tape/tape-block/head/strict-cells rules
+//!   `pmt build --run` uses — this adapter reimplements none of it, and
+//!   has no `"tape"`/`"strictCells"` arguments of its own in this mode.
+//!
+//! Both modes share `"stopOnEntry"`/`"trace"`.
 //!
 //! Lifetime shape: `Machine`/`DebugSession` borrow the `&dyn Arch` they
 //! were built against, not the struct that holds them — so keeping the
@@ -46,6 +65,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -272,11 +292,31 @@ fn writable_var(name: &str, value: String) -> Value {
     json!({"name": name, "value": value, "variablesReference": 0})
 }
 
-/// The `launch` request's program-mode arguments, kept for the lifetime
-/// of the session (`stopOnEntry` is consulted once, at
-/// `configurationDone`; `program`/`tape` are carried for future tasks —
-/// e.g. a termination summary naming the program; `trace` is read on
-/// every `tick`/step to choose the traced code path).
+/// What EITHER launch mode resolves down to before
+/// `PmDapAdapter::finish_launch` takes over — a plain data bundle rather
+/// than a long `finish_launch` parameter list (`clippy::too_many_arguments`
+/// territory otherwise: 7+ independent values). `program` is the
+/// executable path already on disk (a launch argument in program mode,
+/// the just-built output path in target mode); `tape_arg` is the RAW
+/// `"tape"` launch argument if there was one — `None` in target mode,
+/// which has no such argument of its own (its tape comes from the
+/// target's `run` settings instead, already folded into `tape`/
+/// `alphabet` by the time this struct exists).
+struct ResolvedLaunch {
+    program: String,
+    tape_arg: Option<String>,
+    tape: InfiniteTape,
+    alphabet: Option<Vec<String>>,
+    strict_cells: bool,
+    stop_on_entry: bool,
+    trace: bool,
+}
+
+/// The resolved `launch` request's state, kept for the lifetime of the
+/// session regardless of which mode produced it (`stopOnEntry` is
+/// consulted once, at `configurationDone`; `program`/`tape` are carried
+/// for future tasks — e.g. a termination summary naming the program;
+/// `trace` is read on every `tick`/step to choose the traced code path).
 struct LaunchOpts {
     #[allow(dead_code)] // carried for later tasks (e.g. re-launch, summaries)
     program: String,
@@ -302,9 +342,19 @@ pub struct PmDapAdapter {
     /// `disassemble`/trace label resolution needs `MapFunction::labels`,
     /// which `LineIndex` does not carry (it only indexes lines).
     map: Option<MapFile>,
-    /// The launch tape block's glyph table, `None` when no `"tape"` was
-    /// given (the default empty tape carries no alphabet) — `variables`
-    /// falls back to raw indices in that case (module doc).
+    /// The launch tape block's glyph table. Program mode only: `None`
+    /// when no `"tape"` was given (the default empty tape carries no
+    /// alphabet) — `variables` falls back to raw indices in that case
+    /// (module doc). Target mode is never `None` — `cli::run::initial_tape`
+    /// (which `cli::driver::build_target_for_launch` resolves the
+    /// target's tape through) falls back to the CLI's own default glyphs
+    /// when the target's `run` block names no tape of its own, matching
+    /// `pmt run`'s own behavior: a target-mode session always has an
+    /// effective alphabet, program mode only sometimes does. A program
+    /// launched both ways can render a marked cell as `'*'` (target,
+    /// default glyphs or its own tape/tape-block) vs. a raw index
+    /// (program mode, no `"tape"` argument) — a deliberate mode
+    /// difference, not a bug.
     alphabet: Option<Vec<String>>,
     launch_opts: Option<LaunchOpts>,
     /// The loop-facing run state (`DebugAdapter::run_state`): `Running`
@@ -354,13 +404,30 @@ impl PmDapAdapter {
         }
     }
 
-    /// `Initialized` fires here — not from `initialize` itself — because
-    /// readiness-for-configuration is genuinely gated on a program having
-    /// loaded: a failed `launch` returns `Err` before this point and
-    /// never claims readiness, which an automatic post-`initialize`
-    /// emission (fired before any program exists to configure against)
-    /// could not distinguish from a successful one.
+    /// Dispatches on which of `"program"`/`"target"` the arguments carry
+    /// (module doc) — the two are mutually exclusive, checked explicitly
+    /// rather than letting `"target"` silently win, mirroring
+    /// `pmt build`'s own "file inputs or target names, not both"
+    /// rejection (`cli/driver.rs`).
     fn handle_launch(
+        &mut self,
+        arguments: &Value,
+        out: &mut Vec<AdapterEvent>,
+    ) -> Result<Value, String> {
+        let has_program = arguments.get("program").and_then(Value::as_str).is_some();
+        let has_target = arguments.get("target").and_then(Value::as_str).is_some();
+        match (has_program, has_target) {
+            (true, true) => Err(
+                "launch: 'program' and 'target' are mutually exclusive — name exactly one"
+                    .to_string(),
+            ),
+            (_, true) => self.handle_launch_target(arguments, out),
+            _ => self.handle_launch_program(arguments, out),
+        }
+    }
+
+    /// Program mode: a prebuilt `.pmx` used as-is (module doc).
+    fn handle_launch_program(
         &mut self,
         arguments: &Value,
         out: &mut Vec<AdapterEvent>,
@@ -387,6 +454,102 @@ impl PmDapAdapter {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
+        let (tape, alphabet) = build_tape(tape_path.as_deref())?;
+        self.finish_launch(
+            ResolvedLaunch {
+                program,
+                tape_arg: tape_path,
+                tape,
+                alphabet,
+                strict_cells,
+                stop_on_entry,
+                trace,
+            },
+            out,
+        )
+    }
+
+    /// Target mode (module doc): builds `"target"` IN PROCESS through
+    /// `cli::driver::build_target_for_launch`, always forcing `-g`.
+    /// Diagnostics stream as `stderr` `Output` events — one per
+    /// diagnostic line, per the seam's own contract — BEFORE this
+    /// function reaches [`PmDapAdapter::finish_launch`], which is what
+    /// pushes `Initialized`; a build failure returns `Err` before any of
+    /// that ever runs, so a failed target launch pushes nothing at all,
+    /// the same "no phantom initialization" contract program mode's own
+    /// error paths already prove.
+    fn handle_launch_target(
+        &mut self,
+        arguments: &Value,
+        out: &mut Vec<AdapterEvent>,
+    ) -> Result<Value, String> {
+        let target_name = arguments
+            .get("target")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "launch requires a 'target' name".to_string())?;
+        let project = arguments
+            .get("project")
+            .and_then(Value::as_str)
+            .map(Path::new);
+        let stop_on_entry = arguments
+            .get("stopOnEntry")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let trace = arguments
+            .get("trace")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let built = crate::cli::driver::build_target_for_launch(project, target_name, true)?;
+
+        for line in built.diagnostics {
+            out.push(AdapterEvent::Output {
+                category: "stderr",
+                output: line,
+            });
+        }
+
+        let program = built.output.to_string_lossy().into_owned();
+        self.finish_launch(
+            ResolvedLaunch {
+                program,
+                tape_arg: None,
+                tape: built.tape,
+                alphabet: Some(built.alphabet),
+                strict_cells: built.strict_cells,
+                stop_on_entry,
+                trace,
+            },
+            out,
+        )
+    }
+
+    /// The shared tail of BOTH launch modes, once each has resolved its
+    /// own executable path and initial tape: loads the `.pmx`, validates
+    /// its arch byte, builds the `Machine`/`DebugSession`, wraps the tape
+    /// in `StrictTape` when asked, discovers the sidecar map, and
+    /// populates every session field. `Initialized` fires here — not from
+    /// `initialize` itself, and not from either mode's own body — because
+    /// readiness-for-configuration is genuinely gated on a program having
+    /// loaded: a failure anywhere above this point returns `Err` and
+    /// never reaches it, which an automatic post-`initialize` emission
+    /// (fired before any program exists to configure against) could not
+    /// distinguish from a successful one.
+    fn finish_launch(
+        &mut self,
+        resolved: ResolvedLaunch,
+        out: &mut Vec<AdapterEvent>,
+    ) -> Result<Value, String> {
+        let ResolvedLaunch {
+            program,
+            tape_arg,
+            tape,
+            alphabet,
+            strict_cells,
+            stop_on_entry,
+            trace,
+        } = resolved;
+
         let bytes = fs::read(&program).map_err(|e| format!("cannot read {program}: {e}"))?;
         let exe = Executable::from_bytes(&bytes).map_err(|e| format!("{program}: {e}"))?;
         if exe.arch != ARCH_PM1 {
@@ -398,7 +561,6 @@ impl PmDapAdapter {
         let machine = Machine::with_arch(&PM1, exe.code.clone(), exe.entry)
             .map_err(|e| format!("{program}: {e}"))?;
 
-        let (tape, alphabet) = build_tape(tape_path.as_deref())?;
         let tape: Box<dyn Tape> = if strict_cells {
             Box::new(StrictTape::new(tape))
         } else {
@@ -416,7 +578,7 @@ impl PmDapAdapter {
         self.alphabet = alphabet;
         self.launch_opts = Some(LaunchOpts {
             program,
-            tape: tape_path,
+            tape: tape_arg,
             stop_on_entry,
             trace,
         });

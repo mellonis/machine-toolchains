@@ -7,7 +7,11 @@
 pub(crate) mod build;
 mod completions;
 mod dap;
-mod driver;
+// `pub(crate)`: `crate::dap::PmDapAdapter`'s target-mode `launch` calls
+// `driver::build_target_for_launch` directly — the DAP seam this crate's
+// `dap` module carves the manifest build path down to (docs/pmt/cli.md
+// (build)), not a duplicate of it.
+pub(crate) mod driver;
 mod fmt;
 mod inspect;
 mod lint;

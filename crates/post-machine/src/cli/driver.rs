@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::object::SymbolDef;
 use mtc_core::linker::{DEFAULT_ENTRY, LinkOptions};
+use mtc_core::vm::InfiniteTape;
 
 use crate::compiler::{CompileOptions, CompileReport, VariantColumns, compile as compile_source};
 use crate::optimizer::OptLevel;
@@ -127,13 +128,7 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
         ));
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let Some((manifest_path, manifest)) =
-        crate::project::discover_manifest(&cwd).map_err(|e| e.to_string())?
-    else {
-        return Err(
-            "no pmt.json with a `project` section found from the current directory upward".into(),
-        );
-    };
+    let (manifest_path, manifest) = discover_project(&cwd)?;
     let root = manifest_path
         .parent()
         .expect("pmt.json has a parent")
@@ -153,16 +148,7 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
 
     for name in requested {
         if !manifest.targets.contains_key(name) {
-            return Err(format!(
-                "no target `{name}` in {} (targets: {})",
-                manifest_path.display(),
-                manifest
-                    .targets
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            return Err(unknown_target_error(&manifest_path, &manifest, name));
         }
     }
     let selected: Vec<&str> = if requested.is_empty() {
@@ -198,6 +184,166 @@ fn manifest_mode(requested: &[String], flags: &Flags) -> Result<CliOutput, Strin
         return run_target(&root, output, target.run.as_ref(), stderr);
     }
     Ok(CliOutput::ok(String::new(), stderr))
+}
+
+/// Discovers the nearest ancestor `pmt.json` with a `project` section
+/// starting from `start` (docs/pmt/project.md (discovery)) — shared by
+/// `manifest_mode` (CLI, always the process's own `current_dir`) and
+/// [`build_target_for_launch`] (the DAP seam, an explicit override or
+/// that same fallback), so the two callers can never drift on the
+/// "no manifest found" wording.
+fn discover_project(start: &Path) -> Result<(PathBuf, crate::project::Manifest), String> {
+    crate::project::discover_manifest(start)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "no pmt.json with a `project` section found from the current directory upward".into()
+        })
+}
+
+/// The "no such target" error text, shared by `manifest_mode`'s
+/// per-request validation loop and [`build_target_for_launch`]'s single
+/// lookup — one wording, never two.
+fn unknown_target_error(
+    manifest_path: &Path,
+    manifest: &crate::project::Manifest,
+    name: &str,
+) -> String {
+    format!(
+        "no target `{name}` in {} (targets: {})",
+        manifest_path.display(),
+        manifest
+            .targets
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// [`build_target_for_launch`]'s answer: everything a DAP `launch`
+/// handler needs to start a session against a manifest target, without
+/// reaching back into `crate::project` itself — the built executable's
+/// absolute path (already written, sidecar `.map` included), its
+/// rendered compile warnings ONE STRING PER DIAGNOSTIC (this crate's
+/// thin-renderer rule preserved: data, not printing — the caller turns
+/// each line into its own `Output` event), and the initial tape +
+/// alphabet + strict-cells bit resolved from the target's OWN `run`
+/// settings (docs/pmt/project.md (run block)) through the exact rules
+/// `pmt build --run` uses (`run_once`, this file) — never a second copy
+/// of that resolution.
+#[derive(Debug)]
+pub(crate) struct DapTargetBuild {
+    pub output: PathBuf,
+    pub diagnostics: Vec<String>,
+    pub tape: InfiniteTape,
+    pub alphabet: Vec<String>,
+    pub strict_cells: bool,
+}
+
+/// pmt dap target-mode launch (`crate::dap`): builds ONE named manifest
+/// target IN PROCESS — the same manifest-mode path `pmt build TARGET`
+/// already runs (`build_one_target`, shared, not duplicated), carved out
+/// from behind `manifest_mode`'s cwd-only discovery and its declared
+/// flag surface, neither of which a launch request has any use for.
+///
+/// `project_dir` substitutes for the CLI's own `current_dir()` as
+/// [`discover_project`]'s starting point — `None` falls back to it,
+/// matching every other `discover_manifest` call site in this crate; a
+/// directory or the `pmt.json` file itself both work (the discovery walk
+/// tolerates either — see its own doc comment). `force_debug_info` is
+/// the caller's decision, not this function's default: the DAP adapter
+/// always passes `true` (a debug session without line maps is crippled),
+/// but the seam itself stays a faithful `-g`-optional build so a
+/// same-crate test can prove the forcing actually overrides the
+/// manifest's own profile rather than merely agreeing with it by
+/// coincidence.
+///
+/// Scope deliberately narrower than a full `pmt build TARGET` run: only
+/// `-g` is force-overridable here — opt level, `--strip-debugger`, and
+/// `-Werror` still come from the resolved (always non-release) profile
+/// as declared, since a launch request has no flag surface for them. The
+/// target's `run` block's `max-steps`/`max-tacts`/`tact-profile` are
+/// deliberately NOT adopted — those bound a batch `pmt run`, whereas a
+/// debug session runs interactively under its own per-tick budget
+/// (`dap`'s module doc); only the tape/tape-block/head/strict-cells
+/// corner of `run` applies to a launched session.
+pub(crate) fn build_target_for_launch(
+    project_dir: Option<&Path>,
+    target_name: &str,
+    force_debug_info: bool,
+) -> Result<DapTargetBuild, String> {
+    let cwd;
+    let start: &Path = match project_dir {
+        Some(p) => p,
+        None => {
+            cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+            &cwd
+        }
+    };
+    let (manifest_path, manifest) = discover_project(start)?;
+    let root = manifest_path
+        .parent()
+        .expect("pmt.json has a parent")
+        .to_path_buf();
+    let target = manifest
+        .targets
+        .get(target_name)
+        .ok_or_else(|| unknown_target_error(&manifest_path, &manifest, target_name))?;
+
+    let flags = Flags {
+        debug_preset: false,
+        release_preset: false,
+        o0: false,
+        o1: false,
+        debug_info: force_debug_info,
+        strip_debugger: false,
+        werror: false,
+        disabled_passes: Vec::new(),
+        no_relax: false,
+        nostdlib: false,
+        keep_objects: false,
+        search_dirs: Vec::new(),
+        lib_names: Vec::new(),
+        out: None,
+        run: false,
+        list_targets: false,
+        verbose: false,
+    };
+    let (output, diagnostics) = build_one_target(&root, &manifest, target_name, target, &flags)?;
+    // One line per diagnostic is `render_warnings`' own contract (every
+    // diagnostic is exactly one `writeln!`, `verbose: false` above keeps
+    // `render_opt_report`'s multi-line entries out of this string
+    // entirely) — splitting on newlines here recovers that structure
+    // without a second, Vec-returning rendering path in `build.rs`.
+    let diagnostics: Vec<String> = diagnostics
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let spec = target.run.clone().unwrap_or_default();
+    let tape_block = spec
+        .tape_block
+        .map(|raw| -> Result<String, String> {
+            Ok(root
+                .join(crate::project::normalize_rel(&raw)?)
+                .to_string_lossy()
+                .into_owned())
+        })
+        .transpose()?;
+    let (tape, alphabet) = super::run::initial_tape(
+        tape_block.as_deref(),
+        spec.tape.as_deref(),
+        spec.head.unwrap_or(0),
+    )?;
+
+    Ok(DapTargetBuild {
+        output,
+        diagnostics,
+        tape,
+        alphabet,
+        strict_cells: spec.strict_cells,
+    })
 }
 
 /// Builds one target: compile/assemble/load its effective sources with
@@ -946,5 +1092,86 @@ mod tests {
         let scan = scan_source("volatile main() { this is not a program");
         assert!(!scan.volatile);
         assert!(scan.exports.is_empty());
+    }
+
+    // ---- build_target_for_launch (the DAP target-mode seam) ------------
+
+    /// A fresh, per-call scratch directory under the OS temp dir, unique
+    /// by process id + an atomic counter — this is an in-crate `#[cfg(test)]`
+    /// module, not a `tests/*.rs` integration binary, so `CARGO_TARGET_TMPDIR`
+    /// is not set here; mirrors `project.rs`'s own `unique_tmp_dir` for the
+    /// same reason.
+    fn unique_tmp_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "pmt-driver-test-{label}-{}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The negative control the forcing claim needs: without it, a test
+    /// that merely asserts "launching with `force_debug_info: true`
+    /// produces a line map" would pass even if the parameter were
+    /// entirely ignored and `-g` came from elsewhere (the resolved
+    /// profile happens to default to `debug-info: true` for the
+    /// non-release profile `build_target_for_launch` always resolves).
+    /// Pinning `false` first, against a manifest whose OWN debug profile
+    /// disables `-g`, proves the seam is a faithful pass-through by
+    /// default — and only then does flipping to `true` on the exact same
+    /// fixture prove the flag is what closes the gap, not a coincidence
+    /// of the default profile.
+    #[test]
+    fn force_debug_info_overrides_a_manifest_profile_that_disables_it() {
+        let dir = unique_tmp_dir("force-debug-info");
+        fs::write(dir.join("app.pmc"), "main() {\n    mark;\n    halt;\n}\n").unwrap();
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{ "project": {
+                "profiles": { "debug": { "debug-info": false } },
+                "targets": { "app": { "sources": ["app.pmc"] } }
+            } }"#,
+        )
+        .unwrap();
+
+        let line_is_mapped = |built: &DapTargetBuild| {
+            let map_text = fs::read_to_string(sidecar_path(&built.output)).unwrap();
+            let map = mtc_core::linker::MapFile::from_json(&map_text).unwrap();
+            mtc_core::linemap::LineIndex::new(&map)
+                .address_for_line(2)
+                .is_some()
+        };
+
+        let built = build_target_for_launch(Some(&dir), "app", false).unwrap();
+        assert!(
+            !line_is_mapped(&built),
+            "force_debug_info: false must leave the manifest's own -g-less profile in force"
+        );
+
+        // Same fixture, same manifest, same profile — only the seam's own
+        // parameter changes.
+        let built = build_target_for_launch(Some(&dir), "app", true).unwrap();
+        assert!(
+            line_is_mapped(&built),
+            "force_debug_info: true must inject -g even though the manifest profile disabled it"
+        );
+    }
+
+    #[test]
+    fn build_target_for_launch_reports_an_unknown_target_by_name() {
+        let dir = unique_tmp_dir("unknown-target");
+        fs::write(dir.join("app.pmc"), "main() { halt; }").unwrap();
+        fs::write(
+            dir.join("pmt.json"),
+            r#"{ "project": { "targets": { "app": { "sources": ["app.pmc"] } } } }"#,
+        )
+        .unwrap();
+
+        let err = build_target_for_launch(Some(&dir), "nosuch", true).unwrap_err();
+        assert!(err.contains("nosuch"), "{err}");
+        assert!(err.contains("app"), "{err}");
     }
 }
