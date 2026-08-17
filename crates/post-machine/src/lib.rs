@@ -18,6 +18,7 @@ pub mod optimizer;
 pub mod parser;
 mod project;
 pub mod stdlib;
+pub mod syntax;
 
 pub use asm::PM1_PMA_DIALECT_VERSION;
 pub use compiler::{
