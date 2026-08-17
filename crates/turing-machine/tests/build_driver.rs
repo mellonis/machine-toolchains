@@ -1708,3 +1708,37 @@ fn bare_fmt_formats_exactly_the_declared_set() {
         "a declared file is formatted in place"
     );
 }
+
+/// Sidecar source provenance (docs/formats.md (map sidecar)): argv-mode
+/// `build` stores each unit's source path relative to the sidecar's own
+/// directory — mirrors the PM suite's test of the same rule.
+#[test]
+fn build_stamps_sidecar_sources_relative_to_the_sidecar_directory() {
+    let dir = scratch("sidecar-sources-relative");
+    let main = dir.join("main.tmc");
+    fs::write(&main, TRIVIAL_TMC).unwrap();
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let output = out.join("app.tmx");
+
+    execute(&args(&[
+        "build",
+        main.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let map =
+        mtc_core::linker::MapFile::from_json(&fs::read_to_string(out.join("app.tmx.map")).unwrap())
+            .unwrap();
+    assert_eq!(
+        map.functions[0].source.as_deref(),
+        Some("../main.tmc"),
+        "the stored path must anchor at the sidecar's directory"
+    );
+    // The lazily linked stdlib (if reached) and any prebuilt inputs stay
+    // unstamped; TRIVIAL_TMC reaches nothing beyond its own world, so
+    // every linked function here is provenanced.
+    assert!(map.functions.iter().all(|f| f.source.is_some()));
+}

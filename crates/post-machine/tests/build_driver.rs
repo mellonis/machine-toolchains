@@ -1154,10 +1154,32 @@ fn in_memory_equals_on_disk(tag: &str, main_source: &str) {
         fs::read(&disk).unwrap(),
         "{tag}: the in-memory column rule must not change the image"
     );
+    // The sidecars are compared modulo source provenance, which differs
+    // BY DESIGN (docs/formats.md (map sidecar)): `build` compiles from
+    // sources and stamps each function's file; `link` over prebuilt
+    // `.pmo` objects has no source to name. Both directions are pinned
+    // before the strip so the modulo-compare cannot mask a regression.
+    let mut mem_map =
+        mtc_core::linker::MapFile::from_json(&fs::read_to_string(dir.join("mem.pmx.map")).unwrap())
+            .unwrap();
+    let disk_map = mtc_core::linker::MapFile::from_json(
+        &fs::read_to_string(dir.join("disk.pmx.map")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        mem_map.functions.iter().all(|f| f.source.is_some()),
+        "{tag}: build-from-source must stamp provenance"
+    );
+    assert!(
+        disk_map.functions.iter().all(|f| f.source.is_none()),
+        "{tag}: link-over-objects must have none"
+    );
+    for f in &mut mem_map.functions {
+        f.source = None;
+    }
     assert_eq!(
-        fs::read_to_string(dir.join("mem.pmx.map")).unwrap(),
-        fs::read_to_string(dir.join("disk.pmx.map")).unwrap(),
-        "{tag}: nor the debug sidecar"
+        mem_map, disk_map,
+        "{tag}: nor (modulo provenance) the debug sidecar"
     );
     for (which, out) in [("build", &built), ("link", &linked)] {
         assert!(
@@ -1757,5 +1779,36 @@ fn the_two_library_entry_cases_select_different_code() {
     assert_ne!(
         images[0], images[1],
         "the volatile column of `util` is different code from its normal one"
+    );
+}
+
+/// Sidecar source provenance (docs/formats.md (map sidecar)): argv-mode
+/// `build` stores each unit's source path relative to the sidecar's own
+/// directory — an output in a subdirectory records `../main.pmc`, not the
+/// cwd-relative spelling the command line used.
+#[test]
+fn build_stamps_sidecar_sources_relative_to_the_sidecar_directory() {
+    let dir = scratch("sidecar-sources-relative");
+    let main = dir.join("main.pmc");
+    fs::write(&main, "main() {\n    mark;\n    halt;\n}\n").unwrap();
+    let out = dir.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let output = out.join("app.pmx");
+
+    execute(&args(&[
+        "build",
+        main.to_str().unwrap(),
+        "-o",
+        output.to_str().unwrap(),
+    ]))
+    .unwrap();
+
+    let map =
+        mtc_core::linker::MapFile::from_json(&fs::read_to_string(out.join("app.pmx.map")).unwrap())
+            .unwrap();
+    assert_eq!(
+        map.functions[0].source.as_deref(),
+        Some("../main.pmc"),
+        "the stored path must anchor at the sidecar's directory"
     );
 }

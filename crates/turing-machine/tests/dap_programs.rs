@@ -1347,14 +1347,13 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
 
     // See `step_in_and_step_out_behave_depth_wise_around_a_call`'s own
     // comment: a bound call site's callee copy is named `mark.<digest>`.
-    // Frame ids are salted by the current stop generation (dap/mod.rs's
-    // module doc, "Handle-scheme generation salt") — decode via `% 4096`
-    // to recover the depth, the only part this fixture cares about.
+    // Frame ids are the bare depth (dap/mod.rs's module doc, "Handle
+    // stability").
     assert!(
         frames[0]["name"].as_str().unwrap().starts_with("mark"),
         "got: {frames:?}"
     );
-    assert_eq!(frames[0]["id"].as_i64().unwrap() % 4096, 0);
+    assert_eq!(frames[0]["id"], json!(0));
     assert!(
         frames[0]["instructionPointerReference"]
             .as_str()
@@ -1367,22 +1366,21 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
     // label inside it, not a separate `MapFunction`, so the return frame's
     // name is `main`, not `scan`.
     assert_eq!(frames[1]["name"], json!("main"));
-    assert_eq!(frames[1]["id"].as_i64().unwrap() % 4096, 1);
+    assert_eq!(frames[1]["id"], json!(1));
 }
 
-/// Pins `dap/mod.rs`'s generation salt (module doc, "Handle-scheme
-/// generation salt"): two consecutive stops must issue DIFFERENT
-/// `variablesReference`/frame-id handles even though the underlying
-/// scopes/frame are otherwise identical — this is what busts VS Code's
-/// per-reference cache, which otherwise rendered a prior stop's
-/// Variables/Call Stack values after a step (live-observed in VS Code).
-/// Both stops' handles must still decode (`% 4096`) to the SAME base, and
-/// a STALE reference from the first stop must still resolve live data at
-/// the second — a client may briefly still hold one, and it must never be
-/// rejected as merely old. Mirrors PM's own pinning test.
+/// Pins `dap/mod.rs`'s stable handle scheme (module doc, "Handle
+/// stability"): two consecutive stops issue IDENTICAL
+/// `variablesReference`/frame-id handles — per DAP they are only valid
+/// while paused and a client re-fetches on every stop, so stability is
+/// what lets it correlate its own view state — and a reference held from
+/// the first stop resolves live data at the second (it IS the current
+/// reference). Replaces the retired per-stop generation salt, whose
+/// stale-Variables motivation turned out to be the missing frame
+/// `source` (docs/dap.md (source provenance)).
 #[test]
-fn stop_generation_salts_handles_across_stops_while_stale_references_still_resolve() {
-    let dir = scratch("stop-generation");
+fn handles_are_stable_across_stops_and_prior_stop_references_resolve() {
+    let dir = scratch("stable-handles");
     let program = write_tmx(&dir, "stp", STP_TMA, LinkOptions::default()); // ent + stp
     let tape = write_one_tape_block(&dir, "stp", 2, 0);
 
@@ -1394,7 +1392,7 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
     adapter
         .handle("configurationDone", &Value::Null, &mut out)
         .unwrap();
-    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 1
+    assert_eq!(adapter.run_state(), RunState::Stopped); // first stop
 
     let scopes1 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
     let registers1 = scope_ref(&scopes1, "Registers");
@@ -1406,11 +1404,11 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
 
     // Instruction-granularity `stepIn`: retires `ent` only, landing on
     // `stp` (not yet executed) — still genuinely `Stopped`, a second
-    // `Stopped` event, generation 2.
+    // `Stopped` event.
     adapter
         .handle("stepIn", &json!({"granularity": "instruction"}), &mut out)
         .unwrap();
-    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 2
+    assert_eq!(adapter.run_state(), RunState::Stopped); // second stop
 
     let scopes2 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
     let registers2 = scope_ref(&scopes2, "Registers");
@@ -1420,20 +1418,13 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
         .unwrap();
     let frame2 = trace2["stackFrames"][0]["id"].as_i64().unwrap();
 
-    // Different raw handles across the two stops...
-    assert_ne!(
-        registers1, registers2,
-        "Registers scope ref must change across stops"
-    );
-    assert_ne!(tapes1, tapes2, "Tapes scope ref must change across stops");
-    assert_ne!(frame1, frame2, "frame 0's id must change across stops");
-    // ...decoding to the SAME base every time.
-    assert_eq!(registers1 % 4096, registers2 % 4096);
-    assert_eq!(tapes1 % 4096, tapes2 % 4096);
-    assert_eq!(frame1 % 4096, frame2 % 4096);
+    // Identical handles across the two stops.
+    assert_eq!(registers1, registers2);
+    assert_eq!(tapes1, tapes2);
+    assert_eq!(frame1, frame2);
 
-    // A STALE (generation-1) reference must still resolve live data at
-    // generation 2, not error as stale.
+    // A reference held from the first stop resolves live data at the
+    // second — trivially, being the same handle.
     let stale_tapes = adapter
         .handle(
             "variables",
@@ -1445,7 +1436,7 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
         stale_tapes["variables"]
             .as_array()
             .is_some_and(|v| !v.is_empty()),
-        "a stale-generation reference must still resolve, got: {stale_tapes:?}"
+        "a prior-stop reference must still resolve, got: {stale_tapes:?}"
     );
 }
 
@@ -1848,16 +1839,21 @@ fn disassemble_renders_listing_line_text_and_the_top_frames_reference_resolves_w
 
 /// VS Code's real Disassembly-view request shape: a large negative
 /// `instructionOffset` relative to the current frame's `memoryReference`.
-/// Before the clamp fix (`dap/mod.rs`'s `handle_disassemble`) this walked
-/// the linear ordinal index negative and answered `None` for the window
-/// start — an all-`<out of range>` response, the real code included.
-/// Reuses `CALLSTEP_TMC`'s call-site fixture (`mark` compiles before
-/// `main`, so the call site is not at address 0) specifically so the
-/// reference row lands PAST index 0 — proving the window genuinely SHIFTS
-/// to the image start, not merely that row 0 happens to coincide with the
-/// reference. Mirrors PM's own test.
+/// Parses a disassemble row address of either sign (`"0x1f"` / `"-0x2"`).
+fn parse_row_address(s: &str) -> i128 {
+    match s.strip_prefix("-0x") {
+        Some(hex) => -i128::from_str_radix(hex, 16).unwrap(),
+        None => i128::from_str_radix(s.strip_prefix("0x").unwrap(), 16).unwrap(),
+    }
+}
+
+/// The POSITIONAL window contract (docs/dap.md (the Disassembly view)):
+/// row `i` of the response is instruction ordinal
+/// `idx + instructionOffset + i`, out-of-image head ordinals padded with
+/// negative-address placeholders (never `-1`). Mirrors PM's own test —
+/// its doc comment has the full VS Code reference-learning rationale.
 #[test]
-fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
+fn disassemble_negative_offset_pads_the_head_and_keeps_the_anchor_positional() {
     let dir = scratch("disassemble-neg-offset");
     let program = write_tmc_debug(&dir, "callstep", CALLSTEP_TMC);
     let tape = write_two_tape_block(&dir, "callstep", 1, 0);
@@ -1906,31 +1902,42 @@ fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
     let instructions = disassembly["instructions"].as_array().unwrap();
     assert_eq!(instructions.len(), 100);
 
-    // The window shifted to the image start rather than failing outright.
-    assert_eq!(instructions[0]["address"], json!("0x0"));
-    assert_ne!(
-        instructions[0]["instruction"],
-        json!("<out of range>"),
-        "the first row must be real code, not an invalid placeholder, got: {instructions:?}"
+    // THE anchor contract: the reference's own row sits exactly at index
+    // `-instructionOffset`, as real code.
+    assert_eq!(
+        instructions[50]["address"],
+        json!(top_ref),
+        "the anchor row must sit at index -instructionOffset: {instructions:?}"
     );
-    assert!(instructions[0]["presentationHint"].is_null());
+    assert_ne!(instructions[50]["instruction"], json!("<out of range>"));
 
-    // The reference address itself resolves to real code somewhere PAST
-    // row 0, proving the shift rather than a coincidental match.
-    let ref_row = instructions
-        .iter()
-        .position(|entry| entry["address"] == json!(top_ref))
-        .unwrap_or_else(|| {
-            panic!("reference address {top_ref} missing from the window: {instructions:?}")
-        });
+    // Head padding before the image start; real code from `0x0` through
+    // the anchor; strictly increasing distinct addresses; no `-1`.
+    assert_eq!(instructions[0]["instruction"], json!("<out of range>"));
     assert!(
-        ref_row > 0,
-        "expected the reference row past index 0 (proving the shift), got index {ref_row}"
+        instructions[0]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with('-'),
+        "head placeholders carry negative addresses: {instructions:?}"
     );
-    assert_ne!(
-        instructions[ref_row]["instruction"],
-        json!("<out of range>")
+    let first_real = instructions
+        .iter()
+        .position(|entry| entry["instruction"] != json!("<out of range>"))
+        .expect("real code appears in the window");
+    assert_eq!(instructions[first_real]["address"], json!("0x0"));
+    assert!(
+        instructions[first_real..=50]
+            .iter()
+            .all(|e| e["instruction"] != json!("<out of range>")),
+        "everything from the image start to the anchor is real code"
     );
+    let parsed: Vec<i128> = instructions
+        .iter()
+        .map(|e| parse_row_address(e["address"].as_str().unwrap()))
+        .collect();
+    assert!(parsed.windows(2).all(|w| w[0] < w[1]), "{parsed:?}");
+    assert!(!parsed.contains(&-1));
 }
 
 #[test]
@@ -2505,5 +2512,124 @@ fn configuration_done_and_continue_after_done_reject_without_reemitting_terminat
     assert!(
         out.is_empty(),
         "a rejected continue must not push events, got: {out:?}"
+    );
+}
+
+// ---- source provenance (docs/dap.md (source provenance)) — mirrors the
+// PM suite's provenance tests over the TM fixture pair ------------------
+
+/// `write_tmc_debug_multi`'s provenance sibling: writes each source AS A
+/// REAL FILE into `dir` first (a frame's `source` object is attached only
+/// when the resolved file exists) and links with per-unit `sources`
+/// naming those files relative to the sidecar's directory — the shape
+/// `tmt build` emits (docs/formats.md (map sidecar)).
+fn write_tmc_debug_with_sources(dir: &Path, name: &str, units: &[(&str, &str)]) -> PathBuf {
+    let mut objects = Vec::new();
+    let mut sources = Vec::new();
+    for (file, text) in units {
+        fs::write(dir.join(file), text).unwrap();
+        objects.push(
+            compile(
+                text,
+                CompileOptions {
+                    debug_info: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .object,
+        );
+        sources.push(Some((*file).to_string()));
+    }
+    let linked = link(
+        &objects,
+        &[],
+        LinkOptions {
+            sources,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let path = dir.join(format!("{name}.tmx"));
+    fs::write(&path, linked.executable.to_bytes()).unwrap();
+    let mut map_path = path.clone().into_os_string();
+    map_path.push(".map");
+    fs::write(&map_path, linked.map.to_json()).unwrap();
+    path
+}
+
+#[test]
+fn frames_carry_source_objects_and_breakpoints_filter_by_file() {
+    let dir = scratch("provenance");
+    let program = write_tmc_debug_with_sources(
+        &dir,
+        "provenance",
+        &[("a.tmc", RETURN_CALLER_TMC), ("b.tmc", RETURN_CALLEE_TMC)],
+    );
+    let tape = write_one_tape_block(&dir, "provenance", 3, 1);
+
+    let mut adapter = TmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, &tape, true), &mut out)
+        .unwrap();
+
+    // Line 1 is unmapped in both files; the snapping rule plants each
+    // request at ITS OWN file's first mapped line — two different
+    // addresses for the same requested line number.
+    let plant = |adapter: &mut TmDapAdapter, file: &str| -> Value {
+        adapter
+            .handle(
+                "setBreakpoints",
+                &json!({
+                    "source": {"path": dir.join(file).to_str().unwrap()},
+                    "breakpoints": [{"line": 1}],
+                }),
+                &mut Vec::new(),
+            )
+            .unwrap()
+    };
+    let in_a = plant(&mut adapter, "a.tmc");
+    let in_b = plant(&mut adapter, "b.tmc");
+    assert_eq!(in_a["breakpoints"][0]["verified"], json!(true));
+    assert_eq!(in_b["breakpoints"][0]["verified"], json!(true));
+    assert_ne!(
+        in_a["breakpoints"][0]["instructionReference"],
+        in_b["breakpoints"][0]["instructionReference"],
+        "each file must snap line 1 to its own first mapped line"
+    );
+
+    let foreign = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({
+                "source": {"path": dir.join("elsewhere.tmc").to_str().unwrap()},
+                "breakpoints": [{"line": 1}],
+            }),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(foreign["breakpoints"][0]["verified"], json!(false));
+    assert!(
+        foreign["breakpoints"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no code in this program comes from this file"),
+        "got: {foreign}"
+    );
+
+    // The entry frame belongs to a.tmc's machine world — its `source`
+    // object carries the file leaf and the ABSOLUTE resolved path.
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["source"]["name"], json!("a.tmc"));
+    assert_eq!(
+        frame["source"]["path"],
+        json!(dir.join("a.tmc").to_str().unwrap())
     );
 }

@@ -776,6 +776,9 @@ pub(super) fn build(
             end,
             labels,
             lines,
+            // Provenance is stamped by `link` itself, per origin, after
+            // this table is built (docs/formats.md (map sidecar)).
+            source: None,
         });
     }
 
@@ -1045,6 +1048,58 @@ X:      stop
         // Relaxed: call.s is 2 bytes → X moves to absolute 3.
         assert_eq!(out.map.functions[0].labels, vec![("X".to_string(), 3)]);
         assert!(!out.map.functions[0].lines.is_empty());
+    }
+
+    #[test]
+    fn sources_stamp_map_functions_by_origin() {
+        // Provenance is per INPUT, indexed user objects then libraries
+        // (docs/formats.md (map sidecar)): each reached function takes its
+        // origin's string verbatim; a `None` slot (the library here) leaves
+        // its functions unstamped.
+        let syntax = syntax_with_short_call();
+        let a = assemble(
+            &syntax,
+            0x7E,
+            ".func main\n        call    go\n        stop\n",
+            false,
+        )
+        .unwrap();
+        let b = assemble(
+            &syntax,
+            0x7E,
+            ".func go\n        call    helper\n        ret\n",
+            false,
+        )
+        .unwrap();
+        let lib = assemble(&syntax, 0x7E, ".func helper\n        ret\n", false).unwrap();
+        let out = link(
+            &syntax,
+            &[a.clone(), b.clone()],
+            std::slice::from_ref(&lib),
+            LinkOptions {
+                sources: vec![Some("../src/a.pmc".into()), Some("b.pma".into()), None],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let stamped: Vec<(&str, Option<&str>)> = out
+            .map
+            .functions
+            .iter()
+            .map(|f| (f.name.as_str(), f.source.as_deref()))
+            .collect();
+        assert_eq!(
+            stamped,
+            vec![
+                ("main", Some("../src/a.pmc")),
+                ("go", Some("b.pma")),
+                ("helper", None),
+            ]
+        );
+
+        // Empty `sources` (the default) stamps nothing at all.
+        let out = link(&syntax, &[a, b], &[lib], LinkOptions::default()).unwrap();
+        assert!(out.map.functions.iter().all(|f| f.source.is_none()));
     }
 
     #[test]

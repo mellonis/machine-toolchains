@@ -195,13 +195,27 @@ twice.
 
 `setBreakpoints` and `setInstructionBreakpoints` are independent
 kinds — DAP REPLACE semantics apply per kind, so a fresh
-`setBreakpoints` call clears only previously-set *source* addresses,
-leaving instruction breakpoints untouched, and vice versa. Both resolve
-against the one map the launched executable carries, regardless of a
-request's own `source.path` — appropriate for a session debugging one
-program, though a multi-object launch whose different translation units
-share a line number is resolved by that shared map alone, not by which
-file the request named.
+`setBreakpoints` call never disturbs instruction breakpoints, and vice
+versa. Within the source kind, replacement follows DAP's own per-source
+contract: a request's list is the whole new set *for the file it names*,
+so a client holding breakpoints in two files (one `setBreakpoints` call
+each, as real clients send them) keeps both sets planted. A request
+resolved without a file match replaces the one global list instead.
+
+When the map carries source provenance (see **Source provenance**
+below), a `setBreakpoints` request's own `source.path` is matched
+against the map's source records and the line search is confined to
+that one file's functions — so two translation units that share a line
+number can no longer capture each other's breakpoints. A request naming
+a file the map's records never mention answers every line
+`verified: false` with its own message (`"no code in this program comes
+from this file (per the map sidecar's source records)"`) rather than
+falling back to the global table — a fallback would plant an unrelated
+file's identical line numbers, the exact collision the filter exists to
+prevent. A map with no provenance at all (a pre-provenance sidecar, or
+one written by `pmt link`/`tmt link` over prebuilt objects) keeps the
+old behavior: one global line table, resolved regardless of which file
+the request named.
 
 A source breakpoint resolves through the map's line table; an unmapped
 line — no `-g` map at all, or a specific line the map simply has no code
@@ -264,13 +278,25 @@ the same underlying set a source breakpoint's resolved address is
 planted into, so a breakpoint set through either request pauses
 execution identically, regardless of which surface set it.
 
-A window that runs past either end of the code image does not truncate
-the response short: the remaining rows carry a placeholder
-(`instruction: "<out of range>"`, `presentationHint: "invalid"`) at a
-strictly increasing, never-repeating address, since a client's
-Disassembly view routinely prefetches windows past the loaded code and a
-repeated placeholder address across rows would be a real, visible glitch
-rather than a hypothetical one.
+The response window is strictly **positional**: row `i` is the
+instruction `instructionOffset + i` places from the referenced one,
+never shifted or truncated. That is a client contract, not a nicety — a
+client learns a previously unseen reference's memory address from the
+row at index `-instructionOffset` of the response, so an adapter that
+slides a head-overflowing window to the image start teaches it a wrong
+address for every reference within `-instructionOffset` instructions of
+the entry, and the view's current-instruction marker pins to one late
+address no matter where execution actually is. Positions the image has
+no instruction for carry a placeholder instead (`instruction:
+"<out of range>"`, `presentationHint: "invalid"`): past the last
+instruction the placeholder addresses continue one byte at a time from
+the code end, and *before* the first instruction they are negative —
+skipping `-1` itself, the one value clients treat as an
+ignore-this-row sentinel. Placeholder or real, every address in a
+response is strictly increasing and never repeats, since a Disassembly
+view routinely prefetches windows past the loaded code and a repeated
+address across rows would be a real, visible glitch rather than a
+hypothetical one.
 
 ## Assembly-line debugging
 
@@ -283,6 +309,38 @@ at all. Only the compiled path remaps a `.pma`/`.tma` line to the
 skips that remap; and its address ranges and lines resolve exactly the
 same way through the same map either way.
 
+## Source provenance
+
+A map written by `pmt build`/`tmt build` records, per function, the
+source file its defining input was built from (`docs/formats.md` — the
+sidecar's source-provenance field). The adapters put that record to two
+uses: the per-file breakpoint filter above, and a DAP `source` object —
+`{ "name": <file leaf>, "path": <absolute file> }` — attached to every
+stack frame whose function carries provenance. The `source` object is
+what lets a client treat a frame as *openable*: focus it automatically
+on a stop, reveal the file in the editor, and highlight the current
+line. A frame whose function has no provenance (a prebuilt object, the
+embedded stdlib, a pre-provenance sidecar) still carries
+`name`/`line`/`instructionPointerReference`, exactly as before — it is
+usable in the Disassembly view, just not openable as a file.
+
+Resolution back from a sidecar's stored (typically relative) path to
+the absolute one handed to the client anchors at the sidecar's own
+directory and is purely lexical, the same policy the emission side uses
+(`docs/formats.md`). Two guards temper it. A resolved file that does
+not exist on disk — a tree moved after building, a sidecar copied
+without its sources — omits the `source` object rather than handing the
+client a dead path, degrading to the sourceless frame above. And for
+the breakpoint filter's *comparison* (matching the editor's request
+path against a resolved record), both sides are canonicalized through
+the filesystem when the file exists, so a symlinked workspace — where
+the editor and the sidecar legitimately spell one file two ways — still
+matches; only a path that cannot be canonicalized falls back to the
+lexical spelling. That comparison is the one place the adapters go
+beyond the LSP overlay's lexical-only identity (`docs/lsp.md`), because
+a debug session compares paths from two independent producers rather
+than its own URIs round-tripped.
+
 ## State: threads, stack, scopes, variables
 
 `stackTrace` answers frame 0 as the current instruction pointer, then
@@ -293,11 +351,9 @@ it, a source line); an unresolvable one — no map at all, or an address
 outside every known function — falls back to its own hex address as the
 name, line 0. Every frame carries `instructionPointerReference`
 regardless, so a frame stays usable in the Disassembly view even when it
-resolves to nothing else. A stack frame does not currently carry a DAP
-`source` object (a file path a client could open directly) — the
-launched executable's map sidecar names function ranges and lines, not
-which source file on disk produced them, so `name`/`line`/
-`instructionPointerReference` are what a frame offers today.
+resolves to nothing else. A frame whose function record names its source
+file additionally carries the DAP `source` object — see **Source
+provenance** above for what it enables and when it is omitted.
 
 **Scopes are identical for any selected frame** — machine state is
 global, not per-frame — so `scopes` never inspects which frame id was

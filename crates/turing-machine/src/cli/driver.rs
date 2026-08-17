@@ -440,6 +440,7 @@ fn build_one_target(
     let read_err_prefix = format!("target `{name}`: ");
     let mut objects: Vec<ObjectFile> = Vec::new();
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
+    let mut unit_sources: Vec<Option<PathBuf>> = Vec::new();
     for raw in manifest.effective_sources(target) {
         let path = resolve(&raw)?;
         load_one_source(
@@ -449,6 +450,7 @@ fn build_one_target(
             &read_err_prefix,
             &mut objects,
             &mut reports,
+            &mut unit_sources,
         )?;
     }
 
@@ -486,29 +488,46 @@ fn build_one_target(
     // failure anywhere in it — the link itself, or one of the writes after
     // — carries the warnings already rendered above rather than dropping
     // them on an early `?` return (docs/tmt/cli.md (build)).
-    let (output, tail) = link_and_write(root, manifest, name, target, &objects, &libraries, flags)
+    let output = crate::project::normalize_rel(&manifest.output_of(name, target))
+        .map(|rel| root.join(rel))
         .map_err(|e| format!("{stderr}{e}"))?;
+    let tail = link_and_write(
+        manifest,
+        name,
+        target,
+        &objects,
+        &libraries,
+        flags,
+        &output,
+        &unit_sources,
+    )
+    .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
     Ok((output, stderr))
 }
 
 /// Links a target's compiled units, writes the executable (+ sidecar) to
-/// its resolved output path, and renders the `-v` link line — the tail of
-/// `build_one_target` past the point its compile-stage warnings are
-/// already rendered, factored out so that whole sequence is one fallible
-/// unit its caller can prefix with those warnings at a single site
-/// (docs/tmt/cli.md (build)). Returns the absolute output path and the
-/// (possibly empty) `-v` chunk; the caller owns concatenating it onto its
-/// own accumulated stderr.
+/// the caller-resolved output path, and renders the `-v` link line — the
+/// tail of `build_one_target` past the point its compile-stage warnings
+/// are already rendered, factored out so that whole sequence is one
+/// fallible unit its caller can prefix with those warnings at a single
+/// site (docs/tmt/cli.md (build)). Returns the (possibly empty) `-v`
+/// chunk; the caller owns concatenating it onto its own accumulated
+/// stderr.
+#[allow(clippy::too_many_arguments)]
 fn link_and_write(
-    root: &Path,
     manifest: &crate::project::Manifest,
     name: &str,
     target: &crate::project::Target,
     objects: &[ObjectFile],
     libraries: &[ObjectFile],
     flags: &Flags,
-) -> Result<(PathBuf, String), String> {
+    output: &Path,
+    unit_sources: &[Option<PathBuf>],
+) -> Result<String, String> {
+    // The sidecar path anchors the provenance strings, so it is resolved
+    // BEFORE the link (docs/formats.md (map sidecar)).
+    let map_path = sidecar_path(output);
     let linked = crate::asm::link(
         objects,
         libraries,
@@ -521,20 +540,16 @@ fn link_and_write(
                 .call_mech
                 .or_else(|| manifest.effective_call_mech(target))
                 .unwrap_or_default(),
+            sources: sidecar_sources(&map_path, unit_sources),
         },
     )
     .map_err(|e| format!("target `{name}`: {e}"))?;
-
-    let output = root.join(crate::project::normalize_rel(
-        &manifest.output_of(name, target),
-    )?);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    fs::write(&output, linked.executable.to_bytes())
+    fs::write(output, linked.executable.to_bytes())
         .map_err(|e| format!("cannot write {}: {e}", output.display()))?;
-    let map_path = sidecar_path(&output);
     fs::write(&map_path, linked.map.to_json())
         .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
@@ -549,7 +564,7 @@ fn link_and_write(
             r.far_calls
         );
     }
-    Ok((output, tail))
+    Ok(tail)
 }
 
 /// Runs a just-built target under `--run` (docs/tmt/cli.md (run)): the
@@ -677,6 +692,7 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
 
     let mut objects: Vec<ObjectFile> = Vec::new();
     let mut reports: Vec<(PathBuf, CompileReport)> = Vec::new();
+    let mut unit_sources: Vec<Option<PathBuf>> = Vec::new();
     for file in files {
         let path = Path::new(file);
         load_one_source(
@@ -686,6 +702,7 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
             "",
             &mut objects,
             &mut reports,
+            &mut unit_sources,
         )?;
     }
 
@@ -718,7 +735,7 @@ fn argv_mode(files: &[String], flags: &Flags) -> Result<CliOutput, String> {
     // failure anywhere in it carries the warnings already rendered above
     // rather than dropping them on an early `?` return
     // (docs/tmt/cli.md (build)).
-    let tail = link_and_write_argv(&objects, &libraries, flags, &files[0])
+    let tail = link_and_write_argv(&objects, &libraries, flags, &files[0], &unit_sources)
         .map_err(|e| format!("{stderr}{e}"))?;
     stderr.push_str(&tail);
     Ok(CliOutput::ok(String::new(), stderr))
@@ -734,10 +751,14 @@ fn link_and_write_argv(
     libraries: &[ObjectFile],
     flags: &Flags,
     first_file: &str,
+    unit_sources: &[Option<PathBuf>],
 ) -> Result<String, String> {
-    // `LinkOptions` has three fields (relax / entry / call_mech); argv mode
-    // threads all three explicitly — there is no default to lean on for
-    // `call_mech` once the flag exists (TM's own `tmt link` does the same).
+    let target = out_path(Path::new(first_file), flags.out.clone(), "tmx");
+    let map_path = sidecar_path(&target);
+    // Argv mode threads relax / entry / call_mech explicitly — there is
+    // no default to lean on for `call_mech` once the flag exists (TM's
+    // own `tmt link` does the same); `sources` carries the units' sidecar
+    // provenance (docs/formats.md (map sidecar)).
     let linked = crate::asm::link(
         objects,
         libraries,
@@ -745,14 +766,13 @@ fn link_and_write_argv(
             relax: !flags.no_relax,
             entry: flags.entry.clone(),
             call_mech: flags.call_mech.unwrap_or_default(),
+            sources: sidecar_sources(&map_path, unit_sources),
         },
     )
     .map_err(|e| e.to_string())?;
 
-    let target = out_path(Path::new(first_file), flags.out.clone(), "tmx");
     fs::write(&target, linked.executable.to_bytes())
         .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-    let map_path = sidecar_path(&target);
     fs::write(&map_path, linked.map.to_json())
         .map_err(|e| format!("cannot write {}: {e}", map_path.display()))?;
 
@@ -768,6 +788,32 @@ fn link_and_write_argv(
         );
     }
     Ok(tail)
+}
+
+/// The map sidecar's per-unit provenance strings (docs/formats.md (map
+/// sidecar)): each compiled unit's source path re-expressed relative to
+/// the sidecar's own directory, so a build tree stays relocatable —
+/// falling back to the absolute path when the two share no common root.
+/// Purely lexical, like the resolution a debug adapter performs on the
+/// way back (docs/lsp.md (known caveats)). Entries stay parallel to the
+/// unit objects; the libraries after them carry no provenance and are
+/// simply not covered.
+fn sidecar_sources(map_path: &Path, unit_sources: &[Option<PathBuf>]) -> Vec<Option<String>> {
+    use mtc_core::source_path::{lexical_absolute, relative_to};
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let map_dir = lexical_absolute(&cwd, map_path.parent().unwrap_or(Path::new(".")));
+    unit_sources
+        .iter()
+        .map(|source| {
+            source.as_ref().map(|path| {
+                let abs = lexical_absolute(&cwd, path);
+                relative_to(&map_dir, &abs)
+                    .unwrap_or(abs)
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect()
 }
 
 /// Loads one already-resolved source path per its extension
@@ -788,6 +834,7 @@ fn load_one_source(
     read_err_prefix: &str,
     objects: &mut Vec<ObjectFile>,
     reports: &mut Vec<(PathBuf, CompileReport)>,
+    unit_sources: &mut Vec<Option<PathBuf>>,
 ) -> Result<(), String> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("tmc") => {
@@ -803,6 +850,7 @@ fn load_one_source(
                 fs::write(&tmo, out.object.to_bytes())
                     .map_err(|e| format!("cannot write {}: {e}", tmo.display()))?;
             }
+            unit_sources.push(Some(path.to_path_buf()));
             reports.push((path.to_path_buf(), out.report));
             objects.push(out.object);
         }
@@ -819,9 +867,15 @@ fn load_one_source(
                 fs::write(&tmo, object.to_bytes())
                     .map_err(|e| format!("cannot write {}: {e}", tmo.display()))?;
             }
+            unit_sources.push(Some(path.to_path_buf()));
             objects.push(object);
         }
-        _ => objects.push(read_object(path)?),
+        // A prebuilt `.tmo` is not a source a debugger could open — no
+        // provenance (docs/formats.md (map sidecar)).
+        _ => {
+            unit_sources.push(None);
+            objects.push(read_object(path)?);
+        }
     }
     Ok(())
 }
@@ -935,7 +989,7 @@ machine {
         let line_is_mapped = |built: &DapTargetBuild| {
             let map_text = fs::read_to_string(sidecar_path(&built.output)).unwrap();
             let map = MapFile::from_json(&map_text).unwrap();
-            LineIndex::new(&map).address_for_line(7).is_some()
+            LineIndex::new(&map).address_for_line(7, None).is_some()
         };
 
         let built = build_target_for_launch(Some(&dir), "app", false).unwrap();

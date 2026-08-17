@@ -323,6 +323,10 @@ pub(super) fn link(raw: &[String]) -> Result<CliOutput, String> {
             relax,
             entry,
             call_mech,
+            // `link` consumes prebuilt objects, which carry no source to
+            // name — sidecar provenance is a build-driver concern
+            // (docs/formats.md (map sidecar)).
+            sources: Vec::new(),
         },
     )
     .map_err(|e| e.to_string())?;

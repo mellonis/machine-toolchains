@@ -65,47 +65,25 @@
 //! `TAPE_WINDOW_BASE` itself is ever issued; a TM adapter reusing this
 //! scheme would issue `TAPE_WINDOW_BASE + 1`, `+ 2`, … for its other tapes.
 //!
-//! **Generation salt.** Every base above, and every stack-frame `id`
-//! `stackTrace` hands back, is additionally salted by the current stop:
-//! `salted(base) = stop_generation * GENERATION_STRIDE + base`, where
-//! `stop_generation` starts at `0` and is incremented by exactly one on
-//! every `Stopped` event — `push_stopped` is the ONLY function allowed to
-//! push one, so the increment can never be skipped or duplicated at a call
-//! site (every `AdapterEvent::Stopped` push in this module goes through
-//! it). The reason: VS Code (and DAP clients generally) cache a scope's or
-//! frame's children by the exact integer handle across stops; without the
-//! salt this adapter's handles were the SAME fixed constants every time
-//! (`SCOPE_REGISTERS` forever `1`, frame 0's `id` forever `0`), so after a
-//! step the client saw an "unchanged" reference and kept rendering the
-//! PREVIOUS stop's cached values in the Variables/Call Stack panels
-//! instead of asking again — live-observed in VS Code, invisible to this
-//! crate's own tests (which always re-request `scopes`/`stackTrace` fresh
-//! rather than diffing across two stops). Salting forces a new integer
-//! every stop, busting the cache. Decoding (`handle_variables`/
-//! `handle_set_variable`) is deliberately the inverse of only the salt,
-//! not a match on the whole value: `base = raw % GENERATION_STRIDE` — ANY
-//! generation dispatches on its base, not just the current one, because a
-//! client may still be holding a reference from the stop just before this
-//! one (an in-flight request racing a new stop) and that reference must
-//! still resolve LIVE data, not be rejected as stale. Stack-frame ids get
-//! the same salt for the same cache-busting reason even though nothing in
-//! this adapter currently decodes one back (`scopes`'s own dispatch takes
-//! no `arguments` at all, so a frame id is never read here) — a future
-//! frame-scoped feature reading one back must decode it the same way
-//! (`% GENERATION_STRIDE`), and an unsalted `id` sitting next to salted
-//! `variablesReference`s would read as an oversight, not a decision.
-//! `GENERATION_STRIDE` (4096) sits comfortably above every base this
-//! adapter or its TM sibling ever issues (`TAPE_WINDOW_BASE + n` tops out
-//! at `100 + 255` — a TM-1 tape count is a `u8` — well under the stride),
-//! so the modulus recovers the base exactly regardless of which
-//! generation produced it. `stop_generation` is never reset on a re-launch
-//! (`finish_launch`) — zeroing it would reissue generation-1 handles a
-//! client may still have cached from the PRIOR session, exactly the
-//! staleness this salt exists to prevent.
+//! **Handle stability.** Every handle above, and every stack-frame `id`
+//! `stackTrace` hands back, is issued as the bare constant, identical
+//! across stops. That is the DAP contract working as intended: a
+//! `variablesReference` is only valid while the session is paused, and a
+//! client re-fetches scopes and variables on every stop (VS Code
+//! discards its variable model on the `continued` event). An earlier
+//! revision salted every handle with a per-stop generation to bust a
+//! suspected client-side cache — the stale-Variables report that
+//! motivated it was actually the missing frame `source` object (with no
+//! openable source, VS Code never auto-focused the stopped frame and so
+//! never asked for its scopes at all — docs/dap.md (source
+//! provenance)); once frames carried sources, the salt had nothing left
+//! to do, and stable handles are what let a client correlate its own
+//! view state across stops. A reference a client held from a PRIOR stop
+//! is therefore simply the current reference and resolves live data.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -129,17 +107,6 @@ use crate::asm::pm1_syntax;
 const SCOPE_REGISTERS: i64 = 1;
 const SCOPE_TAPES: i64 = 2;
 const TAPE_WINDOW_BASE: i64 = 100;
-
-/// The generation-salt stride (module doc's "Generation salt" section) —
-/// every base constant above is multiplied into this stride's next slot
-/// per stop, so `base = raw % GENERATION_STRIDE` recovers it regardless of
-/// which generation produced the raw value.
-const GENERATION_STRIDE: i64 = 4096;
-
-// A TM-1 tape count is a `u8`, so `TAPE_WINDOW_BASE + n` tops out at
-// `100 + 255` — the widest base either adapter ever issues. Pins the
-// module doc's "comfortably above every base" claim.
-const _: () = assert!(TAPE_WINDOW_BASE + 255 < GENERATION_STRIDE);
 
 /// Half-width of the tape variables window (`TAPE_WINDOW_BASE`): head±8,
 /// 17 cells total.
@@ -168,6 +135,14 @@ static PM1: Pm1 = Pm1;
 const UNMAPPED_BREAKPOINT_MESSAGE: &str =
     "no code at this line — build with -g and place the breakpoint on an executable line";
 
+/// `handle_set_breakpoints`'s answer when the map DOES carry source
+/// provenance but none of its files is the one this request names — the
+/// per-file filter (docs/dap.md (breakpoints and stepping)) then has no
+/// line table to search, and falling back to the global one would plant
+/// breakpoints from an unrelated file's identical line numbers.
+const FOREIGN_SOURCE_BREAKPOINT_MESSAGE: &str =
+    "no code in this program comes from this file (per the map sidecar's source records)";
+
 /// `next`'s underlying primitive steps OVER a call (runs it to completion
 /// before reporting); `stepIn`'s steps INTO one (lands on the callee's
 /// first instruction). `handle_step` is the one loop parameterized by this.
@@ -175,6 +150,20 @@ const UNMAPPED_BREAKPOINT_MESSAGE: &str =
 enum StepKind {
     Over,
     Into,
+}
+
+/// How a `setBreakpoints` request's file constrains the line search
+/// (docs/dap.md (breakpoints and stepping)). `Global` — no provenance in
+/// the map (or no file in the request): every function's lines are
+/// searched, the pre-provenance behavior. `File` — the request's file
+/// matched a map source record; only that file's lines are searched, so
+/// identical line numbers across compilation units cannot collide.
+/// `Foreign` — the map HAS provenance but names no file matching the
+/// request: nothing is searched, and the un-verified answer says why.
+enum SourceFilter {
+    Global,
+    File(String),
+    Foreign,
 }
 
 /// What a stepping request settled on, once its underlying `DebugSession`
@@ -393,6 +382,12 @@ pub struct PmDapAdapter {
     /// `disassemble`/trace label resolution needs `MapFunction::labels`,
     /// which `LineIndex` does not carry (it only indexes lines).
     map: Option<MapFile>,
+    /// The sidecar's directory, lexically absolutized at launch — the
+    /// anchor the map's relative `source` entries resolve against, both
+    /// for the `source` objects frames carry and for matching a
+    /// `setBreakpoints` request's file (docs/formats.md (map sidecar)).
+    /// `None` until a launch discovers a sidecar.
+    map_dir: Option<PathBuf>,
     /// The launch tape block's glyph table. Program mode only: `None`
     /// when no `"tape"` was given (the default empty tape carries no
     /// alphabet) — `variables` falls back to raw indices in that case
@@ -420,24 +415,23 @@ pub struct PmDapAdapter {
     /// `setBreakpoints`, kept separately from `instruction_breakpoints` so
     /// each request kind can REPLACE only its own list (DAP semantics —
     /// `setBreakpoints`/`setInstructionBreakpoints` are independent
-    /// breakpoint kinds). Also consulted directly by the stepping loop
-    /// (`handle_step`) and the traced motions (`step_traced`/`run_traced`):
-    /// `step_in`/`step_over`'s raw per-instruction path never checks
-    /// `DebugSession`'s own breakpoint set (only the `continue`-shaped
-    /// motions do — docs/core.md (DebugSession)), so a breakpoint hit
-    /// mid-line has to be noticed here instead.
-    source_breakpoints: BTreeSet<u32>,
+    /// breakpoint kinds). Bucketed per source file — DAP's own contract
+    /// is per-source replacement ("clears all previous breakpoints in
+    /// that source"), which matters once the map's provenance lets two
+    /// files hold breakpoints at once (docs/dap.md (breakpoints and
+    /// stepping)): the key is the matched map source record, or `""` for
+    /// a request resolved against the global table. Also consulted
+    /// directly by the stepping loop (`handle_step`) and the traced
+    /// motions (`step_traced`/`run_traced`): `step_in`/`step_over`'s raw
+    /// per-instruction path never checks `DebugSession`'s own breakpoint
+    /// set (only the `continue`-shaped motions do — docs/core.md
+    /// (DebugSession)), so a breakpoint hit mid-line has to be noticed
+    /// here instead.
+    source_breakpoints: BTreeMap<String, BTreeSet<u32>>,
     /// Addresses added on behalf of `setInstructionBreakpoints` — see
     /// `source_breakpoints` for why this is a separate set and why the
     /// stepping loop consults both.
     instruction_breakpoints: BTreeSet<u32>,
-    /// The current stop's generation, salted into every issued
-    /// `variablesReference`/frame `id` (module doc's "Generation salt"
-    /// section). Starts at `0`; incremented by exactly one per `Stopped`
-    /// event, ONLY by `push_stopped`. Deliberately never reset by
-    /// `finish_launch` — see that section for why a re-launch must not
-    /// zero it.
-    stop_generation: u64,
 }
 
 impl Default for PmDapAdapter {
@@ -454,34 +448,24 @@ impl PmDapAdapter {
             line_index: None,
             code: None,
             map: None,
+            map_dir: None,
             alphabet: None,
             launch_opts: None,
             run_state: RunState::Stopped,
-            source_breakpoints: BTreeSet::new(),
+            source_breakpoints: BTreeMap::new(),
             instruction_breakpoints: BTreeSet::new(),
-            stop_generation: 0,
         }
     }
 
-    /// Salts a handle-scheme base constant with the CURRENT stop
-    /// generation (module doc's "Generation salt" section) — every site
-    /// that issues a `variablesReference` or stack-frame `id` goes through
-    /// this instead of emitting the bare constant.
-    fn salted(&self, base: i64) -> i64 {
-        self.stop_generation as i64 * GENERATION_STRIDE + base
-    }
-
-    /// The ONE place allowed to push an `AdapterEvent::Stopped` — every
-    /// call site in this module goes through it instead of pushing the
-    /// event directly, so `stop_generation`'s increment can never be
-    /// skipped or duplicated (module doc's "Generation salt" section).
+    /// The ONE place that pushes an `AdapterEvent::Stopped` — a single
+    /// funnel keeps every stop's event shape (and anything a stop must
+    /// ever do uniformly) at one site instead of eight.
     fn push_stopped(
         &mut self,
         out: &mut Vec<AdapterEvent>,
         reason: &'static str,
         description: Option<String>,
     ) {
-        self.stop_generation += 1;
         out.push(AdapterEvent::Stopped {
             reason,
             description,
@@ -653,12 +637,24 @@ impl PmDapAdapter {
         let session = machine.debug(RunOptions::default());
         let map = sidecar_map(&program);
         let line_index = map.as_ref().map(LineIndex::new);
+        // The anchor for the map's relative `source` entries: the
+        // sidecar sits next to the executable, so its directory is the
+        // program's — absolutized here (lexically, docs/formats.md (map
+        // sidecar)) because the frames' `source` objects hand the editor
+        // absolute paths.
+        let map_dir = map.as_ref().and_then(|_| {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            Path::new(&program)
+                .parent()
+                .map(|dir| mtc_core::source_path::lexical_absolute(&cwd, dir))
+        });
 
         self.session = Some(session);
         self.tape = Some(tape);
         self.line_index = line_index;
         self.code = Some(exe.code.clone());
         self.map = map;
+        self.map_dir = map_dir;
         self.alphabet = alphabet;
         self.launch_opts = Some(LaunchOpts {
             program,
@@ -673,11 +669,6 @@ impl PmDapAdapter {
         // matching a new address and firing a phantom breakpoint.
         self.source_breakpoints.clear();
         self.instruction_breakpoints.clear();
-        // `stop_generation` is deliberately NOT reset here — module doc's
-        // "Generation salt" section: zeroing it on a re-launch would
-        // reissue generation-1 handles a client may still have cached from
-        // the PRIOR session, recreating the exact staleness this salt
-        // exists to prevent.
 
         out.push(AdapterEvent::Initialized);
         Ok(Value::Null)
@@ -756,18 +747,41 @@ impl PmDapAdapter {
     /// planted address — both for a real client's UI and so this crate's own
     /// tests can recover an address without any extra introspection surface.
     fn handle_set_breakpoints(&mut self, arguments: &Value) -> Result<Value, String> {
-        let Some(session) = self.session.as_mut() else {
+        if self.session.is_none() {
             return Err("setBreakpoints before launch".to_string());
-        };
+        }
+        // Resolved before the session borrow below (a `&self` method call
+        // cannot overlap it). See `breakpoint_source_filter` for the
+        // per-file rule.
+        let source_filter = self.breakpoint_source_filter(arguments);
+        let session = self.session.as_mut().expect("checked above");
         let requested = arguments
             .get("breakpoints")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
 
-        for addr in std::mem::take(&mut self.source_breakpoints) {
-            if !self.instruction_breakpoints.contains(&addr) {
-                session.remove_breakpoint(addr);
+        // DAP's per-source REPLACE contract: this request's list is the
+        // whole new set for ITS bucket — the matched file, or the one
+        // global bucket (`""`) when the search is global. A `Foreign`
+        // request owns no bucket: it can plant nothing, so it clears
+        // nothing. An address is removed from the session only when no
+        // other bucket (and no instruction breakpoint) still holds it.
+        let bucket = match &source_filter {
+            SourceFilter::Global => Some(String::new()),
+            SourceFilter::File(raw) => Some(raw.clone()),
+            SourceFilter::Foreign => None,
+        };
+        if let Some(key) = &bucket {
+            for addr in self.source_breakpoints.remove(key).unwrap_or_default() {
+                let still_owned = self.instruction_breakpoints.contains(&addr)
+                    || self
+                        .source_breakpoints
+                        .values()
+                        .any(|set| set.contains(&addr));
+                if !still_owned {
+                    session.remove_breakpoint(addr);
+                }
             }
         }
 
@@ -780,19 +794,29 @@ impl PmDapAdapter {
                 }));
                 continue;
             };
-            match self
-                .line_index
-                .as_ref()
-                .and_then(|idx| idx.address_for_line(line))
-            {
+            let planted = match &source_filter {
+                SourceFilter::Foreign => None,
+                SourceFilter::Global => self
+                    .line_index
+                    .as_ref()
+                    .and_then(|idx| idx.address_for_line(line, None)),
+                SourceFilter::File(raw) => self
+                    .line_index
+                    .as_ref()
+                    .and_then(|idx| idx.address_for_line(line, Some(raw))),
+            };
+            match planted {
                 Some(addr) => {
                     session.add_breakpoint(addr);
-                    self.source_breakpoints.insert(addr);
+                    self.source_breakpoints
+                        .entry(bucket.clone().unwrap_or_default())
+                        .or_default()
+                        .insert(addr);
                     let resolved_line = self
                         .line_index
                         .as_ref()
                         .and_then(|idx| idx.resolve(addr))
-                        .and_then(|(_, l)| l)
+                        .and_then(|loc| loc.line)
                         .unwrap_or(line);
                     results.push(json!({
                         "verified": true,
@@ -801,10 +825,15 @@ impl PmDapAdapter {
                     }));
                 }
                 None => {
+                    let message = if matches!(source_filter, SourceFilter::Foreign) {
+                        FOREIGN_SOURCE_BREAKPOINT_MESSAGE
+                    } else {
+                        UNMAPPED_BREAKPOINT_MESSAGE
+                    };
                     results.push(json!({
                         "verified": false,
                         "line": line,
-                        "message": UNMAPPED_BREAKPOINT_MESSAGE,
+                        "message": message,
                     }));
                 }
             }
@@ -831,7 +860,11 @@ impl PmDapAdapter {
             .unwrap_or_default();
 
         for addr in std::mem::take(&mut self.instruction_breakpoints) {
-            if !self.source_breakpoints.contains(&addr) {
+            let still_owned = self
+                .source_breakpoints
+                .values()
+                .any(|set| set.contains(&addr));
+            if !still_owned {
                 session.remove_breakpoint(addr);
             }
         }
@@ -943,7 +976,7 @@ impl PmDapAdapter {
             };
             let session = self.session.as_ref().expect("checked by step_once_traced");
             let ip = session.ip();
-            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+            if self.source_breakpoint_at(ip) || self.instruction_breakpoints.contains(&ip) {
                 return DebugEvent::Paused(PauseCause::Breakpoint(ip));
             }
             match stop_when {
@@ -968,7 +1001,7 @@ impl PmDapAdapter {
             };
             let session = self.session.as_ref().expect("checked by step_once_traced");
             let ip = session.ip();
-            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+            if self.source_breakpoint_at(ip) || self.instruction_breakpoints.contains(&ip) {
                 return DebugEvent::Paused(PauseCause::Breakpoint(ip));
             }
         }
@@ -1036,7 +1069,7 @@ impl PmDapAdapter {
             self.line_index
                 .as_ref()
                 .and_then(|idx| idx.resolve(ip))
-                .map(|(name, line)| (name.to_string(), line))
+                .map(|loc| (loc.function.to_string(), loc.line))
         };
 
         let outcome = loop {
@@ -1084,7 +1117,7 @@ impl PmDapAdapter {
                 .as_ref()
                 .expect("checked by ensure_can_step")
                 .ip();
-            if self.source_breakpoints.contains(&ip) || self.instruction_breakpoints.contains(&ip) {
+            if self.source_breakpoint_at(ip) || self.instruction_breakpoints.contains(&ip) {
                 break StepOutcome::Stop("breakpoint", None);
             }
             if instruction_granularity {
@@ -1094,7 +1127,7 @@ impl PmDapAdapter {
                 .line_index
                 .as_ref()
                 .and_then(|idx| idx.resolve(ip))
-                .map(|(name, line)| (name.to_string(), line));
+                .map(|loc| (loc.function.to_string(), loc.line));
             if now_position != start_position {
                 break StepOutcome::Stop("step", None);
             }
@@ -1193,9 +1226,9 @@ impl PmDapAdapter {
             .session
             .as_ref()
             .ok_or_else(|| "stackTrace before launch".to_string())?;
-        let mut frames = vec![self.frame_json(self.salted(0), session.ip())];
+        let mut frames = vec![self.frame_json(0, session.ip())];
         for (i, &addr) in session.stack().iter().rev().enumerate() {
-            frames.push(self.frame_json(self.salted((i + 1) as i64), addr));
+            frames.push(self.frame_json((i + 1) as i64, addr));
         }
         let total = frames.len();
         Ok(json!({"stackFrames": frames, "totalFrames": total}))
@@ -1208,17 +1241,91 @@ impl PmDapAdapter {
     /// always the hex address, resolvable regardless — `disassemble`'s
     /// `memoryReference` argument.
     fn frame_json(&self, id: i64, addr: u32) -> Value {
-        let (name, line) = match self.line_index.as_ref().and_then(|idx| idx.resolve(addr)) {
-            Some((name, line)) => (name.to_string(), line.unwrap_or(0)),
+        let loc = self.line_index.as_ref().and_then(|idx| idx.resolve(addr));
+        let (name, line) = match &loc {
+            Some(loc) => (loc.function.to_string(), loc.line.unwrap_or(0)),
             None => (format!("0x{addr:04x}"), 0),
         };
-        json!({
+        let mut frame = json!({
             "id": id,
             "name": name,
             "line": line,
             "column": 0,
             "instructionPointerReference": format!("0x{addr:x}"),
-        })
+        });
+        // Source provenance (docs/dap.md (source provenance)): a frame
+        // whose function record names its file gets a DAP `source`
+        // object, which is what lets the client focus the frame and
+        // highlight the line in the editor. Attached only when the
+        // resolved file actually exists — a moved tree degrades to
+        // today's sourceless frame instead of a dead editor tab.
+        if let Some(path) = loc
+            .and_then(|loc| loc.source)
+            .and_then(|raw| self.resolved_source(raw))
+        {
+            frame["source"] = source_json(&path);
+        }
+        frame
+    }
+
+    /// A map `source` entry resolved to the absolute file the editor
+    /// should open: relative entries anchor at the sidecar's directory
+    /// (docs/formats.md (map sidecar)), and a file that does not exist
+    /// resolves to `None` — the caller then omits provenance rather than
+    /// handing the client a dead path.
+    fn resolved_source(&self, raw: &str) -> Option<PathBuf> {
+        let path = self.map_source_path(raw)?;
+        fs::metadata(&path).is_ok().then_some(path)
+    }
+
+    /// Whether ANY source-breakpoint bucket holds `addr` — the stepping
+    /// loop's view, which does not care which file planted a breakpoint,
+    /// only that one exists at the position just reached.
+    fn source_breakpoint_at(&self, addr: u32) -> bool {
+        self.source_breakpoints
+            .values()
+            .any(|set| set.contains(&addr))
+    }
+
+    /// The same resolution without the existence gate — the breakpoint
+    /// filter compares identities, and `source_identity` already treats
+    /// a missing file gracefully (lexical fallback).
+    fn map_source_path(&self, raw: &str) -> Option<PathBuf> {
+        let dir = self.map_dir.as_ref()?;
+        Some(mtc_core::source_path::lexical_absolute(dir, Path::new(raw)))
+    }
+
+    /// Classifies a `setBreakpoints` request's file against the map's
+    /// source records — see [`SourceFilter`]. Identity is
+    /// [`source_identity`]'s: canonicalized when the file exists (so a
+    /// symlinked workspace still matches), lexical otherwise.
+    fn breakpoint_source_filter(&self, arguments: &Value) -> SourceFilter {
+        if !self.line_index.as_ref().is_some_and(LineIndex::has_sources) {
+            return SourceFilter::Global;
+        }
+        let Some(request_path) = arguments
+            .get("source")
+            .and_then(|s| s.get("path"))
+            .and_then(Value::as_str)
+        else {
+            return SourceFilter::Global;
+        };
+        let request = source_identity(Path::new(request_path));
+        let raws = self
+            .map
+            .as_ref()
+            .map(|map| map.functions.iter().filter_map(|f| f.source.as_deref()))
+            .into_iter()
+            .flatten();
+        for raw in raws {
+            let Some(resolved) = self.map_source_path(raw) else {
+                continue;
+            };
+            if source_identity(&resolved) == request {
+                return SourceFilter::File(raw.to_string());
+            }
+        }
+        SourceFilter::Foreign
     }
 
     /// `scopes`: identical for any frame id (machine state is global), so
@@ -1229,8 +1336,8 @@ impl PmDapAdapter {
             return Err("scopes before launch".to_string());
         }
         Ok(json!({"scopes": [
-            {"name": "Registers", "variablesReference": self.salted(SCOPE_REGISTERS), "expensive": false},
-            {"name": "Tapes", "variablesReference": self.salted(SCOPE_TAPES), "expensive": false},
+            {"name": "Registers", "variablesReference": SCOPE_REGISTERS, "expensive": false},
+            {"name": "Tapes", "variablesReference": SCOPE_TAPES, "expensive": false},
         ]}))
     }
 
@@ -1240,19 +1347,13 @@ impl PmDapAdapter {
     /// program terminates (that's how the poke's persistence is proven,
     /// rather than by a snapshot API `dyn Tape` doesn't expose).
     fn handle_variables(&mut self, arguments: &Value) -> Result<Value, String> {
-        let raw_reference = arguments
+        let reference = arguments
             .get("variablesReference")
             .and_then(Value::as_i64)
             .ok_or_else(|| "variables requires a variablesReference".to_string())?;
         if self.session.is_none() {
             return Err("variables before launch".to_string());
         }
-        // Decode: dispatch on the base only, ANY generation (module doc's
-        // "Generation salt" section) — a stale reference must still
-        // resolve live data. The error arm below echoes `raw_reference`,
-        // not this decoded value, so an unrecognized handle is reported
-        // exactly as the client sent it.
-        let reference = raw_reference % GENERATION_STRIDE;
         match reference {
             SCOPE_REGISTERS => {
                 let session = self.session.as_ref().expect("checked above");
@@ -1270,7 +1371,7 @@ impl PmDapAdapter {
                 Ok(json!({"variables": [{
                     "name": "tape 0",
                     "value": format!("head {}", tape.head()),
-                    "variablesReference": self.salted(TAPE_WINDOW_BASE),
+                    "variablesReference": TAPE_WINDOW_BASE,
                 }]}))
             }
             TAPE_WINDOW_BASE => {
@@ -1291,7 +1392,7 @@ impl PmDapAdapter {
                     .collect();
                 Ok(json!({"variables": vars}))
             }
-            _ => Err(format!("unknown variablesReference {raw_reference}")),
+            _ => Err(format!("unknown variablesReference {reference}")),
         }
     }
 
@@ -1306,7 +1407,7 @@ impl PmDapAdapter {
         if self.run_state != RunState::Stopped {
             return Err("cannot set a variable: the program is not stopped".to_string());
         }
-        let raw_reference = arguments
+        let reference = arguments
             .get("variablesReference")
             .and_then(Value::as_i64)
             .ok_or_else(|| "setVariable requires a variablesReference".to_string())?;
@@ -1319,13 +1420,10 @@ impl PmDapAdapter {
             .and_then(Value::as_str)
             .ok_or_else(|| "setVariable requires a value".to_string())?;
 
-        // Decode: same rule as `handle_variables` — dispatch on the base,
-        // ANY generation.
-        let reference = raw_reference % GENERATION_STRIDE;
         match reference {
             SCOPE_REGISTERS => self.set_register_variable(name, value),
             TAPE_WINDOW_BASE => self.set_tape_variable(name, value),
-            _ => Err(format!("cannot set a variable in scope {raw_reference}")),
+            _ => Err(format!("cannot set a variable in scope {reference}")),
         }
     }
 
@@ -1450,70 +1548,70 @@ impl PmDapAdapter {
         let map = self.map.as_ref();
         let resolve = |target: u32| resolve_label(map, target);
 
-        let start_addr = if instruction_offset >= 0 {
-            let mut addr = base;
-            for _ in 0..instruction_offset {
-                if (addr as usize) >= code.len() {
-                    break;
-                }
-                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
-                addr += ilen.max(1);
-            }
-            Some(addr)
-        } else {
-            let mut addrs = Vec::new();
-            let mut addr = 0u32;
-            let len = code.len() as u32;
-            while addr < len {
-                addrs.push(addr);
-                let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
-                addr += ilen.max(1);
-            }
-            // Clamp rather than fail past the image start: VS Code's real
-            // Disassembly-view request shape is an offset like `-50` from
-            // a frame near address 0 (module doc references the live
-            // report), which used to walk `ord` negative and answer `None`
-            // — an all-`<out of range>` window, the real code included.
-            // Clamping to the image start instead shifts the window when
-            // fewer instructions exist before the reference than asked
-            // for; VS Code locates the reference row by address and
-            // tolerates the shift. `None` stays reserved for the ONE case
-            // clamping cannot fix: the reference address itself was never
-            // found in the index (an invalid `memoryReference`).
-            addrs.iter().position(|&a| a == base).and_then(|idx| {
-                let ord = (idx as i64 + instruction_offset).max(0) as usize;
-                addrs.get(ord).copied()
-            })
+        // The whole instruction index, decoded once — both window
+        // directions need ordinal arithmetic over it.
+        let mut addrs = Vec::new();
+        let mut addr = 0u32;
+        let len = code.len() as u32;
+        while addr < len {
+            addrs.push(addr);
+            let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
+            addr += ilen.max(1);
+        }
+
+        // A `memoryReference` that is not an instruction boundary at all
+        // (never issued by this adapter — a client-side invention) gets an
+        // all-invalid window anchored at the raw address, one byte per row.
+        let Some(idx) = addrs.iter().position(|&a| a == base) else {
+            let instructions: Vec<Value> = (0..instruction_count)
+                .map(|i| {
+                    json!({
+                        "address": format!("0x{:x}", u64::from(base) + i as u64),
+                        "instruction": "<out of range>",
+                        "presentationHint": "invalid",
+                    })
+                })
+                .collect();
+            return Ok(json!({"instructions": instructions}));
         };
 
-        // `cursor` tracks a plain address, never `Option` past this point:
-        // an out-of-range row still needs A rendered address (VS Code's
-        // Disassembly view scrolls by prefetching windows past the loaded
-        // code, so identical placeholder addresses across rows is a real
-        // scenario, not a hypothetical one). Once `in_range` goes false it
-        // STAYS false — a one-byte step can never land back on a genuine
-        // instruction boundary — and every subsequent row's address is the
-        // previous row's plus one byte, so the whole response is strictly
-        // increasing and every address is distinct, in range or not.
-        let mut cursor = start_addr.unwrap_or(base);
-        let mut in_range = start_addr.is_some();
+        // The window is strictly POSITIONAL: row `i` is instruction
+        // ordinal `idx + instructionOffset + i`, never shifted — VS
+        // Code's Disassembly view learns a new reference's memory address
+        // from the row at index `-instructionOffset` of the response, so
+        // a window slid to the image start would teach it a wrong address
+        // for every reference within `-instructionOffset` instructions of
+        // the entry (the live symptom: the current-instruction marker
+        // pinned to one late address forever). Ordinals outside the image
+        // pad with `<out of range>` placeholders instead (docs/dap.md
+        // (the Disassembly view)): before ordinal 0 the placeholder
+        // addresses are NEGATIVE (`ord - 1`, so `-1` itself — the one
+        // value clients treat as a skip-me sentinel — never appears),
+        // past the last instruction they continue one byte at a time from
+        // the code end. Addresses are strictly increasing and distinct
+        // across the whole response either way.
         let mut instructions = Vec::new();
-        for _ in 0..instruction_count {
-            if in_range && (cursor as usize) < code.len() {
-                let (line, ilen) = listing_line(&syntax, code, cursor, &resolve);
+        for i in 0..instruction_count {
+            let ord = idx as i64 + instruction_offset + i;
+            if ord < 0 {
                 instructions.push(json!({
-                    "address": format!("0x{cursor:x}"),
-                    "instruction": line,
-                }));
-                cursor += ilen.max(1);
-            } else {
-                in_range = false;
-                instructions.push(json!({
-                    "address": format!("0x{cursor:x}"),
+                    "address": format!("-0x{:x}", 1 - ord),
                     "instruction": "<out of range>",
                     "presentationHint": "invalid",
                 }));
-                cursor = cursor.wrapping_add(1);
+            } else if let Some(&at) = addrs.get(ord as usize) {
+                let (line, _) = listing_line(&syntax, code, at, &resolve);
+                instructions.push(json!({
+                    "address": format!("0x{at:x}"),
+                    "instruction": line,
+                }));
+            } else {
+                let past = ord as u64 - addrs.len() as u64;
+                instructions.push(json!({
+                    "address": format!("0x{:x}", u64::from(len) + past),
+                    "instruction": "<out of range>",
+                    "presentationHint": "invalid",
+                }));
             }
         }
         Ok(json!({"instructions": instructions}))
@@ -1639,6 +1737,32 @@ fn sidecar_map(program: &str) -> Option<MapFile> {
     fs::read_to_string(sidecar)
         .ok()
         .and_then(|text| MapFile::from_json(&text).ok())
+}
+
+/// The DAP `source` object for a resolved provenance path
+/// (docs/dap.md (source provenance)): `name` is the display leaf, `path`
+/// the absolute file the editor opens.
+fn source_json(path: &Path) -> Value {
+    json!({
+        "name": path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string()),
+        "path": path.display().to_string(),
+    })
+}
+
+/// One file's identity for the breakpoint filter: canonicalized when the
+/// file exists — a debug session compares paths from two independent
+/// producers (the editor's request and the sidecar's records), and on a
+/// symlinked tree those legitimately spell one file two ways — with the
+/// purely lexical form as the fallback for a path that cannot be
+/// canonicalized (docs/dap.md (source provenance)).
+fn source_identity(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        mtc_core::source_path::lexical_absolute(&cwd, path)
+    })
 }
 
 #[cfg(test)]

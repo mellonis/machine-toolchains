@@ -1097,12 +1097,11 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
     assert_eq!(frames.len(), 2);
 
     // Frame 0: current position, inside `callee`, at its unmapped entry.
-    // Frame ids are salted by the current stop generation (dap/mod.rs's
-    // module doc, "Generation salt") — decode via `% 4096` to recover the
-    // depth, the only part this fixture cares about.
+    // Frame ids are the bare depth (dap/mod.rs's module doc, "Handle
+    // stability").
     assert_eq!(frames[0]["name"], json!("callee"));
     assert_eq!(frames[0]["line"], json!(0));
-    assert_eq!(frames[0]["id"].as_i64().unwrap() % 4096, 0);
+    assert_eq!(frames[0]["id"], json!(0));
     assert!(
         frames[0]["instructionPointerReference"]
             .as_str()
@@ -1114,21 +1113,21 @@ fn stack_trace_reports_frame_names_and_lines_against_the_known_map() {
     // which the fixture's own layout puts exactly at `halt`'s address.
     assert_eq!(frames[1]["name"], json!("main"));
     assert_eq!(frames[1]["line"], json!(halt_line));
-    assert_eq!(frames[1]["id"].as_i64().unwrap() % 4096, 1);
+    assert_eq!(frames[1]["id"], json!(1));
 }
 
-/// Pins `dap/mod.rs`'s generation salt (module doc, "Generation salt"):
-/// two consecutive stops must issue DIFFERENT `variablesReference`/frame-id
-/// handles even though the underlying scopes/frame are otherwise identical
-/// — this is what busts VS Code's per-reference cache, which otherwise
-/// rendered a prior stop's Variables/Call Stack values after a step
-/// (live-observed in VS Code). Both stops' handles must still decode
-/// (`% 4096`) to the SAME base, and a STALE reference from the first stop
-/// must still resolve live data at the second — a client may briefly still
-/// hold one, and it must never be rejected as merely old.
+/// Pins `dap/mod.rs`'s stable handle scheme (module doc, "Handle
+/// stability"): two consecutive stops issue IDENTICAL
+/// `variablesReference`/frame-id handles — per DAP they are only valid
+/// while paused and a client re-fetches on every stop, so stability is
+/// what lets it correlate its own view state — and a reference held from
+/// the first stop resolves live data at the second (it IS the current
+/// reference). Replaces the retired per-stop generation salt, whose
+/// stale-Variables motivation turned out to be the missing frame
+/// `source` (docs/dap.md (source provenance)).
 #[test]
-fn stop_generation_salts_handles_across_stops_while_stale_references_still_resolve() {
-    let dir = scratch("stop-generation");
+fn handles_are_stable_across_stops_and_prior_stop_references_resolve() {
+    let dir = scratch("stable-handles");
     let program = write_pmx(&dir, "stp", STP_PROGRAM); // ent + stp
 
     let mut adapter = PmDapAdapter::new();
@@ -1139,7 +1138,7 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
     adapter
         .handle("configurationDone", &Value::Null, &mut out)
         .unwrap();
-    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 1
+    assert_eq!(adapter.run_state(), RunState::Stopped); // first stop
 
     let scopes1 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
     let registers1 = scope_ref(&scopes1, "Registers");
@@ -1151,11 +1150,11 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
 
     // Instruction-granularity `stepIn`: retires `ent` only, landing on
     // `stp` (not yet executed) — still genuinely `Stopped`, a second
-    // `Stopped` event, generation 2.
+    // `Stopped` event.
     adapter
         .handle("stepIn", &json!({"granularity": "instruction"}), &mut out)
         .unwrap();
-    assert_eq!(adapter.run_state(), RunState::Stopped); // generation 2
+    assert_eq!(adapter.run_state(), RunState::Stopped); // second stop
 
     let scopes2 = adapter.handle("scopes", &Value::Null, &mut out).unwrap();
     let registers2 = scope_ref(&scopes2, "Registers");
@@ -1165,20 +1164,13 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
         .unwrap();
     let frame2 = trace2["stackFrames"][0]["id"].as_i64().unwrap();
 
-    // Different raw handles across the two stops...
-    assert_ne!(
-        registers1, registers2,
-        "Registers scope ref must change across stops"
-    );
-    assert_ne!(tapes1, tapes2, "Tapes scope ref must change across stops");
-    assert_ne!(frame1, frame2, "frame 0's id must change across stops");
-    // ...decoding to the SAME base every time.
-    assert_eq!(registers1 % 4096, registers2 % 4096);
-    assert_eq!(tapes1 % 4096, tapes2 % 4096);
-    assert_eq!(frame1 % 4096, frame2 % 4096);
+    // Identical handles across the two stops.
+    assert_eq!(registers1, registers2);
+    assert_eq!(tapes1, tapes2);
+    assert_eq!(frame1, frame2);
 
-    // A STALE (generation-1) reference must still resolve live data at
-    // generation 2, not error as stale.
+    // A reference held from the first stop resolves live data at the
+    // second — trivially, being the same handle.
     let stale_tapes = adapter
         .handle(
             "variables",
@@ -1190,7 +1182,7 @@ fn stop_generation_salts_handles_across_stops_while_stale_references_still_resol
         stale_tapes["variables"]
             .as_array()
             .is_some_and(|v| !v.is_empty()),
-        "a stale-generation reference must still resolve, got: {stale_tapes:?}"
+        "a prior-stop reference must still resolve, got: {stale_tapes:?}"
     );
 }
 
@@ -1531,17 +1523,27 @@ fn disassemble_renders_listing_line_text_and_the_top_frames_reference_resolves_w
 
 /// VS Code's real Disassembly-view request shape: a large negative
 /// `instructionOffset` relative to the current frame's `memoryReference`.
-/// Before the clamp fix (`dap/mod.rs`'s `handle_disassemble`) this walked
-/// the linear ordinal index negative and answered `None` for the window
-/// start — an all-`<out of range>` response, the real code included, even
-/// though every requested row easily fits inside the actual image. Reuses
-/// `CALLSTEP_PMC`'s call-site fixture (not a program starting at 0x0)
-/// specifically so the reference row lands PAST index 0 — proving the
-/// window genuinely SHIFTS to the image start, not merely that row 0
-/// happens to coincide with the reference in a trivial one-instruction
-/// program.
+/// Parses a disassemble row address of either sign for the monotonicity
+/// checks below (`"0x1f"` / `"-0x2"`).
+fn parse_row_address(s: &str) -> i128 {
+    match s.strip_prefix("-0x") {
+        Some(hex) => -i128::from_str_radix(hex, 16).unwrap(),
+        None => i128::from_str_radix(s.strip_prefix("0x").unwrap(), 16).unwrap(),
+    }
+}
+
+/// The POSITIONAL window contract (docs/dap.md (the Disassembly view)):
+/// row `i` of the response is instruction ordinal
+/// `idx + instructionOffset + i` — VS Code learns a new reference's
+/// memory address from the row at index `-instructionOffset`, so a
+/// window slid to the image start (the first, wrong fix here) teaches it
+/// one late address for EVERY reference near the entry, and the
+/// Disassembly view's current-instruction marker pins there forever (the
+/// live pow2 symptom). Ordinals before the image pad with negative-
+/// address placeholders (never `-1`, the client's skip-me sentinel);
+/// addresses stay strictly increasing and distinct across the window.
 #[test]
-fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
+fn disassemble_negative_offset_pads_the_head_and_keeps_the_anchor_positional() {
     let dir = scratch("disassemble-neg-offset");
     let program = write_pmc_debug(&dir, "callstep", CALLSTEP_PMC);
     let call_line = line_of(CALLSTEP_PMC, "@callee()");
@@ -1571,8 +1573,8 @@ fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
         .unwrap()
         .to_string();
     // `callee` compiles before `main` in the code image (declaration
-    // order), so the call site is genuinely past the image start — the
-    // precondition this test's whole point rests on.
+    // order), so the call site is genuinely past the image start — a
+    // window that clamps instead of pads would visibly misplace it.
     assert_ne!(
         top_ref, "0x0",
         "fixture must place the call site past the image start"
@@ -1592,31 +1594,53 @@ fn disassemble_with_negative_offset_from_image_start_clamps_to_real_code() {
     let instructions = disassembly["instructions"].as_array().unwrap();
     assert_eq!(instructions.len(), 100);
 
-    // The window shifted to the image start rather than failing outright.
-    assert_eq!(instructions[0]["address"], json!("0x0"));
-    assert_ne!(
-        instructions[0]["instruction"],
-        json!("<out of range>"),
-        "the first row must be real code, not an invalid placeholder, got: {instructions:?}"
+    // THE anchor contract: the reference's own row sits exactly at index
+    // `-instructionOffset`, as real code.
+    assert_eq!(
+        instructions[50]["address"],
+        json!(top_ref),
+        "the anchor row must sit at index -instructionOffset: {instructions:?}"
     );
-    assert!(instructions[0]["presentationHint"].is_null());
+    assert_ne!(instructions[50]["instruction"], json!("<out of range>"));
 
-    // The reference address itself resolves to real code somewhere PAST
-    // row 0, proving the shift rather than a coincidental match.
-    let ref_row = instructions
-        .iter()
-        .position(|entry| entry["address"] == json!(top_ref))
-        .unwrap_or_else(|| {
-            panic!("reference address {top_ref} missing from the window: {instructions:?}")
-        });
+    // Head padding: the fixture has far fewer than 50 instructions before
+    // the call site, so row 0 is an out-of-image placeholder with a
+    // NEGATIVE address; every row before the first real one is invalid,
+    // every row from there to the anchor is real code.
+    assert_eq!(instructions[0]["instruction"], json!("<out of range>"));
     assert!(
-        ref_row > 0,
-        "expected the reference row past index 0 (proving the shift), got index {ref_row}"
+        instructions[0]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with('-'),
+        "head placeholders carry negative addresses: {instructions:?}"
     );
-    assert_ne!(
-        instructions[ref_row]["instruction"],
-        json!("<out of range>")
+    let first_real = instructions
+        .iter()
+        .position(|entry| entry["instruction"] != json!("<out of range>"))
+        .expect("real code appears in the window");
+    assert_eq!(instructions[first_real]["address"], json!("0x0"));
+    assert!(
+        instructions[..first_real]
+            .iter()
+            .all(|e| e["presentationHint"] == json!("invalid")),
+        "everything before the first real row is padding"
     );
+    assert!(
+        instructions[first_real..=50]
+            .iter()
+            .all(|e| e["instruction"] != json!("<out of range>")),
+        "everything from the image start to the anchor is real code"
+    );
+
+    // Addresses are strictly increasing and distinct across the whole
+    // window, and `-1` — the one value clients skip — never appears.
+    let parsed: Vec<i128> = instructions
+        .iter()
+        .map(|e| parse_row_address(e["address"].as_str().unwrap()))
+        .collect();
+    assert!(parsed.windows(2).all(|w| w[0] < w[1]), "{parsed:?}");
+    assert!(!parsed.contains(&-1));
 }
 
 /// Three instructions beyond the implicit `.func` entry: `ent`, `nop`,
@@ -2056,4 +2080,253 @@ fn configuration_done_and_continue_after_done_reject_without_reemitting_terminat
         out.is_empty(),
         "a rejected continue must not push events, got: {out:?}"
     );
+}
+
+// ---- source provenance: frame `source` objects and the per-file
+// breakpoint filter (docs/dap.md (source provenance)) -------------------
+
+/// `write_pmc_debug_multi`'s provenance sibling: writes each source AS A
+/// REAL FILE into `dir` first (a frame's `source` object is attached only
+/// when the resolved file exists), compiles each with debug info, and
+/// links with per-unit `sources` naming those files relative to the
+/// sidecar's directory — exactly the shape `pmt build` emits
+/// (docs/formats.md (map sidecar)). A `None` file skips both the write
+/// and the provenance, standing in for a prebuilt-object input.
+fn write_pmc_debug_with_sources(dir: &Path, name: &str, units: &[(Option<&str>, &str)]) -> PathBuf {
+    let mut objects = Vec::new();
+    let mut sources = Vec::new();
+    for (file, text) in units {
+        if let Some(file) = file {
+            fs::write(dir.join(file), text).unwrap();
+        }
+        objects.push(
+            compile(
+                text,
+                CompileOptions {
+                    debug_info: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .object,
+        );
+        sources.push(file.map(str::to_string));
+    }
+    let linked = link(
+        &objects,
+        &[],
+        LinkOptions {
+            sources,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let path = dir.join(format!("{name}.pmx"));
+    fs::write(&path, linked.executable.to_bytes()).unwrap();
+    let mut map_path = path.clone().into_os_string();
+    map_path.push(".map");
+    fs::write(&map_path, linked.map.to_json()).unwrap();
+    path
+}
+
+/// Steps into the program until frame 0 resolves to `function`, bounded —
+/// a fixture change that makes the function unreachable fails the test
+/// instead of hanging it.
+fn step_into_function(adapter: &mut PmDapAdapter, function: &str) -> Value {
+    for _ in 0..20 {
+        let mut step_out = Vec::new();
+        adapter
+            .handle("stepIn", &Value::Null, &mut step_out)
+            .unwrap();
+        let trace = adapter
+            .handle("stackTrace", &Value::Null, &mut step_out)
+            .unwrap();
+        if trace["stackFrames"][0]["name"] == json!(function) {
+            return trace;
+        }
+    }
+    panic!("never stepped into `{function}`");
+}
+
+#[test]
+fn frames_carry_source_objects_for_provenanced_functions_only() {
+    let dir = scratch("frame-source");
+    let program = write_pmc_debug_with_sources(
+        &dir,
+        "provenance",
+        &[
+            (Some("app.pmc"), RETURN_CALLER_PMC),
+            // No file, no provenance — a prebuilt-object stand-in.
+            (None, RETURN_CALLEE_PMC),
+        ],
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+
+    // At the entry stop, frame 0 is `main` — provenanced, so it carries
+    // the `source` object with the file leaf and the ABSOLUTE resolved
+    // path (the sidecar stores `app.pmc` relative to its own directory).
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["name"], json!("main"));
+    assert_eq!(frame["source"]["name"], json!("app.pmc"));
+    assert_eq!(
+        frame["source"]["path"],
+        json!(dir.join("app.pmc").to_str().unwrap())
+    );
+
+    // Inside `callee` — no provenance, no `source` key at all; the caller
+    // frame behind it keeps its own.
+    let trace = step_into_function(&mut adapter, "callee");
+    let frames = trace["stackFrames"].as_array().unwrap();
+    assert!(
+        frames[0].get("source").is_none(),
+        "an unprovenanced function must not invent a source: {trace}"
+    );
+    assert_eq!(frames[1]["source"]["name"], json!("app.pmc"));
+}
+
+#[test]
+fn a_missing_source_file_omits_the_frame_source_object() {
+    let dir = scratch("frame-source-missing");
+    let program = write_pmc_debug_with_sources(
+        &dir,
+        "moved-tree",
+        &[
+            (Some("app.pmc"), RETURN_CALLER_PMC),
+            (None, RETURN_CALLEE_PMC),
+        ],
+    );
+    // The tree "moves": the source disappears while the map still names it.
+    fs::remove_file(dir.join("app.pmc")).unwrap();
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, true), &mut out)
+        .unwrap();
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    let frame = &trace["stackFrames"][0];
+    assert_eq!(frame["name"], json!("main"));
+    assert!(
+        frame.get("source").is_none(),
+        "a dead path must degrade to a sourceless frame: {trace}"
+    );
+}
+
+#[test]
+fn set_breakpoints_filters_by_the_request_file() {
+    let dir = scratch("bp-file-filter");
+    // Both units carry a line 2 (`halt;` and `right(!);`) — the collision
+    // the per-file filter exists to split.
+    let program = write_pmc_debug_with_sources(
+        &dir,
+        "collide",
+        &[
+            (Some("a.pmc"), RETURN_CALLER_PMC),
+            (Some("b.pmc"), RETURN_CALLEE_PMC),
+        ],
+    );
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+
+    let plant = |adapter: &mut PmDapAdapter, file: &str| -> Value {
+        adapter
+            .handle(
+                "setBreakpoints",
+                &json!({
+                    "source": {"path": dir.join(file).to_str().unwrap()},
+                    "breakpoints": [{"line": 2}],
+                }),
+                &mut Vec::new(),
+            )
+            .unwrap()
+    };
+
+    let in_a = plant(&mut adapter, "a.pmc");
+    let in_b = plant(&mut adapter, "b.pmc");
+    assert_eq!(in_a["breakpoints"][0]["verified"], json!(true));
+    assert_eq!(in_b["breakpoints"][0]["verified"], json!(true));
+    assert_ne!(
+        in_a["breakpoints"][0]["instructionReference"],
+        in_b["breakpoints"][0]["instructionReference"],
+        "the same line number in two files must plant at two addresses"
+    );
+
+    // A file the map never names: unverified, with the foreign-file
+    // message — NOT a silent fall-through to the global table.
+    let foreign = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({
+                "source": {"path": dir.join("elsewhere.pmc").to_str().unwrap()},
+                "breakpoints": [{"line": 2}],
+            }),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_eq!(foreign["breakpoints"][0]["verified"], json!(false));
+    assert!(
+        foreign["breakpoints"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no code in this program comes from this file"),
+        "got: {foreign}"
+    );
+
+    // The planted b.pmc breakpoint is live: the run pauses inside
+    // `callee`, proving the filter picked the right unit's address.
+    adapter
+        .handle("configurationDone", &Value::Null, &mut out)
+        .unwrap();
+    drive_to_pause_or_done(&mut adapter);
+    assert_eq!(adapter.run_state(), RunState::Stopped);
+    let trace = adapter
+        .handle("stackTrace", &Value::Null, &mut out)
+        .unwrap();
+    assert_eq!(trace["stackFrames"][0]["name"], json!("callee"));
+}
+
+#[test]
+fn a_provenance_free_map_keeps_the_global_line_table() {
+    let dir = scratch("bp-global-fallback");
+    let program = write_pmc_debug(&dir, "legacy", CALLSTEP_PMC);
+    let call_line = line_of(CALLSTEP_PMC, "@callee()");
+
+    let mut adapter = PmDapAdapter::new();
+    let mut out = Vec::new();
+    adapter
+        .handle("launch", &launch_args(&program, false), &mut out)
+        .unwrap();
+    // The request names a file, but the map carries no provenance at all —
+    // the pre-provenance global behavior applies, so the line verifies.
+    let response = adapter
+        .handle(
+            "setBreakpoints",
+            &json!({
+                "source": {"path": dir.join("whatever.pmc").to_str().unwrap()},
+                "breakpoints": [{"line": call_line}],
+            }),
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(response["breakpoints"][0]["verified"], json!(true));
 }
