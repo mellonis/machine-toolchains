@@ -468,8 +468,14 @@ fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
     }
 }
 
-/// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`] — `None` for an
-/// empty run (undocumented). `DocRunKind::Comment` items are transparent:
+/// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`]. Used by
+/// [`lower_function`]; also `pub(crate)` for cross-module use by
+/// `crate::syntax::extract`'s own fidelity tests, which lean on the
+/// `DocRunKind::Comment` inertness documented right below to prove two
+/// RAW `Vec<DocRunItem>`s that differ only by a dropped comment still
+/// reduce to the identical [`FnDoc`] (`reparse_doc_items`'s own doc
+/// comment explains why they can differ in the first place). `None` for
+/// an empty run (undocumented). `DocRunKind::Comment` items are transparent:
 /// they contribute nothing and never split a paragraph, matching the
 /// design doc's "comments/blanks don't participate" rule for the run's
 /// own order check. A `?` line's text is the join key; an EMPTY `?` line
@@ -486,7 +492,7 @@ fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
 /// same "an empty line carries no content" rule the `?` side already
 /// applies — so a lone bare `!` can't leave `FnDoc` with a single empty
 /// attention entry and no other content.
-fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
+pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
     if doc_run.is_empty() {
         return None;
     }
@@ -2089,6 +2095,21 @@ pub(crate) fn reparse_item(tokens: &[Token], in_group: bool) -> Item {
 /// isolated slice's own start, not the original file position (nothing
 /// downstream reads `blank_before` off a reduced [`FnDoc`], so this is
 /// cosmetic fidelity, not load-bearing).
+///
+/// **Interleaved comments are dropped, not reproduced.** `tokens` comes
+/// from `crate::syntax::extract::sig_tokens`, which filters comments as
+/// trivia before this ever runs — so a `DOC_RUN` with an interior
+/// `//`/`/* */` comment retokenizes to a strictly SHORTER sequence than
+/// the original CST's `doc_run` (no `DocRunKind::Comment` item ever
+/// appears here). This is behavior-preserving where it matters:
+/// [`reduce_doc_run`] treats every `DocRunKind::Comment` as fully inert
+/// (`DocRunKind::Comment(_) => {}` — no paragraph split, no join, no
+/// attention/`deprecated` effect, regardless of position), so a
+/// comment-dropped run and the original comment-ful run reduce to the
+/// IDENTICAL [`FnDoc`] even though the two raw `Vec<DocRunItem>`s
+/// differ. A caller wanting raw item-for-item parity (spans, `Comment`
+/// entries included) has no such guarantee — only [`reduce_doc_run`]
+/// equality holds.
 #[cfg_attr(
     not(test),
     allow(

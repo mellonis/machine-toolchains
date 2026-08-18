@@ -135,9 +135,9 @@ fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cst::{BodyKind, TopKind};
-    use crate::lexer::{LexMode, lex_with};
-    use crate::parser::{Item, parse_cst, parse_green};
+    use crate::cst::{BodyKind, DocRunKind, TopKind};
+    use crate::lexer::{LexMode, lex, lex_with};
+    use crate::parser::{Item, parse_cst, parse_green, reduce_doc_run};
     use crate::syntax::{FileView, ItemView, StatementView, TopView};
     use mtc_core::syntax::AstNode;
 
@@ -237,22 +237,26 @@ mod tests {
     }
 
     /// Retokenized `DOC_RUN` tokens re-parse to the EXACT C1 doc-run
-    /// items, `blank_before` included. This run is the file's very
-    /// first item, so both sides start `doc_run`'s own `prev_end_line`
-    /// gap-tracking from the same fresh `0` — `reparse_doc_items` always
-    /// starts there (an isolated retokenized slice has no "rest of the
-    /// file" position to inherit), and the ORIGINAL parse's own
-    /// `self.prev_end_line` is still `0` at this point too, since
-    /// nothing precedes the run. Exercises `reparse_doc_items` end to
-    /// end: `sig_tokens` over a `DOC_RUN` node, the `DocLine`/bare-
-    /// `AttentionLine` conversion, AND — the line carrying
-    /// `[deprecated]` — `Parser::parse_attr` actually returning
-    /// `Some(AttrCst)`. A bare `!` line alone would leave `attr: None`
-    /// on every item, which can't discriminate a wrong `sig_tokens`
-    /// `len`: `parse_attr` locates the attribute's `[` column as
-    /// `token.len - 1 - text.chars().count()`, so only the `Some` arm
-    /// actually exercises that arithmetic against the green-tree-derived
-    /// `len`.
+    /// items, `blank_before` included — for THIS comment-free snippet;
+    /// see `reparse_doc_items`'s own doc comment for why a
+    /// comment-interleaved run can't hold to raw item-for-item equality
+    /// (`reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave`
+    /// below covers that case, at the [`crate::parser::reduce_doc_run`]
+    /// level instead). This run is the file's very first item, so both
+    /// sides start `doc_run`'s own `prev_end_line` gap-tracking from the
+    /// same fresh `0` — `reparse_doc_items` always starts there (an
+    /// isolated retokenized slice has no "rest of the file" position to
+    /// inherit), and the ORIGINAL parse's own `self.prev_end_line` is
+    /// still `0` at this point too, since nothing precedes the run.
+    /// Exercises `reparse_doc_items` end to end: `sig_tokens` over a
+    /// `DOC_RUN` node, the `DocLine`/bare-`AttentionLine` conversion,
+    /// AND — the line carrying `[deprecated]` — `Parser::parse_attr`
+    /// actually returning `Some(AttrCst)`. A bare `!` line alone would
+    /// leave `attr: None` on every item, which can't discriminate a
+    /// wrong `sig_tokens` `len`: `parse_attr` locates the attribute's
+    /// `[` column as `token.len - 1 - text.chars().count()`, so only the
+    /// `Some` arm actually exercises that arithmetic against the
+    /// green-tree-derived `len`.
     #[test]
     fn reparsed_doc_items_equal_the_c1_doc_run() {
         let src = "? doc line\n! caution\n! [deprecated] use goToEnd\nmain() { right; }\n";
@@ -276,5 +280,117 @@ mod tests {
             crate::parser::reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index));
 
         assert_eq!(green_doc_run, c1_doc_run);
+    }
+
+    /// A comment interleaved inside a `DOC_RUN` (`(Doc, Comment, Doc)`
+    /// on the C1 side) cannot survive retokenization — `sig_tokens`
+    /// drops it as trivia, so the green side's raw `Vec<DocRunItem>` is
+    /// `(Doc, Doc)`, strictly shorter than C1's. What Task 4/6 actually
+    /// rely on is `reduce_doc_run` equality, not raw item equality —
+    /// this proves that equality holds anyway, because
+    /// `DocRunKind::Comment` is fully inert in `reduce_doc_run`
+    /// regardless of position (see that function's own doc comment):
+    /// dropping the comment can never change the reduced [`FnDoc`].
+    #[test]
+    fn reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave() {
+        let src = "? doc line\n// interleaved comment\n? more doc\nmain() { right; }\n";
+
+        // C1 side: the bound doc run, comment item included, reduced.
+        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+        let TopKind::Function(func) = &cst.items[0].kind else {
+            panic!("expected a top-level function");
+        };
+        assert!(
+            func.doc_run
+                .iter()
+                .any(|i| matches!(i.kind, DocRunKind::Comment(_))),
+            "fixture must actually interleave a comment, or this test proves nothing: {:?}",
+            func.doc_run
+        );
+        let c1_doc = reduce_doc_run(&func.doc_run);
+
+        // Green side: retokenize (the comment is dropped as trivia) and
+        // reduce.
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let index = TextLineIndex::new(src);
+        let file = FileView::cast(root).expect("root is FILE");
+        let TopView::Function(func_view) = file.items().next().expect("one item") else {
+            panic!("expected a function");
+        };
+        let doc_run_view = func_view.doc_run().expect("function carries a doc run");
+        let green_doc_run =
+            crate::parser::reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index));
+        assert_ne!(
+            green_doc_run.len(),
+            func.doc_run.len(),
+            "the comment must actually be dropped, or this test proves nothing"
+        );
+        let green_doc = reduce_doc_run(&green_doc_run);
+
+        assert_eq!(green_doc, c1_doc);
+    }
+
+    /// Drift guard: `token_from_syntax`'s `PmcKind -> TokenKind` mapping
+    /// stays the exact inverse of `sig_kind`'s `TokenKind -> PmcKind`
+    /// mapping (`Parser::bump`'s green-emission counterpart, private to
+    /// `parser.rs`) for all 14 significant kinds. Rather than duplicate
+    /// `sig_kind`'s table by hand (itself a drift risk), this exercises
+    /// every kind at once through a real round trip: retokenizing the
+    /// green tree's FILE root reproduces `lex`'s own real token stream
+    /// exactly, kind for kind, position for position — a snippet
+    /// engineered to contain all 14 kinds at least once (a qualified
+    /// `use` for `ColonColon`, a doc run and an attention run for
+    /// `DocLine`/`AttentionLine`, a bare `!` successor for `Bang`
+    /// distinctly from an attention line's leading `!`, a comma group,
+    /// and an `@`-call for `At`).
+    #[test]
+    fn sig_tokens_over_the_file_root_matches_lex_for_every_significant_kind() {
+        let src = "use std::goToEnd;\n? doc\n! caution\nmain() {\n1: right(!);\ngoto 1;\n2: right, mark;\n@goToEnd();\n}\n";
+
+        let lexed = lex(src).expect("lexes");
+        let seen: std::collections::HashSet<&'static str> = lexed
+            .iter()
+            .map(|t| match &t.kind {
+                TokenKind::Ident(_) => "Ident",
+                TokenKind::Number(..) => "Number",
+                TokenKind::At => "At",
+                TokenKind::Bang => "Bang",
+                TokenKind::Comma => "Comma",
+                TokenKind::Semi => "Semi",
+                TokenKind::Colon => "Colon",
+                TokenKind::ColonColon => "ColonColon",
+                TokenKind::LParen => "LParen",
+                TokenKind::RParen => "RParen",
+                TokenKind::LBrace => "LBrace",
+                TokenKind::RBrace => "RBrace",
+                TokenKind::DocLine(_) => "DocLine",
+                TokenKind::AttentionLine(_) => "AttentionLine",
+                TokenKind::Eof | TokenKind::Comment(_) => "",
+            })
+            .collect();
+        for kind in [
+            "Ident",
+            "Number",
+            "At",
+            "Bang",
+            "Comma",
+            "Semi",
+            "Colon",
+            "ColonColon",
+            "LParen",
+            "RParen",
+            "LBrace",
+            "RBrace",
+            "DocLine",
+            "AttentionLine",
+        ] {
+            assert!(seen.contains(kind), "fixture is missing a {kind} token");
+        }
+
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let index = TextLineIndex::new(src);
+        let retokenized = sig_tokens(&root, &index);
+
+        assert_eq!(retokenized, lexed);
     }
 }
