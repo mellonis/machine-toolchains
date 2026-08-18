@@ -159,12 +159,14 @@ never received.
 
 ### 4.2 Parser
 
-`parse_cst` is reimplemented as the same recursive-descent logic emitting
-green nodes through `TreeBuilder`. Same errors, same spans, same fatal
-model. The parse-time attachment pass for `?`/`!` doc runs stays in the
-parser (a run bound to nothing is still a `DanglingDocRun` *error* at parse
-time); the run itself is just tokens/nodes in the tree, and views expose
-the bound run per declaration.
+`parse_cst`'s recursive descent emits green nodes through `TreeBuilder`
+(woven behind an optional sink during the migration; the C1-CST-building
+half is deleted at cutover, leaving green emission as the parser's only
+construction). Same errors, same spans, same fatal model. The parse-time
+attachment pass for `?`/`!` doc runs stays in the parser (a run bound to
+nothing is still a `DanglingDocRun` *error* at parse time); the run itself
+is just tokens/nodes in the tree, and views expose the bound run per
+declaration.
 
 ### 4.3 Views
 
