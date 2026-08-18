@@ -2057,14 +2057,6 @@ impl Parser<'_> {
 /// former comma-group position. `expect`s on error: extraction only
 /// ever runs on a tree that already parsed once, so a failure here is a
 /// bug in the retokenization, not a malformed program.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_function in the next task of this plan; \
-                   exercised today only by crate::syntax::extract's own tests"
-    )
-)]
 pub(crate) fn reparse_item(tokens: &[Token], in_group: bool) -> Item {
     Parser {
         tokens,
@@ -2110,14 +2102,6 @@ pub(crate) fn reparse_item(tokens: &[Token], in_group: bool) -> Item {
 /// differ. A caller wanting raw item-for-item parity (spans, `Comment`
 /// entries included) has no such guarantee — only [`reduce_doc_run`]
 /// equality holds.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_function in the next task of this plan; \
-                   exercised today only by crate::syntax::extract's own tests"
-    )
-)]
 pub(crate) fn reparse_doc_items(tokens: &[Token]) -> Vec<DocRunItem> {
     let mut p = Parser {
         tokens,

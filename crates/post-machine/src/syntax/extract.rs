@@ -1,25 +1,28 @@
-//! Retokenization: rebuilding a real [`Token`] slice from a green
-//! subtree's own descendant tokens, so extraction can reuse the C1
-//! parser's existing productions (`crate::parser::reparse_item`/
-//! `reparse_doc_items`) instead of re-deriving their grammar decisions
-//! (docs/core.md (syntax tree)).
+//! Extraction: rebuilding the C1 `parser::Function`/`Statement`/`Label`
+//! AST straight from typed views over the green tree, function by
+//! function (docs/core.md (syntax tree)). Two halves:
+//!
+//! - **Retokenization** (`sig_tokens`/`token_from_syntax`): rebuilding a
+//!   real [`Token`] slice from a green subtree's own descendant tokens,
+//!   so extraction can reuse the C1 parser's existing productions
+//!   (`crate::parser::reparse_item`/`reparse_doc_items`) instead of
+//!   re-deriving their grammar decisions.
+//! - **Assembly** ([`extract_function`]): walking the views themselves
+//!   (headers, statements, labels, nesting) and mirroring
+//!   `crate::parser::lower_function`'s own container-building decisions
+//!   exactly — never re-deriving a rule the parser already encodes,
+//!   only naming the shape the green tree already carries.
 
-use mtc_core::syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex};
+use mtc_core::syntax::{AstNode, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex, TextRange};
 
 use super::kinds::PmcKind;
+use super::views::{FunctionView, ItemView, LabelView, StatementView};
 use crate::lexer::{Token, TokenKind, normalize_doc_payload};
+use crate::parser::{Function, Label, Statement, reduce_doc_run, reparse_doc_items, reparse_item};
 
 /// The three trivia kinds `sig_tokens` filters out before mapping —
 /// whitespace and both comment kinds. Every significant token kind, and
 /// every node kind, is `false`.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_function in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn is_trivia(kind: SyntaxKind) -> bool {
     kind == PmcKind::Whitespace.into()
         || kind == PmcKind::LineComment.into()
@@ -31,14 +34,6 @@ fn is_trivia(kind: SyntaxKind) -> bool {
 /// but this reads `char::len_utf8` off the token's actual first
 /// character rather than assuming `1`, so a byte-index slice of a
 /// multi-byte-adjacent string never lands off a char boundary.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_function in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn sigil_len(text: &str) -> usize {
     text.chars()
         .next()
@@ -54,14 +49,6 @@ fn sigil_len(text: &str) -> usize {
 /// because it did); this turns it back into the same token shape the C1
 /// parser's productions accept. Ends with a synthetic `Eof` at `node`'s
 /// own end position, matching every real token stream's own convention.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_function in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn sig_tokens(node: &SyntaxNode, index: &TextLineIndex) -> Vec<Token> {
     let mut tokens: Vec<Token> = node
         .descendant_tokens()
@@ -86,14 +73,6 @@ fn sig_tokens(node: &SyntaxNode, index: &TextLineIndex) -> Vec<Token> {
 /// own [`normalize_doc_payload`] rebuilds the exact normalized payload a
 /// real lexer token would carry), position from `index`, length in
 /// chars (matching every lexer-built [`Token::len`]'s own convention).
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_function in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token {
     let (line, col) = index.line_col(t.text_range().start);
     let text = t.text();
@@ -129,6 +108,218 @@ fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token {
         line,
         col,
         len: text.chars().count() as u32,
+    }
+}
+
+/// True iff `node`'s own direct parent is another FUNCTION node — a
+/// nested definition, per `FunctionView::nested`'s own "direct children
+/// only" contract. A FUNCTION at file or namespace level (the shape
+/// `FileView`/`NamespaceView::items` yield) is never nested.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "wired into extract_program in the next task of this plan; \
+                   exercised today only by this module's own tests"
+    )
+)]
+fn is_nested(node: &SyntaxNode) -> bool {
+    node.parent()
+        .is_some_and(|p| p.kind() == PmcKind::Function.into())
+}
+
+/// True iff `node`'s own direct parent is a NAMESPACE node — i.e. this
+/// (necessarily top-level, per `is_nested`) FUNCTION was parsed with a
+/// non-empty enclosing `ns` path. Namespaces never nest inside a
+/// function, so — unlike a general "any NAMESPACE ancestor" walk — the
+/// direct parent alone settles it: `Parser::top_items`'s own recursion
+/// (parser.rs:1300) only ever calls itself with an EXTENDED (non-empty)
+/// `ns`, so a FUNCTION whose immediate container is a NAMESPACE always
+/// has `ns.is_empty() == false`, regardless of how deeply that
+/// namespace itself is nested.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "wired into extract_program in the next task of this plan; \
+                   exercised today only by this module's own tests"
+    )
+)]
+fn is_namespaced(node: &SyntaxNode) -> bool {
+    node.parent()
+        .is_some_and(|p| p.kind() == PmcKind::Namespace.into())
+}
+
+/// One label `N:` — `crate::parser::Label`'s own doc: span runs from
+/// the number's start to the colon's END, spanning any interior
+/// whitespace.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "wired into extract_program in the next task of this plan; \
+                   exercised today only by this module's own tests"
+    )
+)]
+fn extract_label(view: &LabelView, index: &TextLineIndex) -> Label {
+    let number_tok = view.number_token();
+    let colon_tok = view.colon_token();
+    let written = number_tok.text().to_string();
+    let value = written
+        .parse()
+        .expect("LABEL's NUMBER token text is always digits (docs/pmt/language.md (labels))");
+    Label {
+        value,
+        span: index.span(TextRange::new(
+            number_tok.text_range().start,
+            colon_tok.text_range().end,
+        )),
+        written,
+    }
+}
+
+/// One `;`-terminated statement. `span` is the STATEMENT node's own
+/// extent taken directly from the tree: `Parser::statement`'s green
+/// checkpoint (`cp`, parser.rs:1531) is captured before the label loop
+/// and before the first item — the same point `StatementCst::span`
+/// (cst.rs) starts from (the first label if any, else the first item) —
+/// and the node closes right after the trailing `;` is bumped
+/// (parser.rs:1679, after `self.statement(...)` returns), so the node's
+/// start/end already equal `StatementCst::span`'s "first token through
+/// `;` end" exactly; no separate first/last-token lookup is needed.
+/// `line`, however, is NOT the node's own start line — `Statement::line`
+/// is always the first ITEM's line (`Parser::statement` reads
+/// `self.peek().line` right after the label loop, parser.rs:1715),
+/// which differs from a label's own line whenever the author put the
+/// first command on its own line after the label (`label_break`).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "wired into extract_program in the next task of this plan; \
+                   exercised today only by this module's own tests"
+    )
+)]
+fn extract_statement(view: &StatementView, index: &TextLineIndex) -> Statement {
+    let labels = view.labels().map(|l| extract_label(&l, index)).collect();
+    let item_views: Vec<ItemView> = view.items().collect();
+    // `Parser::statement` parses a statement's first entry with
+    // `item(false)` and every following comma-separated entry with
+    // `item(true)` (parser.rs:1723, 1787) — but `in_group` only ever
+    // changes what `Parser::item` accepts for ONE shape, `goto`
+    // (parser.rs:1881: `in_group` rejects it outright), and `goto` can
+    // never be anything but a multi-item statement's SOLE item — the
+    // comma loop rejects a `,` after any `Goto` unconditionally
+    // (parser.rs:1756-1761, "goto cannot appear in a comma group", no
+    // last-position exception). So on any tree that already parsed once,
+    // a multi-item statement's first entry can never be `goto` either,
+    // and passing `in_group: true` to every entry of such a statement —
+    // first included — reproduces the exact same `Item` the original
+    // per-entry `false`/`true` split produced. Controller-ruled
+    // simplification, verified against `Parser::statement`'s code as
+    // above.
+    let in_group = item_views.len() > 1;
+    let items = item_views
+        .iter()
+        .map(|iv| reparse_item(&sig_tokens(iv.syntax(), index), in_group))
+        .collect();
+    let line = index
+        .line_col(
+            item_views
+                .first()
+                .expect("Parser::statement always parses at least one item")
+                .syntax()
+                .text_range()
+                .start,
+        )
+        .0;
+    Statement {
+        labels,
+        items,
+        line,
+        span: index.span(view.syntax().text_range()),
+    }
+}
+
+/// Rebuild one C1 `parser::Function` from its green-tree view — mirrors
+/// `crate::parser::lower_function` (parser.rs:441) exactly.
+///
+/// `name`/`name_span`/`line`/`col` come from the header's name token
+/// (`FunctionView::header`'s own contextual-keyword decode already
+/// picked it out). `exported`/`volatile` mirror
+/// `Parser::top_items`'s stamping (parser.rs:1377-1381) — the ONLY call
+/// path that ever sets either flag to something other than the
+/// all-`false` defaults `Parser::function` itself initializes a
+/// `FunctionCst` with (parser.rs:1696-1698, `Ok(FunctionCst { ...
+/// has_volatile: false, exported: false, has_export: false, ... })`).
+/// That stamping never runs for a nested definition — `function`'s own
+/// nested-definition branch calls itself directly
+/// (`self.function(None, doc_run)`) and stores the result unstamped —
+/// so `exported`/`volatile` are unconditionally `false` whenever this
+/// FUNCTION's own parent is another FUNCTION, matching
+/// `lower_function`'s own recursive call for nested children
+/// (`lower_function(g, &[])`, parser.rs:453) exactly. For a top-level
+/// FUNCTION (file- or namespace-level parent), `exported` is the
+/// literal `export` keyword OR the un-namespaced top-level `main`
+/// auto-export (`ns.is_empty() && name == "main"`, decided here via
+/// `is_namespaced` rather than a threaded `ns` path — see that
+/// function's own doc); `volatile` is the literal `volatile` keyword
+/// (never auto-applied, unlike `exported` — parser.rs:236-243's own
+/// `FunctionCst::has_volatile` doc).
+///
+/// `nested` hoists nested definitions out of body order (recursing into
+/// this same function, so an arbitrarily deep nesting chain unwinds the
+/// same way `lower_function`'s own recursion does), each carrying an
+/// empty `ns` — both automatic here, since a nested view's own
+/// `is_nested`/`is_namespaced` checks and its statements/nested-of-its-
+/// own are all computed independently by its own `extract_function`
+/// call. `doc` is [`reduce_doc_run`] over the bound `DOC_RUN`'s own
+/// retokenized items (`None` when the function carries no doc run,
+/// matching `reduce_doc_run(&[])`'s own empty-run `None`). `ns` stays
+/// empty (Task 5's recursion stamps the real path on top-level
+/// definitions only, exactly as `lower_items`/`lower_function` do) and
+/// `local` stays `false` (flatten computes it).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "wired into extract_program in the next task of this plan; \
+                   exercised today only by this module's own tests"
+    )
+)]
+fn extract_function(view: &FunctionView, index: &TextLineIndex) -> Function {
+    let header = view.header();
+    let name = header.name.text().to_string();
+    let name_span = index.span(header.name.text_range());
+    let (line, col) = index.line_col(header.name.text_range().start);
+
+    let nested_fn = is_nested(view.syntax());
+    let exported =
+        !nested_fn && (header.has_export || (!is_namespaced(view.syntax()) && name == "main"));
+    let volatile = !nested_fn && header.has_volatile;
+
+    let body = view
+        .statements()
+        .map(|s| extract_statement(&s, index))
+        .collect();
+    let nested = view.nested().map(|n| extract_function(&n, index)).collect();
+    let doc = view.doc_run().and_then(|dr| {
+        let tokens = sig_tokens(dr.syntax(), index);
+        reduce_doc_run(&reparse_doc_items(&tokens))
+    });
+
+    Function {
+        name,
+        line,
+        col,
+        name_span,
+        body,
+        exported,
+        volatile,
+        local: false,
+        nested,
+        ns: Vec::new(),
+        doc,
     }
 }
 
@@ -392,5 +583,33 @@ mod tests {
         let retokenized = sig_tokens(&root, &index);
 
         assert_eq!(retokenized, lexed);
+    }
+
+    /// Green-extracted functions equal lower_cst's — the oracle at
+    /// function granularity, on a snippet with every function feature:
+    /// a bound doc run (a `?` paragraph plus a bare `!` attention line),
+    /// `export` on the un-namespaced top-level `main` (already
+    /// auto-exported, so this also pins that `has_export: true` and the
+    /// auto-export fold-in agree rather than double-applying), a
+    /// labeled statement, and a nested function definition.
+    #[test]
+    fn extracted_function_equals_lowered() {
+        let src = "? doc line\n! caution\nexport main() {\n1: right;\nh() { right; }\n}\n";
+
+        // C1 side: lower the whole CST, straight from parse_cst.
+        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+        let lowered = crate::parser::lower_cst(&cst);
+
+        // Green side: FileView over the root, first (only) top-level item.
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let index = TextLineIndex::new(src);
+        let file = FileView::cast(root).expect("root is FILE");
+        let TopView::Function(f) = file.items().next().expect("one item") else {
+            panic!("expected a function");
+        };
+
+        let extracted = extract_function(&f, &index);
+
+        assert_eq!(extracted, lowered.functions[0]);
     }
 }
