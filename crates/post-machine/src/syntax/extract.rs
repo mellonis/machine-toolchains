@@ -16,9 +16,13 @@
 use mtc_core::syntax::{AstNode, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex, TextRange};
 
 use super::kinds::PmcKind;
-use super::views::{FunctionView, ItemView, LabelView, StatementView};
+use super::views::{
+    FileView, FunctionView, ItemView, LabelView, StatementView, TopView, UsePathView,
+};
 use crate::lexer::{Token, TokenKind, normalize_doc_payload};
-use crate::parser::{Function, Label, Statement, reduce_doc_run, reparse_doc_items, reparse_item};
+use crate::parser::{
+    Function, Import, Label, Program, Statement, reduce_doc_run, reparse_doc_items, reparse_item,
+};
 
 /// The three trivia kinds `sig_tokens` filters out before mapping —
 /// whitespace and both comment kinds. Every significant token kind, and
@@ -115,14 +119,6 @@ fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token {
 /// nested definition, per `FunctionView::nested`'s own "direct children
 /// only" contract. A FUNCTION at file or namespace level (the shape
 /// `FileView`/`NamespaceView::items` yield) is never nested.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_program in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn is_nested(node: &SyntaxNode) -> bool {
     node.parent()
         .is_some_and(|p| p.kind() == PmcKind::Function.into())
@@ -137,14 +133,6 @@ fn is_nested(node: &SyntaxNode) -> bool {
 /// `ns`, so a FUNCTION whose immediate container is a NAMESPACE always
 /// has `ns.is_empty() == false`, regardless of how deeply that
 /// namespace itself is nested.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_program in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn is_namespaced(node: &SyntaxNode) -> bool {
     node.parent()
         .is_some_and(|p| p.kind() == PmcKind::Namespace.into())
@@ -153,14 +141,6 @@ fn is_namespaced(node: &SyntaxNode) -> bool {
 /// One label `N:` — `crate::parser::Label`'s own doc: span runs from
 /// the number's start to the colon's END, spanning any interior
 /// whitespace.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_program in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn extract_label(view: &LabelView, index: &TextLineIndex) -> Label {
     let number_tok = view.number_token();
     let colon_tok = view.colon_token();
@@ -192,14 +172,6 @@ fn extract_label(view: &LabelView, index: &TextLineIndex) -> Label {
 /// `self.peek().line` right after the label loop, parser.rs:1715),
 /// which differs from a label's own line whenever the author put the
 /// first command on its own line after the label (`label_break`).
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_program in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn extract_statement(view: &StatementView, index: &TextLineIndex) -> Statement {
     let labels = view.labels().map(|l| extract_label(&l, index)).collect();
     let item_views: Vec<ItemView> = view.items().collect();
@@ -279,14 +251,6 @@ fn extract_statement(view: &StatementView, index: &TextLineIndex) -> Statement {
 /// empty (Task 5's recursion stamps the real path on top-level
 /// definitions only, exactly as `lower_items`/`lower_function` do) and
 /// `local` stays `false` (flatten computes it).
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "wired into extract_program in the next task of this plan; \
-                   exercised today only by this module's own tests"
-    )
-)]
 fn extract_function(view: &FunctionView, index: &TextLineIndex) -> Function {
     let header = view.header();
     let name = header.name.text().to_string();
@@ -321,6 +285,92 @@ fn extract_function(view: &FunctionView, index: &TextLineIndex) -> Function {
         ns: Vec::new(),
         doc,
     }
+}
+
+/// One `use a::b as c` path — mirrors the parser's own `UsePath`
+/// construction (parser.rs's `use` production): `path` is the segment
+/// texts in order, `alias` the trailing `as`-bound name if any, `line`
+/// the FIRST segment's line, `span` FIRST segment start → LAST segment
+/// end — alias-exclusive, matching [`Import`]'s own doc and
+/// `UsePath`'s C1 span convention. `ns` is the caller's accumulated
+/// namespace path, copied straight through (an import's own path never
+/// contributes to it — only `NAMESPACE` blocks do).
+fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> Import {
+    let segments = view.segments();
+    let first = segments
+        .first()
+        .expect("USE_PATH always carries at least one segment");
+    let last = segments
+        .last()
+        .expect("USE_PATH always carries at least one segment");
+    let path = segments.iter().map(|t| t.text().to_string()).collect();
+    let alias = view.alias_token().map(|t| t.text().to_string());
+    let line = index.line_col(first.text_range().start).0;
+    let span = index.span(TextRange::new(
+        first.text_range().start,
+        last.text_range().end,
+    ));
+    Import {
+        path,
+        alias,
+        line,
+        ns: ns.to_vec(),
+        span,
+    }
+}
+
+/// Walk one level of `FileView`/`NamespaceView::items` — mirrors
+/// `crate::parser::lower_items` (parser.rs:402) exactly: a `USE_DECL`
+/// contributes one [`Import`] per path (ns stamped as-is); a
+/// `NAMESPACE` recurses with its name pushed onto `ns`; a `FUNCTION` is
+/// extracted and stamped with the CURRENT `ns` — top-level only, since a
+/// nested definition never reaches this level (`FunctionView::nested`
+/// hoists it out, and `extract_function`'s own recursion already leaves
+/// a nested `Function`'s `ns` empty). Top-level comments carry no green
+/// node at all (trivia, dropped before `FileView`/`NamespaceView::items`
+/// ever sees them), so — unlike `lower_items`'s explicit
+/// `TopKind::Comment(_) => {}` arm — there is no matching arm to skip
+/// here.
+fn extract_items(
+    items: impl Iterator<Item = TopView>,
+    ns: &[String],
+    index: &TextLineIndex,
+    functions: &mut Vec<Function>,
+    imports: &mut Vec<Import>,
+) {
+    for item in items {
+        match item {
+            TopView::Use(use_decl) => {
+                for path in use_decl.paths() {
+                    imports.push(extract_import(&path, ns, index));
+                }
+            }
+            TopView::Namespace(nsv) => {
+                let mut child = ns.to_vec();
+                child.push(nsv.name());
+                extract_items(nsv.items(), &child, index, functions, imports);
+            }
+            TopView::Function(f) => {
+                let mut function = extract_function(&f, index);
+                function.ns = ns.to_vec();
+                functions.push(function);
+            }
+        }
+    }
+}
+
+/// Rebuild the whole C1 `parser::Program` from the green tree's root —
+/// mirrors `crate::parser::lower_cst` (parser.rs:395): one
+/// [`TextLineIndex`] built once and threaded through the whole walk,
+/// then [`extract_items`] over the file's own top-level items with an
+/// empty starting `ns`.
+pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
+    let index = TextLineIndex::new(source);
+    let file = FileView::cast(root.clone()).expect("root is FILE");
+    let mut functions = Vec::new();
+    let mut imports = Vec::new();
+    extract_items(file.items(), &[], &index, &mut functions, &mut imports);
+    Program { functions, imports }
 }
 
 #[cfg(test)]
@@ -611,5 +661,68 @@ mod tests {
         let extracted = extract_function(&f, &index);
 
         assert_eq!(extracted, lowered.functions[0]);
+    }
+
+    /// Whole-program equality on a namespaced, aliased, nested snippet.
+    #[test]
+    fn extracted_program_equals_lowered() {
+        let src = "use std::goToEnd as ge;\nnamespace n {\nf() { right; }\n}\nmain() { right; }\n";
+        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+        let expected = crate::parser::lower_cst(&cst);
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        assert_eq!(extract_program(&root, src), expected);
+    }
+
+    /// Strengthens `extracted_program_equals_lowered`: the first fixture's
+    /// only `use` lives at file level, so it can't tell an `Import`'s `ns`
+    /// stamp (`lower_items`, parser.rs:417) apart from an accidentally
+    /// dropped one — both read `[]`. This snippet adds a NAMESPACE-scoped
+    /// `use` (pinning `Import.ns == ["n"]` against the file-level one's
+    /// `[]`) and a function-nested-inside-a-namespaced-function (pinning
+    /// the parent's `ns == ["n"]` against the child's `ns == []`,
+    /// `lower_function`'s own `lower_function(g, &[])` for nested
+    /// definitions, parser.rs:453) — the one Task-5-specific interaction
+    /// Task 4's file-level-only nesting test never exercised. Still
+    /// oracle-driven: the whole-program `assert_eq!` against `lower_cst`
+    /// is the actual proof, these are just documentation of which bits it
+    /// pins.
+    #[test]
+    fn extracted_program_pins_namespace_scoped_import_and_nested_function_ns() {
+        let src = "use std::goToEnd as ge;\nnamespace n {\nuse std::goToStart as gs;\nf() {\nright;\ng() { left; }\n}\n}\nmain() { right; }\n";
+        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+        let expected = crate::parser::lower_cst(&cst);
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let extracted = extract_program(&root, src);
+
+        // Fixture sanity — the interactions this test claims to pin
+        // actually appear in the oracle's own output, not just in the
+        // extracted side.
+        assert_eq!(
+            expected
+                .imports
+                .iter()
+                .find(|i| i.binding() == "gs")
+                .expect("namespace-scoped import present")
+                .ns,
+            vec!["n".to_string()]
+        );
+        assert_eq!(
+            expected
+                .imports
+                .iter()
+                .find(|i| i.binding() == "ge")
+                .expect("file-level import present")
+                .ns,
+            Vec::<String>::new()
+        );
+        let f = expected
+            .functions
+            .iter()
+            .find(|f| f.name == "f")
+            .expect("namespaced function present");
+        assert_eq!(f.ns, vec!["n".to_string()]);
+        assert_eq!(f.nested[0].ns, Vec::<String>::new());
+
+        assert_eq!(extracted, expected);
     }
 }

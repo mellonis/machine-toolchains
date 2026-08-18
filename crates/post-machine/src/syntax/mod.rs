@@ -10,6 +10,7 @@ mod layout;
 mod views;
 
 pub use emit::GreenSink;
+pub use extract::extract_program;
 pub use kinds::{PmcKind, kind_name};
 pub use layout::{SigLayout, layout};
 pub use views::{
