@@ -417,15 +417,16 @@ fn corpus() -> Vec<(std::path::PathBuf, String)> {
             }
         }
     }
-    // 10 files at the time of writing: 7 golden programs
+    // 11 files at the time of writing: 7 golden programs
     // (tests/golden/{ex000001,ex000002,sum,sum2,test1,ty,ty2}.pmc), 1
     // lint fixture (tests/lint/unused_labels.pmc), the embedded stdlib
-    // (src/stdlib/std.pmc), and the rich-shape syntax fixture
-    // (tests/syntax/rich.pmc). The floor below is `>= 10` rather than
-    // `== 10` so a future fixture doesn't need this comment touched, only
-    // the count restated if it drifts meaningfully.
+    // (src/stdlib/std.pmc), the rich-shape syntax fixture
+    // (tests/syntax/rich.pmc), and the contextual-keyword syntax fixture
+    // (tests/syntax/contextual.pmc). The floor below is `>= 11` rather
+    // than `== 11` so a future fixture doesn't need this comment touched,
+    // only the count restated if it drifts meaningfully.
     assert!(
-        files.len() >= 10,
+        files.len() >= 11,
         "corpus unexpectedly small: {} files — did the walk break?",
         files.len()
     );
@@ -462,4 +463,64 @@ fn corpus_acceptance_parity() {
         let new_ok = parse_green(&source).is_ok();
         assert_eq!(old_ok, new_ok, "{}: acceptance parity", path.display());
     }
+}
+
+/// Struct-equality oracle between extraction and `lower_cst`, over the
+/// whole corpus — the standing gate the PM consumer migration runs
+/// against. Every real `.pmc` file the crate ships must extract to
+/// EXACTLY the `Program` `lower_cst` builds from the same source,
+/// function by function, import by import, span by span. A parity
+/// failure here is an extraction bug: fix
+/// `crates/post-machine/src/syntax/extract.rs`, never this oracle.
+#[test]
+fn corpus_extraction_parity() {
+    use mtc_post_machine::lexer::{LexMode, lex_with};
+    use mtc_post_machine::parser::parse_cst;
+    use mtc_post_machine::syntax::extract_program;
+    for (path, source) in corpus() {
+        let expected = mtc_post_machine::parser::lower_cst(
+            &parse_cst(&lex_with(&source, LexMode::WithComments).expect("lexes")).expect("parses"),
+        );
+        let root = SyntaxNode::new_root(
+            parse_green(&source).unwrap_or_else(|e| panic!("{}: {e:?}", path.display())),
+        );
+        assert_eq!(
+            extract_program(&root, &source),
+            expected,
+            "{}: extraction parity",
+            path.display()
+        );
+    }
+}
+
+/// Controller addition (Task-4 review follow-up): a nested function
+/// literally named `main` never picks up the un-namespaced top-level
+/// `main` auto-export — `extract.rs`'s `is_nested` check runs BEFORE
+/// the `name == "main"` auto-export test, so `exported` is forced
+/// `false` for any nested function regardless of its name. Same oracle
+/// pattern as `corpus_extraction_parity`, in miniature: one hand-picked
+/// snippet, `extract_program` checked against `lower_cst` directly.
+#[test]
+fn nested_main_stays_unexported() {
+    use mtc_post_machine::lexer::{LexMode, lex_with};
+    use mtc_post_machine::parser::parse_cst;
+    use mtc_post_machine::syntax::extract_program;
+    let src = "outer() {\nmain() { right; }\n}\n";
+
+    let expected = mtc_post_machine::parser::lower_cst(
+        &parse_cst(&lex_with(src, LexMode::WithComments).expect("lexes")).expect("parses"),
+    );
+    let outer = &expected.functions[0];
+    assert_eq!(outer.name, "outer");
+    assert!(!outer.exported, "outer() is not main, never auto-exported");
+    let nested_main = &outer.nested[0];
+    assert_eq!(nested_main.name, "main");
+    assert!(
+        !nested_main.exported,
+        "fixture sanity: a nested `main` must NOT auto-export on the oracle side either, \
+         or this test proves nothing"
+    );
+
+    let root = SyntaxNode::new_root(parse_green(src).unwrap());
+    assert_eq!(extract_program(&root, src), expected);
 }
