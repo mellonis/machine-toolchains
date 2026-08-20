@@ -143,7 +143,6 @@ impl Arch for Pm1 {
 
 #[cfg(test)]
 mod tests {
-    use super::opcodes::*;
     use super::*;
     use mtc_core::vm::{MicroOp, Operand, OperandKind};
 
