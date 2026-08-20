@@ -577,11 +577,19 @@ fn lex_modes_agree_on_errors() {
     }
 }
 
-/// `parse_green_from_tokens` on a pre-lexed stream builds the same tree
-/// `parse_green` builds from the source — the split that lets the
-/// staged pipeline keep its tokens across a parse failure without
-/// lexing twice. Compared by dump, not just by text, so a node-boundary
-/// difference could not hide behind an identical round-trip.
+/// The tokens-taking entry point on a pre-lexed stream produces a tree
+/// that satisfies the lossless law, and the split's significant half is
+/// the `WithoutComments` lex `compiler::analyze` will read its tokens
+/// from — the split that lets the staged pipeline keep its tokens
+/// across a parse failure without lexing twice.
+///
+/// The dump comparison against [`parse_green`] is a delegation pin, NOT
+/// an independent oracle: `parse_green` IS a call to
+/// `parse_green_from_tokens`, so the two sides are one function over
+/// content-identical inputs and agree by construction. It is kept
+/// because it would catch `parse_green` growing logic of its own. The
+/// load-bearing assertions here are the lossless law and the
+/// token-provenance one.
 #[test]
 fn parse_green_from_tokens_matches_parse_green() {
     use mtc_post_machine::lexer::{LexMode, lex_with};
@@ -607,9 +615,12 @@ fn parse_green_from_tokens_matches_parse_green() {
     );
 }
 
-/// A pre-lexed stream that fails to PARSE returns the same error the
-/// source-taking entry does — the staged pipeline reports this one as
-/// its fatal while keeping the tokens it already has.
+/// A pre-lexed stream that fails to PARSE surfaces the error rather
+/// than swallowing it — the staged pipeline reports this one as its
+/// fatal while keeping the tokens it already has. As above, the
+/// equality against [`parse_green`] holds by delegation, not by
+/// independent derivation; what this pins is that the tokens-taking
+/// entry returns `Err` at all on unparseable input.
 #[test]
 fn parse_green_from_tokens_reports_the_same_parse_error() {
     use mtc_post_machine::lexer::{LexMode, lex_with};

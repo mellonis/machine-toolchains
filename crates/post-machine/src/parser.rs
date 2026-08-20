@@ -332,8 +332,12 @@ fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
 /// The significant half of [`split_comments`] — every token that is not
 /// comment trivia. Equal, element for element, to a
 /// `LexMode::WithoutComments` lex of the same source: the lexer's mode
-/// switch decides only whether a `Comment` token is pushed. Pinned by
-/// `tests/syntax_green.rs::corpus_token_provenance_law`, which is what
+/// switch decides only whether a `Comment` token is pushed. That law is
+/// checked corpus-wide by
+/// `tests/syntax_green.rs::corpus_token_provenance_law` — which
+/// re-derives the filter inline rather than calling this function — and
+/// against this function directly by
+/// `parse_green_from_tokens_matches_parse_green`. Together they are what
 /// lets `compiler::analyze` fill `AnalysisOutput.tokens` from the one
 /// `WithComments` lex the green parse already needs.
 pub fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
