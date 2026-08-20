@@ -154,12 +154,15 @@ the token to its canonical decimal form.
 
 Definition names the user owns — functions, namespaces, import
 bindings — should be lowerCamelCase, the project's house style. The
-message carries a mechanically derived rename suggestion; an import
-binding's suggestion is an `as` alias. Report-only: a rename is a
-multi-site edit, and renaming an exported function changes its symbol
-name. The most opinionated rule in the set — `--allow non-camel-case`
-is the escape hatch (note that non-ASCII identifiers, which the
-language permits, do not satisfy the ASCII convention).
+message carries a mechanically derived rename suggestion where one
+exists; an import binding's suggestion is an `as` alias. A name whose
+offending characters lie outside ASCII has no derivable rename — the
+derivation would hand back the same name — so those messages name the
+convention's alphabet instead of suggesting anything. Report-only: a
+rename is a multi-site edit, and renaming an exported function changes
+its symbol name. The most opinionated rule in the set — `--allow
+non-camel-case` is the escape hatch (note that non-ASCII identifiers,
+which the language permits, do not satisfy the ASCII convention).
 
 ### confusable-names
 
