@@ -47,7 +47,7 @@ Regenerate golden files (explicit, `#[ignore]`d — writes into `crates/post-mac
 cargo test -p mtc-post-machine --test golden_programs regen -- --ignored
 ```
 
-CI (`.github/workflows/test.yml`) runs fmt → clippy → the no_std build → `cargo nextest run --workspace` on ubuntu. **Its clippy is newer than local stable** (1.97 vs 1.94 as of 2026-08-20) and has failed pushes that were locally green, so run `cargo +1.97.0 clippy --workspace --all-targets -- -D warnings` against the installed side toolchain before pushing, until local stable catches up.
+CI (`.github/workflows/test.yml`) runs fmt → clippy → the no_std build → `cargo nextest run --workspace` on ubuntu. **The toolchain is pinned in `rust-toolchain.toml`**, so CI and every local checkout compile with the same compiler by construction — plain `cargo clippy` here IS the gate CI runs, with no side-toolchain dance. Bumping the pin is its own deliberate commit: a newer compiler may emit lints the old one never did, and those get fixed in that same change. The file itself carries the why.
 
 `pmt` exit codes from `run`: 0 = program stopped (`stp`), 2 = halted (`hlt`), 3 = trapped. Full flag reference: `docs/pmt/cli.md`; `tmt` shares the exit codes.
 

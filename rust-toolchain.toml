@@ -1,2 +1,18 @@
+# The toolchain is an input like any other, and it is pinned for the same
+# reason Cargo.lock is: a compiler that decides on its own when to change
+# breaks a build nobody touched.
+#
+# This file used to read `channel = "stable"`, which pins nothing. rustup
+# re-resolves `stable` per machine, so a freshly-updated CI runner and a
+# laptop that has not run `rustup update` in months compile the same commit
+# with different compilers — and the file that looks like the safeguard is
+# the mechanism delivering the surprise. That is what happened on
+# 2026-08-20: CI resolved a newer stable and refused two redundant imports
+# that had been green locally for weeks.
+#
+# Bumping the pin is therefore a deliberate commit, and one that may surface
+# lints the previous compiler never emitted. Fix those in the same change,
+# on purpose — not as a side effect of somebody's `rustup update`.
 [toolchain]
-channel = "stable"
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
