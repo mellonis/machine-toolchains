@@ -2285,17 +2285,30 @@ main() { mark; }
     fn analyze_matches_the_c1_front_end() {
         let src = "// lead\nuse std::goToEnd as end;\nnamespace ns { export inner() { right; } }\n? documented\nexport main() {\n    helper() { left; }\n    007: @helper();\n    @ns::inner();\n    @end();\n    goto 007;\n}\n";
 
-        let expected_ast = {
+        let (expected_ast, expected_diagnostics, expected_scopes) = {
             let tokens = crate::lexer::lex(src).expect("lexes");
             let parsed = crate::parser::parse(&tokens).expect("parses");
-            let Flattened { program, .. } = flatten(parsed);
-            program
+            let Flattened {
+                program,
+                scopes,
+                warnings: vis,
+                resolutions: _,
+                docs: _,
+            } = flatten(parsed);
+            let (_ir, diagnostics) = lower_and_merge(&program, vis).expect("lowers");
+            (program, diagnostics, scopes)
         };
         let expected_tokens = crate::lexer::lex(src).expect("lexes");
 
         let a = analyze(src).expect("analyzes");
         assert_eq!(a.ast, expected_ast, "flattened AST parity");
         assert_eq!(a.tokens, expected_tokens, "token provenance");
+        assert_eq!(a.diagnostics, expected_diagnostics, "diagnostics parity");
+        assert_eq!(a.scopes.defs, expected_scopes.defs, "scope defs parity");
+        assert_eq!(
+            a.scopes.bindings, expected_scopes.bindings,
+            "scope bindings parity"
+        );
     }
 
     /// A source that fails to lex still fails at the lex stage, with

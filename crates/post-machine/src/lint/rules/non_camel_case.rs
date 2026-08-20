@@ -5,7 +5,8 @@
 //! Report-only: a rename is a multi-site edit and, for exports, changes
 //! the mangled symbol name (link-time ABI). The message carries a
 //! mechanically derived suggestion where one exists; a name whose
-//! offending characters lie outside ASCII has none, and says so instead.
+//! derivation doesn't land inside the convention's alphabet has none,
+//! and says so instead.
 
 use std::collections::HashSet;
 
@@ -45,21 +46,18 @@ pub(super) fn to_camel(name: &str) -> String {
     out
 }
 
-/// How the messages name this rule's alphabet when they have no
-/// derivable rename to offer.
-const ASCII_CAMEL: &str = "camelCase names are ASCII [a-z][a-zA-Z0-9]*";
+/// The convention's alphabet, named literally in both messages below
+/// wherever no rename is offered.
+const ASCII_ALPHABET: &str = "ASCII [a-z][a-zA-Z0-9]*";
 
-/// The mechanical rename for `name`, or `None` when the derivation
-/// cannot improve on what the author already wrote. [`to_camel`] drops
-/// `_`, capitalizes after each dropped `_`, and lowercases the first
-/// character — none of which changes a name whose offending characters
-/// lie outside ASCII. The language's identifier rule is Unicode-aware
-/// while this rule's convention is ASCII (docs/pmt/lint.md
-/// (non-camel-case)), so that case is reachable, and advising "rename
-/// 'шаг' to 'шаг'" is worse than offering nothing.
+/// The mechanical rename for `name`, or `None` when [`to_camel`]'s
+/// derivation doesn't land inside the convention's alphabet
+/// (docs/pmt/lint.md (non-camel-case)) — offering it anyway would send
+/// the author in a circle: `Шаг` derives `шаг`, which is no more
+/// camelCase than what they wrote.
 fn suggestion(name: &str) -> Option<String> {
     let camel = to_camel(name);
-    (camel != name).then_some(camel)
+    is_lower_camel(&camel).then_some(camel)
 }
 
 pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
@@ -77,7 +75,11 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 Some(camel) => {
                     format!("function '{last}' is not camelCase — rename to '{camel}'")
                 }
-                None => format!("function '{last}' is not camelCase — {ASCII_CAMEL}"),
+                None => {
+                    format!(
+                        "function '{last}' is not camelCase — camelCase names are {ASCII_ALPHABET}"
+                    )
+                }
             };
             out.push(Diagnostic {
                 code: "non-camel-case",
@@ -103,7 +105,9 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                     Some(camel) => {
                         format!("namespace '{segment}' is not camelCase — rename to '{camel}'")
                     }
-                    None => format!("namespace '{segment}' is not camelCase — {ASCII_CAMEL}"),
+                    None => format!(
+                        "namespace '{segment}' is not camelCase — camelCase names are {ASCII_ALPHABET}"
+                    ),
                 };
                 out.push(Diagnostic {
                     code: "non-camel-case",
@@ -125,7 +129,7 @@ pub(crate) fn check(ctx: &LintContext, out: &mut Vec<Diagnostic>) {
                 ),
                 None => format!(
                     "import binding '{binding}' is not camelCase — \
-                     alias it to an ASCII [a-z][a-zA-Z0-9]* name"
+                     alias it to an {ASCII_ALPHABET} name"
                 ),
             };
             out.push(Diagnostic {
@@ -196,10 +200,11 @@ mod tests {
         assert_eq!(to_camel("do_thing_2"), "doThing2");
     }
 
-    /// A non-ASCII name is still reported — the convention is ASCII by
-    /// definition (docs/pmt/lint.md) — but the mechanical derivation
-    /// cannot improve it, so the message must not advise a rename to
-    /// the name the author already wrote.
+    /// The identity case: `шагВперёд` has no `_` and already starts
+    /// lowercase, so [`to_camel`] hands back the same string. The
+    /// message must not advise a rename to the name the author already
+    /// wrote. (The case below covers a derivation that DOES change the
+    /// name and still fails to conform.)
     #[test]
     fn non_ascii_function_fires_without_a_tautological_suggestion() {
         let m = messages("export шагВперёд() { right; }\nmain() { @шагВперёд(); }\n");
@@ -208,6 +213,19 @@ mod tests {
             vec![
                 "function 'шагВперёд' is not camelCase — camelCase names are ASCII [a-z][a-zA-Z0-9]*"
             ]
+        );
+    }
+
+    /// The case the old `camel != name` predicate got wrong: `Шаг`'s
+    /// derivation IS a different string (`шаг`, lowercased) — so the old
+    /// check offered it — but `шаг` is no more camelCase than `Шаг` was,
+    /// so suggesting it would send the author in a circle.
+    #[test]
+    fn non_ascii_function_whose_derivation_changes_but_still_fails_has_no_suggestion() {
+        let m = messages("export Шаг() { right; }\nmain() { @Шаг(); }\n");
+        assert_eq!(
+            m,
+            vec!["function 'Шаг' is not camelCase — camelCase names are ASCII [a-z][a-zA-Z0-9]*"]
         );
     }
 

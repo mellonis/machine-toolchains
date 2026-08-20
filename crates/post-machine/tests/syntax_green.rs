@@ -427,13 +427,18 @@ fn corpus() -> Vec<(std::path::PathBuf, String)> {
             }
         }
     }
-    // 11 files at the time of writing: 7 golden programs
+    // 13 files at the time of writing: 7 golden programs
     // (tests/golden/{ex000001,ex000002,sum,sum2,test1,ty,ty2}.pmc), 1
     // lint fixture (tests/lint/unused_labels.pmc), the embedded stdlib
     // (src/stdlib/std.pmc), the rich-shape syntax fixture
-    // (tests/syntax/rich.pmc), and the contextual-keyword syntax fixture
-    // (tests/syntax/contextual.pmc). The floor below is `>= 11` rather
-    // than `== 11` so a future fixture doesn't need this comment touched,
+    // (tests/syntax/rich.pmc), the contextual-keyword syntax fixture
+    // (tests/syntax/contextual.pmc), the retokenization syntax fixture
+    // (tests/syntax/retok.pmc — non-ASCII identifiers, a multi-byte
+    // block comment sharing a line with code, leading zeros, and
+    // `use as as as`), and the nested-namespace syntax fixture
+    // (tests/syntax/nested_ns.pmc — a two-level namespace plus a
+    // re-opened top-level one). The floor below is `>= 11` rather than
+    // `== 11` so a future fixture doesn't need this comment touched,
     // only the count restated if it drifts meaningfully.
     assert!(
         files.len() >= 11,
@@ -607,8 +612,7 @@ fn parse_green_from_tokens_matches_parse_green() {
     );
 
     // The split's significant half is the `WithoutComments` lex, which
-    // is what Task 4 relies on — asserted here so `significant_tokens`
-    // has a caller from the commit that introduces it.
+    // is what `compiler::analyze` relies on.
     assert_eq!(
         mtc_post_machine::parser::significant_tokens(&tokens),
         mtc_post_machine::lexer::lex(src).expect("lexes")

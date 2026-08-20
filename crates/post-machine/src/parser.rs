@@ -387,7 +387,8 @@ pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
 /// `tokens` MUST be a `LexMode::WithComments` lex of `source`:
 /// `crate::syntax::layout` reconstructs verbatim token text and trivia
 /// from the two together, so a comment-free stream would lose every
-/// comment's own text and break the `text() == source` law.
+/// comment's own text and break the `text() == source` law. An empty
+/// `tokens` slice panics — every real lex result is EOF-terminated.
 ///
 /// Runs the SAME grammar walk as [`parse_cst`] with a green sink
 /// attached: identical acceptance, identical errors — the sink only
