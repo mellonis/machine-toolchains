@@ -294,13 +294,12 @@ fn describe(kind: &TokenKind) -> String {
     }
 }
 
-/// tokens → AST, via the one unified lossless CST. The compiler consumes
-/// the `Program`; fmt
-/// reads the CST directly through [`parse_cst`]. The signature is
-/// unchanged from the pre-C1 parser — verified byte-identical, for the
-/// whole CST migration, against a frozen pre-C1 reference
-/// implementation; that reference parser and its parity harness were
-/// removed once the CST-based parser was confirmed a sound replacement.
+/// tokens → AST, via the one unified lossless CST. No longer the
+/// compiler's path — `compiler::analyze` extracts from the green tree
+/// (docs/core.md (syntax trees)) — this survives as the differential
+/// oracle that extraction is held equal to, and as the parse behind the
+/// optimizer's and IR's own unit tests. The signature is unchanged from
+/// the pre-C1 parser.
 pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
     parse_cst(tokens).map(|cst| lower_cst(&cst))
 }
@@ -344,9 +343,12 @@ pub fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
     split_comments(tokens).0
 }
 
-/// tokens → lossless CST. Accepts either a `WithoutComments` stream (the
-/// compiler's path, no trivia) or a `WithComments` stream (fmt's path,
-/// comments interleaved). Comment tokens are split off up front so the
+/// tokens → lossless CST. Accepts either a `WithoutComments` stream (no
+/// trivia) or a `WithComments` stream (fmt's path and the staged
+/// pipeline's, comments interleaved). Not the compiler's path any more:
+/// `compiler::analyze` extracts from the green tree, and
+/// `compiler::analyze_staged` builds this alongside it only for the
+/// `.pmc` language service. Comment tokens are split off up front so the
 /// grammar walk over the significant tokens is identical to the pre-C1
 /// parser — spans, control flow, and the duplicate-name/-label checks all
 /// carry over verbatim. The dropped-in-lowering trivia (`blank_before`,

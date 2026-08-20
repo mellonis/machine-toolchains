@@ -69,11 +69,23 @@ Dependencies are deliberately minimal: `serde`/`serde_json` only, `proptest` as 
 
 ### Pipeline and key types
 
-`.pmc` → `lexer.rs` (`Vec<Token>`; grammar 0.3 incl. positional `?`/`!` doc-line tokens) → `parser.rs` (recursive descent; `parse` = `lower_cst ∘ parse_cst` over one lossless CST shared with fmt/LSP) → `compiler.rs::compile(source, CompileOptions) -> CompileOutput` which internally runs duplicate-binding checks → flatten (name mangling + visibility; also builds `Analysis.docs`, the qualified doc/deprecation map consumed by the `deprecated-call` lint, hover, and completion tags) → `ir::lower` (`IrProgram`, a versioned per-function CFG) → `optimizer::optimize` (in-place) → `codegen::emit_program` (CFG → `.pma` text only) → core `asm::assemble` (`ObjectFile`). The IR is a **documented, versioned JSON artifact** (`IR_VERSION` in `ir.rs`), not an internal detail.
+`.pmc` → `lexer.rs` (`Vec<Token>`; grammar 0.3 incl. positional `?`/`!` doc-line tokens) → `parser.rs` (recursive descent; `parse` = `lower_cst ∘ parse_cst` over one lossless CST shared with fmt/LSP — fmt's and the LSP's path; the compiler's is `parse_green` + extraction) → `compiler.rs::compile(source, CompileOptions) -> CompileOutput` which internally runs duplicate-binding checks → flatten (name mangling + visibility; also builds `Analysis.docs`, the qualified doc/deprecation map consumed by the `deprecated-call` lint, hover, and completion tags) → `ir::lower` (`IrProgram`, a versioned per-function CFG) → `optimizer::optimize` (in-place) → `codegen::emit_program` (CFG → `.pma` text only) → core `asm::assemble` (`ObjectFile`). The IR is a **documented, versioned JSON artifact** (`IR_VERSION` in `ir.rs`), not an internal detail.
 
 Then: core `linker::link(objects, libraries, LinkOptions) -> LinkOutput { executable, map, report }` → `vm::Machine::from_executable` → `run` / `DebugSession`.
 
-**Two parse paths coexist until the C2 cutover.** `parse` above is the live one and every consumer still goes through it. Alongside it, `parse_green(source)` emits a green tree over core's `syntax/` framework — `syntax/kinds.rs` (`PmcKind`), `layout.rs` (verbatim token text and trivia reconstructed from source; the lexer was deliberately left unchanged), `emit.rs` (a `GreenSink` woven into the existing `Parser`, so error and acceptance parity hold by construction), `views.rs` (typed views, with the contextual-keyword header rule — `export`/`use`/`namespace` are legal function names), and `extract.rs` (`extract_function`/`extract_program`, mirroring `lower_function`/`lower_items`). The two are held equal by differential oracles that run as ordinary tests: `text() == source`, and `extract_program` struct-equal to `lower_cst(parse_cst(...))` across the corpus. **When the cutover lands, the `parse` clause above and this paragraph both change** — consumers move onto extraction and `lower_cst` goes away.
+**Two parse paths coexist until the C2 cutover.** The compiler front end
+is the green one: `analyze`/`analyze_staged` run `lex_with(WithComments)`
+→ `parse_green_from_tokens` → `syntax::extract_program`, and so do the
+embedded stdlib's roster and the build driver's source scan. Lint follows
+for free — `LintContext` carries tokens and the flattened AST, never a
+CST. Still on the C1 path: `fmt` (`parse_cst` directly), the `.pmc`
+language service (`StagedAnalysis.cst`, built alongside the green parse
+until it migrates), and the optimizer/IR/codegen unit tests. `parse` and
+`lower_cst` survive as the differential oracle: `text() == source`, and
+`extract_program` struct-equal to `lower_cst(parse_cst(...))` across the
+corpus. **When the cutover lands, this paragraph and the `parse` clause
+above both change** — `lower_cst`, `parse_cst` and the C1 CST all go away
+together.
 
 ### The `.tmc` front end (`turing-machine/src/`)
 
