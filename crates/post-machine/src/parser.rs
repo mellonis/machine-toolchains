@@ -1810,6 +1810,17 @@ impl Parser<'_> {
         })
     }
 
+    /// One statement item. `in_group` selects the comma-group grammar
+    /// path (docs/pmt/language.md (comma groups)): inside a group,
+    /// `goto` is illegal and a successor may only be the trailing item.
+    ///
+    /// Reached from two places. The statement production passes its own
+    /// group position. [`reparse_item`] — the retokenization reuse shim
+    /// extraction calls — must be told: a green `ITEM` node retokenized
+    /// on its own carries no record of the group it came from, so its
+    /// caller in `crate::syntax::extract` recovers the flag from the
+    /// node's position among its siblings. Any new branch on `in_group`
+    /// here is therefore a change to extraction's contract too.
     fn item(&mut self, in_group: bool) -> Result<Item, CompileError> {
         let tok = self.peek().clone();
         match &tok.kind {

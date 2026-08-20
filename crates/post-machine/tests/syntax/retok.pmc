@@ -1,0 +1,38 @@
+// Retokenization parity fixture (docs/core.md (syntax trees)): the four
+// shapes where extraction's retokenization half could plausibly diverge
+// from the original lex, all in one file the corpus oracles pick up
+// automatically.
+//
+//   - A NON-ASCII identifier. `Token.len` counts CHARACTERS while a
+//     green token's `TextRange` counts BYTES, so a multi-byte name is
+//     the case where `sig_tokens`/`token_from_syntax` would disagree
+//     with the lexer if either mixed the two units up. The `.pmc`
+//     identifier rule is Unicode-aware (`char::is_alphabetic`), so this
+//     is a legal program, not a torture case.
+//   - A multi-byte BLOCK COMMENT sharing a line with code, so trivia
+//     reconstruction has to land a non-ASCII span between two
+//     significant tokens on one line.
+//   - LEADING ZEROS on a label and its `goto`, whose written form is
+//     carried by the token text rather than a parsed value.
+//   - `use as as as;` — the `as`-marker rule read three times over: the
+//     path segment, the marker, and the alias are all the same word.
+//     `as` is an ordinary IDENT in `.pmc`, so this is the sharpest
+//     shape `UsePathView::segments`/`alias_token` can be handed.
+use std::goToEnd as end;
+use as as as;
+
+шагВперёд() {
+    right;
+}
+
+zeros() {
+    007: left; /* ёжик */ right;
+    goto 007;
+}
+
+main() {
+    @шагВперёд();
+    @zeros();
+    @end();
+    @as();
+}

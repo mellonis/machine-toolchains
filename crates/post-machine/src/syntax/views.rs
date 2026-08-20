@@ -41,9 +41,24 @@ fn cast_top(node: SyntaxNode) -> Option<TopView> {
 }
 
 /// Direct top-level-shaped children of `node`, in document order —
-/// shared by `FileView::items` and `NamespaceView::items`.
+/// shared by `FileView::items` and `NamespaceView::items`. A child that
+/// casts to none of the three kinds is a tree the parser cannot
+/// produce: FILE/NAMESPACE children are only USE_DECL / NAMESPACE /
+/// FUNCTION, and a bound DOC_RUN is retro-wrapped into its own FUNCTION
+/// rather than sitting at this level. Asserted rather than silently
+/// filtered, because every consumer of this iterator treats a short
+/// list as "the file had fewer items".
 fn top_items(node: &SyntaxNode) -> impl Iterator<Item = TopView> + '_ {
-    node.children().filter_map(cast_top)
+    node.children().filter_map(|child| {
+        let kind = child.kind();
+        let top = cast_top(child);
+        debug_assert!(
+            top.is_some(),
+            "unexpected node kind at top level: {:?}",
+            kind
+        );
+        top
+    })
 }
 
 impl FileView {
@@ -56,12 +71,22 @@ impl NamespaceView {
     /// The second significant token — the IDENT after the `namespace`
     /// keyword IDENT.
     pub fn name_token(&self) -> SyntaxToken {
-        self.syntax()
+        let idents: Vec<SyntaxToken> = self
+            .syntax()
             .children_with_tokens()
             .filter_map(|e| match e {
                 SyntaxElement::Token(t) if t.kind() == PmcKind::Ident.into() => Some(t),
                 _ => None,
             })
+            .collect();
+        debug_assert_eq!(
+            idents.len(),
+            2,
+            "NAMESPACE header is exactly `namespace <name>`: 2 IDENTs, got {}",
+            idents.len()
+        );
+        idents
+            .into_iter()
             .nth(1)
             .expect("NAMESPACE always carries a name IDENT after the keyword IDENT")
     }
@@ -169,7 +194,11 @@ impl FunctionView {
             match t.text() {
                 "volatile" => has_volatile = true,
                 "export" => has_export = true,
-                _ => {}
+                other => debug_assert!(
+                    false,
+                    "unexpected modifier IDENT {other:?} before the function name — \
+                     the parser accepts only `export` and `volatile`"
+                ),
             }
         }
         FnHeader {
@@ -338,5 +367,72 @@ mod tests {
         let label = stmt.labels().next().expect("one label");
         assert_eq!(label.number_token().text(), "1");
         assert_eq!(label.colon_token().text(), ":");
+    }
+
+    // Gated like the three tests below it: in a release build (where
+    // `debug_assert!` compiles out) this import would otherwise be
+    // reported unused, since nothing outside those `#[cfg(debug_assertions)]`
+    // bodies names `TreeBuilder`.
+    #[cfg(debug_assertions)]
+    use mtc_core::syntax::TreeBuilder;
+
+    /// A FILE whose child node is not one of the three top-level kinds.
+    /// `top_items` filter-maps such a child away; the assertion makes
+    /// the drop loud in debug builds instead of yielding a short list.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "unexpected node kind at top level")]
+    fn top_items_refuses_an_unexpected_child_kind() {
+        let mut b = TreeBuilder::new();
+        b.start_node(PmcKind::File.into());
+        b.start_node(PmcKind::Statement.into());
+        b.token(PmcKind::Ident.into(), "right");
+        b.token(PmcKind::Semi.into(), ";");
+        b.finish_node();
+        b.finish_node();
+        let root = SyntaxNode::new_root(b.finish());
+        let file = FileView::cast(root).expect("root is FILE");
+        let _ = file.items().count();
+    }
+
+    /// A NAMESPACE header is exactly `namespace <name>`: two IDENTs
+    /// before the block. `.nth(1)` would happily take the second of
+    /// three and hand back a wrong name.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "NAMESPACE header is exactly")]
+    fn name_token_refuses_a_three_ident_header() {
+        let mut b = TreeBuilder::new();
+        b.start_node(PmcKind::Namespace.into());
+        b.token(PmcKind::Ident.into(), "namespace");
+        b.token(PmcKind::Ident.into(), "a");
+        b.token(PmcKind::Ident.into(), "b");
+        b.token(PmcKind::LBrace.into(), "{");
+        b.token(PmcKind::RBrace.into(), "}");
+        b.finish_node();
+        let root = SyntaxNode::new_root(b.finish());
+        let ns = NamespaceView::cast(root).expect("root is NAMESPACE");
+        let _ = ns.name();
+    }
+
+    /// The only two modifier IDENTs the parser accepts before a
+    /// function name are `export` and `volatile`. A third would be
+    /// silently ignored by the catch-all arm.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "unexpected modifier IDENT")]
+    fn header_refuses_an_unknown_modifier_ident() {
+        let mut b = TreeBuilder::new();
+        b.start_node(PmcKind::Function.into());
+        b.token(PmcKind::Ident.into(), "inline");
+        b.token(PmcKind::Ident.into(), "f");
+        b.token(PmcKind::LParen.into(), "(");
+        b.token(PmcKind::RParen.into(), ")");
+        b.token(PmcKind::LBrace.into(), "{");
+        b.token(PmcKind::RBrace.into(), "}");
+        b.finish_node();
+        let root = SyntaxNode::new_root(b.finish());
+        let f = FunctionView::cast(root).expect("root is FUNCTION");
+        let _ = f.header();
     }
 }
