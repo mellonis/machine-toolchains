@@ -24,12 +24,11 @@ use std::sync::OnceLock;
 
 use mtc_core::diagnostics::Span;
 use mtc_core::formats::object::ObjectFile;
+use mtc_core::syntax::SyntaxNode;
 
 use crate::compiler::{CompileOptions, VariantColumns, analyze_staged, compile};
-use crate::cst::TopKind;
-use crate::lexer::lex;
 use crate::optimizer::OptLevel;
-use crate::parser::{FnDoc, parse_cst};
+use crate::parser::FnDoc;
 
 pub const SOURCE: &str = include_str!("std.pmc");
 
@@ -72,36 +71,33 @@ pub(crate) struct RosterEntry {
     pub decl_line: u32,
 }
 
-/// Parses `SOURCE` once (lex → `parse_cst`, no hand parsing) into the
-/// roster of exported routines in the `std` namespace block.
+/// Parses `SOURCE` once (lex → green parse → extraction, no hand
+/// parsing) into the roster of exported routines in the `std` namespace
+/// block. Filters the extracted `Program` rather than walking the tree
+/// a second way: extraction is held struct-equal to the C1 lowering by
+/// the corpus oracle, so this cannot drift from what the compiler sees.
+/// `ns == ["std"]` is an exact match, not a prefix — a namespace nested
+/// inside `std` was never part of the roster.
+///
+/// The green tree and every view over it are `Rc`-based and die inside
+/// this initializer; only owned `RosterEntry` fields (String/Span/u32)
+/// reach the `OnceLock`, which requires `Sync`. Do not cache a
+/// `SyntaxNode` or a view here.
 pub(crate) fn roster() -> &'static [RosterEntry] {
     static ROSTER: OnceLock<Vec<RosterEntry>> = OnceLock::new();
     ROSTER.get_or_init(|| {
-        let tokens = lex(SOURCE).expect("the embedded stdlib lexes");
-        let cst = parse_cst(&tokens).expect("the embedded stdlib parses");
-        let mut entries = Vec::new();
-        for top in &cst.items {
-            let TopKind::Namespace(ns) = &top.kind else {
-                continue;
-            };
-            if ns.name != "std" {
-                continue;
-            }
-            for body in &ns.items {
-                let TopKind::Function(f) = &body.kind else {
-                    continue;
-                };
-                if !f.exported {
-                    continue;
-                }
-                entries.push(RosterEntry {
-                    full_path: format!("std::{}", f.name),
-                    name_span: f.name_span,
-                    decl_line: f.line,
-                });
-            }
-        }
-        entries
+        let green = crate::parser::parse_green(SOURCE).expect("the embedded stdlib parses");
+        let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), SOURCE);
+        program
+            .functions
+            .iter()
+            .filter(|f| f.exported && f.ns == ["std"])
+            .map(|f| RosterEntry {
+                full_path: format!("std::{}", f.name),
+                name_span: f.name_span,
+                decl_line: f.line,
+            })
+            .collect()
     })
 }
 
@@ -326,5 +322,44 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), SOURCE.as_bytes());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The roster built from the green tree is the same roster the C1
+    /// CST walk built — same entries, same order, same spans. The C1
+    /// walk is reproduced inline as the oracle rather than recorded as
+    /// a snapshot, so it cannot drift from the real one.
+    #[test]
+    fn roster_matches_the_c1_cst_walk() {
+        use crate::cst::TopKind;
+        use crate::lexer::lex;
+        use crate::parser::parse_cst;
+
+        let cst = parse_cst(&lex(SOURCE).expect("lexes")).expect("parses");
+        let mut expected: Vec<(String, Span, u32)> = Vec::new();
+        for top in &cst.items {
+            let TopKind::Namespace(ns) = &top.kind else {
+                continue;
+            };
+            if ns.name != "std" {
+                continue;
+            }
+            for body in &ns.items {
+                let TopKind::Function(f) = &body.kind else {
+                    continue;
+                };
+                if !f.exported {
+                    continue;
+                }
+                expected.push((format!("std::{}", f.name), f.name_span, f.line));
+            }
+        }
+
+        let actual: Vec<(String, Span, u32)> = roster()
+            .iter()
+            .map(|e| (e.full_path.clone(), e.name_span, e.decl_line))
+            .collect();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), 11, "the embedded stdlib exports 11 routines");
     }
 }

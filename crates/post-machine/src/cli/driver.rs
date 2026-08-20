@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use mtc_core::formats::object::ObjectFile;
 use mtc_core::formats::object::SymbolDef;
 use mtc_core::linker::{DEFAULT_ENTRY, LinkOptions};
+use mtc_core::syntax::SyntaxNode;
 use mtc_core::vm::InfiniteTape;
 
 use crate::compiler::{CompileOptions, CompileReport, VariantColumns, compile as compile_source};
@@ -787,9 +788,9 @@ struct SourceScan {
 }
 
 fn scan_source(text: &str) -> SourceScan {
-    let Some(program) = crate::lexer::lex(text)
+    let Some(program) = crate::parser::parse_green(text)
         .ok()
-        .and_then(|tokens| crate::parser::parse(&tokens).ok())
+        .map(|green| crate::syntax::extract_program(&SyntaxNode::new_root(green), text))
     else {
         return SourceScan::default();
     };
@@ -1238,5 +1239,28 @@ mod tests {
         let err = build_target_for_launch(Some(&dir), "nosuch", true).unwrap_err();
         assert!(err.contains("nosuch"), "{err}");
         assert!(err.contains("app"), "{err}");
+    }
+
+    /// The driver's pre-pass scan agrees with the C1 front end on both
+    /// of the facts it reports, and still degrades to an empty scan on
+    /// a source that does not parse.
+    #[test]
+    fn scan_source_matches_the_c1_front_end() {
+        let src = "use std::goToEnd as end;\nnamespace ns { export inner() { right; } }\nvolatile main() {\n    helper() { left; }\n    @helper();\n}\n";
+        let expected = {
+            let tokens = crate::lexer::lex(src).expect("lexes");
+            crate::parser::parse(&tokens).expect("parses")
+        };
+        let scan = scan_source(src);
+        assert_eq!(scan.volatile, expected.functions.iter().any(|f| f.volatile));
+        assert!(scan.exports.iter().any(|e| e == "main"));
+        assert!(scan.exports.iter().any(|e| e == "ns::inner"));
+    }
+
+    #[test]
+    fn scan_source_degrades_on_a_broken_source() {
+        let scan = scan_source("main() { right");
+        assert!(!scan.volatile);
+        assert!(scan.exports.is_empty());
     }
 }
