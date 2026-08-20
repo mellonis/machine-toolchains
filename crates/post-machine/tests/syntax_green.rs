@@ -386,9 +386,19 @@ FILE@0..36
 fn error_parity_with_parse_cst() {
     use mtc_post_machine::lexer::{LexMode, lex_with};
     use mtc_post_machine::parser::parse_cst;
-    // Unterminated function body; a bare `use` with no path; a missing
-    // `;` after a command; a doc run with nothing bound to it.
-    for src in ["main() {", "use ;", "main() { right }", "? dangling\n"] {
+    // Parse-level: unterminated function body; a bare `use` with no
+    // path; a missing `;` after a command; a doc run with nothing bound
+    // to it. Lex-level: an unterminated block comment, and a stray `/`.
+    // The lex cases matter because `parse_green` lexes internally while
+    // the C1 side lexes first — both must surface the same error.
+    for src in [
+        "main() {",
+        "use ;",
+        "main() { right }",
+        "? dangling\n",
+        "/* never closed\nmain() { right; }\n",
+        "left(!) / right(!);",
+    ] {
         let old = lex_with(src, LexMode::WithComments)
             .and_then(|t| parse_cst(&t).map(|_| ()))
             .expect_err("sample must be invalid .pmc");
@@ -523,4 +533,46 @@ fn nested_main_stays_unexported() {
 
     let root = SyntaxNode::new_root(parse_green(src).unwrap());
     assert_eq!(extract_program(&root, src), expected);
+}
+
+/// The token-provenance law: a `WithComments` stream filtered of its
+/// `Comment` tokens is EXACTLY the `WithoutComments` stream — same
+/// kinds, same line/col, same char lengths, same order. This is what
+/// licenses `compiler::analyze` reading its `tokens` field off the
+/// single `WithComments` lex the green parse needs, instead of lexing
+/// a second time; that field is `LintContext.tokens`, so any drift here
+/// would silently change lint's input. Structurally guaranteed by the
+/// lexer (its two mode branches decide only whether a `Comment` token
+/// is pushed), pinned here because nothing else would catch a
+/// regression until a lint finding moved.
+#[test]
+fn corpus_token_provenance_law() {
+    use mtc_post_machine::lexer::{LexMode, TokenKind, lex, lex_with};
+    for (path, source) in corpus() {
+        let significant: Vec<_> = lex_with(&source, LexMode::WithComments)
+            .expect("lexes")
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+            .collect();
+        let without = lex(&source).expect("lexes");
+        assert_eq!(significant, without, "{}: token provenance", path.display());
+    }
+}
+
+/// The same law's error half: a source that fails to lex fails
+/// IDENTICALLY in both modes. `parse_green` lexes `WithComments`
+/// internally while `compiler::analyze` used to lex `WithoutComments`,
+/// so a mode-dependent lex error would change which diagnostic a
+/// malformed program reports.
+#[test]
+fn lex_modes_agree_on_errors() {
+    use mtc_post_machine::lexer::{LexMode, lex, lex_with};
+    for src in [
+        "/* never closed\nmain() { right; }\n",
+        "left(!) / right(!);",
+    ] {
+        let without = lex(src).expect_err("sample must fail to lex");
+        let with = lex_with(src, LexMode::WithComments).expect_err("sample must fail to lex");
+        assert_eq!(without, with, "lex error parity for {src:?}");
+    }
 }
