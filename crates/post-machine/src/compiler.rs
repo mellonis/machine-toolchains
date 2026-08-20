@@ -11,6 +11,7 @@ use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::{
     BlobDebug, BlobVariant, ObjectFile, Relocation, Symbol, SymbolDef,
 };
+use mtc_core::syntax::SyntaxNode;
 
 use crate::codegen::{CodegenOptions, emit_program};
 use crate::cst::Cst;
@@ -413,11 +414,22 @@ fn lower_and_merge(
     Ok((ir, diagnostics))
 }
 
-/// lex → parse → duplicate-binding check → flatten → lower. Stops before
-/// the optimizer; `compile()` composes this with the back half.
+/// lex → green parse → extract → duplicate-binding check → flatten →
+/// lower. Stops before the optimizer; `compile()` composes this with the
+/// back half.
+///
+/// The parse is the green one (docs/core.md (syntax trees)): one
+/// `WithComments` lex feeds both `parse_green_from_tokens` and — through
+/// `significant_tokens` — the `tokens` field, which stays exactly the
+/// `WithoutComments` stream it has always been (pinned by
+/// `tests/syntax_green.rs::corpus_token_provenance_law`). `extract_program`
+/// rebuilds the same `Program` the C1 path built, held to it by
+/// `tests/syntax_green.rs::corpus_extraction_parity`.
 pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
-    let tokens = crate::lexer::lex(source)?;
-    let parsed = crate::parser::parse(&tokens)?;
+    let lexed = crate::lexer::lex_with(source, LexMode::WithComments)?;
+    let green = crate::parser::parse_green_from_tokens(source, &lexed)?;
+    let parsed = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
+    let tokens = crate::parser::significant_tokens(&lexed);
     check_duplicate_bindings(&parsed)?;
     let Flattened {
         program,
@@ -2217,6 +2229,40 @@ main() { mark; }
         assert!(
             diags.iter().any(|d| d.code == "unused-import"),
             "unrelated diagnostics are untouched"
+        );
+    }
+
+    /// `analyze` runs on the green tree, and the C1 path is the oracle:
+    /// the AST it produces, the diagnostics, the scope summary and the
+    /// token stream must all match what `lex + parse` produced. Written
+    /// against the C1 functions directly rather than a recorded
+    /// snapshot, so the oracle cannot drift.
+    #[test]
+    fn analyze_matches_the_c1_front_end() {
+        let src = "// lead\nuse std::goToEnd as end;\nnamespace ns { export inner() { right; } }\n? documented\nexport main() {\n    helper() { left; }\n    007: @helper();\n    @ns::inner();\n    @end();\n    goto 007;\n}\n";
+
+        let expected_ast = {
+            let tokens = crate::lexer::lex(src).expect("lexes");
+            let parsed = crate::parser::parse(&tokens).expect("parses");
+            let Flattened { program, .. } = flatten(parsed);
+            program
+        };
+        let expected_tokens = crate::lexer::lex(src).expect("lexes");
+
+        let a = analyze(src).expect("analyzes");
+        assert_eq!(a.ast, expected_ast, "flattened AST parity");
+        assert_eq!(a.tokens, expected_tokens, "token provenance");
+    }
+
+    /// A source that fails to lex still fails at the lex stage, with
+    /// the same error — `analyze` now lexes `WithComments`, and the
+    /// mode must not change which diagnostic a malformed program gets.
+    #[test]
+    fn analyze_reports_the_same_lex_error_as_before() {
+        let src = "/* never closed\nmain() { right; }\n";
+        assert_eq!(
+            analyze(src).map(|_| ()).unwrap_err(),
+            crate::lexer::lex(src).map(|_| ()).unwrap_err()
         );
     }
 }
