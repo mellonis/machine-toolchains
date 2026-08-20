@@ -305,17 +305,13 @@ pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
     parse_cst(tokens).map(|cst| lower_cst(&cst))
 }
 
-/// tokens → lossless CST. Accepts either a `WithoutComments` stream (the
-/// compiler's path, no trivia) or a `WithComments` stream (fmt's path,
-/// comments interleaved). Comment tokens are split off up front so the
-/// grammar walk over the significant tokens is identical to the pre-C1
-/// parser — spans, control flow, and the duplicate-name/-label checks all
-/// carry over verbatim. The dropped-in-lowering trivia (`blank_before`,
-/// `label_break`, comment nodes, `trailing`, `CommaItem::leading`) is
-/// attached from the split-off comments by source position;
-/// `CommaItem::newline_before` is attached instead from the significant
-/// tokens' own line numbers (it records a source newline, not a comment).
-pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
+/// Split a token stream into its significant tokens and its comment
+/// trivia — the shape both parse paths hand to `Parser`. `sig_index`
+/// records how many significant tokens precede each comment, which is
+/// the `pos` the significant-token walk sits at while that comment is
+/// pending. A `LexMode::WithoutComments` stream yields an empty
+/// `comments` and clones straight through.
+fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
     let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut comments: Vec<CommentAt> = Vec::new();
     for t in tokens {
@@ -330,6 +326,32 @@ pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
             sig.push(t.clone());
         }
     }
+    (sig, comments)
+}
+
+/// The significant half of [`split_comments`] — every token that is not
+/// comment trivia. Equal, element for element, to a
+/// `LexMode::WithoutComments` lex of the same source: the lexer's mode
+/// switch decides only whether a `Comment` token is pushed. Pinned by
+/// `tests/syntax_green.rs::corpus_token_provenance_law`, which is what
+/// lets `compiler::analyze` fill `AnalysisOutput.tokens` from the one
+/// `WithComments` lex the green parse already needs.
+pub fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
+    split_comments(tokens).0
+}
+
+/// tokens → lossless CST. Accepts either a `WithoutComments` stream (the
+/// compiler's path, no trivia) or a `WithComments` stream (fmt's path,
+/// comments interleaved). Comment tokens are split off up front so the
+/// grammar walk over the significant tokens is identical to the pre-C1
+/// parser — spans, control flow, and the duplicate-name/-label checks all
+/// carry over verbatim. The dropped-in-lowering trivia (`blank_before`,
+/// `label_break`, comment nodes, `trailing`, `CommaItem::leading`) is
+/// attached from the split-off comments by source position;
+/// `CommaItem::newline_before` is attached instead from the significant
+/// tokens' own line numbers (it records a source newline, not a comment).
+pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
+    let (sig, comments) = split_comments(tokens);
     let (items, _sink) = Parser {
         tokens: &sig,
         pos: 0,
@@ -344,29 +366,33 @@ pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
     Ok(Cst { items })
 }
 
-/// source → green syntax tree (docs/core.md (syntax tree)). Runs the
-/// SAME grammar walk as [`parse_cst`] with a green sink attached:
-/// identical acceptance, identical errors — the sink only mirrors
-/// token consumption and node boundaries alongside the unchanged
-/// parser logic. The C1 CST built alongside is discarded; the
-/// compiler's [`parse`] path never sets a sink and is unaffected.
+/// source → green syntax tree (docs/core.md (syntax trees)). Lexes
+/// `WithComments` and hands both halves to
+/// [`parse_green_from_tokens`].
 pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
-    let entries = syntax::layout(source, &tokens);
-    let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
-    let mut comments: Vec<CommentAt> = Vec::new();
-    for t in &tokens {
-        if let TokenKind::Comment(c) = &t.kind {
-            comments.push(CommentAt {
-                comment: c.clone(),
-                line: t.line,
-                col: t.col,
-                sig_index: sig.len(),
-            });
-        } else {
-            sig.push(t.clone());
-        }
-    }
+    parse_green_from_tokens(source, &tokens)
+}
+
+/// Already-lexed tokens → green syntax tree, for callers that need to
+/// keep the token stream even when the parse fails (the staged
+/// pipeline's degradation tiers, docs/lsp.md (staged analysis)).
+///
+/// `tokens` MUST be a `LexMode::WithComments` lex of `source`:
+/// `crate::syntax::layout` reconstructs verbatim token text and trivia
+/// from the two together, so a comment-free stream would lose every
+/// comment's own text and break the `text() == source` law.
+///
+/// Runs the SAME grammar walk as [`parse_cst`] with a green sink
+/// attached: identical acceptance, identical errors — the sink only
+/// mirrors token consumption and node boundaries alongside the
+/// unchanged parser logic.
+pub fn parse_green_from_tokens(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Rc<GreenNode>, CompileError> {
+    let entries = syntax::layout(source, tokens);
+    let (sig, comments) = split_comments(tokens);
     let eof_pos = sig.len() - 1;
     let mut sink = GreenSink::new(entries);
     sink.start(PmcKind::File);
@@ -382,7 +408,7 @@ pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
     }
     .file()?;
     Ok(sink
-        .expect("parse_green always seeds a sink before calling file()")
+        .expect("parse_green_from_tokens always seeds a sink before calling file()")
         .into_tree(eof_pos))
 }
 

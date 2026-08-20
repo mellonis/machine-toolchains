@@ -576,3 +576,50 @@ fn lex_modes_agree_on_errors() {
         assert_eq!(without, with, "lex error parity for {src:?}");
     }
 }
+
+/// `parse_green_from_tokens` on a pre-lexed stream builds the same tree
+/// `parse_green` builds from the source — the split that lets the
+/// staged pipeline keep its tokens across a parse failure without
+/// lexing twice. Compared by dump, not just by text, so a node-boundary
+/// difference could not hide behind an identical round-trip.
+#[test]
+fn parse_green_from_tokens_matches_parse_green() {
+    use mtc_post_machine::lexer::{LexMode, lex_with};
+    use mtc_post_machine::parser::parse_green_from_tokens;
+    let src = "// lead\nuse std::goToEnd as end;\nexport main() {\n    1: right;\n}\n";
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+
+    let a = SyntaxNode::new_root(parse_green(src).expect("parses"));
+    let b = SyntaxNode::new_root(parse_green_from_tokens(src, &tokens).expect("parses"));
+
+    assert_eq!(b.text(), src, "lossless law");
+    assert_eq!(
+        debug_dump(&a, &|k| kind_name(k).to_string()),
+        debug_dump(&b, &|k| kind_name(k).to_string())
+    );
+
+    // The split's significant half is the `WithoutComments` lex, which
+    // is what Task 4 relies on — asserted here so `significant_tokens`
+    // has a caller from the commit that introduces it.
+    assert_eq!(
+        mtc_post_machine::parser::significant_tokens(&tokens),
+        mtc_post_machine::lexer::lex(src).expect("lexes")
+    );
+}
+
+/// A pre-lexed stream that fails to PARSE returns the same error the
+/// source-taking entry does — the staged pipeline reports this one as
+/// its fatal while keeping the tokens it already has.
+#[test]
+fn parse_green_from_tokens_reports_the_same_parse_error() {
+    use mtc_post_machine::lexer::{LexMode, lex_with};
+    use mtc_post_machine::parser::parse_green_from_tokens;
+    let src = "main() { right }";
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+    assert_eq!(
+        parse_green_from_tokens(src, &tokens)
+            .map(|_| ())
+            .unwrap_err(),
+        parse_green(src).map(|_| ()).unwrap_err()
+    );
+}
