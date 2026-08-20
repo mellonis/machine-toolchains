@@ -55,7 +55,7 @@
 //! Container nodes ([`NamespaceCst`], [`FunctionCst`]) deliberately do
 //! NOT carry the AST's lower-copy-computed fields — no `ns` tag, no
 //! separate `nested` list, no `local` flag. Those are computed once, by
-//! a future `lower_cst`, from the CST's block/interleaving structure;
+//! `lower_cst`, from the CST's block/interleaving structure;
 //! duplicating them here would let the two trees disagree.
 //!
 //! # Comment placement (trivia)
@@ -68,9 +68,10 @@
 //! follows ([`UseCst::trailing`], [`StatementCst::trailing`]). There
 //! is no attachment pass — position IS the attachment (the one
 //! exception is [`FunctionCst::doc_run`], a REAL attachment pass over
-//! `?`/`!` lines — see that field's own doc). A future
-//! pretty-printer classifies each comment purely from this structure
-//! (design doc, "Comments = trivia-tokens native in the CST"):
+//! `?`/`!` lines — see that field's own doc). The `.pmc` pretty-printer
+//! classifies each comment purely from this structure — comments are
+//! trivia tokens native to the CST, never re-attached by a later pass
+//! (docs/pmt/fmt.md (comments)):
 //!
 //! - **Leading** — a run of `Comment` items with `blank_before: false`
 //!   immediately before a non-comment item.
@@ -208,7 +209,7 @@ pub struct NamespaceCst {
 
 /// One function definition (top-level or nested) exactly as written —
 /// no `ns` tag, no `nested` list, no `local` flag (module doc's
-/// container-node note; a future `lower_cst` computes all three from
+/// container-node note; `lower_cst` computes all three from
 /// this node's position in the tree).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionCst {

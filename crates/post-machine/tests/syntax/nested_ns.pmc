@@ -4,8 +4,10 @@
 // the definition it encounters; without a nested block, that accumulation
 // never runs more than one level deep in any oracle. This file exercises
 // two levels (`outer::inner`), a definition at each level, and a
-// RE-OPENED top-level namespace — three blocks whose functions must all
-// land in document order with their own distinct `ns` paths.
+// RE-OPENED top-level namespace — whose functions must all land in
+// document order, `deep` stamped `outer::inner` while `shallow` and
+// `second` share the SAME `outer` path, because re-opening a namespace
+// merges into it rather than creating a second one.
 namespace outer {
     namespace inner {
         export deep() { right; }
