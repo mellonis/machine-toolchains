@@ -22,12 +22,16 @@
 //! `None` when `DocState::analysis` is `None` (a post-parse fatal
 //! anywhere in the document), not just the part that failed.
 
+use std::rc::Rc;
+
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::DefTarget;
+use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
 use crate::compiler::{Analysis, Resolution};
-use crate::cst::{BodyKind, FunctionCst, TopItem, TopKind};
+use crate::cst::{TopItem, TopKind};
 use crate::stdlib::{materialized_std_uri, roster};
+use crate::syntax::{FileView, FunctionView, extract_statement};
 
 use super::DocState;
 use super::walk::{enclosing_function_chain, function_labels, label_refs, span_contains};
@@ -71,10 +75,16 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
 
     let cst = state.cst.as_ref()?;
 
-    if let Some(function) = enclosing_function_chain(&cst.items, pos).pop()
-        && let Some((value, origin)) = label_reference_at(function, pos)
+    let green = state.green.as_ref()?;
+    let root = SyntaxNode::new_root(Rc::clone(green));
+    let file = FileView::cast(root).expect("root is FILE");
+    let index = TextLineIndex::new(&state.text);
+    let offset = index.offset(pos);
+
+    if let Some(function) = enclosing_function_chain(&file, offset).pop()
+        && let Some((value, origin)) = label_reference_at(&function, &index, pos)
     {
-        return label_span(function, value).map(|span| DefTarget {
+        return label_span(&function, &index, value).map(|span| DefTarget {
             uri: uri.to_string(),
             span,
             origin: Some(origin),
@@ -275,13 +285,18 @@ fn std_target(full_path: &str, origin: Span) -> Option<DefTarget> {
 /// its nested children are a separate label scope, reached only by
 /// `walk::enclosing_function_chain` descending into them for a `pos`
 /// that lands there.
-fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<(u32, Span)> {
-    for item in &function.body {
-        let BodyKind::Statement(stmt) = &item.kind else {
-            continue;
-        };
-        for comma in &stmt.items {
-            for (value, span) in label_refs(&comma.item).into_iter().flatten() {
+///
+/// The items come from `crate::syntax::extract_statement`, the parser's
+/// own production, so `label_refs` sees exactly the `Item` the compiler
+/// sees.
+fn label_reference_at(
+    function: &FunctionView,
+    index: &TextLineIndex,
+    pos: Pos,
+) -> Option<(u32, Span)> {
+    for stmt in function.statements() {
+        for item in extract_statement(&stmt, index).items {
+            for (value, span) in label_refs(&item).into_iter().flatten() {
                 if span_contains(span, pos) {
                     return Some((value, span));
                 }
@@ -294,8 +309,9 @@ fn label_reference_at(function: &FunctionCst, pos: Pos) -> Option<(u32, Span)> {
 /// `value`'s label declaration span within `function`'s OWN statements
 /// (labels are function-scoped — never searched in nested children or
 /// enclosing scopes), via `walk::function_labels`' shared scan.
-fn label_span(function: &FunctionCst, value: u32) -> Option<Span> {
-    function_labels(function)
+fn label_span(function: &FunctionView, index: &TextLineIndex, value: u32) -> Option<Span> {
+    function_labels(function, index)
+        .into_iter()
         .find(|label| label.value == value)
         .map(|label| label.span)
 }

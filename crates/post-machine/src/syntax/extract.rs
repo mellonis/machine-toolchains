@@ -172,7 +172,14 @@ fn extract_label(view: &LabelView, index: &TextLineIndex) -> Label {
 /// `self.peek().line` right after the label loop, parser.rs:1715),
 /// which differs from a label's own line whenever the author put the
 /// first command on its own line after the label (`label_break`).
-fn extract_statement(view: &StatementView, index: &TextLineIndex) -> Statement {
+///
+/// `pub(crate)` because the `.pmc` language service needs one
+/// statement's item internals — label references, a call's name — and
+/// must get them the same way extraction does, through the parser's own
+/// production (docs/lsp.md (semantic tokens)). Re-deriving that
+/// enumeration over views instead would duplicate grammar the parser
+/// already owns.
+pub(crate) fn extract_statement(view: &StatementView, index: &TextLineIndex) -> Statement {
     let labels = view.labels().map(|l| extract_label(&l, index)).collect();
     let item_views: Vec<ItemView> = view.items().collect();
     // `Parser::statement` parses a statement's first entry with

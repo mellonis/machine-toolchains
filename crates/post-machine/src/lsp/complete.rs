@@ -47,15 +47,18 @@
 //! surface.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use mtc_core::diagnostics::{Pos, Span};
 use mtc_core::lsp::{Candidate, CandidateKind};
+use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
 use crate::compiler::{ScopeSummary, full_name};
-use crate::cst::{BodyKind, TopItem, TopKind};
+use crate::cst::{TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::parser::{FnDoc, RESERVED};
 use crate::stdlib::roster;
+use crate::syntax::FileView;
 
 use super::DocState;
 use super::overlay::OverlaySym;
@@ -602,31 +605,37 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
         .unwrap_or_default();
 
     // (a) nested defs of the enclosing function chain, innermost
-    // outward, hoisted (a function's OWN direct BodyKind::Nested
-    // children, regardless of their position relative to `pos`).
-    // Unavailable without a CST — skipped, not substituted, per spec.
-    // Each chain level's qualified name is rebuilt with flatten's OWN
-    // formula — `compiler::full_name` for the top level, then a `.`
-    // segment per nesting level (`compiler.rs::flatten`'s `emit`) —
-    // never a re-derivation, so a nested candidate's qualified name
-    // matches `Analysis.docs`' key exactly.
-    if let Some(cst) = &state.cst {
-        let chain = enclosing_function_chain(&cst.items, pos);
+    // outward, hoisted (a function's OWN direct nested children, via
+    // `FunctionView::nested`, regardless of their position relative to
+    // `pos`). Unavailable without the green tree — skipped, not
+    // substituted, per spec. Each chain level's qualified name is
+    // rebuilt with flatten's OWN formula — `compiler::full_name` for the
+    // top level, then a `.` segment per nesting level
+    // (`compiler.rs::flatten`'s `emit`) — never a re-derivation, so a
+    // nested candidate's qualified name matches `Analysis.docs`' key
+    // exactly.
+    if let Some(green) = &state.green {
+        let root = SyntaxNode::new_root(Rc::clone(green));
+        let file = FileView::cast(root).expect("root is FILE");
+        let index = TextLineIndex::new(&state.text);
+        let offset = index.offset(pos);
+        let chain = enclosing_function_chain(&file, offset);
         let mut quals: Vec<String> = Vec::with_capacity(chain.len());
         for (i, f) in chain.iter().enumerate() {
+            let header = f.header();
+            let name = header.name.text();
             quals.push(match i {
-                0 => full_name(&ns_path, &f.name),
-                _ => format!("{}.{}", quals[i - 1], f.name),
+                0 => full_name(&ns_path, name),
+                _ => format!("{}.{name}", quals[i - 1]),
             });
         }
         for (f, qual) in chain.iter().zip(&quals).rev() {
-            for item in &f.body {
-                if let BodyKind::Nested(nested) = &item.kind
-                    && seen.insert(nested.name.clone())
-                {
+            for nested in f.nested() {
+                let name = nested.header().name.text().to_string();
+                if seen.insert(name.clone()) {
                     out.push(mk_function_candidate(
-                        &nested.name,
-                        &format!("{qual}.{}", nested.name),
+                        &name,
+                        &format!("{qual}.{name}"),
                         docs,
                         replace_span,
                     ));
@@ -743,19 +752,23 @@ fn command_candidates(final_slot: Option<bool>, replace_span: Span) -> Vec<Candi
 /// Context 4's `after goto` sub-case: the innermost enclosing function's
 /// OWN labels (labels are function-scoped, same as `navigate.rs`'s
 /// `label_span`), via `walk::function_labels`' shared scan, as Value
-/// candidates whose label is the decimal value. No CST → no labels (not
-/// a hardcoded fallback list).
+/// candidates whose label is the decimal value. No green tree → no
+/// labels (not a hardcoded fallback list).
 fn label_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candidate> {
-    let Some(cst) = &state.cst else {
+    let Some(green) = &state.green else {
         return Vec::new();
     };
-    let chain = enclosing_function_chain(&cst.items, pos);
+    let root = SyntaxNode::new_root(Rc::clone(green));
+    let file = FileView::cast(root).expect("root is FILE");
+    let index = TextLineIndex::new(&state.text);
+    let offset = index.offset(pos);
+    let chain = enclosing_function_chain(&file, offset);
     let Some(f) = chain.last() else {
         return Vec::new();
     };
     let mut seen: HashSet<u32> = HashSet::new();
     let mut out = Vec::new();
-    for label in function_labels(f) {
+    for label in function_labels(f, &index) {
         if seen.insert(label.value) {
             out.push(mk_candidate(
                 &label.value.to_string(),

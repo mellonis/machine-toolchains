@@ -6,12 +6,13 @@
 //! (docs/pmt/cli.md).
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::{
     BlobDebug, BlobVariant, ObjectFile, Relocation, Symbol, SymbolDef,
 };
-use mtc_core::syntax::SyntaxNode;
+use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
 use crate::cst::Cst;
@@ -482,6 +483,11 @@ pub(crate) struct StagedAnalysis {
     /// tree yet, so this is still built alongside it. It disappears when
     /// that service migrates.
     pub cst: Option<Cst>,
+    /// Green syntax tree of the current text (docs/core.md (syntax
+    /// trees)); `None` when lexing or parsing failed — the same tier as
+    /// `cst`. The `.pmc` language service's position walks index by byte
+    /// range against this tree.
+    pub green: Option<Rc<GreenNode>>,
     /// `None` if any stage failed (parse, duplicate-binding check, or
     /// lowering).
     pub analysis: Option<Analysis>,
@@ -510,6 +516,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
             return StagedAnalysis {
                 tokens: None,
                 cst: None,
+                green: None,
                 analysis: None,
                 fatal: Some(fatal),
             };
@@ -521,11 +528,13 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
             return StagedAnalysis {
                 tokens: Some(lexed),
                 cst: None,
+                green: None,
                 analysis: None,
                 fatal: Some(fatal),
             };
         }
     };
+    let green_retained = Some(Rc::clone(&green));
     // `.ok()`, not `expect`: acceptance parity makes this `Some`
     // whenever the green parse succeeded, and if that ever broke, an
     // editor should lose one tier of features rather than take the
@@ -541,6 +550,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         return StagedAnalysis {
             tokens: Some(tokens),
             cst,
+            green: green_retained,
             analysis: None,
             fatal: Some(fatal),
         };
@@ -556,6 +566,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         Ok((_ir, warnings)) => StagedAnalysis {
             tokens: Some(tokens),
             cst,
+            green: green_retained,
             analysis: Some(Analysis {
                 ast: program,
                 scopes,
@@ -568,6 +579,7 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         Err(fatal) => StagedAnalysis {
             tokens: Some(tokens),
             cst,
+            green: green_retained,
             analysis: None,
             fatal: Some(fatal),
         },

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Pos, Span};
@@ -14,6 +15,7 @@ use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
+use mtc_core::syntax::GreenNode;
 
 use crate::compiler::{Analysis, CompileError, ScopeSummary, analyze_staged};
 use crate::config;
@@ -157,6 +159,11 @@ struct DocState {
     tokens: Option<Vec<Token>>,
     /// CST of the current text (`None` when lexing or parsing failed).
     cst: Option<Cst>,
+    /// Green syntax tree of the current text (docs/core.md (syntax
+    /// trees)); `None` when lexing or parsing failed — the same tier as
+    /// `cst`. The `.pmc` language service's position walks index by byte
+    /// range against this tree.
+    green: Option<Rc<GreenNode>>,
     /// Post-parse analysis of the current text (`None` when any stage
     /// failed).
     analysis: Option<Analysis>,
@@ -584,6 +591,7 @@ impl LanguageService for PmcLanguageService {
             text: text.to_string(),
             tokens: staged.tokens,
             cst: staged.cst,
+            green: staged.green,
             analysis: staged.analysis,
             lint,
             fatal: staged.fatal,
