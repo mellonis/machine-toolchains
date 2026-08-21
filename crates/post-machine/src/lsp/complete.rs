@@ -1,6 +1,6 @@
 //! Completions (docs/lsp.md (completions)): four contexts detected from
 //! the CURRENT significant token stream (WithComments minus `Comment`)
-//! plus the current CST for positioning, resolved against the *names*
+//! plus the current tree for positioning, resolved against the *names*
 //! roster — `analysis`'s scopes when available, else
 //! `scopes_for_completion` (the sanctioned staleness exception; names
 //! only, positions always come from the current tokens).
@@ -138,7 +138,7 @@ pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
 /// scopes when the current text analyzes cleanly, else the last-good
 /// `scopes_for_completion` — the one sanctioned staleness exception.
 /// Positions are NEVER taken from this source, only names; every caller
-/// pairs it with a `replace_span`/CST computed from the CURRENT tokens.
+/// pairs it with a `replace_span` computed from the CURRENT tokens.
 fn names_roster(state: &DocState) -> Option<&ScopeSummary> {
     state
         .analysis
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn span_contains_excludes_a_position_exactly_at_the_end() {
         // Half-open contract (this module's `span_contains` doc comment
-        // — the CST-extent variant, distinct from `prefix_anchor`'s
+        // — the tree-extent variant, distinct from `prefix_anchor`'s
         // deliberately wider `<=` touches-the-end rule tested below):
         // `end` is one past the last contained position.
         let span = Span::new(1, 1, 1, 5);
@@ -1336,10 +1336,10 @@ export main() {
 
     // `mark(5)` taking a successor mid-group is a parser-level
     // GroupPosition error ("only the last command in a comma group may
-    // take a successor") — the CST fails to build, but lexing doesn't
+    // take a successor") — the tree fails to build, but lexing doesn't
     // care, so `state.tokens` still populates (same staleness tier as
-    // `analyze_staged_parse_failure_keeps_tokens_but_not_cst`). Exists
-    // to exercise `comma_at_depth_zero`'s ACCEPT path through a
+    // `analyze_staged_parse_failure_keeps_tokens_but_not_the_tree`).
+    // Exists to exercise `comma_at_depth_zero`'s ACCEPT path through a
     // genuinely balanced paren pair (`RParen` then `LParen` netting
     // back to zero) — every other comma test here rejects via an
     // unmatched `LParen`, which would also pass a cruder "reject if any

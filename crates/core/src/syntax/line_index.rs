@@ -177,6 +177,11 @@ mod tests {
         assert_eq!(idx.offset(Pos { line: 99, col: 1 }), 6);
         // Line 3 exists (the empty line after the trailing newline).
         assert_eq!(idx.offset(Pos { line: 3, col: 1 }), 6);
+        assert_eq!(
+            idx.offset(Pos { line: 0, col: 1 }),
+            6,
+            "line 0 is below range and snaps like a line past the end"
+        );
     }
 
     #[test]

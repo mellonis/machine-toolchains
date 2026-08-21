@@ -160,6 +160,9 @@ struct DocState {
     /// Green syntax tree of the current text (docs/core.md (syntax
     /// trees)); `None` when lexing or parsing failed. The `.pmc` language
     /// service's position walks index by byte range against this tree.
+    /// `Rc`, not `Arc`: the language server is single-threaded by
+    /// construction, and this field is what pins that — `Rc` is
+    /// `!Send`, so `DocState` cannot cross a thread boundary either.
     green: Option<Rc<GreenNode>>,
     /// Post-parse analysis of the current text (`None` when any stage
     /// failed).
@@ -868,7 +871,7 @@ export main() {
 ";
 
     /// Two `namespace a { … }` blocks (a REOPENED namespace, not merged —
-    /// the CST keeps reopened blocks as separate siblings) plus a
+    /// the tree keeps reopened blocks as separate siblings) plus a
     /// top-level `main` with a nested `helper` and a LABELED statement
     /// (`5: right;`) — proves labels never become symbols, rather than
     /// vacuously passing because none are present.
@@ -1360,7 +1363,7 @@ export main() {
     #[test]
     fn code_actions_empty_when_analysis_failed() {
         // `goto 99` parses fine; it's the undefined-label check well past
-        // the CST stage (`ir::lower`) that fatals — a post-parse fatal,
+        // the parse stage (`ir::lower`) that fatals — a post-parse fatal,
         // so `analysis` (and therefore `lint`) is `None`.
         let mut service = PmcLanguageService::new();
         let uri = "untitled:Untitled-1";
@@ -1797,7 +1800,7 @@ export main() {
 
         let symbols = service
             .document_symbols("untitled:Untitled-1")
-            .expect("CST present on a clean parse");
+            .expect("tree present on a clean parse");
 
         assert_eq!(
             symbols,
@@ -1854,7 +1857,7 @@ export main() {
     fn document_symbols_still_answered_on_a_post_parse_fatal() {
         // `goto 99` parses fine (a well-formed statement); it's the
         // undefined-label check in `ir::lower` that fails, well past the
-        // CST stage — document_symbols is CST-tier and must not care.
+        // parse stage — document_symbols is Parse-tier and must not care.
         let mut service = PmcLanguageService::new();
         let diags = service.did_update("untitled:Untitled-1", "main() {\nright;\ngoto 99;\n}\n");
         assert_eq!(diags.len(), 1, "sanity: the fatal published, {diags:?}");
@@ -1862,7 +1865,7 @@ export main() {
 
         let symbols = service
             .document_symbols("untitled:Untitled-1")
-            .expect("CST-tier symbols survive a post-parse fatal");
+            .expect("Parse-tier symbols survive a post-parse fatal");
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].name, "main");
         assert_eq!(symbols[0].kind, SymbolNodeKind::Function);
@@ -1926,6 +1929,44 @@ export main() {
             symbols[0].span.end,
             Pos { line: 4, col: 2 },
             "one past `}}`"
+        );
+    }
+
+    /// Two more shapes for the same `function_extent` trim, unpinned
+    /// until now: a MODIFIER-PREFIXED header — the doc run retro-wraps
+    /// ahead of `export`/`volatile` too, not just the name — and a
+    /// NESTED doc-commented function, whose range goes through the same
+    /// trim via `function_symbol`'s own recursion. Both spans must start
+    /// at their own header's first token, never at the doc run above it.
+    #[test]
+    fn modifier_prefixed_and_nested_function_symbol_ranges_exclude_their_doc_runs() {
+        // "? doc\n"                  -> line 1, `outer`'s doc run
+        // "export outer() {\n"       -> line 2, `outer`'s header starts
+        //                               at `export`, column 1
+        // "    ? inner doc\n"        -> line 3, `inner`'s doc run
+        // "    inner() { right; }\n" -> line 4, `inner`'s header starts
+        //                               at `inner`, column 5 (past the
+        //                               4-column indent)
+        // "}\n"                      -> line 5, closes `outer`
+        const SRC: &str = "? doc\nexport outer() {\n    ? inner doc\n    inner() { right; }\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        let symbols = service.document_symbols(URI).expect("parses");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "outer");
+        assert_eq!(
+            symbols[0].span.start,
+            Pos { line: 2, col: 1 },
+            "outer's range starts at `export`, not at its doc run"
+        );
+
+        assert_eq!(symbols[0].children.len(), 1);
+        assert_eq!(symbols[0].children[0].name, "inner");
+        assert_eq!(
+            symbols[0].children[0].span.start,
+            Pos { line: 4, col: 5 },
+            "inner's range starts at its own header, not at its doc run"
         );
     }
 

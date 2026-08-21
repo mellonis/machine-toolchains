@@ -1,12 +1,13 @@
-//! Lossless concrete syntax tree (CST) node types for `.pmc` — one unified
-//! lossless CST for the parser, formatter, and LSP.
+//! Lossless concrete syntax tree (CST) node types for `.pmc` — one lossless
+//! CST for the parser and the formatter.
 //!
 //! `parse_cst` produces a [`Cst`] from a `WithComments` token stream,
 //! and [`crate::parser::lower_cst`] copies it into the
 //! [`crate::parser::Program`] shape. That pair is the differential
-//! oracle the green-tree extraction is held equal to, plus fmt's and
-//! the `.pmc` language service's remaining input — the compiler front
-//! end reads the green tree instead (docs/core.md (syntax trees)).
+//! oracle the green-tree extraction is held equal to, plus fmt's
+//! remaining input (via `parse_cst`) — the compiler front end and the
+//! `.pmc` language service both read the green tree instead
+//! (docs/core.md (syntax trees)).
 //!
 //! # The lossless contract
 //!

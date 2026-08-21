@@ -763,7 +763,7 @@ or not.
 |---|---|---|
 | Diagnostics: fatal error | the source lexes | one error at the failing stage, honest and singular |
 | Diagnostics: compile warnings + lint findings | a full successful analysis | omitted — the fatal is the only entry |
-| Completions | tokens for cursor context | candidate *names* may fall back to the last successful analysis, so completion stays useful mid-edit |
+| Completions | tokens/tree for cursor context | candidate *names* may fall back to the last successful analysis, so completion stays useful mid-edit |
 | Hover | a full successful analysis (the resolution table) | `null` |
 | Go-to-definition | a full successful analysis (the resolution table) | `null` |
 | Code actions (quickfixes) | a full successful analysis (lint ran) | empty list |

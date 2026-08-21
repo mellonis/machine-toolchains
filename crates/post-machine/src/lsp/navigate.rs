@@ -387,7 +387,7 @@ fn use_path_at(file: &FileView, index: &TextLineIndex, offset: u32) -> Option<(S
 /// form, or a cross-file overlay symbol's own key — plus the origin span
 /// of the reference under the cursor. Shares every WALK [`definition`]
 /// uses (the resolution table, and [`use_path_at`] above) instead of
-/// re-walking the CST a second time; only the OUTPUT shape differs (a
+/// re-walking the tree a second time; only the OUTPUT shape differs (a
 /// name here, a `DefTarget` location there). Step order:
 ///
 /// 1. a resolution-table entry whose span contains `pos` (a call site)
@@ -858,6 +858,32 @@ mod tests {
             .expect("goToEnd is in the roster");
         assert_eq!(target.span, entry.name_span);
         assert_eq!(target.origin, Some(span_of(NAV_FIXTURE, "std::goToEnd")));
+    }
+
+    #[test]
+    fn pos_inside_a_namespaced_use_path_resolves_to_the_materialized_roster() {
+        // `use_path_at`'s `ns…contains(offset)` guard is a pure
+        // narrowing over the recursion into a namespace's own items, but
+        // nothing had exercised a `use` declaration NESTED inside a
+        // namespace through go-to-definition before this fixture — every
+        // other `use` test here sits at top level.
+        const SRC: &str =
+            "namespace ns {\n    use std::goToEnd;\n    export inner() { @goToEnd(); }\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        let pos = pos_at(SRC, "goToEnd");
+        let target = service
+            .definition(URI, pos)
+            .expect("pos sits inside the namespaced use std::goToEnd's path");
+
+        assert!(target.uri.starts_with("file://"), "uri: {}", target.uri);
+        let entry = roster()
+            .iter()
+            .find(|e| e.full_path == "std::goToEnd")
+            .expect("goToEnd is in the roster");
+        assert_eq!(target.span, entry.name_span);
+        assert_eq!(target.origin, Some(span_of(SRC, "std::goToEnd")));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Shared CST-walk primitives (docs/lsp.md (go-to-definition), docs/lsp.md
+//! Shared tree-walk primitives (docs/lsp.md (go-to-definition), docs/lsp.md
 //! (completions), docs/lsp.md (semantic tokens)): the position-to-
 //! enclosing-function walk, the function-scoped label lookups, and
 //! half-open span containment. `navigate.rs`, `complete.rs`, and
@@ -142,8 +142,11 @@ pub(super) fn label_refs(item: &Item) -> [Option<(u32, Span)>; 2] {
 #[cfg(test)]
 mod tests {
     use mtc_core::diagnostics::Pos;
+    use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
     use super::*;
+    use crate::parser::parse_green;
+    use crate::syntax::FileView;
 
     #[test]
     fn span_contains_excludes_a_position_exactly_at_the_end() {
@@ -165,11 +168,6 @@ mod tests {
             "end is exclusive"
         );
     }
-
-    use crate::parser::parse_green;
-    use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
-
-    use crate::syntax::FileView;
 
     fn file(src: &str) -> (FileView, TextLineIndex) {
         let root = SyntaxNode::new_root(parse_green(src).expect("parses"));

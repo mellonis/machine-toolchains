@@ -51,7 +51,8 @@ pub(super) fn semantic_tokens(state: &DocState) -> Option<Vec<SemToken>> {
     // lookup this table needs without adding a derive to the shared
     // core type. Keyed by the call's own `name_span`: flatten mutates
     // only the AST's `Item::Call::name` string in place, never its
-    // span, so the CST's untouched `name_span` matches exactly.
+    // span, so `extract_statement`'s untouched `name_span` matches
+    // exactly.
     let resolutions: BTreeMap<Span, &Resolution> = analysis
         .resolutions
         .iter()
@@ -239,8 +240,9 @@ fn emit_use_path(
 }
 
 /// A resolved call name's per-segment tokens. Looked up in the
-/// resolution table by the CST's own `name_span` — identical to the
-/// AST's (flatten mutates only the `name` string, never its span).
+/// resolution table by `extract_statement`'s own `name_span` —
+/// identical to the AST's (flatten mutates only the `name` string,
+/// never its span).
 /// `defaultLibrary` applies to the final segment when the resolution is
 /// `ImportBinding`/`QualifiedExternal` with a `std::`-prefixed full path,
 /// the project hasn't opted out of the stdlib ([`std_enabled`]), AND the
@@ -368,7 +370,7 @@ mod tests {
     const RICH_FIXTURE: &str = "namespace ns {\n    export inner() {\n        right;\n    }\n}\nuse std::goToEnd as ge;\nlocal() {\n    right;\n}\nmain() {\n    helper() {\n        1: right;\n        goto 1;\n    }\n    2: left;\n    check(2, !);\n    right(2);\n    @ge();\n    @std::goToEnd();\n    @local();\n    @mystery();\n}\n";
 
     /// `goto 99` — a well-formed statement that references a label the
-    /// function never declares; `ir::lower` fatals well past the CST
+    /// function never declares; `ir::lower` fatals well past the parse
     /// stage, so `analysis` (and therefore `semantic_tokens`) is `None`.
     const UNDEFINED_LABEL_FIXTURE: &str = "main() {\nright;\ngoto 99;\n}\n";
 
