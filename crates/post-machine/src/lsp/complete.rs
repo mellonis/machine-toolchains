@@ -1457,7 +1457,7 @@ export main() {
 
         let state = service.docs.get(URI).unwrap();
         assert!(state.tokens.is_some(), "lexing still succeeds");
-        assert!(state.cst.is_none(), "parsing failed on the broken edit");
+        assert!(state.green.is_none(), "parsing failed on the broken edit");
         assert!(state.analysis.is_none());
         assert!(
             state.scopes_for_completion.is_some(),

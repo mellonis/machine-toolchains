@@ -15,7 +15,6 @@ use mtc_core::formats::object::{
 use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
-use crate::cst::Cst;
 use crate::ir::IrProgram;
 use crate::lexer::{LexMode, Token};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, gated_pass_names, optimize};
@@ -478,15 +477,9 @@ pub(crate) struct Analysis {
 pub(crate) struct StagedAnalysis {
     /// WithComments — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
-    /// CST of the current text (`None` when lexing or parsing failed).
-    /// Interim: the `.pmc` language service has not moved onto the green
-    /// tree yet, so this is still built alongside it. It disappears when
-    /// that service migrates.
-    pub cst: Option<Cst>,
     /// Green syntax tree of the current text (docs/core.md (syntax
-    /// trees)); `None` when lexing or parsing failed — the same tier as
-    /// `cst`. The `.pmc` language service's position walks index by byte
-    /// range against this tree.
+    /// trees)); `None` when lexing or parsing failed. The `.pmc` language
+    /// service's position walks index by byte range against this tree.
     pub green: Option<Rc<GreenNode>>,
     /// `None` if any stage failed (parse, duplicate-binding check, or
     /// lowering).
@@ -503,19 +496,12 @@ pub(crate) struct StagedAnalysis {
 /// always runs through `ir::lower`, never stopping at `flatten`. The
 /// `IrProgram` itself is discarded once `ir::lower` has had its say: the
 /// LSP's tiers only need the flattened `Analysis`, not the CFG.
-///
-/// Interim double parse: the `.pmc` language service still reads the C1
-/// CST, so `parse_cst` runs alongside the green parse until that service
-/// moves onto views. The green parse is the authority — it produces the
-/// `Program` and any parse fatal; `cst` is a side artifact built only
-/// after it succeeded.
 pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
     let lexed = match crate::lexer::lex_with(source, LexMode::WithComments) {
         Ok(tokens) => tokens,
         Err(fatal) => {
             return StagedAnalysis {
                 tokens: None,
-                cst: None,
                 green: None,
                 analysis: None,
                 fatal: Some(fatal),
@@ -527,7 +513,6 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         Err(fatal) => {
             return StagedAnalysis {
                 tokens: Some(lexed),
-                cst: None,
                 green: None,
                 analysis: None,
                 fatal: Some(fatal),
@@ -535,21 +520,11 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         }
     };
     let green_retained = Some(Rc::clone(&green));
-    // `.ok()`, not `expect`: acceptance parity makes this `Some`
-    // whenever the green parse succeeded, and if that ever broke, an
-    // editor should lose one tier of features rather than take the
-    // language server down.
-    let cst = crate::parser::parse_cst(&lexed).ok();
-    debug_assert!(
-        cst.is_some(),
-        "acceptance parity: parse_cst must succeed wherever parse_green did"
-    );
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
     let tokens = lexed;
     if let Err(fatal) = check_duplicate_bindings(&program) {
         return StagedAnalysis {
             tokens: Some(tokens),
-            cst,
             green: green_retained,
             analysis: None,
             fatal: Some(fatal),
@@ -565,7 +540,6 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
     match lower_and_merge(&program, vis) {
         Ok((_ir, warnings)) => StagedAnalysis {
             tokens: Some(tokens),
-            cst,
             green: green_retained,
             analysis: Some(Analysis {
                 ast: program,
@@ -578,7 +552,6 @@ pub(crate) fn analyze_staged(source: &str) -> StagedAnalysis {
         },
         Err(fatal) => StagedAnalysis {
             tokens: Some(tokens),
-            cst,
             green: green_retained,
             analysis: None,
             fatal: Some(fatal),
@@ -2124,7 +2097,7 @@ main() { mark; }
         let staged = analyze_staged(src);
         assert!(staged.fatal.is_none());
         let tokens = staged.tokens.as_ref().expect("lexing succeeded");
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         let analysis = staged.analysis.as_ref().expect("the pipeline succeeded");
 
         let a = analyze(src).unwrap();
@@ -2157,35 +2130,35 @@ main() { mark; }
 
     #[test]
     fn analyze_staged_lex_failure_degrades_everything_to_none() {
-        // Tier 2: lexing itself fails — no tokens, no cst, no analysis.
+        // Tier 2: lexing itself fails — no tokens, no tree, no analysis.
         let staged = analyze_staged("/* never closed");
         assert!(staged.tokens.is_none());
-        assert!(staged.cst.is_none());
+        assert!(staged.green.is_none());
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "lex-error");
     }
 
     #[test]
-    fn analyze_staged_parse_failure_keeps_tokens_but_not_cst() {
+    fn analyze_staged_parse_failure_keeps_tokens_but_not_the_tree() {
         // Tier 3: lexing succeeds, parsing does not (a bare identifier
         // statement that is not a builtin — CompileErrorKind::UnknownCommand).
         let staged = analyze_staged("f() { gibberish; }");
         assert!(staged.tokens.is_some(), "lexing still succeeded");
-        assert!(staged.cst.is_none());
+        assert!(staged.green.is_none());
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "unknown-command");
     }
 
     #[test]
-    fn analyze_staged_duplicate_binding_keeps_cst_but_not_analysis() {
-        // Tier 4: parsing succeeds (the CST is a faithful reprint of two
-        // legal `use` lines), the post-parse duplicate-binding check
-        // fails before flatten/ir::lower ever run.
+    fn analyze_staged_duplicate_binding_keeps_the_tree_but_not_analysis() {
+        // Tier 4: parsing succeeds (the green tree is a faithful reprint
+        // of two legal `use` lines), the post-parse duplicate-binding
+        // check fails before flatten/ir::lower ever run.
         let staged = analyze_staged("use goToEnd; use std::goToEnd; main() { @goToEnd(); }");
         assert!(staged.tokens.is_some());
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "duplicate-binding");
@@ -2199,35 +2172,10 @@ main() { mark; }
         // does not stop at flatten.
         let staged = analyze_staged("main() { goto 99; }");
         assert!(staged.tokens.is_some());
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         assert!(staged.analysis.is_none());
         let fatal = staged.fatal.expect("a fatal is recorded");
         assert_eq!(fatal.kind.code(), "undefined-label");
-    }
-
-    /// The interim double-parse invariant: wherever the green parse
-    /// succeeds, `parse_cst` succeeds too, so the not-yet-migrated
-    /// `.pmc` LSP still gets its C1 CST. Acceptance parity makes this
-    /// true by construction (both walks are the same `Parser`); pinned
-    /// here because `analyze_staged` degrades rather than panics if it
-    /// ever stops being true, which would otherwise be silent.
-    #[test]
-    fn staged_cst_is_present_whenever_the_green_parse_succeeded() {
-        for src in [
-            "main() { right; }\n",
-            "// only a comment\n",
-            "",
-            "use std::goToEnd as end;\nmain() { @end(); }\n",
-            "? doc\nexport main() {\n    1: left;\n}\n",
-        ] {
-            let staged = analyze_staged(src);
-            if staged.fatal.is_none() {
-                assert!(
-                    staged.cst.is_some(),
-                    "green parse succeeded but cst is None for {src:?}"
-                );
-            }
-        }
     }
 
     /// Pins the extraction against this module's REAL warning format — if

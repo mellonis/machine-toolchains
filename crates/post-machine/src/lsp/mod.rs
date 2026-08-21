@@ -19,7 +19,6 @@ use mtc_core::syntax::{AstNode, GreenNode, SyntaxNode, TextLineIndex, TextRange}
 
 use crate::compiler::{Analysis, CompileError, ScopeSummary, analyze_staged};
 use crate::config;
-use crate::cst::Cst;
 use crate::lexer::{Token, TokenKind};
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 use crate::parser::FnDoc;
@@ -158,16 +157,9 @@ struct DocState {
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
     tokens: Option<Vec<Token>>,
-    /// CST of the current text (`None` when lexing or parsing failed).
-    /// Its last production reader moved onto the green tree; only a
-    /// `#[cfg(test)]` assertion still reads it, pending its removal
-    /// alongside the field itself.
-    #[cfg_attr(not(test), allow(dead_code))]
-    cst: Option<Cst>,
     /// Green syntax tree of the current text (docs/core.md (syntax
-    /// trees)); `None` when lexing or parsing failed — the same tier as
-    /// `cst`. The `.pmc` language service's position walks index by byte
-    /// range against this tree.
+    /// trees)); `None` when lexing or parsing failed. The `.pmc` language
+    /// service's position walks index by byte range against this tree.
     green: Option<Rc<GreenNode>>,
     /// Post-parse analysis of the current text (`None` when any stage
     /// failed).
@@ -606,7 +598,6 @@ impl LanguageService for PmcLanguageService {
         let mut state = DocState {
             text: text.to_string(),
             tokens: staged.tokens,
-            cst: staged.cst,
             green: staged.green,
             analysis: staged.analysis,
             lint,
@@ -1397,7 +1388,7 @@ export main() {
             state.tokens.is_some(),
             "lexing succeeded on the broken text"
         );
-        assert!(state.cst.is_none());
+        assert!(state.green.is_none());
         assert!(state.analysis.is_none());
         assert!(state.lint.is_none());
         assert!(state.fatal.is_some());
