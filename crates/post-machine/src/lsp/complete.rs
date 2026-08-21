@@ -54,16 +54,21 @@ use mtc_core::lsp::{Candidate, CandidateKind};
 use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
 use crate::compiler::{ScopeSummary, full_name};
-use crate::cst::{TopItem, TopKind};
 use crate::lexer::{Token, TokenKind};
 use crate::parser::{FnDoc, RESERVED};
 use crate::stdlib::roster;
-use crate::syntax::FileView;
+use crate::syntax::{FileView, TopView};
 
 use super::DocState;
 use super::overlay::OverlaySym;
 use super::std_enabled;
-use super::walk::{enclosing_function_chain, function_labels, span_contains};
+use super::walk::{enclosing_function_chain, function_labels};
+// `span_contains` no longer has a non-test call site in this module now
+// that `enclosing_ns_path` walks the green tree directly (`TextRange::
+// contains`) — kept test-only rather than dropped, since its own
+// half-open-boundary test still lives here.
+#[cfg(test)]
+use super::walk::span_contains;
 
 /// The completion candidates for `pos` in `state`'s current document.
 pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
@@ -373,24 +378,28 @@ fn is_final_slot(sig: &[Token], scan_from: usize) -> bool {
     true
 }
 
-/// The enclosing namespace path at `pos` — walks only `Namespace`
-/// blocks (a function's own extent never changes it; only `namespace {
-/// }` blocks add a `::` segment), recursively, innermost match wins.
-/// Unlike `walk::enclosing_function_chain`, this walks a DIFFERENT node
-/// kind (namespace blocks, never function extents) toward a different
-/// result shape (a path of names, not a chain of CST nodes) — its own
-/// walk, not a duplicate of the shared one.
-fn enclosing_ns_path(items: &[TopItem], pos: Pos) -> Vec<String> {
-    for item in items {
-        if let TopKind::Namespace(ns) = &item.kind
-            && span_contains(ns.span, pos)
-        {
-            let mut path = vec![ns.name.clone()];
-            path.extend(enclosing_ns_path(&ns.items, pos));
-            return path;
+/// The namespace path enclosing `offset` — the `::` segments of the
+/// `namespace { }` blocks it sits inside, outermost first (a function's
+/// own extent never changes it; only namespace blocks add a segment),
+/// recursively, innermost match wins. Unlike
+/// `walk::enclosing_function_chain`, this walks a DIFFERENT node kind
+/// (namespace blocks, never function extents) toward a different result
+/// shape (a path of names, not a chain of views) — its own walk, not a
+/// duplicate of the shared one.
+fn enclosing_ns_path(file: &FileView, offset: u32) -> Vec<String> {
+    fn descend(items: impl Iterator<Item = TopView>, offset: u32) -> Vec<String> {
+        for item in items {
+            if let TopView::Namespace(ns) = item
+                && ns.syntax().text_range().contains(offset)
+            {
+                let mut path = vec![ns.name()];
+                path.extend(descend(ns.items(), offset));
+                return path;
+            }
         }
+        Vec::new()
     }
-    Vec::new()
+    descend(file.items(), offset)
 }
 
 /// Context 1/2's shared member lookup for an exact namespace `path`:
@@ -595,13 +604,23 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<Candidate> = Vec::new();
 
+    // The current tree and this request's byte offset into it, built
+    // once here and shared by the namespace-path lookup and (a)'s
+    // nested-defs walk below, rather than rebuilt per leg. `None` when
+    // the current text failed to parse.
+    let view: Option<(FileView, u32)> = state.green.as_ref().map(|green| {
+        let root = SyntaxNode::new_root(Rc::clone(green));
+        let file = FileView::cast(root).expect("root is FILE");
+        let offset = TextLineIndex::new(&state.text).offset(pos);
+        (file, offset)
+    });
+
     // The enclosing namespace path, shared by (a)'s qualified-name
     // reconstruction and (b)'s prefix walk. Falls back to the top-level
-    // scope ([]) when the CST is unavailable.
-    let ns_path: Vec<String> = state
-        .cst
+    // scope ([]) when the green tree is unavailable.
+    let ns_path: Vec<String> = view
         .as_ref()
-        .map(|cst| enclosing_ns_path(&cst.items, pos))
+        .map(|(file, offset)| enclosing_ns_path(file, *offset))
         .unwrap_or_default();
 
     // (a) nested defs of the enclosing function chain, innermost
@@ -614,12 +633,8 @@ fn call_candidates(state: &DocState, pos: Pos, replace_span: Span) -> Vec<Candid
     // (`compiler.rs::flatten`'s `emit`) — never a re-derivation, so a
     // nested candidate's qualified name matches `Analysis.docs`' key
     // exactly.
-    if let Some(green) = &state.green {
-        let root = SyntaxNode::new_root(Rc::clone(green));
-        let file = FileView::cast(root).expect("root is FILE");
-        let index = TextLineIndex::new(&state.text);
-        let offset = index.offset(pos);
-        let chain = enclosing_function_chain(&file, offset);
+    if let Some((file, offset)) = &view {
+        let chain = enclosing_function_chain(file, *offset);
         let mut quals: Vec<String> = Vec::with_capacity(chain.len());
         for (i, f) in chain.iter().enumerate() {
             let header = f.header();
@@ -1900,6 +1915,75 @@ export main() {
             labels(&candidates),
             BTreeSet::from(["goToEnd".to_string()]),
             "stdlib:false drops the roster but keeps the sibling's own export: {candidates:?}"
+        );
+    }
+
+    /// A nested function's own labels are the `goto` candidates, and
+    /// outer's are not — the two walks that moved to views, exercised
+    /// together in one namespaced, nested fixture.
+    ///
+    /// The fixture PARSES: `label_candidates` reads the tree, so a
+    /// half-written `goto ` with no label would fail the parse and the
+    /// feature would correctly return nothing, testing the fallback
+    /// rather than the walk. The cursor instead sits on the `2` of a
+    /// complete `goto 2;`, which is where a real client asks.
+    #[test]
+    fn goto_candidates_come_from_the_innermost_function_after_the_view_migration() {
+        const SRC: &str = "namespace ns {\n    outer() {\n        1: right;\n        inner() {\n            2: left;\n            goto 2;\n        }\n        goto 1;\n    }\n}\nmain() { @ns::outer(); }\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        let pos = pos_after(SRC, "goto 2", 5);
+        let labels: Vec<String> = service
+            .completion(URI, pos)
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert!(
+            labels.contains(&"2".to_string()),
+            "inner's own label, got {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"1".to_string()),
+            "outer's label is a different scope, got {labels:?}"
+        );
+    }
+
+    /// The enclosing namespace path qualifies the chain's names — the
+    /// walk THIS task migrates. The test above exercises
+    /// `enclosing_function_chain`/`function_labels`, both migrated in an
+    /// earlier task; without this one, nothing here would cover
+    /// `enclosing_ns_path` at all.
+    ///
+    /// At a call position inside `inner`, the candidate for the enclosing
+    /// `outer` must carry the namespace-qualified form `ns::outer` —
+    /// which is `full_name(&ns_path, name)` with `ns_path == ["ns"]`, so
+    /// an `enclosing_ns_path` that returned `[]` would produce a bare
+    /// `outer` and fail here.
+    #[test]
+    fn enclosing_namespace_qualifies_the_chain_after_the_view_migration() {
+        // Not the brief's literal fixture: a bare `@` with nothing after
+        // it is a LEXER fatal ("expected a function name immediately
+        // after `@`"), not a parse-recoverable shape, so the whole
+        // document fails to tokenize and `completion` returns `[]` from
+        // its very first guard — never reaching the code under test.
+        // `@x();` keeps the document parseable while still landing the
+        // cursor at a bare call position, the same trick
+        // `bare_call_position_offers_top_level_sibling_exports_and_qualified_paths`
+        // already uses.
+        const SRC: &str = "namespace ns {\n    outer() {\n        inner() {\n            @x();\n        }\n    }\n}\nmain() { @ns::outer(); }\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        let pos = pos_after(SRC, "@x()", 1);
+        let qualified: Vec<String> = service
+            .completion(URI, pos)
+            .into_iter()
+            .filter_map(|c| c.detail.or(Some(c.label)))
+            .collect();
+        assert!(
+            qualified.iter().any(|q| q.contains("ns::outer")),
+            "the chain's qualified name must carry the namespace path, got {qualified:?}"
         );
     }
 }
