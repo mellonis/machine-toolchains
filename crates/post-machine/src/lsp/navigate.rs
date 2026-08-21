@@ -29,9 +29,8 @@ use mtc_core::lsp::DefTarget;
 use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 
 use crate::compiler::{Analysis, Resolution};
-use crate::cst::{TopItem, TopKind};
 use crate::stdlib::{materialized_std_uri, roster};
-use crate::syntax::{FileView, FunctionView, extract_statement};
+use crate::syntax::{FileView, FunctionView, TopView, extract_statement};
 
 use super::DocState;
 use super::walk::{enclosing_function_chain, function_labels, label_refs, span_contains};
@@ -73,8 +72,6 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
         return resolve_call(state, uri, resolution, origin);
     }
 
-    let cst = state.cst.as_ref()?;
-
     let green = state.green.as_ref()?;
     let root = SyntaxNode::new_root(Rc::clone(green));
     let file = FileView::cast(root).expect("root is FILE");
@@ -91,7 +88,7 @@ pub(super) fn definition(state: &DocState, uri: &str, pos: Pos) -> Option<DefTar
         });
     }
 
-    if let Some((full_path, origin)) = use_path_at(&cst.items, pos) {
+    if let Some((full_path, origin)) = use_path_at(&file, &index, offset) {
         return if full_path.starts_with("std::") {
             std_path_target(state, &full_path, origin)
         } else {
@@ -331,25 +328,58 @@ fn label_span(function: &FunctionView, index: &TextLineIndex, value: u32) -> Opt
 /// `Analysis.docs`, the overlay's doc map, or the stdlib's — local,
 /// sibling, and `std::` names alike. Filtering by `std` here would only
 /// duplicate work every caller already does on its own.
-fn use_path_at(items: &[TopItem], pos: Pos) -> Option<(String, Span)> {
-    for item in items {
-        match &item.kind {
-            TopKind::Namespace(ns) => {
-                if let Some(result) = use_path_at(&ns.items, pos) {
-                    return Some(result);
-                }
-            }
-            TopKind::Import(use_cst) => {
-                for path in &use_cst.paths {
-                    if span_contains(path.span, pos) {
-                        return Some((path.path.join("::"), path.span));
+fn use_path_at(file: &FileView, index: &TextLineIndex, offset: u32) -> Option<(String, Span)> {
+    fn descend(
+        items: impl Iterator<Item = TopView>,
+        index: &TextLineIndex,
+        offset: u32,
+    ) -> Option<(String, Span)> {
+        for item in items {
+            match item {
+                TopView::Namespace(ns) => {
+                    if ns.syntax().text_range().contains(offset)
+                        && let Some(result) = descend(ns.items(), index, offset)
+                    {
+                        return Some(result);
                     }
                 }
+                TopView::Use(use_decl) => {
+                    for path in use_decl.paths() {
+                        // Alias-exclusive on purpose: `UsePath.span`
+                        // (docs/core.md (syntax tree)) never covers an
+                        // `as` alias, so both the containment test and
+                        // the returned span are built from the segment
+                        // tokens the way `extract.rs::extract_import`
+                        // does — the node's own `text_range()` would
+                        // include the alias and let a cursor sitting on
+                        // it resolve to the path.
+                        let segments = path.segments();
+                        let first = segments
+                            .first()
+                            .expect("USE_PATH always carries at least one segment");
+                        let last = segments
+                            .last()
+                            .expect("USE_PATH always carries at least one segment");
+                        let range = mtc_core::syntax::TextRange::new(
+                            first.text_range().start,
+                            last.text_range().end,
+                        );
+                        if range.contains(offset) {
+                            let joined = segments
+                                .iter()
+                                .map(|t| t.text().to_string())
+                                .collect::<Vec<_>>()
+                                .join("::");
+                            return Some((joined, index.span(range)));
+                        }
+                    }
+                }
+                TopView::Function(_) => {}
             }
-            TopKind::Comment(_) | TopKind::Function(_) => {}
         }
+        None
     }
-    None
+    descend(file.items(), index, offset)
 }
 
 /// Hover's own position→target resolution (docs/lsp.md (hover)): the
@@ -405,8 +435,12 @@ pub(super) fn hover_target(state: &DocState, pos: Pos) -> Option<(String, Span)>
         return Some((f.name.clone(), f.name_span));
     }
 
-    let cst = state.cst.as_ref()?;
-    use_path_at(&cst.items, pos)
+    let green = state.green.as_ref()?;
+    let root = SyntaxNode::new_root(Rc::clone(green));
+    let file = FileView::cast(root).expect("root is FILE");
+    let index = TextLineIndex::new(&state.text);
+    let offset = index.offset(pos);
+    use_path_at(&file, &index, offset)
 }
 
 /// The fully-qualified name a step-1 [`Resolution`] ultimately names —
@@ -589,6 +623,26 @@ mod tests {
             !span_contains(span, Pos { line: 1, col: 5 }),
             "end is exclusive"
         );
+    }
+
+    /// Go-to-definition on a label reference still finds the label's own
+    /// declaration in the same function — the walk that moved from the
+    /// C1 CST to views. `007` also pins that the label VALUE survives
+    /// extraction: a token-text re-derivation would either hand back
+    /// `007` (unparseable as a value) or lose the written form.
+    #[test]
+    fn label_reference_resolves_to_its_declaration_after_the_view_migration() {
+        const SRC: &str = "main() {\n    007: right;\n    goto 007;\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        // The `007` inside `goto 007;` — skip past `"goto "`.
+        let pos = pos_after(SRC, "goto 007", 5);
+        let target = service
+            .definition(URI, pos)
+            .expect("resolves to the label declaration");
+        assert_eq!(target.uri, URI);
+        assert_eq!(target.span.start, Pos { line: 2, col: 5 });
     }
 
     #[test]
