@@ -15,14 +15,15 @@ use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
-use mtc_core::syntax::GreenNode;
+use mtc_core::syntax::{AstNode, GreenNode, SyntaxNode, TextLineIndex, TextRange};
 
 use crate::compiler::{Analysis, CompileError, ScopeSummary, analyze_staged};
 use crate::config;
-use crate::cst::{BodyKind, Cst, FunctionCst, TopItem, TopKind};
+use crate::cst::Cst;
 use crate::lexer::{Token, TokenKind};
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 use crate::parser::FnDoc;
+use crate::syntax::{FileView, FunctionView, PmcKind, TopView};
 
 mod complete;
 mod navigate;
@@ -158,6 +159,10 @@ struct DocState {
     /// lexing itself failed.
     tokens: Option<Vec<Token>>,
     /// CST of the current text (`None` when lexing or parsing failed).
+    /// Its last production reader moved onto the green tree; only a
+    /// `#[cfg(test)]` assertion still reads it, pending its removal
+    /// alongside the field itself.
+    #[cfg_attr(not(test), allow(dead_code))]
     cst: Option<Cst>,
     /// Green syntax tree of the current text (docs/core.md (syntax
     /// trees)); `None` when lexing or parsing failed — the same tier as
@@ -449,47 +454,58 @@ fn render_doc(doc: &FnDoc) -> Option<String> {
     Some(sections.join("\n\n"))
 }
 
-/// Walks one CST item list — the file level or a [`crate::cst::NamespaceCst`]'s
-/// own `items` — into document symbols (docs/lsp.md (document symbols),
-/// CST-tier). Comments and imports are skipped; a reopened namespace
-/// block stays a separate sibling because the CST already keeps it apart
-/// (it never merges same-name blocks the way the AST does). Each node's
-/// `span`/`selection_span` are the CST's own extent/name spans, copied
-/// verbatim.
-fn cst_symbols(items: &[TopItem]) -> Vec<SymbolNode> {
+/// A function's C1 extent — its header start through `}`, EXCLUDING a
+/// bound doc run. The green FUNCTION node retro-wraps its doc run, so
+/// `syntax().text_range()` starts a line or more earlier than the CST's
+/// own `span` did; document-symbol ranges are one of the two things that
+/// span was for (docs/lsp.md (document symbols)), so taking the node's
+/// range whole would widen every doc-commented function's outline entry.
+fn function_extent(f: &FunctionView) -> TextRange {
+    let full = f.syntax().text_range();
+    let start = f
+        .syntax()
+        .children_with_tokens()
+        .find(|e| {
+            e.kind() != PmcKind::DocRun.into()
+                && e.kind() != PmcKind::Whitespace.into()
+                && e.kind() != PmcKind::LineComment.into()
+                && e.kind() != PmcKind::BlockComment.into()
+        })
+        .map_or(full.start, |e| e.text_range().start);
+    TextRange::new(start, full.end)
+}
+
+/// Walks one item list — the file level or a namespace's own `items` —
+/// into document symbols (docs/lsp.md (document symbols)). `use`
+/// declarations are skipped; a reopened namespace block stays a separate
+/// sibling because the tree already keeps it apart (it never merges
+/// same-name blocks the way the AST does).
+fn tree_symbols(items: impl Iterator<Item = TopView>, index: &TextLineIndex) -> Vec<SymbolNode> {
     items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            TopKind::Comment(_) | TopKind::Import(_) => None,
-            TopKind::Namespace(ns) => Some(SymbolNode {
-                name: ns.name.clone(),
+        .filter_map(|item| match item {
+            TopView::Use(_) => None,
+            TopView::Namespace(ns) => Some(SymbolNode {
+                name: ns.name(),
                 kind: SymbolNodeKind::Namespace,
-                span: ns.span,
-                selection_span: ns.name_span,
-                children: cst_symbols(&ns.items),
+                span: index.span(ns.syntax().text_range()),
+                selection_span: index.span(ns.name_token().text_range()),
+                children: tree_symbols(ns.items(), index),
             }),
-            TopKind::Function(f) => Some(function_symbol(f)),
+            TopView::Function(f) => Some(function_symbol(&f, index)),
         })
         .collect()
 }
 
-/// One function's symbol (top-level or nested). Children are its
-/// `BodyKind::Nested` functions, recursively; labels and statements are
-/// never emitted as symbols.
-fn function_symbol(f: &FunctionCst) -> SymbolNode {
+/// One function's symbol (top-level or nested). Children are its nested
+/// definitions, recursively; labels and statements are never emitted as
+/// symbols.
+fn function_symbol(f: &FunctionView, index: &TextLineIndex) -> SymbolNode {
     SymbolNode {
-        name: f.name.clone(),
+        name: f.header().name.text().to_string(),
         kind: SymbolNodeKind::Function,
-        span: f.span,
-        selection_span: f.name_span,
-        children: f
-            .body
-            .iter()
-            .filter_map(|item| match &item.kind {
-                BodyKind::Nested(nested) => Some(function_symbol(nested)),
-                _ => None,
-            })
-            .collect(),
+        span: index.span(function_extent(f)),
+        selection_span: index.span(f.header().name.text_range()),
+        children: f.nested().map(|n| function_symbol(&n, index)).collect(),
     }
 }
 
@@ -704,11 +720,14 @@ impl LanguageService for PmcLanguageService {
     }
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
-        // CST-tier: answered as long as parsing succeeded, even if a
+        // Parse-tier: answered as long as parsing succeeded, even if a
         // later stage (duplicate-binding check, `ir::lower`) fatals.
         let state = self.docs.get(uri)?;
-        let cst = state.cst.as_ref()?;
-        Some(cst_symbols(&cst.items))
+        let green = state.green.as_ref()?;
+        let root = SyntaxNode::new_root(Rc::clone(green));
+        let file = FileView::cast(root).expect("root is FILE");
+        let index = TextLineIndex::new(&state.text);
+        Some(tree_symbols(file.items(), &index))
     }
 
     fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
@@ -735,6 +754,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    const URI: &str = "untitled:Symbols-1";
 
     /// A fresh scratch directory under `std::env::temp_dir()`, unique per
     /// call (process id + an atomic counter — this crate has no tempfile
@@ -1862,6 +1883,59 @@ export main() {
         let mut service = PmcLanguageService::new();
         service.did_update("untitled:Untitled-1", "main( {");
         assert_eq!(service.document_symbols("untitled:Untitled-1"), None);
+    }
+
+    /// Document symbols still answer on a document whose LATER stages
+    /// fail — the tier this feature is documented to hold. `goto 99;`
+    /// references an undefined label, which fatals `ir::lower`, so
+    /// `analysis` is `None` while the parse itself succeeded. The same
+    /// degradation shape `NAV_FIXTURE_BROKEN` uses in `navigate.rs`.
+    #[test]
+    fn document_symbols_answer_below_the_analysis_tier() {
+        const SRC: &str = "outer() {\n    inner() { right; }\n    goto 99;\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+        assert!(
+            service.docs.get(URI).unwrap().analysis.is_none(),
+            "sanity: the fatal really did stop analysis, so this pins the tier"
+        );
+
+        let symbols = service
+            .document_symbols(URI)
+            .expect("parsing succeeded, so symbols answer");
+        let names: Vec<String> = symbols.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["outer".to_string()]);
+        let nested: Vec<String> = symbols[0].children.iter().map(|s| s.name.clone()).collect();
+        assert_eq!(nested, vec!["inner".to_string()]);
+    }
+
+    /// A doc-commented function's symbol range starts at its HEADER, not
+    /// at its doc run. The green FUNCTION node retro-wraps the doc run,
+    /// so the node's own range begins a line earlier; the C1 extent this
+    /// feature has always reported does not, and an editor's outline
+    /// shows the difference.
+    #[test]
+    fn doc_commented_function_symbol_range_excludes_its_doc_run() {
+        // "? doc\n"      -> line 1
+        // "main() {\n"   -> line 2, the header
+        // "    right;\n" -> line 3
+        // "}\n"          -> line 4, the closing brace
+        const SRC: &str = "? doc\nmain() {\n    right;\n}\n";
+        let mut service = PmcLanguageService::new();
+        service.did_update(URI, SRC);
+
+        let symbols = service.document_symbols(URI).expect("parses");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(
+            symbols[0].span.start,
+            Pos { line: 2, col: 1 },
+            "range starts at the header, not at the doc line"
+        );
+        assert_eq!(
+            symbols[0].span.end,
+            Pos { line: 4, col: 2 },
+            "one past `}}`"
+        );
     }
 
     #[test]
