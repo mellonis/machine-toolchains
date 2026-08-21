@@ -886,7 +886,9 @@ the toolchains' line/column `Span` as their currency: a
 the lexers use, so spans agree for the single-line tokens the lexers
 produce. For a token spanning multiple lines (a block comment), the
 `TextLineIndex` path yields the true multi-line end where the lexer's
-own span does not.
+own span does not. The inverse `offset` method recovers byte offsets
+from line/column positions, clamping at line and column boundaries
+the way the LSP position decoder does, so the two directions cannot disagree.
 
 A free `debug_dump` function renders an indented tree dump for
 debugging and golden tests; core knows no kind names, so the caller
