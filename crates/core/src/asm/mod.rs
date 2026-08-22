@@ -17,7 +17,8 @@ pub use assembler::assemble;
 pub(crate) use assembler::{MatchRowClass, assemble_lowered, classify_match_row};
 pub use cst::recognized_directives;
 pub use disassembler::{
-    disassemble_executable, disassemble_object, grid_line, listing_executable, listing_line,
+    ListingParts, disassemble_executable, disassemble_object, grid_line, listing_executable,
+    listing_line, listing_parts,
 };
 pub use fmt::{format_asm, format_asm_with};
 pub use syntax::{ArchSyntax, AsmCaps, Flow, RelaxPair, SyntaxEntry};

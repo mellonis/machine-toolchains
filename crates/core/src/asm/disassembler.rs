@@ -1775,12 +1775,32 @@ pub fn disassemble_executable(
 /// Callers rendering a fault address (e.g. a fetch that ran off the end
 /// of the code image) must guard the call themselves; see `pmt run
 /// --trace`'s handling of traced runs in `crates/post-machine/src/cli/run.rs`.
-pub fn listing_line(
+/// The pieces a debugger-listing row is assembled from, decoded once:
+/// the instruction's byte length, its bytes as space-separated uppercase
+/// hex, its mnemonic, and its operand text (empty when it takes none).
+///
+/// [`listing_line`] concatenates these into the single-line form; callers
+/// that need them in separate columns — a DAP `disassemble` response,
+/// where the client renders bytes in its own column, or the wrapped
+/// listing view — take them apart instead of re-splitting a rendered
+/// string (docs/dap.md (the Disassembly view)).
+///
+/// Precondition: as [`listing_line`], `addr` must be strictly inside
+/// `code`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListingParts {
+    pub len: u32,
+    pub bytes_hex: String,
+    pub mnemonic: String,
+    pub operand: String,
+}
+
+pub fn listing_parts(
     syntax: &ArchSyntax,
     code: &[u8],
     addr: u32,
     resolve: &dyn Fn(u32) -> Option<String>,
-) -> (String, u32) {
+) -> ListingParts {
     let (len, mnemonic, operand): (u32, &str, String) = match decode_one(syntax, code, addr) {
         None => (1, ".byte", code[addr as usize].to_string()),
         Some(Decoded {
@@ -1827,8 +1847,122 @@ pub fn listing_line(
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let line = format!("  {addr:04x}:  {bytes_hex:<15} {mnemonic:<8}{operand}");
-    (line.trim_end().to_string(), len)
+    ListingParts {
+        len,
+        bytes_hex,
+        mnemonic: mnemonic.to_string(),
+        operand,
+    }
+}
+
+pub fn listing_line(
+    syntax: &ArchSyntax,
+    code: &[u8],
+    addr: u32,
+    resolve: &dyn Fn(u32) -> Option<String>,
+) -> (String, u32) {
+    let p = listing_parts(syntax, code, addr, resolve);
+    let line = format!(
+        "  {addr:04x}:  {:<15} {:<8}{}",
+        p.bytes_hex, p.mnemonic, p.operand
+    );
+    (line.trim_end().to_string(), p.len)
+}
+
+/// Bytes per row in the listing's byte column.
+const BYTES_PER_ROW: usize = 5;
+
+/// Width of the listing's operand column. Sized so the widest legal
+/// vector — sixteen tapes, TM-1's ceiling — never has to break: it
+/// renders 49 characters.
+const OPERAND_LANE: usize = 50;
+
+/// The operand column's rows. An operand that fits its lane is never
+/// broken. One that does not breaks at the seam BETWEEN bracketed
+/// vectors first — "what is written" and "where the heads move" each get
+/// a row — and only inside a vector if a single one still cannot fit.
+///
+/// [`OPERAND_LANE`] is sized so that the widest legal vector never has
+/// to: sixteen tapes, TM-1's ceiling, render 49 characters.
+fn operand_lanes(operand: &str) -> Vec<String> {
+    if operand.len() <= OPERAND_LANE {
+        return vec![operand.to_string()];
+    }
+    let groups = if operand.contains('[') {
+        split_at_seams(operand)
+    } else {
+        vec![operand.to_string()]
+    };
+    groups.into_iter().flat_map(pack_elements).collect()
+}
+
+/// Split on the commas BETWEEN bracketed groups, never the ones inside.
+fn split_at_seams(operand: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0usize;
+    for ch in operand.chars() {
+        cur.push(ch);
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => {}
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out
+}
+
+/// Last resort: fill lanes element by element, breaking only after a
+/// comma so an element is never split down the middle.
+fn pack_elements(group: String) -> Vec<String> {
+    if group.len() <= OPERAND_LANE {
+        return vec![group];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for tok in group.split_inclusive(',') {
+        if !cur.is_empty() && cur.trim_end().len() + tok.trim_end().len() > OPERAND_LANE {
+            out.push(cur.trim_end().to_string());
+            cur = tok.trim_start().to_string();
+        } else {
+            cur.push_str(tok);
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim_end().to_string());
+    }
+    out
+}
+
+/// One instruction's rows in the debugger listing. The byte column wraps
+/// at [`BYTES_PER_ROW`] onto continuation lines rather than growing, so
+/// the mnemonic keeps its column however wide the instruction is —
+/// TM-1's fused `wrmv` overruns the column at three tapes already, and
+/// grows two bytes per tape from there.
+fn listing_rows(addr: u32, p: &ListingParts) -> Vec<String> {
+    let bytes: Vec<&str> = p.bytes_hex.split(' ').collect();
+    let byte_lanes: Vec<String> = bytes.chunks(BYTES_PER_ROW).map(|c| c.join(" ")).collect();
+    let op_lanes = operand_lanes(&p.operand);
+
+    (0..byte_lanes.len().max(op_lanes.len()))
+        .map(|i| {
+            let b = byte_lanes.get(i).map(String::as_str).unwrap_or("");
+            let o = op_lanes.get(i).map(String::as_str).unwrap_or("");
+            let row = if i == 0 {
+                format!("  {addr:04x}:  {b:<15} {:<8}{o}", p.mnemonic)
+            } else {
+                format!("         {b:<15} {:<8}{o}", "")
+            };
+            row.trim_end().to_string()
+        })
+        .collect()
 }
 
 /// Debugger code view (addresses + raw bytes + mnemonics): every byte
@@ -1863,10 +1997,12 @@ pub fn listing_executable(syntax: &ArchSyntax, exe: &Executable, map: Option<&Ma
             out.push_str(&f.name);
             out.push_str(":\n");
         }
-        let (line, ilen) = listing_line(syntax, code, addr, &name_at);
-        out.push_str(&line);
-        out.push('\n');
-        addr += ilen;
+        let parts = listing_parts(syntax, code, addr, &name_at);
+        for row in listing_rows(addr, &parts) {
+            out.push_str(&row);
+            out.push('\n');
+        }
+        addr += parts.len;
     }
     out
 }
@@ -3148,6 +3284,14 @@ START:  nop
                     operand: OperandKind::SymbolVec,
                     flow: FT,
                 },
+                // A two-vector operand, for the listing view's seam-first
+                // operand wrapping. Shaped like TM-1's fused `wrmv`.
+                SyntaxEntry {
+                    opcode: 0x12,
+                    mnemonic: "wrmv",
+                    operand: OperandKind::WriteMoveVec,
+                    flow: FT,
+                },
                 SyntaxEntry {
                     opcode: 0x19,
                     mnemonic: "jm.s",
@@ -3196,6 +3340,100 @@ main:
   0006:  02              stp
 ";
         assert_eq!(listing, expected);
+    }
+
+    /// `listing_parts` hands back the four pieces `listing_line`
+    /// concatenates, so a caller that needs them in separate columns — a
+    /// DAP `DisassembledInstruction`, or the wrapped listing view — does
+    /// not have to re-split a rendered string.
+    /// An instruction whose bytes overrun the byte column wraps them
+    /// onto continuation lines instead of shoving the mnemonic right.
+    /// TM-1's fused `wrmv` overruns at three tapes already, so this is
+    /// the ordinary case for a multi-tape listing, not an exotic one.
+    /// Instructions that fit are untouched.
+    /// An operand too wide for its lane breaks at the seam BETWEEN the
+    /// bracketed vectors, so "what is written" and "where the heads move"
+    /// each get their own row. It breaks inside a vector only when a
+    /// single vector cannot fit — and the lane is sized so that the
+    /// widest legal one (sixteen tapes) never has to.
+    /// `listing_line` never wraps, however wide the instruction. This is
+    /// a regression pin rather than a red-green cycle — it passes on
+    /// arrival, and it exists because `run --trace` prints exactly one
+    /// row per retired instruction (`cli/run.rs`'s `drive_traced`). If a
+    /// future change routed the wrapping through here instead of through
+    /// `listing_executable`, a traced run would silently grow rows.
+    #[test]
+    fn listing_line_stays_one_row_however_wide_the_instruction() {
+        let mut code = vec![0x12];
+        code.extend(std::iter::repeat_n(0x01u8, 11));
+        code.push(0x81);
+        code.extend(std::iter::repeat_n(0x02u8, 11));
+        code.push(0x82);
+        let (line, len) = listing_line(&pm1_like_syntax(), &code, 0, &|_| None);
+        assert_eq!(len, 25);
+        assert!(!line.contains('\n'), "one row only, got: {line:?}");
+    }
+
+    #[test]
+    fn listing_executable_breaks_a_wide_operand_at_the_vector_seam() {
+        let mut code = vec![0x12];
+        code.extend(std::iter::repeat_n(0x01u8, 11));
+        code.push(0x81);
+        code.extend(std::iter::repeat_n(0x02u8, 11));
+        code.push(0x82);
+        let exe = Executable::code_only(0x01, 0, code);
+        let listing = listing_executable(&pm1_like_syntax(), &exe, None);
+        let expected = concat!(
+            "  0000:  12 01 01 01 01  wrmv    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],\n",
+            "         01 01 01 01 01          [>, >, >, >, >, >, >, >, >, >, >, >]\n",
+            "         01 01 81 02 02\n",
+            "         02 02 02 02 02\n",
+            "         02 02 02 02 82\n",
+        );
+        assert_eq!(listing, expected);
+    }
+
+    #[test]
+    fn listing_executable_wraps_wide_byte_runs_and_holds_the_mnemonic_column() {
+        // 0..8: wr with eight symbols (nine bytes) | 9: stp
+        let exe = Executable::code_only(
+            0x01,
+            0,
+            vec![0x06, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x81, 0x02],
+        );
+        let listing = listing_executable(&pm1_like_syntax(), &exe, None);
+        // Written line by line: a `\`-continued literal would strip the
+        // leading spaces this layout is entirely about.
+        let expected = concat!(
+            "  0000:  06 01 01 01 01  wr      1, 1, 1, 1, 1, 1, 1, 1\n",
+            "         01 01 01 81\n",
+            "  0009:  02              stp\n",
+        );
+        assert_eq!(listing, expected);
+    }
+
+    #[test]
+    fn listing_parts_splits_what_listing_line_concatenates() {
+        let syntax = pm1_like_syntax();
+        let code = [0x06, 0x01, 0x82];
+        let parts = listing_parts(&syntax, &code, 0, &|_| None);
+
+        assert_eq!(parts.len, 3);
+        assert_eq!(parts.bytes_hex, "06 01 82");
+        assert_eq!(parts.mnemonic, "wr");
+        assert_eq!(parts.operand, "1, 2");
+
+        // The one-line rendering is exactly these pieces in the old shape.
+        let (line, len) = listing_line(&syntax, &code, 0, &|_| None);
+        assert_eq!(len, parts.len);
+        assert_eq!(
+            line,
+            format!(
+                "  0000:  {:<15} {:<8}{}",
+                parts.bytes_hex, parts.mnemonic, parts.operand
+            )
+            .trim_end()
+        );
     }
 
     #[test]
