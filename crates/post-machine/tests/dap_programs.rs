@@ -1520,6 +1520,25 @@ fn disassemble_renders_listing_line_text_and_the_top_frames_reference_resolves_w
     assert_eq!(instructions[0]["address"], json!(top_ref));
     let text = instructions[0]["instruction"].as_str().unwrap();
     assert!(text.contains("call"), "got: {text}");
+
+    // The columns are split the way DAP defines them: raw bytes in
+    // `instructionBytes`, and `instruction` carrying the mnemonic and its
+    // operands ONLY. The client renders `address` in its own column and
+    // the bytes in another, so repeating either inside the text
+    // duplicates a column and pushes the mnemonic off to the right.
+    let bytes = instructions[0]["instructionBytes"].as_str().unwrap();
+    assert!(
+        !bytes.is_empty() && bytes.split(' ').all(|b| b.len() == 2),
+        "space-separated hex pairs, got: {bytes}"
+    );
+    assert!(
+        !text.contains(':'),
+        "the address must not be repeated inside the text: {text}"
+    );
+    assert!(
+        text.starts_with("call"),
+        "the text starts at the mnemonic: {text}"
+    );
 }
 
 /// VS Code's real Disassembly-view request shape: a large negative

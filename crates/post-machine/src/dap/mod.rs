@@ -87,7 +87,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use mtc_core::asm::listing_line;
+use mtc_core::asm::{listing_line, listing_parts};
 use mtc_core::dap::server::{AdapterEvent, DebugAdapter, RunState};
 use mtc_core::formats::ARCH_PM1;
 use mtc_core::formats::executable::Executable;
@@ -1565,7 +1565,7 @@ impl PmDapAdapter {
         let len = code.len() as u32;
         while addr < len {
             addrs.push(addr);
-            let (_, ilen) = listing_line(&syntax, code, addr, &|_| None);
+            let ilen = listing_parts(&syntax, code, addr, &|_| None).len;
             addr += ilen.max(1);
         }
 
@@ -1610,10 +1610,19 @@ impl PmDapAdapter {
                     "presentationHint": "invalid",
                 }));
             } else if let Some(&at) = addrs.get(ord as usize) {
-                let (line, _) = listing_line(&syntax, code, at, &resolve);
+                let p = listing_parts(&syntax, code, at, &resolve);
+                // Bytes go to the field DAP defines for them; the text
+                // carries the mnemonic and operands only, so a client
+                // renders the address and the bytes in its own columns
+                // instead of finding them repeated inside the text
+                // (docs/dap.md (the Disassembly view)).
+                let instruction = format!("{:<8}{}", p.mnemonic, p.operand)
+                    .trim_end()
+                    .to_string();
                 instructions.push(json!({
                     "address": format!("0x{at:x}"),
-                    "instruction": line,
+                    "instructionBytes": p.bytes_hex,
+                    "instruction": instruction,
                 }));
             } else {
                 let past = ord as u64 - addrs.len() as u64;
