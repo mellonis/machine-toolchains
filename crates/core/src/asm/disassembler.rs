@@ -3358,10 +3358,11 @@ main:
     /// widest legal one (sixteen tapes) never has to.
     /// `listing_line` never wraps, however wide the instruction. This is
     /// a regression pin rather than a red-green cycle — it passes on
-    /// arrival, and it exists because `run --trace` prints exactly one
-    /// row per retired instruction (`cli/run.rs`'s `drive_traced`). If a
-    /// future change routed the wrapping through here instead of through
-    /// `listing_executable`, a traced run would silently grow rows.
+    /// arrival, and it exists because a traced run prints exactly one row
+    /// per retired instruction and renders that row through this
+    /// function — never through `listing_executable`. Wrapping added here
+    /// rather than in the executable-listing path would therefore grow a
+    /// traced run's rows without any test noticing.
     #[test]
     fn listing_line_stays_one_row_however_wide_the_instruction() {
         let mut code = vec![0x12];
