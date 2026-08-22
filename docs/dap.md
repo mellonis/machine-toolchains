@@ -269,7 +269,18 @@ stepping runs unconstrained to the next breakpoint or to completion.
 `disassemble` renders instruction-listing text through the same renderer
 `dis` and `run --trace` already use, with sidecar label resolution where
 one exists — so a `disassemble` response and a `pmt dis`/`tmt dis`
-listing never disagree about how an instruction reads. Every stack frame
+listing never disagree about how an instruction reads. What differs is
+only how the pieces are packaged. The protocol gives raw bytes a field of
+their own, so a row's `instructionBytes` carries the hex pairs and
+`instruction` carries the mnemonic and operand alone — no address, no
+byte column, nothing a client has to parse back out to display. A client
+that shows a bytes column fills it from the dedicated field; one that
+does not is left with readable disassembly instead of a line beginning in
+hex. The CLI composes those same parts into its own address grid, which
+is why the two surfaces read alike without either reformatting the
+other's text.
+
+Every stack frame
 carries an `instructionPointerReference` (a hex address), which is what
 the Disassembly view resolves to highlight the current instruction and
 track it across every step. `setInstructionBreakpoints` maps the view's

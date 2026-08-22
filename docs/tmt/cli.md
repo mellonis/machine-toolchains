@@ -515,6 +515,18 @@ path reaches, and branch/call targets resolved to `function` /
 reassembleable; it exists to inspect what a `.tmx` actually contains, byte
 for byte. `--listing` applies to executables only.
 
+**Wide instructions wrap in two columns.** A per-tape `wr`/`mov` vector
+grows with the tape count, so a listing row is not always one line. The
+byte column wraps after five bytes and the operand column wraps
+independently, which keeps hex and mnemonics from interleaving on a
+continuation line — the eye can still read either column straight down.
+The operand breaks only when it must, and then at the widest seam
+available: between whole `[..]` vectors first, and inside a vector on
+element boundaries only when one vector alone still will not fit. The
+lane is wide enough that a sixteen-tape vector never breaks internally.
+Continuation lines carry neither the address nor the mnemonic, so the
+address column remains an exact index of where each instruction starts.
+
 ## `tmt run`
 
 ```
@@ -568,7 +580,10 @@ instruction, in the same address/bytes/mnemonic shape as `dis --listing`,
 with a post-execution state suffix `; MF=<0|1> heads=[..]` listing every
 head. The state shown is the one *after* that instruction's effect. An image
 built on the frames profile appends ` FR=<n>`, the frame register; a
-base-profile image's line is byte-identical without it.
+base-profile image's line is byte-identical without it. A trace line never
+wraps, however many tapes the image drives: the two-column wrapping
+`dis --listing` applies to a wide instruction would break the one
+line per retired instruction that makes the stream greppable.
 
 ### Exit codes
 

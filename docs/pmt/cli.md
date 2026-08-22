@@ -518,6 +518,14 @@ control-flow path reaches), branch/call targets resolved to
 not reassembleable — it exists to inspect what a `.pmx` actually contains,
 byte for byte, not to round-trip it.
 
+The renderer wraps a row that will not fit — bytes after five per line,
+the operand within its own column — but no PM-1 instruction is wide
+enough to reach either limit: the widest encoding is five bytes, and a
+resolved `function.label` name is never broken however long it runs. Every
+PM-1 listing row is therefore a single line. The wrapping matters on
+architectures with vector operands; `docs/tmt/cli.md (listing)` describes
+what it looks like there.
+
 ## `pmt tape-block`
 
 ```
