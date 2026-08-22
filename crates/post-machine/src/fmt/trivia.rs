@@ -1,8 +1,8 @@
 //! Comment and blank-line classification, re-derived from green trivia.
 //!
 //! The C1 CST stored these as fields the parser filled in — `blank_before`,
-//! `trailing`, `leading`, `newline_before`, `open_trailing`,
-//! `close_trailing`, `label_break`. The green tree stores nothing derived:
+//! `trailing`, `leading`, `open_trailing`, `close_trailing`, `label_break`.
+//! The green tree stores nothing derived:
 //! trivia are ordinary tokens sitting between a node's children, so every
 //! one of those classifications is a local query over `children_with_tokens`
 //! or a sibling walk. Same decisions, new source of truth
@@ -64,9 +64,9 @@ pub(crate) fn leading_comments(node: &SyntaxNode) -> Vec<SyntaxToken> {
 
 /// Whether the author left an empty line before the whole unit — the item
 /// together with its leading comment run. Keyed off the unit's start, never
-/// off `node.text_range()`: a FUNCTION node already retro-wraps its doc run
-/// and a NAMESPACE node does not, so a raw extent is the wrong anchor for
-/// one of the two.
+/// off `node.text_range()`: a FUNCTION node already retro-wraps its doc run,
+/// whereas a NAMESPACE node never carries a doc run (any comment run before
+/// `namespace` is a parse error: `DanglingDocRun`).
 #[allow(dead_code)]
 pub(crate) fn blank_before_unit(node: &SyntaxNode) -> bool {
     let lead = leading_comments(node);
@@ -239,5 +239,97 @@ mod tests {
         let st = statements(&functions(&r)[0]);
         assert!(label_break(&st[0]));
         assert!(!label_break(&st[1]));
+    }
+
+    /// Mutation test: `blank_before_unit`'s `>= 2` threshold → `>= 1`.
+    /// With just one newline between items, there is no blank line, so
+    /// blank_before_unit must return false. If the threshold is lowered to `>= 1`,
+    /// this would incorrectly return true.
+    #[test]
+    fn blank_before_unit_requires_two_newlines_not_one() {
+        let r = f("main() {\n 1: left;\n}\nother() {\n 1: left;\n}\n");
+        let fns = functions(&r);
+        assert_eq!(fns.len(), 2);
+        assert!(
+            !blank_before_unit(&fns[1]),
+            "single newline is not a blank line"
+        );
+    }
+
+    /// Mutation test: `leading_comments`'s `.reverse()` dropped.
+    /// Comments are collected newest-first from preceding_tokens, so they must be
+    /// reversed to restore source order. Without reverse, they'd appear in reverse order.
+    #[test]
+    fn leading_comments_returns_source_order() {
+        let r = f("main() {\n 1: left;\n}\n// first\n// second\nother() {\n 1: left;\n}\n");
+        let fns = functions(&r);
+        let lead = leading_comments(&fns[1]);
+        assert_eq!(lead.len(), 2);
+        assert_eq!(lead[0].text(), "// first");
+        assert_eq!(lead[1].text(), "// second");
+    }
+
+    /// Mutation test: `trailing_comment`'s newline early-return removed.
+    /// When we encounter a newline token before finding a comment, we must return None
+    /// immediately. Without this check, we'd continue and find comments on the next line.
+    #[test]
+    fn trailing_comment_returns_none_before_newline() {
+        let r = f("main() {\n 1: left;\n // comment on next line\n 2: right;\n}\n");
+        let st = statements(&functions(&r)[0]);
+        assert_eq!(
+            trailing_comment(&st[0]),
+            None,
+            "comment on next line is not a trailing comment"
+        );
+    }
+
+    /// Mutation test: `open_trailing`'s newline `break` removed.
+    /// When we encounter a newline token while walking after an opening brace,
+    /// we must stop immediately. Without the break, we'd continue and find comments
+    /// on the next line.
+    #[test]
+    fn open_trailing_stops_at_newline() {
+        let r = f("main() {\n // comment on next line\n 1: left;\n}\n");
+        let brace = functions(&r)[0]
+            .children_with_tokens()
+            .find_map(|e| match e {
+                SyntaxElement::Token(t) if t.kind() == PmcKind::LBrace.into() => Some(t),
+                _ => None,
+            })
+            .expect("the body brace");
+        let open = open_trailing(&brace);
+        assert!(open.is_empty(), "comment on next line is not open_trailing");
+    }
+
+    /// Mutation test: `label_break`'s node-vs-token arm removed.
+    /// When we see a non-Label node (the first item), we must return false immediately.
+    /// This marks the end of the label sequence. Without this check, we'd continue and
+    /// find newlines between items, incorrectly returning true.
+    #[test]
+    fn label_break_detects_inline_label() {
+        let r = f("main() {\n 1: left,\n    right;\n}\n");
+        let st = statements(&functions(&r)[0]);
+        assert!(
+            !label_break(&st[0]),
+            "label inline with first item means no break"
+        );
+    }
+
+    /// Mutation test: `is_comment`'s `BlockComment` arm dropped.
+    /// Block comments like /* … */ must be recognized as comments, not skipped.
+    #[test]
+    fn is_comment_recognizes_block_comments() {
+        let r = f("main() {\n 1: left;\n}\n/* block comment */\nother() {\n 1: left;\n}\n");
+        let fns = functions(&r);
+        let lead = leading_comments(&fns[1]);
+        assert_eq!(
+            lead.len(),
+            1,
+            "block comment should bind as leading comment"
+        );
+        assert!(
+            lead[0].text().starts_with("/*"),
+            "the comment is a block comment"
+        );
     }
 }
