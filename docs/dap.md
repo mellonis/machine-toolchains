@@ -276,12 +276,12 @@ their own, so a row's `instructionBytes` carries the hex pairs and
 byte column, nothing a client has to parse back out to display. A client
 that shows a bytes column fills it from the dedicated field; one that
 does not is left with readable disassembly instead of a line beginning in
-hex. The CLI composes those same parts into its own address grid, which
-is why the two surfaces read alike without either reformatting the
-other's text.
+hex. The CLI composes those same parts into its own address grid, where a
+wide instruction wraps across lanes; the protocol field keeps it one
+string. The layouts differ, the text does not — neither surface
+reformats what the other rendered.
 
-Every stack frame
-carries an `instructionPointerReference` (a hex address), which is what
+Every stack frame carries an `instructionPointerReference` (a hex address), which is what
 the Disassembly view resolves to highlight the current instruction and
 track it across every step. `setInstructionBreakpoints` maps the view's
 own breakpoint gutter directly onto the session's address breakpoints —
