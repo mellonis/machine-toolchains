@@ -63,6 +63,8 @@
 //! the body onto the next line, there is no BLOCK-stays-inline exception
 //! at a brace.
 
+mod trivia;
+
 use crate::compiler::CompileError;
 use crate::cst::{
     BodyItem, BodyKind, CommaItem, Cst, DocRunItem, DocRunKind, FunctionCst, NamespaceCst,
