@@ -12,14 +12,17 @@
 //! comments and nested/reopened namespaces), functions: headers
 //! (`volatile`/`export`, doc runs), nesting, and statement bodies
 //! (labels, command-column alignment, comma-group layout with the
-//! greedy-fill width fallback) for COMMENT-FREE statements, and — new
-//! this plan — every own-line comment inside a body or a doc run:
-//! leading, standalone, trailing the body, a comment run's own internal
-//! blank line, a block comment spanning lines, and a comment interleaved
-//! inside or immediately after a bound doc run. Every comment position
-//! this module does not yet cover hits an explicit `unreachable!` naming
-//! the plan that owns it, so a test that strays outside the covered
-//! surface fails loudly instead of silently printing something wrong:
+//! greedy-fill width fallback), every own-line comment inside a body or a
+//! doc run (leading, standalone, trailing the body, a comment run's own
+//! internal blank line, a block comment spanning lines, and a comment
+//! interleaved inside or immediately after a bound doc run), and — new
+//! this plan — a statement's own same-line trailing comment, the
+//! column-alignment runs several such comments form together
+//! ([`compute_trailing_spacing`]), and a function's own close-brace
+//! comment. Every comment position this module does not yet cover hits
+//! an explicit `unreachable!` naming the plan that owns it, so a test
+//! that strays outside the covered surface fails loudly instead of
+//! silently printing something wrong:
 //!
 //! - A use list's own interior comments and a comma group's interior
 //!   comments are task 6's surface (`print_use`, [`print_body`]). A
@@ -27,10 +30,6 @@
 //!   task 6's, guarded the same way [`print_body`]'s own
 //!   `descendant_tokens` scan guards a comma group's interior comment
 //!   (both live inside `STATEMENT`, so one scan catches both shapes).
-//! - A statement's own same-line trailing comment, and the alignment
-//!   runs several such comments form together, plus a function's own
-//!   close-brace comment, are task 5's surface ([`print_body`], guarding
-//!   before [`print_statement`] is reached, and [`print_function`]).
 //! - A function's same-line open-brace comment is task 6's surface
 //!   ([`print_function`]) — a different task from its close-brace
 //!   comment, see that function's own doc for why.
@@ -98,10 +97,10 @@ pub(crate) fn format_green(source: &str) -> Result<String, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let root = SyntaxNode::new_root(green);
-    // Threaded through every print function from here down: no surface
-    // this plan covers needs source columns yet, but a later plan's
-    // trailing-comment alignment does, and it should not have to thread
-    // a new parameter through this whole call chain to get one.
+    // Threaded through every print function from here down:
+    // `compute_trailing_spacing`'s aligned/ragged verdict reads each
+    // trailing comment's own SOURCE column (`docs/pmt/fmt.md`
+    // (comments)), which only a line index can answer.
     let line_index = TextLineIndex::new(source);
     let mut out = String::new();
     print_items(&mut out, root.children_with_tokens(), 0, &[], &line_index);
@@ -378,14 +377,14 @@ fn print_comment(out: &mut String, comment: &SyntaxToken, indent: usize) {
 /// its own bound DOC_RUN as a child, so walking back from the FUNCTION
 /// node already walks back from the run's own first line.
 ///
-/// **Brace comments deferred**: a same-line comment after the opening
-/// `{` (`trivia::open_trailing`) is task 6's surface (its own fixture,
-/// "comments after an opening brace") and a same-line comment after the
-/// closing `}` (`trivia::trailing_comment`) is task 5's (its
-/// "trailing comments on declarations" fixture covers exactly this
-/// shape) — both guarded rather than ported, since this task's own
-/// fixtures never exercise either and porting an untested branch would
-/// leave it unproven.
+/// **Open-brace comment deferred, close-brace comment implemented**: a
+/// same-line comment after the opening `{` (`trivia::open_trailing`) is
+/// task 6's surface, still guarded; a same-line comment after the
+/// closing `}` (`trivia::trailing_comment` — the same query a
+/// statement's trailing comment uses, see [`trivia::trailing_comment`]'s
+/// own doc for why one function serves both shapes) prints here exactly
+/// like [`print_namespace`]'s own close-brace comment, one canonical
+/// space before it.
 fn print_function(
     out: &mut String,
     func: &FunctionView,
@@ -428,8 +427,9 @@ fn print_function(
     print_body(out, node, indent + super::INDENT_UNIT, line_index);
     out.push_str(&pad);
     out.push('}');
-    if trivia::trailing_comment(node).is_some() {
-        unreachable!("a function's close-brace trailing comment is task 5's surface")
+    if let Some(c) = trivia::trailing_comment(node) {
+        out.push(' ');
+        out.push_str(&super::normalize_comment_text(c.text()));
     }
     out.push('\n');
 }
@@ -583,7 +583,11 @@ struct StmtElem {
 /// `Comment` is an own-line comment reached directly as a raw sibling
 /// token — leading, standalone, or trailing the whole body — see
 /// [`print_body`]'s own doc for how it's told apart from a comment
-/// that's already part of some OTHER element's leading run.
+/// that's already part of some OTHER element's leading run. A
+/// `Statement`/`Nested`'s own same-line TRAILING comment is never this
+/// variant: [`print_body`]'s collection loop keeps that token out of
+/// `body` entirely, since it prints inline with the element it follows,
+/// not as a body element of its own.
 enum BodyElem {
     Statement(StmtElem),
     Nested(FunctionView),
@@ -612,24 +616,30 @@ fn body_elem_node(elem: &BodyElem) -> Option<&SyntaxNode> {
 /// explains), a second computes the shared command column from every
 /// collected statement (a `BodyElem::Comment` plays no part —
 /// [`max_inline_label_prefix_width`]'s own `filter_map` already ignores
-/// anything that isn't `BodyElem::Statement`), and a third prints them.
+/// anything that isn't `BodyElem::Statement`), a third renders every
+/// statement's own code ONCE up front and derives the trailing-comment
+/// spacing for the whole body from those rendered widths
+/// ([`compute_trailing_spacing`] — mirrors C1's own pre-pass, since the
+/// alignment column of an early run member can depend on a LATER one's
+/// reformatted width), and a fourth prints them.
 ///
 /// **Own-line comments** (`docs/pmt/fmt.md` (comments)) mirror
-/// [`print_items`]'s own `claimed` split, one level down: a comment
-/// immediately (no blank line) before a `STATEMENT`/nested `FUNCTION`
-/// belongs to THAT element's leading run ([`trivia::leading_comments`])
-/// and prints above it; every other comment is its own standalone unit,
-/// printed the same way ([`print_comment`]) with its own blank-line
-/// decision ([`blank_immediately_before`]) — content printing never
-/// distinguishes leading from standalone, only the blank-line decision
-/// does, same rule as the top level. Unlike [`print_items`], there is no
-/// `consumed` half of the split to build here: a body-level trailing
-/// comment (on a `STATEMENT`, or on a nested `FUNCTION`'s own close
-/// brace) is guarded away before this loop ever runs — see the
-/// collection loop below and [`print_function`]'s own close-brace guard
-/// — so no comment reaching the print loop can ever be BOTH a preceding
-/// element's trailing comment AND a following element's leading run the
-/// way a namespace's close-brace comment can at the top level.
+/// [`print_items`]'s own `consumed`/`claimed` split, one level down: a
+/// comment immediately (no blank line) before a `STATEMENT`/nested
+/// `FUNCTION` belongs to THAT element's leading run
+/// ([`trivia::leading_comments`]) and prints above it; every other
+/// comment is its own standalone unit, printed the same way
+/// ([`print_comment`]) with its own blank-line decision
+/// ([`blank_immediately_before`]) — content printing never distinguishes
+/// leading from standalone, only the blank-line decision does, same rule
+/// as the top level. A `STATEMENT`/nested-`FUNCTION`'s own same-line
+/// trailing comment is ALSO already owned outright by another printer
+/// ([`print_statement`], or a nested [`print_function`]'s own
+/// close-brace print) — exactly the shape [`print_items`]'s `consumed`
+/// exists for, one level down: `leading_comments` walks back through
+/// every raw token until a NODE sibling, so a trailing comment like that
+/// surfaces as the NEXT element's own "leading run" too, and `consumed`
+/// filters that print the same way it does at the top level.
 fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_index: &TextLineIndex) {
     let elements: Vec<SyntaxElement> = brace_interior(func_node)
         .filter(|e| !trivia::is_ws(e.kind()))
@@ -652,13 +662,6 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
                     .any(|t| trivia::is_comment(t.kind()))
                 {
                     unreachable!("interior list comments are task 6's surface")
-                }
-                // A statement's own trailing comment lives in the
-                // PARENT's (this body's) child stream, one sibling
-                // after the STATEMENT node — `descendant_tokens` above
-                // never sees it, so it needs its own check.
-                if trivia::trailing_comment(sv.syntax()).is_some() {
-                    unreachable!("a statement's trailing comment is task 5's surface")
                 }
                 let label_break = trivia::label_break(sv.syntax());
                 let item_views: Vec<ItemView> = sv.items().collect();
@@ -693,7 +696,25 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
                 node.kind()
             ),
             SyntaxElement::Token(t) if trivia::is_comment(t.kind()) => {
-                body.push(BodyElem::Comment(t.clone()));
+                // A STATEMENT/nested-FUNCTION's own same-line trailing
+                // comment is this same raw token, reached again here as
+                // the element's own next sibling — `body` must NOT carry
+                // it as a second, separate entry: a `BodyElem::Comment`
+                // between two statements is supposed to mean a genuine
+                // OWN-LINE comment, breaking adjacency for
+                // [`compute_trailing_spacing`]'s run scan; a trailing
+                // comment is not that; it already prints inline, riding
+                // the SAME line as the element it follows
+                // ([`print_statement`]/a nested [`print_function`]'s own
+                // close-brace print).
+                let already_trailing = body
+                    .last()
+                    .and_then(body_elem_node)
+                    .and_then(trivia::trailing_comment)
+                    .is_some_and(|tc| &tc == t);
+                if !already_trailing {
+                    body.push(BodyElem::Comment(t.clone()));
+                }
             }
             SyntaxElement::Token(t) => unreachable!(
                 "unexpected token {:?} inside a function body; only STATEMENT/FUNCTION nodes, \
@@ -705,13 +726,55 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
 
     let command_col = command_column(max_inline_label_prefix_width(&body), indent);
 
+    // Every statement's code (label + items, no `;`) is rendered ONCE up
+    // front — the trailing-comment alignment pre-pass
+    // ([`compute_trailing_spacing`]) needs every run member's rendered
+    // width before any of them is printed, mirroring
+    // [`super::print_function`]'s own `codes` pre-pass. Non-statement
+    // elements get an unused empty placeholder — `compute_trailing_spacing`
+    // never indexes into one, since a run can only ever contain
+    // `BodyElem::Statement` entries (see that function's own doc).
+    let codes: Vec<String> = body
+        .iter()
+        .map(|elem| match elem {
+            BodyElem::Statement(s) => render_statement_code(
+                &s.stmt.labels,
+                s.label_break,
+                &s.stmt.items,
+                &s.newline_before,
+                command_col,
+            ),
+            BodyElem::Nested(_) | BodyElem::Comment(_) => String::new(),
+        })
+        .collect();
+    let trailing_spacing = compute_trailing_spacing(&body, &codes, line_index);
+
+    // Comments some OTHER printer already owns outright: a
+    // `STATEMENT`/nested `FUNCTION`'s own same-line trailing comment
+    // ([`print_statement`], or a nested `print_function`'s own
+    // close-brace print) — mirrors [`print_items`]'s `consumed`, one
+    // difference: the collection loop above already keeps a trailing
+    // comment's OWN token out of `body` (`already_trailing`), so unlike
+    // `print_items` this set is never checked against a `BodyElem::Comment`
+    // arm. It exists for the OTHER direction only: `leading_comments`
+    // walks back through every raw token until a NODE sibling, so a
+    // trailing comment like that surfaces as the NEXT element's own
+    // "leading run" too — filtering it there is this set's one job.
+    let mut consumed: Vec<SyntaxToken> = Vec::new();
+    for elem in &body {
+        if let Some(node) = body_elem_node(elem) {
+            consumed.extend(trivia::trailing_comment(node));
+        }
+    }
+
     // Every STATEMENT/nested-FUNCTION element's own leading comment run,
     // unioned — the set a standalone `BodyElem::Comment` is checked
     // against below, so a comment already printed as some OTHER
     // element's leading run isn't printed a SECOND time when the walk
     // also reaches it directly as its own raw token (mirrors
-    // `print_items`'s `claimed`, minus the `consumed` half — see this
-    // function's own doc for why body level needs none).
+    // [`print_items`]'s `claimed`, minus its `consumed` half — see the
+    // comment above for why body level's `consumed` has nothing to add
+    // here).
     let mut claimed: Vec<SyntaxToken> = Vec::new();
     for elem in &body {
         if let Some(node) = body_elem_node(elem) {
@@ -720,7 +783,7 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
     }
 
     let mut first = true;
-    for elem in &body {
+    for (i, elem) in body.iter().enumerate() {
         if let BodyElem::Comment(tok) = elem {
             if claimed.contains(tok) {
                 continue;
@@ -740,9 +803,18 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
         }
         first = false;
         for c in trivia::leading_comments(node) {
-            print_comment(out, &c, indent);
+            if !consumed.contains(&c) {
+                print_comment(out, &c, indent);
+            }
         }
-        print_body_item(out, elem, indent, command_col, line_index);
+        print_body_item(
+            out,
+            elem,
+            indent,
+            &codes[i],
+            trailing_spacing[i],
+            line_index,
+        );
     }
 }
 
@@ -750,16 +822,21 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
 /// [`super::print_body_item`]. [`BodyElem::Comment`] never reaches this
 /// dispatcher: [`print_body`]'s own loop prints it directly, mirroring
 /// how [`print_items`] prints a standalone comment token itself rather
-/// than routing it through [`print_item`].
+/// than routing it through [`print_item`]. `code`/`trailing_spacing` are
+/// [`print_body`]'s pre-pass outputs, meaningful only for
+/// [`BodyElem::Statement`] (mirrors [`super::print_body_item`]'s own
+/// `code`/`trailing_spacing` parameters, unused by its `Nested`/`Comment`
+/// arms).
 fn print_body_item(
     out: &mut String,
     elem: &BodyElem,
     indent: usize,
-    command_col: usize,
+    code: &str,
+    trailing_spacing: usize,
     line_index: &TextLineIndex,
 ) {
     match elem {
-        BodyElem::Statement(s) => print_statement(out, s, command_col),
+        BodyElem::Statement(s) => print_statement(out, s, code, trailing_spacing),
         BodyElem::Nested(fv) => print_function(out, fv, indent, line_index),
         BodyElem::Comment(_) => unreachable!(
             "print_body's own loop handles BodyElem::Comment directly and never reaches this \
@@ -830,7 +907,10 @@ fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
 /// `labels`/`items` plus the separately-derived `label_break` and
 /// `newline_before` instead of a `StatementCst`'s fields directly. See
 /// that function's own doc for the unlabeled / inline-labeled /
-/// own-line-labeled shapes; the decisions are unchanged.
+/// own-line-labeled shapes; the decisions are unchanged. Called once per
+/// statement, up front, by [`print_body`]'s own pre-pass — see that
+/// function's own doc for why [`compute_trailing_spacing`] needs every
+/// statement's code rendered before any of them prints.
 fn render_statement_code(
     labels: &[Label],
     label_break: bool,
@@ -865,25 +945,195 @@ fn render_statement_code(
     out
 }
 
-/// One statement's final line(s): the precomputed code
-/// ([`render_statement_code`]), the `;`, then the newline — ported from
-/// [`super::print_statement`] WITHOUT its trailing-comment half: a
-/// statement's same-line trailing comment and the column-alignment runs
-/// those form across several statements are task 5's own surface (its
-/// "trailing comments and their alignment runs" task), gated by
-/// [`print_body`]'s own guard on [`trivia::trailing_comment`] before
-/// this is ever reached — porting that half here, untested by this
-/// task's own fixtures, would leave task 5 nothing to prove.
-fn print_statement(out: &mut String, s: &StmtElem, command_col: usize) {
-    out.push_str(&render_statement_code(
-        &s.stmt.labels,
-        s.label_break,
-        &s.stmt.items,
-        &s.newline_before,
-        command_col,
-    ));
+/// One statement's final line(s): the precomputed `code`
+/// ([`render_statement_code`], rendered once by [`print_body`]'s own
+/// pre-pass), the `;`, then a same-line trailing comment if any — spaced
+/// per `trailing_spacing` ([`compute_trailing_spacing`],
+/// `docs/pmt/fmt.md` (comments)) — then the newline. Ported from
+/// [`super::print_statement`], reading the trailing comment straight off
+/// the green tree ([`trivia::trailing_comment`]) instead of a
+/// `StatementCst::trailing` field.
+fn print_statement(out: &mut String, s: &StmtElem, code: &str, trailing_spacing: usize) {
+    out.push_str(code);
     out.push(';');
+    if let Some(tc) = trivia::trailing_comment(&s.node) {
+        out.push_str(&" ".repeat(trailing_spacing));
+        out.push_str(&super::normalize_comment_text(tc.text()));
+    }
     out.push('\n');
+}
+
+/// Char width of `code`'s LAST physical line, `+ 1` for the `;` that
+/// follows it (a statement's trailing comment always rides the line
+/// carrying the final `;`, even when a multi-line own-line label or
+/// comma-group spreads the rest of the statement across earlier lines) —
+/// ported unchanged from [`super::code_line_width_incl_semi`] (pure
+/// text/`usize`, no green-tree input).
+fn code_line_width_incl_semi(code: &str) -> usize {
+    let last_line = code.rsplit('\n').next().unwrap_or(code);
+    last_line.chars().count() + 1
+}
+
+/// Trailing-comment alignment (`docs/pmt/fmt.md` (comments)) — ported
+/// from [`super::compute_trailing_spacing`], reading `body`'s
+/// [`BodyElem`]s instead of C1's `&[BodyItem]` and each member's
+/// trailing comment via [`trivia::trailing_comment`] instead of a
+/// `StatementCst::trailing` field. Returns, per `body` index, the number
+/// of spaces to place between the `;` and a trailing `//`/`/* */` —
+/// meaningful only where that [`BodyElem`] is a [`BodyElem::Statement`]
+/// with a trailing comment; other entries are unused filler.
+///
+/// **The run-boundary rule**, derived by reading
+/// [`super::compute_trailing_spacing`]'s own scan (not restated from any
+/// plan brief) and confirmed against the real C1 formatter on several
+/// hand-built sources before this doc was written: a run is a MAXIMAL
+/// sequence of CONSECUTIVE [`BodyElem::Statement`] entries, each carrying
+/// a trailing comment. The scan that finds one has two distinct rules —
+/// one for starting a run, a stricter one for extending it:
+///
+/// - **Starting**: any [`BodyElem::Statement`] with a trailing comment
+///   can start a run, regardless of its OWN `blank_before` — the C1 scan
+///   never reads `body[run_start].blank_before` at all, only every
+///   CANDIDATE EXTENSION's. A statement preceded by a blank line is
+///   still a perfectly good run of its own.
+/// - **Extending**: the NEXT element joins the current run only if it is
+///   ALSO a [`BodyElem::Statement`] carrying a trailing comment AND has
+///   no blank line before it. Failing either test ends the run right
+///   there — a nested function, an own-line comment, a statement with no
+///   trailing comment, OR a statement that has one but sits after a
+///   blank line, are all run-enders. The very next qualifying statement
+///   (if any) starts a brand-new run, its own `blank_before` irrelevant
+///   as above; nothing is skipped over to "reach past" a non-member.
+///
+/// A run of exactly one member always renders at the default one space
+/// (`spacing` starts all-`1` and the `run_len >= 2` branch below is the
+/// only place that changes it) — alignment as a visible effect exists
+/// only for a run of two or more. For such a run: `align_col` is one
+/// past the WIDEST reformatted code line in the run
+/// ([`code_line_width_incl_semi`], last physical line only — an
+/// own-line-labeled statement's earlier line(s) never count). A member
+/// whose comment would cross column 80 at `align_col` is `overflow` and
+/// falls back to one space on its own, REGARDLESS of what the rest of
+/// the run does. The run is `aligned` only if every NON-overflowing
+/// member's SOURCE `//` column (`index.line_col`) is identical to every
+/// other non-overflowing member's — an overflowing member's own column
+/// plays NO part in that verdict. This exclusion is for IDEMPOTENCE, not
+/// merely to protect the verdict from one ill-fitting number: an
+/// overflowing member renders at its OWN width-derived one-space column,
+/// not `align_col`, so its SOURCE column on a second `pmt fmt` pass (which
+/// re-derives every column from THIS pass's OUTPUT) would almost never
+/// match the rest of the run — reading it into the verdict would flip an
+/// aligned run to ragged on every other reformat. Excluding it is what
+/// keeps a run's aligned/ragged verdict — and so its whole layout —
+/// stable under repeated formatting (`docs/pmt/fmt.md` (comments), same
+/// reasoning C1 documents on [`super::compute_trailing_spacing`] under
+/// "Idempotence note"). When `aligned`, every non-overflowing member gets
+/// `align_col - code_w[off]` spaces (which lands its `//` exactly at
+/// `align_col`); when not, every member (overflowing or not) gets one
+/// space.
+///
+/// **A note on `blank_before`**: C1 reads `BodyItem::blank_before` — the
+/// gap immediately before that ITEM. Extension here reads
+/// [`trivia::blank_before_unit`] instead, which looks PAST an item's own
+/// leading comment run to the gap before the whole unit — a different
+/// query in general. They agree at this one call site: a genuine blank
+/// line strips `body[j]`'s leading run to empty (a blank cuts
+/// `leading_comments`), so `blank_before_unit` looks straight at that
+/// same blank and both queries read it identically; absent a blank line,
+/// `body[j]`'s leading run instead picks up the PRECEDING member's own
+/// trailing comment (same-line whitespace before it, never a blank), so
+/// both queries again agree — `false`. The one shape where they COULD
+/// diverge — a real own-line comment sitting between the two statements —
+/// never reaches this call at all: `has_trailing` already ends the run at
+/// that comment (`BodyElem::Comment` is never `Statement`), short-circuiting
+/// `&&` before `blank_before` is evaluated.
+fn compute_trailing_spacing(
+    body: &[BodyElem],
+    codes: &[String],
+    line_index: &TextLineIndex,
+) -> Vec<usize> {
+    let mut spacing = vec![1usize; body.len()];
+    let has_trailing = |elem: &BodyElem| match elem {
+        BodyElem::Statement(s) => trivia::trailing_comment(&s.node).is_some(),
+        BodyElem::Nested(_) | BodyElem::Comment(_) => false,
+    };
+    // Only ever called on a `body[j]` the caller has already confirmed
+    // `has_trailing` for, so `elem` is always a `BodyElem::Statement`
+    // here — an unreachable panic rather than a silent `false` arm for
+    // `Nested`/`Comment`, since those variants never actually reach this
+    // closure (mirrors `comment_w`/`source_cols`'s own `let … else`
+    // idiom below).
+    let blank_before = |elem: &BodyElem| {
+        let BodyElem::Statement(s) = elem else {
+            unreachable!("has_trailing guarantees a Statement");
+        };
+        trivia::blank_before_unit(&s.node)
+    };
+    let mut i = 0;
+    while i < body.len() {
+        if !has_trailing(&body[i]) {
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        let mut j = i + 1;
+        while j < body.len() && has_trailing(&body[j]) && !blank_before(&body[j]) {
+            j += 1;
+        }
+        let run_end = j;
+        let run_len = run_end - run_start;
+
+        let code_w: Vec<usize> = (run_start..run_end)
+            .map(|k| code_line_width_incl_semi(&codes[k]))
+            .collect();
+        let comment_w: Vec<usize> = (run_start..run_end)
+            .map(|k| {
+                let BodyElem::Statement(s) = &body[k] else {
+                    unreachable!("has_trailing guarantees a Statement");
+                };
+                let tc = trivia::trailing_comment(&s.node).expect("has_trailing guarantees Some");
+                // Measured on the NORMALIZED text: a raw trailing
+                // `\r`/space in the token must not inflate the column
+                // math for a width nothing will actually print.
+                super::normalize_comment_text(tc.text()).chars().count()
+            })
+            .collect();
+
+        if run_len >= 2 {
+            let max_code_w = *code_w.iter().max().expect("run_len >= 2");
+            let align_col = max_code_w + 1;
+            let overflow: Vec<bool> = (0..run_len)
+                .map(|off| align_col + comment_w[off] > super::LINE_WIDTH)
+                .collect();
+            let source_cols: Vec<u32> = (run_start..run_end)
+                .map(|k| {
+                    let BodyElem::Statement(s) = &body[k] else {
+                        unreachable!("has_trailing guarantees a Statement");
+                    };
+                    let tc =
+                        trivia::trailing_comment(&s.node).expect("has_trailing guarantees Some");
+                    line_index.line_col(tc.text_range().start).1
+                })
+                .collect();
+            let non_overflow_cols: Vec<u32> = source_cols
+                .iter()
+                .zip(&overflow)
+                .filter(|&(_, ovf)| !ovf)
+                .map(|(&c, _)| c)
+                .collect();
+            let aligned = non_overflow_cols.windows(2).all(|w| w[0] == w[1]);
+            for off in 0..run_len {
+                spacing[run_start + off] = if aligned && !overflow[off] {
+                    align_col - code_w[off]
+                } else {
+                    1
+                };
+            }
+        }
+        // run_len == 1 (lone): leave the default 1.
+        i = run_end;
+    }
+    spacing
 }
 
 /// Comma-group layout (`docs/pmt/fmt.md` (comma groups)): respect the
@@ -1215,24 +1465,246 @@ mod tests {
         same_as_c1("main() {\n 1: left;\n\n\n\n 2: left;\n}\n");
     }
 
-    /// Pins the four comment-surface guards still standing after this
-    /// task (mirrors `a_comment_nested_inside_a_use_path_is_not_silently_dropped`'s
+    #[test]
+    fn a_single_trailing_comment() {
+        same_as_c1("main() {\n 1: left; // note\n}\n");
+        same_as_c1("main() {\n 1: left;    // over-indented note\n}\n");
+    }
+
+    /// The task-5 brief's own fixture set for run boundaries. Kept
+    /// byte-for-byte as specified, but NONE of these four sources has its
+    /// trailing `//`s sitting at a common source column (confirmed by
+    /// running each through the real C1 formatter before writing this
+    /// comment), so `compute_trailing_spacing`'s `aligned` check is
+    /// `false` in every one of them and every statement here — including
+    /// runs of 2 and 3 — falls back to the one-space default. That makes
+    /// this test a REAL but WEAK proof: it pins boundary detection
+    /// (`has_trailing`/the run-length split) without ever exercising the
+    /// `align_col - code_w[off]` arithmetic, `overflow`, or the
+    /// non-overflow column filter. Those branches get their own,
+    /// deliberately column-equal fixtures below
+    /// (`an_aligned_run_shares_the_widest_reformatted_line` on down).
+    #[test]
+    fn an_alignment_run_and_its_boundaries() {
+        // Three commented statements in a row, source columns unequal
+        // (11/12/11) — a run of >= 2, but ragged, so all three fall back
+        // to a single space each.
+        same_as_c1("main() {\n 1: left; // a\n 2: right; // b\n 3: mark; // c\n}\n");
+        // An uncommented statement in the middle ends the run after
+        // statement 1 and starts a new one at statement 3 — TWO lone
+        // runs, not one of length 2 skipping the gap. Proven by the
+        // column-equal counterpart below
+        // (`a_run_only_ever_spans_consecutive_members`), where a wrong
+        // "skip the gap" rule would visibly misalign 1 and 3.
+        same_as_c1("main() {\n 1: left; // a\n 2: right;\n 3: mark; // c\n}\n");
+        // A blank line before statement 2 ends the run after statement 1:
+        // `!body[j].blank_before` is one of the two conditions extending a
+        // run (`has_trailing` is the other), so statement 2 starts its own
+        // lone run rather than joining statement 1's. With only two
+        // statements, both readings (one broken run vs. two lone ones)
+        // print identically (single space each) — the column-equal
+        // counterpart below (`a_blank_line_ends_a_run`) is where the two
+        // readings diverge visibly.
+        same_as_c1("main() {\n 1: left; // a\n\n 2: right; // b\n}\n");
+        // A statement long enough to push its own comment past the run's
+        // column would decide the run's column for everyone IF this run
+        // were aligned — it isn't (columns 11 vs 44), so both statements
+        // still get one space. The real "decides the column" case is
+        // `an_aligned_run_shares_the_widest_reformatted_line` below.
+        same_as_c1(
+            "main() {\n 1: left; // a\n 2: left, right, mark, unmark, left, right; // b\n}\n",
+        );
+    }
+
+    /// `align_col = max_code_w + 1`, then `spacing[off] = align_col -
+    /// code_w[off]` for every non-overflowing member: two statements
+    /// whose SOURCE `//` columns are hand-padded equal (both at column
+    /// 17) but whose reformatted code widths differ (`left;` vs.
+    /// `left, right;`) — verified against the real C1 formatter before
+    /// writing this fixture. A mutant collapsing that arithmetic to the
+    /// lone-run default `1` turns this red: the wider statement's own
+    /// comment stays at one space (`align_col - code_w == 1` there too),
+    /// but the narrower one's would drop from two spaces to one.
+    #[test]
+    fn an_aligned_run_shares_the_widest_reformatted_line() {
+        same_as_c1("main() {\n 1: left;        // a\n 2: left, right; // b\n}\n");
+    }
+
+    /// The column-equal counterpart to `an_alignment_run_and_its_boundaries`'s
+    /// blank-line case: statements 1 and 3 share source column 17, with
+    /// statement 2 (also at column 17) between them. `!body[j].blank_before`
+    /// stops statement 2 from joining statement 1's run — the blank line
+    /// sits immediately before it — so it starts a NEW run with statement
+    /// 3, and 1 stays a lone run at the default one space, EVEN THOUGH its
+    /// column matches. A mutant that let a blank line pass through would
+    /// merge all three into one aligned run instead, visibly widening
+    /// statement 1's spacing to match 2 and 3.
+    #[test]
+    fn a_blank_line_ends_a_run() {
+        same_as_c1(
+            "main() {\n 1: left;        // a\n\n 2: left, right; // b\n 3: mark;        // c\n}\n",
+        );
+    }
+
+    /// The column-equal counterpart to `an_alignment_run_and_its_boundaries`'s
+    /// middle case: statements 1 and 3 again share column 17, with
+    /// statement 2 (uncommented) between them. `has_trailing(body[2])` is
+    /// false, so the run scan restarts at statement 3 rather than
+    /// extending across the gap — statement 1 and statement 3 are each a
+    /// lone run, both at the default one space, DESPITE sharing a column.
+    /// A mutant that skipped over a non-trailing member instead of ending
+    /// the run there would merge 1 and 3 into one run and align them.
+    #[test]
+    fn a_run_only_ever_spans_consecutive_members() {
+        same_as_c1("main() {\n 1: left;        // a\n 2: right;\n 3: mark;        // c\n}\n");
+    }
+
+    /// The design doc's own worked example (`docs/pmt/fmt.md` (comments)):
+    /// three commented statements where 1 and 2 share a source column and
+    /// 3 does not, AND 3's comment is long enough to overflow 80 columns
+    /// at the run's aligned column. Proves two branches at once: `overflow`
+    /// (statement 3 falls back to one space instead of joining the
+    /// alignment attempt) and the `non_overflow_cols` filter (statement
+    /// 3's mismatched column is excluded from the aligned/ragged verdict,
+    /// so 1 and 2 stay aligned instead of the whole run going ragged). The
+    /// doc's own claim that the header line is invisible to this
+    /// computation is pinned by the `volatile` variant. This source is
+    /// already in the toolchain's canonical form (idempotence check: a
+    /// second `pmt fmt` pass reproduces it byte for byte), confirmed
+    /// against the real C1 formatter before writing this fixture.
+    #[test]
+    fn the_overflow_fallback_is_excluded_from_the_aligned_verdict() {
+        same_as_c1(
+            "main() {\n 1: right;       // a\n    check(1, 3); // b\n 3: left; // a comment \
+             long enough that keeping it aligned would overflow eighty columns\n}\n",
+        );
+        same_as_c1(
+            "volatile main() {\n 1: right;       // a\n    check(1, 3); // b\n 3: left; // a \
+             comment long enough that keeping it aligned would overflow eighty columns\n}\n",
+        );
+    }
+
+    /// `code_line_width_incl_semi` measures only the code's LAST physical
+    /// line — a statement with an own-line label spreads its code across
+    /// two lines (`999999999:` then `    left`), and only the second one
+    /// rides the `;`. Paired at an equal source column (17) with a short
+    /// inline-labeled statement, verified against the real C1 formatter:
+    /// a mutant measuring the WHOLE code string (own-line label included)
+    /// would compute a much wider `align_col`, visibly over-padding
+    /// statement 2's comment instead of the correct two-space/one-space
+    /// split this fixture pins.
+    #[test]
+    fn alignment_measures_only_the_codes_last_line() {
+        same_as_c1("main() {\n 999999999:\n    left;    // a\n 2: right;   // b\n}\n");
+    }
+
+    /// `comment_w` is measured on [`super::normalize_comment_text`]'s
+    /// output, not the raw token — a raw trailing run of spaces before
+    /// the newline must not inflate the overflow math for width nothing
+    /// will actually print. Statement 1's comment carries 60 core
+    /// characters plus 12 raw trailing spaces: `align_col` (11) plus the
+    /// NORMALIZED width (63) is 74, under 80 — no overflow, stays
+    /// aligned; `align_col` plus the RAW width (75) is 86, over 80 — a
+    /// mutant reading the raw token width would wrongly fall statement 1
+    /// back to one space instead of the two this fixture pins. Verified
+    /// against the real C1 formatter before writing this fixture.
+    #[test]
+    fn normalized_width_not_raw_drives_the_overflow_check() {
+        same_as_c1(
+            "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  \
+             \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\n 2: right; // b\n}\n",
+        );
+    }
+
+    /// The overflow test itself, `align_col + comment_w[off] >
+    /// LINE_WIDTH`: exactly column 80 is NOT overflow (`>`, not `>=`),
+    /// 81 is. Two statements share a source column (11 pre-comment);
+    /// statement 1's comment is sized so `align_col (11) + comment_w`
+    /// lands EXACTLY on 80 in the first source, 81 in the second —
+    /// verified against the real C1 formatter before writing this
+    /// fixture. Statement 2's own natural aligned spacing is 1 either
+    /// way (its code is one character wider than statement 1's), so
+    /// statement 1 is the only place a `>` vs. `>=` mutant is visible:
+    /// two spaces at exactly 80, one space (fallen back) at 81.
+    #[test]
+    fn the_overflow_boundary_is_strictly_greater_than_80() {
+        same_as_c1(
+            "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n 2: right; // b\n}\n",
+        );
+        same_as_c1(
+            "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n 2: right; // b\n}\n",
+        );
+    }
+
+    /// `aligned` requires EVERY consecutive pair of non-overflowing
+    /// columns to match (`.all`), not merely some pair (`.any`):
+    /// statements 1 and 2 share a source column, statement 3 sits at a
+    /// different one, none overflow. A `.any`-style check would still
+    /// call this "aligned" off the matching (1, 2) pair alone and hand
+    /// every member its own `align_col - code_w[off]` — verified against
+    /// the real C1 formatter, which instead falls the whole run back to
+    /// one space per comment, since NOT every member shares the column.
+    #[test]
+    fn aligned_requires_every_pair_to_match_not_just_one() {
+        same_as_c1("main() {\n 1: left;  // a\n 2: right; // b\n 3: mark;       // c\n}\n");
+    }
+
+    #[test]
+    fn trailing_comments_on_declarations() {
+        same_as_c1("use std::goToEnd; // note\n");
+        same_as_c1("main() {\n 1: left;\n} // after the brace\n");
+        same_as_c1("namespace n {\n} // after the namespace\n");
+    }
+
+    #[test]
+    fn an_own_line_comment_is_not_a_trailing_one() {
+        same_as_c1("main() {\n 1: left;\n // own line\n 2: left; // trailing\n}\n");
+    }
+
+    /// A statement's trailing comment, immediately followed (same
+    /// non-blank run of tokens) by a genuine own-line comment on its own
+    /// line, before the next statement: both print, in order. This
+    /// fixture alone does NOT distinguish the collection loop's
+    /// `already_trailing` identity check (`&tc == t`) from a weaker
+    /// `.is_some()` — statement 2 carries no trailing comment of its own,
+    /// so [`trivia::leading_comments`]' independent backward walk off
+    /// statement 2 finds and prints "// own line after trailing" via a
+    /// DIFFERENT path regardless of whether it also survives into
+    /// `body` as its own element; see
+    /// `an_own_line_comment_wrongly_treated_as_trailing_corrupts_run_adjacency`
+    /// below for the fixture that DOES distinguish them.
+    #[test]
+    fn a_trailing_comment_does_not_swallow_the_next_own_line_comment() {
+        same_as_c1("main() {\n 1: left; // t\n // own line after trailing\n 2: right;\n}\n");
+    }
+
+    /// The discriminating counterpart: TWO commented statements (both
+    /// run candidates, sharing a source column), separated by a genuine
+    /// own-line comment. `already_trailing`'s identity check correctly
+    /// keeps that own-line comment as its own `BodyElem::Comment`, which
+    /// ends the run between the two statements (`has_trailing` is false
+    /// for a `Comment` element) — both statements fall back to the
+    /// default one space, matching the real C1 formatter (verified
+    /// before writing this fixture). A mutant weakening the check to
+    /// `.is_some()` (statement 1 has SOME trailing comment on record,
+    /// regardless of identity) would wrongly omit the own-line comment
+    /// from `body` entirely, making the two statements look ADJACENT to
+    /// the run scan and aligning them — a visible column shift.
+    #[test]
+    fn an_own_line_comment_wrongly_treated_as_trailing_corrupts_run_adjacency() {
+        same_as_c1("main() {\n 1: left;    // a\n // own line\n 2: right;   // b\n}\n");
+    }
+
+    /// Pins the two comment-surface guards still standing after this task
+    /// (mirrors `a_comment_nested_inside_a_use_path_is_not_silently_dropped`'s
     /// role for task 2's own guard): each fixture is otherwise a valid,
     /// parseable comment-bearing program that a shallower scan — or a
     /// guard mixed up with a neighboring one — could let slip past
     /// silently instead of panicking loudly. Two guards this list used
-    /// to pin — a body's own-line comments and a doc run's interior
-    /// comment — are GONE: this task implements both surfaces (see
-    /// `own_line_comments_inside_a_body` and
-    /// `doc_run_interior_and_trailing_comments` below), per a ruling
-    /// that a doc-run comment is an own-line comment (this task's
-    /// subject), not "interior to a token/entry sequence" (task 6's).
-    #[test]
-    #[should_panic(expected = "a statement's trailing comment is task 5's surface")]
-    fn statement_trailing_comment_guard_fires() {
-        let _ = format_green("main() {\n 1: left; // t\n}\n");
-    }
-
+    /// to pin — a statement's trailing comment and a function's
+    /// close-brace comment — are GONE: this task implements both (see
+    /// `an_alignment_run_and_its_boundaries` and
+    /// `trailing_comments_on_declarations` above).
     #[test]
     #[should_panic(expected = "interior list comments are task 6's surface")]
     fn interior_comma_comment_guard_fires() {
@@ -1243,12 +1715,6 @@ mod tests {
     #[should_panic(expected = "a function's open-brace trailing comment is task 6's surface")]
     fn function_open_brace_comment_guard_fires() {
         let _ = format_green("main() { // open\n 1: left;\n}\n");
-    }
-
-    #[test]
-    #[should_panic(expected = "a function's close-brace trailing comment is task 5's surface")]
-    fn function_close_brace_comment_guard_fires() {
-        let _ = format_green("main() {\n 1: left;\n} // close\n");
     }
 
     /// The middle fixture is also this task's DOUBLE-PRINT guard: `//
@@ -1294,6 +1760,19 @@ mod tests {
         same_as_c1(
             "main() {\n    // about step\n    step() {\n 1: left;\n    }\n\n    @step();\n}\n",
         );
+    }
+
+    /// A nested `FUNCTION`'s own close-brace comment, immediately
+    /// followed (no blank line) by a statement at the OUTER body's own
+    /// level: the same double-print shape `standalone_comments_between_declarations`
+    /// pins at the top level, one level down — the nested function's
+    /// `}`-comment is `print_body`'s own `consumed` set (built from
+    /// `body_elem_node`, which covers `BodyElem::Nested`, not just
+    /// `Statement`), so it does not ALSO reprint as statement 2's own
+    /// leading run.
+    #[test]
+    fn a_nested_functions_close_brace_comment_does_not_double_print() {
+        same_as_c1("main() {\n    step() {\n 1: left;\n    } // after nested\n 2: left;\n}\n");
     }
 
     /// The doc-run-comment ruling's own surface (module doc's second
