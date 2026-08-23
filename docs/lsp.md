@@ -769,7 +769,7 @@ or not.
 | Code actions (quickfixes) | a full successful analysis (lint ran) | empty list |
 | Semantic tokens | a full successful analysis (resolution-aware) | `null` — clients keep the previous tokens or static grammar coloring |
 | Document symbols | a successful parse (the tree only) | `null` |
-| Formatting | a successful parse (CST only) | `null` — the parse error is already on screen as a diagnostic |
+| Formatting | a successful parse (the tree only) | `null` — the parse error is already on screen as a diagnostic |
 | Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) | the single-file view described everywhere above |
 
 ### Materialized standard library

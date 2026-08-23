@@ -69,22 +69,24 @@ Dependencies are deliberately minimal: `serde`/`serde_json` only, `proptest` as 
 
 ### Pipeline and key types
 
-`.pmc` → `lexer.rs` (`Vec<Token>`; grammar 0.3 incl. positional `?`/`!` doc-line tokens) → `parser.rs` (recursive descent; `parse` = `lower_cst ∘ parse_cst` over one lossless CST — the CST is fmt's path; the compiler's and the LSP's is `parse_green` + extraction) → `compiler.rs::compile(source, CompileOptions) -> CompileOutput` which internally runs duplicate-binding checks → flatten (name mangling + visibility; also builds `Analysis.docs`, the qualified doc/deprecation map consumed by the `deprecated-call` lint, hover, and completion tags) → `ir::lower` (`IrProgram`, a versioned per-function CFG) → `optimizer::optimize` (in-place) → `codegen::emit_program` (CFG → `.pma` text only) → core `asm::assemble` (`ObjectFile`). The IR is a **documented, versioned JSON artifact** (`IR_VERSION` in `ir.rs`), not an internal detail.
+`.pmc` → `lexer.rs` (`Vec<Token>`; grammar 0.3 incl. positional `?`/`!` doc-line tokens) → `parser.rs` (recursive descent; the green tree is the one path every consumer runs — `parse_green_from_tokens` feeds the compiler and the `.pmc` language service through `syntax::extract_program`'s flattening, and feeds `fmt` directly over the raw tree and its trivia, since extraction flattens the tree and drops trivia; `parse` = `lower_cst ∘ parse_cst` over the C1 CST survives only as the differential oracle and inside `#[cfg(test)]` modules) → `compiler.rs::compile(source, CompileOptions) -> CompileOutput` which internally runs duplicate-binding checks → flatten (name mangling + visibility; also builds `Analysis.docs`, the qualified doc/deprecation map consumed by the `deprecated-call` lint, hover, and completion tags) → `ir::lower` (`IrProgram`, a versioned per-function CFG) → `optimizer::optimize` (in-place) → `codegen::emit_program` (CFG → `.pma` text only) → core `asm::assemble` (`ObjectFile`). The IR is a **documented, versioned JSON artifact** (`IR_VERSION` in `ir.rs`), not an internal detail.
 
 Then: core `linker::link(objects, libraries, LinkOptions) -> LinkOutput { executable, map, report }` → `vm::Machine::from_executable` → `run` / `DebugSession`.
 
-**Two parse paths coexist until the C2 cutover.** The compiler front end
-is the green one: `analyze`/`analyze_staged` run `lex_with(WithComments)`
+**The compiler front end, the `.pmc` language service, and `fmt` all run
+the green tree.** `analyze`/`analyze_staged` run `lex_with(WithComments)`
 → `parse_green_from_tokens` → `syntax::extract_program`, and so do the
 embedded stdlib's roster and the build driver's source scan. Lint follows
 for free — `LintContext` carries tokens and the flattened AST, never a
-CST. Still on the C1 path: `fmt` (`parse_cst` directly) and the
-optimizer/IR/codegen unit tests (`parse` directly). `parse` and
-`lower_cst` survive as the differential oracle: `text() == source`, and
-`extract_program` struct-equal to `lower_cst(parse_cst(...))` across the
-corpus. **When the cutover lands, this paragraph and the `parse` clause
-above both change** — `lower_cst`, `parse_cst` and the C1 CST all go away
-together.
+CST. `fmt` runs the same `parse_green_from_tokens` but skips extraction,
+printing straight from the raw tree and its trivia (extraction flattens
+the tree and drops trivia). `parse` (`lower_cst ∘ parse_cst`, over the
+C1 CST) has zero production callers left — it survives only as the
+differential oracle (`text() == source`, and `extract_program`
+struct-equal to `lower_cst(parse_cst(...))` across the corpus) and as
+the parse behind the optimizer's, IR's, and codegen's own
+`#[cfg(test)]` modules. The C1 CST goes away at the PM cutover — a
+later plan, not this one.
 
 ### The `.tmc` front end (`turing-machine/src/`)
 
@@ -159,7 +161,7 @@ Four lint surfaces — `.pmc`, `.pma`, `.tmc`, `.tma` — share **one allow name
 - **Two quickfixes were withheld after probing**: `redundant-identity-pairs` (not byte-identical) and `dead-rule` (silent-miscompile risk); ten more rules carry documented `None` reasons. Re-derive the proof before adding either.
 - **Core's `unused-label` sees labels reached through `Dispatch.targets`/`Frame.exits`.** The old `.tma` force-suppression (400 false findings on the flagship) was **deleted** — do not reintroduce it.
 
-`fmt` on `.pmc`/`.tmc` is CST-driven, canonical, idempotent and **whitespace-only**; `.pma`/`.tma` use core's canonical-grid `asm/fmt.rs`. The gate for any formatter or text-only change: compile the embedded stdlib before and after at both opt levels and byte-compare the object. Interior list comments print **in place** (own-line keeps its line, trailing rides the preceding entry, a LINE comment forces multi-line). One documented gap, deliberately unasserted so a future fix does not fail the fixtures: the five `paren_list`/`with-map` surfaces break to multi-line on ANY interior comment — a rendering gap, not data loss.
+`fmt` is canonical, idempotent and **whitespace-only** on both source languages: `.pmc` prints from the green syntax tree (`syntax/`), `.tmc` still from its own lossless CST; `.pma`/`.tma` use core's canonical-grid `asm/fmt.rs`. The gate for any formatter or text-only change: compile the embedded stdlib before and after at both opt levels and byte-compare the object. Interior list comments print **in place** (own-line keeps its line, trailing rides the preceding entry, a LINE comment forces multi-line). One documented gap, deliberately unasserted so a future fix does not fail the fixtures: the five `paren_list`/`with-map` surfaces break to multi-line on ANY interior comment — a rendering gap, not data loss.
 
 ### Project manifests and build drivers
 

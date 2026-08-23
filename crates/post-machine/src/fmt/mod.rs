@@ -3,13 +3,13 @@
 //! returns a `Result` and never prints — `cli/fmt.rs` is the only place
 //! that renders errors or touches the filesystem.
 //!
-//! The printing itself lives in [`print`], which walks the lossless
+//! The printing itself lives in `print`, which walks the lossless
 //! green syntax tree (`docs/core.md` (syntax trees)). That module is
 //! where the whole canonical-form contract is written down —
 //! indentation and namespace nesting, label/command-column alignment,
 //! comma-group layout and its greedy-fill fallback, the blank-line
 //! policy, doc and attention runs, `use` lists, and every comment
-//! position the language admits. [`trivia`] holds the raw
+//! position the language admits. `trivia` holds the raw
 //! sibling-token queries comment attribution is re-derived from. This
 //! module is the public door and nothing else.
 
