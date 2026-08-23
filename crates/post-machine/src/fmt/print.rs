@@ -1,10 +1,16 @@
-//! The green-tree `.pmc` printer (`docs/pmt/fmt.md`,
-//! `docs/core.md` (syntax tree)) — a SEPARATE, parallel implementation
-//! of [`super::format`] built directly on the lossless green tree
-//! instead of the hand-typed C1 CST. It grows surface by surface across
-//! several plans; the C1 printer in [`super`] stays untouched as the
-//! differential oracle every widened surface is checked against (this
-//! module's own `tests`), until the corpus-wide cutover retires it.
+//! The `.pmc` printer (`docs/pmt/fmt.md`, `docs/core.md` (syntax
+//! trees)) — the whole implementation behind [`super::format`], built
+//! directly on the lossless green tree. It replaced a printer that
+//! walked a hand-typed CST ("C1"), and was grown surface by surface
+//! against that printer as a differential oracle before being cut over
+//! wholesale; C1's CST-walking printer is gone.
+//!
+//! Notes below that say a rule is *ported* from `render_items`,
+//! `command_column`, `print_use` and the like name C1's own functions.
+//! They record where a rule came from and that it crossed over
+//! unchanged — history, not code to open. This module's `tests` are the
+//! surviving trace of that oracle: every expected literal in them was
+//! captured from the C1 printer while it still existed.
 //!
 //! **Scope of this module today**: the whole `.pmc` language — the file
 //! itself, `use` declarations (paths, aliases, and every interior
@@ -78,19 +84,36 @@ use crate::syntax::{
 
 use super::trivia;
 
-/// `.pmc` source → canonical text, the green-tree path
-/// (`docs/core.md` (syntax tree)). Lexes `WithComments`, parses straight
-/// to the green tree (no C1 CST involved), and prints from typed views
-/// and raw trivia queries over it. A lex/parse error is returned as
-/// `Err`, never printed (thin renderer, same discipline as
-/// [`super::format`]).
-///
-/// `#[allow(dead_code)]`: nothing outside this module's own tests calls
-/// it yet — later plans widen coverage and, eventually, `cli/fmt.rs`
-/// switches over to it. Every function below is reached only through
-/// this one, so this single attribute covers the whole file.
-#[allow(dead_code)]
-pub(crate) fn format_green(source: &str) -> Result<String, CompileError> {
+/// Spaces per block level (`docs/pmt/fmt.md` (indentation) — 4 spaces,
+/// never tabs).
+const INDENT_UNIT: usize = 4;
+
+/// Line width limit (`docs/pmt/fmt.md` (comma groups) — 80 characters,
+/// matching lint's `line-too-long`; char count, not bytes).
+const LINE_WIDTH: usize = 80;
+
+/// Normalizes one comment's raw trivia text for printing
+/// (`docs/pmt/fmt.md` (comments)): every line's TRAILING whitespace
+/// stripped, joined back with LF only. A comment token's text is raw
+/// trivia, captured character-for-character from source — a line
+/// comment's trailing spaces, or a `\r` immediately before the closing
+/// `\n` of a CRLF source line, survive into the token verbatim unless
+/// stripped here; nothing else in the pipeline ever touches comment text.
+/// Only each line's END is touched: a block comment's interior LEADING
+/// whitespace is preserved verbatim, so `trim_end` must not reach it.
+fn normalize_comment_text(text: &str) -> String {
+    text.split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `.pmc` source → canonical text (`docs/core.md` (syntax trees)).
+/// Lexes `WithComments`, parses straight to the green tree, and prints
+/// from typed views and raw trivia queries over it. A lex/parse error is
+/// returned as `Err`, never printed (thin renderer) — [`super::format`]
+/// is the public wrapper and adds nothing but its own signature.
+pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let root = SyntaxNode::new_root(green);
@@ -101,9 +124,9 @@ pub(crate) fn format_green(source: &str) -> Result<String, CompileError> {
     let line_index = TextLineIndex::new(source);
     let mut out = String::new();
     print_items(&mut out, root.children_with_tokens(), 0, &[], &line_index);
-    // Edge case (module doc's "Edge cases", mirrored from
-    // `super::print_cst`): an empty or whitespace-only file still
-    // reprints as exactly one newline.
+    // Edge case (`docs/pmt/fmt.md` (indentation), mirrored from C1's
+    // `print_cst`): an empty or whitespace-only file still reprints as
+    // exactly one newline.
     if out.is_empty() {
         out.push('\n');
     }
@@ -125,7 +148,7 @@ fn brace_interior(node: &SyntaxNode) -> impl Iterator<Item = SyntaxElement> + '_
 /// called on the FILE root's own children) and a namespace's interior
 /// (one level deeper, called on [`namespace_interior`]) share this walk,
 /// so nesting a namespace inside a namespace recurses "for free" the
-/// same way [`super::print_top_items`] does for C1.
+/// same way C1's `print_top_items` did.
 ///
 /// `reserved` is the caller's own already-printed comment tokens (a
 /// namespace's [`super::trivia::open_trailing`] run) — see the module
@@ -172,10 +195,12 @@ fn print_items(
     for e in &elements {
         match e {
             SyntaxElement::Node(node) => {
-                // The `i > 0`-equivalent brace-edge suppression
-                // (`super::top_wants_blank_before`'s doc): the first
-                // printed unit at this level never gets a forced blank
-                // line, regardless of what precedes it in source.
+                // The `i > 0`-equivalent brace-edge suppression: the
+                // first printed unit at this level never gets a forced
+                // blank line, regardless of what precedes it in source.
+                // The other brace edge, "immediately before `}`", cannot
+                // arise — no unit follows the last one to carry a
+                // blank.
                 if !first && trivia::blank_before_unit(node) {
                     out.push('\n');
                 }
@@ -263,7 +288,7 @@ fn print_item(out: &mut String, node: &SyntaxNode, indent: usize, line_index: &T
 }
 
 /// `namespace NAME { … }` (`docs/pmt/fmt.md` (indentation)),
-/// mirroring [`super::print_namespace`]'s decisions: one space before
+/// mirroring C1's `print_namespace` decisions: one space before
 /// `{`, the closing `}` alone at the header's own indent, and its
 /// `items` printed one level deeper via the same [`print_items`] walk
 /// the file level uses, so nesting recurses for free. The open/close
@@ -290,7 +315,7 @@ fn print_namespace(
         out.push(' ');
         let texts: Vec<String> = open
             .iter()
-            .map(|c| super::normalize_comment_text(c.text()))
+            .map(|c| normalize_comment_text(c.text()))
             .collect();
         out.push_str(&texts.join(" "));
         out.push('\n');
@@ -298,7 +323,7 @@ fn print_namespace(
     print_items(
         out,
         brace_interior(node),
-        indent + super::INDENT_UNIT,
+        indent + INDENT_UNIT,
         &open,
         line_index,
     );
@@ -306,7 +331,7 @@ fn print_namespace(
     out.push('}');
     if let Some(c) = trivia::trailing_comment(node) {
         out.push(' ');
-        out.push_str(&super::normalize_comment_text(c.text()));
+        out.push_str(&normalize_comment_text(c.text()));
     }
     out.push('\n');
 }
@@ -325,8 +350,8 @@ fn print_namespace(
 /// simply stays pending until the drain that follows), so it takes the
 /// index the path's OWN closing bumps the count to, one step ahead of
 /// scanning past the path node — never a reason to guard the shape
-/// away as somebody else's surface, unlike [`super::print_use`]'s own
-/// C1-CST-field precedent (`UseCst::interior`) that this reproduces:
+/// away as somebody else's surface, unlike the C1-CST-field precedent
+/// this reproduces (`UseCst::interior`, drained by C1's `print_use`):
 /// there `Parser::interior_comments` and the mid-path drain already
 /// collapse onto that same index for the same reason, just recorded as
 /// one flat `Vec<(usize, Comment)>` instead of walked live off tokens.
@@ -375,7 +400,7 @@ fn comment_own_line(t: &SyntaxToken) -> bool {
 }
 
 /// One `use` list (`docs/pmt/fmt.md` (spacing, comments inside a use
-/// list)), mirroring [`super::print_use`]'s decisions in full — paths
+/// list)), mirroring C1's `print_use` decisions in full — paths
 /// in source order, `::`-joined, `as`-aliased, one canonical space
 /// after `use` and after each comma, AND interior comments printed in
 /// place rather than relocated below the statement: a comment trailing
@@ -413,7 +438,7 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
         if !use_line_trailing.is_empty() {
             out.push(' ');
             for c in &use_line_trailing {
-                out.push_str(&super::normalize_comment_text(c.text()));
+                out.push_str(&normalize_comment_text(c.text()));
             }
         } else if slot(0, true).is_empty() {
             // No comment rides the `use` line at all — the first path
@@ -428,7 +453,7 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
             for c in slot(i, true) {
                 out.push('\n');
                 out.push_str(&cont);
-                out.push_str(&super::normalize_comment_text(c.text()));
+                out.push_str(&normalize_comment_text(c.text()));
                 out.push('\n');
                 out.push_str(&cont);
             }
@@ -448,7 +473,7 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
             // own line (docs/pmt/fmt.md (comments inside a use list)).
             for c in slot(i + 1, false) {
                 out.push(' ');
-                out.push_str(&super::normalize_comment_text(c.text()));
+                out.push_str(&normalize_comment_text(c.text()));
             }
         }
         // A tail-slot own-line comment sits on its own line before the `;`.
@@ -456,7 +481,7 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
         for c in &tail_own_line {
             out.push('\n');
             out.push_str(&cont);
-            out.push_str(&super::normalize_comment_text(c.text()));
+            out.push_str(&normalize_comment_text(c.text()));
         }
         // Either tail kind can be a LINE comment, which eats the rest of
         // its physical line — the `;` can never follow directly on that
@@ -471,13 +496,13 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
     out.push(';');
     if let Some(tc) = trivia::trailing_comment(node) {
         out.push(' ');
-        out.push_str(&super::normalize_comment_text(tc.text()));
+        out.push_str(&normalize_comment_text(tc.text()));
     }
     out.push('\n');
 }
 
 /// One `use`-list path (`docs/pmt/fmt.md` (spacing)): `::` tight,
-/// ` as ALIAS` one space each side if present — [`super::render_use_path`]'s
+/// ` as ALIAS` one space each side if present — C1's `render_use_path`
 /// decision, ported to read segments/alias off [`UsePathView`] instead
 /// of a parsed `UsePath`.
 fn render_use_path(p: &UsePathView) -> String {
@@ -496,19 +521,19 @@ fn render_use_path(p: &UsePathView) -> String {
 
 /// One own-line comment — leading, standalone, or a namespace's
 /// open/close-brace comment reprinted by their own callers via
-/// [`super::normalize_comment_text`] directly. Content printing is
+/// [`normalize_comment_text`] directly. Content printing is
 /// IDENTICAL regardless of the comment's relationship to its neighbors;
 /// only the blank-line decision made by [`print_items`]'s caller
-/// differs — [`super::print_comment`]'s same rule, ported to a raw
+/// differs — C1's `print_comment` rule unchanged, ported to a raw
 /// [`SyntaxToken`].
 fn print_comment(out: &mut String, comment: &SyntaxToken, indent: usize) {
     out.push_str(&" ".repeat(indent));
-    out.push_str(&super::normalize_comment_text(comment.text()));
+    out.push_str(&normalize_comment_text(comment.text()));
     out.push('\n');
 }
 
 /// Header + doc run + body + closing brace (`docs/pmt/fmt.md`
-/// (indentation)), mirroring [`super::print_function`]'s decisions —
+/// (indentation)), mirroring C1's `print_function` decisions —
 /// used for both top-level and nested functions, a nested `FUNCTION`
 /// being the same shape one indent level deeper. A bound doc run prints
 /// via [`print_doc_run`], then any comment sitting between the run's
@@ -580,17 +605,17 @@ fn print_function(
         out.push(' ');
         let texts: Vec<String> = open
             .iter()
-            .map(|c| super::normalize_comment_text(c.text()))
+            .map(|c| normalize_comment_text(c.text()))
             .collect();
         out.push_str(&texts.join(" "));
         out.push('\n');
     }
-    print_body(out, node, indent + super::INDENT_UNIT, &open, line_index);
+    print_body(out, node, indent + INDENT_UNIT, &open, line_index);
     out.push_str(&pad);
     out.push('}');
     if let Some(c) = trivia::trailing_comment(node) {
         out.push(' ');
-        out.push_str(&super::normalize_comment_text(c.text()));
+        out.push_str(&normalize_comment_text(c.text()));
     }
     out.push('\n');
 }
@@ -650,7 +675,7 @@ fn doc_run_trailing_comments(dr: &SyntaxNode) -> (Vec<SyntaxToken>, bool) {
 /// rule above, at the run's own indent" —
 /// `comment_inside_a_doc_run_prints_under_existing_comment_rules` in
 /// [`super`]'s own tests is the C1 fixture this ports), mirroring
-/// [`super::print_doc_run`]'s decisions: each at the bound declaration's
+/// C1's `print_doc_run` decisions: each at the bound declaration's
 /// own `indent`, blank lines between run items collapsed to one (index
 /// 0's own leading blank is the caller's `blank_before_unit` decision,
 /// not this loop's — same split as the C1 side). `DOC_RUN`'s own
@@ -711,7 +736,7 @@ fn doc_line_payload(t: &SyntaxToken) -> String {
 
 /// One `?`/`!` line's canonical form: `sigil` alone when `text` is
 /// empty, else `sigil` + one space + `text` verbatim — ported unchanged
-/// from [`super::print_doc_run_line`] (pure text, no green-tree input).
+/// from C1's `print_doc_run_line` (pure text, no green-tree input).
 fn print_doc_run_line(out: &mut String, pad: &str, sigil: char, text: &str) {
     out.push_str(pad);
     out.push(sigil);
@@ -903,7 +928,7 @@ fn statement_trailing_and_leftovers(
 }
 
 /// A `FUNCTION` node's own body — [`brace_interior`] between its `{` and
-/// `}` — mirroring [`super::print_function`]'s body loop: one pass
+/// `}` — mirroring C1's `print_function` body loop: one pass
 /// collects each `STATEMENT`/nested `FUNCTION`/own-line comment in
 /// source order (the single ordered walk [`BodyElem`]'s own doc
 /// explains), a second computes the shared command column from every
@@ -1069,7 +1094,7 @@ fn print_body(
     // front — the trailing-comment alignment pre-pass
     // ([`compute_trailing_spacing`]) needs every run member's rendered
     // width before any of them is printed, mirroring
-    // [`super::print_function`]'s own `codes` pre-pass. Non-statement
+    // the `codes` pre-pass C1's `print_function` ran. Non-statement
     // elements get an unused empty placeholder — `compute_trailing_spacing`
     // never indexes into one, since a run can only ever contain
     // `BodyElem::Statement` entries (see that function's own doc).
@@ -1217,14 +1242,14 @@ fn print_body(
 }
 
 /// Dispatches one node-backed [`BodyElem`] to its printer — ported from
-/// [`super::print_body_item`]. [`BodyElem::Comment`]/[`BodyElem::TailComment`]
+/// C1's `print_body_item`. [`BodyElem::Comment`]/[`BodyElem::TailComment`]
 /// never reach this dispatcher: [`print_body`]'s own loop prints them
 /// directly, mirroring how [`print_items`] prints a standalone comment
 /// token itself rather than routing it through [`print_item`].
 /// `code`/`trailing_spacing` are [`print_body`]'s pre-pass outputs,
 /// meaningful only for [`BodyElem::Statement`] (mirrors
-/// [`super::print_body_item`]'s own `code`/`trailing_spacing` parameters,
-/// unused by its `Nested`/`Comment` arms).
+/// the `code`/`trailing_spacing` parameters C1's `print_body_item`
+/// took, unused by its `Nested`/`Comment` arms).
 fn print_body_item(
     out: &mut String,
     elem: &BodyElem,
@@ -1243,18 +1268,18 @@ fn print_body_item(
     }
 }
 
-/// Label prefix width: the smallest multiple of [`super::INDENT_UNIT`]
+/// Label prefix width: the smallest multiple of [`INDENT_UNIT`]
 /// that is `>= max(base_body_indent, P + 2)`, where `P` is the widest
 /// INLINE labeled statement's label-prefix width in the body — ported
-/// unchanged from [`super::command_column`] (pure `usize` arithmetic, no
+/// unchanged from C1's `command_column` (pure `usize` arithmetic, no
 /// green-tree input).
 fn command_column(p: usize, base_body_indent: usize) -> usize {
     let min = base_body_indent.max(p + 2);
-    min.div_ceil(super::INDENT_UNIT) * super::INDENT_UNIT
+    min.div_ceil(INDENT_UNIT) * INDENT_UNIT
 }
 
 /// `P`: the max label-prefix width among `body`'s own INLINE labeled
-/// statements — ported from [`super::max_inline_label_prefix_width`],
+/// statements — ported from C1's `max_inline_label_prefix_width`,
 /// reading `body`'s [`BodyElem`]s instead of C1's `&[BodyItem]`. Only
 /// looks at THIS function's own body — a nested function's statements
 /// belong to ITS OWN body/command-column, and never appear in `body`
@@ -1275,7 +1300,7 @@ fn max_inline_label_prefix_width(body: &[BodyElem]) -> usize {
 /// number as WRITTEN (leading zeros preserved, fmt never touches a
 /// token), not re-derived from the parsed value — joined by one space,
 /// e.g. `1:` or the stacked `1: 2:`. Empty for an unlabeled statement.
-/// Ported unchanged from [`super::label_prefix_text`] (`&[Label]` is the
+/// Ported unchanged from C1's `label_prefix_text` (`&[Label]` is the
 /// same [`crate::parser::Label`] on both sides).
 fn label_prefix_text(labels: &[Label]) -> String {
     labels
@@ -1286,14 +1311,14 @@ fn label_prefix_text(labels: &[Label]) -> String {
 }
 
 /// Char width of [`label_prefix_text`] — ported unchanged from
-/// [`super::label_prefix_width`].
+/// C1's `label_prefix_width`.
 fn label_prefix_width(labels: &[Label]) -> usize {
     label_prefix_text(labels).chars().count()
 }
 
 /// Left margin for a `prefix_width`-wide label prefix at `command_col`,
 /// or `None` if that would leave less than the mandatory 1-space margin
-/// — ported unchanged from [`super::label_margin`].
+/// — ported unchanged from C1's `label_margin`.
 fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
     command_col
         .checked_sub(prefix_width + 1)
@@ -1301,7 +1326,7 @@ fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
 }
 
 /// One statement's code up to but NOT including the final `;` — ported
-/// from [`super::render_statement_code`], reading a `Statement`'s own
+/// from C1's `render_statement_code`, reading a `Statement`'s own
 /// `labels`/`items` plus the separately-derived `label_break` and
 /// `newline_before` instead of a `StatementCst`'s fields directly. See
 /// that function's own doc for the unlabeled / inline-labeled /
@@ -1354,7 +1379,7 @@ fn render_statement_code(
 /// pre-pass), the `;`, then a same-line trailing comment if any — spaced
 /// per `trailing_spacing` ([`compute_trailing_spacing`],
 /// `docs/pmt/fmt.md` (comments)) — then the newline. Ported from
-/// [`super::print_statement`], reading the trailing comment off `s`'s
+/// C1's `print_statement`, reading the trailing comment off `s`'s
 /// own resolved `trailing` field ([`statement_trailing_and_leftovers`])
 /// instead of a `StatementCst::trailing` field — NOT a fresh
 /// `trivia::trailing_comment(&s.node)` call, which would miss a
@@ -1364,7 +1389,7 @@ fn print_statement(out: &mut String, s: &StmtElem, code: &str, trailing_spacing:
     out.push(';');
     if let Some(tc) = &s.trailing {
         out.push_str(&" ".repeat(trailing_spacing));
-        out.push_str(&super::normalize_comment_text(tc.text()));
+        out.push_str(&normalize_comment_text(tc.text()));
     }
     out.push('\n');
 }
@@ -1373,7 +1398,7 @@ fn print_statement(out: &mut String, s: &StmtElem, code: &str, trailing_spacing:
 /// follows it (a statement's trailing comment always rides the line
 /// carrying the final `;`, even when a multi-line own-line label or
 /// comma-group spreads the rest of the statement across earlier lines) —
-/// ported unchanged from [`super::code_line_width_incl_semi`] (pure
+/// ported unchanged from C1's `code_line_width_incl_semi` (pure
 /// text/`usize`, no green-tree input).
 fn code_line_width_incl_semi(code: &str) -> usize {
     let last_line = code.rsplit('\n').next().unwrap_or(code);
@@ -1381,7 +1406,7 @@ fn code_line_width_incl_semi(code: &str) -> usize {
 }
 
 /// Trailing-comment alignment (`docs/pmt/fmt.md` (comments)) — ported
-/// from [`super::compute_trailing_spacing`], reading `body`'s
+/// from C1's `compute_trailing_spacing`, reading `body`'s
 /// [`BodyElem`]s instead of C1's `&[BodyItem]` and each member's
 /// trailing comment via [`resolved_trailing`] instead of a
 /// `StatementCst::trailing` field — the SAME resolved value
@@ -1395,8 +1420,8 @@ fn code_line_width_incl_semi(code: &str) -> usize {
 /// with a trailing comment; other entries are unused filler.
 ///
 /// **The run-boundary rule**, derived by reading
-/// [`super::compute_trailing_spacing`]'s own scan (not restated from any
-/// plan brief) and confirmed against the real C1 formatter on several
+/// C1's own `compute_trailing_spacing` scan (not restated from any
+/// plan brief) and confirmed against the C1 formatter on several
 /// hand-built sources before this doc was written: a run is a MAXIMAL
 /// sequence of CONSECUTIVE [`BodyElem::Statement`] entries, each carrying
 /// a trailing comment. The scan that finds one has two distinct rules —
@@ -1436,9 +1461,9 @@ fn code_line_width_incl_semi(code: &str) -> usize {
 /// match the rest of the run — reading it into the verdict would flip an
 /// aligned run to ragged on every other reformat. Excluding it is what
 /// keeps a run's aligned/ragged verdict — and so its whole layout —
-/// stable under repeated formatting (`docs/pmt/fmt.md` (comments), same
-/// reasoning C1 documents on [`super::compute_trailing_spacing`] under
-/// "Idempotence note"). When `aligned`, every non-overflowing member gets
+/// stable under repeated formatting (`docs/pmt/fmt.md` (comments) —
+/// the same reasoning C1 recorded as its own "Idempotence note").
+/// When `aligned`, every non-overflowing member gets
 /// `align_col - code_w[off]` spaces (which lands its `//` exactly at
 /// `align_col`); when not, every member (overflowing or not) gets one
 /// space.
@@ -1510,7 +1535,7 @@ fn compute_trailing_spacing(
                 // Measured on the NORMALIZED text: a raw trailing
                 // `\r`/space in the token must not inflate the column
                 // math for a width nothing will actually print.
-                super::normalize_comment_text(tc.text()).chars().count()
+                normalize_comment_text(tc.text()).chars().count()
             })
             .collect();
 
@@ -1518,7 +1543,7 @@ fn compute_trailing_spacing(
             let max_code_w = *code_w.iter().max().expect("run_len >= 2");
             let align_col = max_code_w + 1;
             let overflow: Vec<bool> = (0..run_len)
-                .map(|off| align_col + comment_w[off] > super::LINE_WIDTH)
+                .map(|off| align_col + comment_w[off] > LINE_WIDTH)
                 .collect();
             let source_cols: Vec<u32> = (run_start..run_end)
                 .map(|k| {
@@ -1553,15 +1578,28 @@ fn compute_trailing_spacing(
 /// Comma-group layout (`docs/pmt/fmt.md` (comma groups)): respect the
 /// author's own line breaks (`newline_before`), with a greedy-fill width
 /// fallback, PLUS `leading`'s mid-comma-group comments
-/// ([`super::CommaItem::leading`]'s green re-derivation,
-/// [`item_leading_comments`]) — ported from [`super::render_items`] in
+/// ([`crate::cst::CommaItem::leading`]'s green re-derivation,
+/// [`item_leading_comments`]) — ported from C1's `render_items` in
 /// full. `items`, `newline_before` and `leading` are parallel, index 0's
-/// `newline_before` always `false`. See [`super::render_items`]'s own
-/// doc for the per-group fit-or-greedy-fill decision this reproduces
-/// unchanged, and [`layout_leading`] for how a leading comment run
-/// resolves to an inline prefix or a forced break, folded into the SAME
-/// group-boundary machinery a `newline_before` break uses (a forced
-/// break behaves like an author newline for grouping purposes).
+/// `newline_before` always `false`.
+///
+/// Items are first partitioned into groups at each `newline_before`
+/// boundary — the first item always starts group 0, and an item with
+/// `newline_before` set always starts a NEW group. When no item sets it,
+/// this yields exactly one group holding every item, which collapses the
+/// no-author-break rules onto the very same per-group logic as the
+/// preserved-line one: each group is emitted as one line if it fits
+/// (`command_col` + its comma-joined text + 1 for the trailing `,`
+/// boundary or the statement's final `;`, both width 1, <= 80), else
+/// [`greedy_fill_group`] repacks just that group. A non-last group's
+/// line ends with a trailing `,` (the boundary to the next group); the
+/// very last group carries none — [`print_statement`] appends the final
+/// `;` itself.
+///
+/// See [`layout_leading`] for how a leading comment run resolves to an
+/// inline prefix or a forced break, folded into the SAME group-boundary
+/// machinery a `newline_before` break uses (a forced break behaves like
+/// an author newline for grouping purposes).
 fn render_items(
     items: &[Item],
     newline_before: &[bool],
@@ -1609,7 +1647,7 @@ fn render_items(
         let joined = group_texts.join(", ");
         // `+ 1` reserved for the trailing `,`/`;` folded into
         // `< LINE_WIDTH` (clippy::int_plus_one), same as C1.
-        if command_col + joined.chars().count() < super::LINE_WIDTH {
+        if command_col + joined.chars().count() < LINE_WIDTH {
             out.push_str(&joined);
         } else {
             greedy_fill_group(&mut out, &group_texts, command_col);
@@ -1623,7 +1661,7 @@ fn render_items(
 
 /// How one [`item_leading_comments`] entry resolves
 /// (`docs/pmt/fmt.md` (comments)) — ported unchanged from
-/// [`super::LeadingLayout`], reading `&[SyntaxToken]` instead of
+/// C1's `LeadingLayout`, reading `&[SyntaxToken]` instead of
 /// `&[Comment]`. A BLOCK comment with no LINE comment among it/its
 /// siblings stays inline, prepended to the item's own text
 /// (`inline_prefix`) — the join/greedy-fill logic downstream never has
@@ -1641,7 +1679,7 @@ struct LeadingLayout {
     pre_item_lines: Vec<String>,
 }
 
-/// Ported unchanged from [`super::layout_leading`], reading a
+/// Ported unchanged from C1's `layout_leading`, reading a
 /// `SyntaxToken`'s own `kind()`/`text()` instead of a `Comment`'s
 /// `kind`/`text` fields.
 fn layout_leading(leading: &[SyntaxToken]) -> LeadingLayout {
@@ -1652,13 +1690,13 @@ fn layout_leading(leading: &[SyntaxToken]) -> LeadingLayout {
         Some(break_pos) => {
             let mut break_inline = String::new();
             for c in &leading[..break_pos] {
-                break_inline.push_str(&super::normalize_comment_text(c.text()));
+                break_inline.push_str(&normalize_comment_text(c.text()));
                 break_inline.push(' ');
             }
-            break_inline.push_str(&super::normalize_comment_text(leading[break_pos].text()));
+            break_inline.push_str(&normalize_comment_text(leading[break_pos].text()));
             let pre_item_lines = leading[break_pos + 1..]
                 .iter()
-                .map(|c| super::normalize_comment_text(c.text()))
+                .map(|c| normalize_comment_text(c.text()))
                 .collect();
             LeadingLayout {
                 inline_prefix: String::new(),
@@ -1670,7 +1708,7 @@ fn layout_leading(leading: &[SyntaxToken]) -> LeadingLayout {
         None => {
             let mut inline_prefix = String::new();
             for c in leading {
-                inline_prefix.push_str(&super::normalize_comment_text(c.text()));
+                inline_prefix.push_str(&normalize_comment_text(c.text()));
                 inline_prefix.push(' ');
             }
             LeadingLayout {
@@ -1688,7 +1726,7 @@ fn layout_leading(leading: &[SyntaxToken]) -> LeadingLayout {
 /// at `command_col`, then `command_col` spaces — leaving the cursor
 /// ready for the item that follows. The caller has already placed
 /// whatever separator (`,` + space, or nothing for item 0) belongs
-/// before it. Ported unchanged from [`super::emit_forced_break`].
+/// before it. Ported unchanged from C1's `emit_forced_break`.
 fn emit_forced_break(out: &mut String, layout: &LeadingLayout, command_col: usize) {
     out.push_str(&layout.break_inline);
     out.push('\n');
@@ -1701,7 +1739,7 @@ fn emit_forced_break(out: &mut String, layout: &LeadingLayout, command_col: usiz
 }
 
 /// The true output column after appending `text` at the point where the
-/// cursor sits at `base` — ported unchanged from [`super::line_width_after`]
+/// cursor sits at `base` — ported unchanged from C1's `line_width_after`
 /// (pure text/`usize`, no green-tree input). A [`LeadingLayout`] BLOCK
 /// comment can embed real newlines (a multi-line `/* … */` leading an
 /// item); when `text` contains one, everything up to its FIRST `\n`
@@ -1720,7 +1758,7 @@ fn line_width_after(base: usize, text: &str) -> usize {
 }
 
 /// Rule 2's greedy-fill, applied to one group's items — ported unchanged
-/// from [`super::greedy_fill_group`] (pure text/`usize`, no green-tree
+/// from C1's `greedy_fill_group` (pure text/`usize`, no green-tree
 /// input).
 fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
     let mut items = texts.iter();
@@ -1729,7 +1767,7 @@ fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
     let mut col = line_width_after(command_col, first);
     for text in items {
         let w = text.chars().count();
-        if col + 2 + w < super::LINE_WIDTH {
+        if col + 2 + w < LINE_WIDTH {
             out.push_str(", ");
             out.push_str(text);
             col = line_width_after(col + 2, text);
@@ -1743,7 +1781,7 @@ fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
     }
 }
 
-/// Canonical item text — ported unchanged from [`super::render_item`]
+/// Canonical item text — ported unchanged from C1's `render_item`
 /// (reads only [`Item`], the same [`crate::parser`] type on both sides).
 /// A number's WRITTEN spelling is the one thing NOT canonicalized here,
 /// same discipline as everywhere else in this module: emitted verbatim
@@ -1790,7 +1828,7 @@ fn render_item(item: &Item) -> String {
     }
 }
 
-/// Ported unchanged from [`super::builtin_name`].
+/// Ported unchanged from C1's `builtin_name`.
 fn builtin_name(which: Builtin) -> &'static str {
     match which {
         Builtin::Left => "left",
@@ -1800,7 +1838,7 @@ fn builtin_name(which: Builtin) -> &'static str {
     }
 }
 
-/// Ported unchanged from [`super::render_builtin_successor`].
+/// Ported unchanged from C1's `render_builtin_successor`.
 fn render_builtin_successor(succ: Successor, written: Option<&str>) -> String {
     match succ {
         Successor::FallThrough => String::new(),
@@ -1808,7 +1846,7 @@ fn render_builtin_successor(succ: Successor, written: Option<&str>) -> String {
     }
 }
 
-/// Ported unchanged from [`super::render_successor`].
+/// Ported unchanged from C1's `render_successor`.
 fn render_successor(succ: Successor, written: Option<&str>) -> String {
     match succ {
         Successor::FallThrough => String::new(),
@@ -1819,7 +1857,7 @@ fn render_successor(succ: Successor, written: Option<&str>) -> String {
     }
 }
 
-/// Ported unchanged from [`super::render_check_arm`].
+/// Ported unchanged from C1's `render_check_arm`.
 fn render_check_arm(arm: CheckArm, written: Option<&str>) -> String {
     match arm {
         CheckArm::Label(_) => written
@@ -1842,9 +1880,40 @@ mod tests {
     /// green before the C1 printer was deleted. They are therefore pins
     /// on the behavior this migration had to preserve, not restatements
     /// of whatever the green printer happens to do.
+    // -- Pure alignment arithmetic ---------------------------------------
+    //
+    // Moved here with `command_column` itself when the CST printer was
+    // deleted; the rest of that printer's tests drive `format` and stayed
+    // in [`super`].
+
+    #[test]
+    fn command_column_worked_values() {
+        // P=0 (no labels): base indent alone.
+        assert_eq!(command_column(0, 4), 4);
+        // P=2 (`1:`): max(4, 4) = 4.
+        assert_eq!(command_column(2, 4), 4);
+        // P=6 (`11111:`): max(4, 8) = 8.
+        assert_eq!(command_column(6, 4), 8);
+        // P=3 (`12:`): max(4, 5) = 5, rounded up to 8.
+        assert_eq!(command_column(3, 4), 8);
+        // P=5, stacked labels (`1: 2:`): max(4, 7) = 7, rounded up to 8.
+        assert_eq!(command_column(5, 4), 8);
+    }
+
+    #[test]
+    fn command_column_namespaced_base_indent() {
+        // base_body_indent 8 (one level deeper: a namespaced or nested
+        // body). No label wide enough to push past it.
+        assert_eq!(command_column(0, 8), 8);
+        assert_eq!(command_column(2, 8), 8);
+        // P=10 pushes past the deeper base: max(8, 12) = 12, already a
+        // multiple of 4.
+        assert_eq!(command_column(10, 8), 12);
+    }
+
     #[track_caller]
     fn formats_to(src: &str, expected: &str) {
-        let out = format_green(src).expect("the printer accepts it");
+        let out = format(src).expect("the printer accepts it");
         assert_eq!(out, expected, "output diverged for:\n{src}");
     }
 
@@ -2245,7 +2314,7 @@ mod tests {
         );
     }
 
-    /// `comment_w` is measured on [`super::normalize_comment_text`]'s
+    /// `comment_w` is measured on [`normalize_comment_text`]'s
     /// output, not the raw token — a raw trailing run of spaces before
     /// the newline must not inflate the overflow math for width nothing
     /// will actually print. Statement 1's comment carries 60 core
@@ -3190,7 +3259,11 @@ mod tests {
     /// read and would notice changing. The other seven are deliberately
     /// non-canonical (they are lexer and parser fixtures, not formatter
     /// ones), so their canonical form is committed beside them under
-    /// `tests/fmt_expected/`.
+    /// `tests/fmt_expected/`. Each of those is exactly `pmt fmt` output
+    /// for the fixture it names — reproduce one with
+    /// `pmt fmt - < tests/<dir>/<name>.pmc` (the stdin form writes to
+    /// stdout and leaves the fixture itself alone), and overwrite it only
+    /// after deciding the change it would encode is intended.
     #[test]
     fn the_corpus_formats_to_its_pinned_canonical_form() {
         // Already canonical: the expected text is the committed source.
