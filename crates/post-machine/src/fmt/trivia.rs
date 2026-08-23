@@ -28,7 +28,6 @@ pub(crate) fn is_ws(k: SyntaxKind) -> bool {
 
 /// The tokens immediately before `node`, newest-first, stopping at the
 /// first sibling that is a node.
-#[allow(dead_code)]
 fn preceding_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
     let mut out = Vec::new();
     let mut cur = node.prev_sibling_or_token();

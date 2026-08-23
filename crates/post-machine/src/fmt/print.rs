@@ -221,7 +221,7 @@ fn print_item(out: &mut String, node: &SyntaxNode, indent: usize, line_index: &T
     }
 }
 
-/// `namespace NAME { … }` (`docs/pmt/fmt.md`, "Headers and braces"),
+/// `namespace NAME { … }` (`docs/pmt/fmt.md` (indentation)),
 /// mirroring [`super::print_namespace`]'s decisions: one space before
 /// `{`, the closing `}` alone at the header's own indent, and its
 /// `items` printed one level deeper via the same [`print_items`] walk
@@ -270,7 +270,7 @@ fn print_namespace(
     out.push('\n');
 }
 
-/// One `use` list (`docs/pmt/fmt.md`, "Imports"), mirroring
+/// One `use` list (`docs/pmt/fmt.md` (spacing)), mirroring
 /// [`super::print_use`]'s decisions for the surface this plan covers:
 /// paths in source order, `::`-joined, `as`-aliased, one canonical space
 /// after `use` and after each comma. A comment positioned INSIDE the
@@ -302,7 +302,7 @@ fn print_use(out: &mut String, u: &UseDeclView, indent: usize, _line_index: &Tex
     out.push('\n');
 }
 
-/// One `use`-list path (`docs/pmt/fmt.md`, "Imports"): `::` tight,
+/// One `use`-list path (`docs/pmt/fmt.md` (spacing)): `::` tight,
 /// ` as ALIAS` one space each side if present — [`super::render_use_path`]'s
 /// decision, ported to read segments/alias off [`UsePathView`] instead
 /// of a parsed `UsePath`.
@@ -360,6 +360,18 @@ mod tests {
         same_as_c1("use std::goToEnd;\n");
         same_as_c1("use   std::goToEnd  ;\n");
         same_as_c1("use std::goToEnd as far;\n");
+    }
+
+    /// A comment lexed inside a `USE_PATH` node (`std::/* c */goToEnd`,
+    /// one level below `UseDecl`) must hit the guard's loud panic, not
+    /// slip past a shallower `children_with_tokens`-only scan and get
+    /// silently dropped by `render_use_path`. Pins `print_use`'s
+    /// `descendant_tokens` scan — reverting it to direct children only
+    /// makes this test the one that goes red (see the fix report).
+    #[test]
+    #[should_panic(expected = "interior use-list comments are task 6's surface")]
+    fn a_comment_nested_inside_a_use_path_is_not_silently_dropped() {
+        let _ = format_green("use std::/* c */goToEnd;\n");
     }
 
     #[test]
