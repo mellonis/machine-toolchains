@@ -9,20 +9,24 @@
 //! **Scope of this module today**: the file itself, standalone/leading
 //! comments between top-level items, `use` declarations (paths and
 //! aliases), namespaces (including their same-line open/close-brace
-//! comments and nested/reopened namespaces), and — new this plan —
-//! functions: headers (`volatile`/`export`, doc runs), nesting, and
-//! statement bodies (labels, command-column alignment, comma-group
-//! layout with the greedy-fill width fallback), for COMMENT-FREE bodies.
-//! Every comment position this module does not yet cover hits an
-//! explicit `unreachable!` naming the plan that owns it, so a test that
-//! strays outside the covered surface fails loudly instead of silently
-//! printing something wrong:
+//! comments and nested/reopened namespaces), functions: headers
+//! (`volatile`/`export`, doc runs), nesting, and statement bodies
+//! (labels, command-column alignment, comma-group layout with the
+//! greedy-fill width fallback) for COMMENT-FREE statements, and — new
+//! this plan — every own-line comment inside a body or a doc run:
+//! leading, standalone, trailing the body, a comment run's own internal
+//! blank line, a block comment spanning lines, and a comment interleaved
+//! inside or immediately after a bound doc run. Every comment position
+//! this module does not yet cover hits an explicit `unreachable!` naming
+//! the plan that owns it, so a test that strays outside the covered
+//! surface fails loudly instead of silently printing something wrong:
 //!
-//! - A use list's own interior comments, a comma group's interior
-//!   comments, a comment between a statement's label and its first item,
-//!   and a comment inside a bound doc run — all "interior to a
-//!   token/entry sequence" in the same sense — are task 6's surface
-//!   (`print_use`, [`print_body`], [`print_doc_run`]).
+//! - A use list's own interior comments and a comma group's interior
+//!   comments are task 6's surface (`print_use`, [`print_body`]). A
+//!   comment between a statement's label and its first item is also
+//!   task 6's, guarded the same way [`print_body`]'s own
+//!   `descendant_tokens` scan guards a comma group's interior comment
+//!   (both live inside `STATEMENT`, so one scan catches both shapes).
 //! - A statement's own same-line trailing comment, and the alignment
 //!   runs several such comments form together, plus a function's own
 //!   close-brace comment, are task 5's surface ([`print_body`], guarding
@@ -30,8 +34,6 @@
 //! - A function's same-line open-brace comment is task 6's surface
 //!   ([`print_function`]) — a different task from its close-brace
 //!   comment, see that function's own doc for why.
-//! - An own-line comment inside a function body (leading, standalone, or
-//!   trailing the body) is task 4's surface ([`print_body`]).
 //!
 //! ## Comment placement, re-derived from trivia
 //!
@@ -360,11 +362,15 @@ fn print_comment(out: &mut String, comment: &SyntaxToken, indent: usize) {
 /// Header + doc run + body + closing brace (`docs/pmt/fmt.md`
 /// (indentation)), mirroring [`super::print_function`]'s decisions —
 /// used for both top-level and nested functions, a nested `FUNCTION`
-/// being the same shape one indent level deeper. Unlike the C1 side,
-/// `blank_before_decl` (the gap between a bound doc run's last line and
-/// the header) is never threaded in from the caller: it is computed
-/// locally by [`blank_after_doc_run`] from the DOC_RUN node's own next
-/// sibling, since — unlike the C1 CST's `blank_before` field, spent by
+/// being the same shape one indent level deeper. A bound doc run prints
+/// via [`print_doc_run`], then any comment sitting between the run's
+/// last line and the header prints the same way a standalone comment
+/// does ([`doc_run_trailing_comments`] — see that function's own doc for
+/// why such a comment is never one of `DOC_RUN`'s own children). Unlike
+/// the C1 side, `blank_before_decl` (the gap between whichever of the
+/// run's last line or its trailing comment sits closest to the header)
+/// is never threaded in from the caller: it is computed locally, by that
+/// same walk, since — unlike the C1 CST's `blank_before` field, spent by
 /// the wrapping `TopItem`/`BodyItem` — nothing else needs that gap. The
 /// blank line before the whole unit (run included) is still the
 /// generic [`trivia::blank_before_unit`] the caller already applies to
@@ -389,7 +395,14 @@ fn print_function(
     let node = func.syntax();
     if let Some(dr) = func.doc_run() {
         print_doc_run(out, &dr, indent);
-        if blank_after_doc_run(dr.syntax()) {
+        let (trailing, blank_before_header) = doc_run_trailing_comments(dr.syntax());
+        for c in &trailing {
+            if blank_immediately_before(c) {
+                out.push('\n');
+            }
+            print_comment(out, c, indent);
+        }
+        if blank_before_header {
             out.push('\n');
         }
     }
@@ -421,38 +434,74 @@ fn print_function(
     out.push('\n');
 }
 
-/// Whether a blank line separates a bound doc run's LAST line from its
-/// declaration — the whitespace token between the `DOC_RUN` child and
-/// the `FUNCTION` node's first header token, both inside the FUNCTION
-/// node itself. Distinct from [`trivia::blank_before_unit`], which reads
-/// the gap BEFORE the whole run (a sibling-level query on the FUNCTION
-/// node); this one reads forward from the DOC_RUN node's own end,
-/// entirely inside it.
-fn blank_after_doc_run(dr: &SyntaxNode) -> bool {
-    matches!(
-        dr.next_sibling_or_token(),
-        Some(SyntaxElement::Token(t))
-            if trivia::is_ws(t.kind()) && t.text().matches('\n').count() >= 2
-    )
+/// Comments sitting between a bound `DOC_RUN` and its declaration's own
+/// header token — real, but with no C1 CST field to port from.
+/// `Parser::doc_run`'s own comment-draining loop only runs on an
+/// iteration that ALSO consumes one more `?`/`!` line first (the `for
+/// (comment, cline) in self.drain_pending()` call sits at the BOTTOM of
+/// the `loop`, after a `DocLine`/`AttentionLine` match arm, never
+/// reached once the match falls to `_ => break`), so a comment after the
+/// run's LAST line is captured there too — landing in the SAME
+/// `Vec<DocRunItem>` as `DocRunKind::Comment` — but green emission is a
+/// separate mechanism entirely (`GreenSink::flush` is lazy: a token's
+/// leading trivia is only emitted once THAT token itself is bumped, into
+/// whichever node happens to be open at that moment). By the time the
+/// declaration's own header token is finally bumped, `g_finish()` has
+/// already closed `DOC_RUN` — confirmed directly against the green tree
+/// (`debug_dump`): this comment prints as `DOC_RUN`'s own NEXT SIBLING
+/// inside `FUNCTION`, never one of `DOC_RUN`'s children. The printed
+/// TEXT is identical either way, since [`print_comment`] doesn't care
+/// which parent walked to it.
+///
+/// Returns every such trailing comment in source order, plus whether a
+/// blank line precedes the header itself — the whitespace immediately
+/// before whichever of `DOC_RUN` or the last trailing comment sits
+/// closest to it, [`print_function`]'s replacement for C1's
+/// `blank_before_decl`. Each comment's OWN blank-before decision (the
+/// gap before IT, not before the header) is left to the caller
+/// ([`blank_immediately_before`] — the same query a standalone
+/// top-level/body comment uses).
+fn doc_run_trailing_comments(dr: &SyntaxNode) -> (Vec<SyntaxToken>, bool) {
+    let mut out = Vec::new();
+    let mut cur = dr.next_sibling_or_token();
+    loop {
+        match cur {
+            Some(SyntaxElement::Token(t)) if trivia::is_ws(t.kind()) => {
+                cur = t.next_sibling_or_token();
+            }
+            Some(SyntaxElement::Token(t)) if trivia::is_comment(t.kind()) => {
+                cur = t.next_sibling_or_token();
+                out.push(t);
+            }
+            Some(SyntaxElement::Token(t)) => return (out, blank_immediately_before(&t)),
+            _ => unreachable!(
+                "a DOC_RUN always precedes its bound declaration's own header token — a \
+                 dangling run (nothing left to bind to) is DanglingDocRun, a parse error caught \
+                 long before this printer ever runs"
+            ),
+        }
+    }
 }
 
-/// A `DOC_RUN`'s own `?`/`!` lines (`docs/pmt/language.md` (doc lines)),
-/// mirroring [`super::print_doc_run`]'s decisions: each at the bound
-/// declaration's own `indent`, blank lines between run items collapsed
-/// to one (index 0's own leading blank is the caller's
-/// `blank_before_unit` decision, not this loop's — same split as the
-/// C1 side). `DOC_RUN`'s own children are flat tokens (no sub-nodes:
-/// `Parser::doc_run` bumps `DOC_LINE`/`ATTENTION_LINE` tokens directly
-/// into the node it opens), so this walks tokens, not
-/// `children_with_tokens`-over-nodes the way [`print_items`] does.
+/// A `DOC_RUN`'s own `?`/`!` lines PLUS any ordinary comment interleaved
+/// between them (`docs/pmt/fmt.md` (doc and attention runs): "An
+/// ordinary comment interleaved inside a run prints under the Comments
+/// rule above, at the run's own indent" —
+/// `comment_inside_a_doc_run_prints_under_existing_comment_rules` in
+/// [`super`]'s own tests is the C1 fixture this ports), mirroring
+/// [`super::print_doc_run`]'s decisions: each at the bound declaration's
+/// own `indent`, blank lines between run items collapsed to one (index
+/// 0's own leading blank is the caller's `blank_before_unit` decision,
+/// not this loop's — same split as the C1 side). `DOC_RUN`'s own
+/// children are flat tokens (no sub-nodes: `Parser::doc_run` bumps
+/// `DocLine`/`AttentionLine`/comment tokens directly into the node it
+/// opens), so this walks tokens, not `children_with_tokens`-over-nodes
+/// the way [`print_items`] does.
 ///
-/// **Interior comment deferred**: a comment BETWEEN doc-run lines is a
-/// real, already-supported C1 shape
-/// (`comment_inside_a_doc_run_prints_under_existing_comment_rules` in
-/// [`super`]'s own tests) — but no fixture in tasks 3-5 exercises it, so
-/// it stays behind a guard rather than an unproven port; task 6, which
-/// leaves no `unreachable!` guard standing in this module, is where it
-/// lands.
+/// **A comment AFTER the run's last line is a different shape**, printed
+/// by the caller instead ([`doc_run_trailing_comments`]) — see that
+/// function's own doc for why it never reaches a `DOC_RUN`'s own
+/// children, and so never reaches this loop.
 fn print_doc_run(out: &mut String, dr: &DocRunView, indent: usize) {
     let pad = " ".repeat(indent);
     let tokens: Vec<SyntaxToken> = dr
@@ -465,14 +514,13 @@ fn print_doc_run(out: &mut String, dr: &DocRunView, indent: usize) {
         .collect();
     let mut first = true;
     for t in &tokens {
-        if trivia::is_comment(t.kind()) {
-            unreachable!("a comment inside a doc run is task 6's surface")
-        }
         if !first && blank_immediately_before(t) {
             out.push('\n');
         }
         first = false;
-        if t.kind() == PmcKind::DocLine.into() {
+        if trivia::is_comment(t.kind()) {
+            print_comment(out, t, indent);
+        } else if t.kind() == PmcKind::DocLine.into() {
             print_doc_run_line(out, &pad, '?', &doc_line_payload(t));
         } else if t.kind() == PmcKind::AttentionLine.into() {
             print_doc_run_line(out, &pad, '!', &doc_line_payload(t));
@@ -528,27 +576,60 @@ struct StmtElem {
     newline_before: Vec<bool>,
 }
 
-/// A function-body item, in the SAME order [`brace_interior`] yields —
-/// never rebuilt by concatenating [`crate::syntax::FunctionView::statements`]
+/// A function-body element, in the SAME order [`brace_interior`] yields
+/// — never rebuilt by concatenating [`crate::syntax::FunctionView::statements`]
 /// and [`crate::syntax::FunctionView::nested`] separately, which would lose
 /// a nested function's position relative to its neighbouring statements.
+/// `Comment` is an own-line comment reached directly as a raw sibling
+/// token — leading, standalone, or trailing the whole body — see
+/// [`print_body`]'s own doc for how it's told apart from a comment
+/// that's already part of some OTHER element's leading run.
 enum BodyElem {
     Statement(StmtElem),
     Nested(FunctionView),
+    Comment(SyntaxToken),
+}
+
+/// The [`SyntaxNode`] a [`BodyElem::Statement`]/[`BodyElem::Nested`]
+/// wraps, or `None` for [`BodyElem::Comment`] (which carries a raw
+/// token, not a node) — the one query [`print_body`] needs both to build
+/// its `claimed` set (every `STATEMENT`/nested-`FUNCTION`'s own leading
+/// comment run) and to drive its print loop's per-element
+/// `blank_before_unit`/`leading_comments` queries, without duplicating
+/// that pair of calls once per node variant.
+fn body_elem_node(elem: &BodyElem) -> Option<&SyntaxNode> {
+    match elem {
+        BodyElem::Statement(s) => Some(&s.node),
+        BodyElem::Nested(fv) => Some(fv.syntax()),
+        BodyElem::Comment(_) => None,
+    }
 }
 
 /// A `FUNCTION` node's own body — [`brace_interior`] between its `{` and
 /// `}` — mirroring [`super::print_function`]'s body loop: one pass
-/// collects each `STATEMENT`/nested `FUNCTION` in source order (the
-/// single ordered walk [`BodyElem`]'s own doc explains), a second
-/// computes the shared command column from every collected statement,
-/// and a third prints them — three passes over the SAME already-ordered
-/// `Vec<BodyElem>`, not three different orderings.
+/// collects each `STATEMENT`/nested `FUNCTION`/own-line comment in
+/// source order (the single ordered walk [`BodyElem`]'s own doc
+/// explains), a second computes the shared command column from every
+/// collected statement (a `BodyElem::Comment` plays no part —
+/// [`max_inline_label_prefix_width`]'s own `filter_map` already ignores
+/// anything that isn't `BodyElem::Statement`), and a third prints them.
 ///
-/// **Own-line comments deferred**: any comment token surviving the
-/// whitespace filter below (own-line, leading, or standalone inside the
-/// body) is task 4's surface, guarded rather than ported — this task's
-/// own fixtures are comment-free by design.
+/// **Own-line comments** (`docs/pmt/fmt.md` (comments)) mirror
+/// [`print_items`]'s own `claimed` split, one level down: a comment
+/// immediately (no blank line) before a `STATEMENT`/nested `FUNCTION`
+/// belongs to THAT element's leading run ([`trivia::leading_comments`])
+/// and prints above it; every other comment is its own standalone unit,
+/// printed the same way ([`print_comment`]) with its own blank-line
+/// decision ([`blank_immediately_before`]) — content printing never
+/// distinguishes leading from standalone, only the blank-line decision
+/// does, same rule as the top level. Unlike [`print_items`], there is no
+/// `consumed` half of the split to build here: a body-level trailing
+/// comment (on a `STATEMENT`, or on a nested `FUNCTION`'s own close
+/// brace) is guarded away before this loop ever runs — see the
+/// collection loop below and [`print_function`]'s own close-brace guard
+/// — so no comment reaching the print loop can ever be BOTH a preceding
+/// element's trailing comment AND a following element's leading run the
+/// way a namespace's close-brace comment can at the top level.
 fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_index: &TextLineIndex) {
     let elements: Vec<SyntaxElement> = brace_interior(func_node)
         .filter(|e| !trivia::is_ws(e.kind()))
@@ -612,7 +693,7 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
                 node.kind()
             ),
             SyntaxElement::Token(t) if trivia::is_comment(t.kind()) => {
-                unreachable!("own-line comments inside a function body are task 4's surface")
+                body.push(BodyElem::Comment(t.clone()));
             }
             SyntaxElement::Token(t) => unreachable!(
                 "unexpected token {:?} inside a function body; only STATEMENT/FUNCTION nodes, \
@@ -624,24 +705,52 @@ fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_inde
 
     let command_col = command_column(max_inline_label_prefix_width(&body), indent);
 
+    // Every STATEMENT/nested-FUNCTION element's own leading comment run,
+    // unioned — the set a standalone `BodyElem::Comment` is checked
+    // against below, so a comment already printed as some OTHER
+    // element's leading run isn't printed a SECOND time when the walk
+    // also reaches it directly as its own raw token (mirrors
+    // `print_items`'s `claimed`, minus the `consumed` half — see this
+    // function's own doc for why body level needs none).
+    let mut claimed: Vec<SyntaxToken> = Vec::new();
+    for elem in &body {
+        if let Some(node) = body_elem_node(elem) {
+            claimed.extend(trivia::leading_comments(node));
+        }
+    }
+
     let mut first = true;
     for elem in &body {
-        let node: &SyntaxNode = match elem {
-            BodyElem::Statement(s) => &s.node,
-            BodyElem::Nested(fv) => fv.syntax(),
-        };
+        if let BodyElem::Comment(tok) = elem {
+            if claimed.contains(tok) {
+                continue;
+            }
+            if !first && blank_immediately_before(tok) {
+                out.push('\n');
+            }
+            first = false;
+            print_comment(out, tok, indent);
+            continue;
+        }
+        let node = body_elem_node(elem).expect(
+            "BodyElem::Comment handled and skipped above; every other variant carries a node",
+        );
         if !first && trivia::blank_before_unit(node) {
             out.push('\n');
         }
         first = false;
+        for c in trivia::leading_comments(node) {
+            print_comment(out, &c, indent);
+        }
         print_body_item(out, elem, indent, command_col, line_index);
     }
 }
 
-/// Dispatches one [`BodyElem`] to its printer — ported from
-/// [`super::print_body_item`], simplified: a comment-carrying
-/// [`super::BodyKind::Comment`] arm has no counterpart here (task 4's
-/// surface, guarded earlier in [`print_body`]'s own collection loop).
+/// Dispatches one node-backed [`BodyElem`] to its printer — ported from
+/// [`super::print_body_item`]. [`BodyElem::Comment`] never reaches this
+/// dispatcher: [`print_body`]'s own loop prints it directly, mirroring
+/// how [`print_items`] prints a standalone comment token itself rather
+/// than routing it through [`print_item`].
 fn print_body_item(
     out: &mut String,
     elem: &BodyElem,
@@ -652,6 +761,10 @@ fn print_body_item(
     match elem {
         BodyElem::Statement(s) => print_statement(out, s, command_col),
         BodyElem::Nested(fv) => print_function(out, fv, indent, line_index),
+        BodyElem::Comment(_) => unreachable!(
+            "print_body's own loop handles BodyElem::Comment directly and never reaches this \
+             dispatcher — see print_body_item's own doc"
+        ),
     }
 }
 
@@ -1102,12 +1215,18 @@ mod tests {
         same_as_c1("main() {\n 1: left;\n\n\n\n 2: left;\n}\n");
     }
 
-    /// Pins the six comment-surface guards this task adds (mirrors
-    /// `a_comment_nested_inside_a_use_path_is_not_silently_dropped`'s
+    /// Pins the four comment-surface guards still standing after this
+    /// task (mirrors `a_comment_nested_inside_a_use_path_is_not_silently_dropped`'s
     /// role for task 2's own guard): each fixture is otherwise a valid,
     /// parseable comment-bearing program that a shallower scan — or a
     /// guard mixed up with a neighboring one — could let slip past
-    /// silently instead of panicking loudly.
+    /// silently instead of panicking loudly. Two guards this list used
+    /// to pin — a body's own-line comments and a doc run's interior
+    /// comment — are GONE: this task implements both surfaces (see
+    /// `own_line_comments_inside_a_body` and
+    /// `doc_run_interior_and_trailing_comments` below), per a ruling
+    /// that a doc-run comment is an own-line comment (this task's
+    /// subject), not "interior to a token/entry sequence" (task 6's).
     #[test]
     #[should_panic(expected = "a statement's trailing comment is task 5's surface")]
     fn statement_trailing_comment_guard_fires() {
@@ -1132,16 +1251,102 @@ mod tests {
         let _ = format_green("main() {\n 1: left;\n} // close\n");
     }
 
+    /// The middle fixture is also this task's DOUBLE-PRINT guard: `//
+    /// between` is BOTH statement 2's own leading run
+    /// ([`trivia::leading_comments`]) AND a raw comment token
+    /// `print_body`'s own element walk reaches directly — mutating
+    /// `claimed.contains(tok)` to always `false` (skipping the check)
+    /// makes this exact fixture the one that turns red, since C1 prints
+    /// `// between` once but an un-filtered green walk would print it
+    /// twice.
     #[test]
-    #[should_panic(expected = "own-line comments inside a function body are task 4's surface")]
-    fn body_own_line_comment_guard_fires() {
-        let _ = format_green("main() {\n // c\n 1: left;\n}\n");
+    fn own_line_comments_inside_a_body() {
+        same_as_c1("main() {\n    // leading\n 1: left;\n}\n");
+        same_as_c1("main() {\n 1: left;\n    // between\n 2: left;\n}\n");
+        same_as_c1("main() {\n 1: left;\n    // trailing the body\n}\n");
+        // A standalone (unclaimed) comment with a blank line before it —
+        // `blank_immediately_before(tok)`'s own branch in `print_body`'s
+        // Comment arm, not `blank_before_unit`'s (that one only fires for
+        // a NODE, and this comment has no following node to attach to).
+        same_as_c1("main() {\n 1: left;\n\n    // standalone with blank\n}\n");
     }
 
     #[test]
-    #[should_panic(expected = "a comment inside a doc run is task 6's surface")]
-    fn doc_run_interior_comment_guard_fires() {
-        let _ = format_green("? first\n// mid\n? second\nmain() {\n 1: left;\n}\n");
+    fn a_comment_run_keeps_its_internal_gap() {
+        same_as_c1("main() {\n    // far\n\n    // near\n 1: left;\n}\n");
+    }
+
+    #[test]
+    fn block_comments() {
+        same_as_c1("main() {\n    /* one line */\n 1: left;\n}\n");
+        same_as_c1(
+            "main() {\n    /* a block comment\n       spanning two lines */\n 1: left;\n}\n",
+        );
+        // Empty comments — `normalize_comment_text`'s per-line `trim_end`
+        // has nothing to trim either way, but these are real lexed
+        // shapes, not merely untested `text` values.
+        same_as_c1("main() {\n    //\n 1: left;\n}\n");
+        same_as_c1("main() {\n    /**/\n 1: left;\n}\n");
+    }
+
+    #[test]
+    fn comments_around_a_nested_function() {
+        same_as_c1(
+            "main() {\n    // about step\n    step() {\n 1: left;\n    }\n\n    @step();\n}\n",
+        );
+    }
+
+    /// The doc-run-comment ruling's own surface (module doc's second
+    /// bullet): a comment interleaved BETWEEN two run lines
+    /// ([`print_doc_run`]'s own loop) and one sitting AFTER the run's
+    /// last line, before the bound declaration
+    /// ([`doc_run_trailing_comments`] — a real green-tree shape with no
+    /// direct C1-CST field, confirmed against `debug_dump` before
+    /// writing this test: such a comment is `DOC_RUN`'s own NEXT
+    /// SIBLING inside `FUNCTION`, never one of `DOC_RUN`'s children).
+    /// Both parse and format identically today, verified against the
+    /// real C1 formatter before this fixture was written.
+    #[test]
+    fn doc_run_interior_and_trailing_comments() {
+        // Between two doc lines — a DOC_RUN child.
+        same_as_c1("? one\n// interloper\n? two\nmain() {\n 1: left;\n}\n");
+        // After a gap following the run's only line — DOC_RUN's own
+        // next sibling, not a child.
+        same_as_c1("? one\n\n// after a gap\nmain() {\n 1: left;\n}\n");
+        // Directly between the run's last line and the declaration,
+        // no blank either side.
+        same_as_c1("? one\n// trailing before fn\nmain() {\n 1: left;\n}\n");
+        // The same shape, with a blank line before the trailing comment.
+        same_as_c1("? one\n\n// trailing before fn\nmain() {\n 1: left;\n}\n");
+        // More than one trailing comment in a row, still DOC_RUN's own
+        // siblings, not its children.
+        same_as_c1("? one\n// c1\n// c2\nmain() {\n 1: left;\n}\n");
+        // A blank line AFTER the trailing comment, before the header —
+        // `blank_before_header`'s own branch, computed off the LAST
+        // trailing comment rather than off `DOC_RUN` itself.
+        same_as_c1("? one\n// c1\n\nmain() {\n 1: left;\n}\n");
+        // A blank line BETWEEN two run items, INSIDE `print_doc_run`'s
+        // own loop — distinct from every gap above, which all sit
+        // outside the run (before it, or after its last line). One doc
+        // line's own kind, one comment token's, so both branches of the
+        // dispatch below the blank check get their own blank-before
+        // proof.
+        same_as_c1("? one\n\n? two\nmain() {\n 1: left;\n}\n");
+        same_as_c1("? one\n\n// mid\n? two\nmain() {\n 1: left;\n}\n");
+    }
+
+    /// A comment immediately before a bound doc run — `leading_comments`
+    /// on the `FUNCTION` node (which retro-wraps the run as its own
+    /// first child) sees this comment as its OWN preceding sibling, one
+    /// level up from anything [`print_doc_run`]/[`doc_run_trailing_comments`]
+    /// walk. Exercises `print_body`'s `claimed` set against a
+    /// doc-run-bound nested function, at body indent.
+    #[test]
+    fn a_comment_leads_a_bound_doc_run() {
+        same_as_c1("// lead\n? doc\nmain() {\n 1: left;\n}\n");
+        same_as_c1(
+            "main() {\n    // about step\n    ? step doc\n    step() {\n 1: left;\n    }\n}\n",
+        );
     }
 
     // Ported branches that no fixture above reaches, each pinned by a
