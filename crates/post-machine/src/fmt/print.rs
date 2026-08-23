@@ -1143,4 +1143,57 @@ mod tests {
     fn doc_run_interior_comment_guard_fires() {
         let _ = format_green("? first\n// mid\n? second\nmain() {\n 1: left;\n}\n");
     }
+
+    // Ported branches that no fixture above reaches, each pinned by a
+    // C1 unit test in `fmt/mod.rs` that Task 7 deletes along with the
+    // copy it pins — this module's own duplicate needs its own
+    // coverage before that happens (mirrors `comma_group_layout`'s own
+    // rationale, applied to the branches review flagged as untouched
+    // by mutation).
+
+    /// `command_column`'s `base_body_indent.max(p + 2)` only differs from
+    /// a `p + 1` mutant at the residue class `p ≡ 3 (mod 4)`: `p = 3`
+    /// (from a two-digit inline label `"12:"`) makes `p + 2 == 5` round
+    /// up to command column 8, while `p + 1 == 4` would round up to 4
+    /// instead — every other fixture in this module uses a `p` that
+    /// rounds to the same multiple of 4 either way.
+    #[test]
+    fn command_column_rounds_up_from_the_plus_two_margin() {
+        same_as_c1("main() {\n 12: left;\n}\n");
+    }
+
+    /// A `?`/`!` line with an empty payload prints as the bare sigil — a
+    /// real lexed shape (a doc paragraph break), not merely a `text`
+    /// value this printer happens never to receive. C1 pins the same
+    /// shape in `fmt/mod.rs`'s `empty_doc_line_prints_bare_sigil_as_a_paragraph_break`.
+    #[test]
+    fn a_bare_doc_line_is_a_paragraph_break() {
+        same_as_c1("? one\n?\n? two\nmain() {\n 1: left;\n}\n");
+    }
+
+    /// `render_check_arm`'s `CheckArm::Return` arm (`check(..., !)`) —
+    /// every other `check` fixture in this module uses two `Label` arms.
+    #[test]
+    fn check_arm_return() {
+        same_as_c1("main() {\n 1: check(!, 1);\n}\n");
+        same_as_c1("main() {\n 1: check(!, !);\n}\n");
+    }
+
+    /// `render_builtin_successor`'s non-`FallThrough` branch (the
+    /// `(...)` wrapping a written label or `!`) — no fixture above gives
+    /// a builtin its own successor.
+    #[test]
+    fn a_builtin_with_a_successor() {
+        same_as_c1("main() {\n 1: left(5);\n}\n");
+        same_as_c1("main() {\n 1: mark(!);\n}\n");
+    }
+
+    /// `label_margin`'s `None` arm, reached under `label_break` (an
+    /// own-line label wide enough that even the strict 1-space margin
+    /// doesn't fit) — the `labels_stacked_and_own_line` fixtures above
+    /// only exercise the `Some` arm.
+    #[test]
+    fn label_margin_overflow_under_label_break() {
+        same_as_c1("main() {\n 999999999:\n    left;\n}\n");
+    }
 }
