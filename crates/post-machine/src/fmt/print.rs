@@ -1123,17 +1123,35 @@ fn print_body(
     }
 
     let mut first = true;
+    // Carries a computed `blank_override` PAST a `BodyElem::Comment` the
+    // print loop skips outright (`claimed.contains(tok)` — it prints via
+    // the NEXT node's own `leading_comments` loop below instead, never
+    // reached as its own entry here). `override_prev_line[i]` alone is
+    // blind to this: it was computed at COLLECTION time, when whether
+    // THIS comment will end up claimed by a later node isn't known yet
+    // (`claimed` itself is only built once collection finishes). Without
+    // carrying it forward, the override silently vanishes at exactly the
+    // element it was meant for, and whatever prints next falls back to a
+    // real-sibling-gap query that sees `;` sitting between the leftover
+    // and itself — the wrong baseline (this task's own fix report has the
+    // worked trace).
+    let mut carried_prev_line: Option<u32> = None;
     for (i, elem) in body.iter().enumerate() {
         // The green stand-in for C1's evolving `prev_end_line`
         // (`override_prev_line`'s own doc): `Some` only right after a
         // `BodyElem::TailComment` leftover, where the real sibling gap
-        // would ask the wrong question. Every other position's blank-line
-        // decision is untouched — same queries as before this override
-        // existed.
-        let blank_override = override_prev_line[i];
+        // would ask the wrong question — either freshly computed at THIS
+        // index, or carried forward from an earlier index whose own
+        // comment got skipped as claimed (`carried_prev_line`, above). At
+        // most one of the two is ever `Some` in practice: a fresh
+        // `override_prev_line[i]` only arises when NOTHING was pushed
+        // between the leftover and this element, which precludes a
+        // skipped comment (and its carry) from also reaching here.
+        let blank_override = carried_prev_line.take().or(override_prev_line[i]);
         match elem {
             BodyElem::Comment(tok) => {
                 if claimed.contains(tok) {
+                    carried_prev_line = blank_override;
                     continue;
                 }
                 let blank = match blank_override {
@@ -2457,6 +2475,28 @@ mod tests {
         same_as_c1("main() {\n 1: left, // note\n    right, mark;\n}\n");
     }
 
+    /// `render_items`' group-split condition is `nb || layouts[i].forced_break`
+    /// — NOT redundant, despite a LINE comment always consuming to end of
+    /// its own physical line: `item_leading_comments` attributes a
+    /// comment nested INSIDE item `i-1`'s own subtree (here, between
+    /// `@f(`'s `(` and its `)`) to item `i`'s leading slot, not item
+    /// `i-1`'s. Item `i-1`'s own CLOSING token (`)`) can land on a LATER
+    /// physical line than the nested comment — here, the SAME line item
+    /// `i` itself starts on — so `newline_before[i]` (which compares
+    /// item `i`'s start against item `i-1`'s own END, not the comment's
+    /// line) is `false` even though `layouts[i].forced_break` is `true`.
+    /// Verified against the real C1 formatter: `main() {\n 1: @f( //
+    /// c\n), left;\n}\n"` formats to `"main() {\n 1: @f(), // c\n
+    /// left;\n}\n"` — the group DOES break between `@f()` and `left`
+    /// even though both share no real newline between them in the raw
+    /// token stream. A mutant dropping `|| layouts[i].forced_break` here
+    /// would instead keep them on one line, unable to place `// c`
+    /// anywhere at all without corrupting the source.
+    #[test]
+    fn a_comment_nested_inside_the_previous_item_still_forces_the_next_items_break() {
+        same_as_c1("main() {\n 1: @f( // c\n), left;\n}\n");
+    }
+
     /// `layout_leading`'s `pre_item_lines` — a comment AFTER the first
     /// LINE comment in one item's leading run (pathological, but still
     /// reprinted per fidelity-over-layout): the LINE comment becomes
@@ -2567,13 +2607,41 @@ mod tests {
         same_as_c1("main() {\n 1: left\n\n// own line\n;\n}\n");
     }
 
-    /// A candidate that shares `;`'s line but is own-line (nothing but
-    /// whitespace precedes it on ITS OWN line, even though that line is
-    /// the same one `;` sits on) still fails the check — `comment_own_line`
-    /// and "same line as `;`" are independent tests, both required.
+    /// `check(1,\n // a\n 2);` — `// a` sits on line 3, `;` on line 4:
+    /// `first_line == semi_line` is false, so this candidate fails the
+    /// SAME-LINE half. Renamed from an earlier, factually wrong doc
+    /// comment that described this fixture as sharing `;`'s line (it
+    /// doesn't — the comment and `;` are two lines apart). `// a` also
+    /// happens to be own-line, so INVERTING `==` alone does not flip
+    /// this specific test (own_line still independently rejects it) —
+    /// that half's inversion is already pinned elsewhere (five other
+    /// fixtures in this module go red for it). This one exists for the
+    /// SHAPE — a leftover nested inside `check(...)`'s own multi-line
+    /// arm list — not to uniquely discriminate either comparison
+    /// operator on its own.
     #[test]
-    fn a_tail_comment_failing_the_own_line_half_of_the_check_becomes_standalone() {
+    fn a_tail_comment_failing_the_same_line_half_of_the_check_becomes_standalone() {
         same_as_c1("main() {\n 1: check(1,\n // a\n 2);\n}\n");
+    }
+
+    /// The genuine own-line-only counterpart: `/* c */;` — the block
+    /// comment sits on its OWN line (own_line: true) yet `;` follows it
+    /// on that SAME line (same_line: true too) — the ONLY thing standing
+    /// between this candidate and the trailing role is `comment_own_line`
+    /// itself. `statement_trailing_and_leftovers`'s `!comment_own_line(first)`
+    /// conjunct has NO other fixture in this module where deleting it
+    /// outright (not merely inverting it) changes the verdict: every
+    /// other own-line leftover fixture uses a LINE comment, which by
+    /// construction can never share `;`'s physical line, so
+    /// `first_line == semi_line` is ALREADY false there regardless of
+    /// `comment_own_line` — deleting the conjunct is invisible to those.
+    /// Here it is the whole story: C1 prints
+    /// `"main() {\n 1: left;\n    /* c */\n}\n"` (leftover, own line,
+    /// AFTER `;`), never `"main() {\n 1: left; /* c */\n}\n"` (which a
+    /// conjunct-deleted mutant would produce instead).
+    #[test]
+    fn a_tail_comment_failing_only_the_own_line_half_becomes_standalone() {
+        same_as_c1("main() {\n 1: left\n/* c */;\n}\n");
     }
 
     /// Two statements whose trailing comments share a SOURCE column, one
@@ -2649,6 +2717,73 @@ mod tests {
     #[test]
     fn a_second_leftover_in_the_same_tail_measures_against_the_first() {
         same_as_c1("main() {\n 1: check(1 /* a */,\n\n\n 2 /* b */);\n}\n");
+    }
+
+    /// The Task-6 fix-round bug, found by review, not by this task's own
+    /// mutation sweep: the FIRST comment after a leftover is itself
+    /// CLAIMED by the NEXT node's own `leading_comments` run (no blank
+    /// line separates them), so the print loop's `BodyElem::Comment` arm
+    /// `continue`s WITHOUT ever reading its `override_prev_line` entry —
+    /// the override was computed correctly at collection time but
+    /// silently discarded at print time, and the element that actually
+    /// performs the blank-before check (the claiming node) reads its OWN
+    /// `override_prev_line` slot instead, which is `None` (nothing was
+    /// pending when IT was pushed — the leftover's override belonged to
+    /// the comment in between, not to it). Fixed by `carried_prev_line`:
+    /// a skipped, claimed comment now hands its own `blank_override`
+    /// forward to whatever prints next, exactly mirroring how C1's single
+    /// evolving `prev_end_line` cursor is untouched by which BodyItems a
+    /// human would call "leading" vs "standalone" — every comment in the
+    /// pending queue updates it, claimed or not.
+    #[test]
+    fn blank_before_survives_past_a_leftover_into_a_claimed_comment() {
+        same_as_c1("main() {\n 1: left\n// own line\n;\n// c\n 2: right;\n}\n");
+    }
+
+    /// The same carry, but the element the leftover's blank line must
+    /// reach is a NESTED FUNCTION's own leading run, not a statement's —
+    /// `unit_start_line` applied to a `FUNCTION` node, reached only via
+    /// the carry (the claiming node here is `step()`, not a `STATEMENT`).
+    #[test]
+    fn blank_before_survives_past_a_leftover_into_a_nested_functions_leading_run() {
+        same_as_c1("main() {\n 1: left\n// own line\n;\n// c\n    step() {\n 1: left;\n    }\n}\n");
+    }
+
+    /// TWO claimed comments in a row between the leftover and the next
+    /// statement (`// c` then `// d`, no blank between them — both bind
+    /// to statement 2's own leading run as ONE run, `leading_comments`'
+    /// own doc): the carry must survive past BOTH skipped entries, not
+    /// just one — mutating `carried_prev_line`'s assignment to fire only
+    /// on the FIRST skip (not re-armed after that) would still catch this
+    /// exact fixture, since the carry is read-then-reset every iteration
+    /// regardless of how many consecutive skips occur — but the fixture
+    /// pins the shape a one-skip-only carry mechanism would need to get
+    /// right.
+    #[test]
+    fn blank_before_survives_past_two_consecutive_claimed_comments() {
+        same_as_c1("main() {\n 1: left\n// own line\n;\n// c\n// d\n 2: right;\n}\n");
+    }
+
+    /// The tail-slot analogue: the leftover itself is nested inside a
+    /// `check(...)` call rather than sitting directly before `;`, and the
+    /// claimed comment it must reach past documents a SECOND statement
+    /// two positions later — proves the carry mechanism is independent of
+    /// which of `item_leading_comments`'s two leftover shapes produced
+    /// the `BodyElem::TailComment` in the first place.
+    #[test]
+    fn blank_before_survives_past_a_leftover_nested_inside_the_last_item() {
+        same_as_c1("main() {\n 1: check(1,\n // a\n 2);\n// c\n 2: right;\n}\n");
+    }
+
+    /// The control case: with a REAL blank line already present between
+    /// the leftover and the claimed comment, C1 and green already agreed
+    /// before this fix (the ordinary `blank_before_unit`/`blank_immediately_before`
+    /// path was never wrong on its own) — pinned here so a future change
+    /// to the carry mechanism can't regress the case it was never
+    /// responsible for.
+    #[test]
+    fn a_real_blank_line_before_a_claimed_comment_needs_no_carry() {
+        same_as_c1("main() {\n 1: left\n// own line\n;\n\n// c\n 2: right;\n}\n");
     }
 
     /// C1's own `has_trailing` matches `BodyKind::Statement` alone
