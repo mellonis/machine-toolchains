@@ -159,6 +159,20 @@ mod tests {
         layout(src, &lex_with(src, LexMode::WithComments).expect("lexes"))
     }
 
+    /// The foundation invariant: trivia + token texts concatenate back
+    /// to the source, byte for byte. Ported from the sibling `.pmc`
+    /// crate's helper of the same name.
+    fn concat(entries: &[SigLayout]) -> String {
+        let mut out = String::new();
+        for e in entries {
+            for (_, t) in &e.trivia_before {
+                out.push_str(t);
+            }
+            out.push_str(&e.text);
+        }
+        out
+    }
+
     #[test]
     fn the_pieces_concatenate_to_the_source() {
         round_trips("alphabet ab { '_', 'a' }\n");
@@ -238,6 +252,7 @@ mod tests {
     fn no_trailing_newline_eof_trivia_is_empty() {
         let src = "alphabet ab { '_' }";
         let entries = layout_of(src);
+        assert_eq!(concat(&entries), src);
         let eof = entries.last().expect("eof entry");
         assert_eq!(eof.text, "");
         assert!(eof.trivia_before.is_empty());
@@ -261,6 +276,7 @@ mod tests {
                 (TmcKind::Whitespace, "\n".to_string()),
             ]
         );
+        assert_eq!(concat(&entries), src);
     }
 
     /// `end_offset`'s generic path advances by CHARACTERS and returns a
