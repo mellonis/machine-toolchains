@@ -1,0 +1,12 @@
+// Port of the historic test1.pme (Old Test-PostMachine's Compill
+// compiler, 2007) — the only surviving artifact of that generation's
+// code generator. The 12-byte image decodes (big-endian length word,
+// then code) to `left; right; jmp 0` plus the compiler's auto-appended,
+// unreachable stop marker: a codegen smoke test that loops forever.
+// Preserved as-is — the program deliberately never terminates, so its
+// test asserts the step-limit trap rather than a final tape.
+main() {
+ 1: left;
+    right;
+    goto 1;
+}

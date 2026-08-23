@@ -1833,29 +1833,33 @@ fn render_check_arm(arm: CheckArm, written: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// The differential oracle this plan is built on: for every shape the
-    /// green printer already covers, its output is byte-identical to the
-    /// C1 printer's. Tasks 3-6 widen the set of sources this is called on;
-    /// Task 7 makes it corpus-wide and retires the C1 side.
+    /// The assertion every fixture in this module runs on: `src` prints
+    /// to exactly `expected`.
+    ///
+    /// Each `expected` literal here was **captured from the C1 printer**
+    /// — mechanically, one file per call site, while `fmt::format` still
+    /// ran `parse_cst` + `print_cst` — and the converted suite was proven
+    /// green before the C1 printer was deleted. They are therefore pins
+    /// on the behavior this migration had to preserve, not restatements
+    /// of whatever the green printer happens to do.
     #[track_caller]
-    fn same_as_c1(src: &str) {
-        let green = format_green(src).expect("green printer accepts it");
-        let c1 = crate::fmt::format(src).expect("C1 printer accepts it");
-        assert_eq!(green, c1, "green output diverged from C1 for:\n{src}");
+    fn formats_to(src: &str, expected: &str) {
+        let out = format_green(src).expect("the printer accepts it");
+        assert_eq!(out, expected, "output diverged for:\n{src}");
     }
 
     #[test]
     fn empty_and_whitespace_only_files() {
-        same_as_c1("");
-        same_as_c1("\n");
-        same_as_c1("\n\n\n");
+        formats_to("", "\n");
+        formats_to("\n", "\n");
+        formats_to("\n\n\n", "\n");
     }
 
     #[test]
     fn a_single_use_declaration() {
-        same_as_c1("use std::goToEnd;\n");
-        same_as_c1("use   std::goToEnd  ;\n");
-        same_as_c1("use std::goToEnd as far;\n");
+        formats_to("use std::goToEnd;\n", "use std::goToEnd;\n");
+        formats_to("use   std::goToEnd  ;\n", "use std::goToEnd;\n");
+        formats_to("use std::goToEnd as far;\n", "use std::goToEnd as far;\n");
     }
 
     /// A comment lexed inside a `USE_PATH` node (`std::/* c */goToEnd`,
@@ -1866,81 +1870,135 @@ mod tests {
     /// in for: `use_decl_interior_comments`' own doc derives why this is
     /// real handling, not a narrower guard, and this fixture is real
     /// input a user can write, so it belongs here as an ordinary
-    /// `same_as_c1` case instead.
+    /// printed-output case instead.
     #[test]
     fn a_comment_nested_inside_a_use_path_is_reattributed_to_the_next_slot() {
-        same_as_c1("use std::/* c */goToEnd;\n");
-        same_as_c1("use std::/* c */goToEnd, std::goToBegin;\n");
+        formats_to(
+            "use std::/* c */goToEnd;\n",
+            "use std::goToEnd /* c */\n    ;\n",
+        );
+        formats_to(
+            "use std::/* c */goToEnd, std::goToBegin;\n",
+            "use std::goToEnd, /* c */\n    std::goToBegin;\n",
+        );
     }
 
     #[test]
     fn a_multi_path_use_declaration() {
-        same_as_c1("use std::goToEnd, std::goToBegin;\n");
-        same_as_c1("use std::goToEnd,\n    std::goToBegin as backToStart;\n");
+        formats_to(
+            "use std::goToEnd, std::goToBegin;\n",
+            "use std::goToEnd, std::goToBegin;\n",
+        );
+        formats_to(
+            "use std::goToEnd,\n    std::goToBegin as backToStart;\n",
+            "use std::goToEnd, std::goToBegin as backToStart;\n",
+        );
     }
 
     #[test]
     fn standalone_comments_between_declarations() {
-        same_as_c1("// leading\nuse std::goToEnd;\n");
-        same_as_c1("// far\n\n// near\nuse std::goToEnd;\n");
-        same_as_c1("use std::goToEnd;\n\n// trailing file comment\n");
+        formats_to(
+            "// leading\nuse std::goToEnd;\n",
+            "// leading\nuse std::goToEnd;\n",
+        );
+        formats_to(
+            "// far\n\n// near\nuse std::goToEnd;\n",
+            "// far\n\n// near\nuse std::goToEnd;\n",
+        );
+        formats_to(
+            "use std::goToEnd;\n\n// trailing file comment\n",
+            "use std::goToEnd;\n\n// trailing file comment\n",
+        );
         // A same-line trailing comment on one `use` immediately followed
         // (no blank line) by another `use`: `leading_comments` walks
         // back through every raw token until a NODE sibling, so without
         // the `consumed`/`claimed` split in `print_items` this same
         // comment token surfaces as BOTH the first use's trailing
         // comment AND the second use's leading run, printing it twice.
-        same_as_c1("use std::goToEnd; // t\nuse std::goToBegin;\n");
+        formats_to(
+            "use std::goToEnd; // t\nuse std::goToBegin;\n",
+            "use std::goToEnd; // t\nuse std::goToBegin;\n",
+        );
         // The same shape, but with a blank line and a genuine leading
         // comment of its own between the trailing comment and the next
         // `use` — the blank line already cuts `leading_comments`' run
         // before it reaches the trailing comment, so this pins that the
         // fix above doesn't disturb the already-correct case.
-        same_as_c1("use std::goToEnd; // t\n\n// lead\nuse std::goToBegin;\n");
+        formats_to(
+            "use std::goToEnd; // t\n\n// lead\nuse std::goToBegin;\n",
+            "use std::goToEnd; // t\n\n// lead\nuse std::goToBegin;\n",
+        );
     }
 
     #[test]
     fn an_empty_namespace() {
-        same_as_c1("namespace n {\n}\n");
-        same_as_c1("namespace n { // open\n}\n");
-        same_as_c1("namespace n {\n} // close\n");
+        formats_to("namespace n {\n}\n", "namespace n {\n}\n");
+        formats_to("namespace n { // open\n}\n", "namespace n { // open\n}\n");
+        formats_to("namespace n {\n} // close\n", "namespace n {\n} // close\n");
     }
 
     #[test]
     fn nested_and_reopened_namespaces() {
-        same_as_c1("namespace a {\n    namespace b {\n    }\n}\n");
-        same_as_c1("namespace a {\n}\n\nnamespace a {\n}\n");
+        formats_to(
+            "namespace a {\n    namespace b {\n    }\n}\n",
+            "namespace a {\n    namespace b {\n    }\n}\n",
+        );
+        formats_to(
+            "namespace a {\n}\n\nnamespace a {\n}\n",
+            "namespace a {\n}\n\nnamespace a {\n}\n",
+        );
         // Same overlap as the `use`-trailing-comment case above, one
         // level up: a namespace's same-line close-brace comment,
         // immediately followed (no blank line) by another namespace,
         // would otherwise also print as that next namespace's leading
         // comment.
-        same_as_c1("namespace a {\n} // close\nnamespace b {\n}\n");
+        formats_to(
+            "namespace a {\n} // close\nnamespace b {\n}\n",
+            "namespace a {\n} // close\nnamespace b {\n}\n",
+        );
     }
 
     #[test]
     fn a_minimal_function() {
-        same_as_c1("main() {\n 1: left;\n}\n");
-        same_as_c1("main(){1:left;}\n");
-        same_as_c1("main() {\n}\n");
+        formats_to("main() {\n 1: left;\n}\n", "main() {\n 1: left;\n}\n");
+        formats_to("main(){1:left;}\n", "main() {\n 1: left;\n}\n");
+        formats_to("main() {\n}\n", "main() {\n}\n");
     }
 
     #[test]
     fn function_header_modifiers() {
-        same_as_c1("volatile main() {\n 1: left;\n}\n");
-        same_as_c1("export helper() {\n 1: left;\n}\n");
+        formats_to(
+            "volatile main() {\n 1: left;\n}\n",
+            "volatile main() {\n 1: left;\n}\n",
+        );
+        formats_to(
+            "export helper() {\n 1: left;\n}\n",
+            "export helper() {\n 1: left;\n}\n",
+        );
     }
 
     #[test]
     fn a_doc_run_binds_to_its_function() {
-        same_as_c1("? doc line\nmain() {\n 1: left;\n}\n");
-        same_as_c1("? one\n? two\n! attention\nmain() {\n 1: left;\n}\n");
-        same_as_c1("? doc\n\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? doc line\nmain() {\n 1: left;\n}\n",
+            "? doc line\nmain() {\n 1: left;\n}\n",
+        );
+        formats_to(
+            "? one\n? two\n! attention\nmain() {\n 1: left;\n}\n",
+            "? one\n? two\n! attention\nmain() {\n 1: left;\n}\n",
+        );
+        formats_to(
+            "? doc\n\nmain() {\n 1: left;\n}\n",
+            "? doc\n\nmain() {\n 1: left;\n}\n",
+        );
     }
 
     #[test]
     fn nested_functions() {
-        same_as_c1("main() {\n    step() {\n 1: left;\n    }\n\n    @step();\n}\n");
+        formats_to(
+            "main() {\n    step() {\n 1: left;\n    }\n\n    @step();\n}\n",
+            "main() {\n    step() {\n     1: left;\n    }\n\n    @step();\n}\n",
+        );
     }
 
     /// A nested function BETWEEN two statements. This is the fixture that
@@ -1951,22 +2009,44 @@ mod tests {
     /// and every other nested-function fixture happens to put it first.
     #[test]
     fn a_nested_function_between_statements_keeps_its_position() {
-        same_as_c1("main() {\n 1: left;\n    step() {\n 1: left;\n    }\n 2: left;\n}\n");
-        same_as_c1("main() {\n 1: left;\n\n    step() {\n 1: left;\n    }\n\n 2: left;\n}\n");
+        formats_to(
+            "main() {\n 1: left;\n    step() {\n 1: left;\n    }\n 2: left;\n}\n",
+            "main() {\n 1: left;\n    step() {\n     1: left;\n    }\n 2: left;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left;\n\n    step() {\n 1: left;\n    }\n\n 2: left;\n}\n",
+            "main() {\n 1: left;\n\n    step() {\n     1: left;\n    }\n\n 2: left;\n}\n",
+        );
     }
 
     #[test]
     fn labels_stacked_and_own_line() {
-        same_as_c1("main() {\n 1: 2: right, mark;\n 3: left;\n}\n");
-        same_as_c1("main() {\n 1:\n    left;\n}\n");
-        same_as_c1("main() {\n 1: left;\n 10: left;\n 100: left;\n}\n");
+        formats_to(
+            "main() {\n 1: 2: right, mark;\n 3: left;\n}\n",
+            "main() {\n  1: 2: right, mark;\n     3: left;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1:\n    left;\n}\n",
+            "main() {\n 1:\n    left;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left;\n 10: left;\n 100: left;\n}\n",
+            "main() {\n     1: left;\n    10: left;\n   100: left;\n}\n",
+        );
     }
 
     #[test]
     fn statement_shapes() {
-        same_as_c1("main() {\n 1: check(1, 2);\n 2: goto 1;\n 3: halt;\n}\n");
-        same_as_c1("main() {\n 1: @callee();\n 2: @callee(!);\n 3: debugger;\n}\n");
-        same_as_c1(
+        formats_to(
+            "main() {\n 1: check(1, 2);\n 2: goto 1;\n 3: halt;\n}\n",
+            "main() {\n 1: check(1, 2);\n 2: goto 1;\n 3: halt;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: @callee();\n 2: @callee(!);\n 3: debugger;\n}\n",
+            "main() {\n 1: @callee();\n 2: @callee(!);\n 3: debugger;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left, right, mark, unmark, left, right, mark, unmark, left;\n}\n",
             "main() {\n 1: left, right, mark, unmark, left, right, mark, unmark, left;\n}\n",
         );
     }
@@ -1981,23 +2061,39 @@ mod tests {
     /// `greedy_fill_group`'s own wrapping.
     #[test]
     fn comma_group_layout() {
-        same_as_c1("main() {\n 1: left,\n    right;\n}\n");
-        same_as_c1(
+        formats_to(
+            "main() {\n 1: left,\n    right;\n}\n",
+            "main() {\n 1: left,\n    right;\n}\n",
+        );
+        formats_to(
             "main() {\n 1: unmark, unmark, unmark, unmark, unmark, unmark, unmark, unmark, \
              unmark, unmark;\n}\n",
+            "main() {\n 1: unmark, unmark, unmark, unmark, unmark, unmark, unmark, unmark, unmark,\n    unmark;\n}\n",
         );
     }
 
     #[test]
     fn blank_lines_between_body_items() {
-        same_as_c1("main() {\n 1: left;\n\n 2: left;\n}\n");
-        same_as_c1("main() {\n 1: left;\n\n\n\n 2: left;\n}\n");
+        formats_to(
+            "main() {\n 1: left;\n\n 2: left;\n}\n",
+            "main() {\n 1: left;\n\n 2: left;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left;\n\n\n\n 2: left;\n}\n",
+            "main() {\n 1: left;\n\n 2: left;\n}\n",
+        );
     }
 
     #[test]
     fn a_single_trailing_comment() {
-        same_as_c1("main() {\n 1: left; // note\n}\n");
-        same_as_c1("main() {\n 1: left;    // over-indented note\n}\n");
+        formats_to(
+            "main() {\n 1: left; // note\n}\n",
+            "main() {\n 1: left; // note\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left;    // over-indented note\n}\n",
+            "main() {\n 1: left; // over-indented note\n}\n",
+        );
     }
 
     /// The task-5 brief's own fixture set for run boundaries. Kept
@@ -2018,14 +2114,20 @@ mod tests {
         // Three commented statements in a row, source columns unequal
         // (11/12/11) — a run of >= 2, but ragged, so all three fall back
         // to a single space each.
-        same_as_c1("main() {\n 1: left; // a\n 2: right; // b\n 3: mark; // c\n}\n");
+        formats_to(
+            "main() {\n 1: left; // a\n 2: right; // b\n 3: mark; // c\n}\n",
+            "main() {\n 1: left; // a\n 2: right; // b\n 3: mark; // c\n}\n",
+        );
         // An uncommented statement in the middle ends the run after
         // statement 1 and starts a new one at statement 3 — TWO lone
         // runs, not one of length 2 skipping the gap. Proven by the
         // column-equal counterpart below
         // (`a_run_only_ever_spans_consecutive_members`), where a wrong
         // "skip the gap" rule would visibly misalign 1 and 3.
-        same_as_c1("main() {\n 1: left; // a\n 2: right;\n 3: mark; // c\n}\n");
+        formats_to(
+            "main() {\n 1: left; // a\n 2: right;\n 3: mark; // c\n}\n",
+            "main() {\n 1: left; // a\n 2: right;\n 3: mark; // c\n}\n",
+        );
         // A blank line before statement 2 ends the run after statement 1:
         // `!body[j].blank_before` is one of the two conditions extending a
         // run (`has_trailing` is the other), so statement 2 starts its own
@@ -2034,13 +2136,17 @@ mod tests {
         // print identically (single space each) — the column-equal
         // counterpart below (`a_blank_line_ends_a_run`) is where the two
         // readings diverge visibly.
-        same_as_c1("main() {\n 1: left; // a\n\n 2: right; // b\n}\n");
+        formats_to(
+            "main() {\n 1: left; // a\n\n 2: right; // b\n}\n",
+            "main() {\n 1: left; // a\n\n 2: right; // b\n}\n",
+        );
         // A statement long enough to push its own comment past the run's
         // column would decide the run's column for everyone IF this run
         // were aligned — it isn't (columns 11 vs 44), so both statements
         // still get one space. The real "decides the column" case is
         // `an_aligned_run_shares_the_widest_reformatted_line` below.
-        same_as_c1(
+        formats_to(
+            "main() {\n 1: left; // a\n 2: left, right, mark, unmark, left, right; // b\n}\n",
             "main() {\n 1: left; // a\n 2: left, right, mark, unmark, left, right; // b\n}\n",
         );
     }
@@ -2056,7 +2162,10 @@ mod tests {
     /// but the narrower one's would drop from two spaces to one.
     #[test]
     fn an_aligned_run_shares_the_widest_reformatted_line() {
-        same_as_c1("main() {\n 1: left;        // a\n 2: left, right; // b\n}\n");
+        formats_to(
+            "main() {\n 1: left;        // a\n 2: left, right; // b\n}\n",
+            "main() {\n 1: left;        // a\n 2: left, right; // b\n}\n",
+        );
     }
 
     /// The column-equal counterpart to `an_alignment_run_and_its_boundaries`'s
@@ -2070,8 +2179,9 @@ mod tests {
     /// statement 1's spacing to match 2 and 3.
     #[test]
     fn a_blank_line_ends_a_run() {
-        same_as_c1(
+        formats_to(
             "main() {\n 1: left;        // a\n\n 2: left, right; // b\n 3: mark;        // c\n}\n",
+            "main() {\n 1: left; // a\n\n 2: left, right; // b\n 3: mark;        // c\n}\n",
         );
     }
 
@@ -2085,7 +2195,10 @@ mod tests {
     /// the run there would merge 1 and 3 into one run and align them.
     #[test]
     fn a_run_only_ever_spans_consecutive_members() {
-        same_as_c1("main() {\n 1: left;        // a\n 2: right;\n 3: mark;        // c\n}\n");
+        formats_to(
+            "main() {\n 1: left;        // a\n 2: right;\n 3: mark;        // c\n}\n",
+            "main() {\n 1: left; // a\n 2: right;\n 3: mark; // c\n}\n",
+        );
     }
 
     /// The design doc's own worked example (`docs/pmt/fmt.md` (comments)):
@@ -2103,13 +2216,15 @@ mod tests {
     /// against the real C1 formatter before writing this fixture.
     #[test]
     fn the_overflow_fallback_is_excluded_from_the_aligned_verdict() {
-        same_as_c1(
+        formats_to(
             "main() {\n 1: right;       // a\n    check(1, 3); // b\n 3: left; // a comment \
              long enough that keeping it aligned would overflow eighty columns\n}\n",
+            "main() {\n 1: right;       // a\n    check(1, 3); // b\n 3: left; // a comment long enough that keeping it aligned would overflow eighty columns\n}\n",
         );
-        same_as_c1(
+        formats_to(
             "volatile main() {\n 1: right;       // a\n    check(1, 3); // b\n 3: left; // a \
              comment long enough that keeping it aligned would overflow eighty columns\n}\n",
+            "volatile main() {\n 1: right;       // a\n    check(1, 3); // b\n 3: left; // a comment long enough that keeping it aligned would overflow eighty columns\n}\n",
         );
     }
 
@@ -2124,7 +2239,10 @@ mod tests {
     /// split this fixture pins.
     #[test]
     fn alignment_measures_only_the_codes_last_line() {
-        same_as_c1("main() {\n 999999999:\n    left;    // a\n 2: right;   // b\n}\n");
+        formats_to(
+            "main() {\n 999999999:\n    left;    // a\n 2: right;   // b\n}\n",
+            "main() {\n 999999999:\n    left;  // a\n 2: right; // b\n}\n",
+        );
     }
 
     /// `comment_w` is measured on [`super::normalize_comment_text`]'s
@@ -2139,9 +2257,10 @@ mod tests {
     /// against the real C1 formatter before writing this fixture.
     #[test]
     fn normalized_width_not_raw_drives_the_overflow_check() {
-        same_as_c1(
+        formats_to(
             "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx  \
              \u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\u{20}\n 2: right; // b\n}\n",
+            "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n 2: right; // b\n}\n",
         );
     }
 
@@ -2157,11 +2276,13 @@ mod tests {
     /// two spaces at exactly 80, one space (fallen back) at 81.
     #[test]
     fn the_overflow_boundary_is_strictly_greater_than_80() {
-        same_as_c1(
+        formats_to(
+            "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n 2: right; // b\n}\n",
             "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n 2: right; // b\n}\n",
         );
-        same_as_c1(
+        formats_to(
             "main() {\n 1: left;  // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n 2: right; // b\n}\n",
+            "main() {\n 1: left; // xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n 2: right; // b\n}\n",
         );
     }
 
@@ -2175,19 +2296,31 @@ mod tests {
     /// one space per comment, since NOT every member shares the column.
     #[test]
     fn aligned_requires_every_pair_to_match_not_just_one() {
-        same_as_c1("main() {\n 1: left;  // a\n 2: right; // b\n 3: mark;       // c\n}\n");
+        formats_to(
+            "main() {\n 1: left;  // a\n 2: right; // b\n 3: mark;       // c\n}\n",
+            "main() {\n 1: left; // a\n 2: right; // b\n 3: mark; // c\n}\n",
+        );
     }
 
     #[test]
     fn trailing_comments_on_declarations() {
-        same_as_c1("use std::goToEnd; // note\n");
-        same_as_c1("main() {\n 1: left;\n} // after the brace\n");
-        same_as_c1("namespace n {\n} // after the namespace\n");
+        formats_to("use std::goToEnd; // note\n", "use std::goToEnd; // note\n");
+        formats_to(
+            "main() {\n 1: left;\n} // after the brace\n",
+            "main() {\n 1: left;\n} // after the brace\n",
+        );
+        formats_to(
+            "namespace n {\n} // after the namespace\n",
+            "namespace n {\n} // after the namespace\n",
+        );
     }
 
     #[test]
     fn an_own_line_comment_is_not_a_trailing_one() {
-        same_as_c1("main() {\n 1: left;\n // own line\n 2: left; // trailing\n}\n");
+        formats_to(
+            "main() {\n 1: left;\n // own line\n 2: left; // trailing\n}\n",
+            "main() {\n 1: left;\n    // own line\n 2: left; // trailing\n}\n",
+        );
     }
 
     /// A statement's trailing comment, immediately followed (same
@@ -2204,7 +2337,10 @@ mod tests {
     /// below for the fixture that DOES distinguish them.
     #[test]
     fn a_trailing_comment_does_not_swallow_the_next_own_line_comment() {
-        same_as_c1("main() {\n 1: left; // t\n // own line after trailing\n 2: right;\n}\n");
+        formats_to(
+            "main() {\n 1: left; // t\n // own line after trailing\n 2: right;\n}\n",
+            "main() {\n 1: left; // t\n    // own line after trailing\n 2: right;\n}\n",
+        );
     }
 
     /// The discriminating counterpart: TWO commented statements (both
@@ -2221,7 +2357,10 @@ mod tests {
     /// the run scan and aligning them — a visible column shift.
     #[test]
     fn an_own_line_comment_wrongly_treated_as_trailing_corrupts_run_adjacency() {
-        same_as_c1("main() {\n 1: left;    // a\n // own line\n 2: right;   // b\n}\n");
+        formats_to(
+            "main() {\n 1: left;    // a\n // own line\n 2: right;   // b\n}\n",
+            "main() {\n 1: left; // a\n    // own line\n 2: right; // b\n}\n",
+        );
     }
 
     /// The two `unreachable!` coverage stubs this list used to pin —
@@ -2236,12 +2375,18 @@ mod tests {
     /// comment, `Some` arm) doesn't reach.
     #[test]
     fn interior_comma_block_comment_stays_inline() {
-        same_as_c1("main() {\n 1: left, /* x */ right;\n}\n");
+        formats_to(
+            "main() {\n 1: left, /* x */ right;\n}\n",
+            "main() {\n 1: left, /* x */ right;\n}\n",
+        );
     }
 
     #[test]
     fn function_open_brace_comment_rides_the_header_line() {
-        same_as_c1("main() { // open\n 1: left;\n}\n");
+        formats_to(
+            "main() { // open\n 1: left;\n}\n",
+            "main() { // open\n 1: left;\n}\n",
+        );
     }
 
     /// The middle fixture is also this task's DOUBLE-PRINT guard: `//
@@ -2254,38 +2399,64 @@ mod tests {
     /// twice.
     #[test]
     fn own_line_comments_inside_a_body() {
-        same_as_c1("main() {\n    // leading\n 1: left;\n}\n");
-        same_as_c1("main() {\n 1: left;\n    // between\n 2: left;\n}\n");
-        same_as_c1("main() {\n 1: left;\n    // trailing the body\n}\n");
+        formats_to(
+            "main() {\n    // leading\n 1: left;\n}\n",
+            "main() {\n    // leading\n 1: left;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left;\n    // between\n 2: left;\n}\n",
+            "main() {\n 1: left;\n    // between\n 2: left;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left;\n    // trailing the body\n}\n",
+            "main() {\n 1: left;\n    // trailing the body\n}\n",
+        );
         // A standalone (unclaimed) comment with a blank line before it —
         // `blank_immediately_before(tok)`'s own branch in `print_body`'s
         // Comment arm, not `blank_before_unit`'s (that one only fires for
         // a NODE, and this comment has no following node to attach to).
-        same_as_c1("main() {\n 1: left;\n\n    // standalone with blank\n}\n");
+        formats_to(
+            "main() {\n 1: left;\n\n    // standalone with blank\n}\n",
+            "main() {\n 1: left;\n\n    // standalone with blank\n}\n",
+        );
     }
 
     #[test]
     fn a_comment_run_keeps_its_internal_gap() {
-        same_as_c1("main() {\n    // far\n\n    // near\n 1: left;\n}\n");
+        formats_to(
+            "main() {\n    // far\n\n    // near\n 1: left;\n}\n",
+            "main() {\n    // far\n\n    // near\n 1: left;\n}\n",
+        );
     }
 
     #[test]
     fn block_comments() {
-        same_as_c1("main() {\n    /* one line */\n 1: left;\n}\n");
-        same_as_c1(
+        formats_to(
+            "main() {\n    /* one line */\n 1: left;\n}\n",
+            "main() {\n    /* one line */\n 1: left;\n}\n",
+        );
+        formats_to(
+            "main() {\n    /* a block comment\n       spanning two lines */\n 1: left;\n}\n",
             "main() {\n    /* a block comment\n       spanning two lines */\n 1: left;\n}\n",
         );
         // Empty comments — `normalize_comment_text`'s per-line `trim_end`
         // has nothing to trim either way, but these are real lexed
         // shapes, not merely untested `text` values.
-        same_as_c1("main() {\n    //\n 1: left;\n}\n");
-        same_as_c1("main() {\n    /**/\n 1: left;\n}\n");
+        formats_to(
+            "main() {\n    //\n 1: left;\n}\n",
+            "main() {\n    //\n 1: left;\n}\n",
+        );
+        formats_to(
+            "main() {\n    /**/\n 1: left;\n}\n",
+            "main() {\n    /**/\n 1: left;\n}\n",
+        );
     }
 
     #[test]
     fn comments_around_a_nested_function() {
-        same_as_c1(
+        formats_to(
             "main() {\n    // about step\n    step() {\n 1: left;\n    }\n\n    @step();\n}\n",
+            "main() {\n    // about step\n    step() {\n     1: left;\n    }\n\n    @step();\n}\n",
         );
     }
 
@@ -2299,7 +2470,10 @@ mod tests {
     /// leading run.
     #[test]
     fn a_nested_functions_close_brace_comment_does_not_double_print() {
-        same_as_c1("main() {\n    step() {\n 1: left;\n    } // after nested\n 2: left;\n}\n");
+        formats_to(
+            "main() {\n    step() {\n 1: left;\n    } // after nested\n 2: left;\n}\n",
+            "main() {\n    step() {\n     1: left;\n    } // after nested\n 2: left;\n}\n",
+        );
     }
 
     /// The doc-run-comment ruling's own surface (module doc's second
@@ -2315,30 +2489,54 @@ mod tests {
     #[test]
     fn doc_run_interior_and_trailing_comments() {
         // Between two doc lines — a DOC_RUN child.
-        same_as_c1("? one\n// interloper\n? two\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n// interloper\n? two\nmain() {\n 1: left;\n}\n",
+            "? one\n// interloper\n? two\nmain() {\n 1: left;\n}\n",
+        );
         // After a gap following the run's only line — DOC_RUN's own
         // next sibling, not a child.
-        same_as_c1("? one\n\n// after a gap\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n\n// after a gap\nmain() {\n 1: left;\n}\n",
+            "? one\n\n// after a gap\nmain() {\n 1: left;\n}\n",
+        );
         // Directly between the run's last line and the declaration,
         // no blank either side.
-        same_as_c1("? one\n// trailing before fn\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n// trailing before fn\nmain() {\n 1: left;\n}\n",
+            "? one\n// trailing before fn\nmain() {\n 1: left;\n}\n",
+        );
         // The same shape, with a blank line before the trailing comment.
-        same_as_c1("? one\n\n// trailing before fn\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n\n// trailing before fn\nmain() {\n 1: left;\n}\n",
+            "? one\n\n// trailing before fn\nmain() {\n 1: left;\n}\n",
+        );
         // More than one trailing comment in a row, still DOC_RUN's own
         // siblings, not its children.
-        same_as_c1("? one\n// c1\n// c2\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n// c1\n// c2\nmain() {\n 1: left;\n}\n",
+            "? one\n// c1\n// c2\nmain() {\n 1: left;\n}\n",
+        );
         // A blank line AFTER the trailing comment, before the header —
         // `blank_before_header`'s own branch, computed off the LAST
         // trailing comment rather than off `DOC_RUN` itself.
-        same_as_c1("? one\n// c1\n\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n// c1\n\nmain() {\n 1: left;\n}\n",
+            "? one\n// c1\n\nmain() {\n 1: left;\n}\n",
+        );
         // A blank line BETWEEN two run items, INSIDE `print_doc_run`'s
         // own loop — distinct from every gap above, which all sit
         // outside the run (before it, or after its last line). One doc
         // line's own kind, one comment token's, so both branches of the
         // dispatch below the blank check get their own blank-before
         // proof.
-        same_as_c1("? one\n\n? two\nmain() {\n 1: left;\n}\n");
-        same_as_c1("? one\n\n// mid\n? two\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n\n? two\nmain() {\n 1: left;\n}\n",
+            "? one\n\n? two\nmain() {\n 1: left;\n}\n",
+        );
+        formats_to(
+            "? one\n\n// mid\n? two\nmain() {\n 1: left;\n}\n",
+            "? one\n\n// mid\n? two\nmain() {\n 1: left;\n}\n",
+        );
     }
 
     /// A comment immediately before a bound doc run — `leading_comments`
@@ -2349,9 +2547,13 @@ mod tests {
     /// doc-run-bound nested function, at body indent.
     #[test]
     fn a_comment_leads_a_bound_doc_run() {
-        same_as_c1("// lead\n? doc\nmain() {\n 1: left;\n}\n");
-        same_as_c1(
+        formats_to(
+            "// lead\n? doc\nmain() {\n 1: left;\n}\n",
+            "// lead\n? doc\nmain() {\n 1: left;\n}\n",
+        );
+        formats_to(
             "main() {\n    // about step\n    ? step doc\n    step() {\n 1: left;\n    }\n}\n",
+            "main() {\n    // about step\n    ? step doc\n    step() {\n     1: left;\n    }\n}\n",
         );
     }
 
@@ -2370,7 +2572,7 @@ mod tests {
     /// rounds to the same multiple of 4 either way.
     #[test]
     fn command_column_rounds_up_from_the_plus_two_margin() {
-        same_as_c1("main() {\n 12: left;\n}\n");
+        formats_to("main() {\n 12: left;\n}\n", "main() {\n    12: left;\n}\n");
     }
 
     /// A `?`/`!` line with an empty payload prints as the bare sigil — a
@@ -2379,15 +2581,24 @@ mod tests {
     /// shape in `fmt/mod.rs`'s `empty_doc_line_prints_bare_sigil_as_a_paragraph_break`.
     #[test]
     fn a_bare_doc_line_is_a_paragraph_break() {
-        same_as_c1("? one\n?\n? two\nmain() {\n 1: left;\n}\n");
+        formats_to(
+            "? one\n?\n? two\nmain() {\n 1: left;\n}\n",
+            "? one\n?\n? two\nmain() {\n 1: left;\n}\n",
+        );
     }
 
     /// `render_check_arm`'s `CheckArm::Return` arm (`check(..., !)`) —
     /// every other `check` fixture in this module uses two `Label` arms.
     #[test]
     fn check_arm_return() {
-        same_as_c1("main() {\n 1: check(!, 1);\n}\n");
-        same_as_c1("main() {\n 1: check(!, !);\n}\n");
+        formats_to(
+            "main() {\n 1: check(!, 1);\n}\n",
+            "main() {\n 1: check(!, 1);\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: check(!, !);\n}\n",
+            "main() {\n 1: check(!, !);\n}\n",
+        );
     }
 
     /// `render_builtin_successor`'s non-`FallThrough` branch (the
@@ -2395,8 +2606,8 @@ mod tests {
     /// a builtin its own successor.
     #[test]
     fn a_builtin_with_a_successor() {
-        same_as_c1("main() {\n 1: left(5);\n}\n");
-        same_as_c1("main() {\n 1: mark(!);\n}\n");
+        formats_to("main() {\n 1: left(5);\n}\n", "main() {\n 1: left(5);\n}\n");
+        formats_to("main() {\n 1: mark(!);\n}\n", "main() {\n 1: mark(!);\n}\n");
     }
 
     /// `label_margin`'s `None` arm, reached under `label_break` (an
@@ -2405,18 +2616,28 @@ mod tests {
     /// only exercise the `Some` arm.
     #[test]
     fn label_margin_overflow_under_label_break() {
-        same_as_c1("main() {\n 999999999:\n    left;\n}\n");
+        formats_to(
+            "main() {\n 999999999:\n    left;\n}\n",
+            "main() {\n 999999999:\n    left;\n}\n",
+        );
     }
 
     // -- Task 6: use-list interior comments ------------------------------
 
     #[test]
     fn interior_comments_between_use_paths() {
-        same_as_c1("use a::b, // note\n    c::d;\n");
-        same_as_c1("use a::b,\n    // own line\n    c::d;\n");
-        same_as_c1(
+        formats_to(
+            "use a::b, // note\n    c::d;\n",
+            "use a::b, // note\n    c::d;\n",
+        );
+        formats_to(
+            "use a::b,\n    // own line\n    c::d;\n",
+            "use a::b,\n    // own line\n    c::d;\n",
+        );
+        formats_to(
             "use std::goToEnd,\n    // pulled in for the return leg\n    std::goToBegin as \
              backToStart;\n",
+            "use std::goToEnd,\n    // pulled in for the return leg\n    std::goToBegin as backToStart;\n",
         );
     }
 
@@ -2430,18 +2651,32 @@ mod tests {
     /// following `use`.
     #[test]
     fn interior_use_slots_from_the_integration_fixture_set() {
-        same_as_c1(
+        formats_to(
             "use std::goToEnd, // walk right\n    std::goToBegin;\n\nmain() {\n 1: \
              @goToEnd();\n 2: halt;\n}\n",
+            "use std::goToEnd, // walk right\n    std::goToBegin;\n\nmain() {\n 1: @goToEnd();\n 2: halt;\n}\n",
         );
-        same_as_c1("use\n// note\na::b, c::d;\n");
-        same_as_c1("use // note\na::b, c::d;\n");
-        same_as_c1("use a::b, // note\nc::d;\n");
-        same_as_c1("use a::b, c::d\n// note\n;\n");
-        same_as_c1("use a::b // note\n;\n");
-        same_as_c1(
+        formats_to(
+            "use\n// note\na::b, c::d;\n",
+            "use\n    // note\n    a::b,\n    c::d;\n",
+        );
+        formats_to(
+            "use // note\na::b, c::d;\n",
+            "use // note\n    a::b,\n    c::d;\n",
+        );
+        formats_to(
+            "use a::b, // note\nc::d;\n",
+            "use a::b, // note\n    c::d;\n",
+        );
+        formats_to(
+            "use a::b, c::d\n// note\n;\n",
+            "use a::b,\n    c::d\n    // note\n    ;\n",
+        );
+        formats_to("use a::b // note\n;\n", "use a::b // note\n    ;\n");
+        formats_to(
             "use a::b;\n// the fallback path\nuse c::d;\n\nmain() {\n 1: @b();\n 2: \
                     halt;\n}\n",
+            "use a::b;\n// the fallback path\nuse c::d;\n\nmain() {\n 1: @b();\n 2: halt;\n}\n",
         );
     }
 
@@ -2449,8 +2684,14 @@ mod tests {
 
     #[test]
     fn interior_comments_between_comma_items() {
-        same_as_c1("main() {\n 1: left, // note\n    right;\n}\n");
-        same_as_c1("main() {\n 1: left,\n    // own line\n    right;\n}\n");
+        formats_to(
+            "main() {\n 1: left, // note\n    right;\n}\n",
+            "main() {\n 1: left, // note\n    right;\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left,\n    // own line\n    right;\n}\n",
+            "main() {\n 1: left, // own line\n    right;\n}\n",
+        );
     }
 
     /// `render_items`' item-0 special case: a forcing LINE comment
@@ -2462,7 +2703,10 @@ mod tests {
     /// Ported from C1's own `m3_item0_leading_line_comment_forces_a_comma_group_break`.
     #[test]
     fn a_forcing_comment_before_the_first_item_breaks_before_the_loop() {
-        same_as_c1("main() { 1: // c\n left, right; }\n");
+        formats_to(
+            "main() { 1: // c\n left, right; }\n",
+            "main() {\n 1:\n    // c\n    left, right;\n}\n",
+        );
     }
 
     /// The `gi > 0` forced-break branch, distinct from item 0's: a THIRD
@@ -2472,7 +2716,10 @@ mod tests {
     /// member.
     #[test]
     fn items_after_a_forced_break_continue_the_new_group_until_their_own_break() {
-        same_as_c1("main() {\n 1: left, // note\n    right, mark;\n}\n");
+        formats_to(
+            "main() {\n 1: left, // note\n    right, mark;\n}\n",
+            "main() {\n 1: left, // note\n    right, mark;\n}\n",
+        );
     }
 
     /// `render_items`' group-split condition is `nb || layouts[i].forced_break`
@@ -2494,7 +2741,10 @@ mod tests {
     /// anywhere at all without corrupting the source.
     #[test]
     fn a_comment_nested_inside_the_previous_item_still_forces_the_next_items_break() {
-        same_as_c1("main() {\n 1: @f( // c\n), left;\n}\n");
+        formats_to(
+            "main() {\n 1: @f( // c\n), left;\n}\n",
+            "main() {\n 1: @f(), // c\n    left;\n}\n",
+        );
     }
 
     /// `layout_leading`'s `pre_item_lines` — a comment AFTER the first
@@ -2506,7 +2756,10 @@ mod tests {
     /// gives an item's leading run more than one comment.
     #[test]
     fn a_comment_after_the_forcing_line_comment_reprints_as_a_pre_item_line() {
-        same_as_c1("main() { left, // note\n /* extra */\n right; }\n");
+        formats_to(
+            "main() { left, // note\n /* extra */\n right; }\n",
+            "main() {\n    left, // note\n    /* extra */\n    right;\n}\n",
+        );
     }
 
     /// `layout_leading`'s `break_inline` loop over `leading[..break_pos]`
@@ -2517,7 +2770,10 @@ mod tests {
     /// == 0`).
     #[test]
     fn a_comment_before_the_forcing_line_comment_joins_its_break_inline_line() {
-        same_as_c1("main() { left, /* x */ // note\n right; }\n");
+        formats_to(
+            "main() { left, /* x */ // note\n right; }\n",
+            "main() {\n    left, /* x */ // note\n    right;\n}\n",
+        );
     }
 
     /// `line_width_after`'s `rsplit_once` branch and `greedy_fill_group`'s
@@ -2531,9 +2787,10 @@ mod tests {
     #[test]
     fn multiline_leading_comment_uses_last_line_width_for_greedy_fill() {
         let comment = format!("/* {}\ny */", "x".repeat(70));
-        same_as_c1(&format!(
-            "main() {{ left, {comment} right, mark, mark, mark, mark, mark; }}\n"
-        ));
+        formats_to(
+            &format!("main() {{ left, {comment} right, mark, mark, mark, mark, mark; }}\n"),
+            "main() {\n    left,\n    /* xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\ny */ right, mark, mark, mark, mark, mark;\n}\n",
+        );
     }
 
     /// The control for the fixture above, ported from C1's own
@@ -2544,9 +2801,10 @@ mod tests {
     #[test]
     fn control_single_line_leading_comment_is_unaffected_by_the_multiline_fix() {
         let comment = format!("/* {} y */", "x".repeat(70));
-        same_as_c1(&format!(
-            "main() {{ left, {comment} right, mark, mark, mark, mark, mark; }}\n"
-        ));
+        formats_to(
+            &format!("main() {{ left, {comment} right, mark, mark, mark, mark, mark; }}\n"),
+            "main() {\n    left,\n    /* xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx y */ right,\n    mark, mark, mark, mark, mark;\n}\n",
+        );
     }
 
     /// The drain-point rule extended past `ITEM` to `LABEL`: a comment
@@ -2557,8 +2815,14 @@ mod tests {
     /// (`item_leading_comments`'s own doc).
     #[test]
     fn a_comment_nested_inside_a_label_joins_item_zeros_leading_run() {
-        same_as_c1("main() { 1/* lbl */: left; }\n");
-        same_as_c1("main() { 1: 2/* between labels */: left; }\n");
+        formats_to(
+            "main() { 1/* lbl */: left; }\n",
+            "main() {\n 1: /* lbl */ left;\n}\n",
+        );
+        formats_to(
+            "main() { 1: 2/* between labels */: left; }\n",
+            "main() {\n  1: 2: /* between labels */ left;\n}\n",
+        );
     }
 
     // -- Task 6: the pre-`;` trailing-comment relocation -----------------
@@ -2576,9 +2840,18 @@ mod tests {
     /// comment identically.
     #[test]
     fn a_pre_semicolon_comment_relocates_to_the_statements_trailing_comment() {
-        same_as_c1("main() {\n 1: left /* c */;\n}\n");
-        same_as_c1("main() {\n 1: check(1 /* c */, 2);\n}\n");
-        same_as_c1("main() {\n 1: left, /* a */right /* b */;\n}\n");
+        formats_to(
+            "main() {\n 1: left /* c */;\n}\n",
+            "main() {\n 1: left; /* c */\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: check(1 /* c */, 2);\n}\n",
+            "main() {\n 1: check(1, 2); /* c */\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left, /* a */right /* b */;\n}\n",
+            "main() {\n 1: left, /* a */ right; /* b */\n}\n",
+        );
     }
 
     /// C1's `take_trailing` checks only the FIRST comment pending at `;` —
@@ -2592,7 +2865,10 @@ mod tests {
     /// for, dropping it).
     #[test]
     fn a_pre_semicolon_comment_wins_the_trailing_role_over_a_post_semicolon_one() {
-        same_as_c1("main() {\n 1: left /*a*/; // b\n}\n");
+        formats_to(
+            "main() {\n 1: left /*a*/; // b\n}\n",
+            "main() {\n 1: left; /*a*/\n    // b\n}\n",
+        );
     }
 
     /// The candidate tail-slot comment failing EITHER half of C1's check
@@ -2603,8 +2879,14 @@ mod tests {
     /// own doc — a tail member's source line can never exceed `;`'s).
     #[test]
     fn an_own_line_pre_semicolon_comment_becomes_a_standalone_tail_comment() {
-        same_as_c1("main() {\n 1: left\n// own line\n;\n}\n");
-        same_as_c1("main() {\n 1: left\n\n// own line\n;\n}\n");
+        formats_to(
+            "main() {\n 1: left\n// own line\n;\n}\n",
+            "main() {\n 1: left;\n    // own line\n}\n",
+        );
+        formats_to(
+            "main() {\n 1: left\n\n// own line\n;\n}\n",
+            "main() {\n 1: left;\n    // own line\n}\n",
+        );
     }
 
     /// `check(1,\n // a\n 2);` — `// a` sits on line 3, `;` on line 4:
@@ -2621,7 +2903,10 @@ mod tests {
     /// operator on its own.
     #[test]
     fn a_tail_comment_failing_the_same_line_half_of_the_check_becomes_standalone() {
-        same_as_c1("main() {\n 1: check(1,\n // a\n 2);\n}\n");
+        formats_to(
+            "main() {\n 1: check(1,\n // a\n 2);\n}\n",
+            "main() {\n 1: check(1, 2);\n    // a\n}\n",
+        );
     }
 
     /// The genuine own-line-only counterpart: `/* c */;` — the block
@@ -2641,7 +2926,10 @@ mod tests {
     /// conjunct-deleted mutant would produce instead).
     #[test]
     fn a_tail_comment_failing_only_the_own_line_half_becomes_standalone() {
-        same_as_c1("main() {\n 1: left\n/* c */;\n}\n");
+        formats_to(
+            "main() {\n 1: left\n/* c */;\n}\n",
+            "main() {\n 1: left;\n    /* c */\n}\n",
+        );
     }
 
     /// Two statements whose trailing comments share a SOURCE column, one
@@ -2654,7 +2942,10 @@ mod tests {
     /// panicking on the `has_trailing`-guarantees-`Some` `expect`.
     #[test]
     fn a_relocated_and_an_ordinary_trailing_comment_can_share_one_alignment_run() {
-        same_as_c1("main() {\n 1: left /* a */;\n 2: right;    // b\n}\n");
+        formats_to(
+            "main() {\n 1: left /* a */;\n 2: right;    // b\n}\n",
+            "main() {\n 1: left; /* a */\n 2: right; // b\n}\n",
+        );
     }
 
     /// A genuine post-`;` comment that a pre-`;` one already beat to the
@@ -2675,7 +2966,10 @@ mod tests {
     /// losing it outright rather than double-printing it.
     #[test]
     fn a_leftover_post_semicolon_comment_still_prints_via_the_next_statements_leading_run() {
-        same_as_c1("main() {\n 1: left /*a*/; // b\n 2: right;\n}\n");
+        formats_to(
+            "main() {\n 1: left /*a*/; // b\n 2: right;\n}\n",
+            "main() {\n 1: left; /*a*/\n    // b\n 2: right;\n}\n",
+        );
     }
 
     /// A leftover tail comment relocates C1's `prev_end_line` baseline
@@ -2691,7 +2985,10 @@ mod tests {
     /// between.
     #[test]
     fn blank_before_after_a_leftover_measures_from_the_leftovers_own_line() {
-        same_as_c1("main() {\n 1: left\n// own line\n\n\n;\n// b\n}\n");
+        formats_to(
+            "main() {\n 1: left\n// own line\n\n\n;\n// b\n}\n",
+            "main() {\n 1: left;\n    // own line\n\n    // b\n}\n",
+        );
     }
 
     /// The same override, but the element AFTER the leftover is a REAL
@@ -2704,7 +3001,10 @@ mod tests {
     /// says blank.
     #[test]
     fn blank_before_after_a_leftover_applies_to_the_next_statement_too() {
-        same_as_c1("main() {\n 1: left\n// own line\n\n\n\n\n;\n 2: right;\n}\n");
+        formats_to(
+            "main() {\n 1: left\n// own line\n\n\n\n\n;\n 2: right;\n}\n",
+            "main() {\n 1: left;\n    // own line\n\n 2: right;\n}\n",
+        );
     }
 
     /// TWO leftovers from the SAME tail (both nested inside the last
@@ -2716,7 +3016,10 @@ mod tests {
     /// two fixtures in this group pin.
     #[test]
     fn a_second_leftover_in_the_same_tail_measures_against_the_first() {
-        same_as_c1("main() {\n 1: check(1 /* a */,\n\n\n 2 /* b */);\n}\n");
+        formats_to(
+            "main() {\n 1: check(1 /* a */,\n\n\n 2 /* b */);\n}\n",
+            "main() {\n 1: check(1, 2);\n    /* a */\n\n    /* b */\n}\n",
+        );
     }
 
     /// The Task-6 fix-round bug, found by review, not by this task's own
@@ -2737,7 +3040,10 @@ mod tests {
     /// pending queue updates it, claimed or not.
     #[test]
     fn blank_before_survives_past_a_leftover_into_a_claimed_comment() {
-        same_as_c1("main() {\n 1: left\n// own line\n;\n// c\n 2: right;\n}\n");
+        formats_to(
+            "main() {\n 1: left\n// own line\n;\n// c\n 2: right;\n}\n",
+            "main() {\n 1: left;\n    // own line\n\n    // c\n 2: right;\n}\n",
+        );
     }
 
     /// The same carry, but the element the leftover's blank line must
@@ -2746,7 +3052,10 @@ mod tests {
     /// the carry (the claiming node here is `step()`, not a `STATEMENT`).
     #[test]
     fn blank_before_survives_past_a_leftover_into_a_nested_functions_leading_run() {
-        same_as_c1("main() {\n 1: left\n// own line\n;\n// c\n    step() {\n 1: left;\n    }\n}\n");
+        formats_to(
+            "main() {\n 1: left\n// own line\n;\n// c\n    step() {\n 1: left;\n    }\n}\n",
+            "main() {\n 1: left;\n    // own line\n\n    // c\n    step() {\n     1: left;\n    }\n}\n",
+        );
     }
 
     /// TWO claimed comments in a row between the leftover and the next
@@ -2761,7 +3070,10 @@ mod tests {
     /// right.
     #[test]
     fn blank_before_survives_past_two_consecutive_claimed_comments() {
-        same_as_c1("main() {\n 1: left\n// own line\n;\n// c\n// d\n 2: right;\n}\n");
+        formats_to(
+            "main() {\n 1: left\n// own line\n;\n// c\n// d\n 2: right;\n}\n",
+            "main() {\n 1: left;\n    // own line\n\n    // c\n    // d\n 2: right;\n}\n",
+        );
     }
 
     /// The tail-slot analogue: the leftover itself is nested inside a
@@ -2772,7 +3084,10 @@ mod tests {
     /// the `BodyElem::TailComment` in the first place.
     #[test]
     fn blank_before_survives_past_a_leftover_nested_inside_the_last_item() {
-        same_as_c1("main() {\n 1: check(1,\n // a\n 2);\n// c\n 2: right;\n}\n");
+        formats_to(
+            "main() {\n 1: check(1,\n // a\n 2);\n// c\n 2: right;\n}\n",
+            "main() {\n 1: check(1, 2);\n    // a\n\n    // c\n 2: right;\n}\n",
+        );
     }
 
     /// The control case: with a REAL blank line already present between
@@ -2783,7 +3098,10 @@ mod tests {
     /// responsible for.
     #[test]
     fn a_real_blank_line_before_a_claimed_comment_needs_no_carry() {
-        same_as_c1("main() {\n 1: left\n// own line\n;\n\n// c\n 2: right;\n}\n");
+        formats_to(
+            "main() {\n 1: left\n// own line\n;\n\n// c\n 2: right;\n}\n",
+            "main() {\n 1: left;\n    // own line\n\n    // c\n 2: right;\n}\n",
+        );
     }
 
     /// C1's own `has_trailing` matches `BodyKind::Statement` alone
@@ -2798,16 +3116,25 @@ mod tests {
     /// be corrupted to `1`, visibly shrinking statement 2's own spacing.
     #[test]
     fn a_nested_functions_close_brace_comment_never_joins_an_alignment_run() {
-        same_as_c1("main() {\n    step() {\n 1: left;\n    } // a\n 2: right;    // b\n}\n");
+        formats_to(
+            "main() {\n    step() {\n 1: left;\n    } // a\n 2: right;    // b\n}\n",
+            "main() {\n    step() {\n     1: left;\n    } // a\n 2: right; // b\n}\n",
+        );
     }
 
     // -- Task 6: function open-brace comments ----------------------------
 
     #[test]
     fn comments_after_an_opening_brace() {
-        same_as_c1("main() { // open\n 1: left;\n}\n");
-        same_as_c1("namespace n { // open\n}\n");
-        same_as_c1("main() { // open\n    step() { // nested open\n 1: left;\n    }\n}\n");
+        formats_to(
+            "main() { // open\n 1: left;\n}\n",
+            "main() { // open\n 1: left;\n}\n",
+        );
+        formats_to("namespace n { // open\n}\n", "namespace n { // open\n}\n");
+        formats_to(
+            "main() { // open\n    step() { // nested open\n 1: left;\n    }\n}\n",
+            "main() { // open\n    step() { // nested open\n     1: left;\n    }\n}\n",
+        );
     }
 
     /// The DOUBLE-PRINT trap `print_function`'s open-brace comment shares
@@ -2818,50 +3145,103 @@ mod tests {
     /// token, not merely up to `{`) and print a second time.
     #[test]
     fn an_open_brace_comment_does_not_double_print_as_the_first_statements_leading_run() {
-        same_as_c1("main() { // open\n 1: left;\n}\n");
-        same_as_c1("main() { // open\n    step() {\n 1: left;\n    }\n}\n");
+        formats_to(
+            "main() { // open\n 1: left;\n}\n",
+            "main() { // open\n 1: left;\n}\n",
+        );
+        formats_to(
+            "main() { // open\n    step() {\n 1: left;\n    }\n}\n",
+            "main() { // open\n    step() {\n     1: left;\n    }\n}\n",
+        );
     }
 
     // -- Task 6: everything at once ---------------------------------------
 
     #[test]
     fn every_comment_position_at_once() {
-        same_as_c1(concat!(
-            "// file leader\n\n",
-            "use a::b, // interior\n    c::d;\n\n",
-            "? doc\n",
-            "main() { // open\n",
-            "    // leading standalone\n",
-            " 1: left, right; // trailing\n\n",
-            " 2: check(1, 2);\n",
-            "} // close\n"
-        ));
+        formats_to(
+            concat!(
+                "// file leader\n\n",
+                "use a::b, // interior\n    c::d;\n\n",
+                "? doc\n",
+                "main() { // open\n",
+                "    // leading standalone\n",
+                " 1: left, right; // trailing\n\n",
+                " 2: check(1, 2);\n",
+                "} // close\n"
+            ),
+            "// file leader\n\nuse a::b, // interior\n    c::d;\n\n? doc\nmain() { // open\n    // leading standalone\n 1: left, right; // trailing\n\n 2: check(1, 2);\n} // close\n",
+        );
     }
 
-    /// A differential run over every real, multi-hundred-line `.pmc`
-    /// program already in this repository — the embedded stdlib, the
+    /// A pinned run over every real, multi-hundred-line `.pmc` program
+    /// already in this repository — the embedded stdlib, the
     /// derivation-first golden fixtures, and `rich.pmc` (a syntax-tree
-    /// fixture picked BECAUSE it is trivia-dense by construction). This
-    /// task restructured `print_body`'s own signature, both `consumed`
-    /// builders, `render_items`'s wiring, and `StmtElem`'s fields — a
-    /// hand-written 1-5 line fixture proves one shape at a time, but
-    /// never proves the wiring holds together across a real program the
-    /// way the corpus-wide gate `tests/fmt_programs.rs::stdlib_is_fmt_clean`
-    /// already does for C1. Green here is the closest this task gets to
-    /// that same proof without waiting for Task 7's actual cutover.
+    /// fixture picked BECAUSE it is trivia-dense by construction). A
+    /// hand-written 1-5 line fixture proves one shape at a time; only a
+    /// real program proves the wiring holds together — [`print_body`]'s
+    /// signature, both `consumed` builders, [`render_items`]'s wiring
+    /// and [`StmtElem`]'s fields — the way the corpus-wide gates in
+    /// `tests/fmt_programs.rs` do.
+    ///
+    /// Five of the twelve are committed in canonical form, so their own
+    /// source IS the expected text — a stronger pin than a captured
+    /// blob, since the expected side is a file other suites already
+    /// read and would notice changing. The other seven are deliberately
+    /// non-canonical (they are lexer and parser fixtures, not formatter
+    /// ones), so their canonical form is committed beside them under
+    /// `tests/fmt_expected/`.
     #[test]
-    fn the_corpus_formats_identically_to_c1() {
-        same_as_c1(include_str!("../stdlib/std.pmc"));
-        same_as_c1(include_str!("../../tests/golden/sum.pmc"));
-        same_as_c1(include_str!("../../tests/golden/sum2.pmc"));
-        same_as_c1(include_str!("../../tests/golden/ty.pmc"));
-        same_as_c1(include_str!("../../tests/golden/ty2.pmc"));
-        same_as_c1(include_str!("../../tests/golden/ex000001.pmc"));
-        same_as_c1(include_str!("../../tests/golden/ex000002.pmc"));
-        same_as_c1(include_str!("../../tests/golden/test1.pmc"));
-        same_as_c1(include_str!("../../tests/syntax/rich.pmc"));
-        same_as_c1(include_str!("../../tests/syntax/contextual.pmc"));
-        same_as_c1(include_str!("../../tests/syntax/nested_ns.pmc"));
-        same_as_c1(include_str!("../../tests/syntax/retok.pmc"));
+    fn the_corpus_formats_to_its_pinned_canonical_form() {
+        // Already canonical: the expected text is the committed source.
+        formats_to(
+            include_str!("../stdlib/std.pmc"),
+            include_str!("../stdlib/std.pmc"),
+        );
+        formats_to(
+            include_str!("../../tests/golden/sum.pmc"),
+            include_str!("../../tests/golden/sum.pmc"),
+        );
+        formats_to(
+            include_str!("../../tests/golden/ty.pmc"),
+            include_str!("../../tests/golden/ty.pmc"),
+        );
+        formats_to(
+            include_str!("../../tests/golden/ex000002.pmc"),
+            include_str!("../../tests/golden/ex000002.pmc"),
+        );
+        formats_to(
+            include_str!("../../tests/syntax/contextual.pmc"),
+            include_str!("../../tests/syntax/contextual.pmc"),
+        );
+        // Deliberately non-canonical fixtures: canonical form beside them.
+        formats_to(
+            include_str!("../../tests/golden/sum2.pmc"),
+            include_str!("../../tests/fmt_expected/sum2.pmc.expected"),
+        );
+        formats_to(
+            include_str!("../../tests/golden/ty2.pmc"),
+            include_str!("../../tests/fmt_expected/ty2.pmc.expected"),
+        );
+        formats_to(
+            include_str!("../../tests/golden/ex000001.pmc"),
+            include_str!("../../tests/fmt_expected/ex000001.pmc.expected"),
+        );
+        formats_to(
+            include_str!("../../tests/golden/test1.pmc"),
+            include_str!("../../tests/fmt_expected/test1.pmc.expected"),
+        );
+        formats_to(
+            include_str!("../../tests/syntax/rich.pmc"),
+            include_str!("../../tests/fmt_expected/rich.pmc.expected"),
+        );
+        formats_to(
+            include_str!("../../tests/syntax/nested_ns.pmc"),
+            include_str!("../../tests/fmt_expected/nested_ns.pmc.expected"),
+        );
+        formats_to(
+            include_str!("../../tests/syntax/retok.pmc"),
+            include_str!("../../tests/fmt_expected/retok.pmc.expected"),
+        );
     }
 }
