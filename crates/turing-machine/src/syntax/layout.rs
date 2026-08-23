@@ -69,9 +69,17 @@ fn start_offsets(source: &str, tokens: &[Token]) -> Vec<usize> {
 /// End byte of token `i`: start + `len` chars for ordinary tokens
 /// (`len` is already a source-character count for every kind — see
 /// the module doc comment for `Glyph`, `Number` and the two-character
-/// operators specifically); for doc/attention lines the payload is
-/// normalized, so the token runs to the end of its source line
-/// instead.
+/// operators specifically). Doc/attention lines get an explicit
+/// end-of-line rule instead — not because `len` is unusable there:
+/// the lexer computes it from the RAW, unstripped line before
+/// normalizing the payload (one leading space dropped after the
+/// sigil), so it already counts the same source characters the
+/// generic path would advance through, exactly as it does on the
+/// sibling `.pmc` side. The special case is kept anyway, ported
+/// unchanged from `.pmc`: it decouples this function from the
+/// coincidence that `len` still tracks the raw line, so a future
+/// lexer change coupling `len` to the normalized payload instead
+/// could not silently corrupt this pass.
 fn end_offset(source: &str, token: &Token, start: usize) -> usize {
     match &token.kind {
         TokenKind::DocLine(_) | TokenKind::AttentionLine(_) => source[start..]
@@ -147,6 +155,10 @@ mod tests {
         assert_eq!(out, src, "layout is not lossless");
     }
 
+    fn layout_of(src: &str) -> Vec<SigLayout> {
+        layout(src, &lex_with(src, LexMode::WithComments).expect("lexes"))
+    }
+
     #[test]
     fn the_pieces_concatenate_to_the_source() {
         round_trips("alphabet ab { '_', 'a' }\n");
@@ -167,6 +179,88 @@ mod tests {
     fn glyph_and_number_spellings_survive() {
         round_trips("alphabet ab { '_', '\\'', '\\\\' }\n");
         round_trips("machine {\n  tape main: ab;\n  entry state s { [*] -> stop; }\n}\n");
+    }
+
+    /// `Number`'s spelling length, not its parsed value's width, must
+    /// drive the end offset — leading zeros make the two diverge.
+    #[test]
+    fn number_leading_zeros_survive() {
+        round_trips(
+            "alphabet bytes { 0..007 }\nmachine {\n  tape cell: bytes;\n  entry state s { [007] -> stop; }\n}\n",
+        );
+    }
+
+    /// Round-trip concatenation is blind to the TAG half of each trivia
+    /// piece — `round_trips` only ever reads the string, never the
+    /// `TmcKind` beside it. This is the structural check that closes
+    /// that gap: the trivia before the first significant token must be
+    /// typed, not just byte-equal.
+    #[test]
+    fn trivia_pieces_are_typed_and_verbatim() {
+        let src = "// c\nalphabet ab { '_' }\n";
+        let entries = layout_of(src);
+        // First significant token is `alphabet`; its trivia is the
+        // comment then the newline.
+        assert_eq!(
+            entries[0].trivia_before,
+            vec![
+                (TmcKind::LineComment, "// c".to_string()),
+                (TmcKind::Whitespace, "\n".to_string()),
+            ]
+        );
+        assert_eq!(entries[0].text, "alphabet");
+    }
+
+    /// Pins the doc/attention-line end boundary in BOTH directions: the
+    /// token's own text stops before the trailing newline (not one byte
+    /// short, not one byte long), and that newline survives as the next
+    /// entry's leading trivia rather than being swallowed into the doc
+    /// line's own text — the failure mode a too-long end offset produces
+    /// invisibly under the round-trip law alone (it moves the byte
+    /// between entries without losing it).
+    #[test]
+    fn doc_lines_span_to_end_of_line() {
+        let src = "? doc  text\nalphabet ab { '_' }\n";
+        let entries = layout_of(src);
+        assert_eq!(entries[0].text, "? doc  text");
+        assert_eq!(
+            entries[1].trivia_before,
+            vec![(TmcKind::Whitespace, "\n".to_string())]
+        );
+        assert_eq!(entries[1].text, "alphabet");
+    }
+
+    /// No trailing whitespace at all after the last significant token
+    /// (`}`) — the Eof entry's `trivia_before` is an empty `Vec`, not,
+    /// say, a vector holding a spurious empty-string piece that would
+    /// round-trip fine while still being structurally wrong.
+    #[test]
+    fn no_trailing_newline_eof_trivia_is_empty() {
+        let src = "alphabet ab { '_' }";
+        let entries = layout_of(src);
+        let eof = entries.last().expect("eof entry");
+        assert_eq!(eof.text, "");
+        assert!(eof.trivia_before.is_empty());
+    }
+
+    /// Trailing trivia after the last significant token attaches to the
+    /// `Eof` entry, typed and in source order — the round-trip law
+    /// already proves those bytes end up somewhere; this proves they
+    /// end up on `Eof`, tagged correctly, and nowhere else.
+    #[test]
+    fn eof_entry_carries_trailing_trivia() {
+        let src = "alphabet ab { '_' }\n// tail\n";
+        let entries = layout_of(src);
+        let eof = entries.last().expect("eof entry");
+        assert_eq!(eof.text, "");
+        assert_eq!(
+            eof.trivia_before,
+            vec![
+                (TmcKind::Whitespace, "\n".to_string()),
+                (TmcKind::LineComment, "// tail".to_string()),
+                (TmcKind::Whitespace, "\n".to_string()),
+            ]
+        );
     }
 
     /// `end_offset`'s generic path advances by CHARACTERS and returns a
