@@ -146,7 +146,7 @@ fn brace_interior(node: &SyntaxNode) -> impl Iterator<Item = SyntaxElement> + '_
 
 /// One level's item list, at `indent` — the file level (`indent == 0`,
 /// called on the FILE root's own children) and a namespace's interior
-/// (one level deeper, called on [`namespace_interior`]) share this walk,
+/// (one level deeper, called on [`brace_interior`]) share this walk,
 /// so nesting a namespace inside a namespace recurses "for free" the
 /// same way C1's `print_top_items` did.
 ///
@@ -1885,15 +1885,6 @@ fn render_check_arm(arm: CheckArm, written: Option<&str>) -> String {
 mod tests {
     use super::*;
 
-    /// The assertion every fixture in this module runs on: `src` prints
-    /// to exactly `expected`.
-    ///
-    /// Each `expected` literal here was **captured from the C1 printer**
-    /// — mechanically, one file per call site, while `fmt::format` still
-    /// ran `parse_cst` + `print_cst` — and the converted suite was proven
-    /// green before the C1 printer was deleted. They are therefore pins
-    /// on the behavior this migration had to preserve, not restatements
-    /// of whatever the green printer happens to do.
     // -- Pure alignment arithmetic ---------------------------------------
     //
     // Moved here with `command_column` itself when the CST printer was
@@ -1925,6 +1916,21 @@ mod tests {
         assert_eq!(command_column(10, 8), 12);
     }
 
+    /// The assertion every fixture in this module runs on: `src` prints
+    /// to exactly `expected`.
+    ///
+    /// Each `expected` literal here was **captured from the C1 printer**
+    /// — mechanically, one file per call site, while `fmt::format` still
+    /// ran `parse_cst` + `print_cst` — and the converted suite was proven
+    /// green before the C1 printer was deleted. They are therefore pins
+    /// on the behavior this migration had to preserve, not restatements
+    /// of whatever the green printer happens to do.
+    ///
+    /// Commit `63275fc` is the last one where that printer existed, so
+    /// the capture is reproducible rather than merely asserted: check it
+    /// out, feed it any `src` below, and its output is the `expected`
+    /// beside it. Fixtures added since (and any whose expected value a
+    /// deliberate behaviour change moves) say so at their own site.
     #[track_caller]
     fn formats_to(src: &str, expected: &str) {
         let out = format(src).expect("the printer accepts it");
@@ -2654,12 +2660,11 @@ mod tests {
         );
     }
 
-    // Ported branches that no fixture above reaches, each pinned by a
-    // C1 unit test in `fmt/mod.rs` that Task 7 deletes along with the
-    // copy it pins — this module's own duplicate needs its own
-    // coverage before that happens (mirrors `comma_group_layout`'s own
-    // rationale, applied to the branches review flagged as untouched
-    // by mutation).
+    // Ported branches no fixture above reaches. Each was once covered
+    // only by a C1 unit test in `fmt/mod.rs`, which went away with the
+    // printer it pinned; these are what pins them now. Every one names
+    // the branch it holds down and why the fixtures above cannot, so a
+    // mutation of that branch fails here by name.
 
     /// `command_column`'s `base_body_indent.max(p + 2)` only differs from
     /// a `p + 1` mutant at the residue class `p ≡ 3 (mod 4)`: `p = 3`
