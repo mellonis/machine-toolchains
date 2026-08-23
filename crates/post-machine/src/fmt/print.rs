@@ -1114,32 +1114,44 @@ fn print_body(
         .collect();
     let trailing_spacing = compute_trailing_spacing(&body, &codes, line_index);
 
-    // Comments some OTHER printer already owns outright: `reserved` (a
-    // nested function's own open-brace run, see this function's own doc)
-    // plus every STATEMENT/nested-FUNCTION element's own same-line
-    // trailing comment ([`print_statement`], or a nested `print_function`'s
-    // own close-brace print) via [`resolved_trailing`] — mirrors
-    // [`print_items`]'s `consumed`, one difference: the collection loop
-    // above already keeps a trailing comment's OWN token out of `body`
-    // (`already_trailing`), so unlike `print_items` this set is never
-    // checked against a `BodyElem::Comment` arm. It exists for the OTHER
-    // direction only: `leading_comments` walks back through every raw
-    // token until a NODE sibling, so a trailing comment like that
-    // surfaces as the NEXT element's own "leading run" too — filtering it
-    // there is this set's one job.
+    // Comments some OTHER printer already owns outright: `reserved` (this
+    // body's own open-brace run, already printed on the header line by
+    // the caller — see this function's own doc) plus every
+    // STATEMENT/nested-FUNCTION element's own same-line trailing comment
+    // ([`print_statement`], or a nested `print_function`'s own
+    // close-brace print) via [`resolved_trailing`]. It does the same two
+    // jobs [`print_items`]'s `consumed` does, and is checked in both of
+    // the same places:
+    //
+    // * against an element's own leading run — `leading_comments` walks
+    //   back through every raw token until a NODE sibling, so an
+    //   open-brace or trailing comment surfaces as the NEXT element's
+    //   "leading run" too;
+    // * against a standalone `BodyElem::Comment` — the walk also reaches
+    //   an open-brace comment directly, as its own raw token, whenever
+    //   nothing claims it as a leading run (an empty body, or a blank
+    //   line between it and the first body element). Skipping only
+    //   `claimed` there printed it a SECOND time at body indent, and
+    //   since `pmt fmt` rewrites in place every further pass appended
+    //   another copy without bound. The trailing half of this set needs
+    //   no such arm — the collection loop above keeps a trailing
+    //   comment's own token out of `body` (`already_trailing`) — but
+    //   `reserved` is never filtered at collection time, so the arm is
+    //   what covers it (`docs/pmt/fmt.md` (comments)).
     let mut consumed: Vec<SyntaxToken> = reserved.to_vec();
     for elem in &body {
         consumed.extend(resolved_trailing(elem));
     }
 
     // Every STATEMENT/nested-FUNCTION element's own leading comment run,
-    // unioned — the set a standalone `BodyElem::Comment` is checked
-    // against below, so a comment already printed as some OTHER
-    // element's leading run isn't printed a SECOND time when the walk
-    // also reaches it directly as its own raw token (mirrors
-    // [`print_items`]'s `claimed`, minus its `consumed` half — see the
-    // comment above for why body level's `consumed` has nothing to add
-    // here).
+    // unioned — checked, together with `consumed` above, against a
+    // standalone `BodyElem::Comment` below, so a comment already printed
+    // as some OTHER element's leading run isn't printed a SECOND time
+    // when the walk also reaches it directly as its own raw token.
+    // [`print_items`] gets the same two-set guard by building its own
+    // `claimed` as a superset of its `consumed`; here they are kept
+    // disjoint and both named at the use site, because the leading-run
+    // filter below wants `consumed` alone.
     let mut claimed: Vec<SyntaxToken> = Vec::new();
     for elem in &body {
         if let Some(node) = body_elem_node(elem) {
@@ -1149,17 +1161,19 @@ fn print_body(
 
     let mut first = true;
     // Carries a computed `blank_override` PAST a `BodyElem::Comment` the
-    // print loop skips outright (`claimed.contains(tok)` — it prints via
-    // the NEXT node's own `leading_comments` loop below instead, never
-    // reached as its own entry here). `override_prev_line[i]` alone is
-    // blind to this: it was computed at COLLECTION time, when whether
-    // THIS comment will end up claimed by a later node isn't known yet
-    // (`claimed` itself is only built once collection finishes). Without
-    // carrying it forward, the override silently vanishes at exactly the
-    // element it was meant for, and whatever prints next falls back to a
-    // real-sibling-gap query that sees `;` sitting between the leftover
-    // and itself — the wrong baseline (this task's own fix report has the
-    // worked trace).
+    // print loop skips outright (`claimed`/`consumed` — such a comment
+    // prints elsewhere: via the NEXT node's own `leading_comments` loop
+    // below, or on the header line above, never as its own entry here).
+    // `override_prev_line[i]` alone is blind to this: it was computed at
+    // COLLECTION time, when whether THIS comment will end up claimed by a
+    // later node isn't known yet (`claimed` itself is only built once
+    // collection finishes). Without carrying it forward, the override
+    // silently vanishes at exactly the element it was meant for, and
+    // whatever prints next falls back to a real-sibling-gap query that
+    // sees the preceding statement's `;` sitting between the leftover
+    // comment and itself — measuring the gap from the `;` line rather
+    // than from the leftover's own line, which is one line too early and
+    // drops a blank line the author wrote.
     let mut carried_prev_line: Option<u32> = None;
     for (i, elem) in body.iter().enumerate() {
         // The green stand-in for C1's evolving `prev_end_line`
@@ -1175,7 +1189,7 @@ fn print_body(
         let blank_override = carried_prev_line.take().or(override_prev_line[i]);
         match elem {
             BodyElem::Comment(tok) => {
-                if claimed.contains(tok) {
+                if claimed.contains(tok) || consumed.contains(tok) {
                     carried_prev_line = blank_override;
                     continue;
                 }
@@ -1915,6 +1929,20 @@ mod tests {
     fn formats_to(src: &str, expected: &str) {
         let out = format(src).expect("the printer accepts it");
         assert_eq!(out, expected, "output diverged for:\n{src}");
+    }
+
+    /// [`formats_to`] plus the fixed-point half: `expected` must also
+    /// format to itself. A one-pass assertion cannot see a printer that
+    /// GROWS its output — a comment emitted one extra time per pass reads
+    /// as correct on pass one and corrupts the file on pass two — and
+    /// `pmt fmt PATH` rewrites in place, so every pass is one a user
+    /// actually gets (`docs/pmt/fmt.md` (`--check`, stdin, and exit
+    /// codes)). Use this for any fixture whose shape decides where a
+    /// comment prints.
+    #[track_caller]
+    fn formats_to_fixed_point(src: &str, expected: &str) {
+        formats_to(src, expected);
+        formats_to(expected, expected);
     }
 
     #[test]
@@ -3221,6 +3249,108 @@ mod tests {
         formats_to(
             "main() { // open\n    step() {\n 1: left;\n    }\n}\n",
             "main() { // open\n    step() {\n     1: left;\n    }\n}\n",
+        );
+    }
+
+    /// The other half of that trap, and the one the fixtures above all
+    /// miss: nothing has to CLAIM an open-brace comment for the body walk
+    /// to reach it. It is a raw token between `{` and `}`, so it arrives
+    /// as a standalone body element in its own right whenever no element
+    /// takes it as a leading run — an empty body, a body of only
+    /// comments, or a blank line between it and the first statement (a
+    /// blank cuts the leading run, `trivia::leading_comments`). Printing
+    /// it there put a second copy at body indent, and since `pmt fmt`
+    /// rewrites in place, every later pass appended another: five passes,
+    /// five copies. Hence the fixed point, not one pass.
+    #[test]
+    fn an_open_brace_comment_prints_once_when_nothing_claims_it() {
+        // Empty body: nothing else is in the body at all.
+        formats_to_fixed_point("main() { // open\n}\n", "main() { // open\n}\n");
+        // A body of only comments: the walk reaches both as standalone.
+        formats_to_fixed_point(
+            "main() { // open\n    // dangling\n}\n",
+            "main() { // open\n    // dangling\n}\n",
+        );
+        // A blank line cuts the leading run, so the statement below no
+        // longer claims it — and the blank itself is stripped at the
+        // brace edge (`docs/pmt/fmt.md` (blank lines)).
+        formats_to_fixed_point(
+            "main() { // open\n\n 1: left;\n}\n",
+            "main() { // open\n 1: left;\n}\n",
+        );
+        // Any nesting depth: a nested function's own open-brace run is
+        // threaded down the same way.
+        formats_to_fixed_point(
+            "main() {\n    step() { // nested open\n    }\n}\n",
+            "main() {\n    step() { // nested open\n    }\n}\n",
+        );
+        formats_to_fixed_point(
+            "namespace n {\n    f() { // open\n\n 1: left;\n    }\n}\n",
+            "namespace n {\n    f() { // open\n     1: left;\n    }\n}\n",
+        );
+    }
+
+    // -- Stacked labels written on separate lines -------------------------
+
+    /// A newline BETWEEN two labels is not the own-line-label break: the
+    /// break is measured from the last label to the command
+    /// (`docs/pmt/fmt.md` (own-line labels)), so stacked labels the author
+    /// spread over lines restack onto one, and their label prefix keeps
+    /// counting as an INLINE label for the command column
+    /// (`docs/pmt/fmt.md` (label and command alignment)). Reading the
+    /// first newline after ANY label as the break instead put the command
+    /// on its own line and dropped the prefix out of the width
+    /// measurement — which, in a body whose column was set by that very
+    /// statement, collapsed every command in it from column 12 to column
+    /// 4.
+    #[test]
+    fn stacked_labels_written_on_separate_lines_restack() {
+        formats_to_fixed_point(
+            "main() {\n 1:\n 2: left;\n}\n",
+            "main() {\n  1: 2: left;\n}\n",
+        );
+        // Same body, mixed with a wide inline label: both commands land
+        // on the one command column the wide label set.
+        formats_to_fixed_point(
+            "main() {\n 11111: right;\n 1:\n 2: left;\n}\n",
+            "main() {\n 11111: right;\n  1: 2: left;\n}\n",
+        );
+        // Three labels, two breaks — still one statement on one line.
+        formats_to_fixed_point(
+            "main() {\n 1:\n 2:\n 3: left;\n}\n",
+            "main() {\n   1: 2: 3: left;\n}\n",
+        );
+        // A real break after the LAST label is still preserved, and
+        // still keeps the prefix out of the inline-label measurement:
+        // the command sits at the body indent, not at a column widened
+        // by `1: 2:`.
+        formats_to_fixed_point(
+            "main() {\n 1:\n 2:\n    left;\n}\n",
+            "main() {\n 1: 2:\n    left;\n}\n",
+        );
+    }
+
+    /// The same rule with a comment between the two labels: the comment
+    /// does not make the gap a break either, and it prints where the
+    /// printer has always put a comment ahead of a statement's first
+    /// item — drawn up onto the label line, with the command below it.
+    ///
+    /// One pass only, deliberately: that output re-reads as an
+    /// author-written own-line-label break, so a second pass moves the
+    /// comment down to its own line and settles there. That two-step
+    /// settle predates the green tree — the pre-cutover printer does the
+    /// same thing on the same input, byte for byte — and it is why the
+    /// property suite's generator leaves this one comment position out of
+    /// its idempotence sweep.
+    #[test]
+    fn a_comment_between_stacked_labels_does_not_make_a_break() {
+        formats_to(
+            "main() {\n 1:\n // mid\n 2: left;\n}\n",
+            "main() {\n  1: 2: // mid\n        left;\n}\n",
+        );
+        formats_to(
+            "main() {\n  1: 2: // mid\n        left;\n}\n",
+            "main() {\n 1: 2:\n    // mid\n    left;\n}\n",
         );
     }
 

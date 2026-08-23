@@ -114,24 +114,38 @@ pub(crate) fn open_trailing(open: &SyntaxToken) -> Vec<SyntaxToken> {
     out
 }
 
-/// Whether the author broke the line between a statement's last label and
-/// its first item (`docs/pmt/fmt.md` (own-line labels)). The printer
+/// Whether the author broke the line between a statement's **last** label
+/// and its first item (`docs/pmt/fmt.md` (own-line labels)). The printer
 /// preserves this choice and never infers or overrides it.
+///
+/// Measured from the last label only, so stacked labels the author wrote
+/// on separate lines (`1:` / `2: left;`) still restack onto one line —
+/// what decides the break is the gap the author left before the COMMAND,
+/// not any gap between two labels. Accumulating instead of returning at
+/// the first newline is what distinguishes the two: a newline seen after
+/// an earlier label is discarded when the next `LABEL` arrives, while one
+/// seen after the last label survives to the end. A comment sitting
+/// between the last label and the item does not clear the flag — only a
+/// further `LABEL` does.
 pub(crate) fn label_break(stmt: &SyntaxNode) -> bool {
     let mut seen_label = false;
+    let mut broke = false;
     for e in stmt.children_with_tokens() {
         match e {
-            SyntaxElement::Node(n) if n.kind() == PmcKind::Label.into() => seen_label = true,
-            SyntaxElement::Node(_) => return false,
+            SyntaxElement::Node(n) if n.kind() == PmcKind::Label.into() => {
+                seen_label = true;
+                broke = false;
+            }
+            SyntaxElement::Node(_) => return broke,
             SyntaxElement::Token(t) if seen_label && is_ws(t.kind()) => {
                 if t.text().contains('\n') {
-                    return true;
+                    broke = true;
                 }
             }
             SyntaxElement::Token(_) => {}
         }
     }
-    false
+    broke
 }
 
 #[cfg(test)]
@@ -305,6 +319,37 @@ mod tests {
             !label_break(&st[0]),
             "label inline with first item means no break"
         );
+    }
+
+    /// The break is measured from the LAST label, so a newline between
+    /// two stacked labels is not one: `1:` / `2: left;` still puts its
+    /// command on the label line. Returning at the first newline seen
+    /// after ANY label instead — the shape this function had before —
+    /// makes both statements below read as own-line labels, which drops
+    /// their command to the body indent and shrinks the whole body's
+    /// command column.
+    #[test]
+    fn label_break_measures_from_the_last_label_only() {
+        let r = f("main() {\n 1:\n 2: left;\n 3:\n // between\n 4: left;\n}\n");
+        let st = statements(&functions(&r)[0]);
+        assert!(
+            !label_break(&st[0]),
+            "the newline sits between two labels, not before the command"
+        );
+        assert!(
+            !label_break(&st[1]),
+            "a comment between the labels does not make it a break either"
+        );
+    }
+
+    /// The mirror of the above: a comment between the last label and the
+    /// command must not CLEAR an accumulated break. Only a further label
+    /// resets it.
+    #[test]
+    fn label_break_survives_a_comment_before_the_command() {
+        let r = f("main() {\n 1: 2:\n // about\n    left;\n}\n");
+        let st = statements(&functions(&r)[0]);
+        assert!(label_break(&st[0]));
     }
 
     /// Mutation test: `is_comment`'s `BlockComment` arm dropped.
