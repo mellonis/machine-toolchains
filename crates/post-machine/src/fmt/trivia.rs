@@ -117,7 +117,6 @@ pub(crate) fn open_trailing(open: &SyntaxToken) -> Vec<SyntaxToken> {
 /// Whether the author broke the line between a statement's last label and
 /// its first item (`docs/pmt/fmt.md` (own-line labels)). The printer
 /// preserves this choice and never infers or overrides it.
-#[allow(dead_code)]
 pub(crate) fn label_break(stmt: &SyntaxNode) -> bool {
     let mut seen_label = false;
     for e in stmt.children_with_tokens() {

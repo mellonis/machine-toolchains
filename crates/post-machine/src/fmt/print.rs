@@ -6,15 +6,32 @@
 //! differential oracle every widened surface is checked against (this
 //! module's own `tests`), until the corpus-wide cutover retires it.
 //!
-//! **Scope of this module today**: the outermost shapes only — the file
-//! itself, standalone/leading comments between top-level items, `use`
-//! declarations (paths and aliases; a use list's own interior comments
-//! are a later plan's surface), and namespaces (including their
-//! same-line open/close-brace comments and nested/reopened namespaces).
-//! A `FUNCTION` node, or any other shape this module does not yet cover,
-//! hits an explicit `unreachable!` naming the plan that owns it — see
-//! [`print_item`] — so a test that strays outside the covered surface
-//! fails loudly instead of silently printing something wrong.
+//! **Scope of this module today**: the file itself, standalone/leading
+//! comments between top-level items, `use` declarations (paths and
+//! aliases), namespaces (including their same-line open/close-brace
+//! comments and nested/reopened namespaces), and — new this plan —
+//! functions: headers (`volatile`/`export`, doc runs), nesting, and
+//! statement bodies (labels, command-column alignment, comma-group
+//! layout with the greedy-fill width fallback), for COMMENT-FREE bodies.
+//! Every comment position this module does not yet cover hits an
+//! explicit `unreachable!` naming the plan that owns it, so a test that
+//! strays outside the covered surface fails loudly instead of silently
+//! printing something wrong:
+//!
+//! - A use list's own interior comments, a comma group's interior
+//!   comments, a comment between a statement's label and its first item,
+//!   and a comment inside a bound doc run — all "interior to a
+//!   token/entry sequence" in the same sense — are task 6's surface
+//!   (`print_use`, [`print_body`], [`print_doc_run`]).
+//! - A statement's own same-line trailing comment, and the alignment
+//!   runs several such comments form together, plus a function's own
+//!   close-brace comment, are task 5's surface ([`print_body`], guarding
+//!   before [`print_statement`] is reached, and [`print_function`]).
+//! - A function's same-line open-brace comment is task 6's surface
+//!   ([`print_function`]) — a different task from its close-brace
+//!   comment, see that function's own doc for why.
+//! - An own-line comment inside a function body (leading, standalone, or
+//!   trailing the body) is task 4's surface ([`print_body`]).
 //!
 //! ## Comment placement, re-derived from trivia
 //!
@@ -52,9 +69,14 @@
 use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxNode, SyntaxToken, TextLineIndex, token};
 
 use crate::compiler::CompileError;
-use crate::lexer::{LexMode, lex_with};
-use crate::parser::parse_green_from_tokens;
-use crate::syntax::{NamespaceView, PmcKind, UseDeclView, UsePathView};
+use crate::lexer::{LexMode, lex_with, normalize_doc_payload};
+use crate::parser::{
+    Builtin, CheckArm, Item, Label, Statement, Successor, parse_green_from_tokens,
+};
+use crate::syntax::{
+    DocRunView, FunctionView, ItemView, NamespaceView, PmcKind, StatementView, UseDeclView,
+    UsePathView, extract_statement,
+};
 
 use super::trivia;
 
@@ -90,10 +112,11 @@ pub(crate) fn format_green(source: &str) -> Result<String, CompileError> {
     Ok(out)
 }
 
-/// The elements strictly between a `NAMESPACE` node's `{` and `}` — the
-/// window [`print_namespace`] hands to [`print_items`], mirroring the C1
-/// `NamespaceCst::items` field this replaces.
-fn namespace_interior(node: &SyntaxNode) -> impl Iterator<Item = SyntaxElement> + '_ {
+/// The elements strictly between a brace-delimited node's `{` and `}` —
+/// the window [`print_namespace`] hands to [`print_items`] (mirroring the
+/// C1 `NamespaceCst::items` field this replaces) and [`print_body`] walks
+/// directly for a `FUNCTION`'s own body, in source order.
+fn brace_interior(node: &SyntaxNode) -> impl Iterator<Item = SyntaxElement> + '_ {
     node.children_with_tokens()
         .skip_while(|e| e.kind() != PmcKind::LBrace.into())
         .skip(1)
@@ -211,7 +234,8 @@ fn print_item(out: &mut String, node: &SyntaxNode, indent: usize, line_index: &T
         let view = NamespaceView::cast(node.clone()).expect("kind checked by the caller");
         print_namespace(out, &view, indent, line_index);
     } else if node.kind() == PmcKind::Function.into() {
-        unreachable!("FUNCTION is task 3's surface; `format_green` must not be called on it yet")
+        let view = FunctionView::cast(node.clone()).expect("kind checked by the caller");
+        print_function(out, &view, indent, line_index);
     } else {
         unreachable!(
             "unexpected node kind {:?} at item level; only USE_DECL, NAMESPACE and FUNCTION \
@@ -256,7 +280,7 @@ fn print_namespace(
     }
     print_items(
         out,
-        namespace_interior(node),
+        brace_interior(node),
         indent + super::INDENT_UNIT,
         &open,
         line_index,
@@ -331,6 +355,589 @@ fn print_comment(out: &mut String, comment: &SyntaxToken, indent: usize) {
     out.push_str(&" ".repeat(indent));
     out.push_str(&super::normalize_comment_text(comment.text()));
     out.push('\n');
+}
+
+/// Header + doc run + body + closing brace (`docs/pmt/fmt.md`
+/// (indentation)), mirroring [`super::print_function`]'s decisions —
+/// used for both top-level and nested functions, a nested `FUNCTION`
+/// being the same shape one indent level deeper. Unlike the C1 side,
+/// `blank_before_decl` (the gap between a bound doc run's last line and
+/// the header) is never threaded in from the caller: it is computed
+/// locally by [`blank_after_doc_run`] from the DOC_RUN node's own next
+/// sibling, since — unlike the C1 CST's `blank_before` field, spent by
+/// the wrapping `TopItem`/`BodyItem` — nothing else needs that gap. The
+/// blank line before the whole unit (run included) is still the
+/// generic [`trivia::blank_before_unit`] the caller already applies to
+/// every kind of item, top-level or body: a FUNCTION node retro-wraps
+/// its own bound DOC_RUN as a child, so walking back from the FUNCTION
+/// node already walks back from the run's own first line.
+///
+/// **Brace comments deferred**: a same-line comment after the opening
+/// `{` (`trivia::open_trailing`) is task 6's surface (its own fixture,
+/// "comments after an opening brace") and a same-line comment after the
+/// closing `}` (`trivia::trailing_comment`) is task 5's (its
+/// "trailing comments on declarations" fixture covers exactly this
+/// shape) — both guarded rather than ported, since this task's own
+/// fixtures never exercise either and porting an untested branch would
+/// leave it unproven.
+fn print_function(
+    out: &mut String,
+    func: &FunctionView,
+    indent: usize,
+    line_index: &TextLineIndex,
+) {
+    let node = func.syntax();
+    if let Some(dr) = func.doc_run() {
+        print_doc_run(out, &dr, indent);
+        if blank_after_doc_run(dr.syntax()) {
+            out.push('\n');
+        }
+    }
+    let pad = " ".repeat(indent);
+    out.push_str(&pad);
+    // Fixed order — `volatile` precedes `export` when both are written
+    // (mirrors `FnHeader`'s own contextual-keyword decode order).
+    let header = func.header();
+    if header.has_volatile {
+        out.push_str("volatile ");
+    }
+    if header.has_export {
+        out.push_str("export ");
+    }
+    out.push_str(header.name.text());
+    out.push_str("() {");
+    let brace =
+        token(node, PmcKind::LBrace.into()).expect("FUNCTION always carries an L_BRACE token");
+    if !trivia::open_trailing(&brace).is_empty() {
+        unreachable!("a function's open-brace trailing comment is task 6's surface")
+    }
+    out.push('\n');
+    print_body(out, node, indent + super::INDENT_UNIT, line_index);
+    out.push_str(&pad);
+    out.push('}');
+    if trivia::trailing_comment(node).is_some() {
+        unreachable!("a function's close-brace trailing comment is task 5's surface")
+    }
+    out.push('\n');
+}
+
+/// Whether a blank line separates a bound doc run's LAST line from its
+/// declaration — the whitespace token between the `DOC_RUN` child and
+/// the `FUNCTION` node's first header token, both inside the FUNCTION
+/// node itself. Distinct from [`trivia::blank_before_unit`], which reads
+/// the gap BEFORE the whole run (a sibling-level query on the FUNCTION
+/// node); this one reads forward from the DOC_RUN node's own end,
+/// entirely inside it.
+fn blank_after_doc_run(dr: &SyntaxNode) -> bool {
+    matches!(
+        dr.next_sibling_or_token(),
+        Some(SyntaxElement::Token(t))
+            if trivia::is_ws(t.kind()) && t.text().matches('\n').count() >= 2
+    )
+}
+
+/// A `DOC_RUN`'s own `?`/`!` lines (`docs/pmt/language.md` (doc lines)),
+/// mirroring [`super::print_doc_run`]'s decisions: each at the bound
+/// declaration's own `indent`, blank lines between run items collapsed
+/// to one (index 0's own leading blank is the caller's
+/// `blank_before_unit` decision, not this loop's — same split as the
+/// C1 side). `DOC_RUN`'s own children are flat tokens (no sub-nodes:
+/// `Parser::doc_run` bumps `DOC_LINE`/`ATTENTION_LINE` tokens directly
+/// into the node it opens), so this walks tokens, not
+/// `children_with_tokens`-over-nodes the way [`print_items`] does.
+///
+/// **Interior comment deferred**: a comment BETWEEN doc-run lines is a
+/// real, already-supported C1 shape
+/// (`comment_inside_a_doc_run_prints_under_existing_comment_rules` in
+/// [`super`]'s own tests) — but no fixture in tasks 3-5 exercises it, so
+/// it stays behind a guard rather than an unproven port; task 6, which
+/// leaves no `unreachable!` guard standing in this module, is where it
+/// lands.
+fn print_doc_run(out: &mut String, dr: &DocRunView, indent: usize) {
+    let pad = " ".repeat(indent);
+    let tokens: Vec<SyntaxToken> = dr
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if !trivia::is_ws(t.kind()) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let mut first = true;
+    for t in &tokens {
+        if trivia::is_comment(t.kind()) {
+            unreachable!("a comment inside a doc run is task 6's surface")
+        }
+        if !first && blank_immediately_before(t) {
+            out.push('\n');
+        }
+        first = false;
+        if t.kind() == PmcKind::DocLine.into() {
+            print_doc_run_line(out, &pad, '?', &doc_line_payload(t));
+        } else if t.kind() == PmcKind::AttentionLine.into() {
+            print_doc_run_line(out, &pad, '!', &doc_line_payload(t));
+        } else {
+            unreachable!("unexpected token kind {:?} inside a doc run", t.kind())
+        }
+    }
+}
+
+/// A `DOC_LINE`/`ATTENTION_LINE` token's semantic payload: the raw
+/// source text minus its own sigil (`?`/`!`, always one ASCII byte, but
+/// sliced by `char::len_utf8` rather than a bare `1` on principle — same
+/// discipline as `crate::syntax::extract`'s own `sigil_len`), then
+/// [`normalize_doc_payload`]'s one-canonical-leading-space strip — the
+/// same normalization a real lexer token carries.
+fn doc_line_payload(t: &SyntaxToken) -> String {
+    let text = t.text();
+    let sigil_len = text
+        .chars()
+        .next()
+        .expect(
+            "DOC_LINE/ATTENTION_LINE token text is never empty — it always carries its own sigil",
+        )
+        .len_utf8();
+    normalize_doc_payload(&text[sigil_len..])
+}
+
+/// One `?`/`!` line's canonical form: `sigil` alone when `text` is
+/// empty, else `sigil` + one space + `text` verbatim — ported unchanged
+/// from [`super::print_doc_run_line`] (pure text, no green-tree input).
+fn print_doc_run_line(out: &mut String, pad: &str, sigil: char, text: &str) {
+    out.push_str(pad);
+    out.push(sigil);
+    if !text.is_empty() {
+        out.push(' ');
+        out.push_str(text);
+    }
+    out.push('\n');
+}
+
+/// One extracted statement plus the two facts [`Statement`] itself does
+/// not carry: `label_break` ([`trivia::label_break`] — a green-tree
+/// query, not a CST field) and each item's `newline_before` (whether the
+/// author put a newline before it inside its comma group, computed
+/// below from the `ITEM` nodes' own text ranges — `Statement::items` is
+/// a flat `Vec<Item>` with no per-item position of its own). `node` is
+/// kept alongside for [`trivia::blank_before_unit`]'s per-body-item
+/// query in [`print_body`].
+struct StmtElem {
+    node: SyntaxNode,
+    stmt: Statement,
+    label_break: bool,
+    newline_before: Vec<bool>,
+}
+
+/// A function-body item, in the SAME order [`brace_interior`] yields —
+/// never rebuilt by concatenating [`crate::syntax::FunctionView::statements`]
+/// and [`crate::syntax::FunctionView::nested`] separately, which would lose
+/// a nested function's position relative to its neighbouring statements.
+enum BodyElem {
+    Statement(StmtElem),
+    Nested(FunctionView),
+}
+
+/// A `FUNCTION` node's own body — [`brace_interior`] between its `{` and
+/// `}` — mirroring [`super::print_function`]'s body loop: one pass
+/// collects each `STATEMENT`/nested `FUNCTION` in source order (the
+/// single ordered walk [`BodyElem`]'s own doc explains), a second
+/// computes the shared command column from every collected statement,
+/// and a third prints them — three passes over the SAME already-ordered
+/// `Vec<BodyElem>`, not three different orderings.
+///
+/// **Own-line comments deferred**: any comment token surviving the
+/// whitespace filter below (own-line, leading, or standalone inside the
+/// body) is task 4's surface, guarded rather than ported — this task's
+/// own fixtures are comment-free by design.
+fn print_body(out: &mut String, func_node: &SyntaxNode, indent: usize, line_index: &TextLineIndex) {
+    let elements: Vec<SyntaxElement> = brace_interior(func_node)
+        .filter(|e| !trivia::is_ws(e.kind()))
+        .collect();
+
+    let mut body: Vec<BodyElem> = Vec::with_capacity(elements.len());
+    for e in &elements {
+        match e {
+            SyntaxElement::Node(node) if node.kind() == PmcKind::Statement.into() => {
+                let sv = StatementView::cast(node.clone()).expect("kind checked above");
+                // Scanned with `descendant_tokens`, not the item list
+                // alone: a comment between the label and the first
+                // item, or between two comma-group items, is nested
+                // inside STATEMENT either way and must not slip past a
+                // shallower scan undetected (mirrors `print_use`'s own
+                // `descendant_tokens` guard).
+                if sv
+                    .syntax()
+                    .descendant_tokens()
+                    .any(|t| trivia::is_comment(t.kind()))
+                {
+                    unreachable!("interior list comments are task 6's surface")
+                }
+                // A statement's own trailing comment lives in the
+                // PARENT's (this body's) child stream, one sibling
+                // after the STATEMENT node — `descendant_tokens` above
+                // never sees it, so it needs its own check.
+                if trivia::trailing_comment(sv.syntax()).is_some() {
+                    unreachable!("a statement's trailing comment is task 5's surface")
+                }
+                let label_break = trivia::label_break(sv.syntax());
+                let item_views: Vec<ItemView> = sv.items().collect();
+                let mut newline_before = vec![false; item_views.len()];
+                for i in 1..item_views.len() {
+                    // Item K's first token on a later line than item
+                    // K-1's LAST token — mirrors `Parser::statement`'s
+                    // own `last_item_end_line` comparison exactly, so a
+                    // multi-line item (e.g. a `check` split across
+                    // lines inside its own parens) is measured by its
+                    // own last token, not its first.
+                    let prev_end = item_views[i - 1].syntax().text_range().end;
+                    let cur_start = item_views[i].syntax().text_range().start;
+                    newline_before[i] =
+                        line_index.line_col(cur_start).0 > line_index.line_col(prev_end).0;
+                }
+                let stmt = extract_statement(&sv, line_index);
+                body.push(BodyElem::Statement(StmtElem {
+                    node: node.clone(),
+                    stmt,
+                    label_break,
+                    newline_before,
+                }));
+            }
+            SyntaxElement::Node(node) if node.kind() == PmcKind::Function.into() => {
+                let fv = FunctionView::cast(node.clone()).expect("kind checked above");
+                body.push(BodyElem::Nested(fv));
+            }
+            SyntaxElement::Node(node) => unreachable!(
+                "unexpected node kind {:?} inside a function body; only STATEMENT and FUNCTION \
+                 can appear here",
+                node.kind()
+            ),
+            SyntaxElement::Token(t) if trivia::is_comment(t.kind()) => {
+                unreachable!("own-line comments inside a function body are task 4's surface")
+            }
+            SyntaxElement::Token(t) => unreachable!(
+                "unexpected token {:?} inside a function body; only STATEMENT/FUNCTION nodes, \
+                 comments, and whitespace can appear here",
+                t.kind()
+            ),
+        }
+    }
+
+    let command_col = command_column(max_inline_label_prefix_width(&body), indent);
+
+    let mut first = true;
+    for elem in &body {
+        let node: &SyntaxNode = match elem {
+            BodyElem::Statement(s) => &s.node,
+            BodyElem::Nested(fv) => fv.syntax(),
+        };
+        if !first && trivia::blank_before_unit(node) {
+            out.push('\n');
+        }
+        first = false;
+        print_body_item(out, elem, indent, command_col, line_index);
+    }
+}
+
+/// Dispatches one [`BodyElem`] to its printer — ported from
+/// [`super::print_body_item`], simplified: a comment-carrying
+/// [`super::BodyKind::Comment`] arm has no counterpart here (task 4's
+/// surface, guarded earlier in [`print_body`]'s own collection loop).
+fn print_body_item(
+    out: &mut String,
+    elem: &BodyElem,
+    indent: usize,
+    command_col: usize,
+    line_index: &TextLineIndex,
+) {
+    match elem {
+        BodyElem::Statement(s) => print_statement(out, s, command_col),
+        BodyElem::Nested(fv) => print_function(out, fv, indent, line_index),
+    }
+}
+
+/// Label prefix width: the smallest multiple of [`super::INDENT_UNIT`]
+/// that is `>= max(base_body_indent, P + 2)`, where `P` is the widest
+/// INLINE labeled statement's label-prefix width in the body — ported
+/// unchanged from [`super::command_column`] (pure `usize` arithmetic, no
+/// green-tree input).
+fn command_column(p: usize, base_body_indent: usize) -> usize {
+    let min = base_body_indent.max(p + 2);
+    min.div_ceil(super::INDENT_UNIT) * super::INDENT_UNIT
+}
+
+/// `P`: the max label-prefix width among `body`'s own INLINE labeled
+/// statements — ported from [`super::max_inline_label_prefix_width`],
+/// reading `body`'s [`BodyElem`]s instead of C1's `&[BodyItem]`. Only
+/// looks at THIS function's own body — a nested function's statements
+/// belong to ITS OWN body/command-column, and never appear in `body`
+/// (`FunctionView::nested`'s "direct children only" contract).
+fn max_inline_label_prefix_width(body: &[BodyElem]) -> usize {
+    body.iter()
+        .filter_map(|elem| match elem {
+            BodyElem::Statement(s) if !s.label_break && !s.stmt.labels.is_empty() => {
+                Some(label_prefix_width(&s.stmt.labels))
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// A statement's label prefix as printed: each label `N:` — `N` is the
+/// number as WRITTEN (leading zeros preserved, fmt never touches a
+/// token), not re-derived from the parsed value — joined by one space,
+/// e.g. `1:` or the stacked `1: 2:`. Empty for an unlabeled statement.
+/// Ported unchanged from [`super::label_prefix_text`] (`&[Label]` is the
+/// same [`crate::parser::Label`] on both sides).
+fn label_prefix_text(labels: &[Label]) -> String {
+    labels
+        .iter()
+        .map(|l| format!("{}:", l.written))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Char width of [`label_prefix_text`] — ported unchanged from
+/// [`super::label_prefix_width`].
+fn label_prefix_width(labels: &[Label]) -> usize {
+    label_prefix_text(labels).chars().count()
+}
+
+/// Left margin for a `prefix_width`-wide label prefix at `command_col`,
+/// or `None` if that would leave less than the mandatory 1-space margin
+/// — ported unchanged from [`super::label_margin`].
+fn label_margin(command_col: usize, prefix_width: usize) -> Option<usize> {
+    command_col
+        .checked_sub(prefix_width + 1)
+        .filter(|&margin| margin >= 1)
+}
+
+/// One statement's code up to but NOT including the final `;` — ported
+/// from [`super::render_statement_code`], reading a `Statement`'s own
+/// `labels`/`items` plus the separately-derived `label_break` and
+/// `newline_before` instead of a `StatementCst`'s fields directly. See
+/// that function's own doc for the unlabeled / inline-labeled /
+/// own-line-labeled shapes; the decisions are unchanged.
+fn render_statement_code(
+    labels: &[Label],
+    label_break: bool,
+    items: &[Item],
+    newline_before: &[bool],
+    command_col: usize,
+) -> String {
+    let mut out = String::new();
+    if labels.is_empty() {
+        out.push_str(&" ".repeat(command_col));
+    } else {
+        let prefix = label_prefix_text(labels);
+        let width = prefix.chars().count();
+        if label_break {
+            match label_margin(command_col, width) {
+                Some(margin) => out.push_str(&" ".repeat(margin)),
+                None => out.push(' '),
+            }
+            out.push_str(&prefix);
+            out.push('\n');
+            out.push_str(&" ".repeat(command_col));
+        } else {
+            let margin = label_margin(command_col, width).expect(
+                "max_inline_label_prefix_width guarantees a >=1 margin for every inline label",
+            );
+            out.push_str(&" ".repeat(margin));
+            out.push_str(&prefix);
+            out.push(' ');
+        }
+    }
+    out.push_str(&render_items(items, newline_before, command_col));
+    out
+}
+
+/// One statement's final line(s): the precomputed code
+/// ([`render_statement_code`]), the `;`, then the newline — ported from
+/// [`super::print_statement`] WITHOUT its trailing-comment half: a
+/// statement's same-line trailing comment and the column-alignment runs
+/// those form across several statements are task 5's own surface (its
+/// "trailing comments and their alignment runs" task), gated by
+/// [`print_body`]'s own guard on [`trivia::trailing_comment`] before
+/// this is ever reached — porting that half here, untested by this
+/// task's own fixtures, would leave task 5 nothing to prove.
+fn print_statement(out: &mut String, s: &StmtElem, command_col: usize) {
+    out.push_str(&render_statement_code(
+        &s.stmt.labels,
+        s.label_break,
+        &s.stmt.items,
+        &s.newline_before,
+        command_col,
+    ));
+    out.push(';');
+    out.push('\n');
+}
+
+/// Comma-group layout (`docs/pmt/fmt.md` (comma groups)): respect the
+/// author's own line breaks (`newline_before`), with a greedy-fill width
+/// fallback — ported from [`super::render_items`] WITHOUT its
+/// mid-comma-group comment handling (`CommaItem::leading` has no
+/// counterpart here: [`print_body`]'s own `descendant_tokens` guard
+/// already refuses a STATEMENT carrying one, so grouping here is driven
+/// by `newline_before` alone, never a forced comment break). `items` and
+/// `newline_before` are parallel, index 0's `newline_before` always
+/// `false`. See [`super::render_items`]'s own doc for the per-group
+/// fit-or-greedy-fill decision this reproduces unchanged.
+fn render_items(items: &[Item], newline_before: &[bool], command_col: usize) -> String {
+    let texts: Vec<String> = items.iter().map(render_item).collect();
+    let mut groups: Vec<Vec<usize>> = vec![vec![0]];
+    for (i, &nb) in newline_before.iter().enumerate().skip(1) {
+        if nb {
+            groups.push(vec![i]);
+        } else {
+            groups.last_mut().expect("groups is never empty").push(i);
+        }
+    }
+    let last_group_idx = groups.len() - 1;
+    let mut out = String::new();
+    for (gi, group) in groups.iter().enumerate() {
+        if gi > 0 {
+            out.push('\n');
+            out.push_str(&" ".repeat(command_col));
+        }
+        let group_texts: Vec<&str> = group.iter().map(|&i| texts[i].as_str()).collect();
+        let joined = group_texts.join(", ");
+        // `+ 1` reserved for the trailing `,`/`;` folded into
+        // `< LINE_WIDTH` (clippy::int_plus_one), same as C1.
+        if command_col + joined.chars().count() < super::LINE_WIDTH {
+            out.push_str(&joined);
+        } else {
+            greedy_fill_group(&mut out, &group_texts, command_col);
+        }
+        if gi != last_group_idx {
+            out.push(',');
+        }
+    }
+    out
+}
+
+/// The true output column after appending `text` at the point where the
+/// cursor sits at `base` — ported unchanged from [`super::line_width_after`]
+/// (pure text/`usize`, no green-tree input). No `text` this task ever
+/// passes through here embeds a `\n` (comment-free items), so the `rsplit_once`
+/// branch is dead for now — kept anyway, since [`greedy_fill_group`] is
+/// otherwise a byte-for-byte port and diverging it would defeat the
+/// point of porting rather than reimplementing.
+fn line_width_after(base: usize, text: &str) -> usize {
+    match text.rsplit_once('\n') {
+        Some((_, last_line)) => last_line.chars().count(),
+        None => base + text.chars().count(),
+    }
+}
+
+/// Rule 2's greedy-fill, applied to one group's items — ported unchanged
+/// from [`super::greedy_fill_group`] (pure text/`usize`, no green-tree
+/// input).
+fn greedy_fill_group(out: &mut String, texts: &[&str], command_col: usize) {
+    let mut items = texts.iter();
+    let first = items.next().expect("a comma group is never empty");
+    out.push_str(first);
+    let mut col = line_width_after(command_col, first);
+    for text in items {
+        let w = text.chars().count();
+        if col + 2 + w < super::LINE_WIDTH {
+            out.push_str(", ");
+            out.push_str(text);
+            col = line_width_after(col + 2, text);
+        } else {
+            out.push(',');
+            out.push('\n');
+            out.push_str(&" ".repeat(command_col));
+            out.push_str(text);
+            col = line_width_after(command_col, text);
+        }
+    }
+}
+
+/// Canonical item text — ported unchanged from [`super::render_item`]
+/// (reads only [`Item`], the same [`crate::parser`] type on both sides).
+/// A number's WRITTEN spelling is the one thing NOT canonicalized here,
+/// same discipline as everywhere else in this module: emitted verbatim
+/// via `succ_label_written`/`marked_written`/`blank_written`/`label_written`.
+fn render_item(item: &Item) -> String {
+    match item {
+        Item::Builtin {
+            which,
+            succ,
+            succ_label_written,
+            ..
+        } => {
+            format!(
+                "{}{}",
+                builtin_name(*which),
+                render_builtin_successor(*succ, succ_label_written.as_deref())
+            )
+        }
+        Item::Debugger { .. } => "debugger".to_string(),
+        Item::Call {
+            name,
+            succ,
+            succ_label_written,
+            ..
+        } => format!(
+            "@{name}({})",
+            render_successor(*succ, succ_label_written.as_deref())
+        ),
+        Item::Check {
+            marked,
+            blank,
+            marked_written,
+            blank_written,
+            ..
+        } => {
+            format!(
+                "check({}, {})",
+                render_check_arm(*marked, marked_written.as_deref()),
+                render_check_arm(*blank, blank_written.as_deref())
+            )
+        }
+        Item::Halt { .. } => "halt".to_string(),
+        Item::Goto { label_written, .. } => format!("goto {label_written}"),
+    }
+}
+
+/// Ported unchanged from [`super::builtin_name`].
+fn builtin_name(which: Builtin) -> &'static str {
+    match which {
+        Builtin::Left => "left",
+        Builtin::Right => "right",
+        Builtin::Mark => "mark",
+        Builtin::Unmark => "unmark",
+    }
+}
+
+/// Ported unchanged from [`super::render_builtin_successor`].
+fn render_builtin_successor(succ: Successor, written: Option<&str>) -> String {
+    match succ {
+        Successor::FallThrough => String::new(),
+        _ => format!("({})", render_successor(succ, written)),
+    }
+}
+
+/// Ported unchanged from [`super::render_successor`].
+fn render_successor(succ: Successor, written: Option<&str>) -> String {
+    match succ {
+        Successor::FallThrough => String::new(),
+        Successor::Label(_) => written
+            .expect("succ_label_written is Some whenever succ is Successor::Label")
+            .to_string(),
+        Successor::Return => "!".to_string(),
+    }
+}
+
+/// Ported unchanged from [`super::render_check_arm`].
+fn render_check_arm(arm: CheckArm, written: Option<&str>) -> String {
+    match arm {
+        CheckArm::Label(_) => written
+            .expect("marked_written/blank_written is Some whenever the arm is CheckArm::Label")
+            .to_string(),
+        CheckArm::Return => "!".to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -417,5 +1024,123 @@ mod tests {
         // would otherwise also print as that next namespace's leading
         // comment.
         same_as_c1("namespace a {\n} // close\nnamespace b {\n}\n");
+    }
+
+    #[test]
+    fn a_minimal_function() {
+        same_as_c1("main() {\n 1: left;\n}\n");
+        same_as_c1("main(){1:left;}\n");
+        same_as_c1("main() {\n}\n");
+    }
+
+    #[test]
+    fn function_header_modifiers() {
+        same_as_c1("volatile main() {\n 1: left;\n}\n");
+        same_as_c1("export helper() {\n 1: left;\n}\n");
+    }
+
+    #[test]
+    fn a_doc_run_binds_to_its_function() {
+        same_as_c1("? doc line\nmain() {\n 1: left;\n}\n");
+        same_as_c1("? one\n? two\n! attention\nmain() {\n 1: left;\n}\n");
+        same_as_c1("? doc\n\nmain() {\n 1: left;\n}\n");
+    }
+
+    #[test]
+    fn nested_functions() {
+        same_as_c1("main() {\n    step() {\n 1: left;\n    }\n\n    @step();\n}\n");
+    }
+
+    /// A nested function BETWEEN two statements. This is the fixture that
+    /// catches the one Task 3 mistake byte-identity would otherwise only
+    /// surface at Task 7, as a corpus-wide diff to bisect: building body
+    /// order from `statements()` and `nested()` separately instead of from
+    /// `children_with_tokens()` hoists the nested function out of place,
+    /// and every other nested-function fixture happens to put it first.
+    #[test]
+    fn a_nested_function_between_statements_keeps_its_position() {
+        same_as_c1("main() {\n 1: left;\n    step() {\n 1: left;\n    }\n 2: left;\n}\n");
+        same_as_c1("main() {\n 1: left;\n\n    step() {\n 1: left;\n    }\n\n 2: left;\n}\n");
+    }
+
+    #[test]
+    fn labels_stacked_and_own_line() {
+        same_as_c1("main() {\n 1: 2: right, mark;\n 3: left;\n}\n");
+        same_as_c1("main() {\n 1:\n    left;\n}\n");
+        same_as_c1("main() {\n 1: left;\n 10: left;\n 100: left;\n}\n");
+    }
+
+    #[test]
+    fn statement_shapes() {
+        same_as_c1("main() {\n 1: check(1, 2);\n 2: goto 1;\n 3: halt;\n}\n");
+        same_as_c1("main() {\n 1: @callee();\n 2: @callee(!);\n 3: debugger;\n}\n");
+        same_as_c1(
+            "main() {\n 1: left, right, mark, unmark, left, right, mark, unmark, left;\n}\n",
+        );
+    }
+
+    /// `render_items`' two group-boundary paths, neither reached by
+    /// `statement_shapes` above: an author line break with NO comment
+    /// involved at all (`newline_before`'s own group-split branch,
+    /// independent of any comment machinery — the same source
+    /// `trivia::label_break`'s own `label_break_detects_inline_label`
+    /// test uses, confirming it parses), and a comma group wide enough
+    /// to cross the 80-column limit at `command_col` and fall through to
+    /// `greedy_fill_group`'s own wrapping.
+    #[test]
+    fn comma_group_layout() {
+        same_as_c1("main() {\n 1: left,\n    right;\n}\n");
+        same_as_c1(
+            "main() {\n 1: unmark, unmark, unmark, unmark, unmark, unmark, unmark, unmark, \
+             unmark, unmark;\n}\n",
+        );
+    }
+
+    #[test]
+    fn blank_lines_between_body_items() {
+        same_as_c1("main() {\n 1: left;\n\n 2: left;\n}\n");
+        same_as_c1("main() {\n 1: left;\n\n\n\n 2: left;\n}\n");
+    }
+
+    /// Pins the six comment-surface guards this task adds (mirrors
+    /// `a_comment_nested_inside_a_use_path_is_not_silently_dropped`'s
+    /// role for task 2's own guard): each fixture is otherwise a valid,
+    /// parseable comment-bearing program that a shallower scan — or a
+    /// guard mixed up with a neighboring one — could let slip past
+    /// silently instead of panicking loudly.
+    #[test]
+    #[should_panic(expected = "a statement's trailing comment is task 5's surface")]
+    fn statement_trailing_comment_guard_fires() {
+        let _ = format_green("main() {\n 1: left; // t\n}\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "interior list comments are task 6's surface")]
+    fn interior_comma_comment_guard_fires() {
+        let _ = format_green("main() {\n 1: left, /* x */ right;\n}\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "a function's open-brace trailing comment is task 6's surface")]
+    fn function_open_brace_comment_guard_fires() {
+        let _ = format_green("main() { // open\n 1: left;\n}\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "a function's close-brace trailing comment is task 5's surface")]
+    fn function_close_brace_comment_guard_fires() {
+        let _ = format_green("main() {\n 1: left;\n} // close\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "own-line comments inside a function body are task 4's surface")]
+    fn body_own_line_comment_guard_fires() {
+        let _ = format_green("main() {\n // c\n 1: left;\n}\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "a comment inside a doc run is task 6's surface")]
+    fn doc_run_interior_comment_guard_fires() {
+        let _ = format_green("? first\n// mid\n? second\nmain() {\n 1: left;\n}\n");
     }
 }
