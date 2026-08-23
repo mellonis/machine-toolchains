@@ -11,7 +11,7 @@ use mtc_core::syntax::SyntaxKind;
 
 /// `.tmc` kinds. Token kinds first, then trivia, then nodes. The
 /// discriminant IS the wire value inside `SyntaxKind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum TmcKind {
     // Significant tokens (mirror lexer::TokenKind, minus Eof/Comment).
@@ -181,6 +181,18 @@ mod tests {
     /// carries no kind — the tree holds trailing trivia instead of a
     /// zero-length sentinel — and `Comment` becomes trivia, not a
     /// significant kind.
+    ///
+    /// The distinctness half asserts injectivity on the PRODUCED
+    /// `TmcKind`, not on the token discriminant used to key the walk:
+    /// keying on `std::mem::discriminant(&t.kind)` (as an earlier
+    /// version of this test did) can only ever re-confirm that
+    /// `token_kind` is a pure function of its input, since each
+    /// discriminant is only ever compared against itself — it can
+    /// never observe two DIFFERENT token kinds collapsing onto one
+    /// `TmcKind`. Keying on the `TmcKind` instead, and failing when a
+    /// slot already holds a different token's discriminant, is what
+    /// actually catches a collision such as `Comma` and `Semi` both
+    /// mapping to `TmcKind::Semi`.
     #[test]
     fn every_significant_token_kind_maps_to_a_distinct_kind() {
         let src = "? doc\n! attention\nalphabet ab { '_', 'a' }\n\
@@ -188,26 +200,34 @@ mod tests {
                      ['a'] -> write ['_'] move [>] goto s;\n\
                      [*] -> stop;\n  }\n}\n";
         let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-        let mut seen = std::collections::HashMap::new();
+        let mut seen_tokens = std::collections::HashSet::new();
+        let mut by_kind = std::collections::HashMap::new();
         for t in &tokens {
             if matches!(t.kind, crate::lexer::TokenKind::Eof) {
                 continue;
             }
+            let disc = std::mem::discriminant(&t.kind);
+            seen_tokens.insert(disc);
             let k = token_kind(&t.kind);
-            let prev = seen.insert(std::mem::discriminant(&t.kind), k);
-            if let Some(p) = prev {
-                assert_eq!(p, k, "one token kind mapped to two syntax kinds");
+            if let Some(prev_disc) = by_kind.insert(k, disc) {
+                assert_eq!(
+                    prev_disc, disc,
+                    "two distinct token kinds both mapped to {k:?}"
+                );
             }
         }
         assert!(
-            seen.len() >= 12,
+            seen_tokens.len() >= 12,
             "fixture exercised only {} kinds",
-            seen.len()
+            seen_tokens.len()
         );
     }
 
     /// `kind_name` answers for every kind the enum defines, so a tree
-    /// dump can never print a bare number.
+    /// dump can never print a bare number. This is NOT a completeness
+    /// check on the kind space: a raw value with no `TmcKind` behind
+    /// it at all (e.g. a deleted variant) falls into the `_ => "?"`
+    /// fallback and still satisfies this walk — `"?"` is non-empty.
     #[test]
     fn kind_name_answers_for_every_kind() {
         for raw in 0u16..=(TmcKind::Root as u16) {
