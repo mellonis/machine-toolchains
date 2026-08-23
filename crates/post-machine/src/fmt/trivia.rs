@@ -18,12 +18,10 @@
 use crate::syntax::PmcKind;
 use mtc_core::syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
-#[allow(dead_code)]
 pub(crate) fn is_comment(k: SyntaxKind) -> bool {
     k == PmcKind::LineComment.into() || k == PmcKind::BlockComment.into()
 }
 
-#[allow(dead_code)]
 pub(crate) fn is_ws(k: SyntaxKind) -> bool {
     k == PmcKind::Whitespace.into()
 }
@@ -44,7 +42,6 @@ fn preceding_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
 /// The comment run bound to `node` as its leading block, in source order.
 /// A blank line ends the run: comments above the gap belong to whatever
 /// came before, exactly as the CST's attachment pass decided.
-#[allow(dead_code)]
 pub(crate) fn leading_comments(node: &SyntaxNode) -> Vec<SyntaxToken> {
     let mut out = Vec::new();
     for t in preceding_tokens(node) {
@@ -67,7 +64,6 @@ pub(crate) fn leading_comments(node: &SyntaxNode) -> Vec<SyntaxToken> {
 /// off `node.text_range()`: a FUNCTION node already retro-wraps its doc run,
 /// whereas a NAMESPACE node never carries a doc run (any comment run before
 /// `namespace` is a parse error: `DanglingDocRun`).
-#[allow(dead_code)]
 pub(crate) fn blank_before_unit(node: &SyntaxNode) -> bool {
     let lead = leading_comments(node);
     let before = match lead.first() {
@@ -83,7 +79,6 @@ pub(crate) fn blank_before_unit(node: &SyntaxNode) -> bool {
 /// A comment riding the same source line as `node`'s last token — what the
 /// CST recorded as `trailing` on a statement and as `close_trailing` on a
 /// namespace or function.
-#[allow(dead_code)]
 pub(crate) fn trailing_comment(node: &SyntaxNode) -> Option<SyntaxToken> {
     let mut cur = node.next_sibling_or_token();
     while let Some(SyntaxElement::Token(t)) = cur {
@@ -102,7 +97,6 @@ pub(crate) fn trailing_comment(node: &SyntaxNode) -> Option<SyntaxToken> {
 }
 
 /// Comments after an opening `{` still on its line.
-#[allow(dead_code)]
 pub(crate) fn open_trailing(open: &SyntaxToken) -> Vec<SyntaxToken> {
     let mut out = Vec::new();
     let mut cur = open.next_sibling_or_token();

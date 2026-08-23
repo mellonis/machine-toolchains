@@ -63,6 +63,7 @@
 //! the body onto the next line, there is no BLOCK-stays-inline exception
 //! at a brace.
 
+mod print;
 mod trivia;
 
 use crate::compiler::CompileError;
