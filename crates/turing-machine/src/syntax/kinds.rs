@@ -249,6 +249,29 @@ mod tests {
             "expected 28 distinct kinds, got {}",
             by_kind.len()
         );
+
+        // The array's own length is a compile-time constant sized by its
+        // return type, so comparing it against a literal (as this test
+        // used to) proves nothing — it is the array comparing itself to
+        // itself. What DOES bite: the significant kinds occupy a
+        // contiguous discriminant run at the start of `TmcKind`,
+        // `Ident = 0` through `AttentionLine = 27` (spelled as a literal,
+        // not derived from the enum — `TmcKind::AttentionLine as u16`
+        // would reintroduce the same self-referential comparison). A new
+        // significant kind inserted anywhere but the very end of that
+        // run renumbers every member after it, so an array entry left
+        // stale for the new kind makes the produced set diverge from the
+        // literal run — a gap where the stale entry now lands, and an
+        // overrun past 27 from the entries that shifted up. An insertion
+        // appended as the run's very last member is the one placement
+        // this cannot catch, since nothing already tested moves.
+        let mut produced: Vec<u16> = by_kind.keys().map(|k| *k as u16).collect();
+        produced.sort_unstable();
+        let expected: Vec<u16> = (0..=27).collect();
+        assert_eq!(
+            produced, expected,
+            "produced kinds are not the contiguous significant run 0..=27"
+        );
     }
 
     /// Lexing a real `.tmc` fragment exercises a spread of token
@@ -269,9 +292,6 @@ mod tests {
                 continue;
             }
             seen_tokens.insert(std::mem::discriminant(&t.kind));
-            // Real tokens must map without panicking too, not only the
-            // hand-enumerated domain above.
-            let _ = token_kind(&t.kind);
         }
         assert!(
             seen_tokens.len() >= 12,
