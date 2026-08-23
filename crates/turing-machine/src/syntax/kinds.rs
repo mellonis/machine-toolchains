@@ -131,7 +131,10 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
 /// token later fails this build instead of the token silently
 /// resolving to the wrong kind. `Eof` is never bumped into a tree — the
 /// green tree carries trailing trivia instead of a zero-length
-/// sentinel — so that arm is unreachable rather than mapped.
+/// sentinel — so that arm is unreachable rather than mapped. Add the
+/// new variant to `tests::all_significant_tokens` in the same edit —
+/// that array enumerates this match's domain to prove it stays
+/// injective.
 #[allow(dead_code)] // wired up once the green-tree builder lands and calls it
 pub(crate) fn token_kind(t: &TokenKind) -> TmcKind {
     match t {
@@ -176,45 +179,99 @@ mod tests {
     use super::*;
     use crate::lexer::{LexMode, lex_with};
 
-    /// Every significant token the lexer can produce maps to a kind, and
-    /// distinct token kinds never collapse onto one syntax kind. `Eof`
-    /// carries no kind — the tree holds trailing trivia instead of a
+    /// The 28 significant `TokenKind` variants, one payload-bearing
+    /// value each — `token_kind` never reads a payload, so any
+    /// placeholder works. Mirrors `token_kind`'s own arm order; when a
+    /// lexer variant is added, its no-wildcard match already forces a
+    /// visit there, so add the matching entry here in the same edit.
+    fn all_significant_tokens() -> [TokenKind; 28] {
+        [
+            TokenKind::Ident("x".into()),
+            TokenKind::Number(0, "0".into()),
+            TokenKind::Glyph("a".into()),
+            TokenKind::DotDot,
+            TokenKind::Arrow,
+            TokenKind::FatArrow,
+            TokenKind::ColonColon,
+            TokenKind::Dot,
+            TokenKind::Dash,
+            TokenKind::Plus,
+            TokenKind::Eq,
+            TokenKind::Star,
+            TokenKind::Percent,
+            TokenKind::Lt,
+            TokenKind::Gt,
+            TokenKind::LBracket,
+            TokenKind::RBracket,
+            TokenKind::LBrace,
+            TokenKind::RBrace,
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::Comma,
+            TokenKind::Semi,
+            TokenKind::Colon,
+            TokenKind::At,
+            TokenKind::Bang,
+            TokenKind::DocLine("d".into()),
+            TokenKind::AttentionLine("a".into()),
+        ]
+    }
+
+    /// Distinct token kinds never collapse onto one syntax kind — over
+    /// the WHOLE significant domain, enumerated directly rather than
+    /// derived from lexer output. A fixture string only proves
+    /// injectivity for whichever characters it happens to contain
+    /// (`Lt`/`Gt` need a stray `<`/`>` nobody thought to add); the
+    /// domain itself needs no lexer input, since `token_kind` is a
+    /// total function of the token's variant. `Eof` is excluded — it
+    /// carries no kind, the tree holds trailing trivia instead of a
     /// zero-length sentinel — and `Comment` becomes trivia, not a
-    /// significant kind.
-    ///
-    /// The distinctness half asserts injectivity on the PRODUCED
-    /// `TmcKind`, not on the token discriminant used to key the walk:
-    /// keying on `std::mem::discriminant(&t.kind)` (as an earlier
-    /// version of this test did) can only ever re-confirm that
-    /// `token_kind` is a pure function of its input, since each
-    /// discriminant is only ever compared against itself — it can
-    /// never observe two DIFFERENT token kinds collapsing onto one
-    /// `TmcKind`. Keying on the `TmcKind` instead, and failing when a
-    /// slot already holds a different token's discriminant, is what
-    /// actually catches a collision such as `Comma` and `Semi` both
-    /// mapping to `TmcKind::Semi`.
+    /// significant kind, so neither belongs in this domain.
     #[test]
-    fn every_significant_token_kind_maps_to_a_distinct_kind() {
+    fn token_kind_is_injective_over_the_whole_significant_domain() {
+        let tokens = all_significant_tokens();
+        assert_eq!(
+            tokens.len(),
+            28,
+            "the significant TokenKind domain is documented as 28 variants"
+        );
+        let mut by_kind: std::collections::HashMap<TmcKind, &TokenKind> =
+            std::collections::HashMap::new();
+        for t in &tokens {
+            let k = token_kind(t);
+            if let Some(prev) = by_kind.insert(k, t) {
+                panic!("{prev:?} and {t:?} both mapped to {k:?}");
+            }
+        }
+        assert_eq!(
+            by_kind.len(),
+            28,
+            "expected 28 distinct kinds, got {}",
+            by_kind.len()
+        );
+    }
+
+    /// Lexing a real `.tmc` fragment exercises a spread of token
+    /// kinds — an integration sanity check on `lex_with`, distinct
+    /// from completeness or injectivity (both fully covered above by
+    /// enumerating `token_kind`'s domain directly, independent of what
+    /// any fixture contains).
+    #[test]
+    fn lexing_a_fixture_exercises_a_spread_of_token_kinds() {
         let src = "? doc\n! attention\nalphabet ab { '_', 'a' }\n\
                    machine {\n  tape main: ab;\n  entry state s {\n\
                      ['a'] -> write ['_'] move [>] goto s;\n\
                      [*] -> stop;\n  }\n}\n";
         let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
         let mut seen_tokens = std::collections::HashSet::new();
-        let mut by_kind = std::collections::HashMap::new();
         for t in &tokens {
             if matches!(t.kind, crate::lexer::TokenKind::Eof) {
                 continue;
             }
-            let disc = std::mem::discriminant(&t.kind);
-            seen_tokens.insert(disc);
-            let k = token_kind(&t.kind);
-            if let Some(prev_disc) = by_kind.insert(k, disc) {
-                assert_eq!(
-                    prev_disc, disc,
-                    "two distinct token kinds both mapped to {k:?}"
-                );
-            }
+            seen_tokens.insert(std::mem::discriminant(&t.kind));
+            // Real tokens must map without panicking too, not only the
+            // hand-enumerated domain above.
+            let _ = token_kind(&t.kind);
         }
         assert!(
             seen_tokens.len() >= 12,
