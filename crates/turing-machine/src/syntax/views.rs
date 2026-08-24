@@ -202,21 +202,18 @@ impl AlphabetView {
             .expect("ALPHABET always carries a name IDENT before its `{`")
     }
 
-    /// Whether `export` was written. `export` is an ordinary `IDENT`
-    /// at the token level — this lexer has no dedicated keyword token
-    /// kind at all, reserved or contextual, so it never special-cases
-    /// `export`/`alphabet`/`as` (`crates/turing-machine/src/lexer.rs`);
-    /// what makes them behave as keywords is the PARSER, which refuses
-    /// them wherever a name is expected. `export` is fully reserved,
-    /// not contextual (`crate::lexer::RESERVED`; the one contextual
-    /// word in this language is the `deprecated` attribute, which
-    /// isn't even an `IDENT` — it lives inside an `AttentionLine`
-    /// payload) — so `Parser::name()` refuses it, and `alphabet`, as
-    /// an alphabet's own name (`ReservedName`; `alphabet export { ...
-    /// }` does not parse). The header is exactly `export? alphabet
-    /// <name>` with no name/keyword collision possible, and matching
-    /// the FIRST header IDENT's text against `"export"` is therefore
-    /// exactly the presence check it looks like.
+    /// Whether `export` was written. This lexer has no dedicated
+    /// keyword token kind at all — `export` arrives as an ordinary
+    /// `IDENT`, the same as every other word in the language
+    /// (`crates/turing-machine/src/lexer.rs`). What refuses `export`
+    /// wherever a name is expected is the PARSER: it is one of the 27
+    /// fully-reserved words in `crate::lexer::RESERVED`, so
+    /// `Parser::name()` rejects it — and rejects `alphabet` the same
+    /// way — as an alphabet's own name (`ReservedName`; `alphabet
+    /// export { ... }` does not parse). The header is therefore always
+    /// exactly `export? alphabet <name>` with no name/keyword collision
+    /// possible, so matching the FIRST header IDENT's text against
+    /// `"export"` is a real presence check, not a guess.
     pub fn exported(&self) -> bool {
         alphabet_header_idents(self.syntax())
             .first()
