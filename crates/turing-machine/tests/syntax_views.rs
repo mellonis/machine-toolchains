@@ -51,8 +51,17 @@ fn a_view_accepts_its_own_kind_and_refuses_others() {
 }
 
 /// Every view kind casts from the node it names. Enumerated rather than
-/// sampled: a view added later without a cast test is the gap this
-/// catches. The list is the node half of `TmcKind`.
+/// sampled, and the enumeration is itself checked against the kind
+/// space: node kinds occupy the contiguous discriminant run `32..=46`,
+/// spelled here as literals — `TmcKind::Root as u16` would be the table
+/// comparing itself to itself. A node kind inserted anywhere but the
+/// very end of that run renumbers every kind after it, so a table left
+/// stale for the new kind produces a set that diverges from the run.
+/// What this catches: a listed view that stops casting, and a table
+/// left stale across a mid-run insertion. What it does NOT catch: a
+/// node kind appended after `Root` with no view and no entry here,
+/// since nothing already listed moves. Same blind spot, by the same
+/// argument, as the significant-token census in `syntax::kinds`.
 #[test]
 #[allow(clippy::type_complexity)] // the checks table's own type, not worth a named alias for one test
 fn every_node_kind_has_a_view_that_casts_from_it() {
@@ -114,6 +123,14 @@ fn every_node_kind_has_a_view_that_casts_from_it() {
             mtc_turing_machine::syntax::AttrView::cast(n).is_some()
         }),
     ];
+    // The table IS the node half of the kind space, not a sample of it.
+    let mut listed: Vec<u16> = checks.iter().map(|(k, _)| *k as u16).collect();
+    listed.sort_unstable();
+    let expected: Vec<u16> = (32..=46).collect();
+    assert_eq!(
+        listed, expected,
+        "the view table is not the contiguous node run 32..=46"
+    );
     for (kind, casts) in checks {
         let node = if kind == TmcKind::Root {
             root.clone()
