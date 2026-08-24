@@ -420,6 +420,137 @@ git commit -m "feat(turing-machine): world and signature accessors on the .tmc v
 
 ---
 
+### Task 3b: derive the node-kind space from what extraction must rebuild
+
+**Why this task exists.** Plan 7 chose the `.tmc` node kinds from "the
+grammar's containers" — `kinds.rs` says so in its own module doc — and
+nobody checked that choice against the one consumer whose requirements
+are non-negotiable: task 6's oracle holds `extract_program(tree)`
+**struct-equal** to `lower_cst(parse_cst(tokens))`. Task 3's review found
+the first place the two disagree. `ReuseView::signature()` can only offer
+a flat `Vec<SyntaxToken>`, and a two-parameter signature carrying a
+`writes { … }` clause puts commas at brace depth, so a consumer splitting
+that run would have to reimplement `Parser::sig_param()` — the exact
+duplication task 4's own brief forbids ("a view which parsed would
+duplicate grammar the parser owns"). Discovering the rest of this at task
+5 would mean reopening the kind space mid-extraction; discovering it here
+costs one task.
+
+**Files:**
+- Modify: `crates/turing-machine/src/syntax/kinds.rs`,
+  `crates/turing-machine/src/syntax/views.rs`,
+  `crates/turing-machine/src/parser.rs`,
+  `crates/turing-machine/tests/syntax_views.rs`,
+  `crates/turing-machine/tests/tmc_property.rs`
+
+**Interfaces:**
+- Consumes: tasks 1-3's views and the 15-kind space.
+- Produces: whatever node kinds the derivation demands, their views, and a
+  census literal that matches.
+
+- [ ] **Step 1: Write the derivation table before touching any code**
+
+Walk every field of `parser::Program` reachable from a REUSE or MACHINE
+subtree — `Routine`/`Graph`/`Machine`, then `Signature`, `SigParam`,
+`ContractClause`, `State`, `Rule`, `Pattern`, `PatternCell`, `WriteVec`,
+`MoveVec`, `Transition`, `Graft`, `Bind`, `BindingArg`, `QualName`,
+`Doc` — and for each ask ONE question:
+
+> Can `extract_program` rebuild this field from the current green tree
+> using only direct-child walks and splitting on punctuation that is
+> unambiguous at depth zero — WITHOUT reimplementing a parser rule?
+
+Three verdicts, and the middle one is the whole point:
+
+- **YES, already** — the tree brackets it, or the flat token run splits
+  unambiguously. `Pattern`'s cells are an example to check: commas inside
+  `[ … ]` are all at depth zero, so splitting is safe and no new kind is
+  needed. Record WHY, not just "yes".
+- **NO — ambiguous** — the flat run contains punctuation that also occurs
+  at depth, so a consumer must track nesting. `Signature`'s params are
+  the known case (`writes { a, b }`). These demand a node kind.
+- **NO — non-trivial sub-grammar** — splitting is unambiguous, but
+  reconstructing the field still means re-deriving ordering rules,
+  optionality, or validation the parser already owns. `SigParam`'s
+  `writes`-then-`preserves` fixed order is this shape. These demand a
+  node kind too.
+
+Write the table into
+`.superpowers/sdd/2026-08-24-c2-plan8-tmc-views/task-3b-derivation.md`
+before writing code, one row per field: field → verdict → the reason →
+the node kind it demands, if any. **A row saying "YES" must name the
+punctuation that makes it unambiguous or the node that already brackets
+it.** Bare "yes" rows are how plan 7 produced a kind space nobody checked.
+
+Do not guess at depth: for every construct you judge, write the smallest
+`.tmc` program exercising it, run it through `./target/release/tmt fmt
+--check`, and dump its green tree with `mtc_core::syntax::debug_dump`
+(`kinds.rs` supplies the `kind_name` callback). Judge the dump, not the
+grammar as you remember it. Probes live in the session scratchpad, never
+inside the repo.
+
+- [ ] **Step 2: Add the kinds the table demands, and nothing else**
+
+Kinds go at the END of the node run in `TmcKind`, after `Root`. Appending
+rather than inserting is deliberate: it keeps every existing discriminant
+where it is, so no committed test that spells a literal has to move for a
+reason unrelated to its subject.
+
+Bracket each new kind at the parser's EXISTING call site — the function
+that already parses that construct — with the same `g_start`/`g_finish`
+pair the other kinds use. The parser owns every grammar decision; the
+sink only observes. Do not add a parsing branch, do not move one, and do
+not change what the parser accepts. If bracketing a construct seems to
+require changing the walk, stop and report it: that is a finding about
+the grammar, not a step to improvise through.
+
+- [ ] **Step 3: Update the three mirrors that the kind space feeds**
+
+Each of these is a drift guard that MUST fail before you fix it — run it,
+watch it fail, then update it. A guard you updated without seeing it fail
+is a guard you have not tested.
+
+1. `crates/turing-machine/tests/syntax_views.rs`, the census in
+   `every_node_kind_has_a_view_that_casts_from_it`: the literal run
+   `(32..=46)` becomes the new run, and the `checks` table grows a row
+   per new kind. Every new kind needs a view declared with `ast_node!`
+   and a cast test, exactly as the 15 existing ones have.
+2. `kind_name` in `kinds.rs`: it answers for every kind, and its own test
+   enumerates them.
+3. `crates/turing-machine/tests/tmc_property.rs`: plan 7's generator
+   holds `text() == src` over generated programs. New brackets must not
+   move a single byte of text — that is the whole claim of a sink that
+   only observes. Run it.
+
+- [ ] **Step 4: Prove the new brackets are real**
+
+For each new node kind, one test that a flat-token consumer could not
+pass: cast the new view from a real parsed program and assert its
+contents by VALUE. Then mutate the parser to drop that kind's
+`g_start`/`g_finish` pair and confirm the test fails — a bracket nothing
+observes is not a bracket.
+
+The signature case is the one that motivated this task, so it gets the
+adversarial fixture explicitly: a two-parameter signature whose first
+parameter carries `writes { … }` with a comma inside the braces. A
+consumer splitting the old flat run on commas would find three
+separators where there is one. Assert the parameter count and each
+parameter's name.
+
+- [ ] **Step 5: Run the whole suite and commit**
+
+`cargo test -p mtc-turing-machine`, `cargo fmt --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`. `crates/core` and
+`crates/post-machine` stay at zero diff.
+
+```bash
+git add crates/turing-machine
+git commit -m "feat(turing-machine): bracket the .tmc constructs extraction must rebuild"
+```
+
+---
+
+
 ### Task 4: body accessors — states, rules, grafts, binds, doc runs
 
 **Files:**
