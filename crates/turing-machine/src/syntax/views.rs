@@ -923,10 +923,19 @@ impl AttrView {
     /// all. `ATTR` can wrap nothing else and no finer-grained accessor
     /// (a `name_token`) can exist: the lexer folds a whole `! [ident] …`
     /// line into ONE `AttentionLine` token (docs/core.md (syntax
-    /// trees)), so `[deprecated]` is never its own token. A caller
-    /// wanting the attribute NAME hands this token's text back to the
-    /// parser's own `parse_attr` rather than re-deriving the `[ident]`
-    /// grammar here — the duplication this whole layer exists to avoid.
+    /// trees)), so `[deprecated]` is never its own token.
+    ///
+    /// Getting the attribute NAME back out through `Parser::parse_attr`
+    /// is more than a visibility flip. That function takes the lexer's
+    /// own `Token` — `line`/`col`/`len` plus a DECODED payload with the
+    /// leading `!` and one optional space already stripped
+    /// (`crates/turing-machine/src/lexer.rs`'s `?`/`!` line-lexing arm)
+    /// — never this token's raw `.text()`. A caller needs
+    /// `TextLineIndex` to rebuild `line`/`col` from this token's
+    /// `TextRange` and must re-derive the decoded payload from the raw
+    /// text before calling in. Doing THAT re-derivation here instead —
+    /// rather than handing real glue to `parse_attr` — is the string
+    /// surgery this whole layer exists to avoid.
     pub fn line_token(&self) -> SyntaxToken {
         self.syntax()
             .first_token()

@@ -1055,6 +1055,60 @@ fn an_entry_graft_may_omit_its_instance_name() {
     assert!(g.as_name().is_none(), "no `as` was written");
 }
 
+/// Every other `GraftView` fixture in this file writes `entry graft`.
+/// The one other non-entry graft in the whole corpus
+/// (`world_states_grafts_and_binds_are_kind_filtered_and_ordered`, task
+/// 3b) is reached only through `.syntax().text()`, never through a
+/// typed accessor — so nothing here ever drove `is_entry()`'s FALSE
+/// branch, and nothing pinned `target_token()`'s index on the shape
+/// where `entry` is absent from the header run entirely (measured via
+/// `debug_dump`: a non-entry GRAFT's own IDENTs are exactly
+/// `["graft", "g"]`, two elements, not three — the header never grows
+/// a phantom `entry` slot to compensate). This test walks a plain,
+/// non-entry graft through the whole `GraftView` surface.
+#[test]
+fn a_non_entry_grafts_whole_surface_is_read_correctly() {
+    let root = tree(
+        "graph g(tape t: ab, state done) {\n  entry state s { [*] -> done; }\n}\n\n\
+         machine {\n  tape main: ab;\n\
+         \x20 entry state s { [*] -> stop; }\n\
+         \x20 graft g(t = main, done = stop) as gg;\n}\n",
+    );
+    let w = MachineView::cast(first_of(&root, TmcKind::Machine))
+        .expect("machine")
+        .world()
+        .expect("world");
+    let g = w.grafts().next().expect("one graft");
+    assert!(!g.is_entry(), "no `entry` was written on this graft");
+    assert_eq!(g.target_token().text(), "g");
+    assert_eq!(
+        g.as_name().map(|t| t.text().to_string()),
+        Some("gg".to_string())
+    );
+    assert_eq!(g.bindings().count(), 2);
+}
+
+/// `target_token` answers only a qualified target's FIRST segment —
+/// stated already in its own doc, never measured before now. `ns::g`
+/// lexes as two IDENTs joined by `COLON_COLON`; the accessor reads the
+/// one right after the `graft` keyword, which is `ns`, not `g`. Task 5
+/// rebuilds the full qualified name straight from the tree rather than
+/// from this accessor, so a silent change here would surface only as
+/// an oracle failure much later — pinned now instead.
+#[test]
+fn a_qualified_grafts_target_token_is_only_the_first_segment() {
+    let root = tree(
+        "machine {\n  tape main: ab;\n\
+         \x20 entry graft ns::g(t = main, done = stop) as gg;\n}\n",
+    );
+    let g = GraftView::cast(first_of(&root, TmcKind::Graft)).expect("graft");
+    assert_eq!(
+        g.target_token().text(),
+        "ns",
+        "target_token answers only the qualified path's first segment, never the whole path"
+    );
+}
+
 /// `pattern_tokens` stops at `->`, not at the pattern's own `]` — a
 /// rule that continues past the arrow with `write`/`move`/a transition
 /// is the fixture that discriminates a correct Arrow-terminated scan
