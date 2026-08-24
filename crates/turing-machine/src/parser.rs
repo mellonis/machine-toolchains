@@ -11,7 +11,10 @@
 //! expected. `deprecated` is contextual (an attribute word) and is not in that
 //! set.
 
+use std::rc::Rc;
+
 use mtc_core::diagnostics::{Pos, Span};
+use mtc_core::syntax::{Checkpoint, GreenNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
@@ -19,7 +22,8 @@ use crate::cst::{
     ReuseCarrier, ReuseCst, RuleCst, RuleItem, RuleKind, StateCst, TapeCst, TopItem, TopKind,
     UseCst, UsePath, WorldItem, WorldKind,
 };
-use crate::lexer::{Comment, RESERVED, Token, TokenKind};
+use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
+use crate::syntax::{self, GreenSink, TmcKind};
 
 /// The `.tmc` language acceptance-contract version (the spec's language
 /// chapter). Pre-1.0 the version is `0.N` and N bumps on ANY grammar change;
@@ -544,12 +548,13 @@ pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
     parse_cst(tokens).map(|cst| lower_cst(&cst))
 }
 
-/// tokens → lossless CST. Accepts a comment-free stream (the compiler's path)
-/// or a `WithComments` stream (fmt/LSP's path). Comment tokens are split off up
-/// front so the grammar walk over the significant tokens is unaffected; the
-/// dropped-in-lowering trivia (`blank_before`, comment nodes, `trailing`,
-/// `open_trailing`/`close_trailing`, doc runs) is attached by source position.
-pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
+/// Split a token stream into its significant tokens and its comment
+/// trivia — the shape both parse paths hand to `Parser`. `sig_index`
+/// records how many significant tokens precede each comment, which is
+/// the `pos` the significant-token walk sits at while that comment is
+/// pending. A comment-free stream yields an empty `comments` and clones
+/// straight through.
+fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
     let mut sig: Vec<Token> = Vec::with_capacity(tokens.len());
     let mut comments: Vec<CommentAt> = Vec::new();
     for t in tokens {
@@ -563,16 +568,69 @@ pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
             sig.push(t.clone());
         }
     }
-    let items = Parser {
+    (sig, comments)
+}
+
+/// tokens → lossless CST. Accepts a comment-free stream (the compiler's path)
+/// or a `WithComments` stream (fmt/LSP's path). Comment tokens are split off up
+/// front so the grammar walk over the significant tokens is unaffected; the
+/// dropped-in-lowering trivia (`blank_before`, comment nodes, `trailing`,
+/// `open_trailing`/`close_trailing`, doc runs) is attached by source position.
+pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
+    let (sig, comments) = split_comments(tokens);
+    let (items, _sink) = Parser {
         tokens: &sig,
         pos: 0,
         comments,
         cpos: 0,
         prev_end_line: 0,
         machine_seen: false,
+        sink: None,
     }
     .file()?;
     Ok(Cst { items })
+}
+
+/// source → green syntax tree (docs/core.md (syntax trees)). Lexes
+/// `WithComments` and hands both halves to [`parse_green_from_tokens`].
+pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    parse_green_from_tokens(source, &tokens)
+}
+
+/// Already-lexed tokens → green syntax tree, for callers that keep the
+/// token stream alongside the tree. `tokens` MUST be a
+/// `LexMode::WithComments` lex of `source`: [`crate::syntax::layout`]
+/// reconstructs verbatim token text and trivia from the two together, so
+/// a comment-free stream would lose every comment's own text and break
+/// the `text() == source` law.
+///
+/// Runs the SAME grammar walk as [`parse_cst`] with a green sink
+/// attached: identical acceptance, identical errors — the sink only
+/// mirrors token consumption and node boundaries alongside the
+/// unchanged parser logic (docs/core.md (syntax trees)).
+pub fn parse_green_from_tokens(
+    source: &str,
+    tokens: &[Token],
+) -> Result<Rc<GreenNode>, CompileError> {
+    let entries = syntax::layout(source, tokens);
+    let (sig, comments) = split_comments(tokens);
+    let eof_pos = sig.len() - 1;
+    let mut sink = GreenSink::new(entries);
+    sink.start(TmcKind::Root);
+    let (_items, sink) = Parser {
+        tokens: &sig,
+        pos: 0,
+        comments,
+        cpos: 0,
+        prev_end_line: 0,
+        machine_seen: false,
+        sink: Some(sink),
+    }
+    .file()?;
+    Ok(sink
+        .expect("parse_green_from_tokens always seeds a sink before calling file()")
+        .finish_tree(eof_pos))
 }
 
 /// Copy a CST into the flat [`Program`] — infallibly. Stamps each declaration's
@@ -906,6 +964,12 @@ struct Parser<'a> {
     prev_end_line: u32,
     /// A `machine` block has already been seen (multiplicity guard).
     machine_seen: bool,
+    /// Green-tree emission, when this walk is [`parse_green`]'s rather
+    /// than [`parse_cst`]'s: `bump()` mirrors every consumed token into
+    /// it, and the `g_*` helpers below bracket node boundaries. `None`
+    /// on every other path — those helpers are then no-ops, so the CST
+    /// walk is byte-identical whether or not a sink is attached.
+    sink: Option<GreenSink>,
 }
 
 impl Parser<'_> {
@@ -915,7 +979,48 @@ impl Parser<'_> {
 
     fn bump(&mut self) {
         if !matches!(self.tokens[self.pos].kind, TokenKind::Eof) {
+            if let Some(sink) = &mut self.sink {
+                sink.token(self.pos, syntax::token_kind(&self.tokens[self.pos].kind));
+            }
             self.pos += 1;
+        }
+    }
+
+    /// Open a green node, flushing the upcoming token's trivia into the
+    /// PARENT first — the trivia-placement rule: a node starts at its
+    /// first significant token, so whitespace/comments before it belong
+    /// to whatever is still open. No-op when `sink` is `None`.
+    fn g_flush_start(&mut self, kind: TmcKind) {
+        if let Some(sink) = &mut self.sink {
+            sink.flush(self.pos);
+            sink.start(kind);
+        }
+    }
+
+    /// Close the innermost open green node. No-op when `sink` is `None`.
+    fn g_finish(&mut self) {
+        if let Some(sink) = &mut self.sink {
+            sink.finish();
+        }
+    }
+
+    /// Flush the upcoming token's trivia into the parent, then mark a
+    /// green checkpoint for a later [`Self::g_start_at`] — for
+    /// productions that only learn their node kind (or discover an
+    /// optional prefix, e.g. `export`) after parsing has started.
+    /// `None` when `sink` is `None`.
+    fn g_checkpoint(&mut self) -> Option<Checkpoint> {
+        self.sink.as_mut().map(|sink| {
+            sink.flush(self.pos);
+            sink.checkpoint()
+        })
+    }
+
+    /// Open a green node retroactively at a checkpoint taken by
+    /// [`Self::g_checkpoint`]. No-op when either is `None`.
+    fn g_start_at(&mut self, cp: Option<Checkpoint>, kind: TmcKind) {
+        if let (Some(sink), Some(cp)) = (&mut self.sink, cp) {
+            sink.start_at(cp, kind);
         }
     }
 
@@ -1158,8 +1263,12 @@ impl Parser<'_> {
 
     // ---- top level --------------------------------------------------------
 
-    fn file(mut self) -> Result<Vec<TopItem>, CompileError> {
-        self.top_items(&[], None).map(|(items, _, _)| items)
+    /// The whole file is the `ns == []` namespace level. Hands back the
+    /// (possibly `None`) green sink alongside the items: `self` is
+    /// consumed by value, so this is the only place it can escape.
+    fn file(mut self) -> Result<(Vec<TopItem>, Option<GreenSink>), CompileError> {
+        let (items, _, _) = self.top_items(&[], None)?;
+        Ok((items, self.sink))
     }
 
     /// True iff the current token starts a declaration that accepts a doc run.
@@ -1213,15 +1322,30 @@ impl Parser<'_> {
             }
             let saved = self.prev_end_line;
             let decl_line = t.line;
+            // Green checkpoint for whichever node this item turns out to
+            // be: taken here, after the (unwrapped, this task) doc run
+            // and before the header token about to be consumed, so
+            // `g_start_at` below wraps exactly the header onward — an
+            // `export` prefix included, when present — never the doc
+            // run (docs/core.md (syntax trees)). Unused whenever this
+            // token starts a production not among this task's six
+            // wrapped kinds; harmless, a fresh checkpoint is taken every
+            // loop iteration.
+            let cp = self.g_checkpoint();
             let kind = match &t.kind {
                 TokenKind::Ident(w) => match w.as_str() {
-                    "use" => TopKind::Import(self.parse_use()?),
-                    "alphabet" => TopKind::Alphabet(self.parse_alphabet(
-                        false,
-                        t.span().start,
-                        t.col,
-                        doc_run,
-                    )?),
+                    "use" => {
+                        self.g_start_at(cp, TmcKind::Use);
+                        let u = self.parse_use()?;
+                        self.g_finish(); // Use — closes right after the `;`
+                        TopKind::Import(u)
+                    }
+                    "alphabet" => {
+                        self.g_start_at(cp, TmcKind::Alphabet);
+                        let a = self.parse_alphabet(false, t.span().start, t.col, doc_run)?;
+                        self.g_finish(); // Alphabet
+                        TopKind::Alphabet(a)
+                    }
                     "routine" => TopKind::Reuse(self.parse_reuse(
                         ReuseCarrier::Routine,
                         false,
@@ -1236,7 +1360,12 @@ impl Parser<'_> {
                         t.col,
                         doc_run,
                     )?),
-                    "namespace" => TopKind::Namespace(self.parse_namespace(ns, doc_run)?),
+                    "namespace" => {
+                        self.g_start_at(cp, TmcKind::Namespace);
+                        let n = self.parse_namespace(ns, doc_run)?;
+                        self.g_finish(); // Namespace — closes right after the `}`
+                        TopKind::Namespace(n)
+                    }
                     "machine" => {
                         if !ns.is_empty() {
                             return Err(Self::err_at(
@@ -1251,7 +1380,10 @@ impl Parser<'_> {
                             return Err(Self::err_at(&t, CompileErrorKind::MultipleMachines));
                         }
                         self.machine_seen = true;
-                        TopKind::Machine(self.parse_machine(doc_run)?)
+                        self.g_start_at(cp, TmcKind::Machine);
+                        let m = self.parse_machine(doc_run)?;
+                        self.g_finish(); // Machine — closes right after the `}`
+                        TopKind::Machine(m)
                     }
                     "export" => {
                         let export_start = t.span().start;
@@ -1259,9 +1391,13 @@ impl Parser<'_> {
                         self.bump();
                         let t2 = self.peek().clone();
                         match &t2.kind {
-                            TokenKind::Ident(w2) if w2 == "alphabet" => TopKind::Alphabet(
-                                self.parse_alphabet(true, export_start, export_col, doc_run)?,
-                            ),
+                            TokenKind::Ident(w2) if w2 == "alphabet" => {
+                                self.g_start_at(cp, TmcKind::Alphabet);
+                                let a =
+                                    self.parse_alphabet(true, export_start, export_col, doc_run)?;
+                                self.g_finish(); // Alphabet — `export` included
+                                TopKind::Alphabet(a)
+                            }
                             TokenKind::Ident(w2) if w2 == "routine" => {
                                 TopKind::Reuse(self.parse_reuse(
                                     ReuseCarrier::Routine,
@@ -1307,6 +1443,7 @@ impl Parser<'_> {
         let semi_line;
         loop {
             self.interior_comments(paths.len(), &mut interior);
+            self.g_flush_start(TmcKind::UsePath);
             let (first, first_span) = self.name("an imported name")?;
             let mut path = vec![first];
             let mut end = first_span;
@@ -1323,6 +1460,7 @@ impl Parser<'_> {
             } else {
                 None
             };
+            self.g_finish(); // UsePath — the alias, if any, is its last token
             paths.push(UsePath {
                 path,
                 alias,

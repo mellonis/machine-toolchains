@@ -135,7 +135,6 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
 /// new variant to `tests::all_significant_tokens` in the same edit —
 /// that array enumerates this match's domain to prove it stays
 /// injective.
-#[allow(dead_code)] // wired up once the green-tree builder lands and calls it
 pub(crate) fn token_kind(t: &TokenKind) -> TmcKind {
     match t {
         TokenKind::Ident(_) => TmcKind::Ident,
