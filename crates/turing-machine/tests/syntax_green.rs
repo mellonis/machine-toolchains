@@ -116,7 +116,7 @@ fn a_machine_with_one_tape() {
 }
 
 /// Namespaces nest, and a `machine` block may NOT sit inside one — that
-/// is a language rule (`docs/tmt/language.md`, namespaces), so the
+/// is a language rule (docs/tmt/language.md (namespaces)), so the
 /// nesting fixture uses declarations, not a machine.
 ///
 /// A `matches("NAMESPACE").count() == 2` plus a textual `first_ns <
@@ -153,6 +153,19 @@ fn nested_namespaces() {
     // a loose child of the inner namespace still leaves ALPHABET
     // correctly nested one level down.
     assert_eq!(alphabet.text(), "export alphabet ab { '_', 'a' }");
+    // Both NAMESPACE extents, pinned directly: neither the kind/nesting
+    // walk above nor the corpus test (lossless-only — it can't tell a
+    // node's tokens from a sibling's) would notice if OUTER stopped
+    // including its own `{`/`}` pair, or if INNER's checkpoint drifted
+    // to include or exclude the wrong indentation.
+    assert_eq!(
+        outer.text(),
+        "namespace a {\n  namespace b {\n    export alphabet ab { '_', 'a' }\n  }\n}"
+    );
+    assert_eq!(
+        inner.text(),
+        "namespace b {\n    export alphabet ab { '_', 'a' }\n  }"
+    );
     // Every NAMESPACE the corpus contains is one of these two — no
     // stray third one hiding somewhere else in the tree.
     assert_eq!(
@@ -193,6 +206,33 @@ fn a_use_declaration_with_two_paths() {
     }
     assert_eq!(paths[0].text(), "std::binaryNumbers");
     assert_eq!(paths[1].text(), "other::thing");
+    // USE's own extent, both endpoints at once: this catches USE opened
+    // late (after the `use` keyword instead of at it) as readily as USE
+    // closed early (before the `;`) — the corpus test can't see either,
+    // since it only asserts losslessness, which holds even when a
+    // token is emitted OUTSIDE the node it should be inside.
+    assert_eq!(
+        use_node.text(),
+        "use std::binaryNumbers,\n    other::thing;"
+    );
+}
+
+/// The `alias`, when present, is USE_PATH's own last token — a claim
+/// the `g_finish` comment inside `parse_use` makes but nothing
+/// verifies: the two-path fixture above has no alias, and no shipped
+/// `.tmc` file uses `use … as` either, so the whole corpus is silent on
+/// this shape.
+#[test]
+fn a_use_path_with_an_alias() {
+    let source = "use std::binaryNumbers as bn;\n";
+    let root = parse(source);
+    let use_node = root.children().next().expect("a USE child");
+    let path = use_node
+        .children()
+        .next()
+        .expect("a USE_PATH child carrying the alias");
+    assert_eq!(kind_of(&path), "USE_PATH");
+    assert_eq!(path.text(), "std::binaryNumbers as bn");
 }
 
 /// Acceptance parity is the whole point of the sink: it only mirrors an
