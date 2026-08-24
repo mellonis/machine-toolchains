@@ -90,7 +90,7 @@ later plan, not this one.
 
 ### The `.tmc` front end (`turing-machine/src/`)
 
-`lexer` → lossless `cst` → `parser` → `compiler` (flatten + checks) → `expand` (graft splicing and range expansion, compiler-side stamping, oracle-property-tested) → per-world state-graph `ir` → `optimizer` → `codegen` → core asm. Language rules that are design, not implementation detail (`docs/tmt/language.md`):
+`lexer` → lossless `cst` → `parser` → `compiler` (flatten + checks) → `expand` (graft splicing and range expansion, compiler-side stamping, oracle-property-tested) → per-world state-graph `ir` → `optimizer` → `codegen` → core asm. `parser::parse_green` is a second entry point onto the same parser walk, seeded with a green sink, and yields a lossless green tree held to `text() == source` over the shipped corpus and over generated programs. Nothing production-side calls it — `parse_cst` runs the same walk with no sink — so the CST above is still the path every `.tmc` consumer runs; migrating them is later work. Language rules that are design, not implementation detail (`docs/tmt/language.md`):
 
 - **Substitution passthrough is decided BY TREE SHAPE, not text** — a single bare name is passthrough, and `{(c)}` stays passthrough. Otherwise write-folds take the assembler's exact expression grammar (`+ - * %`, parens, i64, folded per expanded row); `negative-remainder` is raised at *both* ends, mirroring core's `subst.rs`.
 - **An omitted transition means "stay in the current state"** (needs ≥1 of write/move/debugger; `call … then` stays mandatory). `Transition::Stay` is resolved in the compiler and never reaches IR — type-level, not a runtime check.
