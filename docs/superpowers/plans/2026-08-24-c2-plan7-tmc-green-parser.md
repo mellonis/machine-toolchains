@@ -504,13 +504,40 @@ git commit -m "feat(turing-machine): weave green emission into the .tmc parser"
 - Consumes: Task 4.
 - Produces: `parse_green` covers every container — adds `WORLD`, `TAPE`, `STATE`, `RULE`, `GRAFT`, `BIND`, `REUSE`, `DOC_RUN` and `ATTR`. After this task no `.tmc` construct is unstructured.
 
-- [ ] **Step 1: Establish the retro-wrap answer before writing any test**
+- [ ] **Step 1: Apply the retro-wrap decision — it is made, not discovered**
 
-On the `.pmc` side a node that binds a doc run **retro-wraps it**, so the node's extent starts a line or more before its first keyword — and this was true of functions but NOT of namespaces. That asymmetry produced a silent blank-line bug that took a plan to find. `.tmc` puts doc runs on more shapes than `.pmc` does.
+An earlier draft of this plan told you to dump trees and find out which `.tmc`
+nodes retro-wrap their bound doc run. **That instruction was circular and has
+been withdrawn.** For `Alphabet`, `Machine` and `Namespace` a dump only reads
+back Task 4's own unexamined default; for `routine`, `graph` and `state` the
+nodes do not exist yet. There is no grammar fact there to find, and an
+implementer following it literally would have enshrined "none retro-wrap" in a
+module doc as durable truth.
 
-So: before writing this task's tests, **dump real trees and find out which `.tmc` nodes retro-wrap their doc run and which do not.** A throwaway binary in a temp directory outside the repo, printing `debug_dump` for a doc-run-carrying `alphabet`, `machine`, `state`, `graph` and `routine`, answers it in one run. **Write the answer into `syntax/mod.rs`'s module doc**, in prose, as a fact later plans can rely on without re-deriving.
+**The decision, made deliberately: a declaration retro-wraps its bound doc
+run**, matching the `.pmc` side. Today Task 4 leaves a doc run as an unwrapped
+sibling of the declaration; change that.
 
-Nothing else in this task is safe to write until that is known.
+Three reasons, so you can weigh a conflict against them rather than guess:
+
+1. The already-shipped `.pmc` formatter depends on it. `crates/post-machine/src/fmt/trivia.rs`'s `blank_before_unit` keys off the *unit* start rather than the node's own extent precisely because a function node retro-wraps its doc run. A later plan ports that logic to `.tmc`; it must land on a tree whose shape it assumes.
+2. `.pmc` has an escape hatch that `.tmc` does not. A `.pmc` namespace cannot carry a doc run at all — it is a `DanglingDocRun` parse error — whereas `.tmc` binds runs to `export`, `alphabet`, `routine`, `graph`, `machine` and `namespace` alike. Wider surface, no exemption.
+3. The C1 CST already associates the run with the declaration: `doc_run` is a field of `AlphabetCst`, `MachineCst` and `NamespaceCst`, not a free-standing item.
+
+Concretely, the shape being fixed is this one — with the run left unwrapped,
+`alphabet a { '_' }\n\n? doc\nalphabet b { '_' }\n` loses the blank line
+before the run once a formatter reads these extents. That is the exact bug
+class the `.pmc` side spent a plan finding.
+
+**Where to take the checkpoint.** `crates/post-machine/src/parser.rs:1052` is
+the template: PM takes it AFTER the pending-comment drain and BEFORE the
+doc-run block. Taking it at the loop top also produces a retro-wrapping tree,
+but changes which comments attach where — use PM's position so leading-comment
+attachment stays identical.
+
+**Then write the answer into `syntax/mod.rs`'s module doc**, in prose, as what
+it is: a decision and its reason, so a later plan can rely on it without
+re-deriving it and can find the argument if it ever needs to overturn it.
 
 - [ ] **Step 2: Write the failing tests**
 
