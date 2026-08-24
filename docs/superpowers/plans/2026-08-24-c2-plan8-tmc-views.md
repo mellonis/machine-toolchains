@@ -427,14 +427,23 @@ grammar's containers" — `kinds.rs` says so in its own module doc — and
 nobody checked that choice against the one consumer whose requirements
 are non-negotiable: task 6's oracle holds `extract_program(tree)`
 **struct-equal** to `lower_cst(parse_cst(tokens))`. Task 3's review found
-the first place the two disagree. `ReuseView::signature()` can only offer
-a flat `Vec<SyntaxToken>`, and a two-parameter signature carrying a
-`writes { … }` clause puts commas at brace depth, so a consumer splitting
-that run would have to reimplement `Parser::sig_param()` — the exact
-duplication task 4's own brief forbids ("a view which parsed would
-duplicate grammar the parser owns"). Discovering the rest of this at task
-5 would mean reopening the kind space mid-extraction; discovering it here
-costs one task.
+the first place the two disagree.
+
+**The rationale first written here was wrong, and the correction is the
+useful part.** It argued that a signature carrying a `writes { … }` clause
+puts commas at brace depth, so extraction would have to reimplement
+`Parser::sig_param()` to split the run. Extraction does no such thing: it
+reparses a node's token EXTENT through the parser's own production, as the
+sibling does with `reparse_item`/`reparse_doc_items` — which task 5's own
+Step 1 already instructs, in this same plan, before task 3b was written.
+`ReuseView::signature()` hands `Parser::signature()` exactly its input, so
+nothing needs splitting and the oracle needs no new kind at all.
+
+What survives is a stronger reason, and it belongs to the VIEW layer
+rather than the oracle: a boundary must be a node when finding it means
+re-encoding a decision the parser already makes. Discovering the rest at
+task 5 would mean reopening the kind space mid-extraction; discovering it
+here costs one task.
 
 **Files:**
 - Modify: `crates/turing-machine/src/syntax/kinds.rs`,
@@ -466,14 +475,20 @@ Three verdicts, and the middle one is the whole point:
   unambiguously. `Pattern`'s cells are an example to check: commas inside
   `[ … ]` are all at depth zero, so splitting is safe and no new kind is
   needed. Record WHY, not just "yes".
-- **NO — ambiguous** — the flat run contains punctuation that also occurs
-  at depth, so a consumer must track nesting. `Signature`'s params are
-  the known case (`writes { a, b }`). These demand a node kind.
-- **NO — non-trivial sub-grammar** — splitting is unambiguous, but
-  reconstructing the field still means re-deriving ordering rules,
-  optionality, or validation the parser already owns. `SigParam`'s
-  `writes`-then-`preserves` fixed order is this shape. These demand a
-  node kind too.
+- **NO — keyword-decided** — the construct's extent or its presence is
+  decided by a reserved word, so locating it re-encodes an optionality
+  decision the parser already makes. `Rule.write` is the clearest case:
+  the bracket group is a write vector only because the word `write`
+  precedes it, and the identical shape is a pattern or a move vector
+  elsewhere. These demand a node kind.
+- **NO — containment** — the field is unambiguous in isolation but its
+  OWNER is not, so a consumer must count back to a keyword to decide
+  which parent a child belongs to. `Signature.params` is this shape once
+  the contract clauses are nodes. These demand a node kind too.
+
+Do NOT use "punctuation recurring at depth" as a discriminator. Tracking
+brace depth is mechanical, and that test would justify a node kind for
+every comma-separated list in the language.
 
 Write the table into
 `.superpowers/sdd/2026-08-24-c2-plan8-tmc-views/task-3b-derivation.md`
