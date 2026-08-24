@@ -130,8 +130,9 @@ fn a_machine_with_one_tape() {
 }
 
 /// Namespaces nest, and a `machine` block may NOT sit inside one — that
-/// is a language rule (docs/tmt/language.md (namespaces)), so the
-/// nesting fixture uses declarations, not a machine.
+/// is a language rule (docs/tmt/language.md (namespaces, visibility,
+/// and imports)), so the nesting fixture uses declarations, not a
+/// machine.
 ///
 /// A `matches("NAMESPACE").count() == 2` plus a textual `first_ns <
 /// alpha` ordering check, as originally drafted, would both still pass
@@ -343,6 +344,155 @@ fn empty_and_whitespace_only_source_stay_lossless() {
         let root = SyntaxNode::new_root(tree);
         assert_eq!(root.text(), src, "{src:?} is not lossless");
     }
+}
+
+// ---------------------------------------------------------------------------
+// `parse_green_from_tokens`: the tokens-taking entry point a later plan's
+// compiler front calls directly (mirroring `.pmc`'s
+// `compiler::analyze`/`analyze_staged`, which call the sibling function
+// from two places), plus the lex-mode parity the whole approach rests on.
+// ---------------------------------------------------------------------------
+
+/// Every `.tmc` file the crate ships — golden programs, the embedded
+/// stdlib, and the flagship worked example — the same set
+/// [`the_whole_shipped_corpus_is_lossless`] round-trips. Walked
+/// explicitly, the same three directories, so a future fixture is
+/// picked up automatically.
+fn corpus() -> Vec<(std::path::PathBuf, String)> {
+    let mut files = Vec::new();
+    for dir in ["tests/golden", "src/stdlib", "../../docs/examples"] {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("tmc") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("readable");
+            files.push((path, src));
+        }
+    }
+    assert!(
+        files.len() >= 9,
+        "corpus unexpectedly small: {} files — did the walk break?",
+        files.len()
+    );
+    files
+}
+
+/// The token-provenance law: a `WithComments` stream filtered of its
+/// `Comment` tokens is EXACTLY the `WithoutComments` stream — same
+/// kinds, same line/col, same char lengths, same order. This is what
+/// would license a future compiler front reading its tokens off the
+/// single `WithComments` lex the green parse already needs, instead of
+/// lexing a second time (the technique the sibling `.pmc` compiler front
+/// already uses, `crates/post-machine/src/compiler.rs`). Structurally
+/// guaranteed by the lexer (its two mode branches decide only whether a
+/// `Comment` token is pushed), pinned here so a regression is caught
+/// before a later plan's compiler front comes to depend on it.
+#[test]
+fn corpus_token_provenance_law() {
+    use mtc_turing_machine::lexer::{LexMode, TokenKind, lex_with};
+    for (path, source) in corpus() {
+        let significant: Vec<_> = lex_with(&source, LexMode::WithComments)
+            .expect("lexes")
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+            .collect();
+        let without = lex(&source).expect("lexes");
+        assert_eq!(significant, without, "{}: token provenance", path.display());
+    }
+}
+
+/// The same law's error half: a source that fails to lex fails
+/// IDENTICALLY in both modes — a mode-dependent lex error would change
+/// which diagnostic a malformed program reports depending on which path
+/// reads it. `errors_agree_with_the_cst_path` above says plainly that
+/// none of its fixtures contain a comment, so it cannot exercise this;
+/// both fixtures here do.
+#[test]
+fn lex_modes_agree_on_errors() {
+    use mtc_turing_machine::lexer::{LexMode, lex_with};
+    for src in ["/* never closed\nmachine { }\n", "stop / halt;"] {
+        let without = lex(src).expect_err("sample must fail to lex");
+        let with = lex_with(src, LexMode::WithComments).expect_err("sample must fail to lex");
+        assert_eq!(without, with, "lex error parity for {src:?}");
+    }
+}
+
+/// The tokens-taking entry point on a pre-lexed stream produces a tree
+/// that satisfies the lossless law.
+///
+/// The dump comparison against [`parse_green`] is a delegation pin, NOT
+/// an independent oracle: `parse_green` IS a call to
+/// `parse_green_from_tokens`, so the two sides are one function over
+/// content-identical inputs and agree by construction. It is kept
+/// because it would catch `parse_green` growing logic of its own. The
+/// load-bearing assertion here is the lossless law; token provenance is
+/// pinned separately by `corpus_token_provenance_law` above.
+#[test]
+fn parse_green_from_tokens_matches_parse_green() {
+    use mtc_turing_machine::lexer::{LexMode, lex_with};
+    use mtc_turing_machine::parser::parse_green_from_tokens;
+    let src = "// lead\nuse std::binaryNumbers;\nmachine {\n  tape main: ab;\n}\n";
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+
+    let a = SyntaxNode::new_root(parse_green(src).expect("parses"));
+    let b = SyntaxNode::new_root(parse_green_from_tokens(src, &tokens).expect("parses"));
+
+    assert_eq!(b.text(), src, "lossless law");
+    assert_eq!(
+        debug_dump(&a, &|k| kind_name(k).to_string()),
+        debug_dump(&b, &|k| kind_name(k).to_string())
+    );
+}
+
+/// A pre-lexed stream that fails to PARSE surfaces the error rather than
+/// swallowing it. As above, the equality against [`parse_green`] holds
+/// by delegation, not by independent derivation; what this pins is that
+/// the tokens-taking entry returns `Err` at all on unparseable input.
+#[test]
+fn parse_green_from_tokens_reports_the_same_parse_error() {
+    use mtc_turing_machine::lexer::{LexMode, lex_with};
+    use mtc_turing_machine::parser::parse_green_from_tokens;
+    let src = "machine { } machine { }";
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+    assert_eq!(
+        parse_green_from_tokens(src, &tokens)
+            .map(|_| ())
+            .unwrap_err(),
+        parse_green(src).map(|_| ()).unwrap_err()
+    );
+}
+
+/// The documented empty-slice contract: every real lex result is
+/// EOF-terminated, so `parse_green_from_tokens`'s doc comment says a
+/// genuinely empty `tokens` slice panics rather than returning some
+/// degenerate `Ok`. It does — `eof_pos = sig.len() - 1` underflows —
+/// but nothing called the function directly before this task, so the
+/// panic itself was never pinned.
+#[test]
+#[should_panic]
+fn parse_green_from_tokens_panics_on_an_empty_token_slice() {
+    use mtc_turing_machine::parser::parse_green_from_tokens;
+    let _ = parse_green_from_tokens("", &[]);
+}
+
+/// The documented `WithComments` contract: `tokens` MUST be a
+/// `LexMode::WithComments` lex of `source`, because
+/// [`mtc_turing_machine::syntax::layout`] reconstructs trivia from the
+/// two together. A `WithoutComments` lex of a commented source still
+/// has the comment's bytes sitting in `source` with no token accounting
+/// for them, so `layout`'s gap-is-whitespace invariant fires — loudly,
+/// rather than silently losing the comment from the tree.
+#[test]
+#[should_panic]
+fn parse_green_from_tokens_panics_on_a_without_comments_lex() {
+    use mtc_turing_machine::parser::parse_green_from_tokens;
+    let src = "// c\nalphabet ab { '_' }\n";
+    let tokens = lex(src).expect("lexes"); // `lex` == `LexMode::WithoutComments`
+    let _ = parse_green_from_tokens(src, &tokens);
 }
 
 // ---------------------------------------------------------------------------

@@ -49,9 +49,10 @@
 //! (`'\''`, `'\\'`); every write-cell shape (`-` keep, a literal,
 //! a passthrough substitution, an arithmetic fold over `+ - * %` and
 //! parens); every move direction; every transition shape (`goto`, the
-//! bare-name sugar, `call … then` against every continuation kind
-//! including a nested `with map` using both arrows, `return`, `stop`,
-//! `halt`, and the omitted-transition "stay" shape); `bind`; qualified
+//! bare-name sugar, `call … then` — its own binding arguments
+//! occasionally carrying a nested `with map` using both arrows — against
+//! every continuation kind (a state name, `return`, `stop`, `halt`), and
+//! the omitted-transition "stay" shape); `bind`; qualified
 //! `call`/`graft`/`bind` TARGETs (`qual_name`'s own grammar, `IDENT (::
 //! IDENT)*` — usually one segment, occasionally the documented
 //! `std::binaryNumbers::plusOne` multi-segment shape, and occasionally a
@@ -559,8 +560,8 @@ fn gen_move_vec(cur: &mut Cursor, arity: usize) -> Option<String> {
 /// imports)) parsed by the one shared `qual_name` function all three
 /// route through. Usually one bare segment, occasionally two or three —
 /// `std::binaryNumbers::plusOne` is the documented spelling — and rarely
-/// carrying a same-line block comment right after a `::`
-/// (`call a:: /* n */ b(…)` parses and round-trips: `qual_name` never
+/// carrying a same-line block comment right after a `::`, no space on
+/// either side (`call a::/* n */b(…)` parses and round-trips: `qual_name` never
 /// calls `interior_comments`, so a comment written here is just ordinary
 /// trivia between two tokens, picked up by whatever list drain runs next
 /// rather than claimed as an "interior" slot the parser tracks — unlike
@@ -727,7 +728,13 @@ fn gen_target(cur: &mut Cursor, n: &mut u32, states: &[String]) -> String {
 
 /// One `pattern -> action transition;` rule (docs/tmt/language.md (the
 /// rule triple)), appended as a whole line at `pad`, with 0-2 own-line
-/// comments above it and an occasional trailing comment.
+/// comments above it and an occasional trailing comment. Grammar-valid
+/// but not shipped-corpus-spelled: when a write or move vector precedes
+/// an omitted ("stay") transition, the vector's own trailing space
+/// combines with the unconditional `;` pushed below to spell
+/// `move [>] ;` — a stray space before `;` no hand-written `.tmc` file
+/// is spelled with — worth knowing before hanging a formatter-
+/// idempotence property on this generator.
 #[allow(clippy::too_many_arguments)]
 fn gen_rule(
     cur: &mut Cursor,

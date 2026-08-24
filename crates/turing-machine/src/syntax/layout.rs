@@ -208,17 +208,25 @@ mod tests {
     /// piece — `round_trips` only ever reads the string, never the
     /// `TmcKind` beside it. This is the structural check that closes
     /// that gap: the trivia before the first significant token must be
-    /// typed, not just byte-equal.
+    /// typed, not just byte-equal. Both comment tags are asserted, not
+    /// just one — a source with only a line comment leaves the
+    /// `CommentKind::Block => TmcKind::BlockComment` arm unguarded in
+    /// the direction that matters (mapping a real block comment to the
+    /// wrong tag), even though the reverse mutation (a line comment
+    /// mistagged as block) is already caught elsewhere by the two
+    /// fixtures below that pin `TmcKind::LineComment` directly.
     #[test]
     fn trivia_pieces_are_typed_and_verbatim() {
-        let src = "// c\nalphabet ab { '_' }\n";
+        let src = "// c\n/* b */\nalphabet ab { '_' }\n";
         let entries = layout_of(src);
-        // First significant token is `alphabet`; its trivia is the
-        // comment then the newline.
+        // First significant token is `alphabet`; its trivia is the line
+        // comment, a newline, the block comment, then another newline.
         assert_eq!(
             entries[0].trivia_before,
             vec![
                 (TmcKind::LineComment, "// c".to_string()),
+                (TmcKind::Whitespace, "\n".to_string()),
+                (TmcKind::BlockComment, "/* b */".to_string()),
                 (TmcKind::Whitespace, "\n".to_string()),
             ]
         );
@@ -291,6 +299,7 @@ mod tests {
 
     #[test]
     fn the_whole_shipped_corpus_round_trips() {
+        let mut checked = 0;
         for dir in ["tests/golden", "src/stdlib"] {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
@@ -312,7 +321,17 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(out, src, "{} is not lossless", path.display());
+                checked += 1;
             }
         }
+        // 7 golden programs plus the embedded stdlib at the time of
+        // writing — narrower than `syntax_green.rs`'s twin corpus test,
+        // which additionally walks `../../docs/examples` (9 there vs 8
+        // here). A failing `read_dir` must not make this pass by doing
+        // nothing.
+        assert!(
+            checked >= 8,
+            "expected the whole .tmc corpus, saw {checked}"
+        );
     }
 }

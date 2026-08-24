@@ -43,10 +43,16 @@
 //!
 //! WORLD sits between MACHINE/REUSE and their body items (`docs/tmt/language.md
 //! (worlds)`), so a doc-run-free `machine`/`routine`/`graph` has exactly
-//! ONE non-trivia child — WORLD itself — not the tape/state/graft/bind
-//! items directly: a later formatter port walking a world-producing
-//! declaration's children for its body items descends through WORLD
-//! first, one level, before reaching them.
+//! one child NODE — WORLD itself, under `SyntaxNode::children()`, which
+//! yields nodes only — not the tape/state/graft/bind items directly: a
+//! later formatter port walking a world-producing declaration's
+//! children for its body items descends through WORLD first, one
+//! level, before reaching them. The braces are WORLD's own tokens, not
+//! MACHINE's (`world.text()` starts at `{` and ends at `}`), so under
+//! `children_with_tokens()` — which sees tokens too — MACHINE itself
+//! carries two entries, `IDENT "machine"` and `WORLD`, and a routine or
+//! graph's own signature tokens (when present) add more still, nine for
+//! a signed routine.
 //!
 //! # The green tree splits what the CST keeps together
 //!
