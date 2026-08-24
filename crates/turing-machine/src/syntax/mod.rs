@@ -77,6 +77,25 @@
 //! port reading node extents directly needs the same asymmetry: the
 //! green tree's node boundary and the CST's "who owns this comment"
 //! answer are not the same question.
+//!
+//! # The parity oracle a later plan must keep green
+//!
+//! The lossless law above (`text() == source`) cannot catch an
+//! extraction bug — a tree can round-trip byte for byte and still be
+//! read wrongly. `extract_program` (`extract.rs`) is checked against
+//! that separately: `Program` is held struct-equal to
+//! `lower_cst(parse_cst(...))` over every `.tmc` file the repo ships
+//! (`tests/syntax_parity.rs::the_shipped_corpus_extracts_identically_on_both_paths`)
+//! and over 2000 generated programs per run
+//! (`tests/tmc_property.rs::generated_programs_extract_identically_on_both_paths`).
+//! `DocRunItem::blank_before` sits outside this equality by
+//! construction — `reduce_doc_run` folds a doc run over its `kind`
+//! alone, so no value of that field changes a `Program` — and it is
+//! pinned one level down in `extract.rs`'s own tests instead;
+//! `tests/syntax_parity.rs`'s module doc names the divergences.
+//! Nothing production-side calls `extract_program` yet; whichever plan
+//! routes a real consumer onto it is the plan that has to keep both
+//! halves of this oracle green, not just the corpus half.
 
 mod emit;
 pub(crate) mod extract;
