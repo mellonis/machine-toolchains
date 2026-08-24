@@ -2946,7 +2946,11 @@ impl Parser<'_> {
 /// (`crate::syntax::extract::sig_tokens`'s own output) — `sink: None`,
 /// since a reparse shim never re-emits a green tree, only a value.
 /// Shared by every `reparse_*` shim below so the field list lives once.
-#[allow(dead_code)]
+/// No `#[allow(dead_code)]` of its own: every `reparse_*` shim below
+/// keeps its own allow, and rustc's dead-code pass treats an
+/// allow-marked item as a live root for reachability — everything an
+/// allowed function calls (this one included) counts as used through
+/// it, so a second allow here would suppress nothing.
 fn bare_parser(tokens: &[Token]) -> Parser<'_> {
     Parser {
         tokens,
@@ -2967,6 +2971,16 @@ fn bare_parser(tokens: &[Token]) -> Parser<'_> {
 /// error: extraction only ever runs on a tree that already parsed
 /// once, so a failure here is a bug in the retokenization, not a
 /// malformed program.
+///
+/// **Structurally uncallable for one of `Transition`'s six variants,
+/// `Stay`.** `Stay` is the ABSENCE of a TRANSITION node — an omitted
+/// transition, legal only when the rule already carries an action
+/// (docs/tmt/language.md (transitions)) — so `RuleView::transition()`
+/// answers `None` for it and there is never a node to retokenize in
+/// the first place. A caller (extraction) must synthesize `Stay`
+/// itself from that `None`; this shim only ever runs for the other
+/// five (`Goto` in both its `explicit` spellings, `Call`, `Return`,
+/// `Stop`, `Halt`).
 #[allow(dead_code)]
 pub(crate) fn reparse_transition(tokens: &[Token]) -> Transition {
     bare_parser(tokens)
@@ -2991,10 +3005,11 @@ pub(crate) fn reparse_binding_arg(tokens: &[Token]) -> BindingArg {
 }
 
 /// Retokenization reuse shim for a BINDING_ARG's own SYM_MAP node:
-/// re-parses it through `Parser::sym_map`. `SymMap::span` runs `map` →
-/// `}` (docs/core.md (syntax trees)), so a SYM_MAP node's own tokens
-/// already start at `map` — exactly where `Parser::sym_map` expects to
-/// begin.
+/// re-parses it through `Parser::sym_map`. A SYM_MAP node's own tokens
+/// already start at `map`, not at the `with` its caller consumed —
+/// `crate::syntax::kinds`'s own module doc records why (the node's
+/// extent is chosen to match `SymMap::span` exactly) — which is
+/// exactly where `Parser::sym_map` expects to begin.
 #[allow(dead_code)]
 pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
     bare_parser(tokens)
@@ -3004,7 +3019,9 @@ pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
 }
 
 /// Retokenization reuse shim for a REUSE's own SIG_PARAM node:
-/// re-parses it through `Parser::sig_param`.
+/// re-parses it through `Parser::sig_param`. Covers both shapes the
+/// production itself branches on — `Tape` (with its optional
+/// `writes`/`preserves` clauses) and the plain `State` parameter.
 #[allow(dead_code)]
 pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
     bare_parser(tokens)
@@ -3020,19 +3037,31 @@ pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
 /// already passed once, over these exact tokens, during the original
 /// parse that produced the tree this run was retokenized from, so
 /// re-running them is redundant work, never a new failure mode.
-/// `prev_end_line: 0` (via `bare_parser`) means a reparsed run's own
-/// `blank_before` gap tracking restarts from the isolated slice's own
-/// start rather than the original file position — `reduce_doc_run`
-/// never reads `blank_before`, so this is cosmetic fidelity only, not
-/// load-bearing on the reduced [`Doc`] a caller ultimately consumes.
 /// Comments interleaved in the original run do not survive: they are
 /// trivia `crate::syntax::extract::sig_tokens` filters out before this
 /// ever runs, so a comment-bearing run retokenizes to a strictly
 /// SHORTER item sequence than the original CST's.
+///
+/// `prev_end_line` seeds the run's FIRST item's `blank_before` gap
+/// check — the end line of whatever preceded this run in the real
+/// file (`0` when the run opens the file). The caller MUST supply the
+/// real value: `tokens` holds only the DOC_RUN node's own descendant
+/// tokens (`crate::syntax::extract::sig_tokens`'s whole contract), and
+/// whether a blank line preceded the run's own first line is a
+/// property of whatever came BEFORE the node — information the
+/// node's own tokens can never carry. Every item AFTER the first computes
+/// its own gap from the item before it, entirely inside `tokens`, so
+/// only the first item's `blank_before` is at stake here; passing the
+/// wrong value disagrees with `lower_cst` on exactly that one field of
+/// exactly that one item. Mirrors the sibling crate's own
+/// `reparse_item(tokens, in_group)`, whose `in_group` flag is the same
+/// shape of caller-supplied context an isolated retokenized node
+/// cannot recover on its own.
 #[allow(dead_code)]
-pub(crate) fn reparse_doc_items(tokens: &[Token]) -> Vec<DocRunItem> {
-    bare_parser(tokens)
-        .doc_run()
+pub(crate) fn reparse_doc_items(tokens: &[Token], prev_end_line: u32) -> Vec<DocRunItem> {
+    let mut p = bare_parser(tokens);
+    p.prev_end_line = prev_end_line;
+    p.doc_run()
         .expect("reparse_doc_items: extraction only ever runs on an already-parsed tree")
         .0
 }

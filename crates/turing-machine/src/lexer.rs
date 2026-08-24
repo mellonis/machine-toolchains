@@ -201,6 +201,17 @@ pub(crate) fn normalize_doc_payload(raw_after_sigil: &str) -> String {
         .to_string()
 }
 
+/// The two characters legal immediately after `\` inside a glyph
+/// literal (docs/tmt/language.md (program structure)) — each escapes to
+/// itself (`\'` -> `'`, `\\` -> `\`); any other backslash sequence is
+/// a lex error. Single source for this module's own scan below,
+/// `crate::syntax::extract::decode_glyph_body` (a second decoder over
+/// already-lexed text — see its own doc comment for why one is
+/// unavoidable), and both functions' property-test generators, so a
+/// THIRD escape added here can never leave one of the other two
+/// silently untested against it.
+pub(crate) const GLYPH_ESCAPES: [char; 2] = ['\'', '\\'];
+
 struct Cursor<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     line: u32,
@@ -381,13 +392,8 @@ pub fn lex_with(source: &str, mode: LexMode) -> Result<Vec<Token>, CompileError>
                         cur.bump();
                         src_len += 1;
                         match cur.peek() {
-                            Some('\'') => {
-                                value.push('\'');
-                                cur.bump();
-                                src_len += 1;
-                            }
-                            Some('\\') => {
-                                value.push('\\');
+                            Some(c) if GLYPH_ESCAPES.contains(&c) => {
+                                value.push(c); // both legal escapes resolve to themselves
                                 cur.bump();
                                 src_len += 1;
                             }
