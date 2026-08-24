@@ -1,4 +1,4 @@
-//! Typed views over the `.tmc` green tree (docs/core.md (syntax tree)):
+//! Typed views over the `.tmc` green tree (docs/core.md (syntax trees)):
 //! zero-copy wrappers over one `super::kinds::TmcKind` node kind each,
 //! declared with the core `ast_node!` macro. Each view accepts exactly
 //! the node kind it names and refuses every other — the cast contract
@@ -9,6 +9,15 @@ use mtc_core::ast_node;
 use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxNode, SyntaxToken, child, children};
 
 use super::kinds::TmcKind;
+
+/// Trivia kinds excluded from a token-run accessor — whitespace and
+/// both comment flavors. Shared by every accessor that returns a flat
+/// significant-token run (`ReuseView::signature`, `RuleView::pattern_tokens`).
+fn is_trivia(t: &SyntaxToken) -> bool {
+    t.kind() == TmcKind::Whitespace.into()
+        || t.kind() == TmcKind::LineComment.into()
+        || t.kind() == TmcKind::BlockComment.into()
+}
 
 ast_node!(pub struct RootView: TmcKind::Root.into());
 ast_node!(pub struct UseView: TmcKind::Use.into());
@@ -366,11 +375,6 @@ impl ReuseView {
     /// REUSE's own tokens, which is why the run still starts and ends
     /// with them.
     pub fn signature(&self) -> Vec<SyntaxToken> {
-        fn is_trivia(t: &SyntaxToken) -> bool {
-            t.kind() == TmcKind::Whitespace.into()
-                || t.kind() == TmcKind::LineComment.into()
-                || t.kind() == TmcKind::BlockComment.into()
-        }
         self.syntax()
             .children_with_tokens()
             .skip_while(|e| e.kind() != TmcKind::LParen.into())
@@ -502,6 +506,69 @@ impl WorldView {
     }
 }
 
+/// `STATE`'s own header IDENTs, in document order — direct child IDENT
+/// tokens up to (not including) the opening `{`: an optional `entry`,
+/// then the `state` keyword, then the name (`parse_state`/`world_body`
+/// in `crates/turing-machine/src/parser.rs`). Shared by `name_token` and
+/// `is_entry` so the walk is written once — the same shape and the same
+/// `{` terminator `alphabet_header_idents` reads for `ALPHABET`.
+///
+/// The `take_while` below is correct only because `{` is
+/// grammar-mandatory right after the name: `state s;` — the body
+/// dropped — is rejected as `StateRedirect` ("a state has a `{ … }`
+/// body — the `state name;` redirect form is not supported"), and any
+/// other token there (verified: `state s foo {` rejects `foo`) is
+/// rejected by
+/// `self.expect(&TokenKind::LBrace, "`{` to open the state body")`.
+/// If that terminator were ever optional, this scan would run past
+/// the header into the body and every accessor built on it would read
+/// the wrong token.
+fn state_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .take_while(|e| e.kind() != TmcKind::LBrace.into())
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+impl StateView {
+    /// The state's name: the LAST header IDENT before `{`, mirroring
+    /// `AlphabetView::name_token`.
+    pub fn name_token(&self) -> SyntaxToken {
+        state_header_idents(self.syntax())
+            .into_iter()
+            .next_back()
+            .expect("STATE always carries a name IDENT before its `{`")
+    }
+
+    /// Whether `entry` was written — the first header IDENT's text, the
+    /// same prefix-modifier rule `AlphabetView::exported` and
+    /// `TapeView::volatile` already use. `entry` is one of the 27
+    /// fully-reserved words the parser refuses wherever a name is
+    /// expected (`crate::lexer::RESERVED`), so no state name can
+    /// collide with it. A world marks exactly one entry, on either its
+    /// one entry state or its one entry graft (docs/tmt/language.md
+    /// (entry)).
+    pub fn is_entry(&self) -> bool {
+        state_header_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "entry")
+    }
+
+    /// This state's own rules, in document order — comments between
+    /// rules are trivia, not RULE nodes, so they never appear here.
+    pub fn rules(&self) -> impl Iterator<Item = RuleView> + '_ {
+        children(self.syntax())
+    }
+
+    /// The doc run this declaration retro-wraps, when one was written.
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
+    }
+}
+
 /// A `SIG_PARAM`'s own direct IDENT tokens, in order. Exactly
 /// `volatile? tape NAME ALPHABET` or `state NAME` — the `writes`/
 /// `preserves` keywords are NOT among them, because each clause is a
@@ -623,6 +690,247 @@ impl BindingArgView {
     /// was written.
     pub fn sym_map(&self) -> Option<SymMapView> {
         child(self.syntax())
+    }
+}
+
+impl RuleView {
+    /// This rule's own pattern: `[` through the matching `]`, trivia
+    /// excluded — the run up to (not including) `->`. Unlike
+    /// `write_vec`/`move_vec`/`transition`, the pattern is not itself a
+    /// node: it is positionally first and mandatory in every rule
+    /// (`Parser::rule` calls `self.pattern()` before anything else), so
+    /// the derivation that gave `WRITE_VEC`/`MOVE_VEC`/`TRANSITION` their
+    /// own node kind — an optional, keyword-decided extent — gives this
+    /// one none (`super::kinds`'s module doc, rule 1). Returned unparsed
+    /// for the same reason `ReuseView::signature` is: turning it into
+    /// values is extraction's job, not the view layer's.
+    pub fn pattern_tokens(&self) -> Vec<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .take_while(|e| e.kind() != TmcKind::Arrow.into())
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t) => Some(t),
+                _ => None,
+            })
+            .filter(|t| !is_trivia(t))
+            .collect()
+    }
+
+    /// The `write […]` vector this rule carries, when one was written.
+    pub fn write_vec(&self) -> Option<WriteVecView> {
+        child(self.syntax())
+    }
+
+    /// The `move […]` vector this rule carries, when one was written.
+    pub fn move_vec(&self) -> Option<MoveVecView> {
+        child(self.syntax())
+    }
+
+    /// The transition this rule writes, when one was written.
+    ///
+    /// `None` here IS `Transition::Stay` — "stay in the current
+    /// state" — never an error and never a missing feature. A rule may
+    /// omit its transition only when it already carries an action
+    /// (`write`, `move`, or a leading `debugger`); with none of those, an
+    /// omitted transition is instead a parse error, so by the time a
+    /// RULE node exists at all, `None` here can only mean `Stay`
+    /// (docs/tmt/language.md (transitions)). The green tree carries this fact
+    /// as the ABSENCE of a TRANSITION node under the rule — no token
+    /// scan could express it, since an omitted transition leaves nothing
+    /// behind but the `;` that would have followed a written one either
+    /// way. A later reader must not "fix" this `None` into a panic.
+    pub fn transition(&self) -> Option<TransitionView> {
+        child(self.syntax())
+    }
+}
+
+/// `GRAFT`'s own header IDENTs, in document order — direct child IDENT
+/// tokens up to (not including) the opening `(` of the binding list: an
+/// optional `entry`, then the `graft` keyword, then the target's own
+/// first name segment (`parse_graft`/`world_body` in
+/// `crates/turing-machine/src/parser.rs`; a qualified target's further
+/// `:: IDENT` segments, if any, follow but are not part of what
+/// `target_token` answers). Shared by `target_token` and `is_entry` so
+/// the walk is written once — the same shape `alphabet_header_idents`
+/// reads for `ALPHABET`, with `(` in place of `{` as the header's
+/// terminator.
+///
+/// The `take_while` below is correct only because `(` is
+/// grammar-mandatory right after the target: `binding_args` opens with
+/// `self.expect(&TokenKind::LParen, "`(` to open the binding")`
+/// immediately after `self.qual_name(...)` returns, with no production
+/// that lets a header omit it (verified: `graft g;` — the argument list
+/// dropped — is rejected with `expected `(` to open the binding, found
+/// `;``). If that terminator were ever optional, this scan would run
+/// past the header into the argument list and every accessor built on
+/// it would read the wrong token.
+fn graft_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .take_while(|e| e.kind() != TmcKind::LParen.into())
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `as NAME` tail after `terminator`, when GRAFT or BIND's own
+/// binding-list close paren is behind it — the grammar allows exactly
+/// two shapes there: nothing, or `as` followed by the name. Both
+/// `parse_graft` and `parse_bind` bump `as` and immediately call
+/// `self.name(...)` for the name in the same breath — the pair is
+/// atomic, so an `as` with no name after it cannot reach the tree.
+/// Shared so the walk is written once; `as`'s own text is never read —
+/// the SECOND ident found (if any) is the answer.
+fn as_name_after(node: &SyntaxNode, terminator: TmcKind) -> Option<SyntaxToken> {
+    node.children_with_tokens()
+        .skip_while(|e| e.kind() != terminator.into())
+        .skip(1)
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .nth(1)
+}
+
+impl GraftView {
+    /// Whether `entry` was written — the first header IDENT's text, the
+    /// same prefix-modifier rule `StateView::is_entry` uses. `entry` is
+    /// one of the 27 fully-reserved words the parser refuses wherever a
+    /// name is expected (`crate::lexer::RESERVED`); it attaches only to
+    /// `state`/`graft`, never `bind` (docs/tmt/language.md (entry)).
+    pub fn is_entry(&self) -> bool {
+        graft_header_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "entry")
+    }
+
+    /// The graft's own target: the first IDENT after the `graft`
+    /// keyword. A qualified target's further `:: IDENT` segments are not
+    /// part of this answer.
+    pub fn target_token(&self) -> SyntaxToken {
+        let idents = graft_header_idents(self.syntax());
+        idents
+            .into_iter()
+            .nth(usize::from(self.is_entry()) + 1)
+            .expect("GRAFT always carries a target IDENT after its `graft` keyword")
+    }
+
+    /// The `as name` instance name, when written. Mandatory on every
+    /// non-entry graft — the parser rejects one without it
+    /// (`GraftNeedsName`: "a non-entry `graft` needs an `as name` — only
+    /// an `entry graft` may omit it") — and optional on an entry graft.
+    pub fn as_name(&self) -> Option<SyntaxToken> {
+        as_name_after(self.syntax(), TmcKind::RParen)
+    }
+
+    /// This graft's own binding arguments, in document order.
+    pub fn bindings(&self) -> impl Iterator<Item = BindingArgView> + '_ {
+        children(self.syntax())
+    }
+}
+
+/// `BIND`'s own header IDENTs, in document order — direct child IDENT
+/// tokens up to (not including) the opening `(` of the binding list:
+/// the `bind` keyword, then the target's own first name segment
+/// (`parse_bind` in `crates/turing-machine/src/parser.rs`). Unlike
+/// `GRAFT`'s, this header never carries an `entry` prefix: `world_body`
+/// reaches its `bind` branch only from an `else if` reached after the
+/// leading `entry` branch was not taken, and `entry`'s own branch
+/// accepts only `state`/`graft` after it — `entry bind` is a parse
+/// error (docs/tmt/language.md (entry)).
+///
+/// The `take_while` below is correct only because `(` is
+/// grammar-mandatory right after the target — see `graft_header_idents`'s
+/// identical note; `binding_args` is the same production both call.
+fn bind_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .take_while(|e| e.kind() != TmcKind::LParen.into())
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+impl BindView {
+    /// The bind's own target: the first IDENT after the `bind` keyword —
+    /// mirrors `GraftView::target_token`, minus the `entry` shift, since
+    /// `BIND` never carries one.
+    pub fn target_token(&self) -> SyntaxToken {
+        bind_header_idents(self.syntax())
+            .into_iter()
+            .nth(1)
+            .expect("BIND always carries a target IDENT after its `bind` keyword")
+    }
+
+    /// The `as name` instance name — mandatory on every `BIND`:
+    /// `parse_bind` calls
+    /// `self.expect_kw("as", "`as` (a bind needs an instance name)")`
+    /// unconditionally after the binding list, with no production that
+    /// lets it be omitted.
+    pub fn as_name(&self) -> SyntaxToken {
+        as_name_after(self.syntax(), TmcKind::RParen)
+            .expect("BIND always carries an `as name` after its binding list")
+    }
+
+    /// This bind's own binding arguments, in document order.
+    pub fn bindings(&self) -> impl Iterator<Item = BindingArgView> + '_ {
+        children(self.syntax())
+    }
+}
+
+impl DocRunView {
+    /// This run's own `?` lines, in document order — direct `DOC_LINE`
+    /// tokens only.
+    pub fn doc_lines(&self) -> Vec<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t) if t.kind() == TmcKind::DocLine.into() => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// This run's own BARE-PROSE `!` lines, in document order — an
+    /// `AttentionLine` token that carries no leading `[ident]`, so
+    /// `Parser::doc_run` never wraps it in an ATTR and it stays a direct
+    /// token here. A TAGGED line (`! [deprecated] …`) is NOT among
+    /// these: `doc_run` wraps that one token in its own ATTR the moment
+    /// `Self::parse_attr` recognizes the payload, so it answers under
+    /// `attrs()` instead, never here (docs/tmt/language.md (doc lines
+    /// and attention lines)).
+    pub fn attention_lines(&self) -> Vec<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t) if t.kind() == TmcKind::AttentionLine.into() => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// This run's own tagged attention lines, each wrapped in its own
+    /// ATTR node, in document order.
+    pub fn attrs(&self) -> impl Iterator<Item = AttrView> + '_ {
+        children(self.syntax())
+    }
+}
+
+impl AttrView {
+    /// The single `AttentionLine` token this node wraps, payload and
+    /// all. `ATTR` can wrap nothing else and no finer-grained accessor
+    /// (a `name_token`) can exist: the lexer folds a whole `! [ident] …`
+    /// line into ONE `AttentionLine` token (docs/core.md (syntax
+    /// trees)), so `[deprecated]` is never its own token. A caller
+    /// wanting the attribute NAME hands this token's text back to the
+    /// parser's own `parse_attr` rather than re-deriving the `[ident]`
+    /// grammar here — the duplication this whole layer exists to avoid.
+    pub fn line_token(&self) -> SyntaxToken {
+        self.syntax()
+            .first_token()
+            .expect("ATTR always wraps exactly one AttentionLine token")
     }
 }
 

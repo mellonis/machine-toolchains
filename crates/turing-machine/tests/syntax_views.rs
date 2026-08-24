@@ -7,8 +7,9 @@
 use mtc_core::syntax::{AstNode, SyntaxNode, TreeBuilder};
 use mtc_turing_machine::parser::parse_green;
 use mtc_turing_machine::syntax::{
-    AlphabetView, BindingArgView, MachineView, NamespaceView, ReuseKind, ReuseView, RootView,
-    SigParamKind, TapeView, TmcKind, UsePathView, UseView,
+    AlphabetView, AttrView, BindView, BindingArgView, DocRunView, GraftView, MachineView,
+    NamespaceView, ReuseKind, ReuseView, RootView, RuleView, SigParamKind, StateView, TapeView,
+    TmcKind, UsePathView, UseView,
 };
 
 fn tree(src: &str) -> SyntaxNode {
@@ -897,5 +898,266 @@ fn each_new_nodes_extent_equals_the_ast_span_it_carries() {
         extent(&all_of(&root, TmcKind::SymMap)[0]),
         map.span,
         "SYM_MAP extent != SymMap::span — the `with` keyword must stay outside"
+    );
+}
+
+// -- body accessors -----------------------------------------------------
+
+/// `is_entry` reads the `entry` marker; a world has exactly one.
+#[test]
+fn states_expose_entry_and_their_rules() {
+    let root = tree(
+        "machine {\n  tape main: ab;\n\
+         \x20 entry state s {\n    ['a'] -> write ['_'] move [>] goto t;\n\
+         \x20   [*] -> stop;\n  }\n\
+         \x20 state t { [*] -> halt; }\n}\n",
+    );
+    let w = MachineView::cast(first_of(&root, TmcKind::Machine))
+        .expect("machine")
+        .world()
+        .expect("world");
+    let states: Vec<StateView> = w.states().collect();
+    assert_eq!(states.len(), 2);
+    assert!(states[0].is_entry());
+    assert!(!states[1].is_entry());
+    assert_eq!(states[0].name_token().text(), "s");
+    assert_eq!(states[0].rules().count(), 2);
+    assert_eq!(states[1].rules().count(), 1);
+}
+
+/// A doc run's three direct-child shapes, which are NOT interchangeable:
+/// `?` lines are DOC_LINE tokens; a `! [ident] …` line is folded by the
+/// lexer into one ATTENTION_LINE token that ATTR then wraps; a bare-prose
+/// `!` line carries no `[ident]`, so no ATTR is emitted and its token
+/// stays a direct child. `attention_lines` means the bare ones — an
+/// implementation returning every ATTENTION_LINE, tagged ones included,
+/// must fail this test, which is why the fixture carries one of each.
+///
+/// ```text
+/// ROOT@0..75
+///   ALPHABET@0..74
+///     DOC_RUN@0..54
+///       DOC_LINE@0..5 "? one"
+///       WHITESPACE@5..6 "\n"
+///       DOC_LINE@6..11 "? two"
+///       WHITESPACE@11..12 "\n"
+///       ATTENTION_LINE@12..25 "! plain prose"
+///       WHITESPACE@25..26 "\n"
+///       ATTR@26..54
+///         ATTENTION_LINE@26..54 "! [deprecated] use the other"
+///     WHITESPACE@54..55 "\n"
+///     IDENT@55..63 "alphabet"
+///     WHITESPACE@63..64 " "
+///     IDENT@64..66 "ab"
+///     WHITESPACE@66..67 " "
+///     L_BRACE@67..68 "{"
+///     WHITESPACE@68..69 " "
+///     GLYPH@69..72 "'_'"
+///     WHITESPACE@72..73 " "
+///     R_BRACE@73..74 "}"
+///   WHITESPACE@74..75 "\n"
+/// ```
+#[test]
+fn doc_runs_split_their_lines_and_expose_attributes() {
+    let root =
+        tree("? one\n? two\n! plain prose\n! [deprecated] use the other\nalphabet ab { '_' }\n");
+    let run = DocRunView::cast(first_of(&root, TmcKind::DocRun)).expect("run");
+    assert_eq!(run.doc_lines().len(), 2);
+    assert_eq!(
+        run.attention_lines().len(),
+        1,
+        "only the bare-prose line — the tagged one lives inside an ATTR"
+    );
+    let attrs: Vec<AttrView> = run.attrs().collect();
+    assert_eq!(attrs.len(), 1);
+    assert!(
+        attrs[0].line_token().text().contains("[deprecated]"),
+        "ATTR wraps the whole attention line, payload and all"
+    );
+}
+
+/// A graft names its target and its instance; `as_name` is absent only
+/// on an entry graft, which may omit it.
+#[test]
+fn grafts_expose_target_and_instance_name() {
+    let root = tree(
+        "graph g(tape t: ab, state done) {\n  entry state s { [*] -> done; }\n}\n\n\
+         machine {\n  tape main: ab;\n\
+         \x20 entry graft g(t = main, done = stop) as gg;\n}\n",
+    );
+    let g = GraftView::cast(first_of(&root, TmcKind::Graft)).expect("graft");
+    assert!(g.is_entry());
+    assert_eq!(g.target_token().text(), "g");
+    assert_eq!(
+        g.as_name().map(|t| t.text().to_string()),
+        Some("gg".to_string())
+    );
+    assert_eq!(g.bindings().count(), 2);
+}
+
+/// `StateView::doc_run` is the state's own retro-wrapped first child,
+/// distinct from a doc run bound to the enclosing machine — mirrors
+/// `a_machines_doc_run_is_the_run_it_retro_wraps`.
+#[test]
+fn a_states_doc_run_is_the_run_it_retro_wraps() {
+    let on_machine =
+        tree("? doc\nmachine {\n  tape main: ab;\n  entry state s { [*] -> stop; }\n}\n");
+    let s = StateView::cast(first_of(&on_machine, TmcKind::State)).expect("state");
+    assert!(
+        s.doc_run().is_none(),
+        "the run belongs to the machine, not the state"
+    );
+
+    let on_state =
+        tree("machine {\n  tape main: ab;\n  ? doc\n  entry state s { [*] -> stop; }\n}\n");
+    let s = StateView::cast(first_of(&on_state, TmcKind::State)).expect("state");
+    assert!(
+        s.doc_run().is_some(),
+        "the run is the state's own retro-wrapped first child"
+    );
+}
+
+/// `BindView` mirrors `GraftView` without the `entry`/`is_entry` axis —
+/// `bind` never carries an `entry` prefix. A non-argless binding list
+/// discriminates `bindings().count()` from a vacuous pass, and a target
+/// distinct from its instance name catches a target/`as_name` mix-up.
+#[test]
+fn binds_expose_target_bindings_and_instance_name() {
+    let root = tree(
+        "machine {\n  tape main: ab;\n\
+         \x20 bind r(t = main, done = stop) as hh;\n\
+         \x20 entry state s { [*] -> stop; }\n}\n",
+    );
+    let b = BindView::cast(first_of(&root, TmcKind::Bind)).expect("bind");
+    assert_eq!(b.target_token().text(), "r");
+    assert_eq!(b.as_name().text(), "hh");
+    let names: Vec<String> = b
+        .bindings()
+        .map(|a| a.name_token().text().to_string())
+        .collect();
+    assert_eq!(names, vec!["t".to_string(), "done".to_string()]);
+}
+
+/// The brief's own claim — "`as_name` is absent only on an entry
+/// graft" — is unexercised by `grafts_expose_target_and_instance_name`
+/// alone, which never writes a graft missing it. An entry graft may
+/// omit `as name` entirely; the parser accepts it (`GraftNeedsName` is
+/// raised only for a NON-entry graft missing it).
+#[test]
+fn an_entry_graft_may_omit_its_instance_name() {
+    let root = tree(
+        "graph g(tape t: ab, state done) {\n  entry state s { [*] -> done; }\n}\n\n\
+         machine {\n  tape main: ab;\n\
+         \x20 entry graft g(t = main, done = stop);\n}\n",
+    );
+    let g = GraftView::cast(first_of(&root, TmcKind::Graft)).expect("graft");
+    assert!(g.is_entry());
+    assert!(g.as_name().is_none(), "no `as` was written");
+}
+
+/// `pattern_tokens` stops at `->`, not at the pattern's own `]` — a
+/// rule that continues past the arrow with `write`/`move`/a transition
+/// is the fixture that discriminates a correct Arrow-terminated scan
+/// from one that keeps going and picks up `write`/the write vector's
+/// own tokens/`;`.
+#[test]
+fn a_rules_pattern_tokens_stop_at_the_arrow() {
+    let root = tree(
+        "machine {\n  tape main: ab;\n\
+         \x20 entry state s {\n    ['a'] -> write ['_'] move [>] goto t;\n  }\n\
+         \x20 state t { [*] -> halt; }\n}\n",
+    );
+    let rule = RuleView::cast(first_of(&root, TmcKind::Rule)).expect("rule");
+    let tokens: Vec<String> = rule
+        .pattern_tokens()
+        .iter()
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(
+        tokens,
+        vec!["[".to_string(), "'a'".to_string(), "]".to_string()],
+        "pattern_tokens must stop at `->`, not run into write/move/the transition"
+    );
+}
+
+/// `write_vec`/`move_vec` are told apart by the child NODE's own kind,
+/// never by bracket-group position — the second rule carries a move
+/// vector and no write vector, so a positional "first bracket group
+/// after `->`" implementation would misread its move vector as a write.
+#[test]
+fn a_rules_write_and_move_accessors_are_told_apart_by_kind() {
+    let root = tree(
+        "alphabet x { '0', '1' }\nmachine {\n  tape m: x;\n\
+         \x20 entry state s {\n    ['0'] -> write ['1'] move [>] goto s;\n\
+         \x20   ['1'] -> move [<] goto s;\n  }\n}\n",
+    );
+    let w = MachineView::cast(first_of(&root, TmcKind::Machine))
+        .expect("machine")
+        .world()
+        .expect("world");
+    let s = w.states().next().expect("one state");
+    let rules: Vec<RuleView> = s.rules().collect();
+    assert_eq!(rules.len(), 2);
+
+    assert_eq!(
+        rules[0].write_vec().map(|v| v.syntax().text().to_string()),
+        Some("['1']".to_string())
+    );
+    assert_eq!(
+        rules[0].move_vec().map(|v| v.syntax().text().to_string()),
+        Some("[>]".to_string())
+    );
+
+    assert!(
+        rules[1].write_vec().is_none(),
+        "the second rule writes nothing"
+    );
+    assert_eq!(
+        rules[1].move_vec().map(|v| v.syntax().text().to_string()),
+        Some("[<]".to_string()),
+        "its lone bracket group after `->` is a MOVE vector"
+    );
+}
+
+/// `transition()` returning `None` IS `Transition::Stay` — a rule may
+/// omit its transition only once it already carries an action, so by
+/// the time a RULE node exists at all, `None` here can only mean
+/// "stay in the current state", never a missing/erroneous transition.
+/// Both a `write`-only rule and a `debugger`-only rule omit theirs;
+/// the third and fourth rules pin the `Some` side against each other so
+/// a "first `TRANSITION` in the whole tree" bug (rather than THIS
+/// rule's own child) cannot pass by accident.
+#[test]
+fn an_omitted_transition_accessor_answers_none() {
+    let root = tree(
+        "alphabet x { '0', '1' }\nmachine {\n  tape m: x;\n\
+         \x20 entry state s {\n    ['0'] -> write ['1'];\n\
+         \x20   ['1'] -> debugger;\n\
+         \x20   [*] -> move [.] goto s;\n\
+         \x20   [*] -> stop;\n  }\n}\n",
+    );
+    let w = MachineView::cast(first_of(&root, TmcKind::Machine))
+        .expect("machine")
+        .world()
+        .expect("world");
+    let s = w.states().next().expect("one state");
+    let rules: Vec<RuleView> = s.rules().collect();
+    assert_eq!(rules.len(), 4);
+
+    assert!(
+        rules[0].transition().is_none(),
+        "a write-only rule omits its transition — Stay"
+    );
+    assert!(
+        rules[1].transition().is_none(),
+        "a debugger-only rule omits its transition — Stay"
+    );
+    assert_eq!(
+        rules[2].transition().map(|t| t.syntax().text().to_string()),
+        Some("goto s".to_string())
+    );
+    assert_eq!(
+        rules[3].transition().map(|t| t.syntax().text().to_string()),
+        Some("stop".to_string())
     );
 }
