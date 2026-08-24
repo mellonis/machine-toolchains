@@ -1,7 +1,6 @@
 //! The `.tmc` green-syntax layer over the core framework
 //! (docs/core.md (syntax trees)): the kind space, the source-layout
-//! pass, and the green-tree sink for now, with typed views following
-//! in later tasks of the same migration.
+//! pass, the green-tree sink, and typed views over the resulting tree.
 //!
 //! # A declaration retro-wraps its bound doc run
 //!
@@ -77,10 +76,15 @@
 mod emit;
 mod kinds;
 mod layout;
+mod views;
 
 pub use emit::GreenSink;
 pub use kinds::{TmcKind, kind_name};
 pub use layout::{SigLayout, layout};
+pub use views::{
+    AlphabetView, AttrView, BindView, DocRunView, GraftView, MachineView, NamespaceView, ReuseView,
+    RootView, RuleView, StateView, TapeView, TopView, UsePathView, UseView, WorldView,
+};
 // `pub(crate)`, not `pub`: `token_kind` itself is `pub(crate)` (only the
 // parser's `bump()` needs it), so re-exporting it any wider than
 // `pub(crate)` here would be private-in-public.
