@@ -12,12 +12,17 @@
 //! the run (wrapped in its own DOC_RUN node) becomes the
 //! declaration's own first child rather than an unwrapped sibling
 //! before it. The checkpoint is taken right after the loop's
-//! pending-comment drain and before the doc-run block — this exact
-//! position, not the loop top, is what keeps leading-comment
-//! attachment identical to the sibling `.pmc` parser's `fn_cp`
-//! (`crates/post-machine/src/parser.rs`): a comment written before the
-//! run still flushes into the PARENT, since the checkpoint carries no
-//! node of its own to flush into until it is retroactively opened.
+//! pending-comment drain and before the doc-run block, matching where
+//! PM's own `fn_cp` sits (`crates/post-machine/src/parser.rs`). That
+//! exact position is NOT behaviourally forced: `drain_pending` only
+//! advances `self.cpos` (the CST's own comment-attachment cursor),
+//! never `self.pos` — the position `g_checkpoint` flushes on — so a
+//! checkpoint taken above the drain instead is an equivalent mutant,
+//! not a bug (confirmed: every test in this crate still passes with
+//! it moved there). The reason to keep it exactly where PM's `fn_cp`
+//! sits is structural parity between the two languages' parsers, and
+//! that reason is sufficient on its own — no mechanical one is needed
+//! or claimed.
 //!
 //! This was a decision, not something the grammar dictated either way,
 //! made for three reasons: the already-shipped `.pmc` formatter's
@@ -35,6 +40,13 @@
 //! `NamespaceCst`, `ReuseCst`, `StateCst`, `GraftCst`, `BindCst`),
 //! never a free-standing item, so the green shape now matches the
 //! CST's own model of "whose run is this" instead of contradicting it.
+//!
+//! WORLD sits between MACHINE/REUSE and their body items (`docs/tmt/language.md
+//! (worlds)`), so a doc-run-free `machine`/`routine`/`graph` has exactly
+//! ONE non-trivia child — WORLD itself — not the tape/state/graft/bind
+//! items directly: a later formatter port walking a world-producing
+//! declaration's children for its body items descends through WORLD
+//! first, one level, before reaching them.
 //!
 //! # The green tree splits what the CST keeps together
 //!

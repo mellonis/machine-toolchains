@@ -29,6 +29,20 @@ fn kind_of(node: &SyntaxNode) -> &'static str {
     kind_name(node.kind())
 }
 
+/// Depth-first search for the first descendant node of `kind`,
+/// `node` itself included — the table-driven retro-wrap probe below
+/// plants its target construct at different depths (a direct ROOT
+/// child for a file-level declaration, one level inside WORLD for a
+/// world-body one), so a single fixed-depth lookup can't serve every
+/// row.
+fn first_descendant_of_kind(node: &SyntaxNode, kind: &str) -> Option<SyntaxNode> {
+    if kind_of(node) == kind {
+        return Some(node.clone());
+    }
+    node.children()
+        .find_map(|child| first_descendant_of_kind(&child, kind))
+}
+
 /// `"alphabet ab { '_' }\n"` — ALPHABET spans `alphabet`..`}` inclusive.
 /// The trailing newline belongs to ROOT, not to ALPHABET: the node
 /// closes right after its `}`.
@@ -661,6 +675,77 @@ fn plain_and_exported_reuse_sites_carry_plain_states_and_grafts() {
         reuses[2].text(),
         "export graph eg() {\n  state s { [*] -> stop; }\n}"
     );
+}
+
+/// A table-driven probe over every doc-run-accepting site — the ten
+/// named directly in the `syntax` module doc's own enumeration
+/// (`export`/`alphabet`/`routine`/`graph`/`machine`/`namespace` at
+/// file/namespace level, `entry`/`state`/`graft`/`bind` inside a world
+/// body). The tests above already prove retro-wrap at SOME of these
+/// (plain `alphabet`, `export routine`, `entry state`); this table is
+/// the one place that proves it at ALL ten, so a future construct added
+/// to that enumeration gets a row here rather than trusting the prose
+/// on faith. For each row: the target construct's own first child must
+/// be DOC_RUN, and the construct's own `text()` must begin with the
+/// run's text.
+#[test]
+fn every_doc_run_accepting_site_retro_wraps() {
+    let cases: [(&str, &str, &str); 10] = [
+        ("alphabet", "? doc\nalphabet ab { '_' }\n", "ALPHABET"),
+        ("export", "? doc\nexport alphabet ab { '_' }\n", "ALPHABET"),
+        (
+            "routine",
+            "? doc\nroutine r() {\n  entry state s { [*] -> stop; }\n}\n",
+            "REUSE",
+        ),
+        (
+            "graph",
+            "? doc\ngraph g() {\n  entry state s { [*] -> stop; }\n}\n",
+            "REUSE",
+        ),
+        ("machine", "? doc\nmachine { }\n", "MACHINE"),
+        ("namespace", "? doc\nnamespace n { }\n", "NAMESPACE"),
+        (
+            "entry",
+            "machine {\n  ? doc\n  entry state s { [*] -> stop; }\n}\n",
+            "STATE",
+        ),
+        (
+            "state",
+            "machine {\n  ? doc\n  state s { [*] -> stop; }\n}\n",
+            "STATE",
+        ),
+        (
+            "graft",
+            "machine {\n  ? doc\n  graft findX(t = work) as fx;\n}\n",
+            "GRAFT",
+        ),
+        (
+            "bind",
+            "machine {\n  ? doc\n  bind findX(t = work) as fx;\n}\n",
+            "BIND",
+        ),
+    ];
+    for (label, source, target_kind) in cases {
+        let root = parse(source);
+        let target = first_descendant_of_kind(&root, target_kind)
+            .unwrap_or_else(|| panic!("{label}: no {target_kind} node in the tree"));
+        let doc_run = target
+            .children()
+            .next()
+            .unwrap_or_else(|| panic!("{label}: {target_kind} has no children at all"));
+        assert_eq!(
+            kind_of(&doc_run),
+            "DOC_RUN",
+            "{label}: {target_kind}'s own first child must be DOC_RUN, got {}",
+            kind_of(&doc_run)
+        );
+        assert!(
+            target.text().starts_with("? doc"),
+            "{label}: {target_kind}'s own text must begin at the run: {}",
+            target.text()
+        );
+    }
 }
 
 /// The law over every `.tmc` the repo ships, including the flagship
