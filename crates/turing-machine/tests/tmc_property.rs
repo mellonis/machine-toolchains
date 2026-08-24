@@ -135,8 +135,15 @@
 //! known starting boundary rather than rediscovering it.
 
 use mtc_core::syntax::SyntaxNode;
-use mtc_turing_machine::parser::parse_green;
+use mtc_turing_machine::lexer::{LexMode, lex_with};
+use mtc_turing_machine::parser::{
+    Continuation, FoldExprKind, FoldOp, MapArrow, MoveDir, PatternCellKind, Program, SigParamKind,
+    SymLit, TermKind, Transition, WriteCellKind, lower_cst, parse_cst, parse_green,
+    parse_green_from_tokens,
+};
+use mtc_turing_machine::syntax::extract_program;
 use proptest::prelude::*;
+use std::collections::BTreeSet;
 
 /// A deterministic cursor over a byte seed, cycling forever so the
 /// generator never has to handle running out of randomness.
@@ -322,7 +329,15 @@ fn gen_elem_list(
 /// declaration, stay attached without breaking it
 /// (docs/tmt/language.md (doc lines and attention lines)).
 fn gen_doc_run(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
-    let docs = cur.choose(3);
+    // Up to THREE `?` lines, not two. At two, a blank break can only ever
+    // land on the last line, and `crate::parser::reduce_doc_run` flushes
+    // the pending paragraph only when it is non-empty — so a trailing
+    // blank adds nothing and the reduced `Doc` never held more than one
+    // paragraph, no matter how many cases ran. Measured by the coverage
+    // floor below, which reported `doc.paragraphs.many` unreached; three
+    // lines let the break sit BETWEEN two real ones, which is the only
+    // spelling that splits.
+    let docs = cur.choose(4);
     let attentions = if docs == 0 { 1 } else { cur.choose(2) };
     for i in 0..docs {
         out.push_str(pad);
@@ -1275,6 +1290,26 @@ fn generate_program(seed: &[u8]) -> String {
     out
 }
 
+/// Both halves of the extraction oracle over one source: what the C1
+/// path lowers, and what the green tree extracts. Shared by the property
+/// below and by the coverage floor, so the two can never drift into
+/// measuring different pipelines.
+static PROBE_CASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PROBE_FIRST_FAIL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn both_paths(src: &str) -> (Program, Program) {
+    let tokens = lex_with(src, LexMode::WithComments)
+        .unwrap_or_else(|e| panic!("generator emitted an unlexable program: {e:?}\n{src}"));
+    let expected = lower_cst(
+        &parse_cst(&tokens)
+            .unwrap_or_else(|e| panic!("generator emitted an invalid program: {e:?}\n{src}")),
+    );
+    let green = parse_green_from_tokens(src, &tokens)
+        .unwrap_or_else(|e| panic!("generator emitted an invalid program: {e:?}\n{src}"));
+    let actual = extract_program(&SyntaxNode::new_root(green), src);
+    (actual, expected)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 
@@ -1289,4 +1324,659 @@ proptest! {
         let root = SyntaxNode::new_root(tree);
         prop_assert_eq!(root.text(), src);
     }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
+
+    /// Extraction parity over generated programs. The lossless property
+    /// above pins the tree's TEXT; this pins what the tree MEANS, and it
+    /// is the first property in this file to look at structure at all.
+    /// The corpus half of the same oracle is `syntax_parity.rs`; what
+    /// this half adds is the shapes nobody wrote — reopened namespaces,
+    /// comments in every positional slot, header tokens split across
+    /// lines, arithmetic folds, omitted transitions.
+    ///
+    /// Two `Program` fields are outside any equality oracle by
+    /// construction and are pinned in `syntax::extract`'s unit tests
+    /// instead; `syntax_parity.rs`'s module doc names both.
+    #[test]
+    fn generated_programs_extract_identically_on_both_paths(
+        seed in prop::collection::vec(any::<u8>(), 1..512)
+    ) {
+        let src = generate_program(&seed);
+        let (actual, expected) = both_paths(&src);
+        let k = PROBE_CASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if actual != expected {
+            let _ = PROBE_FIRST_FAIL.compare_exchange(0, k,
+                std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("PROBE: divergence at case {k}, first at {}",
+                PROBE_FIRST_FAIL.load(std::sync::atomic::Ordering::Relaxed));
+        }
+        prop_assert_eq!(actual, expected, "extraction diverged on:\n{}", src);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coverage floor
+// ---------------------------------------------------------------------------
+
+/// Every construct `syntax::extract` has its own branch for, as a label
+/// the tally below stamps when it observes one in an EXTRACTED
+/// `Program`. Measuring the extracted AST rather than the generated text
+/// is the point: `src.contains("writes")` would measure the generator,
+/// while `SigParamKind::Tape { writes: Some(_), .. }` measures what
+/// extraction actually had to rebuild.
+///
+/// This set is compared against the tally in BOTH directions, matching
+/// this repo's other drift guards: a required label never stamped means
+/// the parity property above runs blind on that construct, and a label
+/// stamped but not required means the tally and this list disagree about
+/// a name.
+///
+/// **Three axes are deliberately absent, each for a measured reason.**
+/// `machine: None` (a library `.tmc`) — `generate_program` always emits
+/// exactly one `machine` block, and the shape is covered by the corpus
+/// half of the oracle, where the embedded stdlib is exactly that.
+/// `entry state` inside a `graph` and `entry graft` inside a `routine` —
+/// the generator ties the entry shape to the world kind on purpose (its
+/// own module doc says why), and extraction reads `entry` off the STATE
+/// or GRAFT view with no knowledge of the enclosing world, so the cross
+/// is not a distinct branch; the two axes themselves (`state.entry`,
+/// `graft.entry`) are required below. `doc.deprecated` with an empty
+/// message — `gen_doc_run` always writes `! [deprecated] superseded`,
+/// and the empty-message reduction is a `reduce_doc_run` behaviour the
+/// green path shares with the CST path rather than re-deriving.
+const REQUIRED_CONSTRUCTS: &[&str] = &[
+    // imports
+    "import.alias",
+    "import.bare",
+    "import.multi-segment",
+    "import.namespaced",
+    "import.file-level",
+    // alphabets
+    "alphabet.exported",
+    "alphabet.private",
+    "alphabet.documented",
+    "alphabet.undocumented",
+    "alphabet.namespaced",
+    "alphabet.elem.single",
+    "alphabet.elem.range",
+    // symbol literals, wherever they occur
+    "sym.glyph",
+    "sym.glyph.escaped",
+    "sym.number",
+    "sym.number.leading-zero",
+    // reuse declarations
+    "routine",
+    "routine.exported",
+    "routine.documented",
+    "routine.namespaced",
+    "graph",
+    "graph.exported",
+    "graph.documented",
+    "graph.namespaced",
+    "namespace.nested",
+    // signatures
+    "sig.param.state",
+    "sig.param.tape",
+    "sig.tape.volatile",
+    "sig.tape.plain",
+    "sig.tape.writes-only",
+    "sig.tape.preserves-only",
+    "sig.tape.both-clauses",
+    "sig.tape.no-clause",
+    "contract.empty",
+    "contract.non-empty",
+    // machine
+    "machine",
+    "machine.documented",
+    "tape.volatile",
+    "tape.plain",
+    // world bodies
+    "state.entry",
+    "state.plain",
+    "state.documented",
+    "state.ruleless",
+    "graft.entry",
+    "graft.plain",
+    "graft.named",
+    "graft.anonymous",
+    "graft.documented",
+    "graft.args.empty",
+    "graft.args.non-empty",
+    "bind",
+    "bind.documented",
+    "bind.args.non-empty",
+    "qualname.single-segment",
+    "qualname.multi-segment",
+    // rules
+    "rule.debugger",
+    "rule.no-debugger",
+    "rule.write-vec",
+    "rule.no-write-vec",
+    "rule.move-vec",
+    "rule.no-move-vec",
+    "pattern.wildcard",
+    "pattern.single",
+    "pattern.range",
+    "pattern.bound",
+    "pattern.unbound",
+    "write.keep",
+    "write.lit",
+    "write.subst.passthrough",
+    "write.subst.int",
+    "write.subst.fold",
+    "fold.add",
+    "fold.sub",
+    "fold.mul",
+    "fold.rem",
+    "fold.nested",
+    "move.left",
+    "move.right",
+    "move.stay",
+    // transitions
+    "transition.goto.explicit",
+    "transition.goto.sugar",
+    "transition.call",
+    "transition.return",
+    "transition.stop",
+    "transition.halt",
+    "transition.stay",
+    "continuation.state",
+    "continuation.return",
+    "continuation.stop",
+    "continuation.halt",
+    // binding arguments and symbol maps
+    "arg.named.mapped",
+    "arg.named.bare",
+    "arg.terminator.return",
+    "arg.terminator.stop",
+    "arg.terminator.halt",
+    "map.bidirectional",
+    "map.read-only",
+    // reduced docs
+    "doc.paragraphs.one",
+    "doc.paragraphs.many",
+    "doc.attention",
+    "doc.deprecated",
+];
+
+/// A splitmix64 stream, turning one test-fixed root seed into the byte
+/// vectors the coverage sweep feeds [`generate_program`]. Deterministic
+/// on purpose: a coverage floor that drifts case to case reports a
+/// different gap every run and stops being a floor.
+struct SplitMix(u64);
+
+impl SplitMix {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// One seed shaped like the property's own `1..512` byte vector, so
+    /// the sweep measures the SAME distribution the parity property runs
+    /// over rather than a differently-shaped one.
+    fn seed(&mut self) -> Vec<u8> {
+        let len = 1 + (self.next_u64() % 511) as usize;
+        (0..len).map(|_| self.next_u64() as u8).collect()
+    }
+}
+
+fn stamp_sym(sym: &SymLit, seen: &mut BTreeSet<&'static str>) {
+    match sym {
+        SymLit::Glyph { value, .. } => {
+            seen.insert("sym.glyph");
+            // The two escapes whose SOURCE spelling differs from their
+            // one-character content (docs/tmt/language.md (alphabets));
+            // a shim that reprinted the value instead of keeping the
+            // written form would diverge here and nowhere else.
+            if value == "'" || value == "\\" {
+                seen.insert("sym.glyph.escaped");
+            }
+        }
+        SymLit::Number { written, .. } => {
+            seen.insert("sym.number");
+            if written.len() > 1 && written.starts_with('0') {
+                seen.insert("sym.number.leading-zero");
+            }
+        }
+    }
+}
+
+fn stamp_elems(
+    elems: &[mtc_turing_machine::parser::AlphabetElem],
+    seen: &mut BTreeSet<&'static str>,
+) {
+    for elem in elems {
+        match elem {
+            mtc_turing_machine::parser::AlphabetElem::Single(sym) => {
+                seen.insert("alphabet.elem.single");
+                stamp_sym(sym, seen);
+            }
+            mtc_turing_machine::parser::AlphabetElem::Range { lo, hi, .. } => {
+                seen.insert("alphabet.elem.range");
+                stamp_sym(lo, seen);
+                stamp_sym(hi, seen);
+            }
+        }
+    }
+}
+
+fn stamp_doc(doc: &Option<mtc_turing_machine::parser::Doc>, seen: &mut BTreeSet<&'static str>) {
+    let Some(doc) = doc else { return };
+    match doc.paragraphs.len() {
+        0 => {}
+        1 => {
+            seen.insert("doc.paragraphs.one");
+        }
+        _ => {
+            seen.insert("doc.paragraphs.many");
+        }
+    }
+    if !doc.attention.is_empty() {
+        seen.insert("doc.attention");
+    }
+    if doc.deprecated.is_some() {
+        seen.insert("doc.deprecated");
+    }
+}
+
+fn stamp_qual(name: &mtc_turing_machine::parser::QualName, seen: &mut BTreeSet<&'static str>) {
+    if name.segments.len() > 1 {
+        seen.insert("qualname.multi-segment");
+    } else {
+        seen.insert("qualname.single-segment");
+    }
+}
+
+fn stamp_args(args: &[mtc_turing_machine::parser::BindingArg], seen: &mut BTreeSet<&'static str>) {
+    for arg in args {
+        match &arg.value {
+            mtc_turing_machine::parser::BindingValue::Named { map, .. } => {
+                if let Some(map) = map {
+                    seen.insert("arg.named.mapped");
+                    for pair in &map.pairs {
+                        stamp_sym(&pair.src, seen);
+                        stamp_sym(&pair.dst, seen);
+                        match pair.arrow {
+                            MapArrow::Bidirectional => seen.insert("map.bidirectional"),
+                            MapArrow::ReadOnly => seen.insert("map.read-only"),
+                        };
+                    }
+                } else {
+                    seen.insert("arg.named.bare");
+                }
+            }
+            mtc_turing_machine::parser::BindingValue::Terminator { kind, .. } => {
+                match kind {
+                    TermKind::Return => seen.insert("arg.terminator.return"),
+                    TermKind::Stop => seen.insert("arg.terminator.stop"),
+                    TermKind::Halt => seen.insert("arg.terminator.halt"),
+                };
+            }
+        }
+    }
+}
+
+fn stamp_fold(node: &mtc_turing_machine::parser::FoldExprNode, seen: &mut BTreeSet<&'static str>) {
+    match &node.kind {
+        FoldExprKind::Var(_) => {}
+        FoldExprKind::Int(_) => {
+            seen.insert("write.subst.int");
+        }
+        FoldExprKind::Bin { op, lhs, rhs } => {
+            seen.insert("write.subst.fold");
+            match op {
+                FoldOp::Add => seen.insert("fold.add"),
+                FoldOp::Sub => seen.insert("fold.sub"),
+                FoldOp::Mul => seen.insert("fold.mul"),
+                FoldOp::Rem => seen.insert("fold.rem"),
+            };
+            if matches!(lhs.kind, FoldExprKind::Bin { .. })
+                || matches!(rhs.kind, FoldExprKind::Bin { .. })
+            {
+                seen.insert("fold.nested");
+            }
+            stamp_fold(lhs, seen);
+            stamp_fold(rhs, seen);
+        }
+    }
+}
+
+fn stamp_rule(rule: &mtc_turing_machine::parser::Rule, seen: &mut BTreeSet<&'static str>) {
+    seen.insert(if rule.debugger {
+        "rule.debugger"
+    } else {
+        "rule.no-debugger"
+    });
+    for cell in &rule.pattern.cells {
+        match &cell.kind {
+            PatternCellKind::Wildcard => {
+                seen.insert("pattern.wildcard");
+            }
+            PatternCellKind::Single(sym) => {
+                seen.insert("pattern.single");
+                stamp_sym(sym, seen);
+            }
+            PatternCellKind::Range { lo, hi } => {
+                seen.insert("pattern.range");
+                stamp_sym(lo, seen);
+                stamp_sym(hi, seen);
+            }
+        }
+        seen.insert(if cell.binding.is_some() {
+            "pattern.bound"
+        } else {
+            "pattern.unbound"
+        });
+    }
+    match &rule.write {
+        Some(vec) => {
+            seen.insert("rule.write-vec");
+            for cell in &vec.cells {
+                match &cell.kind {
+                    WriteCellKind::Keep => {
+                        seen.insert("write.keep");
+                    }
+                    WriteCellKind::Lit(sym) => {
+                        seen.insert("write.lit");
+                        stamp_sym(sym, seen);
+                    }
+                    WriteCellKind::Subst { expr } => {
+                        if matches!(expr.kind, FoldExprKind::Var(_)) {
+                            seen.insert("write.subst.passthrough");
+                        }
+                        stamp_fold(expr, seen);
+                    }
+                }
+            }
+        }
+        None => {
+            seen.insert("rule.no-write-vec");
+        }
+    }
+    match &rule.mov {
+        Some(vec) => {
+            seen.insert("rule.move-vec");
+            for cell in &vec.cells {
+                match cell.dir {
+                    MoveDir::Left => seen.insert("move.left"),
+                    MoveDir::Right => seen.insert("move.right"),
+                    MoveDir::Stay => seen.insert("move.stay"),
+                };
+            }
+        }
+        None => {
+            seen.insert("rule.no-move-vec");
+        }
+    }
+    match &rule.transition {
+        Transition::Goto { explicit, .. } => {
+            seen.insert(if *explicit {
+                "transition.goto.explicit"
+            } else {
+                "transition.goto.sugar"
+            });
+        }
+        Transition::Call {
+            target, args, then, ..
+        } => {
+            seen.insert("transition.call");
+            stamp_qual(target, seen);
+            stamp_args(args, seen);
+            match then {
+                Continuation::State { .. } => seen.insert("continuation.state"),
+                Continuation::Return { .. } => seen.insert("continuation.return"),
+                Continuation::Stop { .. } => seen.insert("continuation.stop"),
+                Continuation::Halt { .. } => seen.insert("continuation.halt"),
+            };
+        }
+        Transition::Return { .. } => {
+            seen.insert("transition.return");
+        }
+        Transition::Stop { .. } => {
+            seen.insert("transition.stop");
+        }
+        Transition::Halt { .. } => {
+            seen.insert("transition.halt");
+        }
+        Transition::Stay { .. } => {
+            seen.insert("transition.stay");
+        }
+    }
+}
+
+fn stamp_world(
+    states: &[mtc_turing_machine::parser::State],
+    grafts: &[mtc_turing_machine::parser::Graft],
+    binds: &[mtc_turing_machine::parser::Bind],
+    seen: &mut BTreeSet<&'static str>,
+) {
+    for state in states {
+        seen.insert(if state.entry {
+            "state.entry"
+        } else {
+            "state.plain"
+        });
+        if state.doc.is_some() {
+            seen.insert("state.documented");
+        }
+        if state.rules.is_empty() {
+            seen.insert("state.ruleless");
+        }
+        stamp_doc(&state.doc, seen);
+        for rule in &state.rules {
+            stamp_rule(rule, seen);
+        }
+    }
+    for graft in grafts {
+        seen.insert(if graft.entry {
+            "graft.entry"
+        } else {
+            "graft.plain"
+        });
+        seen.insert(if graft.as_name.is_some() {
+            "graft.named"
+        } else {
+            "graft.anonymous"
+        });
+        if graft.doc.is_some() {
+            seen.insert("graft.documented");
+        }
+        seen.insert(if graft.args.is_empty() {
+            "graft.args.empty"
+        } else {
+            "graft.args.non-empty"
+        });
+        stamp_doc(&graft.doc, seen);
+        stamp_qual(&graft.target, seen);
+        stamp_args(&graft.args, seen);
+    }
+    for bind in binds {
+        seen.insert("bind");
+        if bind.doc.is_some() {
+            seen.insert("bind.documented");
+        }
+        if !bind.args.is_empty() {
+            seen.insert("bind.args.non-empty");
+        }
+        stamp_doc(&bind.doc, seen);
+        stamp_qual(&bind.target, seen);
+        stamp_args(&bind.args, seen);
+    }
+}
+
+fn stamp_signature(sig: &mtc_turing_machine::parser::Signature, seen: &mut BTreeSet<&'static str>) {
+    for param in &sig.params {
+        match &param.kind {
+            SigParamKind::State => {
+                seen.insert("sig.param.state");
+            }
+            SigParamKind::Tape {
+                volatile,
+                writes,
+                preserves,
+                ..
+            } => {
+                seen.insert("sig.param.tape");
+                seen.insert(if *volatile {
+                    "sig.tape.volatile"
+                } else {
+                    "sig.tape.plain"
+                });
+                seen.insert(match (writes.is_some(), preserves.is_some()) {
+                    (true, true) => "sig.tape.both-clauses",
+                    (true, false) => "sig.tape.writes-only",
+                    (false, true) => "sig.tape.preserves-only",
+                    (false, false) => "sig.tape.no-clause",
+                });
+                for clause in [writes, preserves].into_iter().flatten() {
+                    seen.insert(if clause.elems.is_empty() {
+                        "contract.empty"
+                    } else {
+                        "contract.non-empty"
+                    });
+                    stamp_elems(&clause.elems, seen);
+                }
+            }
+        }
+    }
+}
+
+/// Stamp every construct one extracted `Program` contains.
+fn stamp_program(program: &Program, seen: &mut BTreeSet<&'static str>) {
+    for import in &program.imports {
+        seen.insert(if import.alias.is_some() {
+            "import.alias"
+        } else {
+            "import.bare"
+        });
+        if import.path.len() > 1 {
+            seen.insert("import.multi-segment");
+        }
+        seen.insert(if import.ns.is_empty() {
+            "import.file-level"
+        } else {
+            "import.namespaced"
+        });
+    }
+    for alphabet in &program.alphabets {
+        seen.insert(if alphabet.exported {
+            "alphabet.exported"
+        } else {
+            "alphabet.private"
+        });
+        seen.insert(if alphabet.doc.is_some() {
+            "alphabet.documented"
+        } else {
+            "alphabet.undocumented"
+        });
+        if !alphabet.ns.is_empty() {
+            seen.insert("alphabet.namespaced");
+        }
+        if alphabet.ns.len() > 1 {
+            seen.insert("namespace.nested");
+        }
+        stamp_doc(&alphabet.doc, seen);
+        stamp_elems(&alphabet.elems, seen);
+    }
+    for routine in &program.routines {
+        seen.insert("routine");
+        if routine.exported {
+            seen.insert("routine.exported");
+        }
+        if routine.doc.is_some() {
+            seen.insert("routine.documented");
+        }
+        if !routine.ns.is_empty() {
+            seen.insert("routine.namespaced");
+        }
+        if routine.ns.len() > 1 {
+            seen.insert("namespace.nested");
+        }
+        stamp_doc(&routine.doc, seen);
+        stamp_signature(&routine.sig, seen);
+        stamp_world(&routine.states, &routine.grafts, &routine.binds, seen);
+    }
+    for graph in &program.graphs {
+        seen.insert("graph");
+        if graph.exported {
+            seen.insert("graph.exported");
+        }
+        if graph.doc.is_some() {
+            seen.insert("graph.documented");
+        }
+        if !graph.ns.is_empty() {
+            seen.insert("graph.namespaced");
+        }
+        if graph.ns.len() > 1 {
+            seen.insert("namespace.nested");
+        }
+        stamp_doc(&graph.doc, seen);
+        stamp_signature(&graph.sig, seen);
+        stamp_world(&graph.states, &graph.grafts, &graph.binds, seen);
+    }
+    if let Some(machine) = &program.machine {
+        seen.insert("machine");
+        if machine.doc.is_some() {
+            seen.insert("machine.documented");
+        }
+        stamp_doc(&machine.doc, seen);
+        for tape in &machine.tapes {
+            seen.insert(if tape.volatile {
+                "tape.volatile"
+            } else {
+                "tape.plain"
+            });
+        }
+        stamp_world(&machine.states, &machine.grafts, &machine.binds, seen);
+    }
+}
+
+/// The coverage floor for the parity property above. A property is only
+/// as strong as the shapes it reaches, and this generator was built for a
+/// different job — its own module doc says it asserts `text() == src` and
+/// nothing about structure — so "how many cases ran" is not evidence that
+/// any given construct was ever extracted. This measures it: it sweeps
+/// the same generator over the same seed distribution, extracts each
+/// program through the same [`both_paths`] the property uses, and
+/// requires every construct in [`REQUIRED_CONSTRUCTS`] to have been
+/// observed at least once.
+///
+/// It is a floor, not a snapshot: narrowing the generator so a construct
+/// stops being emitted fails here rather than silently weakening the
+/// property.
+#[test]
+fn the_generator_reaches_every_construct_extraction_rebuilds() {
+    let mut rng = SplitMix(0x7A5C_0DE5_1234_5678);
+    let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    for _ in 0..600 {
+        let src = generate_program(&rng.seed());
+        let (actual, expected) = both_paths(&src);
+        // Sweeping is cheap; checking parity while here is cheaper than
+        // explaining why the sweep looked at a program and did not.
+        assert_eq!(actual, expected, "extraction diverged on:\n{src}");
+        stamp_program(&actual, &mut seen);
+    }
+
+    let required: BTreeSet<&'static str> = REQUIRED_CONSTRUCTS.iter().copied().collect();
+    assert_eq!(
+        required.len(),
+        REQUIRED_CONSTRUCTS.len(),
+        "REQUIRED_CONSTRUCTS has a duplicate label"
+    );
+    let unreached: Vec<&&str> = required.difference(&seen).collect();
+    assert!(
+        unreached.is_empty(),
+        "the generator never produced: {unreached:?}"
+    );
+    let unlisted: Vec<&&str> = seen.difference(&required).collect();
+    assert!(
+        unlisted.is_empty(),
+        "the tally stamps labels REQUIRED_CONSTRUCTS does not list: {unlisted:?}"
+    );
 }
