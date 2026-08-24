@@ -79,6 +79,7 @@
 //! answer are not the same question.
 
 mod emit;
+pub(crate) mod extract;
 mod kinds;
 mod layout;
 mod views;

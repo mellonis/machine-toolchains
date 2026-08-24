@@ -822,8 +822,12 @@ fn lower_machine(m: &MachineCst) -> Machine {
 /// `?` lines join into paragraphs (an empty `?` line splits, leading/trailing
 /// blanks produce no empty paragraph); a `[deprecated]` attention line becomes
 /// `deprecated`; bare-prose `!` lines become `attention`; comments and empty
-/// lines contribute nothing. Mirrors PM-1's `reduce_doc_run`.
-fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
+/// lines contribute nothing. Mirrors PM-1's `reduce_doc_run`. `pub(crate)`
+/// rather than private: `crate::syntax::extract`'s own tests reduce a
+/// green-side reparsed run the same way this module's callers above do, to
+/// check equality where a comment-interleaved run makes raw item equality
+/// impossible (a green reparse drops interleaved comments as trivia).
+pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
     if doc_run.is_empty() {
         return None;
     }
@@ -2936,6 +2940,101 @@ impl Parser<'_> {
             trailing,
         })
     }
+}
+
+/// Builds a bare `Parser` over already-retokenized tokens
+/// (`crate::syntax::extract::sig_tokens`'s own output) — `sink: None`,
+/// since a reparse shim never re-emits a green tree, only a value.
+/// Shared by every `reparse_*` shim below so the field list lives once.
+#[allow(dead_code)]
+fn bare_parser(tokens: &[Token]) -> Parser<'_> {
+    Parser {
+        tokens,
+        pos: 0,
+        comments: Vec::new(),
+        cpos: 0,
+        prev_end_line: 0,
+        machine_seen: false,
+        sink: None,
+    }
+}
+
+/// Retokenization reuse shim (`crate::syntax::extract::sig_tokens`'s
+/// counterpart) for a RULE's own TRANSITION node: re-parse it through
+/// the SAME production the original parse used
+/// (`Parser::transition`), so a green-tree reparse and the original
+/// parse can never disagree on what a transition means. `expect`s on
+/// error: extraction only ever runs on a tree that already parsed
+/// once, so a failure here is a bug in the retokenization, not a
+/// malformed program.
+#[allow(dead_code)]
+pub(crate) fn reparse_transition(tokens: &[Token]) -> Transition {
+    bare_parser(tokens)
+        .transition()
+        .expect("reparse_transition: extraction only ever runs on an already-parsed tree")
+        .0
+}
+
+/// Retokenization reuse shim for a GRAFT/BIND's own BINDING_ARG node:
+/// re-parses it through `Parser::binding_arg`, the exact unit
+/// `crate::syntax::kinds`'s own module doc names as what a caller
+/// "retokenizes and hands back" — `BINDING_ARG` carries no dedicated
+/// list wrapper (the `(`/`)` are its parent GRAFT/BIND's own tokens), so
+/// the reparse unit is one argument at a time, mirroring
+/// `Parser::sig_param`'s identical shape.
+#[allow(dead_code)]
+pub(crate) fn reparse_binding_arg(tokens: &[Token]) -> BindingArg {
+    bare_parser(tokens)
+        .binding_arg()
+        .expect("reparse_binding_arg: extraction only ever runs on an already-parsed tree")
+        .0
+}
+
+/// Retokenization reuse shim for a BINDING_ARG's own SYM_MAP node:
+/// re-parses it through `Parser::sym_map`. `SymMap::span` runs `map` →
+/// `}` (docs/core.md (syntax trees)), so a SYM_MAP node's own tokens
+/// already start at `map` — exactly where `Parser::sym_map` expects to
+/// begin.
+#[allow(dead_code)]
+pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
+    bare_parser(tokens)
+        .sym_map()
+        .expect("reparse_sym_map: extraction only ever runs on an already-parsed tree")
+        .0
+}
+
+/// Retokenization reuse shim for a REUSE's own SIG_PARAM node:
+/// re-parses it through `Parser::sig_param`.
+#[allow(dead_code)]
+pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
+    bare_parser(tokens)
+        .sig_param()
+        .expect("reparse_sig_param: extraction only ever runs on an already-parsed tree")
+}
+
+/// Retokenization reuse shim for a bound DOC_RUN node: re-parses its
+/// `DocLine`/`AttentionLine` tokens through `Parser::doc_run` itself,
+/// rather than a hand-rolled reimplementation of its item loop. Sound
+/// even though `doc_run` also re-enforces the `DocLineOrder` ordering
+/// check and the duplicate-/unknown-attribute checks: those checks
+/// already passed once, over these exact tokens, during the original
+/// parse that produced the tree this run was retokenized from, so
+/// re-running them is redundant work, never a new failure mode.
+/// `prev_end_line: 0` (via `bare_parser`) means a reparsed run's own
+/// `blank_before` gap tracking restarts from the isolated slice's own
+/// start rather than the original file position — `reduce_doc_run`
+/// never reads `blank_before`, so this is cosmetic fidelity only, not
+/// load-bearing on the reduced [`Doc`] a caller ultimately consumes.
+/// Comments interleaved in the original run do not survive: they are
+/// trivia `crate::syntax::extract::sig_tokens` filters out before this
+/// ever runs, so a comment-bearing run retokenizes to a strictly
+/// SHORTER item sequence than the original CST's.
+#[allow(dead_code)]
+pub(crate) fn reparse_doc_items(tokens: &[Token]) -> Vec<DocRunItem> {
+    bare_parser(tokens)
+        .doc_run()
+        .expect("reparse_doc_items: extraction only ever runs on an already-parsed tree")
+        .0
 }
 
 #[cfg(test)]
