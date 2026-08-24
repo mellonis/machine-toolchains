@@ -48,15 +48,24 @@
 //! (`world.text()` starts at `{` and ends at `}`).
 //!
 //! A doc-run-free `machine` therefore has exactly one child NODE under
-//! `SyntaxNode::children()` — WORLD — and three entries under
-//! `children_with_tokens()`, which sees tokens too: `IDENT "machine"`,
-//! the whitespace before the brace, and WORLD. A `routine`/`graph` has
-//! one child node per signature parameter as well, so
-//! `routine r(tape t: ab) { … }` yields two child nodes (SIG_PARAM,
-//! WORLD) and eight `children_with_tokens()` entries: `IDENT "routine"`,
-//! whitespace, `IDENT "r"`, `L_PAREN`, SIG_PARAM, `R_PAREN`, whitespace,
-//! WORLD. An accessor that wants "the body" therefore looks WORLD up by
-//! kind rather than taking the first child node.
+//! `SyntaxNode::children()` — WORLD. `children_with_tokens()` sees
+//! tokens too, and its count is not fixed: `IDENT "machine"` and WORLD
+//! are the only two entries always present, and every trivia token
+//! written between the keyword and the brace sits between them as a
+//! further direct child. Measured: `machine{ … }` two entries,
+//! `machine { … }` three, `machine /* c */ { … }` five. A `routine`/
+//! `graph` has the same shape one level busier: one child NODE per
+//! signature parameter plus WORLD is fixed — `routine r(tape t: ab)
+//! { … }` always yields two child nodes, SIG_PARAM and WORLD — but its
+//! `children_with_tokens()` count is just as unfixed as MACHINE's:
+//! `IDENT "routine"`, `IDENT "r"`, `L_PAREN`, SIG_PARAM and `R_PAREN`
+//! are always present, and every whitespace or comment written around
+//! them (after the keyword, before the parameter list, before the
+//! brace, …) is a further direct child. Measured: `routine
+//! r(tape t: ab){ … }` seven entries (no gap before the brace),
+//! `routine r(tape t: ab) { … }` eight, `routine r(tape t: ab)
+//! /* c */ { … }` ten. An accessor that wants "the body" therefore
+//! looks WORLD up by kind rather than by position or count.
 //!
 //! # The green tree splits what the CST keeps together
 //!

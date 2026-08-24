@@ -1609,6 +1609,16 @@ mod tests {
     /// source every one of those pairs shares a line, so a wrong anchor
     /// is invisible. This fixture splits them so it is not.
     ///
+    /// Two more pairs joined this fixture rather than getting their own
+    /// (mutation-proved: `extract_tape`'s `line` swapped to the NAME's
+    /// and `extract_import`'s `line` swapped to the LAST segment's both
+    /// survived every other test in this module). `extract_tape` reads
+    /// `line` off [`header_token`] (`volatile` when written, else
+    /// `tape`), and `extract_import` reads it off the FIRST path
+    /// segment — a `volatile` tape whose modifier sits on its own line,
+    /// and a `use` path split across a `::`, both make those anchors
+    /// observable the same way the declarations above do.
+    ///
     /// Deliberately NOT canonically formatted: `tmt fmt` would rejoin
     /// every header. It parses — that is all a fixture pinning position
     /// arithmetic needs.
@@ -1628,11 +1638,15 @@ mod tests {
                    }\n\
                    \n\
                    machine {\n\
+                   \x20 volatile\n\
                    \x20 tape main: ab;\n\
                    \x20 entry\n\
                    \x20 graft\n\
                    \x20   r(t = main);\n\
-                   }\n";
+                   }\n\
+                   \n\
+                   use lib\n\
+                   \x20 ::a;\n";
         agrees(src);
 
         let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
@@ -1658,11 +1672,21 @@ mod tests {
             .machine
             .as_ref()
             .expect("the fixture declares a machine");
+        let tape = &machine.tapes[0];
+        assert!(tape.volatile, "the fixture's own tape is `volatile`");
+        assert_eq!(
+            tape.line, 15,
+            "a tape's line is its HEADER's (`volatile` when written), not its NAME's"
+        );
         let graft = &machine.grafts[0];
         assert_eq!(
             (graft.line, graft.span.start.line),
-            (17, 16),
+            (18, 17),
             "a graft's line is its `graft` keyword's, but its span starts at `entry`"
+        );
+        assert_eq!(
+            program.imports[0].line, 22,
+            "an import's line is its FIRST path segment's, not its LAST's"
         );
     }
 

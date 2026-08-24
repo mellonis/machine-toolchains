@@ -42,12 +42,21 @@ ast_node!(pub struct TransitionView: TmcKind::Transition.into());
 ast_node!(pub struct BindingArgView: TmcKind::BindingArg.into());
 ast_node!(pub struct SymMapView: TmcKind::SymMap.into());
 
-/// One item that can appear at file level or inside a `NAMESPACE`
-/// body — the five kinds the grammar allows there: `use`, `alphabet`,
-/// `machine`, a nested `namespace` itself, and `reuse` (both `routine`
-/// and `graph` — the two reusable-graph carriers — parse to the same
-/// `REUSE` node kind, distinguished by their own header token, not by
-/// kind).
+/// One item that can appear at file level: `use`, `alphabet`,
+/// `machine`, `namespace`, and `reuse` (both `routine` and `graph` —
+/// the two reusable-graph carriers — parse to the same `REUSE` node
+/// kind, distinguished by their own header token, not by kind). A
+/// `NAMESPACE` body admits the same set minus `machine`: a nested
+/// `machine` block is a parse error (`top_items` in
+/// `crates/turing-machine/src/parser.rs`), so `TopView::Machine` only
+/// ever arises at file level. Measured: `namespace n { machine { ... } }`
+/// is rejected with "expected a declaration (a `machine` block cannot
+/// be nested in a namespace), found `machine`" —
+/// `extract_items`'s own `TopView::Machine` arm at namespace level is
+/// therefore unreachable in practice; kept as a total match rather
+/// than an unreachable panic, since a total match over a closed
+/// five-variant enum costs nothing and stays correct if the grammar
+/// ever changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TopView {
     Use(UseView),
