@@ -6,7 +6,9 @@
 
 use mtc_core::syntax::{AstNode, SyntaxNode};
 use mtc_turing_machine::parser::parse_green;
-use mtc_turing_machine::syntax::{AlphabetView, MachineView, RootView, TmcKind};
+use mtc_turing_machine::syntax::{
+    AlphabetView, MachineView, NamespaceView, RootView, TmcKind, UsePathView, UseView,
+};
 
 fn tree(src: &str) -> SyntaxNode {
     SyntaxNode::new_root(parse_green(src).expect("parses"))
@@ -139,4 +141,85 @@ fn every_node_kind_has_a_view_that_casts_from_it() {
         };
         assert!(casts(node), "no view casts from {kind:?}");
     }
+}
+
+// -- container accessors ------------------------------------------------
+
+/// `items()` yields the top-level declarations in source order, and
+/// nothing else — not the trivia between them, not the doc runs folded
+/// into them.
+#[test]
+fn root_items_are_the_declarations_in_source_order() {
+    let root = tree("use a::b;\n\nalphabet ab { '_' }\n\nmachine {\n  tape main: ab;\n}\n");
+    let view = RootView::cast(root).expect("root");
+    let kinds: Vec<TmcKind> = view.items().map(|i| i.kind()).collect();
+    assert_eq!(
+        kinds,
+        vec![TmcKind::Use, TmcKind::Alphabet, TmcKind::Machine]
+    );
+}
+
+/// A namespace's own items, not the file's.
+#[test]
+fn namespace_items_are_scoped_to_it() {
+    let root = tree("alphabet outer { '_' }\n\nnamespace n {\n  alphabet inner { '_' }\n}\n");
+    let ns = NamespaceView::cast(first_of(&root, TmcKind::Namespace)).expect("ns");
+    assert_eq!(ns.name(), "n");
+    let names: Vec<String> = ns
+        .items()
+        .filter_map(|i| AlphabetView::cast(i.node().clone()))
+        .map(|a| a.name_token().text().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["inner"],
+        "the outer alphabet is not this namespace's"
+    );
+}
+
+/// A path's segments, and its alias when written.
+#[test]
+fn use_paths_expose_segments_and_alias() {
+    let root = tree("use a::b::c, d::e as f;\n");
+    let u = UseView::cast(first_of(&root, TmcKind::Use)).expect("use");
+    let paths: Vec<UsePathView> = u.paths().collect();
+    assert_eq!(paths.len(), 2);
+
+    let segs: Vec<String> = paths[0]
+        .segments()
+        .iter()
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(segs, vec!["a", "b", "c"]);
+    assert!(paths[0].alias_token().is_none(), "no alias was written");
+
+    assert_eq!(
+        paths[1].alias_token().map(|t| t.text().to_string()),
+        Some("f".to_string())
+    );
+}
+
+/// `exported` reads the `export` keyword's presence, and `doc_run` finds
+/// the run the declaration retro-wraps.
+#[test]
+fn alphabet_exposes_export_glyphs_and_its_doc_run() {
+    let root = tree("? doc\nexport alphabet ab { '_', 'a' }\n");
+    let a = AlphabetView::cast(first_of(&root, TmcKind::Alphabet)).expect("alphabet");
+    assert!(a.exported());
+    assert_eq!(a.name_token().text(), "ab");
+    let glyphs: Vec<String> = a
+        .glyph_tokens()
+        .iter()
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(glyphs, vec!["'_'", "'a'"]);
+    assert!(
+        a.doc_run().is_some(),
+        "the run is the alphabet's own first child"
+    );
+
+    let plain = tree("alphabet ab { '_' }\n");
+    let p = AlphabetView::cast(first_of(&plain, TmcKind::Alphabet)).expect("alphabet");
+    assert!(!p.exported());
+    assert!(p.doc_run().is_none());
 }
