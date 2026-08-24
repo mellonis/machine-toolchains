@@ -28,7 +28,7 @@ use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
     Graft, Machine, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
-    Transition, lower_cst, parse_cst, parse_green_from_tokens,
+    Transition, parse_cst, parse_green_from_tokens,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -1255,10 +1255,17 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
 pub(crate) struct TmcStagedAnalysis {
     /// WithComments token stream — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
-    /// The lossless CST — `None` if lexing or parsing failed.
+    /// The lossless CST — `None` if lexing or parsing failed. INTERIM: the
+    /// `.tmc` language service still reads this tree (`lsp/mod.rs`,
+    /// `lsp/quickfix.rs`), so `parse_cst` runs here as a side artifact
+    /// alongside the green parse that produces `program`; that means this
+    /// field, and the double parse feeding it, are scaffolding, not a design
+    /// choice — plan 10 removes both when the language service moves onto
+    /// the green tree's typed views.
     pub cst: Option<Cst>,
-    /// The flat program (`lower_cst` is infallible, so present whenever the
-    /// CST is), retained even when the resolve stage then fails.
+    /// The flat program, extracted from the green tree — present whenever
+    /// the green parse succeeded, retained even when the resolve stage then
+    /// fails.
     pub program: Option<Program>,
     /// The resolved module — `Some` only when the whole resolve stage ran
     /// clean; `Resolved.docs` carries the doc map hover / the deprecation lint
@@ -1274,13 +1281,16 @@ pub(crate) struct TmcStagedAnalysis {
     pub fatal: Option<CompileError>,
 }
 
-/// lex (WithComments) → `parse_cst` → `lower_cst` → the resolve stage,
-/// retaining each stage's outcome instead of stopping at the first failure.
-/// `lower_cst` is infallible, so once parsing succeeds the flat `program` is
-/// always available; the resolve stage ([`resolve_program`]) is the only
-/// post-parse source of a fatal, and its non-fatal diagnostics ride alongside
-/// a clean resolve. Additive: [`analyze`] and [`compile`] are unchanged, so a
-/// partial fatal a document recovers from never leaks into the batch pipeline.
+/// lex (WithComments) → green parse → extract → the resolve stage, retaining
+/// each stage's outcome instead of stopping at the first failure. The green
+/// parse is the AUTHORITY: it produces both `program` (via
+/// `syntax::extract_program`, infallible once the tree exists) and any parse
+/// fatal. `cst` is a side artifact, built only after the green parse
+/// succeeded, for the not-yet-migrated language service — see the field's own
+/// doc. Past the parse, the resolve stage ([`resolve_program`]) is the only
+/// source of a fatal, and its non-fatal diagnostics ride alongside a clean
+/// resolve. Additive: [`analyze`] and [`compile`] are unchanged, so a partial
+/// fatal a document recovers from never leaks into the batch pipeline.
 ///
 /// Consumed by the phase-7 `.tmc` language service, not by `compile()`.
 pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
@@ -1297,8 +1307,8 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
             };
         }
     };
-    let cst = match parse_cst(&tokens) {
-        Ok(cst) => cst,
+    let green = match parse_green_from_tokens(source, &tokens) {
+        Ok(green) => green,
         Err(fatal) => {
             return TmcStagedAnalysis {
                 tokens: Some(tokens),
@@ -1310,11 +1320,22 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
             };
         }
     };
-    let program = lower_cst(&cst);
+    // `.ok()`, not `expect`: acceptance parity between `parse_cst` and the
+    // green parse (pinned over the shipped corpus and a broken set by
+    // `tests/tmc_green_analyze.rs`) makes this `Some` whenever the green
+    // parse just succeeded above — and if that parity ever broke, the
+    // language service should lose its CST-backed tier rather than take the
+    // whole staged pipeline down.
+    let cst = parse_cst(&tokens).ok();
+    debug_assert!(
+        cst.is_some(),
+        "acceptance parity: parse_cst must succeed wherever parse_green_from_tokens did"
+    );
+    let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
     match resolve_program(&program) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
-            cst: Some(cst),
+            cst,
             program: Some(program),
             resolved: Some(resolved),
             diagnostics,
@@ -1322,7 +1343,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         },
         Err(fatal) => TmcStagedAnalysis {
             tokens: Some(tokens),
-            cst: Some(cst),
+            cst,
             program: Some(program),
             resolved: None,
             diagnostics: Vec::new(),
@@ -4373,17 +4394,19 @@ machine {
         //
         // The lex/parse halves compare against `lex`/`parse` — the PRE-green
         // front end, which neither `analyze` nor `analyze_staged` calls any
-        // more (one runs the green parse, the other `parse_cst` directly).
+        // more; both now build `program` the same way, off the green parse
+        // (`analyze_staged` additionally runs `parse_cst` as a side artifact
+        // for `cst`, not for `program` — see that field's own doc).
         //
-        // What that comparison is, precisely: `parse` IS
-        // `lower_cst ∘ parse_cst`, the same two functions `analyze_staged`
-        // composes, so this is not an independent reimplementation arriving
-        // at the same answer. It is the SAME computation over a DIFFERENT
-        // token stream — comment-free here, `WithComments` in the staged
-        // path — which is what it pins: that neither the lex mode nor the
-        // comment nodes `parse_cst` attaches from it change the lowered AST
-        // or the significant tokens. `analyze` itself keeps neither result,
-        // so the resolved module and the diagnostics are what it has left to
+        // What the `program` comparison below is, precisely: `parse` IS
+        // `lower_cst ∘ parse_cst`, which `tests/syntax_parity.rs` and
+        // `tests/tmc_property.rs` hold struct-equal to `extract_program` over
+        // the green tree. So this is a cross-front ORACLE check resting on
+        // that struct-equality, not a shared-composition identity — it pins
+        // that neither the lex mode nor the comment nodes the green parse
+        // carries change the extracted AST or the significant tokens.
+        // `analyze` itself keeps neither the pre-green tokens nor a CST, so
+        // the resolved module and the diagnostics are what it has left to
         // agree on.
         let src = format!("// leading comment\n{A1}");
         let staged = analyze_staged(&src);
@@ -4422,6 +4445,40 @@ machine {
         assert_eq!(staged.diagnostics, a.diagnostics);
 
         assert!(compile(&src, CompileOptions::default()).is_ok());
+    }
+
+    /// `analyze` and `analyze_staged` build `program` by the SAME route
+    /// (`lex_with(WithComments)` → `parse_green_from_tokens` →
+    /// `syntax::extract_program`) rather than by two independently-proven
+    /// equal ones. This source carries the three shapes the two lex modes
+    /// used to differ on before `analyze` moved onto the green tree: a
+    /// comment, a doc run, and a namespace. Verified clean against the real
+    /// CLI (`tmt lint`) before being trusted here.
+    #[test]
+    fn analyze_staged_and_analyze_agree_on_program_with_comments_docs_and_a_namespace() {
+        let src = "\
+alphabet bits { '_', '0', '1' }
+
+namespace mylib {
+  // a helper routine
+  ? adds one to the tape
+  export routine plusOne(tape t: bits) { entry state g { [*] -> stop; } }
+}
+
+use mylib::plusOne;
+
+machine {
+  tape m: bits;
+  entry state s { [*] -> call plusOne(t = m) then stop; }
+}
+";
+        let staged = analyze_staged(src);
+        assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
+        let staged_program = staged.program.as_ref().expect("program survives");
+
+        let a = analyze(src).expect("analyzes clean");
+
+        assert_eq!(staged_program, &a.program);
     }
 
     #[test]
