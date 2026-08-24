@@ -1,6 +1,7 @@
 //! `.tmc` property tests. A deterministic generator of GRAMMAR-VALID
-//! programs (docs/tmt/language.md), asserting the lossless law the green
-//! tree (docs/core.md (syntax trees)) must hold over every one of them.
+//! programs (docs/tmt/language.md (program structure)), asserting the
+//! lossless law the green tree (docs/core.md (syntax trees)) must hold
+//! over every one of them.
 //! Hand-written fixtures test the shapes someone thought of; this tests
 //! the ones nobody did — the sibling `.pmc` migration ran six plans and
 //! eight mutation-armed reviews on hand-written fixtures alone and still
@@ -33,13 +34,16 @@
 //!
 //! **Scope — deliberately covered.** Every top-level item kind (`use`,
 //! `alphabet`, `routine`, `graph`, `namespace` — including a reopened
-//! and a one-level-nested namespace, `machine`); both `entry` and plain
-//! forms of the two constructs that have both (`state`, `graft`, the
-//! latter's non-entry form additionally exercising the parser's
-//! `as`-name requirement); tape declarations, plain and `volatile`;
-//! routine/graph signatures with both parameter kinds (`tape`, `state`)
-//! and, on a tape parameter, both contract clauses in their one legal
-//! order; every pattern-cell shape (a literal, a range, a wildcard, and
+//! and a one-level-nested namespace (a namespace's body may itself
+//! contain another `namespace` block, one level deep — the documented
+//! `namespace std { namespace binaryNumbers { … } }` shape), `machine`);
+//! both `entry` and plain forms of the two constructs that have both
+//! (`state`, `graft`, the latter's non-entry form additionally
+//! exercising the parser's `as`-name requirement); tape declarations,
+//! plain and `volatile`; routine/graph signatures with both parameter
+//! kinds (`tape`, `state`) and, on a tape parameter, `writes`/`preserves`
+//! independently (neither, either alone, or both in their one legal
+//! order); every pattern-cell shape (a literal, a range, a wildcard, and
 //! — on either a literal or a range, never a wildcard — an `as` binding)
 //! over both symbol kinds (glyph and numeric), including escaped glyphs
 //! (`'\''`, `'\\'`); every write-cell shape (`-` keep, a literal,
@@ -47,17 +51,27 @@
 //! parens); every move direction; every transition shape (`goto`, the
 //! bare-name sugar, `call … then` against every continuation kind
 //! including a nested `with map` using both arrows, `return`, `stop`,
-//! `halt`, and the omitted-transition "stay" shape); `bind`; doc runs
-//! and attention lines (including the `[deprecated]` attribute, a blank
-//! `?` paragraph break, and comments interleaved inside and after a
-//! run); comments in every position the grammar attaches by source
+//! `halt`, and the omitted-transition "stay" shape); `bind`; qualified
+//! `call`/`graft`/`bind` TARGETs (`qual_name`'s own grammar, `IDENT (::
+//! IDENT)*` — usually one segment, occasionally the documented
+//! `std::binaryNumbers::plusOne` multi-segment shape, and occasionally a
+//! same-line block comment right after a `::`, see [`gen_qual_target`]); doc
+//! runs and attention lines (including the `[deprecated]` attribute, a
+//! blank `?` paragraph break, and comments interleaved inside and after
+//! a run); comments in every position the grammar attaches by source
 //! position rather than by an attachment pass — own-line, trailing
 //! (after `;`), riding an opening brace, and, in each of four
 //! representative list shapes (a `use` path list, an alphabet element
 //! list, a rule's pattern vector, and a binding-argument list), both an
-//! interior position and dangling after the last entry (before the
-//! list's own closing bracket) — plus both single-line and embedded
-//! multi-line block comments, the latter specifically because
+//! interior position and dangling after the last entry, before the
+//! list's own TERMINATOR — a closing bracket for three of the four, but
+//! `;` for `use`: `parser.rs::parse_use`'s `Semi` arm drains that
+//! position's interior comments deliberately BEFORE consuming `;`, with
+//! its own comment explaining why (draining after would wrongly claim a
+//! comment documenting the NEXT `use`) — a hand-reasoned attachment
+//! hazard worth generating specifically, not just the three bracketed
+//! siblings that happen to share a helper; plus both single-line and
+//! embedded multi-line block comments, the latter specifically because
 //! `docs/core.md (syntax trees)` calls out a block comment as the one
 //! token whose span crosses lines; and blank lines between every item
 //! kind this generator places in a list.
@@ -84,6 +98,40 @@
 //! not care about nesting depth or vector width once one non-trivial
 //! instance is reached, so deeper recursion buys iteration cost, not
 //! coverage.
+//!
+//! **Two shapes stay skewed rather than uniform, on purpose.** A `graph`
+//! world always gets an `entry graft` and a `routine` world always gets
+//! an `entry state` (`gen_reuse` ties `prefer_entry_graft` to `is_graph`
+//! outright); only `machine` varies its entry shape at random. Both
+//! entry shapes DO appear across the corpus — the doc's own claim above
+//! is about that, and it holds — but a future property assuming every
+//! WORLD KIND sees both shapes, rather than the corpus as a whole, would
+//! be surprised; this is deliberate, not an oversight (a `graph`'s whole
+//! purpose is to be reusable via grafting, so `entry graft` is its
+//! canonical shape, and symmetrically for `routine`/`entry state`), but
+//! it is a real skew worth a plan-8-through-12 author knowing about
+//! before writing a per-world-kind property against this generator.
+//! Separately, [`push_comment_break`]'s four established list positions
+//! always insert a line break after a comment, so a same-line interior
+//! BLOCK comment in one of THOSE four positions (e.g. `['a', /* n */
+//! 'b']`, as opposed to after the whole vector) stays structurally
+//! unreachable there — a real spelling gap, not a correctness risk
+//! (parsing is safe either way; only one alternative spelling is
+//! under-generated). Left as-is rather than special-cased per comment
+//! kind, to keep every one of those four call sites governed by one
+//! simple, always-safe rule; [`gen_qual_target`]'s qualified-path comment
+//! (added specifically because a reviewer's own example showed this
+//! exact shape) exercises a same-line block comment in a DIFFERENT
+//! position instead, as a narrow, deliberate exception rather than a fix
+//! to the four established generators.
+//!
+//! **What this file does NOT check.** The property below asserts exactly
+//! one law — `text() == src` — and nothing about tree SHAPE. Tagging
+//! every `LineComment` as `BlockComment` at emission (text byte-identical,
+//! kind wrong) leaves this property green across the full case count:
+//! kind and node-extent correctness are a later plan's properties to add,
+//! not a gap in this one. Recorded here so plan 8 inherits this as a
+//! known starting boundary rather than rediscovering it.
 
 use mtc_core::syntax::SyntaxNode;
 use mtc_turing_machine::parser::parse_green;
@@ -108,9 +156,17 @@ impl<'a> Cursor<'a> {
         b
     }
 
-    /// A choice in `0..n` (`n > 0`).
+    /// A choice in `0..n`. Guards `n == 0` with `.max(1)` (returning 0
+    /// rather than dividing by zero) even though every call site in this
+    /// file happens to pass a nonzero `n` today — every dynamic-length
+    /// site guards emptiness itself before calling in. The guard is
+    /// cheap insurance for whichever plan next copies this exact
+    /// deterministic-cursor technique (`fmt_property.rs`'s own `pick`
+    /// carries the identical guard): without it, a future call site that
+    /// forgets to check emptiness turns into a divide-by-zero panic
+    /// instead of a shrinkable `proptest` failure.
     fn choose(&mut self, n: usize) -> usize {
-        (self.next_u8() as usize) % n
+        (self.next_u8() as usize) % n.max(1)
     }
 
     /// `true` with probability `num / den`.
@@ -164,8 +220,9 @@ fn gen_comment(cur: &mut Cursor, n: &mut u32) -> String {
 /// place a comment INSIDE a list (an element list, a pattern vector, a
 /// binding-argument list, …) ahead of more content on a later line. A `//`
 /// comment consumes the rest of its source line by construction
-/// (docs/tmt/language.md), so anything meant to follow it — the next list
-/// entry, or the list's own closing bracket — MUST start a new line; a
+/// (docs/tmt/language.md (program structure)), so anything meant to
+/// follow it — the next list entry, or the list's own terminator — MUST
+/// start a new line; a
 /// block comment tolerates either spelling, so always breaking is safe for
 /// both comment kinds and keeps every interior-comment call site simple.
 fn push_comment_break(cur: &mut Cursor, n: &mut u32, out: &mut String) {
@@ -301,7 +358,12 @@ fn gen_doc_run(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
 /// One `use a, mylib::b as c;` (docs/tmt/language.md (namespaces,
 /// visibility, and imports)). `use` never accepts a doc run (absent from
 /// `next_is_top_doc_accepting`), so this is never called with one pending.
-/// Interior comments here are this generator's use-path-list coverage.
+/// Interior comments here are this generator's use-path-list coverage,
+/// including the DANGLING position after the last path, before the `;` —
+/// `parser.rs::parse_use`'s `Semi` arm drains interior comments there
+/// deliberately BEFORE bumping past `;`, with its own comment explaining
+/// why: draining after would wrongly claim a comment that documents the
+/// NEXT `use`, not this one.
 fn gen_use(cur: &mut Cursor, n: &mut u32, out: &mut String) {
     out.push_str("use ");
     let paths = 1 + cur.choose(3);
@@ -316,6 +378,10 @@ fn gen_use(cur: &mut Cursor, n: &mut u32, out: &mut String) {
         if cur.chance(1, 4) {
             out.push_str(&format!(" as alias{}", uid(n)));
         }
+    }
+    if cur.chance(1, 5) {
+        out.push(' ');
+        push_comment_break(cur, n, out);
     }
     out.push_str(";\n");
 }
@@ -488,6 +554,33 @@ fn gen_move_vec(cur: &mut Cursor, arity: usize) -> Option<String> {
     Some(out)
 }
 
+/// A `call`/`graft`/`bind` TARGET — a qualified name
+/// (`IDENT (:: IDENT)*`, docs/tmt/language.md (namespaces, visibility, and
+/// imports)) parsed by the one shared `qual_name` function all three
+/// route through. Usually one bare segment, occasionally two or three —
+/// `std::binaryNumbers::plusOne` is the documented spelling — and rarely
+/// carrying a same-line block comment right after a `::`
+/// (`call a:: /* n */ b(…)` parses and round-trips: `qual_name` never
+/// calls `interior_comments`, so a comment written here is just ordinary
+/// trivia between two tokens, picked up by whatever list drain runs next
+/// rather than claimed as an "interior" slot the parser tracks — unlike
+/// `push_comment_break`'s four list positions, nothing here requires a
+/// line break first, so this is the one place in the generator that
+/// deliberately keeps a block comment on the same line as what follows
+/// it; see the module doc for why the other four stay break-only).
+fn gen_qual_target(cur: &mut Cursor, n: &mut u32, prefix: &str) -> String {
+    let mut out = format!("{prefix}{}", cur.choose(3));
+    let extra_segments = cur.choose(3);
+    for _ in 0..extra_segments {
+        out.push_str("::");
+        if cur.chance(1, 5) {
+            out.push_str(&format!("/* n{} */", uid(n)));
+        }
+        out.push_str(&format!("{prefix}{}", cur.choose(3)));
+    }
+    out
+}
+
 /// One `with map { pairs }` (docs/tmt/language.md (symbol maps)): pairs use
 /// both arrows, `->` (two-way) and `=>` (read-only) — the blank-pinning and
 /// completion-injectivity rules are later semantic checks the parser never
@@ -529,10 +622,10 @@ fn gen_binding_arg(cur: &mut Cursor, n: &mut u32) -> String {
     }
 }
 
-/// A `(args)` binding list, 0-3 arguments (docs/tmt/language.md — every
-/// one of `call`/`graft`/`bind` shares this list shape). `interior` gates
-/// this generator's binding-argument-list interior-comment coverage (the
-/// fourth of its four covered list positions).
+/// A `(args)` binding list, 0-3 arguments (docs/tmt/language.md (reuse) —
+/// every one of `call`/`graft`/`bind` shares this list shape). `interior`
+/// gates this generator's binding-argument-list interior-comment coverage
+/// (the fourth of its four covered list positions).
 fn gen_binding_args(cur: &mut Cursor, n: &mut u32, interior: bool) -> String {
     let mut out = String::from("(");
     let count = cur.choose(4);
@@ -611,7 +704,7 @@ fn gen_transition(
         2 => "stop".to_string(),
         3 => "halt".to_string(),
         4 => {
-            let callee = format!("callee{}", cur.choose(3));
+            let callee = gen_qual_target(cur, n, "callee");
             let interior = cur.chance(1, 4);
             let args = gen_binding_args(cur, n, interior);
             let then = gen_continuation(cur, states);
@@ -757,7 +850,7 @@ fn gen_graft(cur: &mut Cursor, n: &mut u32, pad: &str, entry: bool, out: &mut St
     if entry {
         out.push_str("entry ");
     }
-    let target = format!("graph{}", cur.choose(3));
+    let target = gen_qual_target(cur, n, "graph");
     let interior = cur.chance(1, 4);
     out.push_str(&format!(
         "graft {target}{}",
@@ -782,7 +875,7 @@ fn gen_bind(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
         gen_doc_run(cur, n, pad, out);
     }
     out.push_str(pad);
-    let target = format!("callee{}", cur.choose(3));
+    let target = gen_qual_target(cur, n, "callee");
     let interior = cur.chance(1, 4);
     out.push_str(&format!(
         "bind {target}{} as h{};",
@@ -820,7 +913,11 @@ fn gen_tape(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
 /// `fmt_property.rs`'s reservation pattern for a single per-scope
 /// property), unless `prefer_entry_graft` asks for an entry graft
 /// instead — so both entry-bearing constructs get generated somewhere in
-/// the corpus.
+/// the corpus. Both callers pin `prefer_entry_graft` to their own world
+/// kind rather than randomizing it (`gen_reuse`: `is_graph`; `gen_machine`
+/// alone randomizes) — see the module doc's "two shapes stay skewed"
+/// paragraph for why that's a deliberate per-world-kind choice, not an
+/// oversight.
 #[allow(clippy::too_many_arguments)]
 fn gen_world_items(
     cur: &mut Cursor,
@@ -883,12 +980,14 @@ fn gen_world_items(
 
 /// A `routine`/`graph` signature (docs/tmt/language.md (tapes and heads)):
 /// `tape NAME: ALPHABET` parameters, each occasionally `volatile` and
-/// occasionally carrying `writes { … }` then `preserves { … }` in that
-/// fixed order (docs/tmt/language.md (contract clauses) — the order is a
-/// grammar rule, `ContractClauseOrder`/`DuplicateContractClause` are
-/// parse-time errors this generator avoids by construction, never
-/// generating either clause twice or `preserves` before `writes`); a
-/// `graph` additionally gets `state` exit parameters. Returns the tape
+/// occasionally carrying `writes { … }`, `preserves { … }`, both, or
+/// neither — the two clauses are each independently optional
+/// (docs/tmt/language.md (contract clauses)), and when both appear they
+/// stay in their one legal order, `writes` then `preserves`
+/// (`ContractClauseOrder`/`DuplicateContractClause` are parse-time errors
+/// this generator avoids by construction, never generating either clause
+/// twice or `preserves` before `writes`); a `graph` additionally gets
+/// `state` exit parameters. Returns the tape
 /// arity (the vector width every rule in this world's body must use) and
 /// the exit-state parameter names — present for the `state exit0` shape
 /// itself, but the caller discards them (`gen_reuse`'s `_exits`): a real
@@ -916,15 +1015,22 @@ fn gen_signature(
         }
         let alphabet = ["ab", "bytes", "chars"][cur.choose(3)];
         out.push_str(&format!("tape tp{}: {alphabet}", cur.choose(4)));
-        if cur.chance(1, 3) {
+        // `writes` and `preserves` are each INDEPENDENTLY optional
+        // (docs/tmt/language.md (contract clauses)) — `preserves {}` is
+        // legal with no `writes` at all — so the two draws below are
+        // separate chances, not nested. When both fire they still emit
+        // in the one legal order, `writes` then `preserves`.
+        let want_writes = cur.chance(1, 3);
+        let want_preserves = cur.chance(1, 3);
+        if want_writes {
             out.push_str(" writes { ");
             gen_elem_list(cur, n, true, false, out);
             out.push_str(" }");
-            if cur.chance(1, 2) {
-                out.push_str(" preserves { ");
-                gen_elem_list(cur, n, true, false, out);
-                out.push_str(" }");
-            }
+        }
+        if want_preserves {
+            out.push_str(" preserves { ");
+            gen_elem_list(cur, n, true, false, out);
+            out.push_str(" }");
         }
     }
     if is_graph {
@@ -1149,7 +1255,14 @@ fn generate_program(seed: &[u8]) -> String {
         if u == machine_at {
             gen_machine(&mut cur, &mut n, &mut out);
         } else {
-            gen_top_item(&mut cur, &mut n, "", 1, &mut ns_names, &mut out);
+            // depth = 2: a top-level namespace (depth 2 -> 1) may itself
+            // contain one nested namespace (depth 1 -> 0), matching
+            // "Namespace nesting stops at two levels" below. `depth = 1`
+            // here was a bug — it let `gen_top_item` pick the namespace
+            // arm at the top level, but that namespace's own body was
+            // then generated at depth 0, where the arm is unreachable, so
+            // a namespace could never actually contain another one.
+            gen_top_item(&mut cur, &mut n, "", 2, &mut ns_names, &mut out);
         }
     }
     out
