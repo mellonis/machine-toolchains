@@ -548,6 +548,33 @@ pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
     parse_cst(tokens).map(|cst| lower_cst(&cst))
 }
 
+/// A `WithComments` token stream minus its comment trivia. `Comment` is the
+/// only trivia kind `.tmc` has at the lexer level — doc and attention lines
+/// are semantic tokens both lex modes emit — so filtering it is the whole
+/// job.
+///
+/// It lives at the parser level because the compiler front end is its main
+/// caller: [`crate::compiler::analyze`] lexes `WithComments` for the green
+/// parse and hands the filtered stream on to the lint layer, which walks
+/// token neighbourhoods by adjacency. The language service's own
+/// position-classification walks use it for the same reason — a comment must
+/// never shift a context decision.
+///
+/// Element for element, spans included, the result equals a
+/// `LexMode::WithoutComments` lex of the same source: the lexer's mode gate
+/// decides only whether a `Comment` token is pushed, never how any other
+/// token is consumed. That law is pinned over the shipped corpus by
+/// `tests/tmc_green_analyze.rs::corpus_significant_tokens_equal_a_comment_free_lex`
+/// (which re-derives the filter inline) and against this function itself by
+/// `tests::significant_tokens_is_the_comment_free_lex`.
+pub(crate) fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
+    tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
+        .cloned()
+        .collect()
+}
+
 /// Split a token stream into its significant tokens and its comment
 /// trivia — the shape both parse paths hand to `Parser`. `sig_index`
 /// records how many significant tokens precede each comment, which is

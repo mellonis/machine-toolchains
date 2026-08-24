@@ -18,15 +18,16 @@ use mtc_core::lsp::{Candidate, CandidateKind};
 use super::context::{CallKind, Context, Cursor, VectorKind, classify};
 use super::overlay::OverlaySym;
 use super::roster::{ParamKind, Roster};
-use super::{DocState, significant, std_enabled};
+use super::{DocState, std_enabled};
 use crate::compiler::WorldKind;
+use crate::parser::significant_tokens;
 
 /// The completion candidates for `pos` in `state`'s current document.
 pub(super) fn completion(state: &DocState, pos: Pos) -> Vec<Candidate> {
     let Some(tokens) = &state.tokens else {
         return Vec::new(); // lexing itself failed
     };
-    let sig = significant(tokens);
+    let sig = significant_tokens(tokens);
     let Some(cursor) = classify(&sig, pos) else {
         return Vec::new();
     };

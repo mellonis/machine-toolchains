@@ -41,9 +41,9 @@ use mtc_core::lsp::{
 use crate::compiler::{CompileError, Resolved, analyze_staged};
 use crate::config;
 use crate::cst::{Cst, MachineCst, NamespaceCst, ReuseCst, TopItem, TopKind, WorldItem, WorldKind};
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::Token;
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
-use crate::parser::{Doc, Program};
+use crate::parser::{Doc, Program, significant_tokens};
 
 mod complete;
 mod context;
@@ -618,8 +618,9 @@ impl LanguageService for TmcLanguageService {
 
         // 4. Lint over the resolved module when there is one. The rules also
         //    read the AST and a COMMENT-FREE token stream; the editor lexes
-        //    with comment trivia, so filter to `significant` to match the
-        //    batch path's comment-free stream (identical findings either way).
+        //    with comment trivia, so filter to `significant_tokens` to match
+        //    the batch path's stream (identical findings either way — the
+        //    batch `lint()` filters the very same way).
         //    The editor already has the comment-INCLUSIVE stream too
         //    (`raw_tokens`, pre-filter) — handed over as-is, at no extra cost.
         let lint = match (
@@ -628,7 +629,7 @@ impl LanguageService for TmcLanguageService {
             staged.tokens.as_deref(),
         ) {
             (Some(resolved), Some(program), Some(raw_tokens)) => {
-                let tokens = significant(raw_tokens);
+                let tokens = significant_tokens(raw_tokens);
                 let ctx = LintContext {
                     resolved,
                     diagnostics: &staged.diagnostics,
@@ -774,17 +775,6 @@ fn actions_from_findings(findings: &[Diagnostic], span: Span) -> Vec<Action> {
                 edits: fix.edits.clone(),
             })
         })
-        .collect()
-}
-
-/// The significant token stream of a document: the WithComments stream
-/// minus comment trivia. Every position-classification walk in this module
-/// works over this, so a comment never shifts a context decision.
-pub(crate) fn significant(tokens: &[Token]) -> Vec<Token> {
-    tokens
-        .iter()
-        .filter(|t| !matches!(t.kind, TokenKind::Comment(_)))
-        .cloned()
         .collect()
 }
 

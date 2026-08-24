@@ -1298,3 +1298,36 @@ fn a_comment_before_the_first_entry_keys_to_zero() {
     assert_eq!(a.interior[0].0, 0);
     assert!(a.interior[0].1.own_line, "it sits on its own line");
 }
+
+/// `significant_tokens` — the filter `compiler::analyze` puts between the
+/// `WithComments` stream the green parse needs and the adjacency-walking lint
+/// layer — returns exactly the comment-free lex of the same source: the
+/// comments removed and NOTHING else, spans included.
+///
+/// The corpus-wide form of this law lives in
+/// `tests/tmc_green_analyze.rs::corpus_significant_tokens_equal_a_comment_free_lex`,
+/// which re-derives the filter inline because the function is `pub(crate)`.
+/// This one calls the function itself, so a filter widened to drop a token
+/// kind that is NOT trivia — a doc line, say, which both lex modes emit as a
+/// semantic token — fails here rather than passing an inline re-derivation.
+#[test]
+fn significant_tokens_is_the_comment_free_lex() {
+    let src = "// leading note\n\
+               ? documented\n\
+               alphabet /* inline */ bits { '_', '1' }\n\
+               machine { /* body */ tape t: bits; entry state s { [*] -> stop; } }\n";
+    let raw = lex_with(src, LexMode::WithComments).expect("lexes");
+    assert!(
+        raw.iter()
+            .filter(|t| matches!(t.kind, TokenKind::Comment(_)))
+            .count()
+            >= 3,
+        "the fixture must carry comments, or the filter is a no-op here"
+    );
+    assert!(
+        raw.iter().any(|t| matches!(t.kind, TokenKind::DocLine(_))),
+        "the fixture must carry a doc line — it is the non-trivia kind a \
+         widened filter would wrongly drop"
+    );
+    assert_eq!(significant_tokens(&raw), lex(src).expect("lexes"));
+}

@@ -17,17 +17,18 @@ use std::collections::{HashMap, HashSet};
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::ObjectFile;
+use mtc_core::syntax::SyntaxNode;
 
 use crate::codegen::{CodegenOptions, emit_program};
 use crate::cst::Cst;
 use crate::footprint::SymSet;
 use crate::ir::{IrProgram, lower, validate_world};
-use crate::lexer::{LexMode, Token, lex, lex_with};
+use crate::lexer::{LexMode, Token, lex_with};
 use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
     Graft, Machine, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
-    Transition, lower_cst, parse, parse_cst,
+    Transition, lower_cst, parse_cst, parse_green_from_tokens,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -1002,33 +1003,50 @@ pub(crate) enum ResolvedCallTarget {
 /// batch lint layer) need. Mirrors the `.pmc` compiler's `AnalysisOutput`
 /// shape.
 ///
-/// The token stream and the flat program stay local to [`analyze`]: nothing
-/// downstream reads them off this bundle. The language service needs both, but
-/// takes them from [`TmcStagedAnalysis`], which retains every stage's outcome
-/// independently — a partial-results shape this success-only bundle cannot
-/// express.
+/// The token stream and the flat program are here for the batch lint layer,
+/// which is the only thing that reads them off this bundle — and reads them
+/// with a constraint: `tokens` carries comment trivia, and the
+/// adjacency-walking rules need [`crate::parser::significant_tokens`] of it
+/// first (`crate::lint::lint` does the filtering, once, for all of them).
+/// Nothing on the compile path past [`analyze`] touches either field. The
+/// language service needs both too, but takes them from
+/// [`TmcStagedAnalysis`], which retains every stage's outcome independently —
+/// a partial-results shape this success-only bundle cannot express.
 #[derive(Debug)]
 pub(crate) struct Analysis {
     pub resolved: Resolved,
     pub diagnostics: Vec<Diagnostic>,
-    /// The parsed AST, retained so the lint layer can reach source-level
-    /// detail the resolved module elides (e.g. a signature parameter's own
-    /// span). Comment-free — `analyze` lexes without comment trivia.
+    /// The flat AST, extracted from the green tree. Retained so the lint
+    /// layer can reach source-level detail the resolved module elides (e.g. a
+    /// signature parameter's own span). Trivia-free: extraction flattens the
+    /// tree and keeps no comments.
     pub program: Program,
-    /// The lexed token stream (comment-free — the `analyze` path never emits
-    /// comment trivia). Retained so lint rules can recover a span no earlier
-    /// artifact keeps — the `as` keyword of a graft's `as NAME` clause.
+    /// The lexed token stream, COMMENT-INCLUSIVE — the green parse needs the
+    /// trivia, so this is the `LexMode::WithComments` stream it was built
+    /// from. Retained so lint rules can recover a span no earlier artifact
+    /// keeps (the `as` keyword of a graft's `as NAME` clause) and so the one
+    /// lex serves both channels of [`crate::lint::LintContext`]. Rules that
+    /// walk token neighbourhoods by ADJACENCY must take
+    /// [`crate::parser::significant_tokens`] of this first; `lint()` does.
     pub tokens: Vec<Token>,
 }
 
-/// lex → parse → duplicate-binding check → resolve alphabets → flatten +
-/// world checks. The `.tmc` analog of the `.pmc` compiler's `analyze`;
-/// `compile` composes it with codegen. Fatals stop at the first offending
-/// span; non-fatal findings (undeclared external, unused import) accumulate as
-/// diagnostics.
+/// lex → green parse → extract → duplicate-binding check → resolve alphabets
+/// → flatten + world checks. The `.tmc` analog of the `.pmc` compiler's
+/// `analyze`; `compile` composes it with codegen. Fatals stop at the first
+/// offending span; non-fatal findings (undeclared external, unused import)
+/// accumulate as diagnostics.
+///
+/// The lex is `WithComments` because the green tree is built from the source
+/// text and its trivia together (docs/core.md (syntax trees)) — a
+/// comment-free stream could not reconstruct a comment's own text. The
+/// grammar walk underneath is the same one `parse_cst` runs, so acceptance
+/// and errors are unchanged; that is pinned over the shipped corpus and a
+/// deliberately-broken set by `tests/tmc_green_analyze.rs`.
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
-    let tokens = lex(source)?;
-    let program = parse(&tokens)?;
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    let green = parse_green_from_tokens(source, &tokens)?;
+    let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
     let (resolved, diagnostics) = resolve_program(&program)?;
     Ok(Analysis {
         resolved,
@@ -2877,6 +2895,11 @@ pub(crate) fn refine_undeclared(diags: &mut Vec<Diagnostic>, defined: &HashSet<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The pre-green front end's two calls. `analyze` no longer makes either;
+    // they survive here as the differential oracle the green path is checked
+    // against (`crate::parser::parse` = `lower_cst ∘ parse_cst`).
+    use crate::lexer::lex;
+    use crate::parser::parse;
     use proptest::prelude::*;
 
     /// Every `CompileErrorKind` code is a stable kebab identifier, and no two
@@ -4310,10 +4333,14 @@ machine {
         // exactly, and `compile()` still succeeds — the seam is purely
         // additive.
         //
-        // The lex/parse halves compare against `lex`/`parse` directly, since
-        // those are exactly the two calls `analyze` makes before resolving;
-        // `analyze` itself keeps neither result, so the resolved module and
-        // the diagnostics are what it has left to agree on.
+        // The lex/parse halves compare against `lex`/`parse` — the PRE-green
+        // front end. Neither `analyze` nor `analyze_staged` calls them any
+        // more (one runs the green parse, the other `parse_cst`), which is
+        // exactly what makes them a differential oracle here rather than a
+        // restatement: an independent path arriving at the same tokens and
+        // the same AST. `analyze` itself keeps neither result, so the
+        // resolved module and the diagnostics are what it has left to agree
+        // on.
         let src = format!("// leading comment\n{A1}");
         let staged = analyze_staged(&src);
         assert!(staged.fatal.is_none(), "{:?}", staged.fatal);

@@ -36,7 +36,7 @@ pub mod tma;
 use mtc_core::diagnostics::Diagnostic;
 
 use crate::compiler::{self, CompileError, Resolved};
-use crate::lexer::{LexMode, Token, lex_with};
+use crate::lexer::Token;
 use crate::parser::Program;
 
 #[derive(Debug, Clone, Default)]
@@ -96,19 +96,21 @@ pub(crate) struct LintContext<'a> {
     /// The parsed AST — source-level detail the resolved module elides (a
     /// signature parameter's own span, read by `unused-exit`).
     pub program: &'a Program,
-    /// The COMMENT-FREE token stream. Both entry paths (the batch `lint()` and
-    /// the editor service) supply a comment-free slice, so a token-index walk
-    /// finds the same neighbours in either — the `unused-alphabet` and
-    /// `unused-graft-name` fixes recover spans (a declaration's `}`, a graft's
-    /// `as` keyword) that no earlier artifact keeps.
+    /// The COMMENT-FREE token stream. Both entry paths lex `WithComments` —
+    /// the batch `lint()` through `analyze`, the editor service through
+    /// `analyze_staged` — and both filter through
+    /// [`crate::parser::significant_tokens`] before filling this field, so a
+    /// token-index walk finds the same neighbours in either. Several fixes
+    /// recover spans no earlier artifact keeps (a declaration's `}`, a
+    /// graft's `as` keyword) by walking those neighbours BY ADJACENCY; the
+    /// filter is what keeps a comment from voiding or truncating such a span.
     pub tokens: &'a [Token],
     /// The COMMENT-INCLUSIVE token stream — `TokenKind::Comment` trivia the
     /// `tokens` field above never carries. Read only by a fix that deletes a
     /// source span and must first prove no comment sits inside it (deleting
     /// one silently would be a defect fmt itself avoids by relocating rather
-    /// than dropping). The editor service already lexes this way for its own
-    /// purposes and hands the same slice over; the batch `lint()` path pays
-    /// one extra lex pass for it.
+    /// than dropping). Both entry paths already hold this stream for the
+    /// green parse, so neither pays an extra lex pass for it.
     pub comment_tokens: &'a [Token],
 }
 
@@ -214,18 +216,30 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     validate_allow(&options.allow)?;
     validate_allow(&options.warn)?;
     let analysis = compiler::analyze(source)?;
-    // The comment-free lex already succeeded (`analyze` above ran it), so a
-    // second, comment-inclusive pass over the same source is not expected to
-    // fail; falling back to an empty slice on the unreachable error path just
-    // means a comment-safety check finds nothing to withhold a fix over,
-    // never a new error class leaking out of `lint()`.
-    let comment_tokens = lex_with(source, LexMode::WithComments).unwrap_or_default();
+    // `analyze` lexes WithComments (the green parse needs the trivia), so
+    // that ONE stream serves both channels: `comment_tokens` takes it whole,
+    // `tokens` takes it filtered.
+    //
+    // The filter is load-bearing, not tidiness. `decl_span`
+    // (`unused-alphabet`), `braced_world_decl_span` (`unused-routine`,
+    // `unused-graph`) and `reuse_statement_span` (`unused-binding`,
+    // `unused-graft-*`) locate a declaration by ADJACENCY — the token
+    // immediately before the declared name must be the keyword, and the
+    // doc-run walk-back steps over immediately-preceding doc lines. Handing
+    // them the raw stream breaks both: a comment between keyword and name
+    // voids the fix outright, and a comment between a doc run and its
+    // keyword truncates the span so the deleted declaration leaves an
+    // orphaned `?`/`!` run behind — a parse error, i.e. a quickfix that
+    // produces broken source. Both modes are pinned, per helper, by
+    // `tests/lint_quickfix_comments.rs`; removing this filter turns six of
+    // its eleven tests red.
+    let significant = crate::parser::significant_tokens(&analysis.tokens);
     let ctx = LintContext {
         resolved: &analysis.resolved,
         diagnostics: &analysis.diagnostics,
         program: &analysis.program,
-        tokens: &analysis.tokens,
-        comment_tokens: &comment_tokens,
+        tokens: &significant,
+        comment_tokens: &analysis.tokens,
     };
     let diagnostics = run_rules(&ctx, &options.allow, &options.warn);
     Ok(LintReport { diagnostics })
