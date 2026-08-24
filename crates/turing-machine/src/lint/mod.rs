@@ -109,11 +109,18 @@ pub(crate) struct LintContext<'a> {
     /// `tokens` field above never carries. Read only by a fix that deletes a
     /// source span and must first prove no comment sits inside it (deleting
     /// one silently would be a defect fmt itself avoids by relocating rather
-    /// than dropping). Both entry paths already hold a `WithComments` stream
-    /// for their own reasons — `analyze` because the green parse
-    /// reconstructs trivia from it, `analyze_staged` because `parse_cst`
-    /// attaches the CST's comment nodes from it — so neither pays an extra
-    /// lex pass to fill this field.
+    /// than dropping). Filling it costs neither entry path an extra lex:
+    /// both are REQUIRED to lex `WithComments` for reasons of their own, and
+    /// already hold the stream when they build this context.
+    ///
+    /// That requirement is a standing one, not a fact about today's
+    /// implementation. `syntax::layout` reconstructs a token's verbatim text
+    /// and its surrounding trivia from the source and the stream together,
+    /// and asserts that only whitespace separates consecutive tokens — so
+    /// any path feeding a green parse must lex `WithComments` or PANIC, not
+    /// merely lose comments. Whatever a given entry path parses through, do
+    /// not "optimize" it to a comment-free lex on the grounds that its
+    /// current parser would tolerate one.
     pub comment_tokens: &'a [Token],
 }
 
@@ -223,19 +230,31 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     // that ONE stream serves both channels: `comment_tokens` takes it whole,
     // `tokens` takes it filtered.
     //
-    // The filter is load-bearing, not tidiness. `decl_span`
-    // (`unused-alphabet`), `braced_world_decl_span` (`unused-routine`,
-    // `unused-graph`) and `reuse_statement_span` (`unused-binding`,
-    // `unused-graft-instance`) locate a declaration by ADJACENCY — the token
-    // immediately before the declared name must be the keyword, and the
-    // doc-run walk-back steps over immediately-preceding doc lines. Handing
-    // them the raw stream breaks both: a comment between keyword and name
-    // voids the fix outright, and a comment between a doc run and its
-    // keyword truncates the span so the deleted declaration leaves an
-    // orphaned `?`/`!` run behind — a parse error, i.e. a quickfix that
-    // produces broken source. Both modes are pinned, per helper, by
-    // `tests/lint_quickfix_comments.rs`; removing this filter turns six of
-    // its eleven tests red.
+    // The filter is load-bearing, not tidiness. FIVE quickfix helpers locate
+    // their edit by ADJACENCY — by indexing off a neighbouring token rather
+    // than searching — and every one of them is voided or shifted by a
+    // comment landing in the indexed position:
+    //
+    //   `decl_span`              `unused-alphabet`
+    //   `braced_world_decl_span` `unused-routine`, `unused-graph`
+    //   `reuse_statement_span`   `unused-binding`, `unused-graft-instance`
+    //   `as_clause_span`         `unused-graft-name`
+    //   `marker_span`            `leftover-debugger`
+    //
+    // That list is the complete set, not a sample: these five plus
+    // `arrow_span` (`dead-map-pair`) are ALL the readers of the `tokens`
+    // field below, and `arrow_span` is excluded on a stated mechanism — it
+    // finds its arrow by range containment, so extra tokens cannot move it.
+    //
+    // Two failure modes, both real. A comment between a keyword and the name
+    // it declares voids the fix outright. A comment between a doc run and its
+    // keyword truncates the span instead, so the deleted declaration leaves
+    // an orphaned `?`/`!` run behind — a parse error, i.e. a quickfix that
+    // ships broken source, which is worse than shipping none.
+    //
+    // All of it is pinned by `tests/lint_quickfix_comments.rs`: removing this
+    // filter turns eight of its sixteen tests red, at least one per helper
+    // above, while the `arrow_span` witness stays green.
     let significant = crate::parser::significant_tokens(&analysis.tokens);
     let ctx = LintContext {
         resolved: &analysis.resolved,

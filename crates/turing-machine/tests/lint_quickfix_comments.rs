@@ -1,10 +1,23 @@
-//! Pins the APPLIED TEXT of the three deletion-quickfix helpers shared by the
-//! `unused-*` rules (`docs/tmt/lint.md` (the `.tmc` rules)) — `decl_span`
-//! (`unused-alphabet`), `braced_world_decl_span` (`unused-routine`), and
-//! `reuse_statement_span` (`unused-binding`). Each helper locates the
-//! declared name's token, then requires the token immediately BEFORE it in
-//! the token stream to be the declaration's keyword — strict adjacency, not
-//! a search.
+//! Pins the APPLIED TEXT of every quickfix helper that locates its edit by
+//! ADJACENCY — by indexing off a neighbouring token rather than searching
+//! (`docs/tmt/lint.md` (the `.tmc` rules)). There are five:
+//!
+//! | helper | rules | the indexed neighbour |
+//! |---|---|---|
+//! | `decl_span` | `unused-alphabet` | the keyword before the name |
+//! | `braced_world_decl_span` | `unused-routine`, `unused-graph` | the keyword before the name |
+//! | `reuse_statement_span` | `unused-binding`, `unused-graft-instance` | the keyword before the target |
+//! | `as_clause_span` | `unused-graft-name` | the `)` before `as`, and the name after it |
+//! | `marker_span` | `leftover-debugger` | the token after `->`, and the one after that |
+//!
+//! **That is the complete set, established by enumeration rather than by
+//! counting.** Every one of them reads `LintContext.tokens`, and `tokens` has
+//! exactly six readers in the whole lint layer — these five plus `arrow_span`
+//! (`dead-map-pair`). `arrow_span` is excluded on a mechanism, not on a
+//! guess: it finds its arrow by RANGE CONTAINMENT, so extra tokens in the
+//! stream cannot move its answer. The last test in this file is the witness
+//! for that exclusion, and it was measured — it passes with the filter
+//! removed, while the other eight comment-bearing tests fail.
 //!
 //! The compiler front end lexes `LexMode::WithComments` — the green tree it
 //! parses through is built from the source text and its trivia together — so
@@ -480,4 +493,257 @@ fn unused_binding_fix_takes_a_doc_run_a_comment_interrupts() {
     // line across the `/* c */`, or the deleted statement leaves its doc run
     // behind and the file no longer parses.
     assert_eq!(apply_fix(BIND_DOC_RUN_COMMENT, &fix.edits), BIND_FIXED);
+}
+
+// -- unused-graft-name / as_clause_span ------------------------------------
+//
+// `as_clause_span` anchors on the `as` keyword and requires the token BEFORE
+// it to be the signature's `)` and the token AFTER it to be the instance
+// name. Two adjacency checks rather than one, so a comment on either side of
+// `as` voids the fix.
+
+const GRAFT_NAME_CLEAN: &str = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  entry graft findX(t = work, found = win, missing = lose) as seek;
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+";
+
+/// Identical to `GRAFT_NAME_CLEAN` but for a comment between the signature's
+/// closing `)` and the `as` keyword.
+const GRAFT_NAME_COMMENT: &str = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  entry graft findX(t = work, found = win, missing = lose) /* c */ as seek;
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+";
+
+/// Only ` as seek` goes — the span runs from the `)`'s own end to the name's
+/// end, so the graft survives as a valid unnamed entry graft. In the comment
+/// variant the `/* c */` is interior to that span and goes with it.
+const GRAFT_NAME_FIXED: &str = "\
+alphabet marks { '_', 'x' }
+graph findX(tape t: marks, state found, state missing) {
+  entry state walk { ['x'] -> found; ['_'] -> missing; [*] -> move [>] goto walk; }
+}
+machine {
+  tape work: marks;
+  entry graft findX(t = work, found = win, missing = lose);
+  state win  { [*] -> stop; }
+  state lose { [*] -> halt; }
+}
+";
+
+#[test]
+fn unused_graft_name_fix_removes_the_as_clause() {
+    let ds = findings_for(GRAFT_NAME_CLEAN, "unused-graft-name");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(
+        ds[0].message,
+        "entry graft instance name `seek` is never used"
+    );
+    let fix = ds
+        .into_iter()
+        .next()
+        .unwrap()
+        .fix
+        .expect("as_clause_span found the clause");
+    assert_eq!(apply_fix(GRAFT_NAME_CLEAN, &fix.edits), GRAFT_NAME_FIXED);
+}
+
+#[test]
+fn unused_graft_name_fix_is_unchanged_by_a_comment_before_as() {
+    let ds = findings_for(GRAFT_NAME_COMMENT, "unused-graft-name");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    let fix = ds
+        .into_iter()
+        .next()
+        .unwrap()
+        .fix
+        .expect("as_clause_span found the clause");
+    assert_eq!(apply_fix(GRAFT_NAME_COMMENT, &fix.edits), GRAFT_NAME_FIXED);
+}
+
+// -- leftover-debugger / marker_span ---------------------------------------
+//
+// `marker_span` anchors on the rule's `->` and requires the token right after
+// it to be the `debugger` marker; the token after THAT is the span's end. The
+// fixture puts the comment BEFORE the marker, which exercises the void
+// cleanly: the comment then sits outside the deleted span and must survive
+// the fix, so the assertion sees the marker go and the comment stay.
+
+const DEBUGGER_CLEAN: &str = "\
+alphabet bit { '_', '1' }
+machine {
+  tape t: bit;
+  entry state s {
+    ['1'] -> debugger goto s;
+    ['_'] -> stop;
+  }
+}
+";
+
+/// Identical to `DEBUGGER_CLEAN` but for a comment between the rule's `->`
+/// and the `debugger` marker it precedes.
+const DEBUGGER_COMMENT: &str = "\
+alphabet bit { '_', '1' }
+machine {
+  tape t: bit;
+  entry state s {
+    ['1'] -> /* c */ debugger goto s;
+    ['_'] -> stop;
+  }
+}
+";
+
+/// The marker and the single space after it are gone; the rule keeps its
+/// explicit `goto s`, which is why the fix was offered at all.
+const DEBUGGER_FIXED: &str = "\
+alphabet bit { '_', '1' }
+machine {
+  tape t: bit;
+  entry state s {
+    ['1'] -> goto s;
+    ['_'] -> stop;
+  }
+}
+";
+
+/// The comment variant's own expected text: the span runs from the marker's
+/// start to the following token's start, and the comment sits BEFORE the
+/// marker — outside that span — so it survives untouched.
+const DEBUGGER_COMMENT_FIXED: &str = "\
+alphabet bit { '_', '1' }
+machine {
+  tape t: bit;
+  entry state s {
+    ['1'] -> /* c */ goto s;
+    ['_'] -> stop;
+  }
+}
+";
+
+#[test]
+fn leftover_debugger_fix_removes_the_marker() {
+    let ds = findings_for(DEBUGGER_CLEAN, "leftover-debugger");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert_eq!(ds[0].message, "leftover 'debugger' marker");
+    let fix = ds
+        .into_iter()
+        .next()
+        .unwrap()
+        .fix
+        .expect("marker_span found the marker");
+    assert_eq!(apply_fix(DEBUGGER_CLEAN, &fix.edits), DEBUGGER_FIXED);
+}
+
+#[test]
+fn leftover_debugger_fix_is_unchanged_by_a_comment_before_the_marker() {
+    let ds = findings_for(DEBUGGER_COMMENT, "leftover-debugger");
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    let fix = ds
+        .into_iter()
+        .next()
+        .unwrap()
+        .fix
+        .expect("marker_span found the marker");
+    assert_eq!(
+        apply_fix(DEBUGGER_COMMENT, &fix.edits),
+        DEBUGGER_COMMENT_FIXED
+    );
+}
+
+// -- the one ctx.tokens consumer that is NOT adjacency-sensitive -----------
+//
+// `arrow_span` (`dead-map-pair`) is the sixth and last reader of
+// `LintContext.tokens`, and the only one the filter does not protect —
+// because it needs no protection. It locates the `=>`/`->` of a map pair by
+// RANGE CONTAINMENT (an Arrow token whose span lies between the pair's source
+// and destination glyphs), never by index arithmetic off a neighbour, and a
+// comment lexes as one `Comment` token that can never match `TokenKind::Arrow`.
+// Extra tokens in the stream therefore cannot move the result.
+//
+// This fixture is the witness for that exclusion, which is what makes the
+// five-helper hazard set a CLOSED enumeration rather than a count. It does
+// not discriminate the filter (it passes with the filter removed — measured);
+// it discriminates a future rewrite of `arrow_span` into an index walk, which
+// is exactly when the exclusion would stop holding.
+
+/// A comment sitting immediately before the arrow of the very pair that
+/// fires. `dead-map-pair` is opt-in, so it is requested explicitly below.
+const DEAD_MAP_PAIR_COMMENT: &str = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+alphabet bare3 { '_', '0', '1' }
+
+graph zeroing(tape v: bare3, state done) {
+  entry state s {
+    ['1'] -> write ['0'] move [>] goto s;
+    [*] -> done;
+  }
+}
+
+machine {
+  tape t: host5;
+  entry graft zeroing(v = t with map { '^' => '_', '$' => '_', '0' -> '0', '1' /* c */ -> '1' }, done = fin) as z;
+  state fin { [*] -> stop; }
+}
+";
+
+/// The fix demotes the dead pair by rewriting its `->` to `=>`; the comment
+/// is untouched, since the edit replaces the arrow token's own span only.
+const DEAD_MAP_PAIR_COMMENT_FIXED: &str = "\
+alphabet host5 { '_', '^', '$', '0', '1' }
+alphabet bare3 { '_', '0', '1' }
+
+graph zeroing(tape v: bare3, state done) {
+  entry state s {
+    ['1'] -> write ['0'] move [>] goto s;
+    [*] -> done;
+  }
+}
+
+machine {
+  tape t: host5;
+  entry graft zeroing(v = t with map { '^' => '_', '$' => '_', '0' -> '0', '1' /* c */ => '1' }, done = fin) as z;
+  state fin { [*] -> stop; }
+}
+";
+
+#[test]
+fn dead_map_pair_fix_is_unaffected_by_an_adjacent_comment() {
+    let ds: Vec<Diagnostic> = lint(
+        DEAD_MAP_PAIR_COMMENT,
+        LintOptions {
+            warn: vec!["dead-map-pair".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .diagnostics
+    .into_iter()
+    .filter(|d| d.code == "dead-map-pair")
+    .collect();
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    let fix = ds
+        .into_iter()
+        .next()
+        .unwrap()
+        .fix
+        .expect("arrow_span found the arrow");
+    assert_eq!(
+        apply_fix(DEAD_MAP_PAIR_COMMENT, &fix.edits),
+        DEAD_MAP_PAIR_COMMENT_FIXED
+    );
 }

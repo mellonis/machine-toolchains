@@ -4455,6 +4455,12 @@ machine {
         assert_eq!(program, &parse(&batch_tokens).unwrap());
         assert_eq!(resolved, &a.resolved);
         assert_eq!(staged.diagnostics, a.diagnostics);
+        // The remaining field, compared directly rather than each side
+        // against a third party: both entries now lex WithComments and keep
+        // that stream, so `tokens` agrees token for token, spans included.
+        // Without this line nothing in the crate compares the two token
+        // streams to each other at all.
+        assert_eq!(tokens, &a.tokens);
 
         assert!(compile(&src, CompileOptions::default()).is_ok());
     }
@@ -4496,8 +4502,15 @@ machine {
     #[test]
     fn analyze_staged_agrees_with_analyze_at_every_broken_stage() {
         // Each source breaks at exactly one stage; the fatal `analyze_staged`
-        // reports at its final stage agrees, by code, with what the
-        // all-or-nothing `analyze` and the full `compile` report.
+        // reports at its final stage agrees with what the all-or-nothing
+        // `analyze` and the full `compile` report — as a WHOLE
+        // `CompileError`, kind and span alike, not merely by `code()`.
+        //
+        // Comparing whole errors is what makes "the two entries agree" a
+        // pinned claim rather than a structural expectation: on `code()`
+        // alone, a one-column shift in either entry's parse fatal survives
+        // the entire crate suite (measured — that is why this compares more
+        // than it used to).
         let cases = [
             // Unterminated block comment — a lexical fatal.
             ("lex", "/* never closed"),
@@ -4511,17 +4524,15 @@ machine {
             ),
         ];
         for (stage, src) in cases {
-            let staged_code = analyze_staged(src).fatal.map(|e| e.kind.code());
-            let analyze_code = analyze(src).err().map(|e| e.kind.code());
-            let compile_code = compile(src, CompileOptions::default())
-                .err()
-                .map(|e| e.kind.code());
+            let staged_fatal = analyze_staged(src).fatal;
+            let analyze_fatal = analyze(src).err();
+            let compile_fatal = compile(src, CompileOptions::default()).err();
             assert!(
-                staged_code.is_some(),
+                staged_fatal.is_some(),
                 "{stage}: staged should carry a fatal"
             );
-            assert_eq!(staged_code, analyze_code, "{stage}: staged vs analyze");
-            assert_eq!(staged_code, compile_code, "{stage}: staged vs compile");
+            assert_eq!(staged_fatal, analyze_fatal, "{stage}: staged vs analyze");
+            assert_eq!(staged_fatal, compile_fatal, "{stage}: staged vs compile");
         }
     }
 

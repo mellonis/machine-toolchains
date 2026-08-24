@@ -129,10 +129,10 @@
 //! **What this file does NOT check.** The property below asserts exactly
 //! one law — `text() == src` — and nothing about tree SHAPE. Tagging
 //! every `LineComment` as `BlockComment` at emission (text byte-identical,
-//! kind wrong) leaves this property green across the full case count:
-//! kind and node-extent correctness are a later plan's properties to add,
-//! not a gap in this one. Recorded here so plan 8 inherits this as a
-//! known starting boundary rather than rediscovering it.
+//! kind wrong) leaves this property green across the full case count.
+//! Comment-kind and node-extent correctness are a separate law needing a
+//! separate property; whoever adds one should know this file never
+//! covered it, rather than reading its green result as evidence.
 
 use mtc_core::syntax::SyntaxNode;
 use mtc_turing_machine::lexer::{LexMode, lex_with};
