@@ -695,50 +695,174 @@ git commit -m "feat(turing-machine): body accessors on the .tmc views"
 
 ---
 
-### Task 5: extraction
+### Task 5a: the retokenization bridge
+
+**Why this is its own task.** Extraction does not re-derive the grammar
+from views — it re-runs the parser's own production over a node's tokens,
+the way the sibling's `extract.rs` does with `reparse_item` /
+`reparse_doc_items`. That requires turning green tokens back into lexer
+`Token`s that are INDISTINGUISHABLE from what `lex_with` produced over
+the same span. `.tmc`'s tokens carry richer payloads than the sibling's,
+and every one of them is a place a silent difference hides until it
+surfaces as an inexplicable oracle failure three tasks later:
+
+- `Glyph(String)` holds the value with **escapes resolved**; the green
+  token holds the RAW source text, `'\''` and all.
+- `Number(u32, String)` holds the parsed value **and** the digits as
+  written, so leading zeros survive.
+- `DocLine(String)` / `AttentionLine(String)` hold the payload with the
+  sigil stripped and one optional leading space removed; the green token
+  holds the whole raw line, sigil included.
+- `Token::len` is in CHARS and counts a glyph's quotes and escape
+  backslashes AS WRITTEN, not the resolved value's length.
+
+Build the bridge, prove it exact, and only then build extraction on it.
 
 **Files:**
-- Create: `crates/turing-machine/src/syntax/extract.rs`
-- Modify: `crates/turing-machine/src/syntax/mod.rs`
+- Create: `crates/turing-machine/src/syntax/extract.rs` (the bridge only)
+- Modify: `crates/turing-machine/src/syntax/mod.rs`,
+  `crates/turing-machine/src/parser.rs` (the reparse shims)
 
 **Interfaces:**
-- Consumes: Tasks 1-4; `crate::parser::Program` and the AST types it holds.
+- Produces: `fn sig_tokens(node: &SyntaxNode, index: &TextLineIndex) -> Vec<Token>`
+  and `fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token`
+  in `extract.rs`, plus `pub(crate)` reparse shims in `parser.rs`.
+
+- [ ] **Step 1: Read the sibling's bridge first**
+
+`crates/post-machine/src/syntax/extract.rs` lines 56-90 hold `sig_tokens`
+and `token_from_syntax`; `crates/post-machine/src/parser.rs` holds
+`reparse_item` and `reparse_doc_items`. Read all four. The shape to copy:
+a shim constructs a `Parser` over the given tokens with `sink: None` and
+calls ONE production, then `.expect()`s success on the ground that
+extraction only ever runs over an already-parsed tree.
+
+Note what `sig_tokens` does at the end — it appends an `Eof` token
+positioned at the node's end. A production that peeks past its last token
+needs it, and forgetting it turns a clean parse into an index panic.
+
+- [ ] **Step 2: Write the failing fidelity test**
+
+This is the test the whole task exists for, and the sibling has its twin
+(`sig_tokens_over_the_file_root_matches_lex_for_every_significant_kind`).
+It must compare REBUILT tokens against REAL lexer tokens, field by field,
+over a source exercising every payload-carrying kind:
+
+```rust
+#[test]
+fn rebuilt_tokens_are_indistinguishable_from_lexing_the_same_span() {
+    // Every payload-carrying kind, and the shapes that make each one
+    // differ from its raw text: an escaped glyph, a glyph holding a
+    // backslash, a number with a leading zero, a doc line with the one
+    // optional space after the sigil, and one without it.
+    let src = "? doc\n?no space\n! [deprecated] gone\n\
+               alphabet ab { '_', '\\'', '\\\\' }\n\
+               machine {\n  tape main: ab;\n\
+               \x20 entry state s {\n    ['_'] -> write [{v+007}] move [>] goto s;\n\
+               \x20   [*] -> stop;\n  }\n}\n";
+    let lexed = lex_with(src, LexMode::WithComments).expect("lexes");
+    let green = crate::parser::parse_green(src).expect("parses");
+    let root = SyntaxNode::new_root(green);
+    let index = TextLineIndex::new(src);
+    let rebuilt = sig_tokens(&root, &index);
+
+    // Compare kind, line, col and len — not just kind. A payload that
+    // rebuilds to the wrong string, or a len counting resolved chars
+    // instead of written ones, is exactly the failure this catches.
+    assert_eq!(rebuilt.len(), lexed.len(), "token count");
+    for (i, (a, b)) in rebuilt.iter().zip(lexed.iter()).enumerate() {
+        assert_eq!((&a.kind, a.line, a.col, a.len),
+                   (&b.kind, b.line, b.col, b.len),
+                   "token {i} differs");
+    }
+}
+```
+
+**Run this fixture through the real parser before trusting it.** If a
+shape in it does not parse, find one that does — do not drop the shape,
+because each one is in there to break a plausible shortcut.
+
+- [ ] **Step 3: Run it, watch it fail, then build the bridge**
+
+Run: `cargo test -p mtc-turing-machine --lib syntax::extract`
+
+Build `token_from_syntax` kind by kind. For every payload-carrying kind,
+reuse the LEXER's own decoder rather than writing a second one — find it
+and call it. If a decoder is private, widen it to `pub(crate)`; if none
+exists as a callable unit, say so in your report and quote what you had
+to write instead, because that is a duplication this layer is supposed to
+avoid and a later round may want to fix it properly.
+
+- [ ] **Step 4: Add the reparse shims the intricate constructs need**
+
+One `pub(crate) fn reparse_*` per construct whose internals extraction
+must rebuild: at minimum a rule's transition, a binding-argument list, a
+symbol map, a signature parameter, and a doc run's items. Each is three
+lines around one production, exactly like the sibling's.
+
+For each shim, one test: take a real parsed node of that kind, run the
+shim over `sig_tokens` of it, and assert the result equals what
+`lower_cst` produced for the same construct. Assert by VALUE.
+
+- [ ] **Step 5: Run the whole suite and commit**
+
+`cargo test -p mtc-turing-machine`, `cargo fmt --check`, `cargo clippy
+--workspace --all-targets -- -D warnings`. `crates/core` and
+`crates/post-machine` stay at zero diff.
+
+```bash
+git add crates/turing-machine
+git commit -m "feat(turing-machine): retokenize a .tmc green node back into lexer tokens"
+```
+
+---
+
+### Task 5b: extraction
+
+**Files:**
+- Modify: `crates/turing-machine/src/syntax/extract.rs`,
+  `crates/turing-machine/src/syntax/mod.rs`
+
+**Interfaces:**
+- Consumes: tasks 1-4 and 5a's bridge; `crate::parser::Program`.
 - Produces: `pub fn extract_program(root: &SyntaxNode, source: &str) -> Program`.
 
 - [ ] **Step 1: Read the target before writing anything**
 
-`Program` is `{ imports, alphabets, routines, graphs, machine }`. Read `lower_cst` in `crates/turing-machine/src/parser.rs` — that is the function whose output you must reproduce exactly, and reading it is cheaper than rediscovering its decisions one oracle failure at a time. Note in particular where it *normalises*: any place it computes something rather than copying it is a place extraction must compute the same way.
+`Program` is `{ imports, alphabets, routines, graphs, machine }`. Read
+`lower_cst` in `crates/turing-machine/src/parser.rs` — that is the
+function whose output you must reproduce exactly, and reading it is
+cheaper than rediscovering its decisions one oracle failure at a time.
+Note in particular where it *normalises*: any place it computes something
+rather than copying it is a place extraction must compute the same way.
 
-**The sibling's hardest-won lesson applies here.** `crates/post-machine/src/syntax/extract.rs` does not re-derive the grammar from views: for a statement's internals it re-runs the parser's own production over the node's tokens. Where a `.tmc` construct's internals are equally intricate — a rule's transition, a binding list, a symbol map — do the same rather than writing a second parser. Say in your report which constructs you routed through the parser and which you read directly from views.
+`Program` already derives `PartialEq` and `Eq` — no production change is
+needed for the oracle to compile.
+
+Say in your report which constructs you routed through 5a's shims and
+which you read directly from views.
 
 - [ ] **Step 2: Write the failing test**
 
-Put this in `extract.rs`'s own test module — it is the smallest honest check, and Task 6 is the real one:
+Put this in `extract.rs`'s own test module — it is the smallest honest
+check, and Task 6 is the real one:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::{LexMode, lex_with};
-    use crate::parser::{lower_cst, parse_cst};
-    use mtc_core::syntax::SyntaxNode;
+#[track_caller]
+fn agrees(src: &str) {
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+    let cst = parse_cst(&tokens).expect("parses");
+    let expected = lower_cst(&cst);
+    let green = crate::parser::parse_green_from_tokens(src, &tokens).expect("parses");
+    let actual = extract_program(&SyntaxNode::new_root(green), src);
+    assert_eq!(actual, expected, "extraction diverged for:\n{src}");
+}
 
-    #[track_caller]
-    fn agrees(src: &str) {
-        let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-        let cst = parse_cst(&tokens).expect("parses");
-        let expected = lower_cst(&cst);
-        let green = crate::parser::parse_green_from_tokens(src, &tokens).expect("parses");
-        let actual = extract_program(&SyntaxNode::new_root(green), src);
-        assert_eq!(actual, expected, "extraction diverged for:\n{src}");
-    }
-
-    #[test]
-    fn extraction_agrees_with_the_cst_on_small_programs() {
-        agrees("use a::b;\n");
-        agrees("alphabet ab { '_', 'a' }\n");
-        agrees("machine {\n  tape main: ab;\n  entry state s { [*] -> stop; }\n}\n");
-    }
+#[test]
+fn extraction_agrees_with_the_cst_on_small_programs() {
+    agrees("use a::b;\n");
+    agrees("alphabet ab { '_', 'a' }\n");
+    agrees("machine {\n  tape main: ab;\n  entry state s { [*] -> stop; }\n}\n");
 }
 ```
 
@@ -749,9 +873,10 @@ Expected: FAIL to compile — `extract_program` does not exist.
 
 - [ ] **Step 4: Write the implementation**
 
-Build `Program` from `RootView::items()`, dispatching on `TopView`. Namespaces contribute their items with the namespace's name prefixed the way `lower_cst` does it — **read that code rather than assuming the separator or the order.**
-
-`Program` must derive or already implement `PartialEq` for the oracle to work. If it does not, adding the derive is the one production change this task may make; say so in your report.
+Build `Program` from `RootView::items()`, dispatching on `TopView`.
+Namespaces contribute their items with the namespace's name prefixed the
+way `lower_cst` does it — **read that code rather than assuming the
+separator or the order.**
 
 - [ ] **Step 5: Run the test to verify it passes**
 
@@ -766,6 +891,7 @@ git commit -m "feat(turing-machine): extract a Program from the .tmc green tree"
 ```
 
 ---
+
 
 ### Task 6: the parity oracle — the plan's actual deliverable
 
