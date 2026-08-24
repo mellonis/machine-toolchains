@@ -24,6 +24,15 @@
 //! oracles use (`tests/syntax_parity.rs`), so a corpus file added later is
 //! covered here for free.
 //!
+//! **What this file cannot see, by construction.** It computes both fronts
+//! itself and never calls `analyze` — which is `pub(crate)` and out of an
+//! integration test's reach anyway — so it pins that the two RECIPES agree,
+//! not that `analyze` is wired to the new one. Every test here passes
+//! unchanged against the pre-migration tree, and stays green if `analyze`'s
+//! body is reverted to `lex` + `parse` (measured, by doing exactly that).
+//! The wiring itself is pinned one level down, by
+//! `compiler::tests::analyze_keeps_comment_trivia_in_its_token_stream`.
+//!
 //! What this file does NOT re-check: that the extracted `Program` equals the
 //! CST lowering on the shipped corpus and on generated programs — that is
 //! `tests/syntax_parity.rs` and `tests/tmc_property.rs`. Claim 1 below

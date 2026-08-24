@@ -109,8 +109,11 @@ pub(crate) struct LintContext<'a> {
     /// `tokens` field above never carries. Read only by a fix that deletes a
     /// source span and must first prove no comment sits inside it (deleting
     /// one silently would be a defect fmt itself avoids by relocating rather
-    /// than dropping). Both entry paths already hold this stream for the
-    /// green parse, so neither pays an extra lex pass for it.
+    /// than dropping). Both entry paths already hold a `WithComments` stream
+    /// for their own reasons — `analyze` because the green parse
+    /// reconstructs trivia from it, `analyze_staged` because `parse_cst`
+    /// attaches the CST's comment nodes from it — so neither pays an extra
+    /// lex pass to fill this field.
     pub comment_tokens: &'a [Token],
 }
 
@@ -223,7 +226,7 @@ pub fn lint(source: &str, options: LintOptions) -> Result<LintReport, LintError>
     // The filter is load-bearing, not tidiness. `decl_span`
     // (`unused-alphabet`), `braced_world_decl_span` (`unused-routine`,
     // `unused-graph`) and `reuse_statement_span` (`unused-binding`,
-    // `unused-graft-*`) locate a declaration by ADJACENCY — the token
+    // `unused-graft-instance`) locate a declaration by ADJACENCY — the token
     // immediately before the declared name must be the keyword, and the
     // doc-run walk-back steps over immediately-preceding doc lines. Handing
     // them the raw stream breaks both: a comment between keyword and name

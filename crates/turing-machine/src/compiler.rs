@@ -4322,6 +4322,44 @@ machine {
         assert!(out.tma.contains(".func main"), "{}", out.tma);
     }
 
+    /// `analyze` is WIRED to the comment-bearing front end, not merely
+    /// equivalent to one.
+    ///
+    /// The corpus/broken-source parity in `tests/tmc_green_analyze.rs` pins
+    /// that the two front-end RECIPES agree; by construction it passes
+    /// against the pre-migration tree too, because it computes both recipes
+    /// itself and never calls `analyze`. This is the assertion that fails if
+    /// `analyze`'s body is reverted to `lex` + `parse`.
+    ///
+    /// The lever is the lex mode: on the reverted body `Analysis.tokens` is a
+    /// comment-free stream and this `assert!` fails. That is the half of the
+    /// wiring carrying the hazard — a comment-bearing `tokens` is exactly why
+    /// `lint()` must filter through `significant_tokens`
+    /// (`tests/lint_quickfix_comments.rs`). The parse half is NOT observable
+    /// from `Analysis` and no assertion here could see it: `extract_program`
+    /// is held struct-equal to `lower_cst(parse_cst(…))`, spans included, by
+    /// `tests/syntax_parity.rs` and `tests/tmc_property.rs` — the two ASTs
+    /// are indistinguishable on purpose.
+    #[test]
+    fn analyze_keeps_comment_trivia_in_its_token_stream() {
+        let src = format!("// leading comment\n{A1}");
+        let a = analyze(&src).expect("A1 with a leading comment analyzes");
+        assert!(
+            a.tokens
+                .iter()
+                .any(|t| matches!(t.kind, crate::lexer::TokenKind::Comment(_))),
+            "`analyze` must lex WithComments — the green parse reconstructs \
+             trivia from the token stream, and `lint()` filters this same \
+             stream back down for the adjacency-walking rules"
+        );
+        // …and the filtered view is still exactly the old comment-free lex,
+        // so nothing downstream of that filter sees a different neighbourhood.
+        assert_eq!(
+            crate::parser::significant_tokens(&a.tokens),
+            lex(&src).expect("lexes")
+        );
+    }
+
     // -- staged analysis (the language-service substrate) ------------------
 
     #[test]
@@ -4334,13 +4372,19 @@ machine {
         // additive.
         //
         // The lex/parse halves compare against `lex`/`parse` — the PRE-green
-        // front end. Neither `analyze` nor `analyze_staged` calls them any
-        // more (one runs the green parse, the other `parse_cst`), which is
-        // exactly what makes them a differential oracle here rather than a
-        // restatement: an independent path arriving at the same tokens and
-        // the same AST. `analyze` itself keeps neither result, so the
-        // resolved module and the diagnostics are what it has left to agree
-        // on.
+        // front end, which neither `analyze` nor `analyze_staged` calls any
+        // more (one runs the green parse, the other `parse_cst` directly).
+        //
+        // What that comparison is, precisely: `parse` IS
+        // `lower_cst ∘ parse_cst`, the same two functions `analyze_staged`
+        // composes, so this is not an independent reimplementation arriving
+        // at the same answer. It is the SAME computation over a DIFFERENT
+        // token stream — comment-free here, `WithComments` in the staged
+        // path — which is what it pins: that neither the lex mode nor the
+        // comment nodes `parse_cst` attaches from it change the lowered AST
+        // or the significant tokens. `analyze` itself keeps neither result,
+        // so the resolved module and the diagnostics are what it has left to
+        // agree on.
         let src = format!("// leading comment\n{A1}");
         let staged = analyze_staged(&src);
         assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
@@ -4359,8 +4403,11 @@ machine {
                 .any(|t| matches!(t.kind, crate::lexer::TokenKind::Comment(_))),
             "leading comment should surface as a Comment token"
         );
-        // The comment-filtered WithComments stream is byte-identical to
-        // `analyze()`'s WithoutComments stream.
+        // The comment-filtered WithComments stream is byte-identical to a
+        // WithoutComments lex of the same source. (`analyze` no longer keeps
+        // one — it keeps the WithComments stream and lets `lint()` filter it
+        // — so `lex` below is the pre-green front end, not a second view of
+        // what `analyze` returned.)
         let significant: Vec<_> = tokens
             .iter()
             .filter(|t| !matches!(t.kind, crate::lexer::TokenKind::Comment(_)))
