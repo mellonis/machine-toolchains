@@ -101,25 +101,54 @@ impl TopView {
 }
 
 /// Direct top-level-shaped children of `node`, in document order —
-/// shared by `RootView::items` and `NamespaceView::items`. A child
-/// that casts to none of the five `TopView` kinds is a tree the parser
-/// cannot produce: ROOT/NAMESPACE children are only USE / ALPHABET /
-/// REUSE / MACHINE / NAMESPACE, and a bound DOC_RUN is retro-wrapped
-/// into its own declaration rather than sitting at this level
-/// (docs/core.md (syntax trees)). Asserted rather than silently
-/// filtered, because every consumer of this iterator treats a short
-/// list as "the file/namespace had fewer items".
+/// shared by `RootView::items` and `NamespaceView::items`. Everything
+/// but a container's OWN doc run is asserted to cast, rather than
+/// silently filtered, because every consumer of this iterator treats a
+/// short list as "the file/namespace had fewer items".
+///
+/// # The one node here that is not an item
+///
+/// A `NAMESPACE` retro-wraps its own bound doc run as a direct child,
+/// at exactly this level — measured, on
+/// `"? ns doc\nnamespace n {\n  alphabet a { '0' }\n}\n"`:
+///
+/// ```text
+/// ROOT@0..46
+///   NAMESPACE@0..45
+///     DOC_RUN@0..8
+///       DOC_LINE@0..8 "? ns doc"
+///     IDENT@9..18 "namespace"
+///     IDENT@19..20 "n"
+///     L_BRACE@21..22 "{"
+///     ALPHABET@25..43 …
+///     R_BRACE@44..45 "}"
+/// ```
+/// (whitespace elided.)
+///
+/// The DOC_RUN and the ALPHABET are siblings. It is skipped here — it
+/// is the namespace's own documentation, not one of its items — and
+/// answered by [`NamespaceView::doc_run`] instead. A run bound to an
+/// INNER declaration is retro-wrapped into THAT declaration and never
+/// reaches this level, which is why the skip is one kind wide and not
+/// a general filter.
+///
+/// `ROOT` needs no such skip and gets none: a doc run at file level
+/// binds to the declaration that follows it, and one that binds to
+/// nothing is a `DanglingDocRun` parse error, so ROOT's children are
+/// only USE / ALPHABET / REUSE / MACHINE / NAMESPACE.
 fn top_items(node: &SyntaxNode) -> impl Iterator<Item = TopView> + '_ {
-    node.children().filter_map(|child| {
-        let kind = child.kind();
-        let top = TopView::cast(child);
-        debug_assert!(
-            top.is_some(),
-            "unexpected node kind at top level: {:?}",
-            kind
-        );
-        top
-    })
+    node.children()
+        .filter(|child| child.kind() != TmcKind::DocRun.into())
+        .filter_map(|child| {
+            let kind = child.kind();
+            let top = TopView::cast(child);
+            debug_assert!(
+                top.is_some(),
+                "unexpected node kind at top level: {:?}",
+                kind
+            );
+            top
+        })
 }
 
 impl RootView {
@@ -830,9 +859,11 @@ impl GraftView {
     }
 
     /// The doc run this declaration retro-wraps, when one was written.
-    /// `child` finds it by KIND, not by position, so the SYM_MAP and
-    /// BINDING_ARG children a graft also carries can never be mistaken
-    /// for one.
+    /// `child` finds it by KIND, not by position, so the BINDING_ARG
+    /// children a graft also carries — the only other node kind directly
+    /// under a GRAFT; a `with map`'s SYM_MAP is a child of the argument
+    /// that owns it, one level further down — can never be mistaken for
+    /// one.
     pub fn doc_run(&self) -> Option<DocRunView> {
         child(self.syntax())
     }
@@ -888,7 +919,8 @@ impl BindView {
     }
 
     /// The doc run this declaration retro-wraps, when one was written —
-    /// mirrors `GraftView::doc_run`.
+    /// found by KIND, like `GraftView::doc_run`, and past the same one
+    /// other direct node kind (BINDING_ARG).
     pub fn doc_run(&self) -> Option<DocRunView> {
         child(self.syntax())
     }
@@ -987,6 +1019,15 @@ impl NamespaceView {
 
     pub fn name(&self) -> String {
         self.name_token().text().to_string()
+    }
+
+    /// The doc run this namespace retro-wraps, when one was written —
+    /// the node `items()` skips, since it is the namespace's own
+    /// documentation rather than one of its items (see `top_items`).
+    /// `child` finds it by KIND, so a namespace whose FIRST item is an
+    /// undocumented declaration still answers `None`.
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
     }
 
     /// This namespace's own items, not the whole file's.

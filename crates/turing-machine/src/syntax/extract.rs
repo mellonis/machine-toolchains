@@ -12,6 +12,31 @@
 //!   `crate::parser::lower_cst`'s own decisions exactly, never
 //!   re-deriving a rule the parser already encodes.
 //!
+//! # How the shims are pinned
+//!
+//! The four shims the retokenization bridge shipped with each carry a
+//! direct fidelity test in this module (`reparsed_transition_…`,
+//! `reparsed_binding_arg_…`, `reparsed_sym_map_…`,
+//! `reparsed_sig_param_…`), built when there was no assembly to reach
+//! them through. The five added for assembly — `reparse_alphabet_elems`,
+//! `reparse_pattern`, `reparse_write_vec`, `reparse_move_vec`,
+//! `reparse_qual_name` — deliberately have none, and are pinned
+//! TRANSITIVELY by the `agrees` comparisons instead: `agrees` checks
+//! against `lower_cst`'s own output over the same source, which is a
+//! stronger oracle than a hand-built expected value, and every one of
+//! the five sits on its path. Named, so the asymmetry is a decision and
+//! not a gap:
+//!
+//! - `reparse_alphabet_elems`, `reparse_pattern`, `reparse_write_vec`,
+//!   `reparse_move_vec` — `extraction_agrees_across_every_rule_shape`
+//!   (glyph and numeric ranges, keep cells, folds, both vectors present
+//!   and absent). Verified to bite: making the alphabet shim skip to the
+//!   SECOND `{` fails five tests; swapping the WRITE_VEC and MOVE_VEC
+//!   nodes at the call site fails that one.
+//! - `reparse_qual_name` — `extraction_agrees_on_prefixes_aliases_and_qualified_targets`.
+//!   Verified to bite: feeding it a run starting one token early fails
+//!   three tests.
+//!
 //! # Anchor every position on a TOKEN, never on the node
 //!
 //! A declaration retro-wraps its bound doc run (this crate's `syntax`
@@ -297,20 +322,28 @@ fn tokens_from(toks: &[SyntaxToken], index: &TextLineIndex) -> Vec<Token> {
 ///
 /// Read off the source rather than the tree: the parser's own
 /// `prev_end_line` at the moment it starts a doc run is the end line of
-/// the last non-whitespace SOURCE CONTENT before it, comments included
-/// — `drain_pending`, `capture_open_trailing` and
-/// `capture_close_trailing` each advance it past a comment's own last
-/// line, and the preceding declaration's production sets it to its `;`
-/// or `}` line. Scanning back to the last non-whitespace character
-/// answers all four cases with one rule, where the tree would need the
-/// preceding sibling AND its trailing trivia treated separately.
+/// the last non-whitespace SOURCE CONTENT before it, comments included.
+/// Three things set it there — `capture_open_trailing` and
+/// `capture_close_trailing` each advance it past a captured comment's
+/// own last line; all four of `drain_pending`'s CALLERS do the same for
+/// a drained own-line comment, from the count it hands back —
+/// `top_items`, `world_body` and `state_rules` write the field
+/// directly, `doc_run` through a local it copies back on the way out,
+/// while `drain_pending` itself never touches it; and the preceding
+/// declaration's own production sets it to its `;` or `}` line.
+/// Scanning back to the last non-whitespace character answers all of
+/// them with one rule, where the tree would need the preceding sibling
+/// AND its trailing trivia treated separately.
 ///
 /// One measured divergence, and it is invisible in a [`Program`]: a
 /// MULTI-LINE block comment riding the same line as a `;` is claimed by
-/// `Parser::take_trailing`, which — alone among the four — does NOT
-/// advance `prev_end_line` past it, so `lower_cst` keeps the `;` line
-/// where this returns the comment's end line. The two then disagree on
-/// exactly one field of exactly one item, the first item's
+/// `Parser::take_trailing`, the one comment-capturing helper that
+/// leaves `prev_end_line` where the `;` put it — so `lower_cst` keeps
+/// the `;` line where this returns the comment's end line.
+/// (`interior_comments` leaves the field alone too, but is never the
+/// last word: a list's closing delimiter always follows it, and the
+/// declaration's own production then sets the field.) The two disagree
+/// on exactly one field of exactly one item, the first item's
 /// `blank_before`, and `crate::parser::reduce_doc_run` reads no
 /// `blank_before` at all — it folds over `kind` only. Measured, not
 /// assumed: see `a_block_comment_riding_a_semicolon_diverges_on_blank_before_only`.
@@ -1644,7 +1677,9 @@ mod tests {
     #[test]
     fn extraction_walks_namespaces_in_place_and_stamps_the_path() {
         let src = "namespace outer {\n\
-                   \x20 alphabet inner { '0' }\n\
+                   \x20 use lib::a, lib::b as c;\n\
+                   \n\
+                   \x20 export alphabet inner { '0' }\n\
                    \n\
                    \x20 export routine ir(tape t: inner) {\n\
                    \x20   entry state a {\n\
@@ -1656,6 +1691,8 @@ mod tests {
                    \x20   alphabet deeper { '1' }\n\
                    \x20 }\n\
                    }\n\
+                   \n\
+                   use top::d;\n\
                    \n\
                    alphabet last { '2' }\n";
         agrees(src);
@@ -1679,6 +1716,188 @@ mod tests {
         assert_eq!(
             program.routines[0].name, "ir",
             "the namespace path is stamped alongside the name, never prefixed onto it"
+        );
+
+        // `ns` on an IMPORT, and `exported` on an alphabet: both are
+        // stamped by the same walk, and both are unpinned by a fixture
+        // that keeps every `use` at file level and never writes
+        // `export alphabet`.
+        assert_eq!(
+            program
+                .imports
+                .iter()
+                .map(|i| (i.binding().to_string(), i.ns.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("a".to_string(), vec!["outer".to_string()]),
+                ("c".to_string(), vec!["outer".to_string()]),
+                ("d".to_string(), Vec::new()),
+            ],
+            "an import carries the namespace path it was written in"
+        );
+        assert_eq!(
+            program
+                .alphabets
+                .iter()
+                .map(|a| a.exported)
+                .collect::<Vec<_>>(),
+            vec![true, false, false],
+            "only `inner` is written `export alphabet`"
+        );
+    }
+
+    /// A `namespace` carrying its OWN doc run — the one container whose
+    /// bound run lands as a direct child at the same level as its items
+    /// (`super::views::top_items`'s doc pastes the dump). Before the
+    /// skip that `top_items` now does, this panicked in a debug build
+    /// with `unexpected node kind at top level: SyntaxKind(44)`, since
+    /// `TopView::cast` refuses a DOC_RUN and the assert fired.
+    ///
+    /// The `items()` count is asserted directly: a fix that filtered
+    /// the DOC_RUN into oblivion and a fix that turned the run into a
+    /// phantom item are both wrong, and only the count separates the
+    /// correct answer from the second.
+    #[test]
+    fn extraction_agrees_on_a_documented_namespace() {
+        let src = "? outer doc\n\
+                   namespace outer {\n\
+                   \x20 ? inner doc\n\
+                   \x20 alphabet inner { '0' }\n\
+                   }\n\
+                   \n\
+                   ? last doc\n\
+                   alphabet last { '1' }\n";
+        agrees(src);
+
+        let root =
+            RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
+        let TopView::Namespace(nsv) = root.items().next().expect("first item") else {
+            panic!("expected a NAMESPACE");
+        };
+        assert_eq!(
+            nsv.items().count(),
+            1,
+            "a namespace's own doc run is not one of its items"
+        );
+        assert!(
+            nsv.doc_run().is_some(),
+            "…but it is still reachable, through `doc_run()`"
+        );
+        assert_eq!(
+            root.items().count(),
+            2,
+            "the file's own two declarations, neither doc run counted"
+        );
+
+        let program = extract_program(root.syntax(), src);
+        assert_eq!(program.alphabets.len(), 2);
+        assert_eq!(
+            program.alphabets[0]
+                .doc
+                .as_ref()
+                .map(|d| d.paragraphs.clone()),
+            Some(vec!["inner doc".to_string()]),
+            "the INNER declaration's own run still binds to it"
+        );
+    }
+
+    /// Document order inside a world body, pinned by VALUE rather than
+    /// by count. `lower_world_body` walks one interleaved item list and
+    /// pushes into four vectors; extraction walks the WORLD's children
+    /// four times, once per kind. The two agree only if each of those
+    /// walks preserves order — and with one state, one graft and one
+    /// bind per fixture (which is every OTHER fixture here) reversing a
+    /// vector changes nothing observable.
+    ///
+    /// Order is not cosmetic in this language: rule order is table-row
+    /// order is priority, and a state's position decides which rows a
+    /// world's table gets first (docs/tmt/language.md (which rule
+    /// fires)). The same fixture also carries two-argument binding lists
+    /// on both a `graft` and a `bind`, since a single-argument list
+    /// leaves `args` order equally unpinned.
+    #[test]
+    fn extraction_keeps_world_body_items_in_document_order() {
+        let src = "alphabet ab { '0', '1', '_' }\n\
+                   \n\
+                   machine {\n\
+                   \x20 tape first: ab;\n\
+                   \x20 tape second: ab;\n\
+                   \n\
+                   \x20 entry state alpha {\n\
+                   \x20   [*] -> stop;\n\
+                   \x20 }\n\
+                   \n\
+                   \x20 state beta {\n\
+                   \x20   [*] -> halt;\n\
+                   \x20 }\n\
+                   \n\
+                   \x20 state gamma {\n\
+                   \x20   [*] -> return;\n\
+                   \x20 }\n\
+                   \n\
+                   \x20 graft one(t = first, u = second) as g1;\n\
+                   \n\
+                   \x20 graft two(t = second) as g2;\n\
+                   \n\
+                   \x20 bind three(t = first, u = second) as b1;\n\
+                   \n\
+                   \x20 bind four(t = second) as b2;\n\
+                   }\n";
+        agrees(src);
+
+        let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
+        let machine = program
+            .machine
+            .as_ref()
+            .expect("the fixture declares a machine");
+        assert_eq!(
+            machine
+                .tapes
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(
+            machine
+                .states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta", "gamma"]
+        );
+        assert_eq!(
+            machine
+                .grafts
+                .iter()
+                .map(|g| g.as_name.as_ref().expect("named").name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["g1", "g2"]
+        );
+        assert_eq!(
+            machine
+                .binds
+                .iter()
+                .map(|b| b.as_name.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b1", "b2"]
+        );
+        assert_eq!(
+            machine.grafts[0]
+                .args
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t", "u"],
+            "a binding list's argument order is its declaration order"
+        );
+        assert_eq!(
+            machine.binds[0]
+                .args
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t", "u"]
         );
     }
 
