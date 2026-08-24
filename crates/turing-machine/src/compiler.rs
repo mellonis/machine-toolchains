@@ -1260,8 +1260,8 @@ pub(crate) struct TmcStagedAnalysis {
     /// `lsp/quickfix.rs`), so `parse_cst` runs here as a side artifact
     /// alongside the green parse that produces `program`; that means this
     /// field, and the double parse feeding it, are scaffolding, not a design
-    /// choice — plan 10 removes both when the language service moves onto
-    /// the green tree's typed views.
+    /// choice — both go away once the language service reads the green
+    /// tree's typed views instead.
     pub cst: Option<Cst>,
     /// The flat program, extracted from the green tree — present whenever
     /// the green parse succeeded, retained even when the resolve stage then
