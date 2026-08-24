@@ -1,16 +1,48 @@
-//! The retokenization bridge (docs/core.md (syntax trees)): turning a
-//! green subtree's own tokens back into real lexer [`Token`]s, so
-//! extraction can hand them to the parser's OWN productions
-//! (`crate::parser::reparse_transition`/`reparse_binding_arg`/
-//! `reparse_sym_map`/`reparse_sig_param`/`reparse_doc_items`) instead of
-//! re-deriving their grammar decisions from the tree shape. The
-//! assembly half — walking views to build [`crate::parser::Program`]
-//! itself — is a later change; this module holds only the bridge.
+//! Extraction: rebuilding the C1 [`crate::parser::Program`] straight
+//! from typed views over the `.tmc` green tree (docs/core.md (syntax
+//! trees)). Two halves:
+//!
+//! - **Retokenization** (`sig_tokens`/`token_from_syntax`): turning a
+//!   green subtree's own tokens back into real lexer [`Token`]s, so
+//!   extraction can hand them to the parser's OWN productions
+//!   (`crate::parser`'s `reparse_*` shims) instead of re-deriving their
+//!   grammar decisions from the tree shape.
+//! - **Assembly** ([`extract_program`]): walking the views themselves —
+//!   items, headers, worlds, rules — and mirroring
+//!   `crate::parser::lower_cst`'s own decisions exactly, never
+//!   re-deriving a rule the parser already encodes.
+//!
+//! # Anchor every position on a TOKEN, never on the node
+//!
+//! A declaration retro-wraps its bound doc run (this crate's `syntax`
+//! module doc), so a documented declaration's node STARTS at the doc
+//! run, not at its header. Every `line`/`col`/`span.start` the C1
+//! lowering produces is anchored on a token instead — the name token,
+//! the `entry`/`export`/`volatile` prefix, or the declaring keyword —
+//! so extraction reads [`header_token`] and the views' own name
+//! accessors rather than `SyntaxNode::text_range().start`. A node's
+//! `.end` IS safe: `super::GreenSink::finish` closes a node without
+//! flushing trailing trivia, so a node ends exactly at its own last
+//! significant token.
 
-use mtc_core::syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex};
+use mtc_core::diagnostics::Span;
+use mtc_core::syntax::{
+    AstNode, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex, TextRange,
+};
 
 use super::kinds::TmcKind;
+use super::views::{
+    AlphabetView, BindView, DocRunView, GraftView, MachineView, ReuseKind, ReuseView, RootView,
+    RuleView, StateView, TapeView, TopView, UsePathView, WorldView,
+};
+use crate::cst::DocRunItem;
 use crate::lexer::{GLYPH_ESCAPES, Token, TokenKind, normalize_doc_payload};
+use crate::parser::{
+    Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, Program, Routine, Rule, Signature,
+    State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems, reparse_binding_arg,
+    reparse_doc_items, reparse_move_vec, reparse_pattern, reparse_qual_name, reparse_sig_param,
+    reparse_transition, reparse_write_vec,
+};
 
 /// The three trivia kinds `sig_tokens` filters out before mapping —
 /// whitespace and both comment kinds. Every significant token kind, and
@@ -89,21 +121,6 @@ fn decode_glyph_body(raw: &str) -> String {
 /// because it did); this turns it back into the same token shape the
 /// parser's productions accept. Ends with a synthetic `Eof` at `node`'s
 /// own end position, matching every real token stream's own convention.
-///
-/// `#[allow(dead_code)]`: exercised today only by this module's own
-/// fidelity tests (`#[cfg(test)] mod tests`) — the assembly half that
-/// walks views and calls this as real (non-test) code is a later
-/// change, not yet written, so a plain `cargo build`/`clippy` of the
-/// library target sees no caller outside `#[cfg(test)]`. The four
-/// functions this one transitively calls — `is_trivia`,
-/// `token_from_syntax`, and `token_from_syntax`'s own callees
-/// `sigil_len` and `decode_glyph_body` — need no allow of their own:
-/// rustc's dead-code pass treats an allow-marked item as a live root,
-/// so anything reachable through it counts as used too. That is a
-/// statement about this specific call graph, not a general rule —
-/// a fifth function added later without a call path from here would
-/// still need its own allow.
-#[allow(dead_code)]
 pub(crate) fn sig_tokens(node: &SyntaxNode, index: &TextLineIndex) -> Vec<Token> {
     let mut tokens: Vec<Token> = node
         .descendant_tokens()
@@ -201,6 +218,594 @@ pub(crate) fn token_from_syntax(t: &SyntaxToken, index: &TextLineIndex) -> Token
         col,
         len: text.chars().count() as u32,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Assembly — views → `crate::parser::Program`
+// ---------------------------------------------------------------------------
+
+/// A node's own direct child tokens, trivia excluded — never a
+/// descendant's. The header/keyword scans below all want this: a
+/// descendant walk would reach down into a nested SIG_PARAM,
+/// BINDING_ARG, WRITE_VEC or TRANSITION and read a token that belongs
+/// to it — the RULE dump in [`extract_rule`] below shows exactly that
+/// nesting.
+fn direct_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> + '_ {
+    node.children_with_tokens().filter_map(|e| match e {
+        SyntaxElement::Token(t) if !is_trivia(t.kind()) => Some(t),
+        _ => None,
+    })
+}
+
+/// The declaration's own first significant token — the anchor every
+/// `line`/`col`/`span.start` in the C1 lowering is taken from, and the
+/// reason the module doc says never to read a node's own start.
+///
+/// The shape this walk relies on, for `"? doc\nalphabet ab { '0' }\n"`:
+///
+/// ```text
+/// ROOT@0..26
+///   ALPHABET@0..25
+///     DOC_RUN@0..5
+///       DOC_LINE@0..5 "? doc"
+///     WHITESPACE@5..6 "\n"
+///     IDENT@6..14 "alphabet"
+///     WHITESPACE@14..15 " "
+///     IDENT@15..17 "ab"
+///     …
+/// ```
+///
+/// ALPHABET starts at 0, the doc run — not at 6, its header. The run is
+/// a child NODE, so filtering to direct TOKENS steps over the whole
+/// thing, and the newline between it and the header is trivia this
+/// filter drops. What is left first is the header: `export`/`entry`/
+/// `volatile` when written, else the declaring keyword — exactly the
+/// `header_start` / `prefix` / `machine_tok` / `graft_tok` /
+/// `bind_tok` / `lead_tok` position the matching `Parser::parse_*`
+/// production records.
+fn header_token(node: &SyntaxNode) -> SyntaxToken {
+    direct_tokens(node)
+        .next()
+        .expect("every extracted declaration node carries at least one significant token")
+}
+
+/// A token slice → real [`Token`]s, for the two shims fed an
+/// unbracketed run rather than a whole node (`reparse_pattern`,
+/// `reparse_qual_name`). Ends with the same synthetic `Eof`
+/// [`sig_tokens`] appends, here at the last token's own end.
+fn tokens_from(toks: &[SyntaxToken], index: &TextLineIndex) -> Vec<Token> {
+    let mut out: Vec<Token> = toks.iter().map(|t| token_from_syntax(t, index)).collect();
+    let end = toks
+        .last()
+        .expect("a retokenized run is never empty — its caller found it by its own first token")
+        .text_range()
+        .end;
+    let (line, col) = index.line_col(end);
+    out.push(Token {
+        kind: TokenKind::Eof,
+        line,
+        col,
+        len: 0,
+    });
+    out
+}
+
+/// The end line of whatever precedes `node` in the source — the
+/// `prev_end_line` seed [`reparse_doc_items`] needs for its first
+/// item's `blank_before`, and information a doc run's own tokens can
+/// never carry.
+///
+/// Read off the source rather than the tree: the parser's own
+/// `prev_end_line` at the moment it starts a doc run is the end line of
+/// the last non-whitespace SOURCE CONTENT before it, comments included
+/// — `drain_pending`, `capture_open_trailing` and
+/// `capture_close_trailing` each advance it past a comment's own last
+/// line, and the preceding declaration's production sets it to its `;`
+/// or `}` line. Scanning back to the last non-whitespace character
+/// answers all four cases with one rule, where the tree would need the
+/// preceding sibling AND its trailing trivia treated separately.
+///
+/// One measured divergence, and it is invisible in a [`Program`]: a
+/// MULTI-LINE block comment riding the same line as a `;` is claimed by
+/// `Parser::take_trailing`, which — alone among the four — does NOT
+/// advance `prev_end_line` past it, so `lower_cst` keeps the `;` line
+/// where this returns the comment's end line. The two then disagree on
+/// exactly one field of exactly one item, the first item's
+/// `blank_before`, and `crate::parser::reduce_doc_run` reads no
+/// `blank_before` at all — it folds over `kind` only. Measured, not
+/// assumed: see `a_block_comment_riding_a_semicolon_diverges_on_blank_before_only`.
+fn prev_end_line(source: &str, index: &TextLineIndex, node: &SyntaxNode) -> u32 {
+    let start = node.text_range().start as usize;
+    match source[..start].rfind(|c: char| !c.is_whitespace()) {
+        Some(i) => index.line_col(i as u32).0,
+        None => 0,
+    }
+}
+
+/// A bound doc run's raw items, reparsed through the parser's own
+/// `doc_run` production. Separate from [`extract_doc`] because the raw
+/// items are the only place [`prev_end_line`] is observable — the
+/// reduction below drops `blank_before` entirely.
+fn extract_doc_items(view: &DocRunView, source: &str, index: &TextLineIndex) -> Vec<DocRunItem> {
+    reparse_doc_items(
+        &sig_tokens(view.syntax(), index),
+        prev_end_line(source, index, view.syntax()),
+    )
+}
+
+/// A declaration's reduced [`Doc`] — `None` exactly when no run was
+/// written, matching `reduce_doc_run(&[])`'s own empty-run answer. A
+/// DOC_RUN node that EXISTS always reduces to `Some`: `Parser::doc_run`
+/// opens one only on a `?`/`!` line, and both are significant tokens
+/// [`sig_tokens`] keeps.
+fn extract_doc(run: Option<DocRunView>, source: &str, index: &TextLineIndex) -> Option<Doc> {
+    run.and_then(|dr| reduce_doc_run(&extract_doc_items(&dr, source, index)))
+}
+
+/// One `use a::b as c` path — mirrors `Parser::parse_use`'s own
+/// `UsePath` construction: `path` is the segment texts in order,
+/// `alias` the trailing `as`-bound name if any, `line` the FIRST
+/// segment's line, `span` first-segment start → LAST-segment end, the
+/// alias deliberately excluded ([`Import`]'s own doc). `ns` is the
+/// caller's accumulated namespace path — an import's own path never
+/// contributes to it, only `namespace` blocks do.
+fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> Import {
+    let segments = view.segments();
+    let first = segments
+        .first()
+        .expect("USE_PATH always carries at least one segment");
+    let last = segments
+        .last()
+        .expect("USE_PATH always carries at least one segment");
+    Import {
+        path: segments.iter().map(|t| t.text().to_string()).collect(),
+        alias: view.alias_token().map(|t| t.text().to_string()),
+        line: index.line_col(first.text_range().start).0,
+        ns: ns.to_vec(),
+        span: index.span(TextRange::new(
+            first.text_range().start,
+            last.text_range().end,
+        )),
+    }
+}
+
+/// One `export? alphabet NAME { … }` — mirrors
+/// `crate::parser::lower_alphabet` over `Parser::parse_alphabet`'s own
+/// stamping. Two normalisations worth naming, because neither copies a
+/// single token's position: `line` is the NAME's line (not the
+/// header's), while `col` is the HEADER's column (`export` when
+/// written, else `alphabet`).
+fn extract_alphabet(
+    view: &AlphabetView,
+    ns: &[String],
+    source: &str,
+    index: &TextLineIndex,
+) -> Alphabet {
+    let name = view.name_token();
+    let header = header_token(view.syntax());
+    Alphabet {
+        name: name.text().to_string(),
+        name_span: index.span(name.text_range()),
+        line: index.line_col(name.text_range().start).0,
+        col: index.line_col(header.text_range().start).1,
+        exported: view.exported(),
+        ns: ns.to_vec(),
+        elems: reparse_alphabet_elems(&sig_tokens(view.syntax(), index)),
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
+/// One `volatile? tape NAME: ALPHABET;` — the one declaration here
+/// whose node start IS its header, since `tape` accepts no doc run:
+/// `Parser::next_is_world_doc_accepting` excludes it, so a run written
+/// before one is rejected outright (measured — parsing
+/// `machine {\n  ? doc\n  tape main: ab;\n}\n` fails with
+/// `DanglingDocRun`), never retro-wrapped as a child. `line` and
+/// `span.start` still read [`header_token`] rather than the node, so
+/// the rule holds uniformly instead of by exception.
+fn extract_tape(view: &TapeView, index: &TextLineIndex) -> TapeDecl {
+    let name = view.name_token();
+    let alphabet = view.alphabet_token();
+    let header = header_token(view.syntax());
+    TapeDecl {
+        name: name.text().to_string(),
+        name_span: index.span(name.text_range()),
+        alphabet: alphabet.text().to_string(),
+        alphabet_span: index.span(alphabet.text_range()),
+        volatile: view.volatile(),
+        line: index.line_col(header.text_range().start).0,
+        span: index.span(TextRange::new(
+            header.text_range().start,
+            view.syntax().text_range().end,
+        )),
+    }
+}
+
+/// One `pattern -> action;` rule. Four of the five action pieces come
+/// straight back from the parser's own productions; the fifth,
+/// `debugger`, is a bare keyword with no node of its own.
+///
+/// Reading it as "a direct IDENT child spelling `debugger`" is exact,
+/// not a heuristic. A rule carrying every IDENT-bearing piece at once,
+/// `['0' as v] -> debugger write [{v}] move [>] call sub(t = t) then
+/// stop;`, dumps its own level as:
+///
+/// ```text
+/// RULE@46..116
+///   L_BRACKET@46..47 "["
+///   GLYPH@47..50 "'0'"
+///   IDENT@51..53 "as"
+///   IDENT@54..55 "v"
+///   R_BRACKET@55..56 "]"
+///   ARROW@57..59 "->"
+///   IDENT@60..68 "debugger"
+///   IDENT@69..74 "write"
+///   WRITE_VEC@75..80 …
+///   IDENT@81..85 "move"
+///   MOVE_VEC@86..89 …
+///   TRANSITION@90..115 …
+///   SEMI@115..116 ";"
+/// ```
+/// (whitespace elided.)
+///
+/// So a RULE's direct IDENT children are exactly: the pattern's `as`
+/// markers, the NAMES those markers bind, the `write`/`move` keywords,
+/// and `debugger` itself. Every token of a transition — `call`, the
+/// target, `then`, the continuation — sits inside TRANSITION, a level
+/// down. The one candidate for a false positive is therefore a binding
+/// name, and it cannot be one: `debugger` is one of the 27
+/// fully-reserved words (`crate::lexer::RESERVED`), so `Parser::name`
+/// refuses it wherever a name is expected, `as NAME` included.
+///
+/// `Transition::Stay` is synthesised here and only here: it is the
+/// ABSENCE of a TRANSITION node, so `reparse_transition` is
+/// structurally uncallable for it (docs/tmt/language.md
+/// (transitions)). Its span is the rule's own `;` — `Parser::rule`
+/// builds it as `self.peek().span()` at the point the semicolon is the
+/// upcoming token — which is a RULE node's last token, since the node
+/// closes right after that semicolon is bumped.
+fn extract_rule(view: &RuleView, index: &TextLineIndex) -> Rule {
+    let node = view.syntax();
+    let pattern = reparse_pattern(&tokens_from(&view.pattern_tokens(), index));
+    let debugger =
+        direct_tokens(node).any(|t| t.kind() == TmcKind::Ident.into() && t.text() == "debugger");
+    let transition = match view.transition() {
+        Some(t) => reparse_transition(&sig_tokens(t.syntax(), index)),
+        None => {
+            let semi = node
+                .last_token()
+                .expect("RULE always carries at least its own `;`");
+            debug_assert_eq!(
+                semi.kind(),
+                TmcKind::Semi.into(),
+                "RULE closes right after its own `;`"
+            );
+            Transition::Stay {
+                span: index.span(semi.text_range()),
+            }
+        }
+    };
+    Rule {
+        line: pattern.span.start.line,
+        pattern,
+        debugger,
+        write: view
+            .write_vec()
+            .map(|w| reparse_write_vec(&sig_tokens(w.syntax(), index))),
+        mov: view
+            .move_vec()
+            .map(|m| reparse_move_vec(&sig_tokens(m.syntax(), index))),
+        transition,
+        span: index.span(node.text_range()),
+    }
+}
+
+/// One `entry? state NAME { rules }` — `line` is the NAME's line and
+/// `col` the header's column, the same split [`extract_alphabet`]
+/// carries; `span` runs from the header (`entry` when written) to the
+/// body's closing `}`, which is the node's own end.
+fn extract_state(view: &StateView, source: &str, index: &TextLineIndex) -> State {
+    let name = view.name_token();
+    let header = header_token(view.syntax());
+    State {
+        entry: view.is_entry(),
+        name: name.text().to_string(),
+        name_span: index.span(name.text_range()),
+        line: index.line_col(name.text_range().start).0,
+        col: index.line_col(header.text_range().start).1,
+        rules: view.rules().map(|r| extract_rule(&r, index)).collect(),
+        span: index.span(TextRange::new(
+            header.text_range().start,
+            view.syntax().text_range().end,
+        )),
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
+/// The `IDENT (:: IDENT)*` target run of a GRAFT or BIND, ready for
+/// [`reparse_qual_name`]: every direct token from the target's own
+/// first segment onward. `skip` counts the header keywords the view
+/// already identified — `entry` (GRAFT only, when written) and the
+/// `graft`/`bind` keyword itself.
+///
+/// Deliberately NOT trimmed at the `(` that follows: `qual_name`
+/// advances only while the next token is `::`, so it stops there on its
+/// own, and leaving the trailing tokens in means this helper never has
+/// to encode where a target ENDS — a question the parser already
+/// answers.
+fn target_tokens(node: &SyntaxNode, skip: usize, index: &TextLineIndex) -> Vec<Token> {
+    let run: Vec<SyntaxToken> = direct_tokens(node).skip(skip).collect();
+    tokens_from(&run, index)
+}
+
+/// One `entry? graft TARGET(args) [as NAME];`. The one declaration
+/// whose `line` and `span.start` come from DIFFERENT tokens:
+/// `Parser::parse_graft` records `line` off the `graft` keyword (it
+/// reads `self.peek()` after `entry` has already been bumped) but takes
+/// `span.start` from the `entry` prefix when there is one.
+fn extract_graft(view: &GraftView, source: &str, index: &TextLineIndex) -> Graft {
+    let node = view.syntax();
+    let entry = view.is_entry();
+    let header = header_token(node);
+    let graft_kw = direct_tokens(node)
+        .nth(usize::from(entry))
+        .expect("GRAFT always carries its own `graft` keyword");
+    Graft {
+        entry,
+        target: reparse_qual_name(&target_tokens(node, usize::from(entry) + 1, index)),
+        args: view
+            .bindings()
+            .map(|a| reparse_binding_arg(&sig_tokens(a.syntax(), index)))
+            .collect(),
+        as_name: view.as_name().map(|t| Ident {
+            name: t.text().to_string(),
+            span: index.span(t.text_range()),
+        }),
+        line: index.line_col(graft_kw.text_range().start).0,
+        span: index.span(TextRange::new(
+            header.text_range().start,
+            node.text_range().end,
+        )),
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
+/// One `bind TARGET(args) as NAME;` — [`extract_graft`] without the
+/// `entry` prefix, which `bind` never takes (docs/tmt/language.md
+/// (entry)), so its header token IS its `bind` keyword.
+fn extract_bind(view: &BindView, source: &str, index: &TextLineIndex) -> Bind {
+    let node = view.syntax();
+    let header = header_token(node);
+    let as_name = view.as_name();
+    Bind {
+        target: reparse_qual_name(&target_tokens(node, 1, index)),
+        args: view
+            .bindings()
+            .map(|a| reparse_binding_arg(&sig_tokens(a.syntax(), index)))
+            .collect(),
+        as_name: Ident {
+            name: as_name.text().to_string(),
+            span: index.span(as_name.text_range()),
+        },
+        line: index.line_col(header.text_range().start).0,
+        span: index.span(TextRange::new(
+            header.text_range().start,
+            node.text_range().end,
+        )),
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
+/// A world body split into its four item kinds — the green-tree
+/// counterpart of `crate::parser::lower_world_body`. Each vector keeps
+/// document order, because each view accessor walks the WORLD's
+/// children in order and keeps only its own kind, which is the same
+/// order the CST's single interleaved item list is pushed in.
+#[derive(Default)]
+struct WorldParts {
+    tapes: Vec<TapeDecl>,
+    states: Vec<State>,
+    grafts: Vec<Graft>,
+    binds: Vec<Bind>,
+}
+
+/// `None` — a declaration with no WORLD child — yields four empty
+/// vectors rather than panicking: `ReuseView::world`'s own doc explains
+/// why a view answers absence instead of asserting a shape the parser
+/// always produces.
+fn extract_world(world: Option<WorldView>, source: &str, index: &TextLineIndex) -> WorldParts {
+    let Some(world) = world else {
+        return WorldParts::default();
+    };
+    WorldParts {
+        tapes: world.tapes().map(|t| extract_tape(&t, index)).collect(),
+        states: world
+            .states()
+            .map(|s| extract_state(&s, source, index))
+            .collect(),
+        grafts: world
+            .grafts()
+            .map(|g| extract_graft(&g, source, index))
+            .collect(),
+        binds: world
+            .binds()
+            .map(|b| extract_bind(&b, source, index))
+            .collect(),
+    }
+}
+
+/// Everything a `routine` and a `graph` share, which is every field
+/// either one has. `crate::parser::Routine` and
+/// `crate::parser::Graph` are distinct types with identical shapes —
+/// kept apart because the front end treats the two reuse forms
+/// differently — so extraction reads the node once and the caller
+/// stamps whichever struct the REUSE's own keyword names.
+struct ReuseParts {
+    name: String,
+    name_span: Span,
+    line: u32,
+    col: u32,
+    exported: bool,
+    sig: Signature,
+    states: Vec<State>,
+    grafts: Vec<Graft>,
+    binds: Vec<Bind>,
+    doc: Option<Doc>,
+}
+
+/// One `export? routine|graph NAME(sig) { … }`. `line`/`col` split the
+/// same way [`extract_alphabet`]'s do. The signature's own span is
+/// taken from the first and last of `ReuseView::signature`'s tokens,
+/// which that accessor's doc pins as the `(` and the matching `)` —
+/// there is no node to read it off, and the parameters themselves come
+/// back one at a time through `reparse_sig_param`.
+///
+/// A world body's tapes are dropped, exactly as
+/// `crate::parser::lower_routine`/`lower_graph` drop them: parsing
+/// rejects a `tape` declaration outside a `machine`, so the vector is
+/// always empty here anyway.
+fn extract_reuse(view: &ReuseView, source: &str, index: &TextLineIndex) -> ReuseParts {
+    let name = view.name_token();
+    let header = header_token(view.syntax());
+    let sig_tokens_run = view.signature();
+    let open = sig_tokens_run
+        .first()
+        .expect("REUSE's signature run always opens on its own `(`");
+    let close = sig_tokens_run
+        .last()
+        .expect("REUSE's signature run always closes on its own `)`");
+    let parts = extract_world(view.world(), source, index);
+    ReuseParts {
+        name: name.text().to_string(),
+        name_span: index.span(name.text_range()),
+        line: index.line_col(name.text_range().start).0,
+        col: index.line_col(header.text_range().start).1,
+        exported: view.exported(),
+        sig: Signature {
+            params: view
+                .params()
+                .map(|p| reparse_sig_param(&sig_tokens(p.syntax(), index)))
+                .collect(),
+            span: index.span(TextRange::new(
+                open.text_range().start,
+                close.text_range().end,
+            )),
+        },
+        states: parts.states,
+        grafts: parts.grafts,
+        binds: parts.binds,
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
+/// The single `machine { … }` block. It carries no name, so `line` and
+/// `col` are both the `machine` keyword's, and `span` runs from that
+/// keyword — never the node's own start, which a bound doc run moves —
+/// to the body's closing `}`.
+fn extract_machine(view: &MachineView, source: &str, index: &TextLineIndex) -> Machine {
+    let kw = header_token(view.syntax());
+    let (line, col) = index.line_col(kw.text_range().start);
+    let parts = extract_world(view.world(), source, index);
+    Machine {
+        line,
+        col,
+        span: index.span(TextRange::new(
+            kw.text_range().start,
+            view.syntax().text_range().end,
+        )),
+        tapes: parts.tapes,
+        states: parts.states,
+        grafts: parts.grafts,
+        binds: parts.binds,
+        doc: extract_doc(view.doc_run(), source, index),
+    }
+}
+
+/// Walk one level of `RootView`/`NamespaceView::items` — mirrors
+/// `crate::parser::lower_items` exactly, including its ORDER: a
+/// namespace recurses IN PLACE, depth-first, so a declaration written
+/// after a namespace block lands after that namespace's own contents in
+/// every vector of the [`Program`]. `ns` is a path stamped on each
+/// declaration, never a prefix folded into its name.
+///
+/// Top-level comments carry no green node at all — they are trivia,
+/// dropped before `items()` ever sees them — so unlike `lower_items`'s
+/// explicit `TopKind::Comment(_) => {}` arm there is no comment case to
+/// skip here.
+fn extract_items(
+    items: impl Iterator<Item = TopView>,
+    ns: &[String],
+    source: &str,
+    index: &TextLineIndex,
+    program: &mut Program,
+) {
+    for item in items {
+        match item {
+            TopView::Use(decl) => {
+                for path in decl.paths() {
+                    program.imports.push(extract_import(&path, ns, index));
+                }
+            }
+            TopView::Alphabet(a) => program
+                .alphabets
+                .push(extract_alphabet(&a, ns, source, index)),
+            TopView::Namespace(nsv) => {
+                let mut child = ns.to_vec();
+                child.push(nsv.name());
+                extract_items(nsv.items(), &child, source, index, program);
+            }
+            TopView::Reuse(r) => {
+                let parts = extract_reuse(&r, source, index);
+                match r.kind() {
+                    ReuseKind::Routine => program.routines.push(Routine {
+                        name: parts.name,
+                        name_span: parts.name_span,
+                        line: parts.line,
+                        col: parts.col,
+                        exported: parts.exported,
+                        ns: ns.to_vec(),
+                        sig: parts.sig,
+                        states: parts.states,
+                        grafts: parts.grafts,
+                        binds: parts.binds,
+                        doc: parts.doc,
+                    }),
+                    ReuseKind::Graph => program.graphs.push(Graph {
+                        name: parts.name,
+                        name_span: parts.name_span,
+                        line: parts.line,
+                        col: parts.col,
+                        exported: parts.exported,
+                        ns: ns.to_vec(),
+                        sig: parts.sig,
+                        states: parts.states,
+                        grafts: parts.grafts,
+                        binds: parts.binds,
+                        doc: parts.doc,
+                    }),
+                }
+            }
+            TopView::Machine(m) => program.machine = Some(extract_machine(&m, source, index)),
+        }
+    }
+}
+
+/// Rebuild the whole C1 [`Program`] from the green tree's root —
+/// mirrors `crate::parser::lower_cst`: one [`TextLineIndex`] built once
+/// and threaded through the whole walk, then [`extract_items`] over the
+/// file's own top-level items with an empty starting `ns`.
+pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
+    let index = TextLineIndex::new(source);
+    let file = RootView::cast(root.clone()).expect("root is ROOT");
+    let mut program = Program {
+        imports: Vec::new(),
+        alphabets: Vec::new(),
+        routines: Vec::new(),
+        graphs: Vec::new(),
+        machine: None,
+    };
+    extract_items(file.items(), &[], source, &index, &mut program);
+    program
 }
 
 #[cfg(test)]
@@ -797,6 +1402,499 @@ mod tests {
             reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index), prev_end_line);
 
         assert_eq!(green_doc_run, c1_doc_run);
+    }
+
+    /// Extraction and the C1 lowering agree, on `src`, field for field.
+    /// The smallest honest check on assembly: a later task holds the
+    /// same equality over the whole shipped corpus and over generated
+    /// programs.
+    #[track_caller]
+    fn agrees(src: &str) {
+        let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+        let cst = parse_cst(&tokens).expect("parses");
+        let expected = lower_cst(&cst);
+        let green = crate::parser::parse_green_from_tokens(src, &tokens).expect("parses");
+        let actual = extract_program(&SyntaxNode::new_root(green), src);
+        assert_eq!(actual, expected, "extraction diverged for:\n{src}");
+    }
+
+    #[test]
+    fn extraction_agrees_with_the_cst_on_small_programs() {
+        agrees("use a::b;\n");
+        agrees("alphabet ab { '_', 'a' }\n");
+        agrees("machine {\n  tape main: ab;\n  entry state s { [*] -> stop; }\n}\n");
+    }
+
+    /// The fixture every "anchor on a token, never on the node" claim
+    /// rests on: one doc-run-carrying declaration of EVERY shape that
+    /// accepts a run. A documented declaration's node starts at its doc
+    /// run, so an extraction reading `SyntaxNode::text_range().start`
+    /// for a `line`/`col`/`span.start` disagrees with `lower_cst` here
+    /// and only here — the brief's three doc-free fixtures cannot see
+    /// that bug at all.
+    ///
+    /// The `assert_ne!`s below are not redundant with `agrees`: they
+    /// pin that the FIXTURE still exercises the divergence. Delete a
+    /// `?` line and `agrees` keeps passing while proving nothing.
+    #[test]
+    fn extraction_anchors_positions_on_header_tokens_not_on_node_starts() {
+        let src = "? alphabet doc\n\
+                   alphabet ab { '_', 'a' }\n\
+                   \n\
+                   ? routine doc\n\
+                   ! [deprecated] old\n\
+                   export routine r(tape t: ab, state s) {\n\
+                   \x20 ? state doc\n\
+                   \x20 entry state a {\n\
+                   \x20   [*] -> stop;\n\
+                   \x20 }\n\
+                   \n\
+                   \x20 ? graft doc\n\
+                   \x20 graft gr(t = t) as inst;\n\
+                   \n\
+                   \x20 ? bind doc\n\
+                   \x20 bind r2(t = t) as bd;\n\
+                   }\n\
+                   \n\
+                   ? graph doc\n\
+                   graph gr(tape t: ab) {\n\
+                   \x20 entry state a {\n\
+                   \x20   [*] -> stop;\n\
+                   \x20 }\n\
+                   }\n\
+                   \n\
+                   ? machine doc\n\
+                   machine {\n\
+                   \x20 tape main: ab;\n\
+                   \n\
+                   \x20 ? machine state doc\n\
+                   \x20 entry state s {\n\
+                   \x20   [*] -> stop;\n\
+                   \x20 }\n\
+                   }\n";
+        agrees(src);
+
+        let root =
+            RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
+        let index = TextLineIndex::new(src);
+        let program = extract_program(root.syntax(), src);
+
+        /// The line a node STARTS on — what a wrong extraction would
+        /// have used. Every assertion below states that the extracted
+        /// value is something else.
+        #[track_caller]
+        fn node_line(node: &SyntaxNode, index: &TextLineIndex) -> u32 {
+            index.line_col(node.text_range().start).0
+        }
+
+        let mut items = root.items();
+        let TopView::Alphabet(alphabet_view) = items.next().expect("first item") else {
+            panic!("expected an ALPHABET");
+        };
+        let TopView::Reuse(routine_view) = items.next().expect("second item") else {
+            panic!("expected a REUSE");
+        };
+        let TopView::Reuse(graph_view) = items.next().expect("third item") else {
+            panic!("expected a REUSE");
+        };
+        let TopView::Machine(machine_view) = items.next().expect("fourth item") else {
+            panic!("expected a MACHINE");
+        };
+        let world = routine_view.world().expect("the routine carries a world");
+
+        assert_ne!(
+            program.alphabets[0].line,
+            node_line(alphabet_view.syntax(), &index),
+            "the alphabet must carry a doc run above its header"
+        );
+        assert_ne!(
+            program.routines[0].line,
+            node_line(routine_view.syntax(), &index),
+            "the routine must carry a doc run above its header"
+        );
+        assert_ne!(
+            program.graphs[0].line,
+            node_line(graph_view.syntax(), &index),
+            "the graph must carry a doc run above its header"
+        );
+        let machine = program
+            .machine
+            .as_ref()
+            .expect("the fixture declares a machine");
+        assert_ne!(
+            machine.line,
+            node_line(machine_view.syntax(), &index),
+            "the machine must carry a doc run above its header"
+        );
+        assert_ne!(
+            machine.span.start.line,
+            node_line(machine_view.syntax(), &index),
+            "a machine's span starts at its keyword, never at its doc run"
+        );
+        assert_ne!(
+            program.routines[0].states[0].span.start.line,
+            node_line(world.states().next().expect("one state").syntax(), &index),
+            "a state's span starts at its `entry`/`state` header, never at its doc run"
+        );
+        assert_ne!(
+            program.routines[0].grafts[0].line,
+            node_line(world.grafts().next().expect("one graft").syntax(), &index),
+            "the graft must carry a doc run above its header"
+        );
+        assert_ne!(
+            program.routines[0].binds[0].line,
+            node_line(world.binds().next().expect("one bind").syntax(), &index),
+            "the bind must carry a doc run above its header"
+        );
+
+        // The reduced docs themselves must actually have landed — every
+        // `assert_ne!` above would still hold with `doc: None` stamped
+        // everywhere.
+        assert_eq!(
+            program.alphabets[0]
+                .doc
+                .as_ref()
+                .map(|d| d.paragraphs.clone()),
+            Some(vec!["alphabet doc".to_string()])
+        );
+        assert_eq!(
+            program.routines[0]
+                .doc
+                .as_ref()
+                .and_then(|d| d.deprecated.clone()),
+            Some("old".to_string()),
+            "the routine's `[deprecated]` attention line must survive extraction"
+        );
+    }
+
+    /// A declaration's own header tokens may sit on DIFFERENT lines
+    /// from each other — nothing in the grammar forces `alphabet` and
+    /// its name onto one line. `lower_cst` reads `Alphabet::line` and
+    /// `Reuse::line` off the NAME token while reading `col` off the
+    /// HEADER token, and `Graft::line` off the `graft` keyword while
+    /// its span starts at an `entry` prefix; in canonically formatted
+    /// source every one of those pairs shares a line, so a wrong anchor
+    /// is invisible. This fixture splits them so it is not.
+    ///
+    /// Deliberately NOT canonically formatted: `tmt fmt` would rejoin
+    /// every header. It parses — that is all a fixture pinning position
+    /// arithmetic needs.
+    #[test]
+    fn extraction_agrees_when_a_declarations_header_spans_lines() {
+        let src = "alphabet\n\
+                   \x20 ab { '0', '1' }\n\
+                   \n\
+                   export\n\
+                   routine\n\
+                   \x20 r(tape t: ab) {\n\
+                   \x20 entry\n\
+                   \x20 state\n\
+                   \x20   a {\n\
+                   \x20   [*] -> stop;\n\
+                   \x20 }\n\
+                   }\n\
+                   \n\
+                   machine {\n\
+                   \x20 tape main: ab;\n\
+                   \x20 entry\n\
+                   \x20 graft\n\
+                   \x20   r(t = main);\n\
+                   }\n";
+        agrees(src);
+
+        let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
+        // Each pair below is what the split buys: a value read off the
+        // wrong one of the two tokens would differ.
+        assert_eq!(
+            (program.alphabets[0].line, program.alphabets[0].col),
+            (2, 1),
+            "an alphabet's line is its NAME's, its col its `alphabet` keyword's"
+        );
+        assert_eq!(
+            (program.routines[0].line, program.routines[0].col),
+            (6, 1),
+            "a routine's line is its NAME's, its col its `export` prefix's"
+        );
+        let state = &program.routines[0].states[0];
+        assert_eq!(
+            (state.line, state.col, state.span.start.line),
+            (9, 3, 7),
+            "a state's line is its NAME's, its col and span start its `entry` prefix's"
+        );
+        let machine = program
+            .machine
+            .as_ref()
+            .expect("the fixture declares a machine");
+        let graft = &machine.grafts[0];
+        assert_eq!(
+            (graft.line, graft.span.start.line),
+            (17, 16),
+            "a graft's line is its `graft` keyword's, but its span starts at `entry`"
+        );
+    }
+
+    /// `lower_items` recurses into a namespace IN PLACE, depth-first,
+    /// so a declaration written after a namespace block lands after
+    /// that namespace's own contents in every vector of the `Program`
+    /// — and `ns` is a PATH stamped on each declaration, never a prefix
+    /// folded into its name. A per-item append that hoisted namespaces
+    /// to the end, or one that joined the path into the name, still
+    /// produces the right COUNT; the assertions below are on order and
+    /// on `ns`.
+    #[test]
+    fn extraction_walks_namespaces_in_place_and_stamps_the_path() {
+        let src = "namespace outer {\n\
+                   \x20 alphabet inner { '0' }\n\
+                   \n\
+                   \x20 export routine ir(tape t: inner) {\n\
+                   \x20   entry state a {\n\
+                   \x20     [*] -> stop;\n\
+                   \x20   }\n\
+                   \x20 }\n\
+                   \n\
+                   \x20 namespace deep {\n\
+                   \x20   alphabet deeper { '1' }\n\
+                   \x20 }\n\
+                   }\n\
+                   \n\
+                   alphabet last { '2' }\n";
+        agrees(src);
+
+        let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
+        let names: Vec<(&str, Vec<String>)> = program
+            .alphabets
+            .iter()
+            .map(|a| (a.name.as_str(), a.ns.clone()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("inner", vec!["outer".to_string()]),
+                ("deeper", vec!["outer".to_string(), "deep".to_string()]),
+                ("last", Vec::new()),
+            ],
+            "namespace contents come first (depth-first, in place), and `ns` is a path"
+        );
+        assert_eq!(program.routines[0].ns, vec!["outer".to_string()]);
+        assert_eq!(
+            program.routines[0].name, "ir",
+            "the namespace path is stamped alongside the name, never prefixed onto it"
+        );
+    }
+
+    /// Every rule shape in one state, plus the pieces a rule's own
+    /// grammar branches on: both `goto` spellings, `call … then` with a
+    /// binding list and a `with map`, `return`/`stop`/`halt`, a
+    /// wildcard, a range, an `as` binding, a `debugger` flag with and
+    /// without one, `write`/`move` vectors present and absent, a `-`
+    /// keep cell, and a `{…}` substitution — passthrough on a glyph
+    /// binding, and a real fold on a numeric one.
+    ///
+    /// Two shapes are asserted directly rather than left to `agrees`,
+    /// because both are carried by an ABSENCE that a wrong extraction
+    /// could reproduce by accident: `Transition::Stay` (no TRANSITION
+    /// node) and `debugger: false` (no keyword token).
+    #[test]
+    fn extraction_agrees_across_every_rule_shape() {
+        let src = "alphabet ab { '0'..'9', '_' }\n\
+                   \n\
+                   alphabet nm { 0..9 }\n\
+                   \n\
+                   export graph gr(tape t: ab writes { '0'..'5' } preserves { '_' }, state k) {\n\
+                   \x20 entry state a {\n\
+                   \x20   ['0'] -> write ['1'] move [>] goto a;\n\
+                   \x20   ['1'] -> a;\n\
+                   \x20   ['2' as v] -> write [{v}] move [.];\n\
+                   \x20   ['3'..'5'] -> debugger write [-] move [<] return;\n\
+                   \x20   ['6'] -> debugger;\n\
+                   \x20   ['7'] -> call sub::deep(t = t with map { '0'->'1', '2'=>'3' }, k = halt) \
+                   then stop;\n\
+                   \x20   [*] -> halt;\n\
+                   \x20 }\n\
+                   }\n\
+                   \n\
+                   routine num(tape n: nm) {\n\
+                   \x20 entry state a {\n\
+                   \x20   [3 as v] -> write [{(v + 1) % 6}] move [>] goto a;\n\
+                   \x20   [007 as w] -> write [{w - 1}];\n\
+                   \x20   [*] -> stop;\n\
+                   \x20 }\n\
+                   }\n";
+        agrees(src);
+
+        let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
+        let rules = &program.graphs[0].states[0].rules;
+        assert_eq!(rules.len(), 7, "the fixture must keep every rule shape");
+        assert!(
+            matches!(rules[2].transition, Transition::Stay { .. }),
+            "a rule with an action and no written transition extracts as `Stay`: {:?}",
+            rules[2].transition
+        );
+        assert!(
+            !rules[2].debugger && rules[3].debugger && rules[4].debugger,
+            "the fixture must carry `debugger` rules AND non-`debugger` ones"
+        );
+        assert!(
+            matches!(rules[4].transition, Transition::Stay { .. })
+                && rules[4].write.is_none()
+                && rules[4].mov.is_none(),
+            "a bare `-> debugger;` is the action-only `Stay` shape"
+        );
+    }
+
+    /// The prefixes and the qualified names, which no other fixture
+    /// here reaches: `volatile tape`, an `entry graft` that OMITS its
+    /// `as` name (only an entry graft may), a multi-segment `a::b::c`
+    /// reuse target on both a `graft` and a `bind`, and a `use` list
+    /// with an alias.
+    #[test]
+    fn extraction_agrees_on_prefixes_aliases_and_qualified_targets() {
+        let src = "use lib::a, lib::b as c;\n\
+                   \n\
+                   alphabet ab { '0', '_' }\n\
+                   \n\
+                   machine {\n\
+                   \x20 volatile tape dev: ab;\n\
+                   \x20 tape main: ab;\n\
+                   \n\
+                   \x20 entry graft lib::sub::g(t = main);\n\
+                   \n\
+                   \x20 bind lib::sub::r(t = dev) as bd;\n\
+                   }\n";
+        agrees(src);
+
+        let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
+        assert_eq!(program.imports.len(), 2);
+        assert_eq!(program.imports[1].alias.as_deref(), Some("c"));
+        assert_eq!(program.imports[1].path, vec!["lib", "b"]);
+        let machine = program
+            .machine
+            .as_ref()
+            .expect("the fixture declares a machine");
+        assert!(machine.tapes[0].volatile && !machine.tapes[1].volatile);
+        assert!(
+            machine.grafts[0].entry && machine.grafts[0].as_name.is_none(),
+            "an entry graft may omit its instance name"
+        );
+        assert_eq!(
+            machine.grafts[0].target.segments,
+            vec!["lib", "sub", "g"],
+            "a qualified target keeps every segment"
+        );
+        assert_eq!(machine.binds[0].target.segments, vec!["lib", "sub", "r"]);
+    }
+
+    /// Comments live only as trivia in the green tree, so every one of
+    /// them — between declarations, inside a world, inside a rule list,
+    /// inside a bracketed list, riding a `;` — must vanish from the
+    /// extracted `Program` exactly as `lower_cst` drops them.
+    #[test]
+    fn extraction_agrees_with_comments_scattered_through_the_file() {
+        let src = "// leading\n\
+                   alphabet ab { /* interior */ '0', '_' /* after */ }\n\
+                   // between\n\
+                   \n\
+                   machine { // open trailing\n\
+                   \x20 // own line\n\
+                   \x20 tape main: ab; // riding the semicolon\n\
+                   \x20 entry state s {\n\
+                   \x20   // before a rule\n\
+                   \x20   [*] -> stop; // after a rule\n\
+                   \x20 } // after the state\n\
+                   } // after the machine\n\
+                   // trailing\n";
+        agrees(src);
+    }
+
+    /// `prev_end_line` at the level where it IS observable.
+    ///
+    /// `extract_program` equality can NEVER discriminate this argument:
+    /// it feeds only `blank_before`, and `crate::parser::reduce_doc_run`
+    /// folds over `DocRunItem::kind` alone — so a `Program` built with a
+    /// hardcoded `0` is byte-identical to a correct one. This test
+    /// therefore compares extraction's own [`extract_doc_items`] against
+    /// the C1 `doc_run` directly, which is the only place the value
+    /// surfaces.
+    ///
+    /// Three cases, because one alone under-determines the rule:
+    /// abutting a preceding declaration (`0` fails), abutting a
+    /// preceding COMMENT (reading the preceding SIBLING NODE's end
+    /// instead of the last non-whitespace content fails — the comment is
+    /// trivia, not a sibling), and a genuine blank line (a rule that
+    /// always answered `false` fails).
+    #[test]
+    fn extracted_doc_items_agree_with_lower_cst_on_the_runs_first_blank_before() {
+        #[track_caller]
+        fn check(src: &str, expect_blank_before: bool) {
+            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+            let TopKind::Alphabet(second) = &cst.items[cst.items.len() - 1].kind else {
+                panic!("expected the last item to be an alphabet");
+            };
+            let c1 = second.doc_run.clone();
+            assert!(!c1.is_empty(), "fixture must bind a doc run");
+            assert_eq!(
+                c1[0].blank_before, expect_blank_before,
+                "fixture does not exercise the case it claims: {src}"
+            );
+
+            let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
+                .expect("root is ROOT");
+            let index = TextLineIndex::new(src);
+            let TopView::Alphabet(view) = root.items().last().expect("a last item") else {
+                panic!("expected the last item to be an ALPHABET");
+            };
+            let run = view.doc_run().expect("the alphabet carries a doc run");
+            assert_eq!(extract_doc_items(&run, src, &index), c1, "for:\n{src}");
+        }
+
+        check("alphabet a { '0' }\n? doc\nalphabet b { '0' }\n", false);
+        check(
+            "alphabet a { '0' }\n// note\n? doc\nalphabet b { '0' }\n",
+            false,
+        );
+        check("alphabet a { '0' }\n\n? doc\nalphabet b { '0' }\n", true);
+    }
+
+    /// The ONE shape where [`prev_end_line`]'s source scan disagrees
+    /// with `lower_cst`, measured rather than asserted from reading:
+    /// a MULTI-LINE block comment riding the same line as a `;` is
+    /// claimed by `Parser::take_trailing`, the one comment-capturing
+    /// helper that does NOT advance `prev_end_line` past the comment.
+    ///
+    /// This test records both halves of that measurement: the raw doc
+    /// items differ on exactly `blank_before`, and the extracted
+    /// `Program` is nonetheless identical — because `reduce_doc_run`
+    /// never reads that field. If a later change makes `blank_before`
+    /// reach the `Program`, the second assertion here starts failing
+    /// and this becomes a real bug to fix rather than a recorded gap.
+    #[test]
+    fn a_block_comment_riding_a_semicolon_diverges_on_blank_before_only() {
+        let src = "use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n";
+
+        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+        let TopKind::Alphabet(alphabet) = &cst.items[1].kind else {
+            panic!("expected the second item to be an alphabet");
+        };
+        let c1 = alphabet.doc_run.clone();
+
+        let root =
+            RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
+        let index = TextLineIndex::new(src);
+        let TopView::Alphabet(view) = root.items().last().expect("a last item") else {
+            panic!("expected the last item to be an ALPHABET");
+        };
+        let green = extract_doc_items(&view.doc_run().expect("a doc run"), src, &index);
+
+        assert_ne!(
+            green[0].blank_before, c1[0].blank_before,
+            "the measured divergence is gone — re-derive `prev_end_line`'s doc comment"
+        );
+        assert_eq!(
+            green.len(),
+            c1.len(),
+            "only `blank_before` diverges; the items themselves do not"
+        );
+        agrees(src);
     }
 
     /// Sanity check on the fixtures above: `lower_cst` and the green

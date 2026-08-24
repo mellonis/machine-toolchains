@@ -828,6 +828,14 @@ impl GraftView {
     pub fn bindings(&self) -> impl Iterator<Item = BindingArgView> + '_ {
         children(self.syntax())
     }
+
+    /// The doc run this declaration retro-wraps, when one was written.
+    /// `child` finds it by KIND, not by position, so the SYM_MAP and
+    /// BINDING_ARG children a graft also carries can never be mistaken
+    /// for one.
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
+    }
 }
 
 /// `BIND`'s own header IDENTs, in document order — direct child IDENT
@@ -877,6 +885,12 @@ impl BindView {
     /// This bind's own binding arguments, in document order.
     pub fn bindings(&self) -> impl Iterator<Item = BindingArgView> + '_ {
         children(self.syntax())
+    }
+
+    /// The doc run this declaration retro-wraps, when one was written —
+    /// mirrors `GraftView::doc_run`.
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
     }
 }
 

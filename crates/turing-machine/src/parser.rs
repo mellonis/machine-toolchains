@@ -1550,20 +1550,7 @@ impl Parser<'_> {
         let (name, name_span) = self.name("an alphabet name")?;
         let brace = self.expect(&TokenKind::LBrace, "`{` to open the alphabet body")?;
         let open_trailing = self.capture_open_trailing(brace.line);
-        let mut elems: Vec<AlphabetElem> = Vec::new();
-        let mut interior: Vec<(usize, Comment)> = Vec::new();
-        if !matches!(self.peek().kind, TokenKind::RBrace) {
-            loop {
-                self.interior_comments(elems.len(), &mut interior);
-                elems.push(self.alphabet_elem()?);
-                match self.peek().kind {
-                    TokenKind::Comma => self.bump(),
-                    TokenKind::RBrace => break,
-                    _ => return Err(Self::expected(self.peek(), "`,` or `}`")),
-                }
-            }
-        }
-        self.interior_comments(elems.len(), &mut interior);
+        let (elems, interior) = self.alphabet_elems()?;
         let close = self.expect(&TokenKind::RBrace, "`}` to close the alphabet body")?;
         self.prev_end_line = close.line;
         let close_trailing = self.capture_close_trailing(close.line);
@@ -1583,6 +1570,35 @@ impl Parser<'_> {
             open_trailing,
             close_trailing,
         })
+    }
+
+    /// An alphabet body's element loop, from just past the opening `{`
+    /// up to (not consuming) the closing `}` — the elements themselves
+    /// and the list's own interior comments. Split out of
+    /// [`Self::parse_alphabet`] so [`reparse_alphabet_elems`] runs this
+    /// exact loop rather than a second copy of it: the comma/`}`
+    /// separator rule and the "a comment after the last element still
+    /// gets a home" final drain are grammar decisions with one owner
+    /// (docs/tmt/fmt.md (comments inside a list)). An empty body (`{ }`)
+    /// skips the loop and yields no elements, which is why the
+    /// `RBrace` pre-check sits inside here rather than at the call
+    /// site.
+    fn alphabet_elems(&mut self) -> Result<(Vec<AlphabetElem>, InteriorComments), CompileError> {
+        let mut elems: Vec<AlphabetElem> = Vec::new();
+        let mut interior: InteriorComments = Vec::new();
+        if !matches!(self.peek().kind, TokenKind::RBrace) {
+            loop {
+                self.interior_comments(elems.len(), &mut interior);
+                elems.push(self.alphabet_elem()?);
+                match self.peek().kind {
+                    TokenKind::Comma => self.bump(),
+                    TokenKind::RBrace => break,
+                    _ => return Err(Self::expected(self.peek(), "`,` or `}`")),
+                }
+            }
+        }
+        self.interior_comments(elems.len(), &mut interior);
+        Ok((elems, interior))
     }
 
     fn alphabet_elem(&mut self) -> Result<AlphabetElem, CompileError> {
@@ -2946,11 +2962,10 @@ impl Parser<'_> {
 /// (`crate::syntax::extract::sig_tokens`'s own output) — `sink: None`,
 /// since a reparse shim never re-emits a green tree, only a value.
 /// Shared by every `reparse_*` shim below so the field list lives once.
-/// No `#[allow(dead_code)]` of its own: every `reparse_*` shim below
-/// keeps its own allow, and rustc's dead-code pass treats an
-/// allow-marked item as a live root for reachability — everything an
-/// allowed function calls (this one included) counts as used through
-/// it, so a second allow here would suppress nothing.
+/// No `#[allow(dead_code)]` of its own, and none needed: all but one of
+/// the shims below are live callees of
+/// `crate::syntax::extract::extract_program`, so this is reachable from
+/// real code.
 fn bare_parser(tokens: &[Token]) -> Parser<'_> {
     Parser {
         tokens,
@@ -2981,7 +2996,6 @@ fn bare_parser(tokens: &[Token]) -> Parser<'_> {
 /// itself from that `None`; this shim only ever runs for the other
 /// five (`Goto` in both its `explicit` spellings, `Call`, `Return`,
 /// `Stop`, `Halt`).
-#[allow(dead_code)]
 pub(crate) fn reparse_transition(tokens: &[Token]) -> Transition {
     bare_parser(tokens)
         .transition()
@@ -2996,12 +3010,89 @@ pub(crate) fn reparse_transition(tokens: &[Token]) -> Transition {
 /// list wrapper (the `(`/`)` are its parent GRAFT/BIND's own tokens), so
 /// the reparse unit is one argument at a time, mirroring
 /// `Parser::sig_param`'s identical shape.
-#[allow(dead_code)]
 pub(crate) fn reparse_binding_arg(tokens: &[Token]) -> BindingArg {
     bare_parser(tokens)
         .binding_arg()
         .expect("reparse_binding_arg: extraction only ever runs on an already-parsed tree")
         .0
+}
+
+/// Retokenization reuse shim for an ALPHABET node: re-parses its
+/// element list through [`Parser::alphabet_elems`], the same production
+/// `parse_alphabet` itself runs.
+///
+/// Takes the WHOLE declaration's token run and walks to just past its
+/// first `{`, rather than asking the caller to slice the body out. That
+/// run is `DocLine|AttentionLine* export? alphabet NAME { … }` — the
+/// node retro-wraps its bound doc run, so those lines are part of it —
+/// and NEITHER prefix can carry an `LBrace`: a `?`/`!` line lexes to
+/// one whole-line token, never a brace, and the header is exactly
+/// `export? alphabet NAME`. So the first `LBrace` in the run is always
+/// the body's opener. Doing the slice here rather than at the call site
+/// keeps "where an alphabet body begins" next to the production that
+/// decides it.
+pub(crate) fn reparse_alphabet_elems(tokens: &[Token]) -> Vec<AlphabetElem> {
+    let mut p = bare_parser(tokens);
+    while !matches!(p.peek().kind, TokenKind::LBrace | TokenKind::Eof) {
+        p.bump();
+    }
+    p.bump(); // `{`
+    p.alphabet_elems()
+        .expect("reparse_alphabet_elems: extraction only ever runs on an already-parsed tree")
+        .0
+}
+
+/// Retokenization reuse shim for a RULE's own pattern: re-parses it
+/// through [`Parser::pattern`]. Unlike every other shim here the input
+/// is not a node's token run — a pattern is deliberately unbracketed
+/// (`crate::syntax::kinds`'s own module doc: mandatory and first, so
+/// nothing optional has to be decided to find it) — so the caller
+/// supplies the `[` … `]` token slice instead
+/// (`crate::syntax::views::RuleView::pattern_tokens`).
+pub(crate) fn reparse_pattern(tokens: &[Token]) -> Pattern {
+    bare_parser(tokens)
+        .pattern()
+        .expect("reparse_pattern: extraction only ever runs on an already-parsed tree")
+        .0
+}
+
+/// Retokenization reuse shim for a RULE's own WRITE_VEC node:
+/// re-parses it through [`Parser::write_vec`]. The node's tokens
+/// already start at `[`, not at the `write` keyword its caller
+/// consumed — `crate::syntax::kinds`'s own module doc records why (the
+/// node's extent is chosen to match `WriteVec::span` exactly) — which
+/// is where that production expects to begin.
+pub(crate) fn reparse_write_vec(tokens: &[Token]) -> WriteVec {
+    bare_parser(tokens)
+        .write_vec()
+        .expect("reparse_write_vec: extraction only ever runs on an already-parsed tree")
+        .0
+}
+
+/// Retokenization reuse shim for a RULE's own MOVE_VEC node:
+/// re-parses it through [`Parser::move_vec`] — the same `[`-opening
+/// extent rule as [`reparse_write_vec`].
+pub(crate) fn reparse_move_vec(tokens: &[Token]) -> MoveVec {
+    bare_parser(tokens)
+        .move_vec()
+        .expect("reparse_move_vec: extraction only ever runs on an already-parsed tree")
+        .0
+}
+
+/// Retokenization reuse shim for a GRAFT/BIND target: re-parses it
+/// through [`Parser::qual_name`], so the `::` walk and the
+/// first-segment-start → last-segment-end span join stay in the parser.
+///
+/// A qualified name has no node of its own (`IDENT (:: IDENT)*` sits
+/// directly under GRAFT/BIND), so the caller supplies a token slice.
+/// That slice may run PAST the name — `qual_name` continues only while
+/// the next token is `::`, so it stops of its own accord at the `(`
+/// that always follows a target — which means a caller need only skip
+/// the header keywords, never find the name's end.
+pub(crate) fn reparse_qual_name(tokens: &[Token]) -> QualName {
+    bare_parser(tokens)
+        .qual_name("a reuse target")
+        .expect("reparse_qual_name: extraction only ever runs on an already-parsed tree")
 }
 
 /// Retokenization reuse shim for a BINDING_ARG's own SYM_MAP node:
@@ -3010,6 +3101,15 @@ pub(crate) fn reparse_binding_arg(tokens: &[Token]) -> BindingArg {
 /// `crate::syntax::kinds`'s own module doc records why (the node's
 /// extent is chosen to match `SymMap::span` exactly) — which is
 /// exactly where `Parser::sym_map` expects to begin.
+///
+/// The one shim here that keeps its `#[allow(dead_code)]`: extraction
+/// never calls it, because a map is reached through the argument that
+/// owns it and [`reparse_binding_arg`] parses `with map { … }` as part
+/// of the argument's own value. It stays because a SYM_MAP node is
+/// separately addressable (a language service asking about one map, not
+/// the whole argument, is the case it exists for), and its fidelity
+/// test in `crate::syntax::extract`'s own test module holds
+/// `Parser::sym_map` reachable from a green node independently of that.
 #[allow(dead_code)]
 pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
     bare_parser(tokens)
@@ -3022,7 +3122,6 @@ pub(crate) fn reparse_sym_map(tokens: &[Token]) -> SymMap {
 /// re-parses it through `Parser::sig_param`. Covers both shapes the
 /// production itself branches on — `Tape` (with its optional
 /// `writes`/`preserves` clauses) and the plain `State` parameter.
-#[allow(dead_code)]
 pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
     bare_parser(tokens)
         .sig_param()
@@ -3057,7 +3156,6 @@ pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
 /// `reparse_item(tokens, in_group)`, whose `in_group` flag is the same
 /// shape of caller-supplied context an isolated retokenized node
 /// cannot recover on its own.
-#[allow(dead_code)]
 pub(crate) fn reparse_doc_items(tokens: &[Token], prev_end_line: u32) -> Vec<DocRunItem> {
     let mut p = bare_parser(tokens);
     p.prev_end_line = prev_end_line;
