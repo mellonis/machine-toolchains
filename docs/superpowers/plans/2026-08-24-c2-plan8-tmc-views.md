@@ -312,7 +312,7 @@ Accessors walk direct children of the view's own node. Read the sibling's for th
 Two `.tmc` specifics:
 
 - **`glyph_tokens` must not descend.** An alphabet's glyphs are its own direct `GLYPH` tokens; a nested structure is not possible here, but writing it as a descendant walk would silently start picking up glyphs from elsewhere if the grammar ever nests. Walk direct children.
-- **`exported` is the presence of an `export` keyword token before the `alphabet` keyword.** It is an `IDENT` at the token level — contextual keywords are ordinary identifiers in this lexer — so match on the text, and say so in a comment.
+- **`exported` is the presence of an `export` keyword token before the `alphabet` keyword.** It is an `IDENT` at the token level: this lexer has NO keyword token kind at all, so every word in the language — reserved or not — arrives as an ordinary identifier, and the parser is the one place that refuses reserved words where a name is expected. Match on the text, and say that in a comment. Do NOT call `export` a *contextual* keyword: it is one of the 27 fully-reserved words in `lexer::RESERVED`, and the language's only contextual word is the `deprecated` attribute name.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -402,7 +402,7 @@ Expected: FAIL to compile.
 
 - [ ] **Step 3: Write the implementation**
 
-`ReuseKind` is decided by the leading contextual keyword — `routine` or `graph` — which is an `IDENT` token, same as `export`. `world()` returns `Option<WorldView>` rather than panicking: a view's job is to answer what the tree holds, and reporting absence is an answer.
+`ReuseKind` is decided by the leading keyword — `routine` or `graph` — which arrives as an `IDENT` token, same as `export`, because this lexer has no keyword token kind. Both are fully reserved (`lexer::RESERVED`); neither is contextual. Match on the text. `world()` returns `Option<WorldView>` rather than panicking: a view's job is to answer what the tree holds, and reporting absence is an answer.
 
 **Do not add a convenience that skips WORLD.** A `MachineView::tapes()` forwarding through the world would hide the very structure the module doc tells later plans to expect, and the first thing a formatter needs is the real shape.
 
