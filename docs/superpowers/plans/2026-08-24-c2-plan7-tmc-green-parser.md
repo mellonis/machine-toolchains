@@ -531,9 +531,16 @@ class the `.pmc` side spent a plan finding.
 
 **Where to take the checkpoint.** `crates/post-machine/src/parser.rs:1052` is
 the template: PM takes it AFTER the pending-comment drain and BEFORE the
-doc-run block. Taking it at the loop top also produces a retro-wrapping tree,
-but changes which comments attach where — use PM's position so leading-comment
-attachment stays identical.
+doc-run block. Use that position — matching the sibling structurally is the
+reason, and it is a sufficient one.
+
+An earlier draft of this paragraph claimed the loop top would change which
+comments attach where. **That was false**, and it is corrected here so it does
+not propagate: `drain_pending()` moves only `self.cpos`, never `self.pos`, and
+the checkpoint flushes on `self.pos` — so the two positions are provably
+equivalent for the green sink, and moving the checkpoint above the drain leaves
+the whole suite green. Take PM's position for symmetry with the sibling, and do
+not write down a mechanical justification the code does not support.
 
 **Then write the answer into `syntax/mod.rs`'s module doc**, in prose, as what
 it is: a decision and its reason, so a later plan can rely on it without
