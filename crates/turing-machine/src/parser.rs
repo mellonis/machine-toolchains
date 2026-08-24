@@ -1187,9 +1187,22 @@ impl Parser<'_> {
                 }
                 TokenKind::AttentionLine(text) => {
                     let text = text.clone();
+                    // The lexer folds a `! [ident] …` line into ONE
+                    // `AttentionLine` payload (docs/core.md (syntax
+                    // trees)) — `[ident]` is never its own token, so ATTR
+                    // can only ever wrap this single token, never a
+                    // sub-span of it. Whether it does is known only
+                    // after `parse_attr` reads the payload below, i.e.
+                    // after the token is already bumped — hence the
+                    // checkpoint, taken before, to wrap retroactively.
+                    let attr_cp = self.g_checkpoint();
                     self.bump();
                     seen_attention = true;
                     let attr = Self::parse_attr(&text, &t);
+                    if attr.is_some() {
+                        self.g_start_at(attr_cp, TmcKind::Attr);
+                        self.g_finish(); // Attr — wraps the one AttentionLine token
+                    }
                     if let Some(a) = &attr {
                         if a.name == "deprecated" {
                             if seen_deprecated {
@@ -1291,11 +1304,26 @@ impl Parser<'_> {
                     kind: TopKind::Comment(comment),
                 });
             }
+            // Green checkpoint for whichever node this item turns out to
+            // be: taken here, after the pending-comment drain and BEFORE
+            // the doc run (if any) — mirrors PM's `fn_cp` placement
+            // (crates/post-machine/src/parser.rs) so `g_start_at` below
+            // retro-wraps the run, an `export` prefix when present, and
+            // the header onward, all from one checkpoint. A declaration
+            // retro-wraps its bound doc run by design — see this
+            // crate's `syntax` module doc for the decision and its
+            // reasoning (docs/core.md (syntax trees)). Unused only when
+            // this token starts no valid top-level declaration at all;
+            // harmless, a fresh checkpoint is taken every loop
+            // iteration.
+            let cp = self.g_checkpoint();
             let doc_run = if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
+                self.g_flush_start(TmcKind::DocRun);
                 let (run, first_span) = self.doc_run()?;
+                self.g_finish(); // DocRun
                 if !self.next_is_top_doc_accepting() {
                     return Err(CompileError {
                         span: first_span,
@@ -1323,16 +1351,6 @@ impl Parser<'_> {
             }
             let saved = self.prev_end_line;
             let decl_line = t.line;
-            // Green checkpoint for whichever node this item turns out to
-            // be: taken here, after the (unwrapped, this task) doc run
-            // and before the header token about to be consumed, so
-            // `g_start_at` below wraps exactly the header onward — an
-            // `export` prefix included, when present — never the doc
-            // run (docs/core.md (syntax trees)). Unused whenever this
-            // token starts a production not among this task's six
-            // wrapped kinds; harmless, a fresh checkpoint is taken every
-            // loop iteration.
-            let cp = self.g_checkpoint();
             let kind = match &t.kind {
                 TokenKind::Ident(w) => match w.as_str() {
                     "use" => {
@@ -1347,20 +1365,30 @@ impl Parser<'_> {
                         self.g_finish(); // Alphabet
                         TopKind::Alphabet(a)
                     }
-                    "routine" => TopKind::Reuse(self.parse_reuse(
-                        ReuseCarrier::Routine,
-                        false,
-                        t.span().start,
-                        t.col,
-                        doc_run,
-                    )?),
-                    "graph" => TopKind::Reuse(self.parse_reuse(
-                        ReuseCarrier::Graph,
-                        false,
-                        t.span().start,
-                        t.col,
-                        doc_run,
-                    )?),
+                    "routine" => {
+                        self.g_start_at(cp, TmcKind::Reuse);
+                        let r = self.parse_reuse(
+                            ReuseCarrier::Routine,
+                            false,
+                            t.span().start,
+                            t.col,
+                            doc_run,
+                        )?;
+                        self.g_finish(); // Reuse — closes right after the `}`
+                        TopKind::Reuse(r)
+                    }
+                    "graph" => {
+                        self.g_start_at(cp, TmcKind::Reuse);
+                        let r = self.parse_reuse(
+                            ReuseCarrier::Graph,
+                            false,
+                            t.span().start,
+                            t.col,
+                            doc_run,
+                        )?;
+                        self.g_finish(); // Reuse — closes right after the `}`
+                        TopKind::Reuse(r)
+                    }
                     "namespace" => {
                         self.g_start_at(cp, TmcKind::Namespace);
                         let n = self.parse_namespace(ns, doc_run)?;
@@ -1400,22 +1428,28 @@ impl Parser<'_> {
                                 TopKind::Alphabet(a)
                             }
                             TokenKind::Ident(w2) if w2 == "routine" => {
-                                TopKind::Reuse(self.parse_reuse(
+                                self.g_start_at(cp, TmcKind::Reuse);
+                                let r = self.parse_reuse(
                                     ReuseCarrier::Routine,
                                     true,
                                     export_start,
                                     export_col,
                                     doc_run,
-                                )?)
+                                )?;
+                                self.g_finish(); // Reuse — `export` included
+                                TopKind::Reuse(r)
                             }
                             TokenKind::Ident(w2) if w2 == "graph" => {
-                                TopKind::Reuse(self.parse_reuse(
+                                self.g_start_at(cp, TmcKind::Reuse);
+                                let r = self.parse_reuse(
                                     ReuseCarrier::Graph,
                                     true,
                                     export_start,
                                     export_col,
                                     doc_run,
-                                )?)
+                                )?;
+                                self.g_finish(); // Reuse — `export` included
+                                TopKind::Reuse(r)
                             }
                             _ => {
                                 return Err(Self::expected(
@@ -1604,9 +1638,16 @@ impl Parser<'_> {
         };
         let (name, name_span) = self.name(what)?;
         let (sig, sig_interior) = self.signature()?;
+        // WORLD wraps the `{ … }` body — the shape `machine`/`routine`/
+        // `graph` share (docs/tmt/language.md (worlds)); see the
+        // `syntax` module doc for why it gets its own node kind rather
+        // than folding into REUSE/MACHINE directly. Opened before the
+        // `{` so the brace itself is WORLD's first token.
+        self.g_flush_start(TmcKind::World);
         let brace = self.expect(&TokenKind::LBrace, "`{` to open the body")?;
         let open_trailing = self.capture_open_trailing(brace.line);
         let (items, close_trailing, close_span) = self.world_body(false)?;
+        self.g_finish(); // World — closes right after the closing `}`
         Ok(ReuseCst {
             carrier,
             name,
@@ -1630,9 +1671,13 @@ impl Parser<'_> {
     fn parse_machine(&mut self, doc_run: Vec<DocRunItem>) -> Result<MachineCst, CompileError> {
         let machine_tok = self.peek().clone();
         self.bump(); // `machine`
+        // WORLD wraps the `{ … }` body — see `parse_reuse`'s matching
+        // comment; the same shared shape, no signature to skip over here.
+        self.g_flush_start(TmcKind::World);
         let brace = self.expect(&TokenKind::LBrace, "`{` to open the machine body")?;
         let open_trailing = self.capture_open_trailing(brace.line);
         let (items, close_trailing, close_span) = self.world_body(true)?;
+        self.g_finish(); // World — closes right after the closing `}`
         Ok(MachineCst {
             line: machine_tok.line,
             col: machine_tok.col,
@@ -1811,11 +1856,23 @@ impl Parser<'_> {
                     kind: WorldKind::Comment(comment),
                 });
             }
+            // Green checkpoint for whichever node this item turns out to
+            // be: same placement rule as `top_items`'s `cp` — after the
+            // pending-comment drain, before the doc run (if any) — so
+            // `g_start_at` below retro-wraps the run and an `entry`
+            // prefix, when present, alongside the header. TAPE never
+            // accepts a doc run (`next_is_world_doc_accepting` excludes
+            // it), so this same checkpoint sits at TAPE's own header
+            // token whenever it fires there — no separate checkpoint
+            // needed.
+            let cp = self.g_checkpoint();
             let doc_run = if matches!(
                 self.peek().kind,
                 TokenKind::DocLine(_) | TokenKind::AttentionLine(_)
             ) {
+                self.g_flush_start(TmcKind::DocRun);
                 let (run, first_span) = self.doc_run()?;
+                self.g_finish(); // DocRun
                 if !self.next_is_world_doc_accepting() {
                     return Err(CompileError {
                         span: first_span,
@@ -1844,9 +1901,15 @@ impl Parser<'_> {
                 self.bump();
                 let prefix = Some((entry_tok.span().start, entry_tok.col));
                 if self.at_kw("state") {
-                    WorldKind::State(self.parse_state(true, prefix, doc_run)?)
+                    self.g_start_at(cp, TmcKind::State);
+                    let s = self.parse_state(true, prefix, doc_run)?;
+                    self.g_finish(); // State — `entry` included
+                    WorldKind::State(s)
                 } else if self.at_kw("graft") {
-                    WorldKind::Graft(self.parse_graft(true, prefix, doc_run)?)
+                    self.g_start_at(cp, TmcKind::Graft);
+                    let g = self.parse_graft(true, prefix, doc_run)?;
+                    self.g_finish(); // Graft — `entry` included
+                    WorldKind::Graft(g)
                 } else {
                     return Err(Self::expected(
                         self.peek(),
@@ -1854,11 +1917,20 @@ impl Parser<'_> {
                     ));
                 }
             } else if self.at_kw("state") {
-                WorldKind::State(self.parse_state(false, None, doc_run)?)
+                self.g_start_at(cp, TmcKind::State);
+                let s = self.parse_state(false, None, doc_run)?;
+                self.g_finish(); // State
+                WorldKind::State(s)
             } else if self.at_kw("graft") {
-                WorldKind::Graft(self.parse_graft(false, None, doc_run)?)
+                self.g_start_at(cp, TmcKind::Graft);
+                let g = self.parse_graft(false, None, doc_run)?;
+                self.g_finish(); // Graft
+                WorldKind::Graft(g)
             } else if self.at_kw("bind") {
-                WorldKind::Bind(self.parse_bind(doc_run)?)
+                self.g_start_at(cp, TmcKind::Bind);
+                let b = self.parse_bind(doc_run)?;
+                self.g_finish(); // Bind
+                WorldKind::Bind(b)
             } else if self.at_kw("volatile") {
                 let lead = self.peek().clone();
                 self.bump(); // `volatile`
@@ -1866,14 +1938,20 @@ impl Parser<'_> {
                     return Err(Self::expected(self.peek(), "`tape` after `volatile`"));
                 }
                 if in_machine {
-                    WorldKind::Tape(self.parse_tape(true, lead)?)
+                    self.g_start_at(cp, TmcKind::Tape); // `volatile` included
+                    let tape = self.parse_tape(true, lead)?;
+                    self.g_finish(); // Tape
+                    WorldKind::Tape(tape)
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
                 }
             } else if self.at_kw("tape") {
                 if in_machine {
                     let lead = self.peek().clone();
-                    WorldKind::Tape(self.parse_tape(false, lead)?)
+                    self.g_start_at(cp, TmcKind::Tape);
+                    let tape = self.parse_tape(false, lead)?;
+                    self.g_finish(); // Tape
+                    WorldKind::Tape(tape)
                 } else {
                     return Err(Self::err_at(&t, CompileErrorKind::TapeNotInMachine));
                 }
@@ -1978,8 +2056,10 @@ impl Parser<'_> {
             }
             let saved = self.prev_end_line;
             let rule_line = t.line;
+            self.g_flush_start(TmcKind::Rule);
             let (rule, call_args, map_pairs, pattern_cells, write_cells, move_cells) =
                 self.rule()?;
+            self.g_finish(); // Rule
             let trailing = self.take_trailing(self.prev_end_line);
             let blank_before = rule_line > saved + 1;
             rules.push(RuleItem {

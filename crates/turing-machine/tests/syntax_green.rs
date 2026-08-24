@@ -258,22 +258,36 @@ fn a_use_path_with_an_alias() {
 /// way (only `Comment` itself is mode-gated — `DocLine`/`AttentionLine`
 /// are emitted in both), making `parse` (comment-free) and `parse_green`
 /// (`WithComments`) a fair apples-to-apples comparison on these sources.
+///
+/// Task 5 opens far more nodes on a mid-production error path than Task
+/// 4 did — every one of STATE/GRAFT/BIND/TAPE/REUSE/DOC_RUN/ATTR can be
+/// left open (never `g_finish`ed) when its own production errors out
+/// partway through, a shape none of the original 7 rejecting sources
+/// reach (none of them get past `top_items`). The world-body-reaching
+/// entries below extend the same differential check onto those paths;
+/// each source and its expected code is taken from the existing
+/// `parser::tests` battery, so the code is independently pinned there
+/// too (`tape_declaration_outside_a_machine_is_rejected`,
+/// `state_redirect_form_is_rejected`, `bare_single_tape_pattern_is_rejected`,
+/// `non_entry_graft_needs_a_name`, `dangling_doc_run_is_rejected`).
 #[test]
 fn errors_agree_with_the_cst_path() {
-    // Each rejecting source and the reason, taken from the existing
-    // `parser::tests` battery so the expected code is independently
-    // pinned there too (`machine_cannot_nest_in_a_namespace`,
-    // `reserved_keywords_cannot_name_things`,
-    // `more_than_one_machine_in_a_file_is_rejected_at_parse`, and
-    // `dangling_doc_run_is_rejected`).
     let rejecting = [
-        "namespace n { machine { } }", // unexpected-token
-        "alphabet state { '_' }",      // reserved-name
-        "routine goto() { }",          // reserved-name
-        "use mylib::graph;",           // reserved-name
-        "machine { } machine { }",     // multiple-machines
-        "? orphan\nuse mylib::x;",     // dangling-doc-run
-        "? orphan\n",                  // dangling-doc-run (nothing follows)
+        "namespace n { machine { } }",              // unexpected-token
+        "alphabet state { '_' }",                   // reserved-name
+        "routine goto() { }",                       // reserved-name
+        "use mylib::graph;",                        // reserved-name
+        "machine { } machine { }",                  // multiple-machines
+        "? orphan\nuse mylib::x;",                  // dangling-doc-run
+        "? orphan\n",                               // dangling-doc-run (nothing follows)
+        "routine r() { tape x: bits; }",            // tape-not-in-machine
+        "machine { entry tape t: bits; }",          // "state" or "graft" after "entry"
+        "machine { state s; }",                     // state-redirect
+        "machine { entry state s { * -> stop; } }", // naked-pattern
+        "machine { graft findX(t = work); }",       // graft-needs-name
+        "machine {\n? orphan\ntape t: bits;\n}",    // dangling-doc-run, inside a world body
+        "machine { entry state s {",                // Eof inside a state body
+        "machine {",                                // Eof inside a world body
     ];
     for src in rejecting {
         let cst_err = parse_ast(&lex(src).expect("lexes")).expect_err("rejected on the CST path");
@@ -289,6 +303,11 @@ fn errors_agree_with_the_cst_path() {
         "machine {\n  tape main: ab;\n}\n",
         "namespace a {\n  namespace b {\n    export alphabet ab { '_', 'a' }\n  }\n}\n",
         "use std::binaryNumbers,\n    other::thing;\n",
+        "routine r() {\n  entry state s { [*] -> stop; }\n}\n",
+        "export graph g() {\n  entry state s { [*] -> stop; }\n}\n",
+        "machine {\n  entry graft findX(t = work);\n}\n",
+        "machine {\n  bind findX(t = work) as fx;\n}\n",
+        "machine {\n  ? doc\n  entry state s { [*] -> stop; }\n}\n",
     ];
     for src in accepting {
         assert!(parse_ast(&lex(src).expect("lexes")).is_ok(), "{src}");
@@ -310,6 +329,338 @@ fn empty_and_whitespace_only_source_stay_lossless() {
         let root = SyntaxNode::new_root(tree);
         assert_eq!(root.text(), src, "{src:?} is not lossless");
     }
+}
+
+// ---------------------------------------------------------------------------
+// The remaining containers: WORLD, TAPE, STATE, RULE, GRAFT, BIND, REUSE,
+// DOC_RUN, ATTR — after these, no `.tmc` construct is unstructured.
+// ---------------------------------------------------------------------------
+
+/// The brief's `matches("RULE").count() == 3` plus a textual
+/// `state < first_rule` ordering check would both still pass for a tree
+/// where the three RULEs sit as WORLD-level siblings of STATE rather
+/// than its own children — source order (and the opening-position
+/// ordering the brief checks) survives regardless of nesting depth — or
+/// for a RULE that swallowed the FOLLOWING rule's leading `[` into its
+/// own trailing trivia. Walking WORLD then STATE's actual children and
+/// asserting each RULE's exact `text()` (its own `;` included, the next
+/// rule's leading whitespace excluded) closes both gaps. Expected texts
+/// are located via `find`, not hand-copied, to keep the fixture and its
+/// derivation from silently drifting apart.
+#[test]
+fn a_state_with_three_rules() {
+    let source = "machine {\n  tape main: ab;\n  entry state s {\n\
+         ['b'] -> write ['a'] move [>] goto s;\n\
+         ['a'] ->             move [>] goto s;\n\
+         ['_'] -> stop;\n  }\n}\n";
+    let d = dump(source);
+    assert_eq!(d.matches("RULE").count(), 3, "{d}");
+    let root = parse(source);
+    let machine = root.children().next().expect("a MACHINE child");
+    let world = machine.children().next().expect("a WORLD child of MACHINE");
+    assert_eq!(kind_of(&world), "WORLD");
+    let state = world
+        .children()
+        .find(|c| kind_of(c) == "STATE")
+        .expect("a STATE child of WORLD");
+    assert_eq!(
+        state.text(),
+        "entry state s {\n\
+         ['b'] -> write ['a'] move [>] goto s;\n\
+         ['a'] ->             move [>] goto s;\n\
+         ['_'] -> stop;\n  }"
+    );
+    let rules: Vec<SyntaxNode> = state.children().collect();
+    assert_eq!(rules.len(), 3, "three RULE children of STATE: {source}");
+    for r in &rules {
+        assert_eq!(kind_of(r), "RULE");
+    }
+    // A running cursor, not a fresh `source.find` per marker: rule 0's
+    // own `write ['a']` contains the literal text `['a']` too, so an
+    // unanchored search for rule 1's marker would find rule 0's write
+    // vector instead of rule 1's pattern.
+    let mut cursor = 0usize;
+    let mut next_rule = |marker: &str| -> String {
+        let rel = source[cursor..].find(marker).expect("marker present");
+        let start = cursor + rel;
+        let end = source[start..].find(';').expect("a `;`") + start + 1;
+        cursor = end;
+        source[start..end].to_string()
+    };
+    assert_eq!(rules[0].text(), next_rule("['b']"));
+    assert_eq!(rules[1].text(), next_rule("['a']"));
+    assert_eq!(rules[2].text(), next_rule("['_']"));
+}
+
+/// The brief's `matches("TAPE").count() == 2` says nothing about each
+/// node's own extent — a TAPE that swallowed the following `;` into a
+/// sibling, or that opened one token late, would still count to 2.
+/// Walking WORLD's children and pinning each TAPE's exact `text()`
+/// closes that gap.
+#[test]
+fn a_tape_declaration_is_its_own_node() {
+    let source = "machine {\n  tape main: ab;\n  tape work: ab;\n}\n";
+    let d = dump(source);
+    assert_eq!(d.matches("TAPE").count(), 2, "{d}");
+    let root = parse(source);
+    let machine = root.children().next().expect("a MACHINE child");
+    let world = machine.children().next().expect("a WORLD child");
+    let tapes: Vec<SyntaxNode> = world.children().filter(|c| kind_of(c) == "TAPE").collect();
+    assert_eq!(tapes.len(), 2, "{source}");
+    assert_eq!(tapes[0].text(), "tape main: ab;");
+    assert_eq!(tapes[1].text(), "tape work: ab;");
+}
+
+/// `volatile` is TAPE's own first token when present, the same
+/// retroactive-checkpoint shape `export`/`entry` use elsewhere in this
+/// file. No shipped `.tmc` file exercises a body-level
+/// `volatile tape NAME: ALPHABET;` declaration — the stdlib's own
+/// `volatile tape` occurrences are all the unrelated SIGNATURE-PARAMETER
+/// form (`routine f(volatile tape t: alph) { … }`, a different
+/// production, `sig_param`), so this fixture is the only coverage of
+/// the body-declaration form.
+#[test]
+fn a_volatile_tape_declaration_includes_the_modifier() {
+    let source = "machine {\n  volatile tape sensor: ab;\n}\n";
+    let root = parse(source);
+    let machine = root.children().next().expect("a MACHINE child");
+    let world = machine.children().next().expect("a WORLD child");
+    let tape = world.children().next().expect("a TAPE child");
+    assert_eq!(kind_of(&tape), "TAPE");
+    assert_eq!(tape.text(), "volatile tape sensor: ab;");
+}
+
+/// The brief's `d.contains("DOC_RUN")` plus a DOC_LINE count would both
+/// still pass for a tree where DOC_RUN sits as ALPHABET's SIBLING rather
+/// than its CHILD — precisely the shape Step 1's retro-wrap decision
+/// changes (`crate::syntax`'s module doc). The tree walk below is the
+/// actual test of that decision: ALPHABET is ROOT's first child node,
+/// DOC_RUN is ALPHABET's own first child (not a preceding sibling), and
+/// ALPHABET's own text begins at the run's first token, not at
+/// `alphabet`.
+#[test]
+fn a_doc_run_before_a_declaration() {
+    let source = "? one\n? two\nalphabet ab { '_' }\n";
+    let d = dump(source);
+    assert!(d.contains("DOC_RUN"), "{d}");
+    assert_eq!(d.matches("DOC_LINE").count(), 2, "{d}");
+    let root = parse(source);
+    let alphabet = root.children().next().expect("an ALPHABET child of ROOT");
+    assert_eq!(kind_of(&alphabet), "ALPHABET");
+    let doc_run = alphabet
+        .children()
+        .next()
+        .expect("a DOC_RUN child of ALPHABET — the retro-wrap");
+    assert_eq!(kind_of(&doc_run), "DOC_RUN");
+    assert_eq!(doc_run.text(), "? one\n? two");
+    assert_eq!(alphabet.text(), "? one\n? two\nalphabet ab { '_' }");
+}
+
+/// The brief's `d.contains("ATTENTION_LINE")` passes whether or not
+/// ATTR ever wraps anything — ATTENTION_LINE is the token kind, present
+/// for ANY `!` line, attributed or not. Walking to the ATTR child
+/// directly, and pinning its text to the whole line (the lexer folds
+/// `[deprecated] …` into ONE token payload — `crate::syntax`'s module
+/// doc — so ATTR can only ever wrap that single token, never a
+/// sub-span), is the actual test of the attribute case.
+#[test]
+fn an_attention_line_with_an_attribute() {
+    let source = "? doc\n! [deprecated] use the other one\nalphabet ab { '_' }\n";
+    let root = parse(source);
+    let alphabet = root.children().next().expect("an ALPHABET child");
+    let doc_run = alphabet.children().next().expect("a DOC_RUN child");
+    let attr = doc_run
+        .children()
+        .find(|c| kind_of(c) == "ATTR")
+        .expect("an ATTR child of DOC_RUN");
+    assert_eq!(attr.text(), "! [deprecated] use the other one");
+}
+
+/// A plain attention line — no `[ident]` prefix — never gets an ATTR
+/// wrap: `parse_attr` returns `None`, so the retroactive checkpoint
+/// taken at its site is simply never used (harmless, same as any other
+/// unused checkpoint in this parser). The positive fixture above cannot
+/// show this by itself: it only proves ATTR appears when an attribute
+/// IS present, not that it is absent when one is not.
+#[test]
+fn a_plain_attention_line_has_no_attr_node() {
+    let source = "! plain prose, no brackets\nalphabet ab { '_' }\n";
+    let root = parse(source);
+    let alphabet = root.children().next().expect("an ALPHABET child");
+    let doc_run = alphabet.children().next().expect("a DOC_RUN child");
+    assert!(
+        doc_run.children().all(|c| kind_of(&c) != "ATTR"),
+        "no ATTR expected for an attribute-less attention line: {}",
+        doc_run.text()
+    );
+}
+
+/// WORLD spans the whole brace-delimited body — braces included — the
+/// shared shape `machine`/`routine`/`graph` all funnel through
+/// `world_body`. MACHINE's own text is exactly `machine` followed by
+/// WORLD's, with nothing in between swallowed or dropped.
+#[test]
+fn world_spans_the_whole_brace_delimited_body() {
+    let source = "machine {\n  tape main: ab;\n}\n";
+    let root = parse(source);
+    let machine = root.children().next().expect("a MACHINE child");
+    let world = machine.children().next().expect("a WORLD child of MACHINE");
+    assert_eq!(kind_of(&world), "WORLD");
+    assert_eq!(world.text(), "{\n  tape main: ab;\n}");
+    assert_eq!(machine.text(), format!("machine {}", world.text()));
+}
+
+/// REUSE wraps `export`, a bound doc run, the signature, and WORLD, all
+/// from ONE checkpoint — the same retro-wrap/`export`-inclusion
+/// mechanism already proven for ALPHABET (`nested_namespaces`), now on
+/// the shape ALPHABET's own fixtures can't exercise: a signature
+/// between the name and the body.
+#[test]
+fn a_documented_exported_routine_wraps_its_doc_run_and_signature() {
+    let source =
+        "? does a thing\nexport routine r(tape t: ab) {\n  entry state s { [*] -> stop; }\n}\n";
+    let root = parse(source);
+    let reuse = root.children().next().expect("a REUSE child of ROOT");
+    assert_eq!(kind_of(&reuse), "REUSE");
+    let doc_run = reuse
+        .children()
+        .next()
+        .expect("a DOC_RUN child of REUSE — the retro-wrap");
+    assert_eq!(kind_of(&doc_run), "DOC_RUN");
+    assert_eq!(doc_run.text(), "? does a thing");
+    assert!(
+        reuse
+            .text()
+            .starts_with("? does a thing\nexport routine r(tape t: ab) {"),
+        "{}",
+        reuse.text()
+    );
+    let world = reuse
+        .children()
+        .find(|c| kind_of(c) == "WORLD")
+        .expect("a WORLD child of REUSE");
+    assert_eq!(world.text(), "{\n  entry state s { [*] -> stop; }\n}");
+}
+
+/// `entry` is GRAFT's own first token when present — mirrors STATE's
+/// `entry` inclusion, on the sibling production the brief's own STATE
+/// fixture doesn't exercise.
+#[test]
+fn an_entry_graft_includes_the_entry_keyword() {
+    let source = "machine {\n  entry graft findX(t = work);\n}\n";
+    let root = parse(source);
+    let machine = root.children().next().expect("a MACHINE child");
+    let world = machine.children().next().expect("a WORLD child");
+    let graft = world
+        .children()
+        .find(|c| kind_of(c) == "GRAFT")
+        .expect("a GRAFT child");
+    assert_eq!(graft.text(), "entry graft findX(t = work);");
+}
+
+/// BIND is its own node, `bind` keyword through `;` inclusive — never
+/// `entry`-prefixed (the grammar has no `entry bind` form), so unlike
+/// GRAFT/STATE it always opens at its own first token.
+#[test]
+fn a_bind_declaration_is_its_own_node() {
+    let source = "machine {\n  bind findX(t = work) as fx;\n}\n";
+    let root = parse(source);
+    let machine = root.children().next().expect("a MACHINE child");
+    let world = machine.children().next().expect("a WORLD child");
+    let bind = world
+        .children()
+        .find(|c| kind_of(c) == "BIND")
+        .expect("a BIND child");
+    assert_eq!(bind.text(), "bind findX(t = work) as fx;");
+}
+
+/// Step 1's decision is that a declaration retro-wraps its bound doc
+/// run — proven at file/namespace level by `a_doc_run_before_a_declaration`
+/// and `a_documented_exported_routine_wraps_its_doc_run_and_signature`,
+/// BOTH of which only exercise `top_items`'s checkpoint. `world_body` has
+/// its own, separately-taken checkpoint for the identical mechanism one
+/// level down, and nothing above pins it: deleting `world_body`'s
+/// DOC_RUN wrap entirely, or moving ITS `cp` back below the doc-run
+/// block, would leave every other test in this file green (the tokens
+/// are still mirrored by `bump()`, the tree stays lossless, and
+/// `errors_agree_with_the_cst_path`'s one world-body-doc-run fixture
+/// only asserts that both parse paths ACCEPT the source, not what shape
+/// either tree takes). This test is the missing pin: STATE's own first
+/// child must be DOC_RUN, not a preceding sibling.
+#[test]
+fn a_doc_run_before_a_world_body_state_retro_wraps_into_it() {
+    let source = "machine {\n  ? doc\n  entry state s { [*] -> stop; }\n}\n";
+    let root = parse(source);
+    let machine = root.children().next().expect("a MACHINE child");
+    let world = machine.children().next().expect("a WORLD child");
+    let state = world
+        .children()
+        .find(|c| kind_of(c) == "STATE")
+        .expect("a STATE child of WORLD");
+    let doc_run = state
+        .children()
+        .next()
+        .expect("a DOC_RUN child of STATE — the retro-wrap, one level below top_items");
+    assert_eq!(kind_of(&doc_run), "DOC_RUN");
+    assert_eq!(doc_run.text(), "? doc");
+    // STATE's own extent, derived from the source rather than hand-typed
+    // (the earlier `a_state_with_three_rules` transcription slip is the
+    // reason): starts at `? doc` (the checkpoint precedes it), ends at
+    // this state's own closing `}` — the `\n  ` between `? doc` and
+    // `entry` is flushed into WORLD before `g_start_at(cp, State)` runs,
+    // then pulled in retroactively along with everything else since the
+    // checkpoint, so it lands inside STATE too.
+    let doc_start = source.find("? doc").expect("marker present");
+    let marker = "stop; }";
+    let state_close = source.find(marker).expect("marker present") + marker.len();
+    assert_eq!(state.text(), &source[doc_start..state_close]);
+}
+
+/// The brief's four goldens plus this task's own additions leave several
+/// dispatch sites with no assertion at all: plain (non-`export`)
+/// `routine`/`graph` REUSE, `export graph` (only `export routine` is
+/// assertion-pinned, by `a_documented_exported_routine_…` above), and
+/// plain (non-`entry`) `state`/`graft`. One library-file fixture,
+/// exercising all five at once, closes the gap cheaper than five
+/// separate tests would.
+#[test]
+fn plain_and_exported_reuse_sites_carry_plain_states_and_grafts() {
+    let source = "routine r() {\n  state s { [*] -> stop; }\n  graft findX(t = work) as fx;\n}\n\
+                  graph g() {\n  state s { [*] -> stop; }\n  graft findX(t = work) as fx;\n}\n\
+                  export graph eg() {\n  state s { [*] -> stop; }\n}\n";
+    let root = parse(source);
+    let reuses: Vec<SyntaxNode> = root.children().collect();
+    assert_eq!(reuses.len(), 3, "{source}");
+    for r in &reuses[..2] {
+        assert_eq!(kind_of(r), "REUSE");
+        let world = r
+            .children()
+            .find(|c| kind_of(c) == "WORLD")
+            .expect("a WORLD child");
+        let state = world
+            .children()
+            .find(|c| kind_of(c) == "STATE")
+            .expect("a plain STATE child");
+        assert_eq!(state.text(), "state s { [*] -> stop; }");
+        let graft = world
+            .children()
+            .find(|c| kind_of(c) == "GRAFT")
+            .expect("a plain GRAFT child");
+        assert_eq!(graft.text(), "graft findX(t = work) as fx;");
+    }
+    assert!(reuses[0].text().starts_with("routine r()"));
+    assert!(reuses[1].text().starts_with("graph g()"));
+    // `export graph` — the one REUSE dispatch site the tests above never
+    // touch (`export routine` is pinned by
+    // `a_documented_exported_routine_wraps_its_doc_run_and_signature`,
+    // plain `routine`/`graph` just above): `export` must be included in
+    // REUSE's own extent, the same inclusion ALPHABET already proved for
+    // `export alphabet`.
+    assert_eq!(kind_of(&reuses[2]), "REUSE");
+    assert_eq!(
+        reuses[2].text(),
+        "export graph eg() {\n  state s { [*] -> stop; }\n}"
+    );
 }
 
 /// The law over every `.tmc` the repo ships, including the flagship
