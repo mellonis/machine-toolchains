@@ -102,9 +102,12 @@
 //! alone, so no value of that field changes a `Program` — and it is
 //! pinned one level down in `extract.rs`'s own tests instead;
 //! `tests/syntax_parity.rs`'s module doc names the divergences.
-//! Nothing production-side calls `extract_program` yet; whichever plan
-//! routes a real consumer onto it is the plan that has to keep both
-//! halves of this oracle green, not just the corpus half.
+//! `extract_program` now has a production consumer: `compiler::analyze`
+//! and `compiler::analyze_staged`, the `.tmc` compiler front, both build
+//! their `Program` through it. Both halves of this oracle —
+//! `tests/syntax_parity.rs`'s corpus sweep and `tests/tmc_property.rs`'s
+//! generated-program sweep — are therefore regression gates under live
+//! code now, not plan artifacts a future consumer might someday need.
 
 mod emit;
 pub(crate) mod extract;

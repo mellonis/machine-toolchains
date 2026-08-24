@@ -1255,13 +1255,21 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
 pub(crate) struct TmcStagedAnalysis {
     /// WithComments token stream — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
-    /// The lossless CST — `None` if lexing or parsing failed. INTERIM: the
-    /// `.tmc` language service still reads this tree (`lsp/mod.rs`,
-    /// `lsp/quickfix.rs`), so `parse_cst` runs here as a side artifact
-    /// alongside the green parse that produces `program`; that means this
-    /// field, and the double parse feeding it, are scaffolding, not a design
-    /// choice — both go away once the language service reads the green
-    /// tree's typed views instead.
+    /// The lossless CST — `None` if lexing or the green parse failed, and
+    /// (release builds only) also if `parse_cst` diverges from a green
+    /// parse that just succeeded, a combination the `debug_assert!` beside
+    /// its construction makes unreachable everywhere else. `cst: None`
+    /// alongside `program: Some` did not exist before `program` moved onto
+    /// the green tree, when both fields came from one infallible
+    /// `lower_cst(&cst)` step; both current consumers already degrade to
+    /// "no CST-backed answer" rather than panicking on it
+    /// (`lsp/mod.rs`'s `document_symbols` via `?`, `lsp/quickfix.rs`'s
+    /// `fatal_actions` via `.and_then`). INTERIM: the `.tmc` language
+    /// service still reads this tree (`lsp/mod.rs`, `lsp/quickfix.rs`), so
+    /// `parse_cst` runs here as a side artifact alongside the green parse
+    /// that produces `program`; that means this field, and the double parse
+    /// feeding it, are scaffolding, not a design choice — both go away once
+    /// the language service reads the green tree's typed views instead.
     pub cst: Option<Cst>,
     /// The flat program, extracted from the green tree — present whenever
     /// the green parse succeeded, retained even when the resolve stage then
@@ -1320,12 +1328,16 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
             };
         }
     };
-    // `.ok()`, not `expect`: acceptance parity between `parse_cst` and the
-    // green parse (pinned over the shipped corpus and a broken set by
-    // `tests/tmc_green_analyze.rs`) makes this `Some` whenever the green
-    // parse just succeeded above — and if that parity ever broke, the
-    // language service should lose its CST-backed tier rather than take the
-    // whole staged pipeline down.
+    // `.ok()`, not `expect`: `parse_cst` and `parse_green_from_tokens`
+    // build the identical `Parser` value over the identical `tokens` slice
+    // and run the same `.file()` walk, differing only in a purely-recording
+    // green sink that never gates acceptance or an error (`parser.rs`) — so
+    // `parse_cst` succeeding here whenever the green parse just succeeded
+    // above is a structural invariant, not a tested coincidence. `.ok()`
+    // rather than `.unwrap()` is only the release-build fallback if that
+    // invariant is ever broken by a future edit: the language service
+    // should lose its CST-backed tier rather than take the whole staged
+    // pipeline down.
     let cst = parse_cst(&tokens).ok();
     debug_assert!(
         cst.is_some(),
