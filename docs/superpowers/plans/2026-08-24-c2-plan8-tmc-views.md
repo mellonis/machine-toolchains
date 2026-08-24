@@ -573,7 +573,32 @@ git commit -m "feat(turing-machine): bracket the .tmc constructs extraction must
 
 **Interfaces:**
 - Consumes: Tasks 1-3.
-- Produces: `StateView::{name_token, is_entry, rules, doc_run}`, `RuleView::{pattern_tokens, write_tokens, move_tokens, transition_tokens}`, `GraftView::{target_token, is_entry, as_name, bindings}`, `BindView::{target_token, as_name, bindings}`, `DocRunView::{doc_lines, attention_lines, attrs}`, `AttrView::name_token`.
+- Produces: `StateView::{name_token, is_entry, rules, doc_run}`, `RuleView::{pattern_tokens, write_vec, move_vec, transition}`, `GraftView::{target_token, is_entry, as_name, bindings}`, `BindView::{target_token, as_name, bindings}`, `DocRunView::{doc_lines, attention_lines, attrs}`, `AttrView::line_token`.
+
+**Task 3b changed this task's shape — read this before Step 1.** Three of the
+constructs this task was going to expose as flat token runs are now nodes, and
+one accessor it named cannot exist at all.
+
+- `write_tokens`/`move_tokens`/`transition_tokens` become typed child-node
+  accessors: `write_vec() -> Option<WriteVecView>`, `move_vec() -> Option<MoveVecView>`,
+  `transition() -> Option<TransitionView>`. `pattern_tokens` STAYS token-based —
+  a pattern is positionally first and mandatory, so the derivation gave it no
+  node kind.
+- **`transition()` returning `None` IS `Transition::Stay`**, not an error and not
+  a missing feature. An omitted transition means "stay in the current state", and
+  the absence of the node is the only thing in the tree that carries it. Say so at
+  the definition site; a later reader will otherwise "fix" it into a panic.
+- **`AttrView::name_token` cannot exist.** The lexer folds a whole `! [ident] …`
+  line into ONE `AttentionLine` token, so `[deprecated]` is never its own token
+  and ATTR wraps exactly that single token. Expose `line_token()` instead, and
+  get the attribute NAME by calling the parser's own `parse_attr` over the
+  payload — widen it to `pub(crate)` if needed. Do NOT do string surgery in the
+  view: that is the duplication this whole layer exists to avoid.
+- Some accessors already landed in task 3b, because its by-value assertions
+  needed them: `ReuseView::params`, `SigParamView::{volatile, kind, name_token,
+  alphabet_token, contract_clauses}`, `ContractClauseView::keyword_token`,
+  `BindingArgView::{name_token, sym_map}`. Do not re-add them; do check they are
+  tested by value.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -604,20 +629,31 @@ fn states_expose_entry_and_their_rules() {
     assert_eq!(states[1].rules().count(), 1);
 }
 
-/// A doc run's lines, split by sigil, and the attribute an attention
-/// line may carry.
+/// A doc run's three direct-child shapes, which are NOT interchangeable:
+/// `?` lines are DOC_LINE tokens; a `! [ident] …` line is folded by the
+/// lexer into one ATTENTION_LINE token that ATTR then wraps; a bare-prose
+/// `!` line carries no `[ident]`, so no ATTR is emitted and its token
+/// stays a direct child. `attention_lines` means the bare ones — an
+/// implementation returning every ATTENTION_LINE, tagged ones included,
+/// must fail this test, which is why the fixture carries one of each.
 #[test]
 fn doc_runs_split_their_lines_and_expose_attributes() {
-    let root = tree("? one\n? two\n! [deprecated] use the other\nalphabet ab { '_' }\n");
+    let root = tree("? one\n? two\n! plain prose\n! [deprecated] use the other\nalphabet ab { '_' }\n");
     let run = DocRunView::cast(first_of(&root, TmcKind::DocRun)).expect("run");
     assert_eq!(run.doc_lines().len(), 2);
-    assert_eq!(run.attention_lines().len(), 1);
-    let attrs: Vec<String> = run
-        .attrs()
-        .map(|a| a.name_token().text().to_string())
-        .collect();
-    assert_eq!(attrs, vec!["deprecated"]);
+    assert_eq!(
+        run.attention_lines().len(),
+        1,
+        "only the bare-prose line — the tagged one lives inside an ATTR"
+    );
+    let attrs: Vec<AttrView> = run.attrs().collect();
+    assert_eq!(attrs.len(), 1);
+    assert!(
+        attrs[0].line_token().text().contains("[deprecated]"),
+        "ATTR wraps the whole attention line, payload and all"
+    );
 }
+
 
 /// A graft names its target and its instance; `as_name` is absent only
 /// on an entry graft, which may omit it.
