@@ -82,8 +82,8 @@ pub use emit::GreenSink;
 pub use kinds::{TmcKind, kind_name};
 pub use layout::{SigLayout, layout};
 pub use views::{
-    AlphabetView, AttrView, BindView, DocRunView, GraftView, MachineView, NamespaceView, ReuseView,
-    RootView, RuleView, StateView, TapeView, TopView, UsePathView, UseView, WorldView,
+    AlphabetView, AttrView, BindView, DocRunView, GraftView, MachineView, NamespaceView, ReuseKind,
+    ReuseView, RootView, RuleView, StateView, TapeView, TopView, UsePathView, UseView, WorldView,
 };
 // `pub(crate)`, not `pub`: `token_kind` itself is `pub(crate)` (only the
 // parser's `bump()` needs it), so re-exporting it any wider than

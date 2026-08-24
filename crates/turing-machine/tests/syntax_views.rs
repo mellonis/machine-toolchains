@@ -7,7 +7,8 @@
 use mtc_core::syntax::{AstNode, SyntaxNode, TreeBuilder};
 use mtc_turing_machine::parser::parse_green;
 use mtc_turing_machine::syntax::{
-    AlphabetView, MachineView, NamespaceView, RootView, TmcKind, UsePathView, UseView,
+    AlphabetView, MachineView, NamespaceView, ReuseKind, ReuseView, RootView, TapeView, TmcKind,
+    UsePathView, UseView,
 };
 
 fn tree(src: &str) -> SyntaxNode {
@@ -284,4 +285,128 @@ fn alphabet_glyphs_do_not_descend_into_child_nodes() {
         vec!["'_'"],
         "glyph_tokens descended into a child node"
     );
+}
+
+/// A retro-wrapped attribute sits inside the ALPHABET node ahead of its
+/// header, the same as a doc run does. Both are node-wrapped, so a
+/// token-only scan of the header never sees them and `exported()` still
+/// reads the right IDENT — the load-bearing half of that accessor's
+/// contract, and the half no fixture covered.
+#[test]
+fn an_attribute_before_an_alphabet_does_not_shift_its_header() {
+    let root = tree("? doc\n! [deprecated] gone\nexport alphabet ab { '_' }\n");
+    let a = AlphabetView::cast(first_of(&root, TmcKind::Alphabet)).expect("alphabet");
+    assert!(
+        a.exported(),
+        "the attribute shifted which IDENT reads as first"
+    );
+    assert_eq!(a.name_token().text(), "ab");
+}
+
+// -- world accessors ------------------------------------------------------
+
+/// WORLD sits between a machine and its body items, so `world()` is the
+/// step a caller must take before reaching tapes or states. This test
+/// exists because forgetting it yields an empty body rather than an
+/// error.
+#[test]
+fn a_machines_body_is_reached_through_its_world() {
+    let root = tree("machine {\n  tape main: ab;\n  tape work: ab;\n}\n");
+    let m = MachineView::cast(first_of(&root, TmcKind::Machine)).expect("machine");
+    let w = m.world().expect("every machine has a world");
+    let names: Vec<String> = w
+        .tapes()
+        .map(|t| t.name_token().text().to_string())
+        .collect();
+    assert_eq!(names, vec!["main", "work"]);
+}
+
+/// `volatile` is a modifier on the tape, not a separate declaration.
+#[test]
+fn tapes_expose_their_alphabet_and_volatility() {
+    let root = tree("machine {\n  tape main: ab;\n  volatile tape scratch: ab;\n}\n");
+    let w = MachineView::cast(first_of(&root, TmcKind::Machine))
+        .expect("machine")
+        .world()
+        .expect("world");
+    let tapes: Vec<TapeView> = w.tapes().collect();
+    assert_eq!(tapes.len(), 2);
+    assert_eq!(tapes[0].alphabet_token().text(), "ab");
+    assert!(!tapes[0].volatile());
+    assert!(
+        tapes[1].volatile(),
+        "the modifier belongs to the second tape"
+    );
+}
+
+/// A routine and a graph are both REUSE nodes; the view distinguishes
+/// them, because everything downstream treats them differently.
+#[test]
+fn reuse_distinguishes_a_routine_from_a_graph() {
+    let root = tree(
+        "routine r(tape t: ab) {\n  entry state s { [*] -> stop; }\n}\n\n\
+         graph g(tape t: ab, state done) {\n  entry state s { [*] -> done; }\n}\n",
+    );
+    let reuses: Vec<ReuseView> = RootView::cast(root)
+        .expect("root")
+        .items()
+        .filter_map(|i| ReuseView::cast(i.node().clone()))
+        .collect();
+    assert_eq!(reuses.len(), 2);
+    assert_eq!(reuses[0].kind(), ReuseKind::Routine);
+    assert_eq!(reuses[1].kind(), ReuseKind::Graph);
+    assert_eq!(reuses[0].name_token().text(), "r");
+}
+
+/// `export routine`, not plain `routine`, is the fixture that actually
+/// pins `kind()`'s "second-to-last header IDENT" rule: on a plain
+/// `routine r(...)` the keyword IS the first header IDENT, so a wrong
+/// implementation reading `idents[0]` instead of `idents[len - 2]`
+/// would pass the test above too. This also closes the one-fixture gap
+/// left by the export/no-export split: `signature`, `world` and
+/// `doc_run` had never run on a `REUSE` at all before this test, and
+/// `exported` had never run on one that answers `true`.
+#[test]
+fn an_exported_reuse_still_reads_its_keyword_name_and_signature() {
+    let root =
+        tree("? doc\nexport routine r(tape t: ab) {\n  entry graft g(t = t, done = return);\n}\n");
+    let r = ReuseView::cast(first_of(&root, TmcKind::Reuse)).expect("reuse");
+    assert_eq!(r.kind(), ReuseKind::Routine);
+    assert_eq!(r.name_token().text(), "r");
+    assert!(r.exported(), "export precedes the keyword IDENT");
+    let sig: Vec<String> = r.signature().iter().map(|t| t.text().to_string()).collect();
+    assert_eq!(
+        sig,
+        vec!["(", "tape", "t", ":", "ab", ")"],
+        "signature() must keep the parens and drop interstitial whitespace"
+    );
+    assert!(
+        r.world().is_some(),
+        "every parsed REUSE carries a WORLD body"
+    );
+    assert!(
+        r.doc_run().is_some(),
+        "the run is the reuse's own retro-wrapped first child"
+    );
+}
+
+/// `MachineView::doc_run` sourced its claim from the module doc's list
+/// of doc-run-accepting declarations rather than from a run — this
+/// pins it against the real parser.
+#[test]
+fn a_machines_doc_run_is_the_run_it_retro_wraps() {
+    let root = tree("? doc\nmachine {\n  tape main: ab;\n}\n");
+    let m = MachineView::cast(first_of(&root, TmcKind::Machine)).expect("machine");
+    assert!(
+        m.doc_run().is_some(),
+        "the run is the machine's own retro-wrapped first child"
+    );
+    assert!(
+        m.world().is_some(),
+        "world() must still find WORLD past a leading DOC_RUN"
+    );
+
+    let plain = tree("machine {\n  tape main: ab;\n}\n");
+    let p = MachineView::cast(first_of(&plain, TmcKind::Machine)).expect("machine");
+    assert!(p.doc_run().is_none(), "no run was written");
 }

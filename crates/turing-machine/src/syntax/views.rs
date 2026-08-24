@@ -247,6 +247,206 @@ impl AlphabetView {
     }
 }
 
+/// `REUSE`'s own header IDENTs, in document order — direct child IDENT
+/// tokens up to (not including) the opening `(` of the signature: an
+/// optional `export`, then the `routine`/`graph` keyword, then the
+/// name (`parse_reuse` in `crates/turing-machine/src/parser.rs`, called
+/// from both the plain and the `export`-prefixed arms of `top_items`).
+/// Shared by `name_token`, `exported`, and `kind` so the walk is
+/// written once — the same shape `alphabet_header_idents` reads for
+/// `ALPHABET`, with `(` in place of `{` as the header's terminator.
+fn reuse_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .take_while(|e| e.kind() != TmcKind::LParen.into())
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Which reusable-graph carrier a `REUSE` node spells — `routine` or
+/// `graph`, matched on the header keyword's own text (`crate::lexer`'s
+/// lexer emits no keyword token kind at all: every word, reserved or
+/// not, arrives as an ordinary `IDENT`, and `routine`/`graph` are two
+/// of the 27 fully-reserved words in `crate::lexer::RESERVED` that the
+/// PARSER refuses wherever a name is expected — not a contextual word;
+/// `deprecated` is this language's only contextual one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReuseKind {
+    Routine,
+    Graph,
+}
+
+impl ReuseView {
+    /// `routine` or `graph`: the header IDENT immediately before the
+    /// name, regardless of whether `export` precedes it — the same
+    /// "second-to-last is the keyword, last is the name" position
+    /// `AlphabetView::name_token`'s doc explains for `ALPHABET`'s own
+    /// optional `export` prefix.
+    pub fn kind(&self) -> ReuseKind {
+        let idents = reuse_header_idents(self.syntax());
+        debug_assert!(
+            idents.len() >= 2,
+            "REUSE header is `export? routine|graph <name>`: at least 2 IDENTs, got {}",
+            idents.len()
+        );
+        match idents[idents.len() - 2].text() {
+            "routine" => ReuseKind::Routine,
+            "graph" => ReuseKind::Graph,
+            other => panic!(
+                "unexpected REUSE keyword IDENT {other:?} — the parser accepts only \
+                 `routine`/`graph` here"
+            ),
+        }
+    }
+
+    /// The reuse's name: the LAST header IDENT before `(`, mirroring
+    /// `AlphabetView::name_token`.
+    pub fn name_token(&self) -> SyntaxToken {
+        reuse_header_idents(self.syntax())
+            .into_iter()
+            .next_back()
+            .expect("REUSE always carries a name IDENT before its signature `(`")
+    }
+
+    /// Whether `export` was written — the first header IDENT's text,
+    /// mirroring `AlphabetView::exported`.
+    pub fn exported(&self) -> bool {
+        reuse_header_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "export")
+    }
+
+    /// The signature's own tokens, `(` through the matching `)`,
+    /// trivia excluded — no dedicated node wraps a `.tmc` signature
+    /// (the module doc's REUSE/WORLD accounting explains why: WORLD
+    /// wraps only the body, and a signature's tokens sit directly
+    /// under REUSE between the name and WORLD). Returned unparsed:
+    /// turning this token run into typed parameters is extraction's
+    /// job (a later layer built on top of these views), not this
+    /// one's — a view answers what token run the tree holds, not what
+    /// it means.
+    pub fn signature(&self) -> Vec<SyntaxToken> {
+        self.syntax()
+            .children_with_tokens()
+            .skip_while(|e| e.kind() != TmcKind::LParen.into())
+            .take_while(|e| e.kind() != TmcKind::World.into())
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t)
+                    if t.kind() != TmcKind::Whitespace.into()
+                        && t.kind() != TmcKind::LineComment.into()
+                        && t.kind() != TmcKind::BlockComment.into() =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// This reuse's own body — `None` only for a tree that cannot come
+    /// from the parser, since `parse_reuse` always opens a WORLD node
+    /// around the `{ … }` body. Returning `Option` rather than
+    /// panicking anyway: a view's job is to answer what the tree
+    /// holds, and reporting absence is an answer, not a defect.
+    pub fn world(&self) -> Option<WorldView> {
+        child(self.syntax())
+    }
+
+    /// The doc run this declaration retro-wraps, when one was written.
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
+    }
+}
+
+impl MachineView {
+    /// This machine's own body. See `ReuseView::world` for why this is
+    /// `Option` rather than a panicking accessor.
+    pub fn world(&self) -> Option<WorldView> {
+        child(self.syntax())
+    }
+
+    /// The doc run this declaration retro-wraps, when one was written.
+    pub fn doc_run(&self) -> Option<DocRunView> {
+        child(self.syntax())
+    }
+}
+
+/// `TAPE`'s own header IDENTs, in document order — direct child IDENT
+/// tokens up to (not including) the `:` before the alphabet name: an
+/// optional `volatile`, then the `tape` keyword, then the name
+/// (`parse_tape` in `crates/turing-machine/src/parser.rs`). Shared by
+/// `name_token` and `volatile` so the walk is written once — the same
+/// shape `alphabet_header_idents` reads for `ALPHABET`, with `:` in
+/// place of `{` as the header's terminator.
+fn tape_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .take_while(|e| e.kind() != TmcKind::Colon.into())
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+impl TapeView {
+    /// The tape's name: the LAST header IDENT before `:`, mirroring
+    /// `AlphabetView::name_token`.
+    pub fn name_token(&self) -> SyntaxToken {
+        tape_header_idents(self.syntax())
+            .into_iter()
+            .next_back()
+            .expect("TAPE always carries a name IDENT before its `:`")
+    }
+
+    /// Whether `volatile` was written — the first header IDENT's text,
+    /// mirroring `AlphabetView::exported`. `volatile` is a modifier on
+    /// the tape declaration itself, never a separate node.
+    pub fn volatile(&self) -> bool {
+        tape_header_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "volatile")
+    }
+
+    /// The alphabet name this tape is declared over: the first IDENT
+    /// after `:`.
+    pub fn alphabet_token(&self) -> SyntaxToken {
+        self.syntax()
+            .children_with_tokens()
+            .skip_while(|e| e.kind() != TmcKind::Colon.into())
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+                _ => None,
+            })
+            .next()
+            .expect("TAPE always carries an alphabet IDENT after its `:`")
+    }
+}
+
+impl WorldView {
+    /// This world's own tape declarations, in document order. Direct
+    /// children only, like every accessor at this layer.
+    pub fn tapes(&self) -> impl Iterator<Item = TapeView> + '_ {
+        children(self.syntax())
+    }
+
+    /// This world's own states, in document order.
+    pub fn states(&self) -> impl Iterator<Item = StateView> + '_ {
+        children(self.syntax())
+    }
+
+    /// This world's own grafts, in document order.
+    pub fn grafts(&self) -> impl Iterator<Item = GraftView> + '_ {
+        children(self.syntax())
+    }
+
+    /// This world's own binds, in document order.
+    pub fn binds(&self) -> impl Iterator<Item = BindView> + '_ {
+        children(self.syntax())
+    }
+}
+
 impl NamespaceView {
     /// The second header IDENT — the name after the `namespace`
     /// keyword IDENT. Unlike `ALPHABET`, a `NAMESPACE` header never
