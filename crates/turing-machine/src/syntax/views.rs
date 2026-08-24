@@ -177,6 +177,16 @@ impl UsePathView {
 /// (`parse_alphabet`/the `"export"` arm of `top_items` in
 /// `crates/turing-machine/src/parser.rs`). Shared by `name_token` and
 /// `exported` so the walk is written once.
+///
+/// The `take_while` below is correct only because `{` is
+/// grammar-mandatory right after the name: `parse_alphabet` calls
+/// `self.expect(&TokenKind::LBrace, "`{` to open the alphabet
+/// body")` immediately after `self.name(...)`, with no production
+/// that lets a header omit it (verified: `alphabet ab` with no
+/// following `{` is rejected — `expected `{` to open the alphabet
+/// body, found ...`). If that terminator were ever optional, this
+/// scan would run past the header into the body and every accessor
+/// built on it would read the wrong token.
 fn alphabet_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
     node.children_with_tokens()
         .take_while(|e| e.kind() != TmcKind::LBrace.into())
@@ -255,6 +265,17 @@ impl AlphabetView {
 /// Shared by `name_token`, `exported`, and `kind` so the walk is
 /// written once — the same shape `alphabet_header_idents` reads for
 /// `ALPHABET`, with `(` in place of `{` as the header's terminator.
+///
+/// The `take_while` below is correct only because `(` is
+/// grammar-mandatory right after the name: `parse_reuse` calls
+/// `self.signature()`, which itself calls
+/// `self.expect(&TokenKind::LParen, "`(` to open the signature")`
+/// as its first step, with no production that lets a header omit it
+/// (verified: both `routine r { ... }` and `graph g { ... }` — the
+/// signature's parens dropped — are rejected with `expected `(` to
+/// open the signature, found ...`). If that terminator were ever
+/// optional, this scan would run past the header into the body and
+/// every accessor built on it would read the wrong token.
 fn reuse_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
     node.children_with_tokens()
         .take_while(|e| e.kind() != TmcKind::LParen.into())
@@ -380,6 +401,16 @@ impl MachineView {
 /// `name_token` and `volatile` so the walk is written once — the same
 /// shape `alphabet_header_idents` reads for `ALPHABET`, with `:` in
 /// place of `{` as the header's terminator.
+///
+/// The `take_while` below is correct only because `:` is
+/// grammar-mandatory right after the name: `parse_tape` calls
+/// `self.expect(&TokenKind::Colon, "`:` after the tape name")`
+/// immediately after `self.name(...)`, with no production that lets a
+/// header omit it (verified: `tape main ab;` with no `:` is rejected —
+/// `expected `:` after the tape name, found ...`). If that
+/// terminator were ever optional, this scan would run past the header
+/// into the body and every accessor built on it would read the wrong
+/// token.
 fn tape_header_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
     node.children_with_tokens()
         .take_while(|e| e.kind() != TmcKind::Colon.into())

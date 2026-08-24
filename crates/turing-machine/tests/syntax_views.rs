@@ -287,11 +287,35 @@ fn alphabet_glyphs_do_not_descend_into_child_nodes() {
     );
 }
 
-/// A retro-wrapped attribute sits inside the ALPHABET node ahead of its
-/// header, the same as a doc run does. Both are node-wrapped, so a
-/// token-only scan of the header never sees them and `exported()` still
-/// reads the right IDENT — the load-bearing half of that accessor's
-/// contract, and the half no fixture covered.
+/// `exported()`'s scan is a token-only walk over ALPHABET's own
+/// header, so it never descends into a child NODE — this fixture's
+/// tree (`mtc_core::syntax::debug_dump`, via
+/// `crates/turing-machine/src/syntax/kinds.rs`'s `kind_name`) is the
+/// case that actually exercises that: ATTR nests inside DOC_RUN, not
+/// beside it, and `exported()` still reads the right IDENT.
+///
+/// ```text
+/// ROOT@0..53
+///   ALPHABET@0..52
+///     DOC_RUN@0..25
+///       DOC_LINE@0..5 "? doc"
+///       WHITESPACE@5..6 "\n"
+///       ATTR@6..25
+///         ATTENTION_LINE@6..25 "! [deprecated] gone"
+///     WHITESPACE@25..26 "\n"
+///     IDENT@26..32 "export"
+///     WHITESPACE@32..33 " "
+///     IDENT@33..41 "alphabet"
+///     WHITESPACE@41..42 " "
+///     IDENT@42..44 "ab"
+///     WHITESPACE@44..45 " "
+///     L_BRACE@45..46 "{"
+///     WHITESPACE@46..47 " "
+///     GLYPH@47..50 "'_'"
+///     WHITESPACE@50..51 " "
+///     R_BRACE@51..52 "}"
+///   WHITESPACE@52..53 "\n"
+/// ```
 #[test]
 fn an_attribute_before_an_alphabet_does_not_shift_its_header() {
     let root = tree("? doc\n! [deprecated] gone\nexport alphabet ab { '_' }\n");
@@ -336,6 +360,57 @@ fn tapes_expose_their_alphabet_and_volatility() {
     assert!(
         tapes[1].volatile(),
         "the modifier belongs to the second tape"
+    );
+}
+
+/// `WorldView::states/grafts/binds` each filter to their own node
+/// kind. A world carrying a tape, two states, two grafts and two
+/// binds all at once is the fixture that discriminates a correct
+/// per-kind filter from one that accidentally yields the union of
+/// several kinds, or the wrong kind outright — and comparing each
+/// node's own source text (rather than just a count, and rather than
+/// a kind-specific accessor: `StateView`/`GraftView`/`BindView` carry
+/// none yet, that is a later task) pins both identity and document
+/// order in one assertion per accessor.
+#[test]
+fn world_states_grafts_and_binds_are_kind_filtered_and_ordered() {
+    let root = tree(
+        "machine {\n  tape main: ab;\n  tape work: ab;\n\
+         \x20 entry state s { [*] -> stop; }\n  state t { [*] -> halt; }\n\
+         \x20 graft g(t = main, done = stop) as gg1;\n\
+         \x20 graft g(t = work, done = stop) as gg2;\n\
+         \x20 bind r() as hh1;\n  bind r() as hh2;\n}\n",
+    );
+    let w = MachineView::cast(first_of(&root, TmcKind::Machine))
+        .expect("machine")
+        .world()
+        .expect("world");
+
+    let states: Vec<String> = w.states().map(|s| s.syntax().text()).collect();
+    assert_eq!(
+        states,
+        vec![
+            "entry state s { [*] -> stop; }".to_string(),
+            "state t { [*] -> halt; }".to_string(),
+        ]
+    );
+
+    let grafts: Vec<String> = w.grafts().map(|g| g.syntax().text()).collect();
+    assert_eq!(
+        grafts,
+        vec![
+            "graft g(t = main, done = stop) as gg1;".to_string(),
+            "graft g(t = work, done = stop) as gg2;".to_string(),
+        ]
+    );
+
+    let binds: Vec<String> = w.binds().map(|b| b.syntax().text()).collect();
+    assert_eq!(
+        binds,
+        vec![
+            "bind r() as hh1;".to_string(),
+            "bind r() as hh2;".to_string(),
+        ]
     );
 }
 
