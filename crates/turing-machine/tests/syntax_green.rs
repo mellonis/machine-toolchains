@@ -496,8 +496,12 @@ fn parse_green_from_tokens_panics_on_a_without_comments_lex() {
 }
 
 // ---------------------------------------------------------------------------
-// The remaining containers: WORLD, TAPE, STATE, RULE, GRAFT, BIND, REUSE,
-// DOC_RUN, ATTR — after these, no `.tmc` construct is unstructured.
+// The declaration-level containers: WORLD, TAPE, STATE, RULE, GRAFT,
+// BIND, REUSE, DOC_RUN, ATTR. These are where the node run starts, not
+// where it stops — seven interior boundaries were bracketed afterwards
+// (SIG_PARAM, CONTRACT_CLAUSE, WRITE_VEC, MOVE_VEC, TRANSITION,
+// BINDING_ARG, SYM_MAP), and their own tests live in `syntax_views.rs`
+// beside the views that read them.
 // ---------------------------------------------------------------------------
 
 /// The brief's `matches("RULE").count() == 3` plus a textual

@@ -1699,7 +1699,13 @@ impl Parser<'_> {
         if !matches!(self.peek().kind, TokenKind::RParen) {
             loop {
                 self.interior_comments(params.len(), &mut interior);
+                // SIG_PARAM opens at the parameter's first significant
+                // token, so a comment written between two parameters
+                // flushes into the enclosing REUSE rather than into
+                // either parameter (docs/core.md (syntax trees)).
+                self.g_flush_start(TmcKind::SigParam);
                 params.push(self.sig_param()?);
+                self.g_finish(); // SigParam
                 match self.peek().kind {
                     TokenKind::Comma => self.bump(),
                     TokenKind::RParen => break,
@@ -1814,6 +1820,10 @@ impl Parser<'_> {
     /// comment inside a signature or binding argument list).
     fn contract_clause(&mut self) -> Result<ContractClause, CompileError> {
         let kw_span = self.peek().span();
+        // Bracketed here rather than at the two call sites above, so the
+        // node opens at the clause keyword for both — its extent is then
+        // exactly `kw_span` → the closing `}`, i.e. `ContractClause::span`.
+        self.g_flush_start(TmcKind::ContractClause);
         self.bump(); // `writes` / `preserves`
         self.expect(&TokenKind::LBrace, "`{` to open the clause body")?;
         let mut elems: Vec<AlphabetElem> = Vec::new();
@@ -1828,6 +1838,7 @@ impl Parser<'_> {
             }
         }
         let close = self.expect(&TokenKind::RBrace, "`}` to close the clause body")?;
+        self.g_finish(); // ContractClause
         Ok(ContractClause {
             elems,
             kw_span,
@@ -2110,6 +2121,11 @@ impl Parser<'_> {
         // when the rule already carries an action — write, move, or a leading
         // `debugger`. With no action, `-> ;` stays the "expected a transition"
         // error (docs/tmt/language.md (rules)).
+        //
+        // Only a WRITTEN transition is bracketed: `Stay` is the green
+        // tree's ABSENCE of a TRANSITION node under the rule, never a
+        // zero-width one. That asymmetry is the point — it is the one
+        // fact about a rule that no token run can carry.
         let has_action = debugger || write.is_some() || mov.is_some();
         let (transition, call_args, map_pairs) =
             if has_action && matches!(self.peek().kind, TokenKind::Semi) {
@@ -2121,7 +2137,10 @@ impl Parser<'_> {
                     MapInteriorComments::new(),
                 )
             } else {
-                self.transition()?
+                self.g_flush_start(TmcKind::Transition);
+                let parsed = self.transition()?;
+                self.g_finish(); // Transition
+                parsed
             };
         let semi = self.expect(&TokenKind::Semi, "`;` to end the rule")?;
         self.prev_end_line = semi.line;
@@ -2316,6 +2335,12 @@ impl Parser<'_> {
     /// on [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
     /// comments)).
     fn write_vec(&mut self) -> Result<(WriteVec, InteriorComments), CompileError> {
+        // The node opens at `[`, not at the `write` keyword the caller
+        // already consumed, so its extent is exactly `WriteVec::span`.
+        // The keyword stays a token of the enclosing RULE — nothing has
+        // to read it, since the node's own KIND says which vector this
+        // is (docs/core.md (syntax trees)).
+        self.g_flush_start(TmcKind::WriteVec);
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the write vector")?;
         let mut cells: Vec<WriteCell> = Vec::new();
         let mut interior: InteriorComments = Vec::new();
@@ -2331,6 +2356,7 @@ impl Parser<'_> {
         // Drain HERE, before consuming `]` — see `pattern`'s identical note.
         self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the write vector")?;
+        self.g_finish(); // WriteVec
         Ok((
             WriteVec {
                 cells,
@@ -2468,6 +2494,8 @@ impl Parser<'_> {
     /// on [`RuleCst`]'s side-car field instead (docs/tmt/fmt.md (interior
     /// comments)).
     fn move_vec(&mut self) -> Result<(MoveVec, InteriorComments), CompileError> {
+        // Opens at `[` — see `write_vec`'s identical note.
+        self.g_flush_start(TmcKind::MoveVec);
         let lb = self.expect(&TokenKind::LBracket, "`[` to open the move vector")?;
         let mut cells: Vec<MoveCell> = Vec::new();
         let mut interior: InteriorComments = Vec::new();
@@ -2483,6 +2511,7 @@ impl Parser<'_> {
         // Drain HERE, before consuming `]` — see `pattern`'s identical note.
         self.interior_comments(cells.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBracket, "`]` to close the move vector")?;
+        self.g_finish(); // MoveVec
         Ok((
             MoveVec {
                 cells,
@@ -2667,7 +2696,13 @@ impl Parser<'_> {
             loop {
                 self.interior_comments(args.len(), &mut interior);
                 let arg_index = args.len();
+                // BINDING_ARG opens at the argument's own name IDENT, so
+                // its extent is exactly `BindingArg::span` and a comment
+                // between two arguments flushes into the enclosing
+                // GRAFT/BIND/TRANSITION instead.
+                self.g_flush_start(TmcKind::BindingArg);
                 let (arg, arg_map_interior) = self.binding_arg()?;
+                self.g_finish(); // BindingArg
                 map_interior.extend(
                     arg_map_interior
                         .into_iter()
@@ -2772,6 +2807,11 @@ impl Parser<'_> {
     /// `map { pairs }` after a consumed `with`; returns its own interior
     /// list, mirroring [`Parser::binding_args`].
     fn sym_map(&mut self) -> Result<(SymMap, InteriorComments), CompileError> {
+        // Opens at `map`, not at the `with` the caller already consumed:
+        // `SymMap::span` runs `map` → `}`, and keeping the node's extent
+        // equal to that span is what lets extraction copy it rather than
+        // recompute it.
+        self.g_flush_start(TmcKind::SymMap);
         let map_tok = self.expect_kw_tok("map", "`map` after `with`")?;
         self.expect(&TokenKind::LBrace, "`{` to open the map")?;
         let mut pairs: Vec<MapPair> = Vec::new();
@@ -2789,6 +2829,7 @@ impl Parser<'_> {
         }
         self.interior_comments(pairs.len(), &mut interior);
         let rb = self.expect(&TokenKind::RBrace, "`}` to close the map")?;
+        self.g_finish(); // SymMap
         Ok((
             SymMap {
                 pairs,

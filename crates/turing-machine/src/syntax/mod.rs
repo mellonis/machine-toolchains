@@ -41,17 +41,22 @@
 //! CST's own model of "whose run is this" instead of contradicting it.
 //!
 //! WORLD sits between MACHINE/REUSE and their body items (`docs/tmt/language.md
-//! (worlds)`), so a doc-run-free `machine`/`routine`/`graph` has exactly
-//! one child NODE — WORLD itself, under `SyntaxNode::children()`, which
-//! yields nodes only — not the tape/state/graft/bind items directly: a
-//! later formatter port walking a world-producing declaration's
-//! children for its body items descends through WORLD first, one
-//! level, before reaching them. The braces are WORLD's own tokens, not
-//! MACHINE's (`world.text()` starts at `{` and ends at `}`), so under
-//! `children_with_tokens()` — which sees tokens too — MACHINE itself
-//! carries two entries, `IDENT "machine"` and `WORLD`, and a routine or
-//! graph's own signature tokens (when present) add more still, nine for
-//! a signed routine.
+//! (worlds)`), never the tape/state/graft/bind items directly: a later
+//! formatter port walking a world-producing declaration's children for
+//! its body items descends through WORLD first, one level, before
+//! reaching them. The braces are WORLD's own tokens, not MACHINE's
+//! (`world.text()` starts at `{` and ends at `}`).
+//!
+//! A doc-run-free `machine` therefore has exactly one child NODE under
+//! `SyntaxNode::children()` — WORLD — and three entries under
+//! `children_with_tokens()`, which sees tokens too: `IDENT "machine"`,
+//! the whitespace before the brace, and WORLD. A `routine`/`graph` has
+//! one child node per signature parameter as well, so
+//! `routine r(tape t: ab) { … }` yields two child nodes (SIG_PARAM,
+//! WORLD) and eight `children_with_tokens()` entries: `IDENT "routine"`,
+//! whitespace, `IDENT "r"`, `L_PAREN`, SIG_PARAM, `R_PAREN`, whitespace,
+//! WORLD. An accessor that wants "the body" therefore looks WORLD up by
+//! kind rather than taking the first child node.
 //!
 //! # The green tree splits what the CST keeps together
 //!
@@ -82,8 +87,10 @@ pub use emit::GreenSink;
 pub use kinds::{TmcKind, kind_name};
 pub use layout::{SigLayout, layout};
 pub use views::{
-    AlphabetView, AttrView, BindView, DocRunView, GraftView, MachineView, NamespaceView, ReuseKind,
-    ReuseView, RootView, RuleView, StateView, TapeView, TopView, UsePathView, UseView, WorldView,
+    AlphabetView, AttrView, BindView, BindingArgView, ContractClauseView, DocRunView, GraftView,
+    MachineView, MoveVecView, NamespaceView, ReuseKind, ReuseView, RootView, RuleView,
+    SigParamKind, SigParamView, StateView, SymMapView, TapeView, TopView, TransitionView,
+    UsePathView, UseView, WorldView, WriteVecView,
 };
 // `pub(crate)`, not `pub`: `token_kind` itself is `pub(crate)` (only the
 // parser's `bump()` needs it), so re-exporting it any wider than

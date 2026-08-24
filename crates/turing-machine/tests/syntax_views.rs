@@ -7,8 +7,8 @@
 use mtc_core::syntax::{AstNode, SyntaxNode, TreeBuilder};
 use mtc_turing_machine::parser::parse_green;
 use mtc_turing_machine::syntax::{
-    AlphabetView, MachineView, NamespaceView, ReuseKind, ReuseView, RootView, TapeView, TmcKind,
-    UsePathView, UseView,
+    AlphabetView, BindingArgView, MachineView, NamespaceView, ReuseKind, ReuseView, RootView,
+    SigParamKind, TapeView, TmcKind, UsePathView, UseView,
 };
 
 fn tree(src: &str) -> SyntaxNode {
@@ -55,9 +55,9 @@ fn a_view_accepts_its_own_kind_and_refuses_others() {
 
 /// Every view kind casts from the node it names. Enumerated rather than
 /// sampled, and the enumeration is itself checked against the kind
-/// space: node kinds occupy the contiguous discriminant run `32..=46`,
-/// spelled here as literals — `TmcKind::Root as u16` would be the table
-/// comparing itself to itself. A node kind inserted anywhere but the
+/// space: node kinds occupy the contiguous discriminant run `32..=53`,
+/// spelled here as literals — `TmcKind::SymMap as u16` would be the
+/// table comparing itself to itself. A node kind inserted anywhere but the
 /// very end of that run renumbers every kind after it, so a table left
 /// stale for the new kind produces a set that diverges from the run.
 /// What this catches: a listed view that stops casting, and a table
@@ -68,24 +68,28 @@ fn a_view_accepts_its_own_kind_and_refuses_others() {
 #[test]
 #[allow(clippy::type_complexity)] // the checks table's own type, not worth a named alias for one test
 fn every_node_kind_has_a_view_that_casts_from_it() {
-    // Verified against the real parser before this plan shipped: it parses,
-    // and it yields all fifteen node kinds with none missing. Three things
-    // it must keep — `use` accepts NO doc run (`DanglingDocRun` otherwise;
-    // only export/alphabet/routine/graph/machine/namespace do), a signature
-    // parameter writes its keyword FIRST (`tape t: ab`, `state done`), and
-    // a namespace must be present or NAMESPACE has no instance to cast from.
+    // Verified against the real parser: it parses, and it yields all
+    // twenty-two node kinds with none missing (checked by dumping the tree
+    // and set-comparing the kind names against `syntax::kind_name`). Five
+    // things it must keep — `use` accepts NO doc run (`DanglingDocRun`
+    // otherwise; only export/alphabet/routine/graph/machine/namespace do), a
+    // signature parameter writes its keyword FIRST (`tape t: ab`,
+    // `state done`), a namespace must be present or NAMESPACE has no
+    // instance to cast from, a signature tape parameter must carry a
+    // `writes`/`preserves` clause or CONTRACT_CLAUSE has none, and a binding
+    // argument must carry `with map { … }` or SYM_MAP has none.
     let src = "use a::b;\n\n? doc\n! [deprecated] old\nalphabet ab { '_', 'a' }\n\n\
                namespace n {\n  alphabet inner { '_' }\n}\n\n\
-               graph g(tape t: ab, state done) {\n\
+               graph g(tape t: ab writes { '_' }, state done) {\n\
                \x20 entry state gs { [*] -> done; }\n}\n\n\
                routine r(tape t: ab) {\n\
-               \x20 entry graft g(t = t, done = return);\n}\n\n\
+               \x20 entry graft g(t = t with map { '_' -> 'a' }, done = return);\n}\n\n\
                machine {\n  tape main: ab;\n  bind r() as hh;\n\
                \x20 entry state s {\n    ['a'] -> write ['_'] move [>] goto s;\n\
                \x20   [*] -> stop;\n  }\n}\n";
     let root = tree(src);
     // Each entry: the kind, and a closure proving a view casts from it.
-    let checks: [(TmcKind, fn(SyntaxNode) -> bool); 15] = [
+    let checks: [(TmcKind, fn(SyntaxNode) -> bool); 22] = [
         (TmcKind::Root, |n| RootView::cast(n).is_some()),
         (TmcKind::Use, |n| {
             mtc_turing_machine::syntax::UseView::cast(n).is_some()
@@ -125,14 +129,35 @@ fn every_node_kind_has_a_view_that_casts_from_it() {
         (TmcKind::Attr, |n| {
             mtc_turing_machine::syntax::AttrView::cast(n).is_some()
         }),
+        (TmcKind::SigParam, |n| {
+            mtc_turing_machine::syntax::SigParamView::cast(n).is_some()
+        }),
+        (TmcKind::ContractClause, |n| {
+            mtc_turing_machine::syntax::ContractClauseView::cast(n).is_some()
+        }),
+        (TmcKind::WriteVec, |n| {
+            mtc_turing_machine::syntax::WriteVecView::cast(n).is_some()
+        }),
+        (TmcKind::MoveVec, |n| {
+            mtc_turing_machine::syntax::MoveVecView::cast(n).is_some()
+        }),
+        (TmcKind::Transition, |n| {
+            mtc_turing_machine::syntax::TransitionView::cast(n).is_some()
+        }),
+        (TmcKind::BindingArg, |n| {
+            mtc_turing_machine::syntax::BindingArgView::cast(n).is_some()
+        }),
+        (TmcKind::SymMap, |n| {
+            mtc_turing_machine::syntax::SymMapView::cast(n).is_some()
+        }),
     ];
     // The table IS the node half of the kind space, not a sample of it.
     let mut listed: Vec<u16> = checks.iter().map(|(k, _)| *k as u16).collect();
     listed.sort_unstable();
-    let expected: Vec<u16> = (32..=46).collect();
+    let expected: Vec<u16> = (32..=53).collect();
     assert_eq!(
         listed, expected,
-        "the view table is not the contiguous node run 32..=46"
+        "the view table is not the contiguous node run 32..=53"
     );
     for (kind, casts) in checks {
         let node = if kind == TmcKind::Root {
@@ -484,4 +509,255 @@ fn a_machines_doc_run_is_the_run_it_retro_wraps() {
     let plain = tree("machine {\n  tape main: ab;\n}\n");
     let p = MachineView::cast(first_of(&plain, TmcKind::Machine)).expect("machine");
     assert!(p.doc_run().is_none(), "no run was written");
+}
+
+// -- the interior boundaries ---------------------------------------------
+//
+// Each test below asserts a value a consumer of the flat token run could
+// not produce without re-deriving a parser decision, and each was checked
+// against a deliberately-dropped `g_start`/`g_finish` pair in the parser
+// before it was kept.
+
+/// Every node of `kind` anywhere under `root`, in document order.
+fn all_of(root: &SyntaxNode, kind: TmcKind) -> Vec<SyntaxNode> {
+    fn go(n: &SyntaxNode, k: TmcKind, out: &mut Vec<SyntaxNode>) {
+        for c in n.children() {
+            if c.kind() == k.into() {
+                out.push(c.clone());
+            }
+            go(&c, k, out);
+        }
+    }
+    let mut out = Vec::new();
+    go(root, kind, &mut out);
+    out
+}
+
+/// The shape that motivated bracketing the signature at all: two
+/// parameters, three commas, and only ONE of them a separator. The
+/// assertion on the flat run is not decoration — it is the measurement
+/// that makes the rest of the test meaningful, because it shows exactly
+/// what a comma-splitting consumer would have found.
+#[test]
+fn a_writes_clause_puts_commas_where_a_splitter_would_read_separators() {
+    let root = tree(
+        "alphabet x { '0', '1' }\nalphabet y { '_' }\n\
+         routine r(tape a: x writes { '0', '1' }, tape b: y) {\n\
+         \x20 entry state s { [*, *] -> return; }\n}\n",
+    );
+    let r = ReuseView::cast(first_of(&root, TmcKind::Reuse)).expect("reuse");
+
+    let commas = r
+        .signature()
+        .iter()
+        .filter(|t| t.kind() == TmcKind::Comma.into())
+        .count();
+    assert_eq!(
+        commas, 2,
+        "the flat signature run carries two commas; only one separates parameters, \
+         so a splitter reads three parameters where there are two"
+    );
+
+    let params: Vec<_> = r.params().collect();
+    assert_eq!(params.len(), 2, "two parameters, not four");
+    let names: Vec<String> = params
+        .iter()
+        .map(|p| p.name_token().text().to_string())
+        .collect();
+    assert_eq!(names, vec!["a", "b"]);
+    let alphabets: Vec<Option<String>> = params
+        .iter()
+        .map(|p| p.alphabet_token().map(|t| t.text().to_string()))
+        .collect();
+    assert_eq!(
+        alphabets,
+        vec![Some("x".to_string()), Some("y".to_string())],
+        "the alphabet is the IDENT after `:`, not the `writes` keyword"
+    );
+    assert_eq!(
+        params[0].syntax().text(),
+        "tape a: x writes { '0', '1' }",
+        "a parameter's extent runs through its own clause, not to the first comma"
+    );
+}
+
+/// A clause is identified by its own keyword, never by its position:
+/// both are optional, so position says nothing on a parameter carrying
+/// only one of them. `volatile` and a `state` parameter ride along —
+/// they are the two shapes that would break a naive positional read of
+/// a parameter's IDENTs.
+#[test]
+fn contract_clauses_are_named_by_their_own_keyword() {
+    let root = tree(
+        "alphabet x { '0', '1' }\n\
+         routine r(volatile tape a: x writes { '0' } preserves { '1' }, state done) {\n\
+         \x20 entry state s { [*] -> done; }\n}\n",
+    );
+    let r = ReuseView::cast(first_of(&root, TmcKind::Reuse)).expect("reuse");
+    let params: Vec<_> = r.params().collect();
+    assert_eq!(params.len(), 2);
+
+    assert!(params[0].volatile());
+    assert_eq!(params[0].kind(), SigParamKind::Tape);
+    assert_eq!(params[0].name_token().text(), "a");
+    assert_eq!(
+        params[0].alphabet_token().map(|t| t.text().to_string()),
+        Some("x".to_string()),
+        "`volatile` shifts the name and alphabet by one IDENT"
+    );
+    let clauses: Vec<_> = params[0].contract_clauses().collect();
+    let keywords: Vec<String> = clauses
+        .iter()
+        .map(|c| c.keyword_token().text().to_string())
+        .collect();
+    assert_eq!(keywords, vec!["writes", "preserves"]);
+    assert_eq!(clauses[0].syntax().text(), "writes { '0' }");
+    assert_eq!(clauses[1].syntax().text(), "preserves { '1' }");
+
+    assert!(!params[1].volatile());
+    assert_eq!(params[1].kind(), SigParamKind::State);
+    assert_eq!(params[1].name_token().text(), "done");
+    assert!(
+        params[1].alphabet_token().is_none(),
+        "a state parameter declares no alphabet"
+    );
+    assert_eq!(params[1].contract_clauses().count(), 0);
+}
+
+/// Three bracket groups of identical shape in one rule; only the node's
+/// KIND tells them apart, and only a per-rule walk shows which rule has
+/// which. The second rule is the one that matters: it carries a move
+/// vector and no write vector, so a consumer indexing bracket groups
+/// positionally would read its move vector as a write.
+#[test]
+fn a_rules_write_and_move_vectors_are_told_apart_by_kind_not_position() {
+    let root = tree(
+        "alphabet x { '0', '1' }\nmachine {\n  tape m: x;\n\
+         \x20 entry state s {\n    ['0'] -> write ['1'] move [>] goto s;\n\
+         \x20   ['1'] -> move [<] goto s;\n  }\n}\n",
+    );
+    let rules = all_of(&root, TmcKind::Rule);
+    assert_eq!(rules.len(), 2);
+
+    let writes: Vec<String> = all_of(&rules[0], TmcKind::WriteVec)
+        .iter()
+        .map(|n| n.text())
+        .collect();
+    let moves: Vec<String> = all_of(&rules[0], TmcKind::MoveVec)
+        .iter()
+        .map(|n| n.text())
+        .collect();
+    assert_eq!(
+        writes,
+        vec!["['1']"],
+        "the node opens at `[`, not at `write`"
+    );
+    assert_eq!(moves, vec!["[>]"]);
+
+    assert_eq!(
+        all_of(&rules[1], TmcKind::WriteVec).len(),
+        0,
+        "the second rule writes nothing"
+    );
+    let moves: Vec<String> = all_of(&rules[1], TmcKind::MoveVec)
+        .iter()
+        .map(|n| n.text())
+        .collect();
+    assert_eq!(
+        moves,
+        vec!["[<]"],
+        "its lone bracket group after `->` is a MOVE vector"
+    );
+}
+
+/// `Transition::Stay` is the ABSENCE of a TRANSITION node. This is the
+/// one fact about a rule that no token run can carry: an omitted
+/// transition leaves nothing behind but the `;` that would have followed
+/// it either way.
+#[test]
+fn an_omitted_transition_is_the_absence_of_a_transition_node() {
+    let root = tree(
+        "alphabet x { '0', '1' }\nmachine {\n  tape m: x;\n\
+         \x20 entry state s {\n    ['0'] -> write ['1'];\n\
+         \x20   ['1'] -> debugger;\n\
+         \x20   [*] -> move [.] goto s;\n\
+         \x20   [*] -> stop;\n  }\n}\n",
+    );
+    let rules = all_of(&root, TmcKind::Rule);
+    assert_eq!(rules.len(), 4);
+
+    let written: Vec<Vec<String>> = rules
+        .iter()
+        .map(|r| {
+            all_of(r, TmcKind::Transition)
+                .iter()
+                .map(|n| n.text())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        written,
+        vec![
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+            vec!["goto s".to_string()],
+            vec!["stop".to_string()],
+        ],
+        "rules 1 and 2 omit their transition — `Stay` — and 3 and 4 write one"
+    );
+}
+
+/// A binding list splits around an interior symbol map for the same
+/// reason a signature splits around a contract clause, and the map's own
+/// node opens at `map`, not at the `with` that introduces it — so its
+/// extent is `SymMap::span` exactly.
+#[test]
+fn binding_arguments_split_around_an_interior_symbol_map() {
+    let root = tree(
+        "alphabet ab { '_', 'a' }\nroutine r(tape t: ab, state done) {\n\
+         \x20 entry state s { [*] -> done; }\n}\n\
+         machine {\n  tape main: ab;\n\
+         \x20 bind r(t = main with map { '_' -> 'a', 'a' => '_' }, done = stop) as bb;\n\
+         \x20 entry state s { [*] -> stop; }\n}\n",
+    );
+    let bind = first_of(&root, TmcKind::Bind);
+
+    let commas = bind
+        .descendant_tokens()
+        .filter(|t| t.kind() == TmcKind::Comma.into())
+        .count();
+    assert_eq!(
+        commas, 2,
+        "two commas in the bind; only one separates arguments, so a splitter reads \
+         three arguments where there are two"
+    );
+
+    let args: Vec<_> = all_of(&bind, TmcKind::BindingArg)
+        .into_iter()
+        .map(|n| BindingArgView::cast(n).expect("binding arg"))
+        .collect();
+    assert_eq!(args.len(), 2, "two arguments, not four");
+    let names: Vec<String> = args
+        .iter()
+        .map(|a| a.name_token().text().to_string())
+        .collect();
+    assert_eq!(names, vec!["t", "done"]);
+    assert_eq!(
+        args[0].syntax().text(),
+        "t = main with map { '_' -> 'a', 'a' => '_' }",
+        "an argument's extent runs through its own map, not to the first comma"
+    );
+    assert_eq!(
+        args[0]
+            .sym_map()
+            .expect("the first argument carries a map")
+            .syntax()
+            .text(),
+        "map { '_' -> 'a', 'a' => '_' }",
+        "SYM_MAP opens at `map`, so `with` stays a token of the argument"
+    );
+    assert!(
+        args[1].sym_map().is_none(),
+        "the second argument carries no map"
+    );
 }

@@ -5,6 +5,41 @@
 //! whitespace runs), node kinds mirror the grammar's containers.
 //! `Eof` has no kind: the green tree carries trailing trivia instead
 //! of a zero-length sentinel.
+//!
+//! # Node granularity
+//!
+//! "The grammar's containers" is where the node run STARTS, not where
+//! it stops: a container whose interior a consumer can already read is
+//! not enough on its own. Two further rules add a kind, and both are
+//! about what a consumer would otherwise have to re-derive:
+//!
+//! 1. **A keyword-decided extent.** `write [ … ]`, `move [ … ]`, a
+//!    written transition, `writes { … }`/`preserves { … }`, and
+//!    `map { … }` are each present only if their reserved word is, so
+//!    finding where one starts and stops means re-encoding a decision
+//!    `Parser::rule`/`sig_param`/`binding_arg` already made. An omitted
+//!    transition is the sharpest case: `Transition::Stay` is the
+//!    ABSENCE of a TRANSITION node, which no token scan can express.
+//! 2. **Containment.** `SIG_PARAM` and `BINDING_ARG` exist because
+//!    bracketing a child without bracketing its parent makes the
+//!    containment relation unrecoverable — a CONTRACT_CLAUSE floating
+//!    among the other parameters' tokens, or a SYM_MAP among the other
+//!    arguments', is attributable to its owner only by counting
+//!    depth-zero commas, which is rule 1 one level up.
+//!
+//! Every one of those seven nodes has an extent byte-identical to the
+//! AST span of the value it carries (`SigParam::span`,
+//! `ContractClause::span`, `WriteVec::span`, `MoveVec::span`, each
+//! `Transition` variant's own `span`, `BindingArg::span`,
+//! `SymMap::span`) — which is why SYM_MAP opens at `map` rather than at
+//! `with`, and WRITE_VEC at `[` rather than at `write`.
+//!
+//! What deliberately stays unbracketed: a rule's PATTERN (RULE's own
+//! tokens up to `->` — mandatory and first, so nothing optional has to
+//! be decided to find it), the `( … )` wrappers around a signature and
+//! around a binding list (parens cannot nest in either, and the typed
+//! children are a direct-child walk), and every comma-separated cell,
+//! pair or element inside a delimiter pair that cannot nest.
 
 use crate::lexer::{CommentKind, TokenKind};
 use mtc_core::syntax::SyntaxKind;
@@ -63,6 +98,17 @@ pub enum TmcKind {
     DocRun = 44,
     Attr = 45,
     Root = 46,
+    // Nodes appended after `Root`: the interior boundaries a consumer
+    // would otherwise have to re-derive from a reserved word (see the
+    // module doc's granularity note). Appended rather than inserted so
+    // no existing discriminant moves.
+    SigParam = 47,
+    ContractClause = 48,
+    WriteVec = 49,
+    MoveVec = 50,
+    Transition = 51,
+    BindingArg = 52,
+    SymMap = 53,
 }
 
 impl From<TmcKind> for SyntaxKind {
@@ -73,6 +119,14 @@ impl From<TmcKind> for SyntaxKind {
 
 /// Debug name for a `.tmc` kind — the `kind_name` callback for
 /// `mtc_core::syntax::debug_dump`. Unknown values render as `"?"`.
+///
+/// `"?"` is reserved for values no kind occupies — which, in this space,
+/// means exactly `31`, the gap between the trivia run and the node run.
+/// Every OCCUPIED discriminant is guaranteed a real name:
+/// `tests::kind_name_never_falls_through_for_an_occupied_discriminant`
+/// walks `0..=30` and `32..=53` and fails on a fallback, so an arm
+/// missing for a kind that exists is a bug this module's own tests
+/// catch rather than a tolerated degradation.
 pub fn kind_name(kind: SyntaxKind) -> &'static str {
     match kind {
         k if k == TmcKind::Ident.into() => "IDENT",
@@ -121,6 +175,13 @@ pub fn kind_name(kind: SyntaxKind) -> &'static str {
         k if k == TmcKind::DocRun.into() => "DOC_RUN",
         k if k == TmcKind::Attr.into() => "ATTR",
         k if k == TmcKind::Root.into() => "ROOT",
+        k if k == TmcKind::SigParam.into() => "SIG_PARAM",
+        k if k == TmcKind::ContractClause.into() => "CONTRACT_CLAUSE",
+        k if k == TmcKind::WriteVec.into() => "WRITE_VEC",
+        k if k == TmcKind::MoveVec.into() => "MOVE_VEC",
+        k if k == TmcKind::Transition.into() => "TRANSITION",
+        k if k == TmcKind::BindingArg.into() => "BINDING_ARG",
+        k if k == TmcKind::SymMap.into() => "SYM_MAP",
         _ => "?",
     }
 }
@@ -300,15 +361,35 @@ mod tests {
     }
 
     /// `kind_name` answers for every kind the enum defines, so a tree
-    /// dump can never print a bare number. This is NOT a completeness
-    /// check on the kind space: a raw value with no `TmcKind` behind
-    /// it at all (e.g. a deleted variant) falls into the `_ => "?"`
-    /// fallback and still satisfies this walk — `"?"` is non-empty.
+    /// dump can never print a bare number.
+    ///
+    /// Asserting merely that the name is non-EMPTY proves nothing about
+    /// completeness — a kind with no arm falls into `_ => "?"`, and
+    /// `"?"` is non-empty, so that walk passes with every arm deleted
+    /// (measured: all seven of this round's arms removed, the walk still
+    /// green). What bites is asserting the name is not the FALLBACK,
+    /// over the two occupied discriminant runs spelled as literals:
+    /// `0..=30` (significant tokens then trivia) and `32..=53` (nodes).
+    /// `31` is the one gap between them — a deliberate hole no kind
+    /// occupies, so `"?"` is its correct answer and it is asserted to BE
+    /// `"?"`, which is what keeps the two runs from silently being
+    /// widened into one.
+    ///
+    /// Still not a completeness check on the kind SPACE: a variant
+    /// appended at 54 with no arm sits outside both literals. That blind
+    /// spot is the same one the significant-token census above carries,
+    /// by the same argument.
     #[test]
-    fn kind_name_answers_for_every_kind() {
-        for raw in 0u16..=(TmcKind::Root as u16) {
+    fn kind_name_never_falls_through_for_an_occupied_discriminant() {
+        for raw in (0u16..=30).chain(32u16..=53) {
             let name = kind_name(SyntaxKind(raw));
             assert!(!name.is_empty(), "kind {raw} has no name");
+            assert_ne!(name, "?", "kind {raw} has no `kind_name` arm");
         }
+        assert_eq!(
+            kind_name(SyntaxKind(31)),
+            "?",
+            "31 is the gap between the trivia run and the node run"
+        );
     }
 }

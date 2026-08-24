@@ -25,6 +25,13 @@ ast_node!(pub struct GraftView: TmcKind::Graft.into());
 ast_node!(pub struct BindView: TmcKind::Bind.into());
 ast_node!(pub struct DocRunView: TmcKind::DocRun.into());
 ast_node!(pub struct AttrView: TmcKind::Attr.into());
+ast_node!(pub struct SigParamView: TmcKind::SigParam.into());
+ast_node!(pub struct ContractClauseView: TmcKind::ContractClause.into());
+ast_node!(pub struct WriteVecView: TmcKind::WriteVec.into());
+ast_node!(pub struct MoveVecView: TmcKind::MoveVec.into());
+ast_node!(pub struct TransitionView: TmcKind::Transition.into());
+ast_node!(pub struct BindingArgView: TmcKind::BindingArg.into());
+ast_node!(pub struct SymMapView: TmcKind::SymMap.into());
 
 /// One item that can appear at file level or inside a `NAMESPACE`
 /// body — the five kinds the grammar allows there: `use`, `alphabet`,
@@ -344,26 +351,40 @@ impl ReuseView {
     /// (the module doc's REUSE/WORLD accounting explains why: WORLD
     /// wraps only the body, and a signature's tokens sit directly
     /// under REUSE between the name and WORLD). Returned unparsed:
-    /// turning this token run into typed parameters is extraction's
-    /// job (a later layer built on top of these views), not this
-    /// one's — a view answers what token run the tree holds, not what
-    /// it means.
+    /// this is the exact token run `Parser::signature` itself accepts,
+    /// so a consumer wanting VALUES reparses it through that production
+    /// rather than splitting it — splitting is what would duplicate
+    /// grammar the parser owns.
+    ///
+    /// Flattens each element rather than keeping only direct-child
+    /// tokens: a parameter is a `SIG_PARAM` node, so a direct-token
+    /// filter would return `(`, the separating commas and `)` and
+    /// silently drop every parameter. The parens themselves are
+    /// REUSE's own tokens, which is why the run still starts and ends
+    /// with them.
     pub fn signature(&self) -> Vec<SyntaxToken> {
+        fn is_trivia(t: &SyntaxToken) -> bool {
+            t.kind() == TmcKind::Whitespace.into()
+                || t.kind() == TmcKind::LineComment.into()
+                || t.kind() == TmcKind::BlockComment.into()
+        }
         self.syntax()
             .children_with_tokens()
             .skip_while(|e| e.kind() != TmcKind::LParen.into())
             .take_while(|e| e.kind() != TmcKind::World.into())
-            .filter_map(|e| match e {
-                SyntaxElement::Token(t)
-                    if t.kind() != TmcKind::Whitespace.into()
-                        && t.kind() != TmcKind::LineComment.into()
-                        && t.kind() != TmcKind::BlockComment.into() =>
-                {
-                    Some(t)
-                }
-                _ => None,
+            .flat_map(|e| match e {
+                SyntaxElement::Token(t) => vec![t],
+                SyntaxElement::Node(n) => n.descendant_tokens().collect(),
             })
+            .filter(|t| !is_trivia(t))
             .collect()
+    }
+
+    /// This reuse's signature parameters, in declaration order — which
+    /// is the order that IS the vector position
+    /// (docs/tmt/language.md (signatures)).
+    pub fn params(&self) -> impl Iterator<Item = SigParamView> + '_ {
+        children(self.syntax())
     }
 
     /// This reuse's own body — `None` only for a tree that cannot come
@@ -475,6 +496,109 @@ impl WorldView {
     /// This world's own binds, in document order.
     pub fn binds(&self) -> impl Iterator<Item = BindView> + '_ {
         children(self.syntax())
+    }
+}
+
+/// A `SIG_PARAM`'s own direct IDENT tokens, in order. Exactly
+/// `volatile? tape NAME ALPHABET` or `state NAME` — the `writes`/
+/// `preserves` keywords are NOT among them, because each clause is a
+/// `CONTRACT_CLAUSE` child node and this walk is direct-children-only.
+/// That is the whole reason the clauses are bracketed: without it, a
+/// two-clause tape parameter puts six IDENTs in one flat run
+/// (`volatile`, `tape`, the name, the alphabet, `writes`, `preserves`)
+/// and no positional rule picks the name out of it.
+fn sig_param_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    node.children_with_tokens()
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Ident.into() => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Which of the two signature-parameter forms a `SIG_PARAM` spells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SigParamKind {
+    Tape,
+    State,
+}
+
+impl SigParamView {
+    /// Whether `volatile` was written — the first direct IDENT's text,
+    /// the same prefix-modifier rule `AlphabetView::exported` and
+    /// `TapeView::volatile` already use. `volatile` is one of the 27
+    /// fully-reserved words the parser refuses wherever a name is
+    /// expected, so no parameter name can collide with it.
+    pub fn volatile(&self) -> bool {
+        sig_param_idents(self.syntax())
+            .first()
+            .is_some_and(|t| t.text() == "volatile")
+    }
+
+    /// `tape` or `state` — the first non-`volatile` direct IDENT.
+    pub fn kind(&self) -> SigParamKind {
+        let idents = sig_param_idents(self.syntax());
+        let kw = &idents[usize::from(self.volatile())];
+        match kw.text() {
+            "tape" => SigParamKind::Tape,
+            "state" => SigParamKind::State,
+            other => panic!(
+                "unexpected SIG_PARAM keyword IDENT {other:?} — the parser accepts only \
+                 `tape`/`state` here"
+            ),
+        }
+    }
+
+    /// The parameter's own name: the IDENT after the `tape`/`state`
+    /// keyword.
+    pub fn name_token(&self) -> SyntaxToken {
+        let idents = sig_param_idents(self.syntax());
+        idents
+            .into_iter()
+            .nth(usize::from(self.volatile()) + 1)
+            .expect("SIG_PARAM always carries a name IDENT after its keyword")
+    }
+
+    /// The alphabet a tape parameter is declared over — the IDENT after
+    /// `:`. `None` for a `state` parameter, which declares no alphabet.
+    pub fn alphabet_token(&self) -> Option<SyntaxToken> {
+        let idents = sig_param_idents(self.syntax());
+        idents.into_iter().nth(usize::from(self.volatile()) + 2)
+    }
+
+    /// This parameter's own contract clauses, in the order written.
+    /// The parser fixes that order (`writes` before `preserves`) and
+    /// rejects a duplicate of either, so a caller reads each clause's
+    /// own keyword rather than its position.
+    pub fn contract_clauses(&self) -> impl Iterator<Item = ContractClauseView> + '_ {
+        children(self.syntax())
+    }
+}
+
+impl ContractClauseView {
+    /// `writes` or `preserves` — the clause's own first token. The
+    /// keyword is what says which field this clause fills; its position
+    /// among the parameter's clauses does not.
+    pub fn keyword_token(&self) -> SyntaxToken {
+        self.syntax()
+            .first_token()
+            .expect("CONTRACT_CLAUSE always opens on its own keyword IDENT")
+    }
+}
+
+impl BindingArgView {
+    /// The parameter name being bound — the argument's own first token,
+    /// the LHS of `=`.
+    pub fn name_token(&self) -> SyntaxToken {
+        self.syntax()
+            .first_token()
+            .expect("BINDING_ARG always opens on its own name IDENT")
+    }
+
+    /// The `map { … }` this argument's value carries, when `with map`
+    /// was written.
+    pub fn sym_map(&self) -> Option<SymMapView> {
+        child(self.syntax())
     }
 }
 
