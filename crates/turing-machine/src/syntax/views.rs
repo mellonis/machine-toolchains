@@ -351,15 +351,18 @@ impl ReuseView {
     /// (the module doc's REUSE/WORLD accounting explains why: WORLD
     /// wraps only the body, and a signature's tokens sit directly
     /// under REUSE between the name and WORLD). Returned unparsed:
-    /// this is the exact token run `Parser::signature` itself accepts,
-    /// so a consumer wanting VALUES reparses it through that production
-    /// rather than splitting it — splitting is what would duplicate
-    /// grammar the parser owns.
+    /// this is the token run `Parser::signature` itself consumes — that
+    /// production opens with `expect(LParen)` and closes with
+    /// `expect(RParen)`, taking nothing outside them — so a consumer
+    /// wanting VALUES retokenizes this run and hands it back to that
+    /// production rather than splitting it. Splitting is what would
+    /// duplicate grammar the parser owns.
     ///
     /// Flattens each element rather than keeping only direct-child
     /// tokens: a parameter is a `SIG_PARAM` node, so a direct-token
-    /// filter would return `(`, the separating commas and `)` and
-    /// silently drop every parameter. The parens themselves are
+    /// filter drops every parameter and keeps only the punctuation
+    /// REUSE itself owns. Measured on `routine r(tape t: ab)` with the
+    /// flattening removed, this returned `["(", ")"]`. The parens are
     /// REUSE's own tokens, which is why the run still starts and ends
     /// with them.
     pub fn signature(&self) -> Vec<SyntaxToken> {
@@ -382,7 +385,7 @@ impl ReuseView {
 
     /// This reuse's signature parameters, in declaration order — which
     /// is the order that IS the vector position
-    /// (docs/tmt/language.md (signatures)).
+    /// (docs/tmt/language.md (tapes and heads)).
     pub fn params(&self) -> impl Iterator<Item = SigParamView> + '_ {
         children(self.syntax())
     }
@@ -503,10 +506,22 @@ impl WorldView {
 /// `volatile? tape NAME ALPHABET` or `state NAME` — the `writes`/
 /// `preserves` keywords are NOT among them, because each clause is a
 /// `CONTRACT_CLAUSE` child node and this walk is direct-children-only.
-/// That is the whole reason the clauses are bracketed: without it, a
-/// two-clause tape parameter puts six IDENTs in one flat run
-/// (`volatile`, `tape`, the name, the alphabet, `writes`, `preserves`)
-/// and no positional rule picks the name out of it.
+///
+/// That exclusion is a CONSEQUENCE of bracketing the clauses, not the
+/// reason for it, and the accessors below do not depend on it. Measured
+/// with the `CONTRACT_CLAUSE` bracket removed, on
+/// `volatile tape a: x writes { '0' } preserves { '1' }`: this run
+/// becomes six IDENTs (`volatile`, `tape`, `a`, `x`, `writes`,
+/// `preserves`), and every positional accessor still answers correctly
+/// — `volatile()` true, `kind()` `Tape`, `name_token()` `a`,
+/// `alphabet_token()` `Some("x")` — because a clause keyword can only
+/// ever sit AFTER the alphabet. The single thing that breaks is
+/// `contract_clauses()`, which goes empty.
+///
+/// So the clause bracket's reason is the one `super::kinds`'s module
+/// doc gives — a clause's EXTENT is decided by its own reserved word,
+/// so with no node nothing addresses the clause at all — never a risk
+/// to the parameter's name.
 fn sig_param_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
     node.children_with_tokens()
         .filter_map(|e| match e {
@@ -517,6 +532,13 @@ fn sig_param_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
 }
 
 /// Which of the two signature-parameter forms a `SIG_PARAM` spells.
+///
+/// Deliberately the same name as `crate::parser::SigParamKind`, which
+/// this mirrors: that one is the AST's, carrying the tape form's
+/// payload (alphabet, `volatile`, both clauses); this one is the view
+/// layer's, a bare tag over a node whose payload the other accessors
+/// answer for. A consumer importing both aliases one at the `use` site
+/// — the collision is a compile error, never a silent mix-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SigParamKind {
     Tape,
@@ -538,7 +560,9 @@ impl SigParamView {
     /// `tape` or `state` — the first non-`volatile` direct IDENT.
     pub fn kind(&self) -> SigParamKind {
         let idents = sig_param_idents(self.syntax());
-        let kw = &idents[usize::from(self.volatile())];
+        let kw = idents
+            .get(usize::from(self.volatile()))
+            .expect("SIG_PARAM always carries a `tape`/`state` keyword IDENT");
         match kw.text() {
             "tape" => SigParamKind::Tape,
             "state" => SigParamKind::State,

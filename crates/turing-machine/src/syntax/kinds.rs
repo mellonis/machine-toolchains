@@ -20,12 +20,18 @@
 //!    `Parser::rule`/`sig_param`/`binding_arg` already made. An omitted
 //!    transition is the sharpest case: `Transition::Stay` is the
 //!    ABSENCE of a TRANSITION node, which no token scan can express.
-//! 2. **Containment.** `SIG_PARAM` and `BINDING_ARG` exist because
-//!    bracketing a child without bracketing its parent makes the
-//!    containment relation unrecoverable — a CONTRACT_CLAUSE floating
-//!    among the other parameters' tokens, or a SYM_MAP among the other
-//!    arguments', is attributable to its owner only by counting
-//!    depth-zero commas, which is rule 1 one level up.
+//! 2. **The reparse unit, which is also the owner.** `SIG_PARAM` and
+//!    `BINDING_ARG` are NOT keyword-decided, and the honest statement
+//!    of their case is weaker than rule 1's: once the clauses and maps
+//!    are nodes, every comma remaining at that level IS a separator, so
+//!    a consumer COULD attribute a clause to its parameter by counting
+//!    them. What the bracket buys is that the parameter's own boundary
+//!    lives in the tree instead of in every consumer — and a parameter
+//!    is precisely the unit a caller retokenizes and hands back to
+//!    `Parser::sig_param` (`BINDING_ARG` likewise to
+//!    `Parser::binding_arg`). The PM sibling brackets the same unit for
+//!    the same reason, as `PmcKind::Item`
+//!    (`crates/post-machine/src/syntax/kinds.rs`).
 //!
 //! Every one of those seven nodes has an extent byte-identical to the
 //! AST span of the value it carries (`SigParam::span`,
@@ -98,10 +104,14 @@ pub enum TmcKind {
     DocRun = 44,
     Attr = 45,
     Root = 46,
-    // Nodes appended after `Root`: the interior boundaries a consumer
-    // would otherwise have to re-derive from a reserved word (see the
-    // module doc's granularity note). Appended rather than inserted so
-    // no existing discriminant moves.
+    // Nodes appended after `Root`: the interior boundaries (see the
+    // module doc's granularity note for both rules). `ContractClause`,
+    // `WriteVec`, `MoveVec`, `Transition` and `SymMap` are here by
+    // rule 1 — a reserved word decides each one's extent. `SigParam`
+    // and `BindingArg` are NOT keyword-decided; they are here by
+    // rule 2, so that the clause and map nodes have an owner, and
+    // because each is the unit a reparse consumes. Appended rather
+    // than inserted so no existing discriminant moves.
     SigParam = 47,
     ContractClause = 48,
     WriteVec = 49,

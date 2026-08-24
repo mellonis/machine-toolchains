@@ -534,10 +534,11 @@ fn all_of(root: &SyntaxNode, kind: TmcKind) -> Vec<SyntaxNode> {
 }
 
 /// The shape that motivated bracketing the signature at all: two
-/// parameters, three commas, and only ONE of them a separator. The
-/// assertion on the flat run is not decoration — it is the measurement
-/// that makes the rest of the test meaningful, because it shows exactly
-/// what a comma-splitting consumer would have found.
+/// parameters, two commas, and only ONE of them a separator — so a
+/// consumer splitting the flat run reads THREE parameters where there
+/// are two. The assertion on the comma count is not decoration: it is
+/// the measurement that makes the rest of the test meaningful, because
+/// it shows exactly what a comma-splitting consumer would have found.
 #[test]
 fn a_writes_clause_puts_commas_where_a_splitter_would_read_separators() {
     let root = tree(
@@ -583,9 +584,19 @@ fn a_writes_clause_puts_commas_where_a_splitter_would_read_separators() {
 
 /// A clause is identified by its own keyword, never by its position:
 /// both are optional, so position says nothing on a parameter carrying
-/// only one of them. `volatile` and a `state` parameter ride along —
-/// they are the two shapes that would break a naive positional read of
-/// a parameter's IDENTs.
+/// only one of them (measured — on `tape a: x preserves { '1' }` the
+/// clause at position 0 is `preserves`).
+///
+/// The two extra shapes earn their place for different reasons, both
+/// measured by mutation. `volatile` is the one that breaks a NAIVE
+/// positional read: with `name_token` forced to `.nth(1)` this test
+/// reads `"tape"` for the name, and with `alphabet_token` forced to
+/// `.nth(2)` it reads `Some("a")` for the alphabet. The `state`
+/// parameter breaks neither of those — a naive read answers it
+/// correctly — and is here instead as the only parameter form with no
+/// alphabet and no clause, pinning the `State` arm (forcing `kind()`
+/// to return `Tape` fails this test) alongside the `None` and empty
+/// answers.
 #[test]
 fn contract_clauses_are_named_by_their_own_keyword() {
     let root = tree(
@@ -759,5 +770,132 @@ fn binding_arguments_split_around_an_interior_symbol_map() {
     assert!(
         args[1].sym_map().is_none(),
         "the second argument carries no map"
+    );
+}
+
+/// Every one of the seven interior nodes has an extent byte-identical to
+/// the AST span of the value it carries. `syntax::kinds`'s module doc
+/// states that as a property of the kind space; this is the measurement
+/// behind it, and it is the reason `SYM_MAP` opens at `map` rather than
+/// at `with` and `WRITE_VEC` at `[` rather than at `write`.
+///
+/// Worth a test rather than prose because extraction leans on it
+/// directly: a bracket placed one token off still round-trips (the
+/// lossless law sees the same bytes) and still casts (the kind is
+/// right), so nothing else in this file would notice — it would surface
+/// only as a span mismatch deep in a later parity oracle. `TRANSITION`
+/// is checked on three variants, since each carries its own span field.
+#[test]
+fn each_new_nodes_extent_equals_the_ast_span_it_carries() {
+    use mtc_core::diagnostics::Span;
+    use mtc_core::syntax::TextLineIndex;
+    use mtc_turing_machine::lexer::{LexMode, lex_with};
+    use mtc_turing_machine::parser::{
+        BindingValue, SigParamKind as AstSigParamKind, Transition, lower_cst, parse_cst,
+        parse_green_from_tokens,
+    };
+
+    let src = "alphabet x { '0', '1' }\n\
+               routine r(volatile tape a: x writes { '0' } preserves { '1' }, state done) {\n\
+               \x20 entry state s { [*] -> return; }\n\
+               }\n\
+               machine {\n\
+               \x20 tape m: x;\n\
+               \x20 bind r(a = m with map { '0' -> '1', '1' => '0' }, done = stop) as bb;\n\
+               \x20 entry state s {\n\
+               \x20   ['0'] -> write ['1'] move [>] goto s;\n\
+               \x20   [*] -> stop;\n\
+               \x20 }\n\
+               }\n";
+    let index = TextLineIndex::new(src);
+    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+    let ast = lower_cst(&parse_cst(&tokens).expect("parses"));
+    let root = SyntaxNode::new_root(parse_green_from_tokens(src, &tokens).expect("parses"));
+
+    // The green node's extent, expressed the way an AST `Span` is.
+    let extent = |n: &SyntaxNode| {
+        let r = n.text_range();
+        let (sl, sc) = index.line_col(r.start);
+        let (el, ec) = index.line_col(r.end);
+        Span::new(sl, sc, el, ec)
+    };
+
+    let routine = &ast.routines[0];
+    let params = all_of(&root, TmcKind::SigParam);
+    assert_eq!(params.len(), routine.sig.params.len());
+    for (node, p) in params.iter().zip(&routine.sig.params) {
+        assert_eq!(extent(node), p.span, "SIG_PARAM extent != SigParam::span");
+    }
+
+    let clauses = all_of(&root, TmcKind::ContractClause);
+    let AstSigParamKind::Tape {
+        writes, preserves, ..
+    } = &routine.sig.params[0].kind
+    else {
+        panic!("the first parameter is a tape parameter");
+    };
+    assert_eq!(clauses.len(), 2);
+    for (node, clause) in clauses.iter().zip([writes, preserves]) {
+        let clause = clause.as_ref().expect("both clauses are written");
+        assert_eq!(
+            extent(node),
+            clause.span,
+            "CONTRACT_CLAUSE extent != ContractClause::span"
+        );
+    }
+
+    let machine = ast.machine.as_ref().expect("a machine");
+    let rule = &machine.states[0].rules[0];
+    assert_eq!(
+        extent(&all_of(&root, TmcKind::WriteVec)[0]),
+        rule.write.as_ref().expect("a write vector").span,
+        "WRITE_VEC extent != WriteVec::span — the `write` keyword must stay outside"
+    );
+    assert_eq!(
+        extent(&all_of(&root, TmcKind::MoveVec)[0]),
+        rule.mov.as_ref().expect("a move vector").span,
+        "MOVE_VEC extent != MoveVec::span"
+    );
+
+    let span_of = |t: &Transition| match t {
+        Transition::Goto { span, .. }
+        | Transition::Call { span, .. }
+        | Transition::Return { span }
+        | Transition::Stop { span }
+        | Transition::Halt { span }
+        | Transition::Stay { span } => *span,
+    };
+    let transitions = all_of(&root, TmcKind::Transition);
+    let written = [
+        &routine.states[0].rules[0].transition, // `return`
+        &rule.transition,                       // `goto s`
+        &machine.states[0].rules[1].transition, // `stop`
+    ];
+    assert_eq!(transitions.len(), written.len());
+    for (node, t) in transitions.iter().zip(written) {
+        assert_eq!(
+            extent(node),
+            span_of(t),
+            "TRANSITION extent != the variant's own span"
+        );
+    }
+
+    let bind = &machine.binds[0];
+    let args = all_of(&root, TmcKind::BindingArg);
+    assert_eq!(args.len(), bind.args.len());
+    for (node, a) in args.iter().zip(&bind.args) {
+        assert_eq!(
+            extent(node),
+            a.span,
+            "BINDING_ARG extent != BindingArg::span"
+        );
+    }
+    let BindingValue::Named { map: Some(map), .. } = &bind.args[0].value else {
+        panic!("the first argument carries a map");
+    };
+    assert_eq!(
+        extent(&all_of(&root, TmcKind::SymMap)[0]),
+        map.span,
+        "SYM_MAP extent != SymMap::span — the `with` keyword must stay outside"
     );
 }
