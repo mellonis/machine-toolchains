@@ -204,15 +204,19 @@ impl AlphabetView {
 
     /// Whether `export` was written. `export` is an ordinary `IDENT`
     /// at the token level — this lexer has no dedicated keyword token
-    /// kind, so contextual keywords like `export`/`alphabet`/`as` are
-    /// plain identifiers (`crates/turing-machine/src/lexer.rs`) — so
-    /// this reads the FIRST header IDENT's text. `export` and
-    /// `alphabet` are both reserved words (`crate::lexer::RESERVED`),
-    /// so the parser's own `name()` refuses either one as the
-    /// alphabet's own name (`ReservedName`, `alphabet export { ... }`
-    /// does not parse) — the header is exactly `export? alphabet
-    /// <name>` with no name/keyword collision possible, and the first
-    /// slot is where `export` lives when it was written.
+    /// kind at all, reserved or contextual, so it never special-cases
+    /// `export`/`alphabet`/`as` (`crates/turing-machine/src/lexer.rs`);
+    /// what makes them behave as keywords is the PARSER, which refuses
+    /// them wherever a name is expected. `export` is fully reserved,
+    /// not contextual (`crate::lexer::RESERVED`; the one contextual
+    /// word in this language is the `deprecated` attribute, which
+    /// isn't even an `IDENT` — it lives inside an `AttentionLine`
+    /// payload) — so `Parser::name()` refuses it, and `alphabet`, as
+    /// an alphabet's own name (`ReservedName`; `alphabet export { ...
+    /// }` does not parse). The header is exactly `export? alphabet
+    /// <name>` with no name/keyword collision possible, and matching
+    /// the FIRST header IDENT's text against `"export"` is therefore
+    /// exactly the presence check it looks like.
     pub fn exported(&self) -> bool {
         alphabet_header_idents(self.syntax())
             .first()

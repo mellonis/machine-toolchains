@@ -4,7 +4,7 @@
 //! names. Extraction parity is a separate file; a view that returns the
 //! wrong child still round-trips, so losslessness cannot catch it.
 
-use mtc_core::syntax::{AstNode, SyntaxNode};
+use mtc_core::syntax::{AstNode, SyntaxNode, TreeBuilder};
 use mtc_turing_machine::parser::parse_green;
 use mtc_turing_machine::syntax::{
     AlphabetView, MachineView, NamespaceView, RootView, TmcKind, UsePathView, UseView,
@@ -159,12 +159,20 @@ fn root_items_are_the_declarations_in_source_order() {
     );
 }
 
-/// A namespace's own items, not the file's.
+/// A namespace's own items, not the file's — and not its nested
+/// namespace's either. The nested case is the one that matters: a
+/// descendant walk passes the sibling-isolation check, so only a
+/// namespace inside a namespace tells the two walks apart.
 #[test]
 fn namespace_items_are_scoped_to_it() {
-    let root = tree("alphabet outer { '_' }\n\nnamespace n {\n  alphabet inner { '_' }\n}\n");
+    let root = tree(
+        "alphabet outer { '_' }\n\n\
+         namespace n {\n  alphabet direct { '_' }\n\
+         \x20 namespace inner {\n    alphabet nested { '_' }\n  }\n}\n",
+    );
     let ns = NamespaceView::cast(first_of(&root, TmcKind::Namespace)).expect("ns");
     assert_eq!(ns.name(), "n");
+
     let names: Vec<String> = ns
         .items()
         .filter_map(|i| AlphabetView::cast(i.node().clone()))
@@ -172,10 +180,28 @@ fn namespace_items_are_scoped_to_it() {
         .collect();
     assert_eq!(
         names,
-        vec!["inner"],
-        "the outer alphabet is not this namespace's"
+        vec!["direct"],
+        "items() must yield this namespace's own alphabets — not the file's, not the nested namespace's"
     );
+
+    // The nested namespace itself IS a direct child, and appears as one item.
+    let kinds: Vec<TmcKind> = ns.items().map(|i| i.kind()).collect();
+    assert_eq!(kinds, vec![TmcKind::Alphabet, TmcKind::Namespace]);
 }
+
+// A parity gap with the PM sibling, recorded so nobody goes looking for
+// the missing test: PM's `use_path_as_marker_is_positional_not_textual`
+// (`crates/post-machine/src/syntax/views.rs`) builds `use as as as;` to
+// prove its alias marker is found by POSITION, never by comparing a
+// segment's text against `"as"` — in `.pmc`, a name can legally spell
+// `as`, so the two ways of finding the marker could in principle
+// disagree and the test pins that they don't. `.tmc` has no counterpart
+// and cannot: `as` is one of the 27 words in `lexer::RESERVED`, so
+// `Parser::name()` rejects it wherever a name is expected and `use as
+// as as;` never parses — a segment can never literally spell `as`, so
+// `use_path_parts`'s positional split and a hypothetical textual one
+// would never have anything to disagree about. The hazard PM's test
+// guards against does not exist on this side of the language.
 
 /// A path's segments, and its alias when written.
 #[test]
@@ -222,4 +248,40 @@ fn alphabet_exposes_export_glyphs_and_its_doc_run() {
     let p = AlphabetView::cast(first_of(&plain, TmcKind::Alphabet)).expect("alphabet");
     assert!(!p.exported());
     assert!(p.doc_run().is_none());
+}
+
+/// `glyph_tokens` walks DIRECT children, never descendants. No parsed
+/// fixture can pin this: the grammar cannot nest a glyph-carrying node
+/// inside an ALPHABET, so both walks agree on every program that
+/// exists. The shape is built directly instead, because the requirement
+/// is about what the accessor PROMISES, not about what today's grammar
+/// happens to allow — a descendant walk would start answering
+/// differently the day the grammar nests, and losslessness would not
+/// notice.
+#[test]
+fn alphabet_glyphs_do_not_descend_into_child_nodes() {
+    let mut b = TreeBuilder::new();
+    b.start_node(TmcKind::Alphabet.into());
+    b.token(TmcKind::Ident.into(), "ab");
+    b.token(TmcKind::LBrace.into(), "{");
+    b.token(TmcKind::Glyph.into(), "'_'");
+    // A child NODE carrying a glyph of its own: synthetic, unreachable
+    // through the parser, and exactly what a descendant walk would take.
+    b.start_node(TmcKind::DocRun.into());
+    b.token(TmcKind::Glyph.into(), "'x'");
+    b.finish_node();
+    b.token(TmcKind::RBrace.into(), "}");
+    b.finish_node();
+
+    let a = AlphabetView::cast(SyntaxNode::new_root(b.finish())).expect("alphabet");
+    let glyphs: Vec<String> = a
+        .glyph_tokens()
+        .iter()
+        .map(|t| t.text().to_string())
+        .collect();
+    assert_eq!(
+        glyphs,
+        vec!["'_'"],
+        "glyph_tokens descended into a child node"
+    );
 }
