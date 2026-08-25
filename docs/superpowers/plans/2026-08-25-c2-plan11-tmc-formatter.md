@@ -1235,6 +1235,13 @@ Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
 
+**Put `state s /* x */ { // open` through `agrees` as soon as states render.**
+Task 4 fixed the rule that governs it — a pre-brace comment suppresses a node's
+whole open run, so C1 prints `state s {` / `/* x */` / `// open` / the first rule —
+but with no state surface to render, it could only pin that shape by asserting on
+`trivia`'s unit stream, not on printed bytes. You are the first task that can
+compare the bytes. Add it.
+
 **`trivia::unclaimed_inside`'s RULE arm answers empty today, and filling it in is
 this task's obligation — nothing will fail if you skip it.** Task 4 built that
 helper for the `;`-terminated declarations it renders and left the RULE arm empty
@@ -1414,6 +1421,14 @@ Run: `cargo test -p mtc-turing-machine --lib fmt::print`
 Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
+
+**The `alphabet` pre-brace pair will pass its existing assertion even if you
+forget it.** Task 4's fix made the trivia model right for `alphabet /* x */ ab {
+// open`, and as a consequence the ALPHABET surface now drops BOTH comments where
+it previously dropped one and misplaced the other. The direct assertion guarding
+it pins only that `open_trailing` is empty — so wiring the element list without
+also handling the pre-brace comments leaves a green suite and two dropped
+comments. Pin this one on printed bytes through `agrees`, not on `open_trailing`.
 
 **`trivia::interior` was never exercised on the two-level `map_pairs` surface
 in Task 2** — do not assume that coverage exists. The nested case is this
