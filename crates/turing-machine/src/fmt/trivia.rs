@@ -216,9 +216,19 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
         *near_edge = end_line(index, t);
     };
 
-    // Comments written BEFORE the brace — between a declaration's
-    // keyword and its name, or after an `entry` prefix. No production
-    // holds them, so they lead the body.
+    // Comments written before the brace. The slot this walk is FOR is
+    // the header — between the declaring keyword (or an `entry`/
+    // `export` prefix) and the `{`. No production holds a comment
+    // there, so the old parser's body drain took it and it printed as
+    // the body's first item.
+    //
+    // One slot in this same region IS held, and this walk does not tell
+    // the two apart: a comment between a bound DOC_RUN's last line and
+    // the keyword belongs to the RUN as `Parser::doc_run` reads it, and
+    // prints above the declaration rather than inside the body. It is a
+    // direct child token here for NAMESPACE and STATE, so this walk
+    // claims it; closing that belongs with doc-run rendering, not with
+    // the container walk.
     for e in &elems[..head_end] {
         if let SyntaxElement::Token(t) = e
             && is_comment(t.kind())
@@ -567,6 +577,26 @@ mod tests {
         let chained = units(&root, &index);
         assert_eq!(chained.len(), 3, "a comment never carries a trailing");
         assert!(chained.iter().all(|u| u.trailing.is_none()));
+
+        // The same-line boundary itself: the comment nearest a
+        // declaration is its trailing only when it was written on that
+        // declaration's OWN last line. Drop that test and this comment is
+        // hoisted onto the `use`'s line — a silently relocated comment,
+        // which is what whitespace-only exists to forbid.
+        let (root, index) = tree("use a::b;\n// own line\nuse c::d;\n");
+        let separated = units(&root, &index);
+        assert_eq!(
+            separated.len(),
+            3,
+            "an own-line comment is an item of its own, not the previous \
+             declaration's trailing"
+        );
+        assert!(separated[0].trailing.is_none());
+        assert!(matches!(&separated[1].kind, UnitKind::Comment(c) if c.text == "// own line"));
+        assert!(
+            !separated[2].blank_before,
+            "and the gap after it is measured from the comment, not the `;`"
+        );
     }
 
     /// The gap after a `;`-terminated declaration is measured from the `;`,

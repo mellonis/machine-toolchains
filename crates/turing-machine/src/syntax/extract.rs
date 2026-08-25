@@ -2190,9 +2190,26 @@ mod tests {
     /// `Parser::take_trailing`, which leaves `prev_end_line` at the `;`.
     /// The green walk must do the same, because the field it feeds — the
     /// FIRST doc item's `blank_before` — is what `fmt` turns into a blank
-    /// line before a doc run. The two agreed everywhere else already: C1
-    /// DOES advance past a `}`-closing declaration's trailing comment, and
-    /// a single-line comment ends on the line it starts.
+    /// line before a doc run.
+    ///
+    /// This closed the last divergence in the SEED, and the claim stops
+    /// there: over the shapes this test and the two above cover — a
+    /// `}`-closing declaration's trailing comment, an own-line comment, a
+    /// chained pair after the `;`, a comment ahead of the `;`, and a
+    /// genuine blank line — the two paths agree item for item.
+    ///
+    /// A divergence remains INSIDE the run, and it is not about the seed:
+    /// [`sig_tokens`] drops an interleaved comment as trivia, so
+    /// [`extract_doc_items`] returns a shorter run than C1's AND the item
+    /// after the comment measures its own `blank_before` against the
+    /// previous DOC LINE instead of against the comment. For
+    /// `"? doc\n// c\n? more\n…"` C1 reads three items and no blanks
+    /// where this reads two and a blank, while the formatter prints that
+    /// comment in place — measured, and the reason a doc-run renderer
+    /// built on these items cannot yet be trusted with one.
+    /// `reparsed_doc_items_reduce_to_the_same_doc_when_comments_interleave`
+    /// above pins the half that IS safe: the reduced [`Doc`] is unaffected,
+    /// because `reduce_doc_run` treats a comment item as fully inert.
     #[test]
     fn a_block_comment_riding_a_semicolon_agrees_on_blank_before() {
         let src = "use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n";
