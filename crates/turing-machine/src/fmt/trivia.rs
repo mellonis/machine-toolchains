@@ -23,6 +23,23 @@
 //! - **An item of the container's stream** — everything else, printed
 //!   at the block's indent on a line of its own.
 //!
+//! # Two comments a plain sibling walk cannot see
+//!
+//! Both were measured against the printer this module has to stay
+//! byte-identical to, and each one is a DROPPED comment if unhandled.
+//!
+//! - **Between a `machine`/`routine`/`graph` header and its `{`.** WORLD
+//!   opens AT the brace, so `machine /* x */ {` leaves that comment in
+//!   the DECLARATION's stream, one level up. The old parser body-drains
+//!   it and prints it as the body's first item; [`pre_world_comments`]
+//!   reaches back for it.
+//! - **Inside a `;`-terminated declaration.** `tape main /* c */: ab;`
+//!   prints as `tape main: ab; /* c */`, because the old parser's
+//!   `take_trailing` looks at whatever is still PENDING when it reaches
+//!   the `;` — and a comment written inside the statement is pending
+//!   there. [`unclaimed_inside`] names, per node kind, which of a node's
+//!   own comments are still pending at its terminator.
+//!
 //! # The near edge of a gap
 //!
 //! `blank_before` is `line(unit) > near_edge + 1`, where the near edge
@@ -147,6 +164,88 @@ fn open_run(
     Some((brace, body, run))
 }
 
+/// The comments written between a `machine`/`routine`/`graph` header
+/// and the `{` its WORLD opens at — empty for every other container.
+///
+/// **The scan runs BACKWARDS from the WORLD and stops at the first
+/// significant token**, which is what keeps it disjoint from the
+/// declaration's own lists. A forward scan from the declaring keyword
+/// would look right and be wrong: a comment written anywhere in a
+/// REUSE's HEADER — `routine /* c */ r(tape t: ab)` — is swept into
+/// slot 0 of the SIGNATURE's interior list by the old parser's
+/// `interior_comments`, which drains on a global cursor, and printing it
+/// here as well would print it twice. Backwards-to-the-first-significant
+/// token is exactly "after the last list drain": the `)` for a REUSE,
+/// the `machine` keyword for a MACHINE.
+fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
+    if world.kind() != TmcKind::World.into() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cur = world.prev_sibling_or_token();
+    while let Some(SyntaxElement::Token(t)) = cur {
+        if is_comment(t.kind()) {
+            out.push(t.clone());
+        } else if !is_whitespace(t.kind()) {
+            break;
+        }
+        cur = t.prev_sibling_or_token();
+    }
+    out.reverse();
+    out
+}
+
+/// The comment tokens inside `node` that the old parser leaves PENDING
+/// when it reaches the node's terminator — the ones `take_trailing` and
+/// then the container's own drain get to claim, in that order.
+///
+/// A comment is pending exactly while nothing else has taken it, and
+/// what takes one is a list's `interior_comments` drain (or a doc run).
+/// So this is a per-KIND question, and the chain below is deliberately
+/// accounted for in prose rather than left to a silent default:
+///
+/// - **TAPE** — no doc run, no list, so every comment inside it is
+///   pending. `tape /* c */ main: ab;` prints `tape main: ab; /* c */`.
+/// - **GRAFT / BIND** — the binding list's last drain runs immediately
+///   before the `)`, claiming everything at or before it; only what is
+///   written AFTER the `)` (around an `as NAME`) is still pending.
+/// - **USE** — its own drain runs at the `;`, so nothing inside it is
+///   ever pending; the empty answer here is a fact about `parse_use`,
+///   not a gap.
+/// - **RULE** — `;`-terminated like the three above, and
+///   `[*] -> stop /* c */;` really does leave a comment pending that
+///   `take_trailing` claims. It answers empty here **only because this
+///   printer does not render rules yet**; the rule surface must fill
+///   this arm in, or that comment is dropped with no test failing.
+/// - **Everything else** is `}`-terminated. `capture_close_trailing`
+///   requires the comment to sit AFTER the `}`, so a node's own
+///   comments never reach it — and they are not lost either: they were
+///   claimed by that node's body drain (its head scan here) or by one
+///   of its lists.
+fn unclaimed_inside(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    let comments = |elems: &[SyntaxElement]| -> Vec<SyntaxToken> {
+        elems
+            .iter()
+            .filter_map(|e| match e {
+                SyntaxElement::Token(t) if is_comment(t.kind()) => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let elems: Vec<SyntaxElement> = node.children_with_tokens().collect();
+    if node.kind() == TmcKind::Tape.into() {
+        comments(&elems)
+    } else if node.kind() == TmcKind::Graft.into() || node.kind() == TmcKind::Bind.into() {
+        let after = elems
+            .iter()
+            .rposition(|e| e.kind() == TmcKind::RParen.into())
+            .map_or(elems.len(), |i| i + 1);
+        comments(&elems[after..])
+    } else {
+        Vec::new()
+    }
+}
+
 /// A container's items, in source order — the file (ROOT), a
 /// `namespace` body, a `machine`/`routine`/`graph` body (the WORLD), or
 /// a state's rule list.
@@ -213,6 +312,15 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
             push_comment(&mut out, &mut near_edge, t);
         }
     }
+    // The same header slot for a MACHINE/REUSE body, which lives one
+    // level up: WORLD opens at the `{`, so `elems[..head_end]` above is
+    // empty and this is the only reader that can reach it. It runs
+    // AFTER the open run has set the near edge, which is the old
+    // parser's own order — `capture_open_trailing` seeds `prev_end_line`
+    // from the brace before `world_body` drains anything pending.
+    for t in pre_world_comments(container) {
+        push_comment(&mut out, &mut near_edge, &t);
+    }
 
     let mut i = body_start;
     while i < elems.len() {
@@ -231,7 +339,26 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
                     .last_token()
                     .expect("a container's item node carries at least one token");
                 let blank_before = start_line(index, &first) > near_edge + 1;
-                let (trailing, next) = claim_trailing(&elems, i + 1, index, end_line(index, &last));
+                let node_last_line = end_line(index, &last);
+                // A comment still pending INSIDE the node is ahead of
+                // everything the container's own stream holds, and the
+                // old parser's `take_trailing` inspects only the FIRST
+                // pending one — so when there is an inside comment, no
+                // comment written after the `;` can be the trailing,
+                // whichever line it sits on.
+                let inside = unclaimed_inside(n);
+                let (trailing, next, taken) = match inside.first() {
+                    None => {
+                        let (trailing, next) = claim_trailing(&elems, i + 1, index, node_last_line);
+                        (trailing, next, 0)
+                    }
+                    Some(t)
+                        if !comment_from(t).own_line && start_line(index, t) == node_last_line =>
+                    {
+                        (Some((comment_from(t), end_line(index, t))), i + 1, 1)
+                    }
+                    Some(_) => (None, i + 1, 0),
+                };
                 // A `}`-terminated declaration's trailing comment moves
                 // the near edge past itself; a `;`-terminated one's does
                 // not. That asymmetry is not about the token — it is
@@ -239,13 +366,20 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
                 // partition the declaration kinds exactly.
                 near_edge = match &trailing {
                     Some((_, comment_end)) if last.kind() == TmcKind::RBrace.into() => *comment_end,
-                    _ => end_line(index, &last),
+                    _ => node_last_line,
                 };
                 out.push(Unit {
                     blank_before,
                     kind: UnitKind::Node(n.clone()),
                     trailing: trailing.map(|(c, _)| c),
                 });
+                // Whatever the trailing did not take drains next, as
+                // items of the container — before any comment written
+                // after the terminator, which is where they already sit
+                // in source order.
+                for t in &inside[taken..] {
+                    push_comment(&mut out, &mut near_edge, t);
+                }
                 i = next;
             }
         }
@@ -713,6 +847,128 @@ mod tests {
                 .expect("an ALPHABET");
             assert_eq!(blank_before_decl(&alphabet), expect, "for:\n{src}");
         }
+    }
+
+    /// A comment written between a `machine`/`routine`/`graph` header and
+    /// its `{` is a child of the DECLARATION — WORLD opens at the brace —
+    /// so the head scan that catches the NAMESPACE/STATE twin cannot see
+    /// it. It still leads the body, and it still moves the near edge onto
+    /// its own line, which for a comment written ABOVE the brace is where
+    /// the printer's unwritten blank line comes from.
+    ///
+    /// The REUSE case is the one that says why the scan runs BACKWARDS:
+    /// `routine /* c */ r(…)` — a comment earlier in the header — belongs
+    /// to the signature's interior list, and the scan must stop at the
+    /// `)` rather than sweep the whole header.
+    #[test]
+    fn a_comment_before_a_worlds_brace_is_the_bodys_first_unit() {
+        let src = "machine /* x */ {\n  tape t: ab;\n}\n";
+        let (root, index) = tree(src);
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        let items = units(&world, &index);
+        assert!(
+            matches!(&items[0].kind, UnitKind::Comment(c) if c.text == "/* x */"),
+            "the pre-brace comment leads the body"
+        );
+        assert!(!items[1].blank_before);
+
+        let src = "machine // why\n{\n  tape t: ab;\n}\n";
+        let (root, index) = tree(src);
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        let above = units(&world, &index);
+        assert!(matches!(&above[0].kind, UnitKind::Comment(c) if c.text == "// why"));
+        assert!(
+            above[1].blank_before,
+            "the comment's line is ABOVE the brace's, so the tape reads two lines away"
+        );
+
+        let src = "routine r(tape /* sig */ t: ab) /* body */ {\n  state s {\n  }\n}\n";
+        let (root, index) = tree(src);
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        let reuse = units(&world, &index);
+        assert!(
+            matches!(&reuse[0].kind, UnitKind::Comment(c) if c.text == "/* body */"),
+            "only what is written past the signature's `)` reaches the body"
+        );
+        assert!(
+            !reuse
+                .iter()
+                .any(|u| matches!(&u.kind, UnitKind::Comment(c) if c.text == "/* sig */")),
+            "a comment inside the signature belongs to the signature's own list"
+        );
+    }
+
+    /// A comment written INSIDE a `;`-terminated declaration is still
+    /// PENDING when the old parser reaches the `;`, so `take_trailing`
+    /// relocates it to after the terminator — and what it declines
+    /// (another line, an own-line comment, a second comment) drains as an
+    /// item of the container instead, ahead of anything written after the
+    /// `;`.
+    #[test]
+    fn a_comment_inside_a_semicolon_declaration_is_relocated_past_it() {
+        let (root, index) = tree("machine {\n  tape main /* c */: ab;\n}\n");
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        let taken = units(&world, &index);
+        assert_eq!(taken.len(), 1, "the comment rides the declaration");
+        assert_eq!(
+            taken[0].trailing.as_ref().map(|c| c.text.as_str()),
+            Some("/* c */")
+        );
+
+        let (root, index) = tree("machine {\n  tape main /* a */: ab; /* b */\n}\n");
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        let both = units(&world, &index);
+        assert_eq!(
+            both[0].trailing.as_ref().map(|c| c.text.as_str()),
+            Some("/* a */"),
+            "the INSIDE comment is ahead of the container's own stream"
+        );
+        assert!(
+            matches!(&both[1].kind, UnitKind::Comment(c) if c.text == "/* b */"),
+            "so the one after the `;` is an item, not a second trailing"
+        );
+
+        // Declined on the line test, and declined on `own_line` — both
+        // fall through to the container's drain.
+        for src in [
+            "machine {\n  tape main /* c */\n    : ab;\n}\n",
+            "machine {\n  tape main\n    /* c */: ab;\n}\n",
+        ] {
+            let (root, index) = tree(src);
+            let world = descendants(&root)
+                .find(|n| n.kind() == TmcKind::World.into())
+                .expect("a WORLD");
+            let declined = units(&world, &index);
+            assert!(declined[0].trailing.is_none(), "for:\n{src}");
+            assert!(
+                matches!(&declined[1].kind, UnitKind::Comment(c) if c.text == "/* c */"),
+                "for:\n{src}"
+            );
+        }
+
+        // A GRAFT claims everything at or before its binding list's `)`
+        // into that list's interior, so only the tail region is pending.
+        let (root, index) =
+            tree("machine {\n  entry graft n::g(/* in list */ t = main) /* after */ as inst;\n}\n");
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        let graft = units(&world, &index);
+        assert_eq!(
+            graft[0].trailing.as_ref().map(|c| c.text.as_str()),
+            Some("/* after */")
+        );
+        assert_eq!(graft.len(), 1, "the in-list comment is not a unit here");
     }
 
     /// Every `Comment` this module hands the printer must be the one the

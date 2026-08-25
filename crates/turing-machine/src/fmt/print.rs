@@ -42,9 +42,17 @@ use super::trivia::{self, Unit, UnitKind};
 use crate::compiler::CompileError;
 use crate::cst::{DocRunItem, DocRunKind};
 use crate::lexer::{Comment, CommentKind, LexMode, lex_with};
-use crate::parser::{AlphabetElem, Import, SymLit, parse_green_from_tokens};
-use crate::syntax::extract::{extract_alphabet, extract_doc_items, extract_import};
-use crate::syntax::{AlphabetView, DocRunView, NamespaceView, RootView, TopView, UseView};
+use crate::parser::{
+    AlphabetElem, BindingArg, BindingValue, ContractClause, Import, MapArrow, SigParam,
+    SigParamKind, SymLit, SymMap, TermKind, parse_green_from_tokens, reparse_sig_param,
+};
+use crate::syntax::extract::{
+    extract_alphabet, extract_bind, extract_doc_items, extract_graft, extract_import, sig_tokens,
+};
+use crate::syntax::{
+    AlphabetView, BindView, DocRunView, GraftView, MachineView, NamespaceView, ReuseKind,
+    ReuseView, RootView, TapeView, TopView, UseView, WorldView,
+};
 
 /// Spaces per block level (`super`'s module doc, "Indentation").
 const INDENT_UNIT: usize = 2;
@@ -340,6 +348,235 @@ fn alphabet_elem_text(elem: &AlphabetElem) -> String {
     }
 }
 
+/// One `writes { … }` or `preserves { … }` clause, re-encoded losslessly:
+/// a single leading space ahead of the keyword, then the same brace-body
+/// spacing an `alphabet` renders inline (`{ elem, elem }`,
+/// [`render_alphabet`]). An empty clause is meaningful — it declares that
+/// the parameter writes (or preserves) nothing, distinct from no clause at
+/// all — and prints `{}` with no inner space; this deliberately does NOT
+/// mirror `render_alphabet`'s empty-body spacing because a bare `alphabet`
+/// body can never be empty (the compiler rejects it), so that path renders
+/// no real input and sets no convention. A clause carries no interior
+/// comments (the parser never attaches any to one), so there is no
+/// interior/wrapping case to consider here — unlike `render_alphabet` or
+/// [`paren_list`], a clause is always one unbroken run of tokens on the line
+/// its parameter entry occupies.
+fn contract_clause_text(keyword: &str, clause: &ContractClause) -> String {
+    let entries: Vec<String> = clause.elems.iter().map(alphabet_elem_text).collect();
+    if entries.is_empty() {
+        format!(" {keyword} {{}}")
+    } else {
+        format!(" {keyword} {{ {} }}", entries.join(", "))
+    }
+}
+
+fn signature_params(params: &[SigParam]) -> Vec<String> {
+    params
+        .iter()
+        .map(|param| match &param.kind {
+            SigParamKind::Tape {
+                alphabet,
+                volatile,
+                writes,
+                preserves,
+                ..
+            } => {
+                let prefix = if *volatile { "volatile " } else { "" };
+                let mut out = format!("{prefix}tape {}: {alphabet}", param.name);
+                if let Some(clause) = writes {
+                    out.push_str(&contract_clause_text("writes", clause));
+                }
+                if let Some(clause) = preserves {
+                    out.push_str(&contract_clause_text("preserves", clause));
+                }
+                out
+            }
+            SigParamKind::State => format!("state {}", param.name),
+        })
+        .collect()
+}
+
+/// One binding argument, at the column it will print from — needed only to
+/// hand a nested (and possibly broken) `with map` the column its own closing
+/// `}` must return to.
+fn binding_arg_text(arg: &BindingArg, col: usize, map_interior: &Interior<'_>) -> String {
+    let value_col = col + arg.name.chars().count() + 3; // "NAME = "
+    format!(
+        "{} = {}",
+        arg.name,
+        binding_value_text(&arg.value, value_col, map_interior)
+    )
+}
+
+fn binding_value_text(value: &BindingValue, col: usize, map_interior: &Interior<'_>) -> String {
+    match value {
+        BindingValue::Named { target, map, .. } => match map {
+            Some(map) => {
+                let map_col = col + target.chars().count() + 1; // "TARGET "
+                format!("{target} {}", sym_map_text(map, map_col, map_interior))
+            }
+            None => target.clone(),
+        },
+        BindingValue::Terminator { kind, .. } => term_text(*kind).to_string(),
+    }
+}
+
+/// A `with map { … }`, starting at column `col` (where the `w` of `with`
+/// lands) — the column its closing `}` returns to once broken. `interior` is
+/// this map's OWN interior comments, one level down from the binding list's
+/// (`super`'s module doc, "Argument lists and the width threshold";
+/// docs/tmt/fmt.md (interior comments)).
+fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
+    let pairs: Vec<String> = map
+        .pairs
+        .iter()
+        .map(|pair| {
+            let arrow = match pair.arrow {
+                MapArrow::Bidirectional => "->",
+                MapArrow::ReadOnly => "=>",
+            };
+            format!("{} {arrow} {}", sym_text(&pair.src), sym_text(&pair.dst))
+        })
+        .collect();
+    if interior.is_empty() {
+        return format!("with map {{ {} }}", pairs.join(", "));
+    }
+    let entry_pad = " ".repeat(col + INDENT_UNIT);
+    // Slot 0's same-line comments precede every pair, so there is no
+    // preceding pair's line for them to trail — they ride the opening `{`
+    // itself (`super`'s module doc, "Blank lines and comments").
+    let mut out = String::from("with map {");
+    out.push_str(&interior_trailing(&interior.slots[0]));
+    out.push('\n');
+    for (i, pair) in pairs.iter().enumerate() {
+        out.push_str(&interior_lines(&interior.slots[i], col + INDENT_UNIT));
+        out.push_str(&entry_pad);
+        out.push_str(pair);
+        if i + 1 < pairs.len() {
+            out.push(',');
+        }
+        // The NEXT slot's same-line comments belong to THIS pair's line —
+        // see the indexing rule (`super`'s module doc, "Blank lines and
+        // comments").
+        out.push_str(&interior_trailing(&interior.slots[i + 1]));
+        out.push('\n');
+    }
+    out.push_str(&interior_lines(
+        &interior.slots[pairs.len()],
+        col + INDENT_UNIT,
+    ));
+    out.push_str(&" ".repeat(col));
+    out.push('}');
+    out
+}
+
+/// The pair count of a binding argument's map, or 0 when it carries none —
+/// what [`bucket`] needs to size a map's own slot list.
+fn map_pair_count(value: &BindingValue) -> usize {
+    match value {
+        BindingValue::Named { map: Some(m), .. } => m.pairs.len(),
+        _ => 0,
+    }
+}
+
+/// One binding argument's `with map` interior comments, filtered out of a
+/// binding list's flat `(arg index, pair index, comment)` side-car and
+/// re-keyed to the plain `(pair index, comment)` shape [`bucket`] expects
+/// (docs/tmt/fmt.md (interior comments)).
+fn map_interior_for(
+    map_pairs: &[(usize, usize, Comment)],
+    arg_index: usize,
+) -> Vec<(usize, Comment)> {
+    map_pairs
+        .iter()
+        .filter(|(ai, _, _)| *ai == arg_index)
+        .map(|(_, pair_index, comment)| (*pair_index, comment.clone()))
+        .collect()
+}
+
+/// A binding list's entries, each rendered from column `entry_col` (the
+/// column a broken list's own entries — and so a broken map nested inside
+/// one — line up at), pulling each argument's own `with map` interior
+/// comments out of the list's flat side-car.
+fn binding_entries(
+    args: &[BindingArg],
+    entry_col: usize,
+    map_pairs: &[(usize, usize, Comment)],
+) -> Vec<String> {
+    args.iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            let filtered = map_interior_for(map_pairs, i);
+            let map_interior = bucket(&filtered, map_pair_count(&arg.value));
+            binding_arg_text(arg, entry_col, &map_interior)
+        })
+        .collect()
+}
+
+fn term_text(kind: TermKind) -> &'static str {
+    match kind {
+        TermKind::Return => "return",
+        TermKind::Stop => "stop",
+        TermKind::Halt => "halt",
+    }
+}
+
+/// `head(entries)tail` on one line while it fits from column `col`
+/// (`super`'s module doc, "Argument lists and the width threshold"), else
+/// one entry per line. `head` starts AT `col` and never carries the leading
+/// indent itself — a caller opening a line emits that indent before calling.
+/// `interior` is the list's interior comments, bucketed by [`bucket`]; a
+/// caller with no such list passes `&bucket(&[], entries.len())`. An entry
+/// that already spans several physical lines (a binding argument whose own
+/// nested `with map` broke on an interior comment) forces the list to break
+/// too — the alternative would splice that entry's own newlines into what
+/// the width check believes is one line, with no indent for the
+/// continuation.
+fn paren_list(
+    col: usize,
+    head: &str,
+    entries: &[String],
+    tail: &str,
+    interior: &Interior<'_>,
+) -> String {
+    let one_line = format!("{head}({}){tail}", entries.join(", "));
+    let has_multiline_entry = entries.iter().any(|e| e.contains('\n'));
+    if (entries.is_empty() || col + one_line.chars().count() <= LINE_WIDTH)
+        && interior.is_empty()
+        && !has_multiline_entry
+    {
+        return one_line;
+    }
+    let entry_pad = " ".repeat(col + INDENT_UNIT);
+    // Slot 0's same-line comments precede every entry, so there is no
+    // preceding entry's line for them to trail — they ride the opening `(`
+    // itself (`super`'s module doc, "Blank lines and comments").
+    let mut out = format!("{head}(");
+    out.push_str(&interior_trailing(&interior.slots[0]));
+    out.push('\n');
+    for (i, entry) in entries.iter().enumerate() {
+        out.push_str(&interior_lines(&interior.slots[i], col + INDENT_UNIT));
+        out.push_str(&entry_pad);
+        out.push_str(entry);
+        if i + 1 < entries.len() {
+            out.push(',');
+        }
+        // The NEXT slot's same-line comments belong to THIS entry's line —
+        // see the indexing rule (`super`'s module doc, "Blank lines and
+        // comments").
+        out.push_str(&interior_trailing(&interior.slots[i + 1]));
+        out.push('\n');
+    }
+    out.push_str(&interior_lines(
+        &interior.slots[entries.len()],
+        col + INDENT_UNIT,
+    ));
+    out.push_str(&" ".repeat(col));
+    out.push(')');
+    out.push_str(tail);
+    out
+}
+
 /// One `use` path's text. Takes the [`Import`] extraction builds rather
 /// than re-reading the view's own tokens, so the segment order and the
 /// alias rule stay owned by the one walk the C1 lowering is pinned
@@ -381,10 +618,8 @@ fn render_top_item(unit: &Unit, indent: usize, source: &str, index: &TextLineInd
             TopView::Use(v) => render_use(&v, unit, indent, index),
             TopView::Alphabet(v) => render_alphabet(&v, unit, indent, source, index),
             TopView::Namespace(v) => render_namespace(&v, unit, indent, source, index),
-            TopView::Reuse(_) | TopView::Machine(_) => unimplemented!(
-                "the green printer covers the file skeleton — `use`, `alphabet` and \
-                 `namespace`; world-carrying declarations arrive with their own surfaces"
-            ),
+            TopView::Reuse(v) => render_reuse(&v, unit, indent, source, index),
+            TopView::Machine(v) => render_machine(&v, unit, indent, source, index),
         },
     }
 }
@@ -606,6 +841,259 @@ fn render_namespace(
     Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
 }
 
+fn render_reuse(
+    view: &ReuseView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let pad = " ".repeat(indent);
+    let mut code = doc_run_text(
+        &doc_items(view.doc_run(), source, index),
+        indent,
+        trivia::blank_before_decl(view.syntax()),
+    );
+    let carrier = match view.kind() {
+        ReuseKind::Routine => "routine",
+        ReuseKind::Graph => "graph",
+    };
+    let head = format!(
+        "{}{carrier} {}",
+        if view.exported() { "export " } else { "" },
+        view.name_token().text()
+    );
+    let params: Vec<SigParam> = view
+        .params()
+        .map(|p| reparse_sig_param(&sig_tokens(p.syntax(), index)))
+        .collect();
+    let entries = signature_params(&params);
+    let world = view
+        .world()
+        .expect("a parsed REUSE always carries its WORLD body");
+    code.push_str(&pad);
+    // The signature's interior comments are a later surface — see
+    // `render_use`.
+    code.push_str(&paren_list(
+        indent,
+        &head,
+        &entries,
+        " {",
+        &bucket(&[], entries.len()),
+    ));
+    code.push_str(&render_world_after_brace(&world, indent, source, index));
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
+fn render_machine(
+    view: &MachineView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let pad = " ".repeat(indent);
+    let mut code = doc_run_text(
+        &doc_items(view.doc_run(), source, index),
+        indent,
+        trivia::blank_before_decl(view.syntax()),
+    );
+    let world = view
+        .world()
+        .expect("a parsed MACHINE always carries its WORLD body");
+    code.push_str(&format!("{pad}machine {{"));
+    code.push_str(&render_world_after_brace(&world, indent, source, index));
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
+/// A world body from just past its `{` — the brace's own comment run, the
+/// items at one more indent level, and the closing `}` back at `indent`.
+/// The `{` itself is the CALLER's: `render_machine` writes it into the
+/// header, `render_reuse` gets it from `paren_list`'s tail.
+fn render_world_after_brace(
+    world: &WorldView,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> String {
+    // The braces belong to WORLD, not to the declaration that carries it,
+    // so the open run is asked of WORLD (`super::trivia`'s module doc).
+    let mut out = open_trailing_text(&trivia::open_trailing(world.syntax(), index));
+    out.push('\n');
+    out.push_str(&flush(&render_world_items(
+        world.syntax(),
+        indent + INDENT_UNIT,
+        source,
+        index,
+    )));
+    out.push_str(&" ".repeat(indent));
+    out.push('}');
+    out
+}
+
+// ---------------------------------------------------------------------------
+// World bodies.
+// ---------------------------------------------------------------------------
+
+/// A world body's items — tape declarations, grafts, binds, states, and the
+/// own-line comments between them, in source order. The stream comes from
+/// [`super::trivia::units`] over the WORLD node rather than from
+/// `WorldView`'s per-kind accessors, which are filters and lose source
+/// order.
+fn render_world_items(
+    world: &SyntaxNode,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Vec<Rendered> {
+    let units = trivia::units(world, index);
+    let tape_names = tape_name_widths(&units);
+    units
+        .iter()
+        .enumerate()
+        .map(|(i, unit)| render_world_item(unit, tape_names[i], indent, source, index))
+        .collect()
+}
+
+fn render_world_item(
+    unit: &Unit,
+    name_width: usize,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let node = match &unit.kind {
+        UnitKind::Comment(c) => return Rendered::new(unit.blank_before, comment_line(c, indent)),
+        UnitKind::Node(node) => node,
+    };
+    if let Some(v) = TapeView::cast(node.clone()) {
+        render_tape(&v, unit, name_width, indent)
+    } else if let Some(v) = GraftView::cast(node.clone()) {
+        render_graft(&v, unit, indent, source, index)
+    } else if let Some(v) = BindView::cast(node.clone()) {
+        render_bind(&v, unit, indent, source, index)
+    } else {
+        unimplemented!(
+            "the green printer covers a world's tapes, grafts and binds; states arrive \
+             with their own surface"
+        )
+    }
+}
+
+/// Per world item, the name width a tape declaration pads to. A run of
+/// adjacent `tape` declarations (no blank line, nothing else between them) is
+/// a little table of its own: the alphabets line up in one column.
+fn tape_name_widths(units: &[Unit]) -> Vec<usize> {
+    let mut out = vec![0usize; units.len()];
+    let name = |unit: &Unit| match &unit.kind {
+        UnitKind::Node(n) => {
+            TapeView::cast(n.clone()).map(|t| t.name_token().text().chars().count())
+        }
+        UnitKind::Comment(_) => None,
+    };
+    let mut i = 0;
+    while i < units.len() {
+        let Some(first) = name(&units[i]) else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        let mut end = i + 1;
+        let mut width = first;
+        while end < units.len() && !units[end].blank_before {
+            let Some(next) = name(&units[end]) else { break };
+            width = width.max(next);
+            end += 1;
+        }
+        for slot in out.iter_mut().take(end).skip(start) {
+            *slot = width;
+        }
+        i = end;
+    }
+    out
+}
+
+fn render_tape(view: &TapeView, unit: &Unit, name_width: usize, indent: usize) -> Rendered {
+    // `name_width` is name-length-only (see `tape_name_widths`): the
+    // `volatile ` prefix does not enter the run's column alignment, so a
+    // mixed volatile/plain run aligns names but not the modifier.
+    let name = view.name_token();
+    let name = name.text();
+    let code = format!(
+        "{}{}tape {}:{} {};",
+        " ".repeat(indent),
+        if view.volatile() { "volatile " } else { "" },
+        name,
+        " ".repeat(name_width.saturating_sub(name.chars().count())),
+        view.alphabet_token().text()
+    );
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
+fn render_graft(
+    view: &GraftView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let g = extract_graft(view, source, index);
+    let mut code = doc_run_text(
+        &doc_items(view.doc_run(), source, index),
+        indent,
+        trivia::blank_before_decl(view.syntax()),
+    );
+    let head = format!(
+        "{}graft {}",
+        if g.entry { "entry " } else { "" },
+        g.target.joined()
+    );
+    let tail = match &g.as_name {
+        Some(name) => format!(" as {};", name.name),
+        None => ";".to_string(),
+    };
+    // Interior comments — the binding list's own and any nested `with map`'s
+    // — are a later surface; see `render_use`.
+    let entries = binding_entries(&g.args, indent + INDENT_UNIT, &[]);
+    code.push_str(&" ".repeat(indent));
+    code.push_str(&paren_list(
+        indent,
+        &head,
+        &entries,
+        &tail,
+        &bucket(&[], entries.len()),
+    ));
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
+fn render_bind(
+    view: &BindView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let b = extract_bind(view, source, index);
+    let mut code = doc_run_text(
+        &doc_items(view.doc_run(), source, index),
+        indent,
+        trivia::blank_before_decl(view.syntax()),
+    );
+    let head = format!("bind {}", b.target.joined());
+    let tail = format!(" as {};", b.as_name.name);
+    // Interior comments are a later surface — see `render_graft`.
+    let entries = binding_entries(&b.args, indent + INDENT_UNIT, &[]);
+    code.push_str(&" ".repeat(indent));
+    code.push_str(&paren_list(
+        indent,
+        &head,
+        &entries,
+        &tail,
+        &bucket(&[], entries.len()),
+    ));
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -770,6 +1258,234 @@ mod tests {
         );
         agrees("alphabet a { '\\'', '\\\\' }\n");
         agrees("use a; // one   \nuse bb; // two\n");
+    }
+
+    /// `machine`, `routine` and `graph` headers and bodies, the tape
+    /// declarations' shared name column, and grafts and binds — the
+    /// brief's own eight sources, every one of which parses (a world
+    /// with no states is accepted).
+    #[test]
+    fn worlds_tapes_grafts_and_binds_agree() {
+        agrees("alphabet ab { '_' }\nmachine {\n  tape main: ab;\n}\n");
+        agrees(
+            "alphabet ab { '_' }\nmachine {\n  tape m: ab;\n  tape longer: ab;\n  \
+             volatile tape x: ab;\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\nmachine { // open\n  tape main: ab; // trailing\n} // close\n",
+        );
+        // A blank line ENDS a tape run's shared name column, so the two
+        // here size independently. Without that boundary both would pad
+        // to the wider name.
+        agrees("alphabet ab { '_' }\nmachine {\n  tape m: ab;\n\n  tape longerName: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n  }\n}\n");
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  export graph g(tape t: ab, state done) \
+             {\n  }\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  export routine r(\n    \
+             tape t: ab writes { '_' }\n  ) {\n  }\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             machine {\n  tape main: ab;\n  \
+             entry graft n::g(t = main, done = fin) as inst; // trailing\n  \
+             bind n::g(t = main, done = fin) as other;\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             machine {\n  tape main: ab;\n  \
+             bind n::g(t = main with map { '_' -> '_', 'a' -> 'a' }, d = fin) as one;\n}\n",
+        );
+    }
+
+    /// **Hazard 1** — a comment between a `machine`/`routine`/`graph`
+    /// header and its `{`. WORLD opens AT the brace, so the comment is
+    /// the DECLARATION's child, one level up, and the head scan that
+    /// solves this for NAMESPACE and STATE cannot see it; C1 body-drains
+    /// it and prints it as the body's FIRST item.
+    ///
+    /// Three sources, because one cannot carry the claim:
+    ///
+    /// - `machine /* x */ {` — the plain relocation. Without the fix the
+    ///   comment is dropped outright.
+    /// - `machine // why\n{` — the comment's line sits ABOVE the brace's,
+    ///   so the near edge moves BACKWARDS and the first real item gains a
+    ///   blank line nobody wrote (`constraints.md`'s mandated quirk 1).
+    ///   A fix that finds the comment but appends it to the item list
+    ///   without moving the edge passes the first source and fails this
+    ///   one.
+    /// - `routine r(…) /* c */ {` — the REUSE twin, where the comment
+    ///   sits after the signature's `)` rather than after a bare keyword.
+    ///
+    /// The scan runs BACKWARDS from WORLD deliberately: a comment written
+    /// earlier in a REUSE header — `routine /* c */ r(…)` — belongs to
+    /// the SIGNATURE's interior list, not the body, so it is excluded
+    /// here and is a later surface's to render. It is in no source below.
+    #[test]
+    fn a_comment_between_a_world_header_and_its_brace_agrees() {
+        agrees("alphabet ab { '_' }\nmachine /* x */ {\n  tape main: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine // why\n{\n  tape main: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ {\n  }\n}\n");
+        // The pre-brace comment is a UNIT of the body, so it also shifts
+        // every later unit's index — which is what `tape_name_widths`
+        // keys off. A misaligned unit list moves the name column, and
+        // nothing else here would catch it.
+        agrees("alphabet ab { '_' }\nmachine /* x */ {\n  tape m: ab;\n  tape longer: ab;\n}\n");
+        // Two of them, so the backwards scan's order is asserted: it
+        // collects from the brace towards the keyword and reverses, and a
+        // missing reverse prints them swapped.
+        agrees("alphabet ab { '_' }\nmachine /* a */ /* b */ {\n  tape main: ab;\n}\n");
+    }
+
+    /// **Hazard 2** — a comment written INSIDE a `;`-terminated
+    /// declaration. C1's `take_trailing` claims whatever is still PENDING
+    /// at the `;`, and a comment inside the statement is pending there,
+    /// so it is RELOCATED to after the `;`. It lives inside the node, so
+    /// the container's sibling walk never sees it.
+    ///
+    /// The sources pin all four outcomes of that one rule, each of which
+    /// a narrower fix gets wrong:
+    ///
+    /// - inside, same line as the `;`, not own-line → the node's trailing.
+    /// - inside, NOT on the `;`'s line → an item BELOW the declaration
+    ///   (`take_trailing` compares lines).
+    /// - inside and own-line, even on the `;`'s line → an item
+    ///   (`take_trailing` refuses an own-line comment).
+    /// - two inside → the first is the trailing, the rest are items.
+    ///
+    /// The `/* a */: ab; /* b */` source is the one that pins "an inside
+    /// comment is ahead of the container's own stream": C1 inspects only
+    /// the FIRST pending comment, so `/* b */` is an item and not a
+    /// second trailing.
+    ///
+    /// For a graft or a bind only the region AFTER the binding list's
+    /// `)` is pending — everything at or before it was swept into that
+    /// list's interior — so the sources put the comment around the
+    /// `as NAME`, never inside the parentheses.
+    #[test]
+    fn a_comment_inside_a_semicolon_declaration_agrees() {
+        let graph = "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) \
+                     {\n  }\n}\n";
+        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* c */: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine {\n  tape /* c */ main: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* c */\n    : ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine {\n  tape main\n    /* c */: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* c1 */ /* c2 */: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* a */: ab; /* b */\n}\n");
+        agrees(&format!(
+            "{graph}machine {{\n  tape main: ab;\n  \
+             entry graft n::g(t = main, d = fin) /* c */ as inst;\n}}\n"
+        ));
+        agrees(&format!(
+            "{graph}machine {{\n  tape main: ab;\n  \
+             bind n::g(t = main, d = fin) as one /* c */;\n}}\n"
+        ));
+        agrees(&format!(
+            "{graph}machine {{\n  tape main: ab;\n  \
+             entry graft n::g(t = main, d = fin) /* c1 */ as inst /* c2 */;\n}}\n"
+        ));
+    }
+
+    /// The world surfaces' own value and layout branches, one source per
+    /// branch — the same audit `the_copied_layout_rules_agree` runs for
+    /// the file skeleton.
+    ///
+    /// - **`paren_list`'s break** — a signature and a binding list each
+    ///   long enough to cross the 80-column limit. The brief's own
+    ///   sources all collapse to one line, so the multi-line body is a
+    ///   copied branch nothing else reaches.
+    /// - **`contract_clause_text`** — both keywords, a range element, and
+    ///   the EMPTY clause, which prints `{}` with no inner space and is
+    ///   the one shape `render_alphabet`'s body spacing does not mirror.
+    /// - **`SigParamKind`'s two arms and the `volatile` prefix.**
+    /// - **`binding_value_text`'s three shapes** — a bare name, a
+    ///   terminator (all three of `return`/`stop`/`halt`), and a
+    ///   `with map`, whose `MapArrow` has both spellings.
+    /// - **`sym_text`'s number arm** — written digits, leading zeros
+    ///   included, in an alphabet range and in a map pair.
+    /// - **`render_graft`'s tail** — an entry graft may omit `as NAME`;
+    ///   every other graft and every bind carries one.
+    /// - **An empty signature**, which is `paren_list`'s
+    ///   `entries.is_empty()` short-circuit.
+    ///
+    /// `paren_list`'s `has_multiline_entry` guard stays unreachable: only
+    /// a nested `with map` broken by an interior comment produces an
+    /// entry with a newline in it, and interior comments are a later
+    /// surface. Deliberately not faked with a source that cannot reach
+    /// it.
+    #[test]
+    fn the_world_value_and_layout_rules_agree() {
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  \
+             export routine longRoutineName(tape firstTape: ab, tape secondTape: ab, \
+             state doneState) {\n  }\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             machine {\n  tape main: ab;\n  \
+             entry graft n::g(t = main with map { '_' -> '_', 'a' -> 'a' }, d = fin) \
+             as instanceName;\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  \
+             routine r(volatile tape t: ab writes {} preserves { '_'..'a' }, state s) {\n  }\n}\n",
+        );
+        agrees("alphabet ab { '_' }\nnamespace n {\n  graph g() {\n  }\n}\n");
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             machine {\n  tape main: ab;\n  entry graft n::g(t = main, d = stop) as i;\n  \
+             bind n::g(t = main, d = halt) as j;\n  bind n::g(t = main, d = return) as k;\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             machine {\n  tape main: ab;\n  \
+             bind n::g(t = main with map { '_' => '_' }, d = fin) as one;\n}\n",
+        );
+        agrees(
+            "alphabet nb { 00..05 }\nnamespace n {\n  graph g(tape t: nb, state d) {\n  }\n}\n\
+             machine {\n  tape main: nb;\n  \
+             bind n::g(t = main with map { 00 -> 01 }, d = fin) as one;\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             machine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin);\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) { // open\n  } \
+                // close\n}\n",
+        );
+    }
+
+    /// A world's doc-run surfaces. `blank_before_decl` on GRAFT, BIND,
+    /// REUSE and MACHINE is what the green walk substitutes for C1's
+    /// `leads_with_blank`, and every source above is undocumented — so
+    /// each declaration here carries a run, one with a real leading blank
+    /// and one with a run→declaration gap, which are the two halves the
+    /// substitution splits.
+    #[test]
+    fn a_documented_world_declaration_agrees() {
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             machine {\n  tape main: ab;\n\n  ? doc\n\n  \
+             entry graft n::g(t = main, d = fin) as inst;\n  ? bdoc\n  \
+             bind n::g(t = main, d = fin) as other;\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\n\n? routine doc\n![deprecated] gone\nnamespace n {\n  \
+             ? inner\n\n  routine r(tape t: ab) {\n  }\n}\n\n? machine doc\nmachine {\n  \
+             tape main: ab;\n}\n",
+        );
+        // MACHINE and BIND with a real run→declaration gap. Every source
+        // above writes its run tight against the keyword, where
+        // `blank_before_decl` answering `false` unconditionally is
+        // unobservable.
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
+             ? machine doc\n\nmachine {\n  tape main: ab;\n  ? bind doc\n\n  \
+             bind n::g(t = main, d = fin) as one;\n}\n",
+        );
     }
 
     /// The whole adversarial set, over the surfaces this printer covers.

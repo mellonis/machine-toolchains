@@ -820,7 +820,7 @@ fn target_tokens(node: &SyntaxNode, skip: usize, index: &TextLineIndex) -> Vec<T
 /// `Parser::parse_graft` records `line` off the `graft` keyword (it
 /// reads `self.peek()` after `entry` has already been bumped) but takes
 /// `span.start` from the `entry` prefix when there is one.
-fn extract_graft(view: &GraftView, source: &str, index: &TextLineIndex) -> Graft {
+pub(crate) fn extract_graft(view: &GraftView, source: &str, index: &TextLineIndex) -> Graft {
     let node = view.syntax();
     let entry = view.is_entry();
     let header = header_token(node);
@@ -850,7 +850,7 @@ fn extract_graft(view: &GraftView, source: &str, index: &TextLineIndex) -> Graft
 /// One `bind TARGET(args) as NAME;` — [`extract_graft`] without the
 /// `entry` prefix, which `bind` never takes (docs/tmt/language.md
 /// (entry)), so its header token IS its `bind` keyword.
-fn extract_bind(view: &BindView, source: &str, index: &TextLineIndex) -> Bind {
+pub(crate) fn extract_bind(view: &BindView, source: &str, index: &TextLineIndex) -> Bind {
     let node = view.syntax();
     let header = header_token(node);
     let as_name = view.as_name();
