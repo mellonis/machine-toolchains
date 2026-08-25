@@ -193,7 +193,14 @@ pub(crate) struct DocState {
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
     pub(crate) tokens: Option<Vec<Token>>,
-    /// The lossless CST (`None` when lexing or parsing failed).
+    /// The lossless CST (`None` when lexing or parsing failed). No
+    /// production reader remains after this task's port — the quickfix
+    /// module's `enclosing_body` was the last one, following
+    /// `document_symbols` — but the field itself is out of this task's
+    /// scope: it stays until a later step removes the CST reader while
+    /// retaining the green tree. Read only by `tests.rs`'s own
+    /// staged-state assertions until then.
+    #[allow(dead_code)]
     pub(crate) cst: Option<Cst>,
     /// The flat program — survives a resolve-stage fatal.
     pub(crate) program: Option<Program>,

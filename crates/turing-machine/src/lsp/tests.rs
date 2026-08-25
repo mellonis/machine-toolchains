@@ -1705,6 +1705,34 @@ machine {
 }
 
 #[test]
+fn a_documented_machines_state_stub_lands_past_its_bound_doc_run() {
+    // A doc-run-bound declaration's green node starts at the `?`/`!` line,
+    // not the keyword (docs/core.md (syntax trees)) — but `enclosing_body`
+    // reads only the node's END, which a leading doc run never moves. If
+    // that end ever regressed to reading a re-based start instead, this
+    // stub would land on the doc line rather than the closing brace.
+    let src = "\
+alphabet bits { '_', '1' }
+
+?A short description.
+machine {
+  tape ctl: bits;
+  entry state main { [*] -> goto nowhere; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let at = span_of(src, "nowhere");
+    let actions = service.code_actions(&uri, at);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0].edits[0].replacement,
+        "  state nowhere { [*] -> stop; }\n"
+    );
+    let close_line = src.lines().count() as u32;
+    assert_eq!(actions[0].edits[0].span.start.line, close_line);
+}
+
+#[test]
 fn an_omitted_binding_map_offers_the_pairs_it_needs() {
     let src = "\
 alphabet marks { '_', 'x', 'y' }
