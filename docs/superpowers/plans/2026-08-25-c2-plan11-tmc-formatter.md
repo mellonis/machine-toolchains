@@ -346,9 +346,31 @@ surface hands `trivia::interior` is:
 > claimed — in that order.
 
 A naive header-through-closer slice double-counts the brace-line comments the
-open run took; a naive delimiter-only slice silently DROPS the header ones. Note
-that the header half is the same slice `trivia::units`'s head scan already
-computes, so it is available rather than needing a new walk.
+open run took; a naive delimiter-only slice silently DROPS the header ones.
+
+**The header half coincides with `trivia::units`'s head scan only on the two
+BRACE-owning surfaces** (`alphabet`, and the brace-delimited bodies) — not on the
+three PAREN ones (a signature's `(`, a `graft`/`bind` binding list, a `call`'s
+argument list), which need their own local scan. `pre_brace_comments` is also
+private and, more importantly, folding it in would be wrong: it includes
+`pre_world_comments`, which has no meaning for a signature's `(`.
+
+**And the stream is not only "between the delimiters" — a comment written INSIDE
+an entry is a third case, and dropping it is silent.** Measured:
+
+```
+routine r(tape /* c */ t: ab)   ->   routine r(
+                                       tape t: ab /* c */
+                                     )
+use a:: /* u */ b;              ->   use a::b /* u */;
+graft n::g(t = /* c */ main)    ->   the comment survives, keyed to the next slot
+```
+
+An entry runs no drain of its own, so such a comment is still pending when the
+NEXT slot drains and C1 keys it there. The token is not a direct child of the list
+owner at all, so a direct-child walk between the delimiters never sees it. One
+exception: a `BINDING_ARG` carrying a `with map` — that map's own list claims its
+comments.
 
 This is why `constraints.md`'s mandated quirk (3) — `alphabet /* a */ ab { '_' }`
 settling on the second pass — is a Task 7 obligation and not merely a Task 1
