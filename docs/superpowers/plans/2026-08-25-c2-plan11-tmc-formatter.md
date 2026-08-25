@@ -314,12 +314,46 @@ at least one differential test (Tasks 3–7).
 | `close_trailing` | `AlphabetCst`, `ReuseCst`, `MachineCst`, `NamespaceCst`, `StateCst` | same primitive as `trailing` |
 | `open_trailing` | the same five | comments after `{` on the `{`'s line — in `WORLD` for MACHINE/REUSE |
 | `doc_run` | the seven retro-wrapping kinds | `DocRunView` + `extract_doc_items` |
-| `interior` | `UseCst` (no delimiters — `use` … `;`), `AlphabetCst` (`{}`), `GraftCst` (`()`), `BindCst` (`()`) | entries-started-so-far over the list's element stream |
-| `sig_interior` | `ReuseCst` (`()` around `sig.params`) | same primitive |
+| `interior` | `UseCst` (`use` … `;`), `AlphabetCst`, `GraftCst`, `BindCst` | entries-started-so-far over the list's element stream — **which begins at the declaration's HEADER, not at the opening delimiter; see below** |
+| `sig_interior` | `ReuseCst` (the `()` around `sig.params`) | same primitive, same header rule |
 | `call_args` | `RuleCst` (a `call` transition's `()`) | same primitive, inside `TRANSITION` |
 | `map_pairs` | `RuleCst`, `GraftCst`, `BindCst` — keyed `(arg index, pair index)` | same primitive, inside each `SYM_MAP`, one level down |
 | `pattern_cells` | `RuleCst` (`[]` before `->`) | same primitive over RULE's leading bracket run |
 | `write_cells` / `move_cells` | `RuleCst` | same primitive inside `WRITE_VEC` / `MOVE_VEC` |
+
+
+### The interior stream starts at the HEADER, not at the delimiter
+
+Measured against the real formatter, and the single easiest thing in this plan to
+get wrong, because the obvious reading — "the elements between `{` and `}`" — is
+wrong on every delimited surface:
+
+| written | C1 prints |
+|---|---|
+| `alphabet /* a */ ab { '_' }` | `alphabet ab { /* a */ '_' }` |
+| `alphabet ab /* a */ { '_' }` | `alphabet ab { /* a */ '_' }` |
+| `routine /* c */ r(tape t: ab)` | `routine r( /* c */` … |
+| `graft /* c */ n::g(t = main, …)` | `graft n::g( /* c */` … |
+
+The mechanism is C1's `Parser::interior_comments`, which drains on a GLOBAL
+cursor (`while self.comments[self.cpos].sig_index <= self.pos`): the list's first
+drain sweeps up every comment still unclaimed since the previous one, which
+includes everything written in the declaration's header. So the element stream a
+surface hands `trivia::interior` is:
+
+> the declaration's header (its first token through the opening delimiter),
+> **plus** the delimiter's interior, **minus** whatever `open_trailing` already
+> claimed — in that order.
+
+A naive header-through-closer slice double-counts the brace-line comments the
+open run took; a naive delimiter-only slice silently DROPS the header ones. Note
+that the header half is the same slice `trivia::units`'s head scan already
+computes, so it is available rather than needing a new walk.
+
+This is why `constraints.md`'s mandated quirk (3) — `alphabet /* a */ ab { '_' }`
+settling on the second pass — is a Task 7 obligation and not merely a Task 1
+fixture: without the header half, that comment is dropped and the quirk cannot
+reproduce.
 
 ---
 
