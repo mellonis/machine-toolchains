@@ -1787,6 +1787,53 @@ fn document_symbols_name_the_alphabets_worlds_and_their_members() {
     assert!(members.contains(&"inc1"), "{members:?}");
 }
 
+/// Every top-level (and one nested) symbol reports the RIGHT
+/// `SymbolNodeKind`, asserted BY VALUE — not just that a symbol with
+/// that name exists. A kind swap (e.g. a REUSE symbol reporting
+/// `Namespace` instead of `Function`) passes any test that only checks
+/// names or counts; this is the one written to catch it.
+/// `NamespaceView` is the only `SymbolNodeKind::Namespace` producer, so
+/// distinguishing it from every Function-kind symbol here (two
+/// alphabets, a `graph`, a `routine`, and the machine block) exercises
+/// both variants the enum has.
+#[test]
+fn document_symbols_report_the_right_kind_for_each_top_level_declaration() {
+    let (mut service, uri) = opened(CROSS_WORLD);
+    let symbols = service.document_symbols(&uri).expect("symbols");
+    let kind_of = |name: &str| {
+        symbols
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("no top-level symbol named {name:?} in {symbols:?}"))
+            .kind
+    };
+    assert_eq!(kind_of("bits"), SymbolNodeKind::Function, "alphabet `bits`");
+    assert_eq!(kind_of("wide"), SymbolNodeKind::Function, "alphabet `wide`");
+    assert_eq!(
+        kind_of("mylib"),
+        SymbolNodeKind::Namespace,
+        "namespace `mylib`"
+    );
+    assert_eq!(
+        kind_of("findX"),
+        SymbolNodeKind::Function,
+        "reuse (graph) `findX`"
+    );
+    assert_eq!(kind_of("machine"), SymbolNodeKind::Function, "machine");
+
+    let mylib = symbols.iter().find(|s| s.name == "mylib").unwrap();
+    let plus_one = mylib
+        .children
+        .iter()
+        .find(|s| s.name == "plusOne")
+        .expect("nested reuse symbol");
+    assert_eq!(
+        plus_one.kind,
+        SymbolNodeKind::Function,
+        "reuse (routine) `plusOne`, nested inside a namespace"
+    );
+}
+
 #[test]
 fn document_symbols_survive_a_resolve_stage_fatal() {
     let broken = CROSS_WORLD.replace("then done;", "then nowhere;");

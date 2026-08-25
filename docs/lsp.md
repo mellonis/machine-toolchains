@@ -834,7 +834,7 @@ service adds for its fatal (**Diagnostics**, above).
 | Go-to-definition | a successful parse | `null` |
 | Code actions (quickfixes) | a fatal the service knows how to repair, overlapping the request | empty list |
 | Semantic tokens | the source lexes | `null` |
-| Document symbols | a successful parse (CST only) | `null` |
+| Document symbols | a successful parse (the tree only) | `null` |
 | Formatting | a successful parse (CST only) | `null` — the parse error is already on screen as a diagnostic |
 | Cross-file overlay (completion, hover, go-to-definition, the `undeclared-external` refinement) | membership in a declared project target (**Cross-file resolution (the project overlay)**, above) — semantic tokens are NOT part of this row: `.tmc`'s legend has no resolution tier for the overlay to extend | the single-file view described everywhere above |
 
