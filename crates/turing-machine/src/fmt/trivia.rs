@@ -127,25 +127,88 @@ fn end_line(index: &TextLineIndex, t: &SyntaxToken) -> u32 {
 /// newline: a multi-line block comment riding the `{` is part of the
 /// run, and anything after it has started a later line even with no
 /// newline in between, so it is already a body item.
+///
+/// **A comment written BEFORE the `{` suppresses the whole run** — see
+/// [`open_run`].
 pub(crate) fn open_trailing(brace_owner: &SyntaxNode, index: &TextLineIndex) -> Vec<Comment> {
     let elems: Vec<SyntaxElement> = brace_owner.children_with_tokens().collect();
-    match open_run(&elems, index) {
+    match open_run(brace_owner, &elems, index) {
         Some((_, _, run)) => run.iter().map(comment_from).collect(),
         None => Vec::new(),
     }
+}
+
+/// True for a direct child token that is neither whitespace nor a
+/// comment — the position a declaration's own header starts at.
+fn is_significant(e: &SyntaxElement) -> bool {
+    match e {
+        SyntaxElement::Token(t) => !is_whitespace(t.kind()) && !is_comment(t.kind()),
+        SyntaxElement::Node(_) => false,
+    }
+}
+
+/// The comments written between a declaration's header and its `{`.
+///
+/// The scan starts at the header's first significant token, not at the
+/// node, because a comment written above that keyword belongs to the
+/// bound DOC_RUN as the old parser reads it (`crate::syntax::extract`'s
+/// `doc_run_tokens`) — the same position [`blank_before_decl`] measures
+/// its gap at, so the two agree by construction. For MACHINE and REUSE
+/// the `{` is WORLD's, so `node` is the WORLD, its own `elems[..brace]`
+/// is empty, and the answer comes from [`pre_world_comments`] one level
+/// up: exactly one of the two halves is ever non-empty.
+fn pre_brace_comments(
+    node: &SyntaxNode,
+    elems: &[SyntaxElement],
+    brace: usize,
+) -> Vec<SyntaxToken> {
+    let head_start = elems[..brace]
+        .iter()
+        .position(is_significant)
+        .unwrap_or(brace);
+    let mut out: Vec<SyntaxToken> = elems[head_start..brace]
+        .iter()
+        .filter_map(|e| match e {
+            SyntaxElement::Token(t) if is_comment(t.kind()) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    out.extend(pre_world_comments(node));
+    out
 }
 
 /// The first `L_BRACE` child's position, the position the body's own
 /// elements start at, and the comment tokens riding that brace. `None`
 /// when the container has no brace of its own — ROOT, whose items begin
 /// at its first element.
+///
+/// # A pre-brace comment suppresses the run entirely
+///
+/// The old parser's `capture_open_trailing` pops from a GLOBAL comment
+/// cursor and keeps only comments whose next significant token is past
+/// the `{` it has just consumed. A comment written BEFORE the brace is
+/// still pending, sits at the head of that cursor, and fails that test —
+/// so the loop breaks on its FIRST iteration and the run comes back
+/// EMPTY, however many comments ride the brace's own line. All of them
+/// fall to the body's drain instead, printed as items in source order
+/// behind the pre-brace one, and the near edge stays on the brace.
+///
+/// Measured, on every brace owner: `machine /* x */ { // open` prints
+/// `/* x */` and `// open` as the first two body items, not `// open` on
+/// the brace line. The `namespace`, `state` and `routine`/`graph` twins
+/// behave identically, and an `alphabet`'s pair goes to slot 0 of its
+/// element list rather than to the body.
 fn open_run(
+    node: &SyntaxNode,
     elems: &[SyntaxElement],
     index: &TextLineIndex,
 ) -> Option<(usize, usize, Vec<SyntaxToken>)> {
     let brace = elems
         .iter()
         .position(|e| e.kind() == TmcKind::LBrace.into())?;
+    if !pre_brace_comments(node, elems, brace).is_empty() {
+        return Some((brace, brace + 1, Vec::new()));
+    }
     let brace_line = index.line_col(elems[brace].text_range().start).0;
     let mut body = brace + 1;
     let mut run = Vec::new();
@@ -255,7 +318,7 @@ fn unclaimed_inside(node: &SyntaxNode) -> Vec<SyntaxToken> {
 /// rather than read off the whitespace before each item.
 pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> {
     let elems: Vec<SyntaxElement> = container.children_with_tokens().collect();
-    let (head_end, body_start, mut near_edge) = match open_run(&elems, index) {
+    let (head_end, body_start, mut near_edge) = match open_run(container, &elems, index) {
         // ROOT has no opener at all, and the parser seeds its own
         // `prev_end_line` at zero — so a file whose first item sits on
         // line 2 or later leads with a blank line.
@@ -281,44 +344,19 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
 
     // Comments written before the brace. The slot this walk is FOR is
     // the header — between the declaring keyword (or an `entry`/
-    // `export` prefix) and the `{`. No production holds a comment
-    // there, so the old parser's body drain took it and it printed as
-    // the body's first item.
+    // `export` prefix) and the `{`, one level up for a WORLD. No
+    // production holds a comment there, so the old parser's body drain
+    // took it and it printed as the body's first item
+    // ([`pre_brace_comments`] explains where each half lives, and why
+    // the scan starts at the keyword rather than at the node).
     //
-    // The scan starts at the declaring keyword, not at the node, because
-    // one slot in this same region IS held: a comment between a bound
-    // DOC_RUN's last line and that keyword belongs to the RUN as
-    // `Parser::doc_run` reads it, and prints above the declaration
-    // rather than inside the body (`crate::syntax::extract`'s
-    // `doc_run_tokens`). It is a direct child token here for NAMESPACE
-    // and STATE, so a scan from the node's own start would claim it a
-    // second time. Nothing else can precede the keyword — a node begins
-    // at its first significant token, so trivia written above an
-    // UNDOCUMENTED declaration is flushed to the container instead —
-    // which makes "from the keyword" exactly "everything the body drain
-    // could see". The position is the same one `blank_before_decl`
-    // measures its gap at, so the two agree by construction.
-    let head_start = elems[..head_end]
-        .iter()
-        .position(|e| match e {
-            SyntaxElement::Token(t) => !is_whitespace(t.kind()) && !is_comment(t.kind()),
-            SyntaxElement::Node(_) => false,
-        })
-        .unwrap_or(head_end);
-    for e in &elems[head_start..head_end] {
-        if let SyntaxElement::Token(t) = e
-            && is_comment(t.kind())
-        {
-            push_comment(&mut out, &mut near_edge, t);
-        }
-    }
-    // The same header slot for a MACHINE/REUSE body, which lives one
-    // level up: WORLD opens at the `{`, so `elems[..head_end]` above is
-    // empty and this is the only reader that can reach it. It runs
-    // AFTER the open run has set the near edge, which is the old
-    // parser's own order — `capture_open_trailing` seeds `prev_end_line`
-    // from the brace before `world_body` drains anything pending.
-    for t in pre_world_comments(container) {
+    // These lead the body, and the near edge starts on the `{`, never
+    // past an open run: whenever anything is pending here,
+    // `capture_open_trailing` captures NOTHING at all, so the run is
+    // empty by construction (see [`open_run`]). The two are therefore
+    // never both non-empty, and the order between them cannot be
+    // observed.
+    for t in pre_brace_comments(container, &elems, head_end) {
         push_comment(&mut out, &mut near_edge, &t);
     }
 
@@ -901,6 +939,59 @@ mod tests {
                 .iter()
                 .any(|u| matches!(&u.kind, UnitKind::Comment(c) if c.text == "/* sig */")),
             "a comment inside the signature belongs to the signature's own list"
+        );
+    }
+
+    /// A comment written BEFORE the `{` suppresses the open run
+    /// ENTIRELY: `capture_open_trailing` pops from a global cursor and
+    /// keeps only comments past the brace, so the still-pending
+    /// pre-brace one sits at the head of that cursor, fails the test on
+    /// the loop's first iteration, and takes nothing with it. Every
+    /// brace-line comment then falls to the body's drain instead, and
+    /// the near edge stays on the `{`.
+    ///
+    /// The rule lives in `open_run`, so it holds for every brace owner.
+    /// The two named here are the ones the green printer cannot yet put
+    /// through its differential harness: STATE renders with a later
+    /// surface, and an ALPHABET's pre-brace pair lands in its element
+    /// list's interior, later still. Asserted directly so neither waits
+    /// for the surface that would otherwise be the first to notice.
+    #[test]
+    fn a_pre_brace_comment_suppresses_the_open_run() {
+        let src =
+            "machine {\n  tape t: ab;\n  state /* x */ s { // open\n    [*] -> stop;\n  }\n}\n";
+        let (root, index) = tree(src);
+        let state = descendants(&root)
+            .find(|n| n.kind() == TmcKind::State.into())
+            .expect("a STATE");
+        assert!(
+            open_trailing(&state, &index).is_empty(),
+            "a pending pre-brace comment takes the whole run with it"
+        );
+        let items = units(&state, &index);
+        assert!(matches!(&items[0].kind, UnitKind::Comment(c) if c.text == "/* x */"));
+        assert!(
+            matches!(&items[1].kind, UnitKind::Comment(c) if c.text == "// open"),
+            "the brace-line comment is a body item, not part of the run"
+        );
+        assert!(!items[1].blank_before);
+
+        let src = "alphabet ab /* x */ { // open\n  '_'\n}\n";
+        let (root, index) = tree(src);
+        let alphabet = root
+            .children()
+            .find(|n| n.kind() == TmcKind::Alphabet.into())
+            .expect("an ALPHABET");
+        assert!(open_trailing(&alphabet, &index).is_empty());
+
+        let src = "machine /* x */ { // open\n  tape t: ab;\n}\n";
+        let (root, index) = tree(src);
+        let world = descendants(&root)
+            .find(|n| n.kind() == TmcKind::World.into())
+            .expect("a WORLD");
+        assert!(
+            open_trailing(&world, &index).is_empty(),
+            "the WORLD twin, whose pre-brace comment lives one level up"
         );
     }
 

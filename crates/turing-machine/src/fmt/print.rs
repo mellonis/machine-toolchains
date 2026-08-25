@@ -1339,6 +1339,40 @@ mod tests {
         agrees("alphabet ab { '_' }\nmachine /* a */ /* b */ {\n  tape main: ab;\n}\n");
     }
 
+    /// **A pre-brace comment SUPPRESSES the whole open run.** C1's
+    /// `capture_open_trailing` pops from a global cursor and keeps only
+    /// comments whose next significant token is past the `{`; a pre-brace
+    /// comment is still pending, sits at the head of that cursor, and
+    /// fails that test — so the loop breaks on its first iteration and
+    /// takes NOTHING, however many comments ride the brace's own line.
+    /// Both then print as body items in source order, and the near edge
+    /// stays on the brace.
+    ///
+    /// Three symptoms, which is why every source below writes a comment
+    /// on BOTH sides of the `{`: the two comments come out in the wrong
+    /// ORDER, the brace-line one is wrongly RETAINED on the header line,
+    /// and — when the pre-brace comment sits on an earlier line than the
+    /// brace — the near edge moves backwards past a run that already
+    /// advanced it, inventing a blank line C1 does not emit.
+    ///
+    /// The rule belongs to `open_run`, not to any one surface: the
+    /// NAMESPACE twin is the same shape, and so are `routine`/`graph` and
+    /// (once it renders) `state`. The `alphabet` twin cannot go through
+    /// `agrees` — its pair lands in the element list's interior, a later
+    /// surface — and is asserted directly in `super::trivia`'s own tests
+    /// instead.
+    #[test]
+    fn a_pre_brace_comment_suppresses_the_open_run_and_agrees() {
+        agrees("alphabet ab { '_' }\nmachine /* x */ { // open\n  tape main: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine // why\n{ // open\n  tape main: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nmachine /* x */ { /* a */ /* b */\n  tape main: ab;\n}\n");
+        agrees("alphabet ab { '_' }\nnamespace n /* x */ { // open\n  alphabet b { '0' }\n}\n");
+        agrees("alphabet ab { '_' }\nnamespace n /* x */ { // open\n\n  alphabet b { '0' }\n}\n");
+        agrees(
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ { // open\n               }\n}\n",
+        );
+    }
+
     /// **Hazard 2** — a comment written INSIDE a `;`-terminated
     /// declaration. C1's `take_trailing` claims whatever is still PENDING
     /// at the `;`, and a comment inside the statement is pending there,
