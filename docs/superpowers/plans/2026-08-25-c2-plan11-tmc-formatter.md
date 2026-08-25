@@ -668,7 +668,9 @@ git commit -m "test(turing-machine): the adversarial fmt sources and the two-pas
 
 **Interfaces:**
 - Consumes: `mtc_core::syntax::{SyntaxNode, SyntaxToken, SyntaxElement, TextLineIndex}`,
-  `crate::lexer::{Comment, CommentKind}`, `crate::syntax::extract::token_from_syntax`.
+  `crate::lexer::{Comment, CommentKind}`. **Not `extract::token_from_syntax`** —
+  it maps SIGNIFICANT token kinds only and has no comment arm, so it would
+  panic on trivia; this module needs its own small comment converter.
 - Produces:
   ```rust
   pub(crate) struct Unit { pub blank_before: bool, pub kind: UnitKind, pub trailing: Option<Comment> }
@@ -676,7 +678,7 @@ git commit -m "test(turing-machine): the adversarial fmt sources and the two-pas
   pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit>;
   pub(crate) fn blank_before_decl(node: &SyntaxNode) -> bool;
   pub(crate) fn open_trailing(brace_owner: &SyntaxNode, index: &TextLineIndex) -> Vec<Comment>;
-  pub(crate) fn interior(elems: impl Iterator<Item = SyntaxElement>, index: &TextLineIndex) -> Vec<(usize, Comment)>;
+  pub(crate) fn interior(elems: impl Iterator<Item = SyntaxElement>) -> Vec<(usize, Comment)>;
   ```
   and, from `syntax::extract`, `pub(crate)` on `extract_doc_items`,
   `extract_rule`, `extract_tape`, `extract_alphabet`'s element half,
@@ -881,7 +883,7 @@ mod tests {
             .find(|n| n.kind() == TmcKind::Alphabet.into())
             .expect("an ALPHABET");
         let elems = between_braces(&alphabet);
-        let found = interior(elems, &index);
+        let found = interior(elems);
         let keys: Vec<usize> = found.iter().map(|(i, _)| *i).collect();
         assert_eq!(keys, vec![0, 1, 2], "two entries, so the last key is 2");
     }
@@ -894,11 +896,17 @@ mod tests {
     fn a_substitution_cell_does_not_confuse_the_entry_scan() {
         let src = "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s {\n    [*] -> write [/* c */ {0 + 1}] stop;\n  }\n}\n";
         let (root, index) = tree(src);
-        let vec_node = root
-            .descendants()
-            .find(|n| n.kind() == TmcKind::WriteVec.into())
-            .expect("a WRITE_VEC");
-        let found = interior(between_brackets(&vec_node), &index);
+        // `SyntaxNode` has `children`, `children_with_tokens`, `ancestors`
+        // and `descendant_tokens` — there is NO `descendants()`. Walk down
+        // with a small local recursion; core is frozen for this plan.
+        fn find_kind(n: &SyntaxNode, k: TmcKind) -> Option<SyntaxNode> {
+            if n.kind() == k.into() {
+                return Some(n.clone());
+            }
+            n.children().find_map(|c| find_kind(&c, k))
+        }
+        let vec_node = find_kind(&root, TmcKind::WriteVec).expect("a WRITE_VEC");
+        let found = interior(between_brackets(&vec_node));
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, 0, "one cell, comment before it");
     }
@@ -925,10 +933,13 @@ first token contains **two or more** newlines. **Do not compute line numbers
 and subtract them** — a multi-line block comment makes that wrong, and it is
 the mistake `prev_end_line` already cost this arc once.
 
-Build `Comment` values with `crate::syntax::extract::token_from_syntax`
-(widen it to `pub(crate)` in `extract.rs` if it is not already) so a comment's
-`kind`, `line` and `col` come from the same converter the compiler front uses —
-never from a second hand-rolled decoder.
+Build `Comment` values with a small converter local to this module.
+`extract::token_from_syntax` cannot serve: it maps the SIGNIFICANT token kinds
+and has no arm for `LineComment`/`BlockComment`, because `sig_tokens` filters
+trivia out before it is ever called — handing it a comment token panics. Pin the
+local converter against `lex_with(.., WithComments)` over real fixtures so its
+`kind`, `line` and `col` provably agree with the lexer's own, which is the
+guarantee the shared converter would have bought.
 
 `open_trailing` scans forward from the node's first `L_BRACE` child, taking
 comment tokens until a whitespace token containing a newline. `interior`
@@ -1084,6 +1095,21 @@ Expected: FAIL — the new shapes are unhandled.
 
 - [ ] **Step 3: Write the implementation**
 
+**Two comment positions `trivia::units` cannot reach on its own — measured in
+Task 2, and each one is a DROPPED COMMENT if unhandled.**
+
+1. A comment between a `machine`/`routine`/`graph` header and its brace —
+   `machine /* x */ {` — sits in the **declaration's** stream, not `WORLD`'s,
+   because `WORLD` opens at the `{`. `units(&world)` therefore never sees it,
+   while C1 relocates it into the body. Reach back from `WORLD` to its parent's
+   element stream for the comment tokens between the header's last token and the
+   `{`, and render them where C1 does. Add a differential case for it.
+2. A comment written INSIDE a `;`-terminated declaration — `tape main /* c */:
+   ab;` — is relocated by C1 to after the `;`, because `Parser::take_trailing`
+   tests `sig_index <= pos`. It lives inside the node, so it must be found while
+   rendering that node rather than in the parent's stream. Add a differential
+   case for it here, and one for a `graft`/`bind` in the same shape.
+
 `render_reuse` and `render_machine` ask `trivia::open_trailing` of the
 **`WORLD`** node, and take their `Rendered::trailing` (C1's `close_trailing`)
 from the unit, exactly as a `;`-terminated declaration does. `render_namespace`
@@ -1141,6 +1167,10 @@ Run: `cargo test -p mtc-turing-machine --lib fmt::print`
 Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
+
+The intra-node relocation named in Task 4 applies to rules too: a comment
+written inside a rule, before its `;`, is relocated by C1 to after the `;`.
+Find it while rendering the rule, and add a differential case.
 
 A state's rule list is `trivia::units(state.syntax(), &index)`; the grid is
 computed over the `RULE` units only, and own-line comments and blank lines
@@ -1303,6 +1333,11 @@ Run: `cargo test -p mtc-turing-machine --lib fmt::print`
 Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
+
+**`trivia::interior` was never exercised on the two-level `map_pairs` surface
+in Task 2** — do not assume that coverage exists. The nested case is this
+task's to prove: a `with map { … }` carrying an interior comment, inside a
+binding list that also carries one, with BOTH indices asserted by value.
 
 Each surface hands `trivia::interior` the element stream strictly between its
 delimiters — the `use` list is the one with none, running from the `use`
