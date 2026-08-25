@@ -333,26 +333,114 @@ fn tokens_from(toks: &[SyntaxToken], index: &TextLineIndex) -> Vec<Token> {
 /// declaration's own production sets it to its `;` or `}` line.
 /// Scanning back to the last non-whitespace character answers all of
 /// them with one rule, where the tree would need the preceding sibling
-/// AND its trailing trivia treated separately.
+/// AND its trailing trivia treated separately — so that scan stays the
+/// default answer here.
 ///
-/// One measured divergence, and it is invisible in a [`Program`]: a
-/// MULTI-LINE block comment riding the same line as a `;` is claimed by
-/// `Parser::take_trailing`, the one comment-capturing helper that
-/// leaves `prev_end_line` where the `;` put it — so `lower_cst` keeps
-/// the `;` line where this returns the comment's end line.
+/// It answers all of them but ONE, and that one is why the `;` arm
+/// below exists. `Parser::take_trailing` is the single
+/// comment-capturing helper that does NOT advance `prev_end_line` past
+/// the comment it claims — it fires only right after a `;` (the five
+/// `;`-terminated productions: `use`, `tape`, `graft`, `bind`, and a
+/// rule), where `capture_close_trailing`, the `}` twin, DOES advance.
+/// So when a `;`'s trailing comment is the last thing before the run,
+/// `lower_cst` keeps the `;`'s line where the scan-back would report
+/// the comment's end line — a difference only a MULTI-LINE comment can
+/// show, since a single-line one ends where it starts.
+///
+/// The arm is narrow in both directions, and both edges are pinned by
+/// `the_semicolon_arm_is_narrow_in_both_directions`:
+///
+/// - It is keyed on `;` because `}` behaves the other way, and every
+///   other predecessor (a `{` through `capture_open_trailing`, an
+///   own-line comment through `drain_pending`) advances the field too.
+/// - `take_trailing` claims AT MOST ONE comment, so the arm requires
+///   the comment run to be exactly one long. Write a second comment
+///   after the `;` and the first is the trailing while the rest are
+///   drained as ordinary pending comments, each advancing the field —
+///   which lands it back on the scan-back's own answer.
+///
 /// (`interior_comments` leaves the field alone too, but is never the
 /// last word: a list's closing delimiter always follows it, and the
-/// declaration's own production then sets the field.) The two disagree
-/// on exactly one field of exactly one item, the first item's
-/// `blank_before`, and `crate::parser::reduce_doc_run` reads no
-/// `blank_before` at all — it folds over `kind` only. Measured, not
-/// assumed: see `a_block_comment_riding_a_semicolon_diverges_on_blank_before_only`.
+/// declaration's own production then sets the field.)
 fn prev_end_line(source: &str, index: &TextLineIndex, node: &SyntaxNode) -> u32 {
-    let start = node.text_range().start as usize;
-    match source[..start].rfind(|c: char| !c.is_whitespace()) {
+    let scan_back = |start: usize| match source[..start].rfind(|c: char| !c.is_whitespace()) {
         Some(i) => index.line_col(i as u32).0,
         None => 0,
+    };
+    let start = node.text_range().start as usize;
+    let (significant, comments) = preceding_trivia(node);
+    let semi_line = match &significant {
+        Some(sig) if sig.kind() == TmcKind::Semi.into() => {
+            Some(index.line_col(sig.text_range().start).0)
+        }
+        _ => None,
+    };
+    if let (Some(line), [only]) = (semi_line, comments.as_slice())
+        && index.line_col(only.text_range().start).0 == line
+    {
+        return line;
     }
+    scan_back(start)
+}
+
+/// Walking backward out of `node` to the last significant token before
+/// it, collecting the comment tokens written in between (document
+/// order). [`prev_end_line`]'s `;` arm needs both halves, and neither
+/// is a sibling lookup: a bound `DOC_RUN` is its declaration's FIRST
+/// child, so everything before it lives in an ancestor's stream.
+///
+/// The cursor never descends. A preceding sibling NODE contributes only
+/// its `last_token`, which this module's own doc explains is always
+/// significant (`GreenSink::finish` closes a node without flushing
+/// trailing trivia) — so the walk stops there, and there is nothing
+/// deeper it could still need to see.
+fn preceding_trivia(node: &SyntaxNode) -> (Option<SyntaxToken>, Vec<SyntaxToken>) {
+    fn step_back(cur: &SyntaxElement) -> Option<SyntaxElement> {
+        match cur {
+            SyntaxElement::Node(n) => n.prev_sibling_or_token(),
+            SyntaxElement::Token(t) => t.prev_sibling_or_token(),
+        }
+    }
+    fn climb(cur: &SyntaxElement) -> Option<SyntaxNode> {
+        match cur {
+            SyntaxElement::Node(n) => n.parent(),
+            SyntaxElement::Token(t) => Some(t.parent()),
+        }
+    }
+
+    let mut cur = SyntaxElement::Node(node.clone());
+    let mut comments: Vec<SyntaxToken> = Vec::new();
+    let mut significant = None;
+    loop {
+        let Some(prev) = step_back(&cur) else {
+            match climb(&cur) {
+                Some(parent) => {
+                    cur = SyntaxElement::Node(parent);
+                    continue;
+                }
+                None => break,
+            }
+        };
+        match &prev {
+            SyntaxElement::Token(t) if t.kind() == TmcKind::Whitespace.into() => {}
+            // Whitespace is already gone, so the rest of the trivia
+            // space is exactly the two comment kinds.
+            SyntaxElement::Token(t) if is_trivia(t.kind()) => comments.push(t.clone()),
+            SyntaxElement::Token(t) => {
+                significant = Some(t.clone());
+                break;
+            }
+            SyntaxElement::Node(n) => {
+                if let Some(last) = n.last_token() {
+                    significant = Some(last);
+                    break;
+                }
+            }
+        }
+        cur = prev;
+    }
+    comments.reverse();
+    (significant, comments)
 }
 
 /// A bound doc run's raw items, reparsed through the parser's own
@@ -2098,20 +2186,15 @@ mod tests {
         check("alphabet a { '0' }\n\n? doc\nalphabet b { '0' }\n", true);
     }
 
-    /// The ONE shape where [`prev_end_line`]'s source scan disagrees
-    /// with `lower_cst`, measured rather than asserted from reading:
-    /// a MULTI-LINE block comment riding the same line as a `;` is
-    /// claimed by `Parser::take_trailing`, the one comment-capturing
-    /// helper that does NOT advance `prev_end_line` past the comment.
-    ///
-    /// This test records both halves of that measurement: the raw doc
-    /// items differ on exactly `blank_before`, and the extracted
-    /// `Program` is nonetheless identical — because `reduce_doc_run`
-    /// never reads that field. If a later change makes `blank_before`
-    /// reach the `Program`, the second assertion here starts failing
-    /// and this becomes a real bug to fix rather than a recorded gap.
+    /// A MULTI-LINE block comment riding a `;` is claimed by C1's
+    /// `Parser::take_trailing`, which leaves `prev_end_line` at the `;`.
+    /// The green walk must do the same, because the field it feeds — the
+    /// FIRST doc item's `blank_before` — is what `fmt` turns into a blank
+    /// line before a doc run. The two agreed everywhere else already: C1
+    /// DOES advance past a `}`-closing declaration's trailing comment, and
+    /// a single-line comment ends on the line it starts.
     #[test]
-    fn a_block_comment_riding_a_semicolon_diverges_on_blank_before_only() {
+    fn a_block_comment_riding_a_semicolon_agrees_on_blank_before() {
         let src = "use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n";
 
         let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
@@ -2128,16 +2211,73 @@ mod tests {
         };
         let green = extract_doc_items(&view.doc_run().expect("a doc run"), src, &index);
 
-        assert_ne!(
-            green[0].blank_before, c1[0].blank_before,
-            "the measured divergence is gone — re-derive `prev_end_line`'s doc comment"
+        assert_eq!(green, c1, "the two paths must agree on the whole run");
+        assert!(
+            c1[0].blank_before,
+            "C1 keeps prev_end_line at the `;`, so the run reads as blank-separated"
         );
-        assert_eq!(
-            green.len(),
-            c1.len(),
-            "only `blank_before` diverges; the items themselves do not"
+    }
+
+    /// Both edges of [`prev_end_line`]'s `;` arm, so neither can be
+    /// widened away. Every fixture writes a MULTI-LINE block comment
+    /// after a declaration, which is the only shape where the two
+    /// candidate answers — the terminator's line and the comment's end
+    /// line — differ at all:
+    ///
+    /// - **Alone after a `;`** — `take_trailing` claims it and leaves the
+    ///   field on the `;`, so the run reads as blank-separated.
+    /// - **Second after a `;`** — `take_trailing` claims AT MOST ONE, so
+    ///   the first is the trailing and the rest are drained as ordinary
+    ///   pending comments, each of which DOES advance the field, landing
+    ///   it back on the last comment's end line.
+    /// - **Alone after a `}`** — `capture_close_trailing`, not
+    ///   `take_trailing`, so the field advances past it.
+    ///
+    /// Measured, both directions: dropping the one-comment condition makes
+    /// the second fixture report `true` where `lower_cst` says `false`;
+    /// dropping the `;` key does the same to the third.
+    ///
+    /// `agrees` runs on each because it is what pins the OTHER half of the
+    /// old divergence record: the extracted `Program` is identical either
+    /// way, since `reduce_doc_run` folds over `kind` alone.
+    #[test]
+    fn the_semicolon_arm_is_narrow_in_both_directions() {
+        #[track_caller]
+        fn check(src: &str, expect_blank_before: bool) {
+            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+            // NOT `items[1]`: in the two-comment fixture the second
+            // comment is a standalone `TopKind::Comment` item of its
+            // own, so the alphabet slides to index 2.
+            let TopKind::Alphabet(alphabet) = &cst.items.last().expect("a last item").kind else {
+                panic!("expected the last item to be an alphabet");
+            };
+            let c1 = alphabet.doc_run.clone();
+            assert_eq!(
+                c1[0].blank_before, expect_blank_before,
+                "fixture does not exercise the case it claims: {src}"
+            );
+
+            let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
+                .expect("root is ROOT");
+            let index = TextLineIndex::new(src);
+            let TopView::Alphabet(view) = root.items().last().expect("a last item") else {
+                panic!("expected the last item to be an ALPHABET");
+            };
+            let green = extract_doc_items(&view.doc_run().expect("a doc run"), src, &index);
+
+            assert_eq!(green, c1, "for:\n{src}");
+            agrees(src);
+        }
+
+        check("use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n", true);
+        check(
+            "use a; /* one */ /* two\nthree */\n? doc\nalphabet b { '0' }\n",
+            false,
         );
-        agrees(src);
+        check(
+            "alphabet a { '0' } /* one\ntwo */\n? doc\nalphabet b { '0' }\n",
+            false,
+        );
     }
 
     /// Sanity check on the fixtures above: `lower_cst` and the green
