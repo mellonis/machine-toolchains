@@ -1,0 +1,31 @@
+? a documented namespace
+namespace n {
+  ? a documented alphabet
+  !
+  ! [deprecated] use the other one
+  export alphabet ab { '_', 'a' }
+
+  ? a documented graph
+  ?
+  ? with a blank line inside the run
+
+  export graph g(tape t: ab, state done) {
+    ? a documented state
+    entry state s {
+      [*] -> done;
+    }
+  }
+}
+
+? a documented machine
+machine {
+  tape main: ab;
+
+  ? a documented graft
+  entry graft n::g(t = main, done = fin) as inst;
+
+  ? a documented bind
+  bind n::g(t = main, done = fin) as other;
+
+  state fin { [*] -> stop; }
+}

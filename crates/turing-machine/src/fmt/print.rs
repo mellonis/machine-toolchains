@@ -1,40 +1,172 @@
-//! The `.tmc` printer over the green syntax tree — the replacement for
-//! the C1-CST printer in this module's parent, built one surface at a
-//! time and held byte-identical to it at every step.
+//! The `.tmc` printer — the walk behind [`super::format`].
+//!
+//! # The contract
+//!
+//! The printer walks the lossless green syntax tree ([`crate::syntax`],
+//! built by [`crate::parser::parse_green_from_tokens`]) rather than the
+//! flattened AST. The tree keeps every token the author wrote, comments
+//! and whitespace included, so the four properties the fmt battery
+//! (`tests/fmt_tmc.rs`) proves on every fixture in the repository are
+//! properties of the walk itself rather than of a side-car the parser had
+//! to remember to fill:
+//!
+//! - **Canonical** — the output depends on the token stream and on the few
+//!   layout choices the author's own line breaks record (blank-line
+//!   presence, whether a state was written on one line), never on the
+//!   author's spacing.
+//! - **Idempotent** — `format(format(s)) == format(s)`. Every layout
+//!   decision is either derived from the token content (widths, the line
+//!   limit) or from a property the printer's own output preserves.
+//! - **Whitespace-only** — no token is added, dropped, or rewritten. A
+//!   number reprints from its WRITTEN spelling (leading zeros survive), a
+//!   glyph reprints with only the two escapes the lexer accepts, and the
+//!   bare-name `goto` sugar stays bare (`Transition::Goto::explicit` is
+//!   read, never normalized either way).
+//! - **Trivia-preserving** — every comment reprints somewhere: own-line
+//!   comments at their block's indent, same-line trailing comments riding
+//!   their line, brace-line comments riding the `{`/`}` they were written
+//!   on. Doc (`?`) and attention (`!`) runs — `[deprecated]` included —
+//!   stay directly above the declaration they document, in source order. A
+//!   comment written INSIDE a comma-separated list — an `alphabet` body, a
+//!   `routine`/`graph` signature parameter list, a `call`/`graft`/`bind`
+//!   binding list, a `with map` pair list, a `use` path list, or a rule's
+//!   pattern/`write`/`move` vector — prints where its author wrote it, keyed
+//!   to the entry it precedes: a same-line comment rides the preceding
+//!   entry's line, an own-line comment keeps its own line, and a comment
+//!   after the last entry prints before the closer. A `//` comment forces
+//!   such a list onto multiple lines (nothing can follow it on its physical
+//!   line), and so does any OWN-LINE comment, block or line (inlining an
+//!   own-line comment onto an entry's line would silently flip that flag on
+//!   the next parse); a SAME-LINE `/* … */` comment is the one case that can
+//!   stay inline instead, EXCEPT in the bracketed `routine`/`graph`
+//!   signature, `call`/`graft`/`bind`, and `with map` lists, which have no
+//!   inline-with-comments form at all. A pattern/`write`/`move` vector's
+//!   SAME-LINE block comment stays inline like an `alphabet` body's or a
+//!   `use` path list's does; its `//` comment, and any OWN-LINE comment
+//!   (block or line), differ from every other list, because these three
+//!   vectors double as the state-block grid's columns (below) — either kind
+//!   does not just force its own vector onto several lines, it takes the
+//!   WHOLE enclosing rule off the grid, so the rule renders across several
+//!   lines without widening the columns its neighbours share
+//!   (docs/tmt/fmt.md (interior comments)).
 //!
 //! # Two inputs, two owners
 //!
-//! Every printed VALUE comes from `crate::syntax::extract`'s own
-//! helpers, which are oracle-tested against the C1 lowering: an
-//! alphabet's elements, a `use` path's segments, a doc run's items. Every
-//! derived layout FACT — a blank line, a trailing comment, the comments
-//! riding a `{` — comes from [`super::trivia`], which re-derives them
-//! from the tree. Neither half re-implements the other's decisions
+//! Every printed VALUE comes from `crate::syntax::extract`'s own helpers:
+//! an alphabet's elements, a `use` path's segments, a doc run's items.
+//! Every derived layout FACT — a blank line, a trailing comment, the
+//! comments riding a `{` — comes from [`super::trivia`], which re-derives
+//! them from the tree. Neither half re-implements the other's decisions
 //! (docs/tmt/fmt.md (comments), docs/tmt/fmt.md (blank lines)).
 //!
-//! # The duplication is deliberate
+//! # One blank-line question, asked at two scopes
 //!
-//! The layout machinery and the value→text functions below are copied
-//! VERBATIM from the C1 printer rather than shared with it. That printer
-//! is this one's differential oracle until the whole surface is ported,
-//! and a helper shared between the two would make the oracle blind to
-//! any bug introduced inside it. The copies go away with the C1 printer
-//! itself.
+//! A declaration's bound doc run is INSIDE the declaration's node, so the
+//! gap before the whole unit and the gap between a run and the declaration
+//! it documents are the same query at two scopes — "the gap before this
+//! node's first token" — rather than two different rules. The unit's own
+//! `blank_before` answers the outer one; `trivia::blank_before_decl`
+//! answers the smaller inner one.
 //!
-//! # What `blank_before` costs here
+//! # Indentation
 //!
-//! C1 needed a two-way branch (`leads_with_blank`) because a documented
-//! declaration repurposed its own `blank_before` for the run→declaration
-//! gap. On the green tree the bound doc run is INSIDE the declaration's
-//! node, so both questions are "the gap before this node's first token"
-//! and the branch disappears: the unit's own flag answers the outer one,
-//! and `trivia::blank_before_decl` answers the smaller inner one.
-
-// Every surface is wired, but the C1 printer is still the one `format`
-// calls: this one has no production caller until the cutover, so its
-// entry point and the helpers only it reaches are dead outside this
-// module's own tests.
-#![allow(dead_code)]
+//! Two spaces per level, never tabs. (PM-1's `.pmc` printer uses four; a
+//! `.tmc` rule commonly sits five levels deep — namespace, namespace,
+//! routine, state, rule — where four-space steps would push the transition
+//! table off the right margin.)
+//!
+//! # The state-block grid
+//!
+//! Within a grid GROUP, a state's rules are laid out as a table: the pattern
+//! is padded to the group's widest pattern, so every `->` lands in one
+//! column; then the optional action segments — `debugger`, `write [...]`,
+//! `move [...]` — each occupy a column sized to the group's widest instance.
+//! A group is either one multi-line state's whole rule list (own-line
+//! comments and blank lines inside it do NOT split the grid — a state is one
+//! table), or a run of adjacent single-line states (see below).
+//!
+//! A rule pads a column it does not use only when it has content in a LATER
+//! column; trailing columns collapse. That is what keeps a bare-transition
+//! row tight against the arrow, which is how these tables are written by
+//! hand:
+//!
+//! ```text
+//! ['b'] -> write ['a'] move [>] goto scan;
+//! ['a'] ->             move [>] goto scan;
+//! ['_'] -> stop;
+//! ```
+//!
+//! The transition itself is NOT column-aligned — it is the row's tail, and
+//! padding it would leave a ragged gap in every table whose rules mix
+//! `write`-only and `write`+`move` actions.
+//!
+//! A rule whose pattern, `write`, or `move` vector carries a `//` comment, or
+//! any OWN-LINE comment (block or line), cannot be a grid row — nothing may
+//! follow `//` on its physical line, and an own-line comment must keep its
+//! own line, so either way the vector (and the rule around it) renders
+//! across several lines instead. Only a SAME-LINE `/* … */` comment stays
+//! inline and leaves the rule on the grid. An off-grid rule is excluded from
+//! the group's width computation in both directions: it does not consume the
+//! group's shared columns, and it does not widen them for its neighbours
+//! (docs/tmt/fmt.md (interior comments)).
+//!
+//! # Single-line states
+//!
+//! `state done { [*] -> stop; }` stays on one line when the author wrote it
+//! that way (all its rules on the header's own line) and it carries no
+//! interior comment. A maximal run of adjacent single-line states — no blank
+//! line, no doc run, nothing else in between — is one unit: their headers pad
+//! to a common width so the `{` column lines up, and their rules share one
+//! grid. If any member of the run would cross the line limit, the whole run
+//! expands to block form; expansion is stable, since an expanded state is no
+//! longer written on one line.
+//!
+//! # Argument lists and the width threshold
+//!
+//! The threshold is the **80-column line limit** — the same width
+//! `line-too-long` (docs/core.md (assembly lint)) enforces on the two
+//! assembly dialects; `.tmc` has no line-length lint of its own, so
+//! fmt's active wrapping below is what keeps most lines under it (see
+//! "Blank lines and comments", below, for the one mechanism that isn't
+//! wrapping — comment alignment — and why it carries no diagnostic
+//! cost here). A parenthesized list — a `call`'s bindings, a `graft`/`bind`'s
+//! bindings, a `routine`/`graph` signature, an `alphabet` body — renders on
+//! one line while the resulting line fits; past that it breaks one entry per
+//! line, indented two columns past the construct's FIRST token, with the
+//! closing `)`/`}` returning to that token's column:
+//!
+//! ```text
+//! [*] -> call std::binaryNumbersBare::invertNumber(
+//!          num = num with map { '^' => '_', '$' => '_' }
+//!        ) then return;
+//! ```
+//!
+//! A single binding argument is never broken further — a `with map { … }`
+//! stays inline, so one very long binding may still exceed the limit. That is
+//! deliberate: the alternative (breaking a map across lines) buys little and
+//! costs the map its at-a-glance readability.
+//!
+//! # Blank lines and comments
+//!
+//! Blank-line policy is the `.pmc` one: the author's choice is preserved, any
+//! run of blank lines collapses to one, and a blank is never forced. Presence
+//! is all the walk asks of the tree — [`super::trivia`] answers a gap with a
+//! bool, so the collapse is free; a list's first item never takes a leading
+//! blank, which is also what suppresses a blank immediately after `{`.
+//!
+//! An own-line comment prints at its block's indent, with each of its lines'
+//! trailing whitespace stripped (a block comment's interior indentation is
+//! content and is left verbatim). A trailing comment sits one space after the
+//! code by default; in a run of two or more adjacent single-line entries that
+//! all carry one, the comments align one column past the run's widest line —
+//! every member aligns, even one whose aligned comment then crosses 80
+//! columns. No lint rule flags that: `.tmc` has no line-length rule of its
+//! own, and `line-too-long` (docs/core.md (assembly lint)) covers only the
+//! two assembly dialects, `.pma` and `.tma`, never `.tmc` — so alignment
+//! here carries no diagnostic cost. Unlike `.pmc`'s rule, this does not
+//! consult the author's source columns: a run either aligns or it does not,
+//! which is both simpler and one less way for a second pass to disagree
+//! with the first.
 
 use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxKind, SyntaxNode, TextLineIndex};
 
@@ -59,17 +191,17 @@ use crate::syntax::{
     ReuseView, RootView, RuleView, StateView, TapeView, TmcKind, TopView, UseView, WorldView,
 };
 
-/// Spaces per block level (`super`'s module doc, "Indentation").
+/// Spaces per block level (module doc, "Indentation").
 const INDENT_UNIT: usize = 2;
 
-/// The line limit every width decision is measured against (`super`'s
-/// module doc, "Argument lists and the width threshold").
+/// The line limit every width decision is measured against (module doc,
+/// "Argument lists and the width threshold").
 const LINE_WIDTH: usize = 80;
 
 /// `.tmc` source → canonical text, printed from the green syntax tree.
 /// Lexes with comments retained, builds the tree, and walks it. A lex or
 /// parse error is returned, never printed.
-pub(crate) fn format_green(source: &str) -> Result<String, CompileError> {
+pub(crate) fn format(source: &str) -> Result<String, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
     let root = RootView::cast(SyntaxNode::new_root(green)).expect("the green root is a ROOT node");
@@ -130,8 +262,8 @@ fn flush(items: &[Rendered]) -> String {
     out
 }
 
-/// Spaces between an item's code and its trailing comment (`super`'s module
-/// doc, "Blank lines and comments"): one by default; in a run of two or more
+/// Spaces between an item's code and its trailing comment (module doc,
+/// "Blank lines and comments"): one by default; in a run of two or more
 /// adjacent single-line entries that all carry a trailing comment, enough to
 /// align them one column past the run's widest code line — every member of
 /// the run aligns, even one whose aligned comment then crosses the line
@@ -675,24 +807,21 @@ fn write_vec_text(vec: &WriteVec, tokens: &[Token], interior: &Interior<'_>) -> 
 /// concatenating their spellings yields the tight form.
 ///
 /// A substitution has no node of its own — its `{`, its expression and its
-/// `}` are plain tokens of the enclosing WRITE_VEC — so the span filter is
-/// still what selects it. `tokens` is that vector's own significant run
-/// (`syntax::extract`'s `sig_tokens`) rather than the whole file's: the
-/// spans are absolute either way, so the filter selects the same tokens,
-/// and the run ends in a synthetic `Eof` that lies past every cell. One
-/// consequence of that narrowing, stated because a reader will otherwise
-/// look for the case it covers: `sig_tokens` drops trivia, so the
-/// comment test below is DEAD here — it is kept only because this
-/// function is a verbatim copy of the C1 printer's, where the whole
-/// file's tokens (comments included) are what arrives.
+/// `}` are plain tokens of the enclosing WRITE_VEC — so a span cut, not a
+/// child walk, is what selects it. `tokens` is that vector's own
+/// significant run (`syntax::extract`'s `sig_tokens`) rather than the whole
+/// file's: the spans are absolute either way, so the cut selects the same
+/// tokens, and the run ends in a synthetic `Eof` that lies past every cell.
+///
+/// The span cut is the WHOLE filter, and that is a property of the input
+/// rather than an omission: `sig_tokens` builds its run by dropping every
+/// trivia kind, comments included, so no `TokenKind::Comment` can reach
+/// here to be filtered out. A comment test would be dead code, not a
+/// safeguard.
 fn subst_body_text(span: &Span, tokens: &[Token]) -> String {
     tokens
         .iter()
-        .filter(|t| {
-            !matches!(t.kind, TokenKind::Comment(_))
-                && t.span().start >= span.start
-                && t.span().end <= span.end
-        })
+        .filter(|t| t.span().start >= span.start && t.span().end <= span.end)
         .map(|t| fold_token_text(&t.kind))
         .collect()
 }
@@ -752,7 +881,12 @@ fn continuation_text(cont: &Continuation) -> String {
 /// interior/wrapping case to consider here — unlike `render_alphabet` or
 /// [`paren_list`], a clause is always one unbroken run of tokens on the line
 /// its parameter entry occupies.
-fn contract_clause_text(keyword: &str, clause: &ContractClause) -> String {
+///
+/// `pub(crate)` so the LSP hover renderers (`lsp/navigate.rs`) can spell a
+/// declared clause identically to this printer's canonical output instead
+/// of keeping a second copy of the same string in sync; `super` re-exports
+/// it under the module's own name.
+pub(crate) fn contract_clause_text(keyword: &str, clause: &ContractClause) -> String {
     let entries: Vec<String> = clause.elems.iter().map(alphabet_elem_text).collect();
     if entries.is_empty() {
         format!(" {keyword} {{}}")
@@ -815,7 +949,7 @@ fn binding_value_text(value: &BindingValue, col: usize, map_interior: &Interior<
 /// A `with map { … }`, starting at column `col` (where the `w` of `with`
 /// lands) — the column its closing `}` returns to once broken. `interior` is
 /// this map's OWN interior comments, one level down from the binding list's
-/// (`super`'s module doc, "Argument lists and the width threshold";
+/// (module doc, "Argument lists and the width threshold";
 /// docs/tmt/fmt.md (interior comments)).
 fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
     let pairs: Vec<String> = map
@@ -835,7 +969,7 @@ fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
     let entry_pad = " ".repeat(col + INDENT_UNIT);
     // Slot 0's same-line comments precede every pair, so there is no
     // preceding pair's line for them to trail — they ride the opening `{`
-    // itself (`super`'s module doc, "Blank lines and comments").
+    // itself (module doc, "Blank lines and comments").
     let mut out = String::from("with map {");
     out.push_str(&interior_trailing(&interior.slots[0]));
     out.push('\n');
@@ -847,7 +981,7 @@ fn sym_map_text(map: &SymMap, col: usize, interior: &Interior<'_>) -> String {
             out.push(',');
         }
         // The NEXT slot's same-line comments belong to THIS pair's line —
-        // see the indexing rule (`super`'s module doc, "Blank lines and
+        // see the indexing rule (module doc, "Blank lines and
         // comments").
         out.push_str(&interior_trailing(&interior.slots[i + 1]));
         out.push('\n');
@@ -913,7 +1047,7 @@ fn term_text(kind: TermKind) -> &'static str {
 }
 
 /// `head(entries)tail` on one line while it fits from column `col`
-/// (`super`'s module doc, "Argument lists and the width threshold"), else
+/// (module doc, "Argument lists and the width threshold"), else
 /// one entry per line. `head` starts AT `col` and never carries the leading
 /// indent itself — a caller opening a line emits that indent before calling.
 /// `interior` is the list's interior comments, bucketed by [`bucket`]; a
@@ -941,7 +1075,7 @@ fn paren_list(
     let entry_pad = " ".repeat(col + INDENT_UNIT);
     // Slot 0's same-line comments precede every entry, so there is no
     // preceding entry's line for them to trail — they ride the opening `(`
-    // itself (`super`'s module doc, "Blank lines and comments").
+    // itself (module doc, "Blank lines and comments").
     let mut out = format!("{head}(");
     out.push_str(&interior_trailing(&interior.slots[0]));
     out.push('\n');
@@ -953,7 +1087,7 @@ fn paren_list(
             out.push(',');
         }
         // The NEXT slot's same-line comments belong to THIS entry's line —
-        // see the indexing rule (`super`'s module doc, "Blank lines and
+        // see the indexing rule (module doc, "Blank lines and
         // comments").
         out.push_str(&interior_trailing(&interior.slots[i + 1]));
         out.push('\n');
@@ -985,7 +1119,7 @@ fn use_path_text(path: &Import) -> String {
 // The rule grid.
 // ---------------------------------------------------------------------------
 
-/// The column widths one grid group shares (`super`'s module doc, "The
+/// The column widths one grid group shares (module doc, "The
 /// state-block grid"). A width of zero means the group has no rule using
 /// that segment, so the column does not exist at all.
 struct Grid {
@@ -1055,7 +1189,7 @@ fn breaks_the_grid(interior: &RuleInterior) -> bool {
     })
 }
 
-/// `rules` off the grid (`super`'s module doc, "The state-block grid")
+/// `rules` off the grid (module doc, "The state-block grid")
 /// are excluded from every column: they consume none of the group's
 /// width and, since they render themselves, do not need one.
 fn grid_for(rules: &[&PreparedRule]) -> Grid {
@@ -1182,7 +1316,7 @@ fn render_rule(prepared: &PreparedRule, grid: &Grid, indent: usize) -> String {
     line
 }
 
-/// A rule off the grid (`super`'s module doc, "The state-block grid"): a
+/// A rule off the grid (module doc, "The state-block grid"): a
 /// LINE comment in one of its glyph vectors forces it there, and the
 /// whole rule renders across several lines instead of padding to the
 /// group's shared columns — every vector it carries breaks, not only the
@@ -1259,7 +1393,7 @@ fn glyph_vec_multiline(
     let mut out = String::from(head);
     // Slot 0's same-line comments precede every cell, so there is no
     // preceding cell's line for them to trail — they ride the opening `[`
-    // itself (`super`'s module doc, "Blank lines and comments").
+    // itself (module doc, "Blank lines and comments").
     out.push_str(&interior_trailing(&interior.slots[0]));
     out.push('\n');
     for (i, cell) in cells.iter().enumerate() {
@@ -1270,7 +1404,7 @@ fn glyph_vec_multiline(
             out.push(',');
         }
         // The NEXT slot's same-line comments belong to THIS cell's line —
-        // see the indexing rule above (`super`'s module doc, "Blank lines
+        // see the indexing rule above (module doc, "Blank lines
         // and comments").
         out.push_str(&interior_trailing(&interior.slots[i + 1]));
         out.push('\n');
@@ -1410,7 +1544,7 @@ fn render_use(view: &UseView, unit: &Unit, indent: usize, index: &TextLineIndex)
     } else {
         // A LINE comment forces the path list onto multiple lines, each
         // continuation aligned 4 columns past the statement indent — the
-        // column right past `use ` (`super`'s module doc, "Argument lists
+        // column right past `use ` (module doc, "Argument lists
         // and the width threshold").
         let cont_pad = " ".repeat(indent + 4);
         let mut out = String::new();
@@ -1423,7 +1557,7 @@ fn render_use(view: &UseView, unit: &Unit, indent: usize, index: &TextLineIndex)
         // itself; an own-line comment prints on its own continuation line
         // below. A LINE comment eats the rest of its physical line, so the
         // first path moves to a fresh continuation line whenever this slot
-        // is non-empty (`super`'s module doc, "Blank lines and comments").
+        // is non-empty (module doc, "Blank lines and comments").
         let slot0_trailing = interior_trailing(&interior.slots[0]);
         let slot0_lines = interior_lines(&interior.slots[0], indent + 4);
         if !slot0_trailing.is_empty() {
@@ -1452,7 +1586,7 @@ fn render_use(view: &UseView, unit: &Unit, indent: usize, index: &TextLineIndex)
                 out.push(',');
             }
             // The NEXT slot's same-line comments belong to THIS entry's
-            // line — see the indexing rule (`super`'s module doc, "Blank
+            // line — see the indexing rule (module doc, "Blank
             // lines and comments").
             out.push_str(&interior_trailing(&interior.slots[i + 1]));
         }
@@ -1546,7 +1680,7 @@ fn render_alphabet(
         code.push_str(&open_trailing_text(&open_trailing));
         // Slot 0's same-line comments precede every entry, so there is no
         // preceding entry's line for them to trail — they ride the opening
-        // `{` itself (`super`'s module doc, "Blank lines and comments").
+        // `{` itself (module doc, "Blank lines and comments").
         code.push_str(&interior_trailing(&interior.slots[0]));
         code.push('\n');
         let entry_pad = " ".repeat(indent + INDENT_UNIT);
@@ -2066,8 +2200,8 @@ fn render_inline_state(
 /// rule table at one more indent level, and the closing `}`.
 ///
 /// The whole state is ONE grid group — an own-line comment or a blank
-/// line between two rules does not split the table (`super`'s module
-/// doc, "The state-block grid"), so the group is computed over every
+/// line between two rules does not split the table (module doc, "The
+/// state-block grid"), so the group is computed over every
 /// RULE unit at once and the walk below only interleaves the comment
 /// units back in at their own positions.
 ///
@@ -2134,30 +2268,63 @@ fn render_block_state(
 mod tests {
     use super::*;
 
-    /// The differential oracle: the green printer and the C1 printer must
-    /// agree byte for byte. A green walk that renders something BETTER still
-    /// fails here, and that is the point — the C1 printer is the only
-    /// reference that proves this rewrite faithful.
+    /// The differential oracle, FROZEN. `expected` is not an aspirational
+    /// golden: every one of these strings is the output the C1 printer
+    /// itself produced for `src`, captured mechanically while both
+    /// printers still existed and while each source still ran through the
+    /// green-vs-C1 comparison this helper used to be. Each source below
+    /// keeps the prose that says which mechanism it arms.
+    ///
+    /// What that still proves: this printer emits exactly these bytes for
+    /// these shapes, so any later change to it that moves a byte fails
+    /// here, on the shape that moved it.
+    ///
+    /// What it no longer proves: that two independently written printers
+    /// agree. A bug present in BOTH at capture time is now enshrined
+    /// rather than exposed — the price of deleting the reference, and the
+    /// reason the capture was mechanical rather than hand-written.
+    ///
+    /// Deliberately NOT paired with an idempotency assertion: several
+    /// sources here are the formatter's mandated non-idempotent quirks
+    /// (docs/tmt/fmt.md (idempotency)), which such an assertion would
+    /// fail.
     #[track_caller]
-    fn agrees(src: &str) {
-        let green = format_green(src).expect("the green printer formats");
-        let c1 = crate::fmt::format(src).expect("the C1 printer formats");
-        assert_eq!(green, c1, "printers diverged for:\n{src}");
+    fn pins(src: &str, expected: &str) {
+        let out = format(src).expect("the printer formats");
+        assert_eq!(out, expected, "for:\n{src}");
     }
 
     #[test]
     fn the_file_skeleton_agrees() {
-        agrees("");
-        agrees("use a::b;\n");
-        agrees("use a::b, c::d as e;\n");
-        agrees("// standalone\n\nuse a::b; // trailing\n");
-        agrees("alphabet ab { '_', 'a' }\n");
-        agrees("export alphabet ab { '_'..'z' }\n");
-        agrees("? doc\n![deprecated] gone\nalphabet ab { '_' }\n");
-        agrees("? doc\n\nalphabet ab { '_' }\n");
-        agrees("namespace n {\n  namespace m {\n    alphabet ab { '_' }\n  }\n}\n");
-        agrees("namespace n { // open\n  alphabet ab { '_' }\n} // close\n");
-        agrees("use a::b;\n\n\nuse c::d;\n");
+        pins("", "\n");
+        pins("use a::b;\n", "use a::b;\n");
+        pins("use a::b, c::d as e;\n", "use a::b, c::d as e;\n");
+        pins(
+            "// standalone\n\nuse a::b; // trailing\n",
+            "// standalone\n\nuse a::b; // trailing\n",
+        );
+        pins("alphabet ab { '_', 'a' }\n", "alphabet ab { '_', 'a' }\n");
+        pins(
+            "export alphabet ab { '_'..'z' }\n",
+            "export alphabet ab { '_'..'z' }\n",
+        );
+        pins(
+            "? doc\n![deprecated] gone\nalphabet ab { '_' }\n",
+            "? doc\n! [deprecated] gone\nalphabet ab { '_' }\n",
+        );
+        pins(
+            "? doc\n\nalphabet ab { '_' }\n",
+            "? doc\n\nalphabet ab { '_' }\n",
+        );
+        pins(
+            "namespace n {\n  namespace m {\n    alphabet ab { '_' }\n  }\n}\n",
+            "namespace n {\n  namespace m {\n    alphabet ab { '_' }\n  }\n}\n",
+        );
+        pins(
+            "namespace n { // open\n  alphabet ab { '_' }\n} // close\n",
+            "namespace n { // open\n  alphabet ab { '_' }\n} // close\n",
+        );
+        pins("use a::b;\n\n\nuse c::d;\n", "use a::b;\n\nuse c::d;\n");
     }
 
     /// The unit's own `blank_before` is what the green walk prints, in
@@ -2170,9 +2337,18 @@ mod tests {
     /// even though only one newline separates them.
     #[test]
     fn a_documented_declarations_leading_blank_agrees() {
-        agrees("alphabet a { '_' }\n\n? doc\nalphabet b { '_' }\n");
-        agrees("use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n");
-        agrees("alphabet a { '_' } /* one\ntwo */\n? doc\nalphabet b { '0' }\n");
+        pins(
+            "alphabet a { '_' }\n\n? doc\nalphabet b { '_' }\n",
+            "alphabet a { '_' }\n\n? doc\nalphabet b { '_' }\n",
+        );
+        pins(
+            "use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n",
+            "use a; /* one\ntwo */\n\n? doc\nalphabet b { '0' }\n",
+        );
+        pins(
+            "alphabet a { '_' } /* one\ntwo */\n? doc\nalphabet b { '0' }\n",
+            "alphabet a { '_' } /* one\ntwo */\n? doc\nalphabet b { '0' }\n",
+        );
     }
 
     /// A comment written inside a doc run — between two `?` lines, or
@@ -2192,14 +2368,38 @@ mod tests {
     /// body.
     #[test]
     fn a_comment_inside_a_doc_run_agrees() {
-        agrees("? doc\n/* c */\nalphabet b { '0' }\n");
-        agrees("? doc\n// c\n? more\nalphabet b { '0' }\n");
-        agrees("? doc\n/* multi\nline */\n? more\nalphabet b { '0' }\n");
-        agrees("? doc\n/* c1 */ /* c2 */\nalphabet b { '0' }\n");
-        agrees("? doc\n\n/* c */\nalphabet b { '0' }\n");
-        agrees("? doc\n/* c */\n\nalphabet b { '0' }\n");
-        agrees("? doc\n/* a */\nnamespace n {\n  alphabet b { '0' }\n}\n");
-        agrees("? doc\n/* a */\nnamespace /* b */ n {\n  alphabet b { '0' }\n}\n");
+        pins(
+            "? doc\n/* c */\nalphabet b { '0' }\n",
+            "? doc\n/* c */\nalphabet b { '0' }\n",
+        );
+        pins(
+            "? doc\n// c\n? more\nalphabet b { '0' }\n",
+            "? doc\n// c\n? more\nalphabet b { '0' }\n",
+        );
+        pins(
+            "? doc\n/* multi\nline */\n? more\nalphabet b { '0' }\n",
+            "? doc\n/* multi\nline */\n? more\nalphabet b { '0' }\n",
+        );
+        pins(
+            "? doc\n/* c1 */ /* c2 */\nalphabet b { '0' }\n",
+            "? doc\n/* c1 */\n/* c2 */\nalphabet b { '0' }\n",
+        );
+        pins(
+            "? doc\n\n/* c */\nalphabet b { '0' }\n",
+            "? doc\n\n/* c */\nalphabet b { '0' }\n",
+        );
+        pins(
+            "? doc\n/* c */\n\nalphabet b { '0' }\n",
+            "? doc\n/* c */\n\nalphabet b { '0' }\n",
+        );
+        pins(
+            "? doc\n/* a */\nnamespace n {\n  alphabet b { '0' }\n}\n",
+            "? doc\n/* a */\nnamespace n {\n  alphabet b { '0' }\n}\n",
+        );
+        pins(
+            "? doc\n/* a */\nnamespace /* b */ n {\n  alphabet b { '0' }\n}\n",
+            "? doc\n/* a */\nnamespace n {\n  /* b */\n  alphabet b { '0' }\n}\n",
+        );
     }
 
     /// Every doc-run ITEM shape, over the surfaces this printer covers.
@@ -2219,11 +2419,15 @@ mod tests {
     /// segmented one cannot differ.
     #[test]
     fn every_doc_run_item_shape_agrees() {
-        agrees(
+        pins(
             "? one\n?\n? two\n\n? three\n!\n! bare prose\n![deprecated] gone\n\
              alphabet ab { '_' }\n",
+            "? one\n?\n? two\n\n? three\n!\n! bare prose\n! [deprecated] gone\nalphabet ab { '_' }\n",
         );
-        agrees("? doc\n/* c */\n![deprecated] gone\nalphabet ab { '_' }\n");
+        pins(
+            "? doc\n/* c */\n![deprecated] gone\nalphabet ab { '_' }\n",
+            "? doc\n/* c */\n! [deprecated] gone\nalphabet ab { '_' }\n",
+        );
     }
 
     /// The container walk starts its pre-brace scan at the declaring
@@ -2249,8 +2453,14 @@ mod tests {
     /// shorter gap cannot separate the two candidate near edges at all.
     #[test]
     fn a_doc_runs_comment_does_not_move_the_body_walks_near_edge() {
-        agrees("? doc\n/* a */\n\n\nnamespace\n/* b */\nn {\n  alphabet b { '0' }\n}\n");
-        agrees("? doc\n/* a */\n\n\nnamespace n {\n  alphabet b { '0' }\n}\n");
+        pins(
+            "? doc\n/* a */\n\n\nnamespace\n/* b */\nn {\n  alphabet b { '0' }\n}\n",
+            "? doc\n/* a */\n\nnamespace n {\n  /* b */\n\n  alphabet b { '0' }\n}\n",
+        );
+        pins(
+            "? doc\n/* a */\n\n\nnamespace n {\n  alphabet b { '0' }\n}\n",
+            "? doc\n/* a */\n\nnamespace n {\n  alphabet b { '0' }\n}\n",
+        );
     }
 
     /// The four copied layout rules no other source in this module can
@@ -2285,15 +2495,26 @@ mod tests {
     ///   this module writes.
     #[test]
     fn the_copied_layout_rules_agree() {
-        agrees("use a; // one\nuse bb; // two\n");
-        agrees(
+        pins(
+            "use a; // one\nuse bb; // two\n",
+            "use a;  // one\nuse bb; // two\n",
+        );
+        pins(
+            "alphabet aaaaaaaaaaaaaaaaaaaaaaa { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i' }\n",
             "alphabet aaaaaaaaaaaaaaaaaaaaaaa { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i' }\n",
         );
-        agrees(
+        pins(
             "alphabet aaaaaaaaaaaaaaaaaaaaaaaa { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i' }\n",
+            "alphabet aaaaaaaaaaaaaaaaaaaaaaaa {\n  'a',\n  'b',\n  'c',\n  'd',\n  'e',\n  'f',\n  'g',\n  'h',\n  'i'\n}\n",
         );
-        agrees("alphabet a { '\\'', '\\\\' }\n");
-        agrees("use a; // one   \nuse bb; // two\n");
+        pins(
+            "alphabet a { '\\'', '\\\\' }\n",
+            "alphabet a { '\\'', '\\\\' }\n",
+        );
+        pins(
+            "use a; // one   \nuse bb; // two\n",
+            "use a;  // one\nuse bb; // two\n",
+        );
     }
 
     /// `machine`, `routine` and `graph` headers and bodies, the tape
@@ -2302,37 +2523,52 @@ mod tests {
     /// with no states is accepted).
     #[test]
     fn worlds_tapes_grafts_and_binds_agree() {
-        agrees("alphabet ab { '_' }\nmachine {\n  tape main: ab;\n}\n");
-        agrees(
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n}\n",
+        );
+        pins(
             "alphabet ab { '_' }\nmachine {\n  tape m: ab;\n  tape longer: ab;\n  \
              volatile tape x: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape m:      ab;\n  tape longer: ab;\n  volatile tape x:      ab;\n}\n",
         );
-        agrees(
+        pins(
+            "alphabet ab { '_' }\nmachine { // open\n  tape main: ab; // trailing\n} // close\n",
             "alphabet ab { '_' }\nmachine { // open\n  tape main: ab; // trailing\n} // close\n",
         );
         // A blank line ENDS a tape run's shared name column, so the two
         // here size independently. Without that boundary both would pad
         // to the wider name.
-        agrees("alphabet ab { '_' }\nmachine {\n  tape m: ab;\n\n  tape longerName: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n  }\n}\n");
-        agrees(
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape m: ab;\n\n  tape longerName: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape m: ab;\n\n  tape longerName: ab;\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n  }\n}\n",
+        );
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  export graph g(tape t: ab, state done) \
              {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  export graph g(tape t: ab, state done) {\n  }\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  export routine r(\n    \
              tape t: ab writes { '_' }\n  ) {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  export routine r(tape t: ab writes { '_' }) {\n  }\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  \
              entry graft n::g(t = main, done = fin) as inst; // trailing\n  \
              bind n::g(t = main, done = fin) as other;\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, done = fin) as inst; // trailing\n  bind n::g(t = main, done = fin) as other;\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  \
              bind n::g(t = main with map { '_' -> '_', 'a' -> 'a' }, d = fin) as one;\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(t = main with map { '_' -> '_', 'a' -> 'a' }, d = fin) as one;\n}\n",
         );
     }
 
@@ -2366,18 +2602,33 @@ mod tests {
     /// no source below.
     #[test]
     fn a_comment_between_a_world_header_and_its_brace_agrees() {
-        agrees("alphabet ab { '_' }\nmachine /* x */ {\n  tape main: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine // why\n{\n  tape main: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ {\n  }\n}\n");
+        pins(
+            "alphabet ab { '_' }\nmachine /* x */ {\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  /* x */\n  tape main: ab;\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine // why\n{\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  // why\n\n  tape main: ab;\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n    /* c */\n  }\n}\n",
+        );
         // The pre-brace comment is a UNIT of the body, so it also shifts
         // every later unit's index — which is what `tape_name_widths`
         // keys off. A misaligned unit list moves the name column, and
         // nothing else here would catch it.
-        agrees("alphabet ab { '_' }\nmachine /* x */ {\n  tape m: ab;\n  tape longer: ab;\n}\n");
+        pins(
+            "alphabet ab { '_' }\nmachine /* x */ {\n  tape m: ab;\n  tape longer: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  /* x */\n  tape m:      ab;\n  tape longer: ab;\n}\n",
+        );
         // Two of them, so the backwards scan's order is asserted: it
         // collects from the brace towards the keyword and reverses, and a
         // missing reverse prints them swapped.
-        agrees("alphabet ab { '_' }\nmachine /* a */ /* b */ {\n  tape main: ab;\n}\n");
+        pins(
+            "alphabet ab { '_' }\nmachine /* a */ /* b */ {\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  /* a */\n  /* b */\n  tape main: ab;\n}\n",
+        );
     }
 
     /// **A pre-brace comment SUPPRESSES the whole open run.** C1's
@@ -2404,13 +2655,29 @@ mod tests {
     /// instead.
     #[test]
     fn a_pre_brace_comment_suppresses_the_open_run_and_agrees() {
-        agrees("alphabet ab { '_' }\nmachine /* x */ { // open\n  tape main: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine // why\n{ // open\n  tape main: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine /* x */ { /* a */ /* b */\n  tape main: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nnamespace n /* x */ { // open\n  alphabet b { '0' }\n}\n");
-        agrees("alphabet ab { '_' }\nnamespace n /* x */ { // open\n\n  alphabet b { '0' }\n}\n");
-        agrees(
+        pins(
+            "alphabet ab { '_' }\nmachine /* x */ { // open\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  /* x */\n  // open\n  tape main: ab;\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine // why\n{ // open\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  // why\n  // open\n  tape main: ab;\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine /* x */ { /* a */ /* b */\n  tape main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  /* x */\n  /* a */\n  /* b */\n  tape main: ab;\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nnamespace n /* x */ { // open\n  alphabet b { '0' }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  /* x */\n  // open\n  alphabet b { '0' }\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nnamespace n /* x */ { // open\n\n  alphabet b { '0' }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  /* x */\n  // open\n\n  alphabet b { '0' }\n}\n",
+        );
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ { // open\n               }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) {\n    /* c */\n    // open\n  }\n}\n",
         );
         // The STATE twin, on printed BYTES. Task 4 fixed the rule that
         // governs it but had no state surface, so it could pin the shape
@@ -2428,17 +2695,20 @@ mod tests {
         //
         // so the `// open` of the second source occupies the gap and
         // suppresses the blank line the third one gains.
-        agrees(
+        pins(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry state s /* x */ { // open\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s {\n    /* x */\n    // open\n    [*] -> stop;\n  }\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry // why\n  state s { // open\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s {\n    // why\n    // open\n    [*] -> stop;\n  }\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry // why\n  state s {\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s {\n    // why\n\n    [*] -> stop;\n  }\n}\n",
         );
     }
 
@@ -2471,24 +2741,51 @@ mod tests {
     fn a_comment_inside_a_semicolon_declaration_agrees() {
         let graph = "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) \
                      {\n  }\n}\n";
-        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* c */: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine {\n  tape /* c */ main: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* c */\n    : ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine {\n  tape main\n    /* c */: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* c1 */ /* c2 */: ab;\n}\n");
-        agrees("alphabet ab { '_' }\nmachine {\n  tape main /* a */: ab; /* b */\n}\n");
-        agrees(&format!(
-            "{graph}machine {{\n  tape main: ab;\n  \
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape main /* c */: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* c */\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape /* c */ main: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* c */\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape main /* c */\n    : ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  /* c */\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape main\n    /* c */: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  /* c */\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape main /* c1 */ /* c2 */: ab;\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* c1 */\n  /* c2 */\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nmachine {\n  tape main /* a */: ab; /* b */\n}\n",
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab; /* a */\n  /* b */\n}\n",
+        );
+        pins(
+            &format!(
+                "{graph}machine {{\n  tape main: ab;\n  \
              entry graft n::g(t = main, d = fin) /* c */ as inst;\n}}\n"
-        ));
-        agrees(&format!(
-            "{graph}machine {{\n  tape main: ab;\n  \
+            ),
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin) as inst; /* c */\n}\n",
+        );
+        pins(
+            &format!(
+                "{graph}machine {{\n  tape main: ab;\n  \
              bind n::g(t = main, d = fin) as one /* c */;\n}}\n"
-        ));
-        agrees(&format!(
-            "{graph}machine {{\n  tape main: ab;\n  \
+            ),
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(t = main, d = fin) as one; /* c */\n}\n",
+        );
+        pins(
+            &format!(
+                "{graph}machine {{\n  tape main: ab;\n  \
              entry graft n::g(t = main, d = fin) /* c1 */ as inst /* c2 */;\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin) as inst; /* c1 */\n  /* c2 */\n}\n",
+        );
     }
 
     /// The world surfaces' own value and layout branches, one source per
@@ -2520,44 +2817,55 @@ mod tests {
     /// it.
     #[test]
     fn the_world_value_and_layout_rules_agree() {
-        agrees(
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  \
              export routine longRoutineName(tape firstTape: ab, tape secondTape: ab, \
              state doneState) {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  export routine longRoutineName(\n    tape firstTape: ab,\n    tape secondTape: ab,\n    state doneState\n  ) {\n  }\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  \
              entry graft n::g(t = main with map { '_' -> '_', 'a' -> 'a' }, d = fin) \
              as instanceName;\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(\n    t = main with map { '_' -> '_', 'a' -> 'a' },\n    d = fin\n  ) as instanceName;\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  \
              routine r(volatile tape t: ab writes {} preserves { '_'..'a' }, state s) {\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(volatile tape t: ab writes {} preserves { '_'..'a' }, state s) {\n  }\n}\n",
         );
-        agrees("alphabet ab { '_' }\nnamespace n {\n  graph g() {\n  }\n}\n");
-        agrees(
+        pins(
+            "alphabet ab { '_' }\nnamespace n {\n  graph g() {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g() {\n  }\n}\n",
+        );
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  entry graft n::g(t = main, d = stop) as i;\n  \
              bind n::g(t = main, d = halt) as j;\n  bind n::g(t = main, d = return) as k;\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = stop) as i;\n  bind n::g(t = main, d = halt) as j;\n  bind n::g(t = main, d = return) as k;\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  \
              bind n::g(t = main with map { '_' => '_' }, d = fin) as one;\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(t = main with map { '_' => '_' }, d = fin) as one;\n}\n",
         );
-        agrees(
+        pins(
             "alphabet nb { 00..05 }\nnamespace n {\n  graph g(tape t: nb, state d) {\n  }\n}\n\
              machine {\n  tape main: nb;\n  \
              bind n::g(t = main with map { 00 -> 01 }, d = fin) as one;\n}\n",
+            "alphabet nb { 00..05 }\nnamespace n {\n  graph g(tape t: nb, state d) {\n  }\n}\nmachine {\n  tape main: nb;\n  bind n::g(t = main with map { 00 -> 01 }, d = fin) as one;\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin);\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(t = main, d = fin);\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) { // open\n  } \
                 // close\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) { // open\n  } // close\n}\n",
         );
     }
 
@@ -2569,25 +2877,28 @@ mod tests {
     /// substitution splits.
     #[test]
     fn a_documented_world_declaration_agrees() {
-        agrees(
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n\n  ? doc\n\n  \
              entry graft n::g(t = main, d = fin) as inst;\n  ? bdoc\n  \
              bind n::g(t = main, d = fin) as other;\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n\n  ? doc\n\n  entry graft n::g(t = main, d = fin) as inst;\n  ? bdoc\n  bind n::g(t = main, d = fin) as other;\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_' }\n\n? routine doc\n![deprecated] gone\nnamespace n {\n  \
              ? inner\n\n  routine r(tape t: ab) {\n  }\n}\n\n? machine doc\nmachine {\n  \
              tape main: ab;\n}\n",
+            "alphabet ab { '_' }\n\n? routine doc\n! [deprecated] gone\nnamespace n {\n  ? inner\n\n  routine r(tape t: ab) {\n  }\n}\n\n? machine doc\nmachine {\n  tape main: ab;\n}\n",
         );
         // MACHINE and BIND with a real run→declaration gap. Every source
         // above writes its run tight against the keyword, where
         // `blank_before_decl` answering `false` unconditionally is
         // unobservable.
-        agrees(
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              ? machine doc\n\nmachine {\n  tape main: ab;\n  ? bind doc\n\n  \
              bind n::g(t = main, d = fin) as one;\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n? machine doc\n\nmachine {\n  tape main: ab;\n  ? bind doc\n\n  bind n::g(t = main, d = fin) as one;\n}\n",
         );
     }
 
@@ -2612,24 +2923,37 @@ mod tests {
     #[test]
     fn block_states_and_the_grid_agree() {
         let head = "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state s {{\n    ['b'] -> write ['a'] move [>] goto s;\n    \
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    ['b'] -> write ['a'] move [>] goto s;\n    \
              ['a'] ->             move [>] goto s;\n    ['_'] -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{ // open\n    // own-line\n    ['a'] -> stop; // trailing\n\n\
+            ),
+            "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ['b'] -> write ['a'] move [>] goto s;\n    ['a'] ->             move [>] goto s;\n    ['_'] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state s {{ // open\n    // own-line\n    ['a'] -> stop; // trailing\n\n\
              \x20   ['_'] -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> debugger goto s;\n    \
+            ),
+            "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s { // open\n    // own-line\n    ['a'] -> stop; // trailing\n\n    ['_'] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [*] -> debugger goto s;\n    \
              ['a'] -> write [{{0 + 1}}] move [.] stop;\n    ['_'] -> halt;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  ? documented\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> goto s;\n  }}\n  ? empty\n  state z {{\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*]   -> debugger goto s;\n    ['a'] ->          write [{0+1}] move [.] stop;\n    ['_'] -> halt;\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  ? documented\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n  ? documented\n  entry state s {\n    [*] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [*] -> goto s;\n  }}\n  ? empty\n  state z {{\n  }}\n}}\n"
+            ),
+            "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> goto s;\n  }\n  ? empty\n  state z {\n  }\n}\n",
+        );
         // A state's own CLOSE trailing. It is the same primitive
         // MACHINE and REUSE carry, but a different call site, and every
         // other source in this module reaches that primitive through
@@ -2638,13 +2962,17 @@ mod tests {
         // second source adds the near-edge half: a `}`'s trailing
         // comment ADVANCES the near edge (a `;`'s does not), so `state
         // z` reads as adjacent even though the comment spans two lines.
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> stop;\n  }} // close\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> goto z;\n  }} /* one\ntwo */\n  \
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> stop;\n  }} // close\n}}\n"),
+            "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop;\n  } // close\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [*] -> goto z;\n  }} /* one\ntwo */\n  \
              state z {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> goto z;\n  } /* one\ntwo */\n  state z {\n    [*] -> stop;\n  }\n}\n",
+        );
     }
 
     /// A state's own doc-run halves, which the sources above cannot
@@ -2657,13 +2985,17 @@ mod tests {
     #[test]
     fn a_documented_state_agrees() {
         let head = "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> goto z;\n  }}\n\n  ? doc\n  \
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [*] -> goto z;\n  }}\n\n  ? doc\n  \
              state z {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  ? doc\n\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> goto z;\n  }\n\n  ? doc\n  state z {\n    [*] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  ? doc\n\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"),
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  ? doc\n\n  entry state s {\n    [*] -> stop;\n  }\n}\n",
+        );
     }
 
     /// Runs of adjacent single-line states.
@@ -2714,52 +3046,82 @@ mod tests {
     #[test]
     fn single_line_state_runs_agree() {
         let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> goto b; }}\n  \
+        pins(
+            &format!(
+                "{head}  entry state a {{ ['a'] -> goto b; }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state aa {{ [*] -> goto b; }}\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { ['a'] -> goto b; }\n  state b       { ['_'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state aa {{ [*] -> goto b; }}\n  \
              state b {{ ['_'..'a'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> goto b; }}\n\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state aa { [*]        -> goto b; }\n  state b        { ['_'..'a'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ ['a'] -> goto b; }}\n\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> goto b; }}\n  ? doc\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { ['a'] -> goto b; }\n\n  state b { ['_'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ ['a'] -> goto b; }}\n  ? doc\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> goto b; }}\n  // c\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { ['a'] -> goto b; }\n  ? doc\n  state b {\n    ['_'] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ ['a'] -> goto b; }}\n  // c\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> goto b;\n    // c\n  }}\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { ['a'] -> goto b; }\n  // c\n  state b { ['_'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ ['a'] -> goto b;\n    // c\n  }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ /* c */ ['a'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ // c\n    ['a'] -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a {\n    ['a'] -> goto b;\n    // c\n  }\n  state b { ['_'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state a {{ /* c */ ['a'] -> stop; }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { /* c */\n    ['a'] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state a {{ // c\n    ['a'] -> stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { // c\n    ['a'] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
              {{ ['a'] -> goto bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; }}\n  \
              state bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry\n  state a {{ ['a'] -> goto b; }}\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa {\n    ['a'] -> goto bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;\n  }\n  state bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb {\n    ['_'] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry\n  state a {{ ['a'] -> goto b; }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> stop; }} // c\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> goto b; }} // one\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { ['a'] -> goto b; }\n  state b       { ['_'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state a {{ ['a'] -> stop; }} // c\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { ['a'] -> stop; } // c\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ ['a'] -> goto b; }} // one\n  \
              state bb {{ ['_'] -> stop; }} // two\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { ['a'] -> goto b; } // one\n  state bb      { ['_'] -> stop; }   // two\n}\n",
+        );
     }
 
     /// The two shapes Task 5 measured and could not cover, each silent
@@ -2790,21 +3152,32 @@ mod tests {
     #[test]
     fn a_bare_zero_row_state_inlines_and_a_relocated_trailing_blocks() {
         let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state s {{ [*] -> goto z; }}\n  state z {{ }}\n}}\n"
-        ));
-        agrees(&format!("{head}  entry state z {{ }}\n}}\n"));
-        agrees(&format!(
-            "{head}  entry state a {{ [*] -> stop; }}\n  \
+        pins(
+            &format!("{head}  entry state s {{ [*] -> goto z; }}\n  state z {{ }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s { [*] -> goto z; }\n  state z       { }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state z {{ }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state z { }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ [*] -> stop; }}\n  \
              state zzzzzzzzzzzzzzzzzzzz {{ }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ [*] -> stop /* c */; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ ['a'] -> stop /* c */; }}\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a              { [*] -> stop; }\n  state zzzzzzzzzzzzzzzzzzzz { }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state a {{ [*] -> stop /* c */; }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a {\n    [*] -> stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ ['a'] -> stop /* c */; }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a {\n    ['a'] -> stop; /* c */\n  }\n  state b { ['_'] -> stop; }\n}\n",
+        );
     }
 
     /// [`inline_candidate`]'s off-grid clause, asserted DIRECTLY. The
@@ -2887,45 +3260,62 @@ mod tests {
         let call_head = "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    \
                          entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  \
                          tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> stop /* c */;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] /* c */ -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> /* c */ stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> debugger /* c */ stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> write ['a'] /* c */ stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{call_head}  entry state s {{\n    \
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> stop /* c */;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state s {{\n    [*] /* c */ -> stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> /* c */ stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> debugger /* c */ stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> debugger stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> write ['a'] /* c */ stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write ['a'] stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{call_head}  entry state s {{\n    \
              [*] -> call n::r(t = main) /* c */ then stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{call_head}  entry state s {{\n    \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> call n::r(t = main) then stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{call_head}  entry state s {{\n    \
              [*] -> call n::r(t = main) then /* c */ stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{call_head}  entry state s {{\n    \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> call n::r(t = main) then stop; /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{call_head}  entry state s {{\n    \
              [*] -> call n::r(t = main) then stop /* c */;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> call n::r(t = main) then stop; /* c */\n  }\n}\n",
+        );
         // Two of them: the first is the trailing, the rest drain as
         // items — C1 inspects only the FIRST pending comment.
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> stop /* a */ /* b */;\n  }}\n}}\n"
-        ));
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> stop /* a */ /* b */;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop; /* a */\n    /* b */\n  }\n}\n",
+        );
         // Declined on the line test, and declined on `own_line`.
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> stop /* c */\n      ;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> stop\n      /* c */;\n  }}\n}}\n"
-        ));
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> stop /* c */\n      ;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop;\n    /* c */\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> stop\n      /* c */;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> stop;\n    /* c */\n  }\n}\n",
+        );
     }
 
     /// The rule surface's own value and layout branches, one source per
@@ -2964,21 +3354,23 @@ mod tests {
     /// branch, `col_after`'s own column arithmetic included.
     #[test]
     fn the_rule_value_and_layout_rules_agree() {
-        agrees(
+        pins(
             "alphabet nb { 00..05 }\nnamespace n {\n  routine r(tape t: nb, tape u: nb) {\n    \
              entry state q {\n      [00 as v, *] -> write [{(v)*2 + 1}, {v}] move [<, .] return;\n\
              \x20     [01..03, *] -> write [-, 00] move [>, >];\n      [*, *] -> q;\n    }\n  }\n\
              }\nmachine {\n  tape main: nb;\n  tape aux: nb;\n  entry state s {\n    \
              [*, *] -> debugger call n::r(t = main, u = aux) then fin;\n  }\n  state fin {\n    \
              [*, *] -> halt;\n  }\n}\n",
+            "alphabet nb { 00..05 }\nnamespace n {\n  routine r(tape t: nb, tape u: nb) {\n    entry state q {\n      [00 as v, *] -> write [{(v)*2+1}, {v}] move [<, .] return;\n      [01..03, *]  -> write [-, 00]          move [>, >];\n      [*, *]       -> q;\n    }\n  }\n}\nmachine {\n  tape main: nb;\n  tape aux:  nb;\n  entry state s {\n    [*, *] -> debugger call n::r(t = main, u = aux) then fin;\n  }\n  state fin {\n    [*, *] -> halt;\n  }\n}\n",
         );
-        agrees(
+        pins(
             "alphabet nb { 00..05 }\nnamespace nnnnnnnnnnnnnn {\n  \
              routine rrrrrrrrrrrrrrrrrrrr(tape ttttttttttt: nb, tape uuuuuuuuuuu: nb) {\n    \
              entry state q {\n      [*, *] -> stop;\n    }\n  }\n}\nmachine {\n  \
              tape main: nb;\n  tape aux: nb;\n  entry state s {\n    \
              [*, *] -> call nnnnnnnnnnnnnn::rrrrrrrrrrrrrrrrrrrr(ttttttttttt = main, \
              uuuuuuuuuuu = aux) then stop;\n  }\n}\n",
+            "alphabet nb { 00..05 }\nnamespace nnnnnnnnnnnnnn {\n  routine rrrrrrrrrrrrrrrrrrrr(tape ttttttttttt: nb, tape uuuuuuuuuuu: nb) {\n    entry state q {\n      [*, *] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: nb;\n  tape aux:  nb;\n  entry state s {\n    [*, *] -> call nnnnnnnnnnnnnn::rrrrrrrrrrrrrrrrrrrr(\n                ttttttttttt = main,\n                uuuuuuuuuuu = aux\n              ) then stop;\n  }\n}\n",
         );
     }
 
@@ -3032,24 +3424,6 @@ mod tests {
         }
     }
 
-    /// The whole adversarial set, over the surfaces this printer covers.
-    /// The fixtures the file skeleton cannot yet render (anything with a
-    /// world) are excluded by name rather than by a `catch_unwind`, so a
-    /// fixture that starts failing for a REAL reason is not silently
-    /// swallowed.
-    #[test]
-    fn the_skeleton_only_adversarial_sources_agree() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fmt_adversarial");
-        for name in [
-            "divergence_semicolon_block_comment",
-            "doc_run_interior_comment",
-        ] {
-            let path = format!("{dir}/{name}.tmc");
-            let src = std::fs::read_to_string(&path).expect("a readable fixture");
-            agrees(&src);
-        }
-    }
-
     /// One interior-comment source per list surface: the `use` list, an
     /// `alphabet` body inline and broken, a signature, the `graft` and
     /// `bind` binding lists, a nested `with map`, all three glyph
@@ -3059,48 +3433,73 @@ mod tests {
     /// `glyph_vec_multiline` and `col_after` at all.
     #[test]
     fn interior_list_comments_agree_on_every_surface() {
-        agrees("use // before\n  a::b, /* mid */\n  c::d\n  // before the semicolon\n;\n");
-        agrees(
+        pins(
+            "use // before\n  a::b, /* mid */\n  c::d\n  // before the semicolon\n;\n",
+            "use // before\n    a::b, /* mid */\n    c::d\n    // before the semicolon\n;\n",
+        );
+        pins(
+            "alphabet ab {\n  // before\n  '_', /* after */\n  'a'\n  // before the closer\n}\n",
             "alphabet ab {\n  // before\n  '_', /* after */\n  'a'\n  // before the closer\n}\n",
         );
-        agrees("alphabet ab { /* stays inline */ '_', 'a' }\n");
+        pins(
+            "alphabet ab { /* stays inline */ '_', 'a' }\n",
+            "alphabet ab { /* stays inline */\n  '_',\n  'a'\n}\n",
+        );
         let head = "alphabet ab { '_', 'a' }\n";
-        agrees(&format!(
-            "{head}namespace n {{\n  graph g(\n    // before\n    tape t: ab,\n    state d\n    \
+        pins(
+            &format!(
+                "{head}namespace n {{\n  graph g(\n    // before\n    tape t: ab,\n    state d\n    \
              // before the closer\n  ) {{\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}namespace n {{\n  graph g(tape t: ab, state d) {{\n  }}\n}}\nmachine {{\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(\n    // before\n    tape t: ab,\n    state d\n    // before the closer\n  ) {\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}namespace n {{\n  graph g(tape t: ab, state d) {{\n  }}\n}}\nmachine {{\n  \
              tape main: ab;\n  entry graft n::g(\n    // before\n    t = main,\n    d = fin\n  ) \
              as i;\n  state fin {{ [*] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}namespace n {{\n  graph g(tape t: ab, state d) {{\n  }}\n}}\nmachine {{\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(\n    // before\n    t = main,\n    d = fin\n  ) as i;\n  state fin { [*] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}namespace n {{\n  graph g(tape t: ab, state d) {{\n  }}\n}}\nmachine {{\n  \
              tape main: ab;\n  bind n::g(t = main with map {{\n    // before the pair\n    \
              '_' -> '_',\n    'a' -> 'a'\n  }}, d = fin) as o;\n  \
              state fin {{ [*] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}machine {{\n  tape main: ab;\n  entry state s {{\n    \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(\n    t = main with map {\n               // before the pair\n               '_' -> '_',\n               'a' -> 'a'\n             },\n    d = fin\n  ) as o;\n  state fin { [*] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}machine {{\n  tape main: ab;\n  entry state s {{\n    \
              [/* p */ *] -> write [/* w */ 'a'] move [/* m */ .] stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}machine {{\n  tape main: ab;\n  entry state s {{\n    [*] -> write [\n      \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [/* p */ *] -> write [/* w */ 'a'] move [/* m */ .] stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}machine {{\n  tape main: ab;\n  entry state s {{\n    [*] -> write [\n      \
              // own-line takes the rule off the grid\n      'a'\n    ] stop;\n    \
              ['a'] -> stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [\n      *\n    ] -> write [\n      // own-line takes the rule off the grid\n      'a'\n    ] stop;\n    ['a'] -> stop;\n  }\n}\n",
+        );
         // The off-grid path's own column arithmetic: a `call` is the one
         // transition that breaks against a column, and an off-grid rule
         // is the one shape whose rendered prefix already holds newlines —
         // so `col_after` has to measure the LAST physical line. Measured:
         // the list fits on one line from column 6 and would break from
         // the 60-odd columns the whole prefix counts to.
-        agrees(&format!(
-            "{head}namespace n {{\n  routine r(tape t: ab) {{\n    entry state q {{\n      \
+        pins(
+            &format!(
+                "{head}namespace n {{\n  routine r(tape t: ab) {{\n    entry state q {{\n      \
              [*] -> stop;\n    }}\n  }}\n}}\nmachine {{\n  tape main: ab;\n  \
              entry state s {{\n    [*] -> write [\n      // off the grid\n      'a'\n    ] \
              call n::r(t = main) then stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [\n      *\n    ] -> write [\n      // off the grid\n      'a'\n    ] call n::r(t = main) then stop;\n  }\n}\n",
+        );
     }
 
     /// **The element stream starts at the DECLARATION's HEADER**, not at
@@ -3121,15 +3520,31 @@ mod tests {
     /// whole body multi-line from slot 0.
     #[test]
     fn a_headers_comment_belongs_to_the_declarations_list() {
-        agrees("alphabet /* a */ ab { '_' }\n");
-        agrees("alphabet ab /* a */ { '_' }\n");
-        agrees("alphabet ab /* a */ { // open\n  '_'\n}\n");
-        agrees("alphabet\n// why\nab { '_' }\n");
-        agrees("alphabet ab { '_' }\nnamespace n {\n  routine /* c */ r(tape t: ab) {\n  }\n}\n");
-        agrees(
+        pins(
+            "alphabet /* a */ ab { '_' }\n",
+            "alphabet ab { /* a */ '_' }\n",
+        );
+        pins(
+            "alphabet ab /* a */ { '_' }\n",
+            "alphabet ab { /* a */ '_' }\n",
+        );
+        pins(
+            "alphabet ab /* a */ { // open\n  '_'\n}\n",
+            "alphabet ab { /* a */ // open\n  '_'\n}\n",
+        );
+        pins(
+            "alphabet\n// why\nab { '_' }\n",
+            "alphabet ab {\n  // why\n  '_'\n}\n",
+        );
+        pins(
+            "alphabet ab { '_' }\nnamespace n {\n  routine /* c */ r(tape t: ab) {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r( /* c */\n    tape t: ab\n  ) {\n  }\n}\n",
+        );
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  entry graft /* c */ n::g(t = main, d = fin) as i;\n  \
              state fin {\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g( /* c */\n    t = main,\n    d = fin\n  ) as i;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
         );
     }
 
@@ -3146,12 +3561,12 @@ mod tests {
     #[test]
     fn the_alphabet_header_quirk_settles_on_the_second_pass() {
         let src = "alphabet /* a */ ab { '_' }\n";
-        agrees(src);
-        let once = format_green(src).expect("the green printer formats");
-        agrees(&once);
-        let twice = format_green(&once).expect("the green printer formats");
+        pins(src, "alphabet ab { /* a */ '_' }\n");
+        let once = format(src).expect("the green printer formats");
+        pins(&once, "alphabet ab { /* a */\n  '_'\n}\n");
+        let twice = format(&once).expect("the green printer formats");
         assert_ne!(once, twice, "quirk (3) settles on the SECOND pass");
-        let thrice = format_green(&twice).expect("the green printer formats");
+        let thrice = format(&twice).expect("the green printer formats");
         assert_eq!(twice, thrice, "and is a fixed point from there");
     }
 
@@ -3169,16 +3584,22 @@ mod tests {
     #[test]
     fn the_grid_measures_a_pattern_with_its_spliced_comment() {
         let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state s {{\n    [/* p */ *] -> write ['a'] stop;\n    \
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [/* p */ *] -> write ['a'] stop;\n    \
              ['_'] -> stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [/* p */ *] -> write ['a'] stop;\n    ['_']       -> stop;\n  }\n}\n",
+        );
         // The same asymmetry on the write column, whose own widths are
         // measured through a second bucket.
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> write [/* w */ 'a'] move [>] stop;\n    \
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [*] -> write [/* w */ 'a'] move [>] stop;\n    \
              ['_'] -> write ['_'] move [.] stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*]   -> write [/* w */ 'a'] move [>] stop;\n    ['_'] -> write ['_']         move [.] stop;\n  }\n}\n",
+        );
     }
 
     /// **The interior predicate and the inline path's rendering are one
@@ -3198,23 +3619,35 @@ mod tests {
         let call_head = "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    \
                          entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  \
                          tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state a {{ [/* p */ *] -> stop; }}\n  \
+        pins(
+            &format!(
+                "{head}  entry state a {{ [/* p */ *] -> stop; }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state a {{ [*] -> write [/* w */ 'a'] stop; }}\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { [/* p */ *] -> stop; }\n  state b       { ['_']       -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state a {{ [*] -> write [/* w */ 'a'] stop; }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{call_head}  entry state a {{ [*] -> call n::r(/* c */ t = main) then stop; }}\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state a { [*]   -> write [/* w */ 'a'] stop; }\n  state b       { ['_'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{call_head}  entry state a {{ [*] -> call n::r(/* c */ t = main) then stop; }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{call_head}  entry state a {{ \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state a {\n    [*] -> call n::r( /* c */\n             t = main\n           ) then stop;\n  }\n  state b { ['_'] -> stop; }\n}\n",
+        );
+        pins(
+            &format!(
+                "{call_head}  entry state a {{ \
              [*] -> call n::r(t = main with map {{ /* c */ '_' -> '_' }}) then stop; }}\n  \
              state b {{ ['_'] -> stop; }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state a {\n    [*] -> call n::r(\n             t = main with map { /* c */\n                        '_' -> '_'\n                      }\n           ) then stop;\n  }\n  state b { ['_'] -> stop; }\n}\n",
+        );
     }
 
     /// The two boundaries Task 5 could pin only by direct assertion,
@@ -3239,28 +3672,43 @@ mod tests {
                          tape main: ab;\n";
         let graph = "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) \
                      {\n  }\n}\n";
-        agrees(&format!(
-            "{call_head}  entry state s {{\n    \
+        pins(
+            &format!(
+                "{call_head}  entry state s {{\n    \
              [*] -> move [>] /* c */ call n::r(t = main) then stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{call_head}  entry state s {{\n    \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> move [>] call n::r( /* c */\n                      t = main\n                    ) then stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{call_head}  entry state s {{\n    \
              [*] -> call /* c */ n::r(t = main) then stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{call_head}  entry state s {{\n    \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> call n::r( /* c */\n             t = main\n           ) then stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{call_head}  entry state s {{\n    \
              [*] -> move [/* c */ >] call n::r(t = main) then stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{graph}machine {{\n  tape main: ab;\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> move [/* c */ >] call n::r(t = main) then stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{graph}machine {{\n  tape main: ab;\n  \
              entry graft n::g(t = main /* in */, d = fin) /* out */ as i;\n  \
              state fin {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{graph}machine {{\n  tape main: ab;\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(\n    t = main, /* in */\n    d = fin\n  ) as i; /* out */\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{graph}machine {{\n  tape main: ab;\n  \
              bind n::g(t = main, d = fin /* in */) /* out */ as o;\n  \
              state fin {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(\n    t = main,\n    d = fin /* in */\n  ) as o; /* out */\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+        );
     }
 
     /// A glyph vector's own list claims its HEADER as well as its
@@ -3279,18 +3727,26 @@ mod tests {
     #[test]
     fn a_glyph_vectors_header_comment_belongs_to_that_vector() {
         let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> write /* c */ ['a'] move [>] stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> write ['a'] /* c */ move [>] stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> /* c */ write ['a'] stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{head}  entry state s {{\n    [*] -> move /* c */ [>] stop;\n  }}\n}}\n"
-        ));
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [*] -> write /* c */ ['a'] move [>] stop;\n  }}\n}}\n"
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [/* c */ 'a'] move [>] stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{head}  entry state s {{\n    [*] -> write ['a'] /* c */ move [>] stop;\n  }}\n}}\n"
+            ),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write ['a'] move [/* c */ >] stop;\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> /* c */ write ['a'] stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> write [/* c */ 'a'] stop;\n  }\n}\n",
+        );
+        pins(
+            &format!("{head}  entry state s {{\n    [*] -> move /* c */ [>] stop;\n  }}\n}}\n"),
+            "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    [*] -> move [/* c */ >] stop;\n  }\n}\n",
+        );
     }
 
     /// A comment written inside a list ENTRY, where the entry runs no
@@ -3305,25 +3761,33 @@ mod tests {
     fn a_comment_inside_an_entry_keys_to_the_next_slot() {
         let graph = "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) \
                      {\n  }\n}\n";
-        agrees("use a:: /* c */ b, c::d;\n");
-        agrees(
+        pins("use a:: /* c */ b, c::d;\n", "use a::b, /* c */ c::d;\n");
+        pins(
             "alphabet ab { '_' }\nnamespace n {\n  routine r(tape /* c */ t: ab, state d) \
                 {\n  }\n}\n",
+            "alphabet ab { '_' }\nnamespace n {\n  routine r(\n    tape t: ab, /* c */\n    state d\n  ) {\n  }\n}\n",
         );
-        agrees(
+        pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  \
              routine r(tape t: ab writes { /* c */ '_' }, state d) {\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(\n    tape t: ab writes { '_' }, /* c */\n    state d\n  ) {\n  }\n}\n",
         );
-        agrees(&format!(
-            "{graph}machine {{\n  tape main: ab;\n  \
+        pins(
+            &format!(
+                "{graph}machine {{\n  tape main: ab;\n  \
              entry graft n::g(t = /* c */ main, d = fin) as i;\n  \
              state fin {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
-        agrees(&format!(
-            "{graph}machine {{\n  tape main: ab;\n  \
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  entry graft n::g(\n    t = main, /* c */\n    d = fin\n  ) as i;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+        );
+        pins(
+            &format!(
+                "{graph}machine {{\n  tape main: ab;\n  \
              bind n::g(t = main with /* c */ map {{ '_' -> '_' }}, d = fin) as o;\n  \
              state fin {{\n    [*] -> stop;\n  }}\n}}\n"
-        ));
+            ),
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  bind n::g(\n    t = main with map { /* c */\n               '_' -> '_'\n             },\n    d = fin\n  ) as o;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+        );
     }
 
     /// **The two-level `map_pairs` surface, both indices asserted by
@@ -3335,28 +3799,46 @@ mod tests {
     ///
     /// So the source carries a comment in the binding list itself AND a
     /// comment inside the map of its SECOND argument, ahead of that map's
-    /// SECOND pair — the only shape where `(1, 1)` is distinguishable
-    /// from `(0, 0)`, `(0, 1)` and `(1, 0)` at once.
+    /// SECOND pair.
+    ///
+    /// That `(1, 1)` alone does NOT arm the ordering, and neither does the
+    /// `(0, 0)` shape below it: both tuples are SYMMETRIC, so swapping the
+    /// two components inside [`nested_map_pairs`] leaves either assertion
+    /// passing. The two ASYMMETRIC sources in the middle are what actually
+    /// separates the keys — a map on argument 1 carrying a pair-0 comment,
+    /// and a map on argument 0 carrying a pair-1 one. A swap turns each
+    /// one's expectation into the other's, so each fails on its own source.
     #[test]
     fn nested_map_comments_are_keyed_two_levels_deep() {
-        let src = "alphabet ab { '_', 'a' }\nnamespace n {\n  \
-                   graph g(tape t: ab, tape u: ab) {\n  }\n}\nmachine {\n  tape main: ab;\n  \
-                   tape aux: ab;\n  bind n::g(t = main, /* list */ \
-                   u = aux with map { '_' -> '_', /* pair */ 'a' -> 'a' }) as o;\n  \
-                   state fin {\n    [*] -> stop;\n  }\n}\n";
-        let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-        let green = parse_green_from_tokens(src, &tokens).expect("parses");
-        let root = SyntaxNode::new_root(green);
-        let mut stack: Vec<SyntaxNode> = root.children().collect();
-        let mut bind = None;
-        while let Some(n) = stack.pop() {
-            if n.kind() == TmcKind::Bind.into() {
-                bind = Some(n);
-                break;
+        fn bind_of(src: &str) -> SyntaxNode {
+            let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
+            let green = parse_green_from_tokens(src, &tokens).expect("parses");
+            let root = SyntaxNode::new_root(green);
+            let mut stack: Vec<SyntaxNode> = root.children().collect();
+            while let Some(n) = stack.pop() {
+                if n.kind() == TmcKind::Bind.into() {
+                    return n;
+                }
+                stack.extend(n.children());
             }
-            stack.extend(n.children());
+            panic!("a BIND");
         }
-        let bind = bind.expect("a BIND");
+        /// The two-tape fixture the sources below vary only the binding
+        /// list of.
+        fn two_tape_src(args: &str) -> String {
+            format!(
+                "alphabet ab {{ '_', 'a' }}\nnamespace n {{\n  \
+                 graph g(tape t: ab, tape u: ab) {{\n  }}\n}}\nmachine {{\n  tape main: ab;\n  \
+                 tape aux: ab;\n  bind n::g({args}) as o;\n  \
+                 state fin {{\n    [*] -> stop;\n  }}\n}}\n"
+            )
+        }
+
+        let src = two_tape_src(
+            "t = main, /* list */ u = aux with map { '_' -> '_', /* pair */ 'a' -> 'a' }",
+        );
+        let src = src.as_str();
+        let bind = bind_of(src);
 
         let list = delimited_interior(&bind, TmcKind::LParen, TmcKind::RParen, 0);
         let keys: Vec<(usize, &str)> = list.iter().map(|(i, c)| (*i, c.text.as_str())).collect();
@@ -3374,9 +3856,40 @@ mod tests {
         assert_eq!(
             keys,
             vec![(1, 1, "/* pair */")],
-            "argument index 1, pair index 1 — neither key is the other's"
+            "argument index 1, pair index 1"
         );
-        agrees(src);
+
+        // The asymmetric pair: here the two components genuinely differ,
+        // so a swap inside `nested_map_pairs` fails on each source.
+        for (args, expected) in [
+            (
+                "t = main, u = aux with map { /* pair */ '_' -> '_', 'a' -> 'a' }",
+                (1usize, 0usize),
+            ),
+            (
+                "t = main with map { '_' -> '_', /* pair */ 'a' -> 'a' }, u = aux",
+                (0usize, 1usize),
+            ),
+        ] {
+            let src = two_tape_src(args);
+            let maps = nested_map_pairs(&bind_of(&src));
+            let keys: Vec<(usize, usize, &str)> = maps
+                .iter()
+                .map(|(a, p, c)| (*a, *p, c.text.as_str()))
+                .collect();
+            assert_eq!(
+                keys,
+                vec![(expected.0, expected.1, "/* pair */")],
+                "argument {} / pair {} for:\n{src}",
+                expected.0,
+                expected.1
+            );
+        }
+
+        pins(
+            src,
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, tape u: ab) {\n  }\n}\nmachine {\n  tape main: ab;\n  tape aux:  ab;\n  bind n::g(\n    t = main, /* list */\n    u = aux with map {\n              '_' -> '_', /* pair */\n              'a' -> 'a'\n            }\n  ) as o;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
+        );
 
         // The argument index counts BINDING_ARGs, not the declaration's
         // child nodes: a bound DOC_RUN is a child node too, and counting
@@ -3384,47 +3897,44 @@ mod tests {
         // outright, the argument it then lands on carrying no map to
         // print it in. Every other source here is undocumented, where the
         // two counts coincide.
-        agrees(
+        pins(
             "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\n\
              machine {\n  tape main: ab;\n  ? doc\n  \
              bind n::g(t = main with map { /* c */ '_' -> '_' }, d = fin) as o;\n  \
              state fin {\n    [*] -> stop;\n  }\n}\n",
+            "alphabet ab { '_', 'a' }\nnamespace n {\n  graph g(tape t: ab, state d) {\n  }\n}\nmachine {\n  tape main: ab;\n  ? doc\n  bind n::g(\n    t = main with map { /* c */\n               '_' -> '_'\n             },\n    d = fin\n  ) as o;\n  state fin {\n    [*] -> stop;\n  }\n}\n",
         );
     }
 
-    /// The whole adversarial set, and the whole shipped corpus, through
-    /// the differential oracle. This is the check that stops a green walk
-    /// from being right about every shape someone remembered to write a
-    /// test for.
+    /// An out-of-range index clamps to the tail slot rather than dropping
+    /// the comment: a misplaced comment is a bug, a lost one is data loss. No
+    /// fixture can reach this — the parser's own bookkeeping never hands
+    /// `bucket` an index past `entry_count` — so it needs a direct unit test,
+    /// and only in release: the `debug_assert!` in `bucket` fires first under
+    /// `cargo test`'s default debug profile (guarded below accordingly). The
+    /// `#[cfg_attr(debug_assertions, ignore = …)]` below only marks this test
+    /// `ignore`d in a DEBUG build; in release `debug_assertions` is off, so the
+    /// attribute does not apply and the test is NOT ignored — `--ignored` would
+    /// filter it right back OUT. Run it with a plain `cargo test -p
+    /// mtc-turing-machine --release --lib fmt::print::tests::an_out_of_range`.
     #[test]
-    fn the_corpus_and_the_adversarial_set_agree() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut checked = 0;
-        for dir in [
-            "tests/golden",
-            "src/stdlib",
-            "../../docs/examples",
-            "tests/fmt_adversarial",
-        ] {
-            let full = root.join(dir);
-            let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&full)
-                .unwrap_or_else(|e| panic!("{} is unreadable: {e}", full.display()))
-                .map(|e| e.expect("a readable entry").path())
-                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("tmc"))
-                .collect();
-            paths.sort();
-            assert!(!paths.is_empty(), "{} contributed nothing", full.display());
-            for path in paths {
-                let src = std::fs::read_to_string(&path).expect("readable");
-                let green = format_green(&src).expect("the green printer formats");
-                let c1 = crate::fmt::format(&src).expect("the C1 printer formats");
-                assert_eq!(green, c1, "{} formats differently", path.display());
-                checked += 1;
-            }
-        }
+    #[cfg_attr(
+        debug_assertions,
+        ignore = "the debug_assert fires first; this pins release behaviour"
+    )]
+    fn an_out_of_range_interior_index_clamps_to_the_tail() {
+        let comment = Comment {
+            text: "// stray".into(),
+            kind: CommentKind::Line,
+            own_line: false,
+        };
+        let interior = vec![(99, comment)];
+        let bucketed = bucket(&interior, 2);
+        assert_eq!(bucketed.slots.len(), 3, "one slot per position 0..=count");
+        assert_eq!(bucketed.slots[2].len(), 1, "clamped into the tail slot");
         assert!(
-            checked >= 15,
-            "expected corpus plus adversarial, saw {checked}"
+            bucketed.forces_break,
+            "a line comment still forces the break"
         );
     }
 }

@@ -1,0 +1,19 @@
+alphabet ab { // alphabet open
+  '_',
+  'a'
+} // alphabet close
+
+namespace n { // namespace open
+  routine r(tape t: ab) { // reuse open
+    entry state s { // state open
+      [*] -> stop;
+    } // state close
+  } // reuse close
+} // namespace close
+
+machine { // machine open
+  tape main: ab;
+  entry state go {
+    [*] -> stop;
+  }
+} // machine close

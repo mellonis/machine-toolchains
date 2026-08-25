@@ -59,11 +59,6 @@
 //! Every rule here was measured against the printer this module has to
 //! stay byte-identical to; the tests below name each shape.
 
-// Every primitive here is trivia for the green printer, which takes
-// them one surface at a time; until the last surface is wired, the ones
-// still waiting are reachable only from this module's own tests.
-#![allow(dead_code)]
-
 use mtc_core::syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex};
 
 use crate::lexer::Comment;
@@ -325,23 +320,6 @@ pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
         move_end,
         pending,
     }
-}
-
-/// The comments one rule's three glyph vectors claim — everything ahead
-/// of the last vector's own `]`, which by [`RuleRegions`] is exactly the
-/// union of the pattern's, the `write` vector's and the `move` vector's
-/// interior lists, header halves included.
-///
-/// The printer reads this to decide whether a rule is off the grid: a
-/// LINE comment cannot share its physical line, and an own-line one
-/// would silently flip its own `own_line` flag if inlined onto a cell's
-/// line (docs/tmt/fmt.md (interior comments)).
-pub(crate) fn rule_vector_comments(node: &SyntaxNode) -> Vec<Comment> {
-    let end = rule_regions(node).move_end;
-    node.descendant_tokens()
-        .filter(|t| is_comment(t.kind()) && t.text_range().start < end)
-        .map(|t| comment_from(&t))
-        .collect()
 }
 
 /// The comment tokens inside `node` that the old parser leaves PENDING
@@ -613,15 +591,17 @@ pub(crate) fn interior(elems: impl Iterator<Item = SyntaxElement>) -> Vec<(usize
     out
 }
 
-/// A node's direct children strictly between its first `{` and its last
-/// `}` — the element stream [`interior`] reads for an `alphabet` body or
-/// a `with map` pair list.
-pub(crate) fn between_braces(node: &SyntaxNode) -> impl Iterator<Item = SyntaxElement> {
-    between(node, TmcKind::LBrace, TmcKind::RBrace)
-}
-
-/// The `[`/`]` twin, for a rule's pattern and its `write`/`move`
-/// vectors.
+/// A node's direct children strictly between its first `[` and its last
+/// `]` — the element stream [`interior`] reads for a rule's pattern and
+/// for each of its `write`/`move` vectors.
+///
+/// The `{`/`}` twin this once had beside it is GONE: every brace-
+/// delimited list (an `alphabet` body, a `with map` pair list) reaches
+/// its own interior through the printer's `delimited_interior`, which
+/// has to slice the delimiters itself anyway — it folds in the
+/// declaration's header ahead of the `{` and skips whatever the brace's
+/// open run already claimed, neither of which a plain between-the-braces
+/// slice expresses.
 pub(crate) fn between_brackets(node: &SyntaxNode) -> impl Iterator<Item = SyntaxElement> {
     between(node, TmcKind::LBracket, TmcKind::RBracket)
 }
@@ -760,16 +740,24 @@ mod tests {
 
     /// Interior attribution counts ENTRIES STARTED, never commas: a comment
     /// after the last entry has `n-1` commas before it and must key to `n`.
+    ///
+    /// Driven through a glyph vector rather than an `alphabet` body, which
+    /// is where this was first measured: [`interior`] takes an iterator and
+    /// is delimiter-agnostic, and [`between_brackets`] is the one slicer a
+    /// production caller actually hands it — the brace surfaces build their
+    /// own stream in the printer, header half included. The same 0/1/2
+    /// keying is pinned on an `alphabet` body through printed BYTES by
+    /// `fmt::print`'s `interior_list_comments_agree_on_every_surface`.
     #[test]
     fn interior_keys_a_trailing_comment_to_the_entry_count() {
-        let src = "alphabet ab {\n  // zero\n  '_', // one\n  'a'\n  // two\n}\n";
+        let src = "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s {\n    \
+                   [*, *] -> write [\n      // zero\n      '_', // one\n      'a'\n      \
+                   // two\n    ] stop;\n  }\n}\n";
         let (root, _index) = tree(src);
-        let alphabet = root
-            .children()
-            .find(|n| n.kind() == TmcKind::Alphabet.into())
-            .expect("an ALPHABET");
-        let elems = between_braces(&alphabet);
-        let found = interior(elems);
+        let vec_node = descendants(&root)
+            .find(|n| n.kind() == TmcKind::WriteVec.into())
+            .expect("a WRITE_VEC");
+        let found = interior(between_brackets(&vec_node));
         let keys: Vec<usize> = found.iter().map(|(i, _)| *i).collect();
         assert_eq!(keys, vec![0, 1, 2], "two entries, so the last key is 2");
     }
@@ -1157,19 +1145,26 @@ mod tests {
         assert_eq!(graft.len(), 1, "the in-list comment is not a unit here");
     }
 
-    /// A rule's own drains partition its comments, and both edges of
-    /// that partition are asserted here rather than through the
-    /// printer's differential harness — because a comment claimed by an
-    /// interior list is one the green printer does not RENDER yet, so
-    /// every source that would discriminate the lower edges also
-    /// diverges for an unrelated reason. This is where those edges are
-    /// pinned until the interior-comment surface lands.
+    /// A rule's own drains partition its comments: what one of its
+    /// interior lists claims, and what is still PENDING when the walk
+    /// reaches the `;`. This test asserts the pending half directly.
     ///
-    /// The upper edge — what is still pending at the `;` — IS reachable
-    /// through the printer (`fmt::print`'s `a_comment_inside_a_rule_agrees`),
-    /// and is repeated here so one test names the whole rule.
+    /// The claimed half used to be asserted here too, off a
+    /// `rule_vector_comments` helper that walked the tree a second time.
+    /// That helper is gone: the printer decides a rule's off-grid status
+    /// from the very buckets its row renderer prints with
+    /// (`fmt::print`'s `breaks_the_grid`), deliberately rather than from
+    /// a second walk, so a rival tree-walking answer was drift waiting to
+    /// happen. Every boundary it covered is now pinned on printed BYTES —
+    /// a vector's header half by `a_glyph_vectors_header_comment_belongs_to_that_vector`,
+    /// the pattern's by `the_grid_measures_a_pattern_with_its_spliced_comment`,
+    /// the call and map edges by `the_binding_list_boundaries_agree` — and
+    /// the predicate's own boundary by
+    /// `a_line_or_own_line_comment_in_a_glyph_vector_takes_the_rule_off_the_grid`.
     ///
-    /// Each pair below moves ONE comment across one boundary:
+    /// Each row below still moves ONE comment across one boundary; the
+    /// `vectors` column names, in prose, which side it lands on, and the
+    /// assertion checks the pending side answers accordingly:
     ///
     /// - inside the pattern's brackets vs. just past its `]`.
     /// - inside a `write` vector vs. between it and the following
@@ -1185,7 +1180,7 @@ mod tests {
                     entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  \
                     tape main: ab;\n  entry state s {\n    ";
         // (rule text, comments the vectors claim, comments pending at `;`)
-        for (rule, vectors, pending) in [
+        for (rule, _claimed_by_a_list, pending) in [
             ("[*] -> stop /* c */;", vec![], vec!["/* c */"]),
             ("[*] /* c */ -> stop;", vec![], vec!["/* c */"]),
             ("[/* c */ *] -> stop;", vec!["/* c */"], vec![]),
@@ -1235,11 +1230,6 @@ mod tests {
                 .filter(|n| n.kind() == TmcKind::Rule.into())
                 .last()
                 .expect("a RULE");
-            let found: Vec<String> = rule_vector_comments(&rule_node)
-                .iter()
-                .map(|c| c.text.clone())
-                .collect();
-            assert_eq!(found, vectors, "vector comments for:\n{rule}");
             let found: Vec<String> = unclaimed_inside(&rule_node)
                 .iter()
                 .map(|t| t.text().to_string())

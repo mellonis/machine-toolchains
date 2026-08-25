@@ -3,7 +3,7 @@
 //! (`mtc_core::asm::format_asm_with` under `tm1_syntax()`'s caps, so
 //! sections / table directives / `.rept` blocks / frame descriptors /
 //! vector operands all normalize); the `.tmc` side wires the crate's own
-//! CST printer ([`crate::fmt::format`]). Both are whitespace-only and
+//! green-tree printer ([`crate::fmt::format`]). Both are whitespace-only and
 //! idempotent, so `--check` is a safe CI gate for either language. Batch
 //! model (`PATH...`) is IDENTICAL to `tmt lint`'s, so it shares
 //! [`super::lint::collect_sources`] rather than duplicating the walk, and

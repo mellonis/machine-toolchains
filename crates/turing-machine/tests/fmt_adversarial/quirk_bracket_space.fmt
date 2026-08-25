@@ -1,0 +1,8 @@
+alphabet ab { '_', 'a' }
+
+machine {
+  tape main: ab;
+  entry state s {
+    [/* p */ *] -> write [/* w */ 'a'] move [/* m */ .] stop;
+  }
+}
