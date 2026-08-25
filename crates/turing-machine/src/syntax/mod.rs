@@ -108,6 +108,29 @@
 //! `tests/syntax_parity.rs`'s corpus sweep and `tests/tmc_property.rs`'s
 //! generated-program sweep — are therefore regression gates under live
 //! code now, not plan artifacts a future consumer might someday need.
+//!
+//! # `syntax::views` also has consumers outside `extract_program`
+//!
+//! The typed-view layer `extract_program` is built on is no longer only
+//! an implementation detail of extraction: the `.tmc` language service
+//! casts a document's own retained green tree straight to `RootView`
+//! and walks it directly, without reparsing. `lsp/mod.rs`'s
+//! `document_symbols`
+//! (`a_documented_declarations_symbol_starts_at_its_keyword`,
+//! `a_documented_world_members_symbol_starts_at_its_keyword`) reads
+//! only the views — `tree_symbols` never touches `Program`.
+//! `lsp/quickfix.rs`'s `state_stub`
+//! (`a_documented_machines_state_stub_lands_past_its_bound_doc_run`)
+//! reads the views AND the document's already-extracted `Program`
+//! together: `enclosing_body` walks `RootView` to find the enclosing
+//! MACHINE/REUSE span, then reads the arity out of `Program` — a REUSE's
+//! by name, from `Program.routines`/`Program.graphs`; a top-level
+//! MACHINE's own, from `Program.machine`'s tape count directly —
+//! extraction and the views answer two different halves of the same
+//! question, not one superseding the other. Both fixtures live in
+//! `crates/turing-machine/src/lsp/tests.rs`. A change to a view's
+//! accessor shape is therefore live-code-breaking from two independent
+//! directions, not one.
 
 mod emit;
 pub(crate) mod extract;

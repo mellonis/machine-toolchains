@@ -196,10 +196,10 @@ pub(crate) struct DocState {
     /// Green syntax tree of the current text (docs/core.md (syntax
     /// trees)); `None` when lexing or parsing failed. `Rc`, not `Arc`:
     /// the language server is single-threaded by construction, and this
-    /// field is what pins that — `Rc` is `!Send`, so `DocState` cannot
-    /// cross a thread boundary either. Read by `document_symbols` and by
-    /// `quickfix.rs`'s `state_stub`, both indexing into the SAME tree by
-    /// byte range rather than reparsing.
+    /// is the one field that would need to change for `DocState` to
+    /// become `Send` — every other field is (pinned below). Read by
+    /// `document_symbols` and by `quickfix.rs`'s `state_stub`, both
+    /// indexing into the SAME tree by byte range rather than reparsing.
     pub(crate) green: Option<Rc<GreenNode>>,
     /// The flat program — survives a resolve-stage fatal.
     pub(crate) program: Option<Program>,
@@ -234,6 +234,64 @@ pub(crate) struct DocState {
     /// outside that tree, so a wider modifier here would just be a
     /// `private_interfaces` mismatch waiting to happen.
     overlay: Option<overlay::Overlay>,
+}
+
+// Pins the `green` field doc comment above, in two halves.
+//
+// Half one: `DocState: !Send` fails to compile the moment that stops
+// holding, by any route. `AmbiguousIfSend<()>` is a blanket impl every
+// type gets; `AmbiguousIfSend<Invalid>` only lands on a `Send` type.
+// `DocState: Send` would make both apply, so the trailing type parameter
+// on `_marker` cannot be inferred and the crate stops compiling — there
+// is no positive way to assert a negative trait bound in stable Rust, so
+// this ambiguity is the mechanism, not a workaround for lacking one.
+#[allow(dead_code)]
+const _: fn() = || {
+    trait AmbiguousIfSend<A> {
+        fn _marker() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+    struct Invalid;
+    impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
+    let _ = <DocState as AmbiguousIfSend<_>>::_marker;
+};
+
+// Half two: every OTHER field is independently `Send`, which is what
+// makes `green` "the one field" rather than merely "a field" — the half
+// the assertion above cannot check, since adding a second `!Send` field
+// leaves `DocState: !Send` (and that assertion) untouched. Destructured
+// exhaustively (no `..`) and by value on purpose: a field added to
+// `DocState` tomorrow fails to compile HERE until it is added below and
+// classified, rather than silently escaping the check the way a list
+// keyed by type alone would. A positive bound needs no ambiguity trick —
+// `assert_send(v)` type-checks each binding against `T: Send` whether or
+// not this function ever runs.
+#[allow(dead_code)]
+fn assert_every_other_docstate_field_is_send(state: DocState) {
+    fn assert_send<T: Send>(_: T) {}
+    let DocState {
+        text,
+        tokens,
+        green: _,
+        program,
+        resolved,
+        warnings,
+        lint,
+        fatal,
+        roster,
+        config_errors,
+        overlay,
+    } = state;
+    assert_send(text);
+    assert_send(tokens);
+    assert_send(program);
+    assert_send(resolved);
+    assert_send(warnings);
+    assert_send(lint);
+    assert_send(fatal);
+    assert_send(roster);
+    assert_send(config_errors);
+    assert_send(overlay);
 }
 
 /// Whether the embedded stdlib's `std::` surface should be offered at all

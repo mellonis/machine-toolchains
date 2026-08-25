@@ -1256,8 +1256,10 @@ pub(crate) struct TmcStagedAnalysis {
     /// WithComments token stream — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
     /// Green syntax tree of the current text (docs/core.md (syntax
-    /// trees)); `None` when lexing or parsing failed. The `.tmc` language
-    /// service's position walks index by byte range against this tree.
+    /// trees)); `None` when lexing or parsing failed. Read by
+    /// `document_symbols` and `quickfix.rs`'s `state_stub` (`lsp/mod.rs`,
+    /// `lsp/quickfix.rs`), both indexing into it by byte range rather
+    /// than reparsing.
     pub green: Option<Rc<GreenNode>>,
     /// The flat program, extracted from the green tree — present whenever
     /// the green parse succeeded, retained even when the resolve stage then
