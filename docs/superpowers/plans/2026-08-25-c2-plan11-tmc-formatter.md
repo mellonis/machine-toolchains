@@ -1589,6 +1589,34 @@ existing token-preservation battery. Say which you chose and why; silently
 dropping the corpus×adversarial check would remove this plan's only
 comprehensive guard.
 
+- [ ] **Step 2b: Discharge the obligations earlier tasks routed here**
+
+Five, each recorded with its reason:
+
+1. **`every_adversarial_source_formats`'s floor is `seen >= 6` against SEVEN
+   files.** A fixture could be deleted or renamed off `.tmc` and the suite would
+   stay green — a silent shrink of the directory the whole differential battery
+   reads. Floor it at the real count, or assert the expected filename set.
+2. **Two direct-assertion tests are now the ONLY pins on where
+   `breaks_the_grid`'s boundary lies.** Neither calls `crate::fmt::format`, so
+   both survive this cutover — **keep them.** Deleting them because they look
+   like leftovers of the differential era would unpin the boundary silently.
+3. **`trivia::rule_vector_comments` and `trivia::between_braces` are now
+   production-dead**, reached only from `trivia.rs`'s own test module (the module
+   carries `#![allow(dead_code)]`, so nothing complains). Decide their fate
+   deliberately — delete, or keep with a stated reason. Do not inherit them by
+   default.
+4. **`nested_map_comments_are_keyed_two_levels_deep` does not do what its
+   docstring says.** Its asserted tuples are `(1, 1)` and `(0, 0)` — both
+   symmetric — so swapping the two components inside `nested_map_pairs` leaves
+   both assertions passing. The behaviour IS caught elsewhere, so nothing is
+   unarmed, but the named test does not discharge its own obligation. Add one
+   ASYMMETRIC source: a map on argument 1 with a pair-0 comment, or argument 0
+   with a pair-1 comment.
+5. **`fmt/mod.rs`'s module documentation describes a CST walk.** It moves to
+   `print.rs` with this task; rewrite the sentences that describe how the printer
+   reads source, rather than moving them verbatim.
+
 - [ ] **Step 3: Prove no production caller of the C1 path remains**
 
 ```bash
