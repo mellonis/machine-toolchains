@@ -1033,6 +1033,39 @@ on this tree the doc run is inside the node and the two cases coincide (see
 "The tree shape", consequence 2). `doc_run_text`'s `blank_before_decl`
 argument comes from `trivia::blank_before_decl`.
 
+**A comment written INSIDE a doc run is this task's to fix — measured, and
+invisible to the entire corpus.** `extract_doc_items` reparses `sig_tokens`,
+which filters trivia, so an ordinary comment interleaved in a `?`/`!` run is
+DROPPED; worse, the item after it then measures its gap against the previous doc
+line instead of against the comment, so a blank line nobody wrote is INVENTED.
+Both halves measured:
+
+| source | C1 `doc_run` | `extract_doc_items` today |
+|---|---|---|
+| `"? doc\n/* c */\nalphabet b { '0' }\n"` | 2 items, no blanks | 1 item |
+| `"? doc\n// c\n? more\nalphabet b { '0' }\n"` | 3 items, no blanks | 2 items, `? more` has `blank_before: true` |
+
+The real formatter leaves both sources unchanged — they are already canonical —
+so this is a byte-identity break on a four-line file. The shape occurs in none of
+the seven adversarial fixtures, none of the corpus, and neither the stdlib nor the
+flagship, which is why no differential test can catch it: **add
+`tests/fmt_adversarial/doc_run_interior_comment.tmc` carrying both shapes as part
+of this task.**
+
+Fixing it means letting comment tokens reach the doc-run items — a BODY change in
+`syntax::extract`, which the standing visibility-only ruling does not cover.
+It is in scope here for the same reason `prev_end_line` was in scope in Task 2:
+a field the compiler path could ignore becomes observable the moment `fmt` reads
+it. `reduce_doc_run` treats a comment item as inert, so the reduced `Doc` the
+compiler consumes is unaffected — verify that rather than assuming it, and keep
+both differential oracles green.
+
+Note the two surfaces differ, and a fix that handles one silently misses the
+other: for NAMESPACE and STATE the comment is a direct child token before the
+`{`, so `trivia::units(&node)` hands it back as the body's FIRST unit while the
+formatter keeps it above the keyword; for ALPHABET — and for MACHINE/REUSE, where
+it sits in the declaration's stream ahead of `WORLD` — nothing picks it up at all.
+
 An alphabet's elements come from the existing extraction path, not from a new
 walk: reuse whatever `syntax::extract`'s alphabet helper already builds, and
 widen its visibility rather than duplicating the element decode. Same for a
