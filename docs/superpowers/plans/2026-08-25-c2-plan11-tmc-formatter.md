@@ -1235,9 +1235,23 @@ Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
 
-The intra-node relocation named in Task 4 applies to rules too: a comment
-written inside a rule, before its `;`, is relocated by C1 to after the `;`.
-Find it while rendering the rule, and add a differential case.
+**`trivia::unclaimed_inside`'s RULE arm answers empty today, and filling it in is
+this task's obligation — nothing will fail if you skip it.** Task 4 built that
+helper for the `;`-terminated declarations it renders and left the RULE arm empty
+because no rule was rendered yet. RULE is `;`-terminated like the others, and the
+relocation is real. Measured:
+
+```
+[*] -> stop /* c */;      C1 prints:   [*] -> stop; /* c */
+```
+
+Green drops that comment unless the arm is filled in, and **no existing test
+covers the shape**, so the suite stays green while a comment disappears. Fill the
+arm, add a differential case for it here, and add one for a comment inside a rule
+whose transition is a `call` — the longest form, where the pending comment has the
+furthest to travel. Task 6 inherits this through inline states, which embed rules:
+if a rule carrying such a comment is a candidate for a single-line state, check
+what C1 does with it before assuming the inline path is safe.
 
 A state's rule list is `trivia::units(state.syntax(), &index)`; the grid is
 computed over the `RULE` units only, and own-line comments and blank lines
