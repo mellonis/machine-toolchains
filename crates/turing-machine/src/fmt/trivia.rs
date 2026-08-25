@@ -258,6 +258,92 @@ fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
     out
 }
 
+/// Where a rule's own interior drains fall, as source offsets — the
+/// partition that decides which of a RULE's comments belongs to which
+/// claimant.
+///
+/// Every drain the old parser runs inside a rule claims everything
+/// still pending at or before its own position (`interior_comments`
+/// walks a GLOBAL cursor), so the claimants tile the rule's text with
+/// no gaps. A comment starting in:
+///
+/// | region | is claimed by |
+/// |---|---|
+/// | `[node.start, pattern_end)` | the pattern's interior list |
+/// | `[pattern_end, write_end)` | the `write` vector's list |
+/// | `[write_end, move_end)` | the `move` vector's list |
+/// | `[move_end, pending)` | the `call` binding list, or one of its maps |
+/// | `[pending, node.end)` | nothing — still pending at the `;` |
+///
+/// A vector's region therefore holds not only what was written between
+/// its brackets but also the HEADER ahead of it — `write /* c */ [` and
+/// `-> /* c */ write [` both land in the write vector's list, which is
+/// where the old parser puts them (docs/tmt/fmt.md (interior comments);
+/// this crate's `fmt` module doc). An absent vector collapses its
+/// region to nothing by taking the previous boundary as its own end.
+pub(crate) struct RuleRegions {
+    pub pattern_end: u32,
+    pub write_end: u32,
+    pub move_end: u32,
+    pub pending: u32,
+}
+
+/// [`RuleRegions`] for one RULE node. `node` must be a RULE; asking any
+/// other kind answers a degenerate partition, not an error.
+pub(crate) fn rule_regions(node: &SyntaxNode) -> RuleRegions {
+    // The pattern is not a node, so its `]` is one of RULE's own direct
+    // children — and the only one, since each glyph vector's brackets
+    // belong to its own WRITE_VEC/MOVE_VEC node.
+    let pattern_end = node
+        .children_with_tokens()
+        .find(|e| e.kind() == TmcKind::RBracket.into())
+        .map_or(node.text_range().start, |e| e.text_range().end);
+    let vec_end = |kind: TmcKind, fallback: u32| {
+        node.children()
+            .find(|n| n.kind() == kind.into())
+            .map_or(fallback, |n| n.text_range().end)
+    };
+    let write_end = vec_end(TmcKind::WriteVec, pattern_end);
+    let move_end = vec_end(TmcKind::MoveVec, write_end);
+    // A `call`'s binding list drains immediately before its `)`, which
+    // is a direct child of TRANSITION (the arguments are BINDING_ARG
+    // nodes, and a nested `with map` uses braces) — so the LAST `)`
+    // there is the rule's last drain. Every other transition runs none.
+    let pending = node
+        .children()
+        .find(|n| n.kind() == TmcKind::Transition.into())
+        .and_then(|t| {
+            t.children_with_tokens()
+                .filter(|e| e.kind() == TmcKind::RParen.into())
+                .map(|e| e.text_range().end)
+                .last()
+        })
+        .unwrap_or(move_end);
+    RuleRegions {
+        pattern_end,
+        write_end,
+        move_end,
+        pending,
+    }
+}
+
+/// The comments one rule's three glyph vectors claim — everything ahead
+/// of the last vector's own `]`, which by [`RuleRegions`] is exactly the
+/// union of the pattern's, the `write` vector's and the `move` vector's
+/// interior lists, header halves included.
+///
+/// The printer reads this to decide whether a rule is off the grid: a
+/// LINE comment cannot share its physical line, and an own-line one
+/// would silently flip its own `own_line` flag if inlined onto a cell's
+/// line (docs/tmt/fmt.md (interior comments)).
+pub(crate) fn rule_vector_comments(node: &SyntaxNode) -> Vec<Comment> {
+    let end = rule_regions(node).move_end;
+    node.descendant_tokens()
+        .filter(|t| is_comment(t.kind()) && t.text_range().start < end)
+        .map(|t| comment_from(&t))
+        .collect()
+}
+
 /// The comment tokens inside `node` that the old parser leaves PENDING
 /// when it reaches the node's terminator — the ones `take_trailing` and
 /// then the container's own drain get to claim, in that order.
@@ -275,11 +361,13 @@ fn pre_world_comments(world: &SyntaxNode) -> Vec<SyntaxToken> {
 /// - **USE** — its own drain runs at the `;`, so nothing inside it is
 ///   ever pending; the empty answer here is a fact about `parse_use`,
 ///   not a gap.
-/// - **RULE** — `;`-terminated like the three above, and
-///   `[*] -> stop /* c */;` really does leave a comment pending that
-///   `take_trailing` claims. It answers empty here **only because this
-///   printer does not render rules yet**; the rule surface must fill
-///   this arm in, or that comment is dropped with no test failing.
+/// - **RULE** — `;`-terminated like the three above, and it runs
+///   several drains of its own: the pattern's, each glyph vector's,
+///   and — for a `call` — its binding list's and every nested map's.
+///   [`RuleRegions`] names where the last of them falls, and everything
+///   past it is pending: `[*] -> stop /* c */;` prints as
+///   `[*] -> stop; /* c */`, and so does the same comment written
+///   anywhere in a `call`'s tail (`) /* c */ then`, `then stop /* c */`).
 /// - **Everything else** is `}`-terminated. `capture_close_trailing`
 ///   requires the comment to sit AFTER the `}`, so a node's own
 ///   comments never reach it — and they are not lost either: they were
@@ -304,6 +392,13 @@ fn unclaimed_inside(node: &SyntaxNode) -> Vec<SyntaxToken> {
             .rposition(|e| e.kind() == TmcKind::RParen.into())
             .map_or(elems.len(), |i| i + 1);
         comments(&elems[after..])
+    } else if node.kind() == TmcKind::Rule.into() {
+        // Not `elems`: a rule's pending region can begin INSIDE its
+        // TRANSITION (`call r(…) /* c */ then stop`), one level down.
+        let from = rule_regions(node).pending;
+        node.descendant_tokens()
+            .filter(|t| is_comment(t.kind()) && t.text_range().start >= from)
+            .collect()
     } else {
         Vec::new()
     }
@@ -1060,6 +1155,97 @@ mod tests {
             Some("/* after */")
         );
         assert_eq!(graft.len(), 1, "the in-list comment is not a unit here");
+    }
+
+    /// A rule's own drains partition its comments, and both edges of
+    /// that partition are asserted here rather than through the
+    /// printer's differential harness — because a comment claimed by an
+    /// interior list is one the green printer does not RENDER yet, so
+    /// every source that would discriminate the lower edges also
+    /// diverges for an unrelated reason. This is where those edges are
+    /// pinned until the interior-comment surface lands.
+    ///
+    /// The upper edge — what is still pending at the `;` — IS reachable
+    /// through the printer (`fmt::print`'s `a_comment_inside_a_rule_agrees`),
+    /// and is repeated here so one test names the whole rule.
+    ///
+    /// Each pair below moves ONE comment across one boundary:
+    ///
+    /// - inside the pattern's brackets vs. just past its `]`.
+    /// - inside a `write` vector vs. between it and the following
+    ///   `move` (still the move vector's, by the header rule) vs. past
+    ///   the last vector with no `move` written at all.
+    /// - inside a `call`'s parens, or inside a nested `with map`, vs.
+    ///   past the `)` — and, the case a `move_end`-only cut gets wrong,
+    ///   BETWEEN the last vector and the call's `(`, which the binding
+    ///   list's own drain sweeps up.
+    #[test]
+    fn a_rules_comments_are_partitioned_by_its_own_drains() {
+        let head = "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    \
+                    entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  \
+                    tape main: ab;\n  entry state s {\n    ";
+        // (rule text, comments the vectors claim, comments pending at `;`)
+        for (rule, vectors, pending) in [
+            ("[*] -> stop /* c */;", vec![], vec!["/* c */"]),
+            ("[*] /* c */ -> stop;", vec![], vec!["/* c */"]),
+            ("[/* c */ *] -> stop;", vec!["/* c */"], vec![]),
+            ("[*] -> write /* c */ ['a'] stop;", vec!["/* c */"], vec![]),
+            ("[*] -> write ['a'] /* c */ stop;", vec![], vec!["/* c */"]),
+            (
+                "[*] -> write ['a'] /* c */ move [>] stop;",
+                vec!["/* c */"],
+                vec![],
+            ),
+            (
+                "[*] -> call n::r(/* c */ t = main) then stop;",
+                vec![],
+                vec![],
+            ),
+            (
+                "[*] -> call n::r(t = main with map { /* c */ '_' -> '_' }) then stop;",
+                vec![],
+                vec![],
+            ),
+            (
+                "[*] -> move [>] /* c */ call n::r(t = main) then stop;",
+                vec![],
+                vec![],
+            ),
+            (
+                "[*] -> move [/* c */ >] call n::r(t = main) then stop;",
+                vec!["/* c */"],
+                vec![],
+            ),
+            (
+                "[*] -> call n::r(t = main) /* c */ then stop;",
+                vec![],
+                vec!["/* c */"],
+            ),
+            (
+                "[*] -> call n::r(t = main) then stop /* c */;",
+                vec![],
+                vec!["/* c */"],
+            ),
+        ] {
+            let src = format!("{head}{rule}\n  }}\n}}\n");
+            let (root, _index) = tree(&src);
+            // The LAST rule in the file: the fixture's `routine` filler
+            // carries one of its own, ahead of the rule under test.
+            let rule_node = descendants(&root)
+                .filter(|n| n.kind() == TmcKind::Rule.into())
+                .last()
+                .expect("a RULE");
+            let found: Vec<String> = rule_vector_comments(&rule_node)
+                .iter()
+                .map(|c| c.text.clone())
+                .collect();
+            assert_eq!(found, vectors, "vector comments for:\n{rule}");
+            let found: Vec<String> = unclaimed_inside(&rule_node)
+                .iter()
+                .map(|t| t.text().to_string())
+                .collect();
+            assert_eq!(found, pending, "pending comments for:\n{rule}");
+        }
     }
 
     /// Every `Comment` this module hands the printer must be the one the

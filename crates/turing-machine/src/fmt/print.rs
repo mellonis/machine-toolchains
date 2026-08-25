@@ -41,17 +41,22 @@ use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
 use super::trivia::{self, Unit, UnitKind};
 use crate::compiler::CompileError;
 use crate::cst::{DocRunItem, DocRunKind};
-use crate::lexer::{Comment, CommentKind, LexMode, lex_with};
+use mtc_core::diagnostics::Span;
+
+use crate::lexer::{Comment, CommentKind, LexMode, Token, TokenKind, lex_with};
 use crate::parser::{
-    AlphabetElem, BindingArg, BindingValue, ContractClause, Import, MapArrow, SigParam,
-    SigParamKind, SymLit, SymMap, TermKind, parse_green_from_tokens, reparse_sig_param,
+    AlphabetElem, BindingArg, BindingValue, Continuation, ContractClause, Import, MapArrow,
+    MoveCell, MoveDir, MoveVec, Pattern, PatternCell, PatternCellKind, Rule, SigParam,
+    SigParamKind, SymLit, SymMap, TermKind, Transition, WriteCell, WriteCellKind, WriteVec,
+    parse_green_from_tokens, reparse_sig_param,
 };
 use crate::syntax::extract::{
-    extract_alphabet, extract_bind, extract_doc_items, extract_graft, extract_import, sig_tokens,
+    extract_alphabet, extract_bind, extract_doc_items, extract_graft, extract_import, extract_rule,
+    sig_tokens,
 };
 use crate::syntax::{
     AlphabetView, BindView, DocRunView, GraftView, MachineView, NamespaceView, ReuseKind,
-    ReuseView, RootView, TapeView, TopView, UseView, WorldView,
+    ReuseView, RootView, RuleView, StateView, TapeView, TopView, UseView, WorldView,
 };
 
 /// Spaces per block level (`super`'s module doc, "Indentation").
@@ -348,6 +353,146 @@ fn alphabet_elem_text(elem: &AlphabetElem) -> String {
     }
 }
 
+/// A pattern vector on the grid (or single-line-inline) path: `interior`
+/// carries only BLOCK comments here — a LINE comment sends the rule down
+/// [`render_rule_off_grid`] before this is ever called.
+fn pattern_text(pattern: &Pattern, interior: &Interior<'_>) -> String {
+    let cells: Vec<String> = pattern.cells.iter().map(pattern_cell_text).collect();
+    format!("[{}]", join_cells_with_interior(&cells, interior))
+}
+
+/// Joins rendered cells with `, `, splicing each slot's BLOCK comments
+/// inline. Slot `i`'s comments precede cell `i`; the tail slot's precede
+/// the closing bracket. Only reached when no LINE comment is present —
+/// the caller has already sent that case down the multi-line path.
+fn join_cells_with_interior(cells: &[String], interior: &Interior<'_>) -> String {
+    let mut out = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        for c in interior.slots[i].iter() {
+            out.push_str(&normalize_comment_text(&c.text));
+            out.push(' ');
+        }
+        out.push_str(cell);
+        if i + 1 < cells.len() {
+            out.push_str(", ");
+        }
+    }
+    for c in interior.slots[cells.len()].iter() {
+        out.push(' ');
+        out.push_str(&normalize_comment_text(&c.text));
+    }
+    out
+}
+
+fn pattern_cell_text(cell: &PatternCell) -> String {
+    let mut out = match &cell.kind {
+        PatternCellKind::Wildcard => "*".to_string(),
+        PatternCellKind::Single(sym) => sym_text(sym),
+        PatternCellKind::Range { lo, hi } => format!("{}..{}", sym_text(lo), sym_text(hi)),
+    };
+    if let Some(binding) = &cell.binding {
+        out.push_str(" as ");
+        out.push_str(&binding.name);
+    }
+    out
+}
+
+/// One write cell. `tokens` is the enclosing WRITE_VEC's own significant
+/// token run — see [`subst_body_text`] for why a substitution reprints
+/// from tokens rather than from its parsed value.
+fn write_cell_text(cell: &WriteCell, tokens: &[Token]) -> String {
+    match &cell.kind {
+        WriteCellKind::Keep => "-".to_string(),
+        WriteCellKind::Lit(sym) => sym_text(sym),
+        WriteCellKind::Subst { expr } => format!("{{{}}}", subst_body_text(&expr.span, tokens)),
+    }
+}
+
+/// A write vector on the grid (or single-line-inline) path — see
+/// [`pattern_text`]'s note on what `interior` carries here.
+fn write_vec_text(vec: &WriteVec, tokens: &[Token], interior: &Interior<'_>) -> String {
+    let cells: Vec<String> = vec
+        .cells
+        .iter()
+        .map(|cell| write_cell_text(cell, tokens))
+        .collect();
+    format!("write [{}]", join_cells_with_interior(&cells, interior))
+}
+
+/// Reprint a substitution `{…}` from its SOURCE TOKENS, tight (no interior
+/// whitespace), rather than re-deriving from the parsed tree. This keeps the
+/// formatter whitespace-only (docs/tmt/fmt.md (whitespace-only)): the source's
+/// own parenthesization survives (`{(v*2)+1}` is not rewritten to `{v*2+1}`),
+/// and a number reprints from its written spelling. `span` is the expression's
+/// span (braces excluded); the significant tokens lying within it are exactly
+/// the expression, comments having been split off before the grammar walk, so
+/// concatenating their spellings yields the tight form.
+///
+/// A substitution has no node of its own — its `{`, its expression and its
+/// `}` are plain tokens of the enclosing WRITE_VEC — so the span filter is
+/// still what selects it. `tokens` is that vector's own significant run
+/// (`syntax::extract`'s `sig_tokens`) rather than the whole file's: the
+/// spans are absolute either way, so the filter selects the same tokens,
+/// and the run ends in a synthetic `Eof` that lies past every cell. One
+/// consequence of that narrowing, stated because a reader will otherwise
+/// look for the case it covers: `sig_tokens` drops trivia, so the
+/// comment test below is DEAD here — it is kept only because this
+/// function is a verbatim copy of the C1 printer's, where the whole
+/// file's tokens (comments included) are what arrives.
+fn subst_body_text(span: &Span, tokens: &[Token]) -> String {
+    tokens
+        .iter()
+        .filter(|t| {
+            !matches!(t.kind, TokenKind::Comment(_))
+                && t.span().start >= span.start
+                && t.span().end <= span.end
+        })
+        .map(|t| fold_token_text(&t.kind))
+        .collect()
+}
+
+/// The source spelling of one write-cell fold-expression token. Only the fold
+/// grammar's tokens (`+ - * %`, parens, names, integers) fall within a
+/// substitution's span, so nothing else is reachable here.
+fn fold_token_text(kind: &TokenKind) -> &str {
+    match kind {
+        TokenKind::Ident(s) => s,
+        TokenKind::Number(_, spelling) => spelling,
+        TokenKind::Plus => "+",
+        TokenKind::Dash => "-",
+        TokenKind::Star => "*",
+        TokenKind::Percent => "%",
+        TokenKind::LParen => "(",
+        TokenKind::RParen => ")",
+        _ => "",
+    }
+}
+
+fn move_cell_text(cell: &MoveCell) -> String {
+    match cell.dir {
+        MoveDir::Left => "<",
+        MoveDir::Right => ">",
+        MoveDir::Stay => ".",
+    }
+    .to_string()
+}
+
+/// A move vector on the grid (or single-line-inline) path — see
+/// [`pattern_text`]'s note on what `interior` carries here.
+fn move_vec_text(vec: &MoveVec, interior: &Interior<'_>) -> String {
+    let cells: Vec<String> = vec.cells.iter().map(move_cell_text).collect();
+    format!("move [{}]", join_cells_with_interior(&cells, interior))
+}
+
+fn continuation_text(cont: &Continuation) -> String {
+    match cont {
+        Continuation::State { name, .. } => name.clone(),
+        Continuation::Return { .. } => "return".to_string(),
+        Continuation::Stop { .. } => "stop".to_string(),
+        Continuation::Halt { .. } => "halt".to_string(),
+    }
+}
+
 /// One `writes { … }` or `preserves { … }` clause, re-encoded losslessly:
 /// a single leading space ahead of the keyword, then the same brace-body
 /// spacing an `alphabet` renders inline (`{ elem, elem }`,
@@ -588,6 +733,328 @@ fn use_path_text(path: &Import) -> String {
         out.push_str(alias);
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// The rule grid.
+// ---------------------------------------------------------------------------
+
+/// The column widths one grid group shares (`super`'s module doc, "The
+/// state-block grid"). A width of zero means the group has no rule using
+/// that segment, so the column does not exist at all.
+struct Grid {
+    pattern: usize,
+    debugger: usize,
+    write: usize,
+    mov: usize,
+}
+
+/// One rule, ready to lay out: its value, its own WRITE_VEC token run
+/// (what a `{expr}` substitution reprints from), and whether it is off
+/// the grid.
+///
+/// The value comes from `syntax::extract`'s own `extract_rule`, which is
+/// oracle-tested against the C1 lowering; the off-grid flag is trivia,
+/// re-derived by [`super::trivia::rule_vector_comments`].
+struct PreparedRule {
+    rule: Rule,
+    write_tokens: Vec<Token>,
+    off_grid: bool,
+}
+
+/// A RULE node → the pieces the grid and the row renderer need.
+fn prepare_rule(view: &RuleView, index: &TextLineIndex) -> PreparedRule {
+    PreparedRule {
+        rule: extract_rule(view, index),
+        // Only a `write` vector can hold a substitution, and only the
+        // vector's own tokens are ever consulted — so an absent one
+        // needs no run at all.
+        write_tokens: view
+            .write_vec()
+            .map(|w| sig_tokens(w.syntax(), index))
+            .unwrap_or_default(),
+        off_grid: breaks_the_grid(view.syntax()),
+    }
+}
+
+/// True when any glyph vector carries a LINE comment or an OWN-LINE
+/// comment (mirrors [`bucket`]'s `forces_break`). A LINE comment cannot
+/// share its physical line; an own-line comment, block or line, would
+/// silently flip its own `own_line` flag on the next parse if inlined
+/// onto a cell's line. Either way the rule cannot be a grid row, so it
+/// renders multi-line and is excluded from the grid's width computation
+/// (docs/tmt/fmt.md (interior comments)).
+///
+/// "In a glyph vector" is the OLD PARSER's reading of it, not the
+/// bracket's: a comment written in a vector's header — `write /* c */ [`
+/// — is claimed by that vector's interior list too. `rule_vector_comments`
+/// answers the union of all three lists, header halves included.
+fn breaks_the_grid(rule: &SyntaxNode) -> bool {
+    trivia::rule_vector_comments(rule)
+        .iter()
+        .any(|c| matches!(c.kind, CommentKind::Line) || c.own_line)
+}
+
+/// `rules` off the grid (`super`'s module doc, "The state-block grid")
+/// are excluded from every column: they consume none of the group's
+/// width and, since they render themselves, do not need one.
+fn grid_for(rules: &[&PreparedRule]) -> Grid {
+    let width = |s: &str| s.chars().count();
+    let on_grid: Vec<&PreparedRule> = rules.iter().copied().filter(|p| !p.off_grid).collect();
+    // Interior comments are a later surface — see `render_use`. Every
+    // width below is measured with the same empty interior the row
+    // renderer prints with, so the two cannot disagree.
+    Grid {
+        pattern: on_grid
+            .iter()
+            .map(|p| {
+                let interior = bucket(&[], p.rule.pattern.cells.len());
+                width(&pattern_text(&p.rule.pattern, &interior))
+            })
+            .max()
+            .unwrap_or(0),
+        debugger: if on_grid.iter().any(|p| p.rule.debugger) {
+            "debugger".len()
+        } else {
+            0
+        },
+        write: on_grid
+            .iter()
+            .filter_map(|p| {
+                p.rule.write.as_ref().map(|w| {
+                    let interior = bucket(&[], w.cells.len());
+                    width(&write_vec_text(w, &p.write_tokens, &interior))
+                })
+            })
+            .max()
+            .unwrap_or(0),
+        mov: on_grid
+            .iter()
+            .filter_map(|p| {
+                p.rule.mov.as_ref().map(|m| {
+                    let interior = bucket(&[], m.cells.len());
+                    width(&move_vec_text(m, &interior))
+                })
+            })
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// One rule as a grid row: `indent`, the padded pattern, the arrow, the
+/// action columns, the transition, `;`. Delegates to
+/// [`render_rule_off_grid`] first when the rule is off the grid — such a
+/// rule ignores `grid` entirely, since it was excluded from the
+/// computation that produced it.
+fn render_rule(prepared: &PreparedRule, grid: &Grid, indent: usize) -> String {
+    if prepared.off_grid {
+        return render_rule_off_grid(prepared, indent);
+    }
+    let rule = &prepared.rule;
+    let mut line = " ".repeat(indent);
+    let pattern_interior = bucket(&[], rule.pattern.cells.len());
+    let pattern = pattern_text(&rule.pattern, &pattern_interior);
+    let pattern_width = pattern.chars().count();
+    line.push_str(&pattern);
+    line.push_str(&" ".repeat(grid.pattern.saturating_sub(pattern_width)));
+    line.push_str(" -> ");
+
+    let write_text = match &rule.write {
+        Some(w) => write_vec_text(w, &prepared.write_tokens, &bucket(&[], w.cells.len())),
+        None => String::new(),
+    };
+    let move_text = match &rule.mov {
+        Some(m) => move_vec_text(m, &bucket(&[], m.cells.len())),
+        None => String::new(),
+    };
+    let segments: [(bool, String, usize); 3] = [
+        (rule.debugger, "debugger".to_string(), grid.debugger),
+        (rule.write.is_some(), write_text, grid.write),
+        (rule.mov.is_some(), move_text, grid.mov),
+    ];
+    // Trailing columns collapse: padding exists only to line up what comes
+    // AFTER it, so a rule pads a column it skips (and its own last column is
+    // never padded) exactly while a later segment still has to be reached.
+    let last_used = segments.iter().rposition(|(present, _, _)| *present);
+    for (i, (present, text, column)) in segments.iter().enumerate() {
+        match last_used {
+            Some(last) if i < last => {
+                if *column == 0 {
+                    continue;
+                }
+                if *present {
+                    line.push_str(text);
+                    line.push_str(&" ".repeat(column - text.chars().count()));
+                } else {
+                    line.push_str(&" ".repeat(*column));
+                }
+                line.push(' ');
+            }
+            Some(last) if i == last => {
+                line.push_str(text);
+                line.push(' ');
+            }
+            _ => {}
+        }
+    }
+
+    let col = line.chars().count();
+    let transition = transition_text(&rule.transition, col);
+    if transition.is_empty() {
+        // Omitted transition: no token to print. Trim the trailing space the
+        // action segments left so the `;` abuts the last action.
+        while line.ends_with(' ') {
+            line.pop();
+        }
+    } else {
+        line.push_str(&transition);
+    }
+    line.push(';');
+    line
+}
+
+/// A rule off the grid (`super`'s module doc, "The state-block grid"): a
+/// LINE comment in one of its glyph vectors forces it there, and the
+/// whole rule renders across several lines instead of padding to the
+/// group's shared columns — every vector it carries breaks, not only the
+/// one with the comment, so the rule reads as one consistent shape
+/// rather than a mix of broken and padded segments.
+fn render_rule_off_grid(prepared: &PreparedRule, indent: usize) -> String {
+    let rule = &prepared.rule;
+    let mut line = " ".repeat(indent);
+
+    let pattern_cells: Vec<String> = rule.pattern.cells.iter().map(pattern_cell_text).collect();
+    let pattern_interior = bucket(&[], pattern_cells.len());
+    line.push_str(&glyph_vec_multiline(
+        "[",
+        &pattern_cells,
+        &pattern_interior,
+        indent,
+    ));
+    line.push_str(" -> ");
+
+    if rule.debugger {
+        line.push_str("debugger ");
+    }
+    if let Some(w) = &rule.write {
+        let cells: Vec<String> = w
+            .cells
+            .iter()
+            .map(|c| write_cell_text(c, &prepared.write_tokens))
+            .collect();
+        let interior = bucket(&[], cells.len());
+        line.push_str(&glyph_vec_multiline("write [", &cells, &interior, indent));
+        line.push(' ');
+    }
+    if let Some(m) = &rule.mov {
+        let cells: Vec<String> = m.cells.iter().map(move_cell_text).collect();
+        let interior = bucket(&[], cells.len());
+        line.push_str(&glyph_vec_multiline("move [", &cells, &interior, indent));
+        line.push(' ');
+    }
+
+    let col = col_after(&line);
+    let transition = transition_text(&rule.transition, col);
+    if transition.is_empty() {
+        while line.ends_with(' ') {
+            line.pop();
+        }
+    } else {
+        line.push_str(&transition);
+    }
+    line.push(';');
+    line
+}
+
+/// One glyph vector's cells, one per line at `indent + INDENT_UNIT`, closer
+/// on its own line back at `indent` — the off-grid form
+/// [`breaks_the_grid`] sends a rule down. `head` is the vector's leading
+/// text up to and including its opening `[` (`"["` for a pattern,
+/// `"write ["` / `"move ["` for the action vectors). Mirrors
+/// [`paren_list`]'s multi-line branch and the same indexing rule as every
+/// other list: slot `i`'s own-line comments print above cell `i`; slot
+/// `i + 1`'s same-line comments print at the end of cell `i`'s line
+/// (docs/tmt/fmt.md (interior comments)).
+fn glyph_vec_multiline(
+    head: &str,
+    cells: &[String],
+    interior: &Interior<'_>,
+    indent: usize,
+) -> String {
+    let cell_pad = " ".repeat(indent + INDENT_UNIT);
+    let mut out = String::from(head);
+    // Slot 0's same-line comments precede every cell, so there is no
+    // preceding cell's line for them to trail — they ride the opening `[`
+    // itself (`super`'s module doc, "Blank lines and comments").
+    out.push_str(&interior_trailing(&interior.slots[0]));
+    out.push('\n');
+    for (i, cell) in cells.iter().enumerate() {
+        out.push_str(&interior_lines(&interior.slots[i], indent + INDENT_UNIT));
+        out.push_str(&cell_pad);
+        out.push_str(cell);
+        if i + 1 < cells.len() {
+            out.push(',');
+        }
+        // The NEXT slot's same-line comments belong to THIS cell's line —
+        // see the indexing rule above (`super`'s module doc, "Blank lines
+        // and comments").
+        out.push_str(&interior_trailing(&interior.slots[i + 1]));
+        out.push('\n');
+    }
+    out.push_str(&interior_lines(
+        &interior.slots[cells.len()],
+        indent + INDENT_UNIT,
+    ));
+    out.push_str(&" ".repeat(indent));
+    out.push(']');
+    out
+}
+
+/// The column position right after the LAST physical line of `s` — what a
+/// nested list beginning immediately after `s` breaks against, when `s`
+/// itself may already contain embedded newlines (an off-grid rule's broken
+/// glyph vectors, e.g.). Degrades to `s.chars().count()` when `s` has none.
+fn col_after(s: &str) -> usize {
+    match s.rsplit_once('\n') {
+        Some((_, last)) => last.chars().count(),
+        None => s.chars().count(),
+    }
+}
+
+/// A transition, starting at column `col` — the column an argument list
+/// breaks against. A `call`'s own interior comments (its binding list's
+/// and any nested `with map`'s) are a later surface — see `render_use`.
+fn transition_text(transition: &Transition, col: usize) -> String {
+    match transition {
+        Transition::Goto { name, explicit, .. } => {
+            if *explicit {
+                format!("goto {name}")
+            } else {
+                name.clone()
+            }
+        }
+        Transition::Call {
+            target, args, then, ..
+        } => {
+            let entry_col = col + INDENT_UNIT;
+            let entries = binding_entries(args, entry_col, &[]);
+            let head = format!("call {}", target.joined());
+            // The `;` the caller appends is reserved by rendering it into the
+            // tail used for the fit measurement.
+            let tail = format!(" then {};", continuation_text(then));
+            let rendered = paren_list(col, &head, &entries, &tail, &bucket(&[], entries.len()));
+            rendered
+                .strip_suffix(';')
+                .expect("the tail ends in the reserved `;`")
+                .to_string()
+        }
+        Transition::Return { .. } => "return".to_string(),
+        Transition::Stop { .. } => "stop".to_string(),
+        Transition::Halt { .. } => "halt".to_string(),
+        // An omitted transition prints nothing — the `;` abuts the last action
+        // (the caller trims the trailing action space).
+        Transition::Stay { .. } => String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -972,11 +1439,12 @@ fn render_world_item(
         render_graft(&v, unit, indent, source, index)
     } else if let Some(v) = BindView::cast(node.clone()) {
         render_bind(&v, unit, indent, source, index)
+    } else if let Some(v) = StateView::cast(node.clone()) {
+        // Every state renders in block form here; the single-line run is
+        // its own surface.
+        render_block_state(&v, unit, indent, source, index)
     } else {
-        unimplemented!(
-            "the green printer covers a world's tapes, grafts and binds; states arrive \
-             with their own surface"
-        )
+        unimplemented!("a world holds only tapes, grafts, binds and states")
     }
 }
 
@@ -1091,6 +1559,79 @@ fn render_bind(
         &tail,
         &bucket(&[], entries.len()),
     ));
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
+fn state_header_text(view: &StateView) -> String {
+    format!(
+        "{}state {}",
+        if view.is_entry() { "entry " } else { "" },
+        view.name_token().text()
+    )
+}
+
+/// A state in block form: the header, the brace's own comment run, the
+/// rule table at one more indent level, and the closing `}`.
+///
+/// The whole state is ONE grid group — an own-line comment or a blank
+/// line between two rules does not split the table (`super`'s module
+/// doc, "The state-block grid"), so the group is computed over every
+/// RULE unit at once and the walk below only interleaves the comment
+/// units back in at their own positions.
+///
+/// A zero-row state is valid — it traps on entry (docs/tmt/language.md
+/// (rules)) — and renders as an empty body, never as an error.
+fn render_block_state(
+    view: &StateView,
+    unit: &Unit,
+    indent: usize,
+    source: &str,
+    index: &TextLineIndex,
+) -> Rendered {
+    let pad = " ".repeat(indent);
+    let mut code = doc_run_text(
+        &doc_items(view.doc_run(), source, index),
+        indent,
+        trivia::blank_before_decl(view.syntax()),
+    );
+    code.push_str(&format!("{pad}{} {{", state_header_text(view)));
+    code.push_str(&open_trailing_text(&trivia::open_trailing(
+        view.syntax(),
+        index,
+    )));
+    code.push('\n');
+    let units = trivia::units(view.syntax(), index);
+    let prepared: Vec<Option<PreparedRule>> = units
+        .iter()
+        .map(|u| match &u.kind {
+            UnitKind::Comment(_) => None,
+            UnitKind::Node(n) => Some(prepare_rule(
+                &RuleView::cast(n.clone()).expect("a state's item node is a RULE"),
+                index,
+            )),
+        })
+        .collect();
+    // Every rule of the state, not only the on-grid ones: `grid_for`
+    // does that filtering itself.
+    let rules: Vec<&PreparedRule> = prepared.iter().flatten().collect();
+    let grid = grid_for(&rules);
+    let body: Vec<Rendered> = units
+        .iter()
+        .zip(&prepared)
+        .map(|(u, p)| match (p, &u.kind) {
+            (Some(p), _) => {
+                Rendered::new(u.blank_before, render_rule(p, &grid, indent + INDENT_UNIT))
+                    .with_trailing(u.trailing.as_ref())
+            }
+            (None, UnitKind::Comment(c)) => {
+                Rendered::new(u.blank_before, comment_line(c, indent + INDENT_UNIT))
+            }
+            (None, UnitKind::Node(_)) => unreachable!("every node unit was prepared above"),
+        })
+        .collect();
+    code.push_str(&flush(&body));
+    code.push_str(&pad);
+    code.push('}');
     Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
 }
 
@@ -1371,6 +1912,21 @@ mod tests {
         agrees(
             "alphabet ab { '_' }\nnamespace n {\n  routine r(tape t: ab) /* c */ { // open\n               }\n}\n",
         );
+        // The STATE twin, on printed BYTES. Task 4 fixed the rule that
+        // governs it but had no state surface, so it could pin the shape
+        // only on `trivia`'s unit stream — this is the first source that
+        // compares output. The second one puts the pre-brace comment on
+        // an EARLIER line than the `{`, which is where the suppression
+        // additionally moves the near edge backwards and C1 emits a
+        // blank line nobody wrote.
+        agrees(
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
+             entry state s /* x */ { // open\n    [*] -> stop;\n  }\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
+             entry // why\n  state s { // open\n    [*] -> stop;\n  }\n}\n",
+        );
     }
 
     /// **Hazard 2** — a comment written INSIDE a `;`-terminated
@@ -1520,6 +2076,262 @@ mod tests {
              ? machine doc\n\nmachine {\n  tape main: ab;\n  ? bind doc\n\n  \
              bind n::g(t = main, d = fin) as one;\n}\n",
         );
+    }
+
+    /// States in block form, and the rule table inside one.
+    ///
+    /// Every state below is deliberately NOT a single-line candidate —
+    /// each writes its rules on their own lines — because the
+    /// single-line run is a later surface and C1 would render such a
+    /// state inline. That includes the filler states a fixture only
+    /// carries to parse: `state fin { [*] -> stop; }`, the natural
+    /// shape, IS a candidate and must be written open.
+    ///
+    /// The sources, in order: the grid's column padding and the
+    /// collapse of a skipped column; a state whose body carries a brace
+    /// comment, an own-line comment, a rule trailing comment and a
+    /// blank line — none of which splits the table; the `debugger`
+    /// column, a `{expr}` substitution and `halt`; a documented state;
+    /// and a ZERO-ROW state, which is valid, traps on entry, and must
+    /// render as an empty body. The zero-row state is given a doc run
+    /// precisely to keep it out of the single-line path, where C1 would
+    /// print `state z { }`.
+    #[test]
+    fn block_states_and_the_grid_agree() {
+        let head = "alphabet ab { '_', 'a', 'b' }\nmachine {\n  tape main: ab;\n";
+        agrees(&format!(
+            "{head}  entry state s {{\n    ['b'] -> write ['a'] move [>] goto s;\n    \
+             ['a'] ->             move [>] goto s;\n    ['_'] -> stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{ // open\n    // own-line\n    ['a'] -> stop; // trailing\n\n\
+             \x20   ['_'] -> stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> debugger goto s;\n    \
+             ['a'] -> write [{{0 + 1}}] move [.] stop;\n    ['_'] -> halt;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  ? documented\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> goto s;\n  }}\n  ? empty\n  state z {{\n  }}\n}}\n"
+        ));
+        // A state's own CLOSE trailing. It is the same primitive
+        // MACHINE and REUSE carry, but a different call site, and every
+        // other source in this module reaches that primitive through
+        // one of those two — so without these the one wire in
+        // `render_block_state` that carries it has nothing on it. The
+        // second source adds the near-edge half: a `}`'s trailing
+        // comment ADVANCES the near edge (a `;`'s does not), so `state
+        // z` reads as adjacent even though the comment spans two lines.
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> stop;\n  }} // close\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> goto z;\n  }} /* one\ntwo */\n  \
+             state z {{\n    [*] -> stop;\n  }}\n}}\n"
+        ));
+    }
+
+    /// A state's own doc-run halves, which the sources above cannot
+    /// separate: `? documented` there is written tight against the
+    /// keyword with no blank line above it, so `unit.blank_before`
+    /// answering `false` unconditionally AND `blank_before_decl`
+    /// answering `false` unconditionally would both go unnoticed. One
+    /// source per half — a real leading blank, and a real
+    /// run→declaration gap.
+    #[test]
+    fn a_documented_state_agrees() {
+        let head = "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n";
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> goto z;\n  }}\n\n  ? doc\n  \
+             state z {{\n    [*] -> stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  ? doc\n\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"
+        ));
+    }
+
+    /// **Hazard 2, on a RULE.** A rule is `;`-terminated like a `tape`
+    /// or a `bind`, and it runs several interior drains of its own — the
+    /// pattern's, each glyph vector's, and, for a `call`, its binding
+    /// list's. Everything written past the LAST of them is still pending
+    /// when C1 reaches the `;`, so `take_trailing` relocates it:
+    ///
+    /// ```text
+    /// [*] -> stop /* c */;   prints   [*] -> stop; /* c */
+    /// ```
+    ///
+    /// Nothing in the shipped corpus or the adversarial set writes that
+    /// shape, so before these sources existed the green walk dropped
+    /// such a comment with the whole suite staying green.
+    ///
+    /// The sources walk the boundary outwards from the shortest rule to
+    /// the longest, because each shape moves the last drain:
+    ///
+    /// - no action at all → the boundary is the pattern's `]`, so a
+    ///   comment after it, after the `->`, or after a bare `debugger`
+    ///   is pending.
+    /// - a `write` but no `move` → the boundary is the write vector's
+    ///   `]`.
+    /// - a `call` → the boundary is the binding list's `)`, which lies
+    ///   INSIDE the TRANSITION node, and the pending comment can sit
+    ///   after that `)`, after the `then`, or after the continuation.
+    ///   This is the furthest a pending comment travels.
+    ///
+    /// The last two sources cover `take_trailing`'s two refusals, the
+    /// same pair `a_comment_inside_a_semicolon_declaration_agrees` pins
+    /// for a `tape`: a comment not on the `;`'s line, and an own-line
+    /// one — both fall through to the state's own drain and print as
+    /// items BELOW the rule.
+    #[test]
+    fn a_comment_inside_a_rule_agrees() {
+        let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
+        let call_head = "alphabet ab { '_', 'a' }\nnamespace n {\n  routine r(tape t: ab) {\n    \
+                         entry state q {\n      [*] -> stop;\n    }\n  }\n}\nmachine {\n  \
+                         tape main: ab;\n";
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> stop /* c */;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] /* c */ -> stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> /* c */ stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> debugger /* c */ stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> write ['a'] /* c */ stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{call_head}  entry state s {{\n    \
+             [*] -> call n::r(t = main) /* c */ then stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{call_head}  entry state s {{\n    \
+             [*] -> call n::r(t = main) then /* c */ stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{call_head}  entry state s {{\n    \
+             [*] -> call n::r(t = main) then stop /* c */;\n  }}\n}}\n"
+        ));
+        // Two of them: the first is the trailing, the rest drain as
+        // items — C1 inspects only the FIRST pending comment.
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> stop /* a */ /* b */;\n  }}\n}}\n"
+        ));
+        // Declined on the line test, and declined on `own_line`.
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> stop /* c */\n      ;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state s {{\n    [*] -> stop\n      /* c */;\n  }}\n}}\n"
+        ));
+    }
+
+    /// The rule surface's own value and layout branches, one source per
+    /// branch — the audit `the_copied_layout_rules_agree` runs for the
+    /// file skeleton and `the_world_value_and_layout_rules_agree` for a
+    /// world.
+    ///
+    /// - **`pattern_cell_text`'s three kinds and its `as` binding** — a
+    ///   wildcard, a literal, a range, and a bound cell.
+    /// - **`write_cell_text`'s three kinds** — `-` (keep), a literal,
+    ///   and a `{expr}` substitution. The substitution is written
+    ///   PARENTHESIZED and spaced (`{(v)*2 + 1}`): it reprints tight but
+    ///   keeps its own parens, which is what separates reprinting from
+    ///   the source tokens from re-deriving the expression from its
+    ///   parsed value. A second, bare `{v}` cell in the same vector pins
+    ///   that the span filter selects one cell rather than the whole
+    ///   vector.
+    /// - **`move_cell_text`'s three directions.**
+    /// - **`sym_text`'s number arm**, in a pattern range and in a write
+    ///   cell.
+    /// - **`transition_text`'s six arms** — explicit `goto`, the bare
+    ///   name sugar, `return`, `stop`, `halt`, and a `call`; plus
+    ///   `Stay`, the OMITTED transition, whose `;` abuts the last
+    ///   action.
+    /// - **`grid_for`'s zero-width collapse** — the third rule uses
+    ///   neither vector, so it pads to the pattern column and stops.
+    /// - **`paren_list` inside a transition** — the second source's
+    ///   `call` is long enough to break, which puts the closing `)` back
+    ///   at the transition's own column rather than at the rule's.
+    ///
+    /// `render_rule_off_grid` (and with it `glyph_vec_multiline` and
+    /// `col_after`) stays UNREACHABLE from this harness, deliberately
+    /// unfaked: the only thing that sends a rule off the grid is a LINE
+    /// or own-line comment inside one of its glyph vectors, and this
+    /// printer does not render a vector's interior comments yet — so any
+    /// source that reaches the branch also diverges by the dropped
+    /// comment. `breaks_the_grid` itself is asserted directly in
+    /// `super::trivia`'s own tests instead.
+    #[test]
+    fn the_rule_value_and_layout_rules_agree() {
+        agrees(
+            "alphabet nb { 00..05 }\nnamespace n {\n  routine r(tape t: nb, tape u: nb) {\n    \
+             entry state q {\n      [00 as v, *] -> write [{(v)*2 + 1}, {v}] move [<, .] return;\n\
+             \x20     [01..03, *] -> write [-, 00] move [>, >];\n      [*, *] -> q;\n    }\n  }\n\
+             }\nmachine {\n  tape main: nb;\n  tape aux: nb;\n  entry state s {\n    \
+             [*, *] -> debugger call n::r(t = main, u = aux) then fin;\n  }\n  state fin {\n    \
+             [*, *] -> halt;\n  }\n}\n",
+        );
+        agrees(
+            "alphabet nb { 00..05 }\nnamespace nnnnnnnnnnnnnn {\n  \
+             routine rrrrrrrrrrrrrrrrrrrr(tape ttttttttttt: nb, tape uuuuuuuuuuu: nb) {\n    \
+             entry state q {\n      [*, *] -> stop;\n    }\n  }\n}\nmachine {\n  \
+             tape main: nb;\n  tape aux: nb;\n  entry state s {\n    \
+             [*, *] -> call nnnnnnnnnnnnnn::rrrrrrrrrrrrrrrrrrrr(ttttttttttt = main, \
+             uuuuuuuuuuu = aux) then stop;\n  }\n}\n",
+        );
+    }
+
+    /// [`breaks_the_grid`], asserted directly. It cannot be reached
+    /// through `agrees`: the only thing that sends a rule off the grid
+    /// is a LINE or own-line comment inside one of its glyph vectors,
+    /// and such a comment is one this printer does not render yet — so
+    /// the source diverges whichever way the predicate answers, and a
+    /// differential case would prove nothing about it.
+    ///
+    /// The four sources are the predicate's whole surface, one boundary
+    /// each: a same-line BLOCK comment stays on the grid (the one
+    /// interior comment a glyph vector can hold inline); a LINE comment
+    /// does not, because nothing can follow `//` on its line; an
+    /// own-line BLOCK comment does not either, because inlining it would
+    /// flip its own `own_line` flag on the next parse; and a comment in
+    /// the vector's HEADER — `write /* c */ [` — counts as the vector's
+    /// too, which is the old parser's reading and not the bracket's.
+    #[test]
+    fn a_line_or_own_line_comment_in_a_glyph_vector_takes_the_rule_off_the_grid() {
+        let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ";
+        for (rule, expect) in [
+            ("[*] -> write [/* c */ 'a'] stop;", false),
+            ("[*] -> write [\n      // c\n      'a'\n    ] stop;", true),
+            (
+                "[*] -> write [\n      /* c */\n      'a'\n    ] stop;",
+                true,
+            ),
+            ("[*] -> write /* c */ ['a'] stop;", false),
+            ("[*] -> write\n      // c\n      ['a'] stop;", true),
+        ] {
+            let src = format!("{head}{rule}\n  }}\n}}\n");
+            let tokens = lex_with(&src, LexMode::WithComments).expect("lexes");
+            let green = parse_green_from_tokens(&src, &tokens).expect("parses");
+            let root = SyntaxNode::new_root(green);
+            let mut stack: Vec<SyntaxNode> = root.children().collect();
+            let mut rule_node = None;
+            while let Some(n) = stack.pop() {
+                if n.kind() == crate::syntax::TmcKind::Rule.into() {
+                    rule_node = Some(n);
+                    break;
+                }
+                stack.extend(n.children());
+            }
+            let rule_node = rule_node.expect("a RULE");
+            assert_eq!(breaks_the_grid(&rule_node), expect, "for:\n{rule}");
+        }
     }
 
     /// The whole adversarial set, over the surfaces this printer covers.

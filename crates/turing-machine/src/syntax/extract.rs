@@ -741,7 +741,7 @@ fn extract_tape(view: &TapeView, index: &TextLineIndex) -> TapeDecl {
 /// builds it as `self.peek().span()` at the point the semicolon is the
 /// upcoming token — which is a RULE node's last token, since the node
 /// closes right after that semicolon is bumped.
-fn extract_rule(view: &RuleView, index: &TextLineIndex) -> Rule {
+pub(crate) fn extract_rule(view: &RuleView, index: &TextLineIndex) -> Rule {
     let node = view.syntax();
     let pattern = reparse_pattern(&tokens_from(&view.pattern_tokens(), index));
     let debugger =
