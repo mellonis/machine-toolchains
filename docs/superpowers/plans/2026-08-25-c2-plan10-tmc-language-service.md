@@ -53,7 +53,7 @@ Two consequences, and they split this plan:
 
 The sibling's precedent is `crates/post-machine/src/lsp/mod.rs:458`, `fn function_extent(f: &FunctionView) -> TextRange`, which takes the first child that is not a DOC_RUN or trivia and re-bases the range's start on it.
 
-**The retro-wrap trap is wider here than on the sibling.** PM had ONE retro-wrapping kind at symbol level (FUNCTION). Plan 8 measured **four** for `.tmc` — NAMESPACE, ALPHABET, REUSE and MACHINE all carry their own doc run as a direct first child (WORLD has none; a run before the first body item retro-wraps INTO that item). A helper written for one kind and reused for three without checking each is the shape that shipped the `top_items` assert which panicked on a documented namespace.
+**The retro-wrap trap is wider here than on the sibling.** PM had ONE retro-wrapping kind at symbol level (FUNCTION). `.tmc` has **seven** — NAMESPACE, ALPHABET, REUSE and MACHINE at the top level, and STATE, GRAFT and BIND inside a world body. Plan 8's table named the first four and said WORLD has no run of its own *because a run before the first body item retro-wraps INTO that item*, which is precisely what makes the last three retro-wrap too; this plan's first draft read that as "four" and undercounted. Do not take a count from prose — measure it. A helper written for one kind and reused for three without checking each is the shape that shipped the `top_items` assert which panicked on a documented namespace.
 
 ---
 
@@ -211,10 +211,12 @@ git commit -m "polish(turing-machine): one parse per .tmc language-service reque
 ### Task 4: documentation
 
 **Files:**
-- Modify: `CLAUDE.md`, `crates/turing-machine/src/syntax/mod.rs`
+- Modify: `CLAUDE.md`, `crates/turing-machine/src/syntax/mod.rs`, `docs/lsp.md`
 
 **Interfaces:**
 - Consumes: Tasks 1-3. No code changes.
+
+`docs/lsp.md`'s feature matrix has a `.tmc` row reading "a successful parse (CST only)" for document symbols. The `.pmc` row already says "(the tree only)" from the sibling's own migration. Bring the `.tmc` row across, and sweep the page for any other row or sentence this arc has falsified — `docs/lsp.md` is a DURABLE reference, so a stale claim there is published, not internal.
 
 - [ ] **Step 1: Record what is true now**
 
