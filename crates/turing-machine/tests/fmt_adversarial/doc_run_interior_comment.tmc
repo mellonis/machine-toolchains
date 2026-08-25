@@ -1,0 +1,17 @@
+? an ordinary comment written between two doc lines
+// belongs to the run, and the line below measures its gap against IT
+? so no blank line appears here
+alphabet ab { '_' }
+
+? a comment written below the run's last line is still one of its items
+/* even though the run node ends at the `?` line above it */
+export alphabet cd { '0'..'9' }
+
+? and the same on a namespace, where a pre-brace comment is
+/* a direct child token — the run's, not the body's */
+namespace n {
+  ? while one written after the KEYWORD does belong to the body
+  namespace /* this one */ m {
+    alphabet ef { '_' }
+  }
+}

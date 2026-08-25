@@ -60,8 +60,8 @@ use super::views::{
     AlphabetView, BindView, DocRunView, GraftView, MachineView, ReuseKind, ReuseView, RootView,
     RuleView, StateView, TapeView, TopView, UsePathView, WorldView,
 };
-use crate::cst::DocRunItem;
-use crate::lexer::{GLYPH_ESCAPES, Token, TokenKind, normalize_doc_payload};
+use crate::cst::{DocRunItem, DocRunKind};
+use crate::lexer::{Comment, CommentKind, GLYPH_ESCAPES, Token, TokenKind, normalize_doc_payload};
 use crate::parser::{
     Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, Program, Routine, Rule, Signature,
     State, TapeDecl, Transition, reduce_doc_run, reparse_alphabet_elems, reparse_binding_arg,
@@ -443,15 +443,171 @@ fn preceding_trivia(node: &SyntaxNode) -> (Option<SyntaxToken>, Vec<SyntaxToken>
     (significant, comments)
 }
 
+/// One green comment token → the [`Comment`] the lexer would have built
+/// for the same source. Not a second decoder: a comment carries no
+/// decoded payload — [`Comment::text`] is documented as the verbatim
+/// source text, delimiters included, which is exactly the token's own
+/// text, and the kind is the delimiter pair. Only `own_line` is derived,
+/// because it is the one field that is contextual rather than a property
+/// of the token — which is why [`token_from_syntax`], whose arms map a
+/// kind to a payload and nothing else, has no arm for a comment at all
+/// and would hit its `unreachable!()` on one.
+///
+/// Lives here rather than in `crate::fmt`, even though the formatter is
+/// its heaviest reader: a doc run's own items carry `Comment` VALUES
+/// ([`DocRunItem`]'s `DocRunKind::Comment`), so extraction needs the
+/// same conversion, and `syntax` must not depend on `fmt`. Pinned
+/// against `lex_with` itself by `crate::fmt::trivia`'s
+/// `comment_values_match_the_lexers_own`.
+pub(crate) fn comment_from(t: &SyntaxToken) -> Comment {
+    Comment {
+        text: t.text().to_string(),
+        kind: if t.kind() == TmcKind::LineComment.into() {
+            CommentKind::Line
+        } else {
+            CommentKind::Block
+        },
+        own_line: starts_its_line(t),
+    }
+}
+
+/// True iff nothing but whitespace precedes `t` on its physical line —
+/// the lexer's `Cursor::at_line_start` read through the tree instead of
+/// through a second scan of the source.
+///
+/// A node begins at its own first significant token, so a comment is
+/// never a node's first child and its predecessor is always a sibling.
+/// Two things make the line start: a whitespace run holding a newline,
+/// and the start of the file — which includes a whitespace run that has
+/// no newline but IS the file's first token, the leading-indent case a
+/// newline test alone would miss.
+fn starts_its_line(t: &SyntaxToken) -> bool {
+    match t.prev_sibling_or_token() {
+        None => true,
+        Some(SyntaxElement::Token(p)) if p.kind() == TmcKind::Whitespace.into() => {
+            p.text().contains('\n') || p.prev_sibling_or_token().is_none()
+        }
+        _ => false,
+    }
+}
+
+/// Every token `Parser::doc_run` folds into one run, in source order:
+/// the run node's own `?`/`!` lines and interleaved comments, plus the
+/// comments written between the run's last line and the declaration's
+/// header.
+///
+/// The second half is not in the node. `doc_run`'s item loop drains
+/// pending comments AFTER each line it consumes, so a comment written
+/// below the run's last line — with only the declaring keyword after it
+/// — is still one of the run's items; in the tree that comment sits
+/// OUTSIDE the DOC_RUN node, as a direct sibling token of the
+/// declaration's own stream, because the run node closes on its last
+/// `?`/`!` token. Measured, for `"? doc\n/* c */\nalphabet b { '0' }\n"`:
+///
+/// ```text
+/// ALPHABET@0..32
+///   DOC_RUN@0..5
+///     DOC_LINE@0..5 "? doc"
+///   WHITESPACE@5..6 "\n"
+///   BLOCK_COMMENT@6..13 "/* c */"     <- an item of the RUN, not of ALPHABET
+///   WHITESPACE@13..14 "\n"
+///   IDENT@14..22 "alphabet"
+/// ```
+///
+/// The forward walk stops at the first element that is not trivia, which
+/// is always that header token: a declaration's own first significant
+/// token follows its bound run with nothing but trivia in between.
+fn doc_run_tokens(view: &DocRunView) -> Vec<SyntaxToken> {
+    let mut out: Vec<SyntaxToken> = view
+        .syntax()
+        .descendant_tokens()
+        .filter(|t| t.kind() != TmcKind::Whitespace.into())
+        .collect();
+    let mut cur = view.syntax().next_sibling_or_token();
+    while let Some(SyntaxElement::Token(t)) = cur {
+        if t.kind() == TmcKind::Whitespace.into() {
+            cur = t.next_sibling_or_token();
+        } else if is_trivia(t.kind()) {
+            out.push(t.clone());
+            cur = t.next_sibling_or_token();
+        } else {
+            break;
+        }
+    }
+    out
+}
+
 /// A bound doc run's raw items, reparsed through the parser's own
 /// `doc_run` production. Separate from [`extract_doc`] because the raw
-/// items are the only place [`prev_end_line`] is observable — the
-/// reduction below drops `blank_before` entirely.
-fn extract_doc_items(view: &DocRunView, source: &str, index: &TextLineIndex) -> Vec<DocRunItem> {
-    reparse_doc_items(
-        &sig_tokens(view.syntax(), index),
-        prev_end_line(source, index, view.syntax()),
-    )
+/// items are the only place [`prev_end_line`] — and every comment item —
+/// is observable: the reduction below drops `blank_before` entirely and
+/// treats a comment item as inert.
+///
+/// # Why the run is reparsed in segments
+///
+/// [`reparse_doc_items`] runs `Parser::doc_run` over a comment-free
+/// token stream, which is what [`sig_tokens`] produces — so a run alone
+/// cannot see its own comments, and `doc_run`'s comment arm never fires.
+/// Both halves of that matter to `fmt`, which prints these items
+/// verbatim (docs/tmt/fmt.md (comments)): the comment is DROPPED, and
+/// the item after it then measures its gap against the previous `?`/`!`
+/// LINE rather than against the comment, inventing a blank line nobody
+/// wrote. Measured, for `"? doc\n// c\n? more\nalphabet b { '0' }\n"`:
+/// three items and no blanks become two items with `? more` blank-
+/// separated.
+///
+/// So the run is split at its comments and each `?`/`!` segment goes
+/// through the production as before, with `prev_end_line` threaded
+/// across the joins exactly as `doc_run`'s own loop threads its local.
+/// The comment arm below is the one piece of that loop reproduced here,
+/// because there is no comment-carrying entry point into the production
+/// to hand these tokens to. Re-running the production per segment loses
+/// no check that matters: `DocLineOrder`, the duplicate- and the
+/// unknown-attribute checks all passed once already, over these exact
+/// tokens, during the parse that produced the tree.
+pub(crate) fn extract_doc_items(
+    view: &DocRunView,
+    source: &str,
+    index: &TextLineIndex,
+) -> Vec<DocRunItem> {
+    /// One pending `?`/`!` segment through the production, leaving
+    /// `prev` on its last line — where `doc_run` leaves its own local
+    /// after the matching iteration.
+    fn flush_lines(
+        lines: &mut Vec<SyntaxToken>,
+        prev: &mut u32,
+        out: &mut Vec<DocRunItem>,
+        index: &TextLineIndex,
+    ) {
+        let Some(last) = lines.last() else { return };
+        let last_line = index.line_col(last.text_range().start).0;
+        out.extend(reparse_doc_items(&tokens_from(lines, index), *prev));
+        *prev = last_line;
+        lines.clear();
+    }
+
+    let mut prev = prev_end_line(source, index, view.syntax());
+    let mut out: Vec<DocRunItem> = Vec::new();
+    let mut lines: Vec<SyntaxToken> = Vec::new();
+    for t in doc_run_tokens(view) {
+        if !is_trivia(t.kind()) {
+            lines.push(t);
+            continue;
+        }
+        flush_lines(&mut lines, &mut prev, &mut out, index);
+        let line = index.line_col(t.text_range().start).0;
+        let comment = comment_from(&t);
+        // `Parser::doc_run`'s own comment arm: a multi-line block
+        // comment leaves the near edge on the line it ENDS on.
+        let blank_before = line > prev + 1;
+        prev = line + comment.text.matches('\n').count() as u32;
+        out.push(DocRunItem {
+            blank_before,
+            kind: DocRunKind::Comment(comment),
+        });
+    }
+    flush_lines(&mut lines, &mut prev, &mut out, index);
+    out
 }
 
 /// A declaration's reduced [`Doc`] — `None` exactly when no run was
@@ -470,7 +626,7 @@ fn extract_doc(run: Option<DocRunView>, source: &str, index: &TextLineIndex) -> 
 /// alias deliberately excluded ([`Import`]'s own doc). `ns` is the
 /// caller's accumulated namespace path — an import's own path never
 /// contributes to it, only `namespace` blocks do.
-fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> Import {
+pub(crate) fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> Import {
     let segments = view.segments();
     let first = segments
         .first()
@@ -496,7 +652,7 @@ fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> I
 /// single token's position: `line` is the NAME's line (not the
 /// header's), while `col` is the HEADER's column (`export` when
 /// written, else `alphabet`).
-fn extract_alphabet(
+pub(crate) fn extract_alphabet(
     view: &AlphabetView,
     ns: &[String],
     source: &str,
@@ -1422,16 +1578,23 @@ mod tests {
     }
 
     /// A comment interleaved inside a `DOC_RUN` (`(Doc, Comment,
-    /// Attention)` on the C1 side) cannot survive retokenization —
-    /// `sig_tokens` drops it as trivia, so the green side's raw
-    /// `Vec<DocRunItem>` is strictly SHORTER than C1's. What a caller
-    /// actually needs is `reduce_doc_run` equality, not raw item
-    /// equality — this proves that holds anyway, because
+    /// Attention)` on the C1 side) cannot survive one pass of
+    /// retokenization — `sig_tokens` drops it as trivia, so the SHIM's
+    /// raw `Vec<DocRunItem>` is strictly SHORTER than C1's. This is a
+    /// test of the shim alone, called directly and deliberately:
+    /// [`extract_doc_items`] no longer hands it a whole comment-bearing
+    /// run, precisely because `fmt` needs those comments back, and
+    /// segments the run around them instead.
+    ///
+    /// What a caller reading only a reduced [`Doc`] needs is
+    /// `reduce_doc_run` equality, not raw item equality — this proves
+    /// that holds even for the lossy one-pass form, because
     /// `DocRunKind::Comment` is fully inert in `.tmc`'s own
     /// `reduce_doc_run` regardless of position (`DocRunKind::Comment(_)
     /// => {}` — no paragraph split, no attention/`deprecated` effect):
-    /// dropping the comment can never change the reduced [`Doc`].
-    /// Mirrors the PM sibling's own
+    /// dropping the comment can never change the reduced [`Doc`]. That
+    /// inertness is also what makes the segmented walk above safe to add
+    /// to a path the compiler front runs. Mirrors the PM sibling's own
     /// `reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave`.
     #[test]
     fn reparsed_doc_items_reduce_to_the_same_doc_when_comments_interleave() {
@@ -2186,6 +2349,72 @@ mod tests {
         check("alphabet a { '0' }\n\n? doc\nalphabet b { '0' }\n", true);
     }
 
+    /// A comment written INSIDE a doc run is one of the run's items, and
+    /// [`extract_doc_items`] must produce it where `Parser::doc_run`
+    /// does — the whole item, `blank_before` included, since the gap of
+    /// every LATER item is measured against it.
+    ///
+    /// Two placements, and the tree puts them in different places: one
+    /// BETWEEN two `?` lines sits inside the DOC_RUN node, one written
+    /// below the run's last line sits outside it, in the declaration's
+    /// own stream ahead of the header. A fix that reads only the node
+    /// handles the first and silently drops the second, so both are
+    /// here, on ALPHABET and on NAMESPACE alike.
+    ///
+    /// `agrees` runs on each because the other half of the claim is that
+    /// the COMPILER path does not move: `reduce_doc_run` folds over
+    /// `kind` and treats a comment item as inert, so the extracted
+    /// `Program` must be identical to `lower_cst`'s with these items
+    /// added — including the reduced [`Doc`] each declaration carries.
+    #[test]
+    fn extracted_doc_items_carry_the_comments_written_inside_the_run() {
+        #[track_caller]
+        fn check(src: &str, c1: &[DocRunItem], run: Option<DocRunView>, source: &str) {
+            assert!(
+                c1.iter().any(|i| matches!(i.kind, DocRunKind::Comment(_))),
+                "fixture must actually write a comment inside the run: {src}"
+            );
+            let index = TextLineIndex::new(source);
+            let run = run.expect("the declaration carries a doc run");
+            assert_eq!(extract_doc_items(&run, source, &index), c1, "for:\n{src}");
+            agrees(src);
+        }
+
+        for src in [
+            "? doc\n// c\n? more\nalphabet b { '0' }\n",
+            "? doc\n/* c */\nalphabet b { '0' }\n",
+            "? doc\n/* multi\nline */\n? more\nalphabet b { '0' }\n",
+            "? doc\n\n/* c */\nalphabet b { '0' }\n",
+        ] {
+            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+            let TopKind::Alphabet(alphabet) = &cst.items[0].kind else {
+                panic!("expected an alphabet");
+            };
+            let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
+                .expect("root is ROOT");
+            let TopView::Alphabet(view) = root.items().next().expect("one item") else {
+                panic!("expected an ALPHABET");
+            };
+            check(src, &alphabet.doc_run, view.doc_run(), src);
+        }
+
+        for src in [
+            "? doc\n// c\n? more\nnamespace n {\n  alphabet b { '0' }\n}\n",
+            "? doc\n/* c */\nnamespace n {\n  alphabet b { '0' }\n}\n",
+        ] {
+            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
+            let TopKind::Namespace(ns) = &cst.items[0].kind else {
+                panic!("expected a namespace");
+            };
+            let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
+                .expect("root is ROOT");
+            let TopView::Namespace(view) = root.items().next().expect("one item") else {
+                panic!("expected a NAMESPACE");
+            };
+            check(src, &ns.doc_run, view.doc_run(), src);
+        }
+    }
+
     /// A MULTI-LINE block comment riding a `;` is claimed by C1's
     /// `Parser::take_trailing`, which leaves `prev_end_line` at the `;`.
     /// The green walk must do the same, because the field it feeds — the
@@ -2198,18 +2427,16 @@ mod tests {
     /// chained pair after the `;`, a comment ahead of the `;`, and a
     /// genuine blank line — the two paths agree item for item.
     ///
-    /// A divergence remains INSIDE the run, and it is not about the seed:
-    /// [`sig_tokens`] drops an interleaved comment as trivia, so
-    /// [`extract_doc_items`] returns a shorter run than C1's AND the item
-    /// after the comment measures its own `blank_before` against the
-    /// previous DOC LINE instead of against the comment. For
-    /// `"? doc\n// c\n? more\n…"` C1 reads three items and no blanks
-    /// where this reads two and a blank, while the formatter prints that
-    /// comment in place — measured, and the reason a doc-run renderer
-    /// built on these items cannot yet be trusted with one.
-    /// `reparsed_doc_items_reduce_to_the_same_doc_when_comments_interleave`
-    /// above pins the half that IS safe: the reduced [`Doc`] is unaffected,
-    /// because `reduce_doc_run` treats a comment item as fully inert.
+    /// The seed is no longer the only thing pinned. A divergence INSIDE
+    /// the run — [`sig_tokens`] drops an interleaved comment as trivia, so
+    /// the run came back SHORTER than C1's and the item after the comment
+    /// measured its gap against the previous DOC LINE, inventing a blank
+    /// line nobody wrote — was closed by segmenting the reparse around the
+    /// run's own comments (see [`extract_doc_items`]). It was invisible to
+    /// every `Program`-level oracle, because `reduce_doc_run` treats a
+    /// comment item as fully inert; `a_comment_inside_a_doc_run_agrees` in
+    /// `crate::fmt::print` is what watches it now, from the one consumer
+    /// that reads these items verbatim.
     #[test]
     fn a_block_comment_riding_a_semicolon_agrees_on_blank_before() {
         let src = "use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n";

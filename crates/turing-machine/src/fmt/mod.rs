@@ -1678,6 +1678,7 @@ fn render_bind(b: &BindCst, blank_before: bool, indent: usize) -> Rendered {
         .with_trailing(b.trailing.as_ref())
 }
 
+mod print;
 mod trivia;
 
 #[cfg(test)]

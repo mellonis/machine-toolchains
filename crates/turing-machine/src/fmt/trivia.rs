@@ -49,8 +49,13 @@
 
 use mtc_core::syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex};
 
-use crate::lexer::{Comment, CommentKind};
+use crate::lexer::Comment;
 use crate::syntax::TmcKind;
+// One converter, shared: a doc run's own items carry `Comment` VALUES,
+// so `syntax::extract` needs the same green-token → `Comment` mapping
+// this module does, and `syntax` cannot depend on `fmt`. Pinned against
+// the lexer here, by `tests::comment_values_match_the_lexers_own`.
+use crate::syntax::extract::comment_from;
 
 /// One item of a container's stream: a declaration or a standalone
 /// comment, the blank line written before it, and the comment riding
@@ -88,47 +93,6 @@ fn start_line(index: &TextLineIndex, t: &SyntaxToken) -> u32 {
 
 fn end_line(index: &TextLineIndex, t: &SyntaxToken) -> u32 {
     index.line_col(t.text_range().end).0
-}
-
-/// One green comment token → the [`Comment`] the lexer would have built
-/// for the same source. Not a second decoder: a comment has no decoded
-/// payload — `Comment::text` is documented as the verbatim source text,
-/// delimiters included, which is exactly the token's own text, and the
-/// kind is the delimiter pair. Only `own_line` is derived, because it is
-/// the one field that is contextual rather than a property of the token
-/// (and therefore the one `syntax::extract`'s converter has no arm for).
-/// Pinned against `lex_with` itself by
-/// `tests::comment_values_match_the_lexers_own`.
-fn comment_from(t: &SyntaxToken) -> Comment {
-    Comment {
-        text: t.text().to_string(),
-        kind: if t.kind() == TmcKind::LineComment.into() {
-            CommentKind::Line
-        } else {
-            CommentKind::Block
-        },
-        own_line: starts_its_line(t),
-    }
-}
-
-/// True iff nothing but whitespace precedes `t` on its physical line —
-/// the lexer's `Cursor::at_line_start` read through the tree instead of
-/// through a second scan of the source.
-///
-/// A node begins at its own first significant token, so a comment is
-/// never a node's first child and its predecessor is always a sibling.
-/// Two things make the line start: a whitespace run holding a newline,
-/// and the start of the file — which includes a whitespace run that has
-/// no newline but IS the file's first token, the leading-indent case a
-/// newline test alone would miss.
-fn starts_its_line(t: &SyntaxToken) -> bool {
-    match t.prev_sibling_or_token() {
-        None => true,
-        Some(SyntaxElement::Token(p)) if is_whitespace(p.kind()) => {
-            p.text().contains('\n') || p.prev_sibling_or_token().is_none()
-        }
-        _ => false,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -222,14 +186,27 @@ pub(crate) fn units(container: &SyntaxNode, index: &TextLineIndex) -> Vec<Unit> 
     // there, so the old parser's body drain took it and it printed as
     // the body's first item.
     //
-    // One slot in this same region IS held, and this walk does not tell
-    // the two apart: a comment between a bound DOC_RUN's last line and
-    // the keyword belongs to the RUN as `Parser::doc_run` reads it, and
-    // prints above the declaration rather than inside the body. It is a
-    // direct child token here for NAMESPACE and STATE, so this walk
-    // claims it; closing that belongs with doc-run rendering, not with
-    // the container walk.
-    for e in &elems[..head_end] {
+    // The scan starts at the declaring keyword, not at the node, because
+    // one slot in this same region IS held: a comment between a bound
+    // DOC_RUN's last line and that keyword belongs to the RUN as
+    // `Parser::doc_run` reads it, and prints above the declaration
+    // rather than inside the body (`crate::syntax::extract`'s
+    // `doc_run_tokens`). It is a direct child token here for NAMESPACE
+    // and STATE, so a scan from the node's own start would claim it a
+    // second time. Nothing else can precede the keyword — a node begins
+    // at its first significant token, so trivia written above an
+    // UNDOCUMENTED declaration is flushed to the container instead —
+    // which makes "from the keyword" exactly "everything the body drain
+    // could see". The position is the same one `blank_before_decl`
+    // measures its gap at, so the two agree by construction.
+    let head_start = elems[..head_end]
+        .iter()
+        .position(|e| match e {
+            SyntaxElement::Token(t) => !is_whitespace(t.kind()) && !is_comment(t.kind()),
+            SyntaxElement::Node(_) => false,
+        })
+        .unwrap_or(head_end);
+    for e in &elems[head_start..head_end] {
         if let SyntaxElement::Token(t) = e
             && is_comment(t.kind())
         {
