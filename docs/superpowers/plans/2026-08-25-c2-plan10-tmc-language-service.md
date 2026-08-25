@@ -176,6 +176,17 @@ Grep for every `.cst` read across `crates/turing-machine/src`. Report the list; 
 
 `analyze_staged` stops calling `parse_cst` entirely. The `.ok()` and its `debug_assert!` go with it.
 
+**Deleting `parse_cst` does NOT by itself give one parse per request** — task 1
+found this and it would otherwise be discovered here. `document_symbols` now
+reparses the green tree per request, because nothing retains it. Getting to one
+parse means retaining the tree: add `green: Option<Rc<GreenNode>>` to
+`TmcStagedAnalysis` and carry it onto `DocState`, the way the sibling does at
+`crates/post-machine/src/compiler.rs:483`. Read that first.
+
+So this task has two halves — remove the CST, and retain the green tree — and the
+exit criterion is about the second. Measure the parse count before and after and
+say how you measured it.
+
 - [ ] **Step 3: Delete the stale doc comment carried from plan 9**
 
 `DocState.cst`'s doc carried the same stale claim `TmcStagedAnalysis.cst` had — "`None` when lexing or parsing failed" — from before `program` moved onto the green tree. The field goes away, so the sentence goes with it; confirm no other comment in `lsp/` still describes a CST-backed tier.
