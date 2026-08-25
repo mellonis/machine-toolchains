@@ -35,7 +35,7 @@
 | `lsp/mod.rs:743` (`document_symbols`) | walks top items → `namespace_symbol` / `reuse_symbol` / `machine_symbol`, each needing name, `span`, `name_span`, and nested items |
 | `lsp/quickfix.rs:29` (`state_stub` → `enclosing_body`) | finds the innermost world block containing a position, and its closing brace |
 
-`lsp/mod.rs:655` is the assignment that feeds `DocState.cst`. That is the whole surface. Everything else in `lsp/` — `overlay.rs` (1,828 lines), `navigate.rs`, `complete.rs`, `context.rs`, `roster.rs` — already runs off `Program`/`Resolved` and is untouched by this plan.
+`lsp/mod.rs:655` is the assignment that feeds `DocState.cst`. That is the whole surface. Everything else in `lsp/` — `overlay.rs` (1,828 lines), `navigate.rs`, `complete.rs`, `roster.rs` — already runs off `Program`/`Resolved`. (`context.rs` and `tokens.rs` were listed here as untouched in this plan's first draft; both were in fact changed, by the significant-token filter moving and by the retained tree being threaded through.)
 
 **The decisive measurement, run before writing.** On `"alphabet ab { '_' }\n\n? doc\nmachine {\n …\n}\n"`:
 
@@ -242,7 +242,7 @@ git commit -m "docs: the .tmc language service runs the green tree"
 ## Exit criteria
 
 - `document_symbols` and the state-stub quickfix both read the green tree; neither imports `crate::cst::`.
-- Every symbol span starts at its declaration's keyword, not at a bound doc run, proven by a fixture at each of the four retro-wrapping kinds.
+- Every symbol span starts at its declaration's keyword, not at a bound doc run, proven by a fixture at each retro-wrapping kind — seven, measured, not the four this plan's first draft claimed.
 - `TmcStagedAnalysis` and `DocState` have no `cst` field; `analyze_staged` parses once.
 - `fmt.rs` is the only production `parse_cst` caller left, and it is untouched by this plan.
 - The state-stub fix's inserted text and indent are asserted by value, including a world nested in a namespace.
