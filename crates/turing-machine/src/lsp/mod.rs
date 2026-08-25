@@ -37,13 +37,18 @@ use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
+use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxNode, TextLineIndex, TextRange};
 
 use crate::compiler::{CompileError, Resolved, analyze_staged};
 use crate::config;
-use crate::cst::{Cst, MachineCst, NamespaceCst, ReuseCst, TopItem, TopKind, WorldItem, WorldKind};
+use crate::cst::Cst;
 use crate::lexer::Token;
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 use crate::parser::{Doc, Program, significant_tokens};
+use crate::syntax::{
+    BindView, GraftView, MachineView, NamespaceView, ReuseView, RootView, StateView, TmcKind,
+    TopView,
+};
 
 mod complete;
 mod context;
@@ -439,90 +444,165 @@ pub(crate) fn render_doc(doc: &Doc) -> Option<String> {
     Some(sections.join("\n\n"))
 }
 
-/// Walks one CST item list — the file level or a namespace block's own
-/// items — into document symbols. Comments and imports are skipped; a
-/// reopened namespace stays a separate sibling because the CST already
-/// keeps it apart.
-fn cst_symbols(items: &[TopItem]) -> Vec<SymbolNode> {
+/// The first child of `node` — token or node — that is neither its own
+/// bound doc run nor trivia (docs/core.md (syntax trees)): the keyword a
+/// documented declaration's C1 extent used to open at, before the green
+/// tree started retro-wrapping the doc run in front of it. Shared by
+/// `symbol_extent`, which reads only this element's start, and
+/// `machine_symbol`, which reads the whole element because it IS the
+/// answer to "where is this machine's name".
+fn first_significant_child(node: &SyntaxNode) -> Option<SyntaxElement> {
+    node.children_with_tokens().find(|e| {
+        e.kind() != TmcKind::DocRun.into()
+            && e.kind() != TmcKind::Whitespace.into()
+            && e.kind() != TmcKind::LineComment.into()
+            && e.kind() != TmcKind::BlockComment.into()
+    })
+}
+
+/// A declaration's C2 extent — its keyword (or, when one precedes the
+/// keyword, its leading modifier — `export`/`entry`) through the node's
+/// own end, EXCLUDING a bound doc run. `.tmc` retro-wraps a doc run as
+/// the declaration's own first child at seven symbol-level kinds — the
+/// file/namespace-level NAMESPACE, ALPHABET, REUSE, MACHINE, and the
+/// world-level STATE, GRAFT, BIND
+/// (`crates/turing-machine/src/syntax/mod.rs`'s module doc) — so
+/// `syntax().text_range()` on any of them starts at the `?`/`!` line
+/// rather than the keyword; taking the node's range whole would widen
+/// every doc-commented declaration's outline entry into its own leading
+/// comment. Ports the sibling's `function_extent`
+/// (`crates/post-machine/src/lsp/mod.rs`), generalized from the one kind
+/// PM retro-wraps at symbol level to `.tmc`'s seven — a helper trusted
+/// across kinds without checking each is exactly how a wrong assumption
+/// ships here (the module doc above names all seven explicitly for the
+/// same reason). `tree_symbols` and `world_symbols` are pinned
+/// separately, one fixture per kind, at both levels — see
+/// `a_documented_declarations_symbol_starts_at_its_keyword` and
+/// `a_documented_world_members_symbol_starts_at_its_keyword`
+/// (`crates/turing-machine/src/lsp/tests.rs`).
+fn symbol_extent(node: &SyntaxNode) -> TextRange {
+    let full = node.text_range();
+    let start = first_significant_child(node).map_or(full.start, |e| e.text_range().start);
+    TextRange::new(start, full.end)
+}
+
+/// Walks one item list — the file level or a namespace's own `items` —
+/// into document symbols. `use` declarations are skipped. A reopened
+/// namespace (`.tmc` permits it: the duplicate-binding check
+/// `crate::compiler::check_duplicate_bindings` only walks `Program`'s
+/// imports, never namespace occurrences) stays a separate sibling: each
+/// source occurrence is its own NAMESPACE node, and this walk builds one
+/// `SymbolNode` per node it visits with no merge step anywhere in it —
+/// unlike `Program`, which has no namespace-block type to merge in the
+/// first place, only a flat `ns: Vec<String>` path field per
+/// declaration (`crate::parser::Program`).
+fn tree_symbols(items: impl Iterator<Item = TopView>, index: &TextLineIndex) -> Vec<SymbolNode> {
     items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            TopKind::Comment(_) | TopKind::Import(_) => None,
-            TopKind::Alphabet(a) => Some(SymbolNode {
-                name: a.name.clone(),
+        .filter_map(|item| match item {
+            TopView::Use(_) => None,
+            TopView::Alphabet(a) => Some(SymbolNode {
+                name: a.name_token().text().to_string(),
                 kind: SymbolNodeKind::Function,
-                span: a.span,
-                selection_span: a.name_span,
+                span: index.span(symbol_extent(a.syntax())),
+                selection_span: index.span(a.name_token().text_range()),
                 children: Vec::new(),
             }),
-            TopKind::Namespace(ns) => Some(namespace_symbol(ns)),
-            TopKind::Reuse(r) => Some(reuse_symbol(r)),
-            TopKind::Machine(m) => Some(machine_symbol(m)),
+            TopView::Namespace(ns) => Some(namespace_symbol(&ns, index)),
+            TopView::Reuse(r) => Some(reuse_symbol(&r, index)),
+            TopView::Machine(m) => Some(machine_symbol(&m, index)),
         })
         .collect()
 }
 
-fn namespace_symbol(ns: &NamespaceCst) -> SymbolNode {
+fn namespace_symbol(ns: &NamespaceView, index: &TextLineIndex) -> SymbolNode {
     SymbolNode {
-        name: ns.name.clone(),
+        name: ns.name(),
         kind: SymbolNodeKind::Namespace,
-        span: ns.span,
-        selection_span: ns.name_span,
-        children: cst_symbols(&ns.items),
+        span: index.span(symbol_extent(ns.syntax())),
+        selection_span: index.span(ns.name_token().text_range()),
+        children: tree_symbols(ns.items(), index),
     }
 }
 
-fn reuse_symbol(r: &ReuseCst) -> SymbolNode {
+fn reuse_symbol(r: &ReuseView, index: &TextLineIndex) -> SymbolNode {
     SymbolNode {
-        name: r.name.clone(),
+        name: r.name_token().text().to_string(),
         kind: SymbolNodeKind::Function,
-        span: r.span,
-        selection_span: r.name_span,
-        children: world_symbols(&r.items),
+        span: index.span(symbol_extent(r.syntax())),
+        selection_span: index.span(r.name_token().text_range()),
+        children: r
+            .world()
+            .map(|w| world_symbols(w.syntax(), index))
+            .unwrap_or_default(),
     }
 }
 
-fn machine_symbol(m: &MachineCst) -> SymbolNode {
-    // The machine block has no name token of its own, so its selection
-    // span is the keyword's own position (a one-character point the
-    // client can still reveal).
+fn machine_symbol(m: &MachineView, index: &TextLineIndex) -> SymbolNode {
+    let node = m.syntax();
+    let extent = symbol_extent(node);
+    // A machine block has no name token of its own — unlike every other
+    // kind `tree_symbols`/`world_symbols` name — so this selection span
+    // is SYNTHESIZED rather than read off one: it is the `machine`
+    // keyword's own token, which is exactly `first_significant_child`'s
+    // answer here (the same element `symbol_extent`'s start above
+    // re-bases onto), never a name the tree could supply directly.
+    let selection = first_significant_child(node)
+        .map_or(TextRange::new(extent.start, extent.start), |e| {
+            e.text_range()
+        });
     SymbolNode {
         name: "machine".to_string(),
         kind: SymbolNodeKind::Function,
-        span: m.span,
-        selection_span: Span::point(m.line, m.col),
-        children: world_symbols(&m.items),
+        span: index.span(extent),
+        selection_span: index.span(selection),
+        children: m
+            .world()
+            .map(|w| world_symbols(w.syntax(), index))
+            .unwrap_or_default(),
     }
 }
 
-/// A world body's addressable children: states, graft instances, binds.
-/// Tape declarations and comments are not symbols.
-fn world_symbols(items: &[WorldItem]) -> Vec<SymbolNode> {
-    items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            WorldKind::Comment(_) | WorldKind::Tape(_) => None,
-            WorldKind::State(s) => Some(SymbolNode {
-                name: s.name.clone(),
-                kind: SymbolNodeKind::Function,
-                span: s.span,
-                selection_span: s.name_span,
-                children: Vec::new(),
-            }),
-            WorldKind::Graft(g) => g.as_name.as_ref().map(|(name, name_span)| SymbolNode {
-                name: name.clone(),
-                kind: SymbolNodeKind::Function,
-                span: g.span,
-                selection_span: *name_span,
-                children: Vec::new(),
-            }),
-            WorldKind::Bind(b) => Some(SymbolNode {
-                name: b.as_name.0.clone(),
-                kind: SymbolNodeKind::Function,
-                span: b.span,
-                selection_span: b.as_name.1,
-                children: Vec::new(),
-            }),
+/// A world body's addressable children, in document order: states,
+/// named graft instances, and binds. A WORLD's own direct children are a
+/// known-mixed set that also includes TAPE
+/// (`crates/turing-machine/src/syntax/mod.rs`'s module doc) — an
+/// expected kind that is simply never a symbol, not a wrong-shape tree —
+/// and a comment is trivia, never a node at all, so both are excluded
+/// by construction rather than by an explicit filter.
+fn world_symbols(world: &SyntaxNode, index: &TextLineIndex) -> Vec<SymbolNode> {
+    world
+        .children()
+        .filter_map(|child| {
+            if let Some(s) = StateView::cast(child.clone()) {
+                return Some(SymbolNode {
+                    name: s.name_token().text().to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: index.span(symbol_extent(s.syntax())),
+                    selection_span: index.span(s.name_token().text_range()),
+                    children: Vec::new(),
+                });
+            }
+            if let Some(g) = GraftView::cast(child.clone()) {
+                let name = g.as_name()?;
+                return Some(SymbolNode {
+                    name: name.text().to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: index.span(symbol_extent(g.syntax())),
+                    selection_span: index.span(name.text_range()),
+                    children: Vec::new(),
+                });
+            }
+            if let Some(b) = BindView::cast(child.clone()) {
+                let name = b.as_name();
+                return Some(SymbolNode {
+                    name: name.text().to_string(),
+                    kind: SymbolNodeKind::Function,
+                    span: index.span(symbol_extent(b.syntax())),
+                    selection_span: index.span(name.text_range()),
+                    children: Vec::new(),
+                });
+            }
+            None
         })
         .collect()
 }
@@ -737,11 +817,19 @@ impl LanguageService for TmcLanguageService {
     }
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
-        // CST-tier: answered as long as parsing succeeded, even if the
-        // resolve or expansion stage then fatals.
+        // Green-tier: answered as long as parsing succeeded, even if the
+        // resolve or expansion stage then fatals. INTERIM: reparses here
+        // rather than reading a tree retained on `DocState` —
+        // `TmcStagedAnalysis` (`crate::compiler`) does not carry the
+        // green tree it already built for `program` past its own return,
+        // so this is a second parse of the same tokens until a later
+        // step threads that tree through and removes it.
         let state = self.docs.get(uri)?;
-        let cst = state.cst.as_ref()?;
-        Some(cst_symbols(&cst.items))
+        let tokens = state.tokens.as_deref()?;
+        let green = crate::parser::parse_green_from_tokens(&state.text, tokens).ok()?;
+        let root = RootView::cast(SyntaxNode::new_root(green))?;
+        let index = TextLineIndex::new(&state.text);
+        Some(tree_symbols(root.items(), &index))
     }
 
     fn semantic_tokens(&mut self, uri: &str) -> Option<Vec<SemToken>> {
