@@ -1223,7 +1223,11 @@ git commit -m "feat(turing-machine): green printing for worlds, tapes, grafts an
         agrees(&format!("{head}  entry state s {{\n    ['b'] -> write ['a'] move [>] goto s;\n    ['a'] ->             move [>] goto s;\n    ['_'] -> stop;\n  }}\n}}\n"));
         agrees(&format!("{head}  entry state s {{ // open\n    // own-line\n    ['a'] -> stop; // trailing\n\n    ['_'] -> stop;\n  }} // close\n}}\n"));
         agrees(&format!("{head}  entry state s {{\n    [*] -> debugger goto s;\n    ['a'] -> write [{{0 + 1}}] move [.] stop;\n    ['_'] -> halt;\n  }}\n}}\n"));
-        agrees(&format!("{head}  entry state s {{\n    [*] -> goto s;\n  }}\n  state z {{\n  }}\n}}\n"));
+        // A zero-row state, DOCUMENTED — the doc run is what keeps it out of a
+        // single-line run. A bare `state z { }` is ALWAYS a single-line
+        // candidate, so C1 prints it on one line and it belongs to Task 6, not
+        // here (measured; the earlier draft of this fixture was wrong).
+        agrees(&format!("{head}  entry state s {{\n    [*] -> goto s;\n  }}\n  ? documented\n  state z {{\n  }}\n}}\n"));
         agrees(&format!("{head}  ? documented\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"));
     }
 ```
@@ -1264,9 +1268,16 @@ A state's rule list is `trivia::units(state.syntax(), &index)`; the grid is
 computed over the `RULE` units only, and own-line comments and blank lines
 inside a state do **not** split the grid (a state is one table). A rule's
 value is `extract_rule(&RuleView, &index)`, which already reproduces
-`lower_cst`'s `Rule` and is oracle-tested; `write_cell_text` loses its
-`tokens` parameter, and `subst_body_text` collapses to the substitution's own
-node text — the `{`/`}` excluded, matching what C1 sliced from the span.
+`lower_cst`'s `Rule` and is oracle-tested.
+
+**There is NO substitution node — do not go looking for one.** `TmcKind` has no
+`Subst` kind; a `{expr}` cell's `{`, its expression and its `}` are plain direct
+tokens of `WRITE_VEC`. So `subst_body_text` does NOT collapse to a node's text:
+keep it verbatim and feed it the WRITE_VEC's own significant-token run, which
+selects the same span the old printer sliced. One consequence to state in the
+copied function's docstring rather than leave for a reader to trip over: its
+comment filter is dead in the green copy, because the run it is handed carries no
+trivia.
 
 A zero-row state is valid and must render; do not special-case it into an
 error.
@@ -1316,6 +1327,18 @@ git commit -m "feat(turing-machine): green printing for states, rules and the gr
         agrees(&format!("{head}  entry state aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa {{ ['a'] -> goto bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; }}\n  state bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb {{ ['_'] -> stop; }}\n}}\n"));
     }
 ```
+
+**Two things Task 5 measured and handed you; both are silent if missed.**
+
+1. **A bare zero-row state is ALWAYS a single-line candidate** — C1 prints
+   `state z { }`. Task 5 could not cover it (its fixture had to document the state
+   to force block form), so it is yours: add `state z { }` to `agrees`.
+2. **A rule whose pending comment was relocated gains a TRAILING comment, and C1
+   then prints its state in BLOCK form.** So `inline_candidate` must read the
+   relocated trailing off `trivia::units` — testing "the rule node carries no
+   comment" is not the same question and will wrongly inline the state. Add a
+   differential case with a rule of the form `[*] -> stop /* c */;` inside an
+   otherwise inline-capable state.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -1421,6 +1444,16 @@ Run: `cargo test -p mtc-turing-machine --lib fmt::print`
 Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
+
+**Two more surfaces become armable for the first time here.** Task 5 reports that
+the `call` transition's binding-list boundary and the whole
+`render_rule_off_grid` / `glyph_vec_multiline` / `col_after` branch are
+unreachable from the differential harness until interior comments render — the
+only off-grid trigger is a comment no earlier task could print. Task 5 pinned what
+it could by direct assertion in `fmt::trivia`; **promote those to `agrees` here**,
+alongside the graft/bind `)` source already owed. `trivia::rule_regions` exposes
+per-vector boundaries with their header halves, so keying interior comments needs
+no second walk.
 
 **The `alphabet` pre-brace pair will pass its existing assertion even if you
 forget it.** Task 4's fix made the trivia model right for `alphabet /* x */ ab {
