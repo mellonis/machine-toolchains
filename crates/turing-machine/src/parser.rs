@@ -1,10 +1,11 @@
 //! `.tmc` recursive-descent parser (spec's language chapter): tokens → AST,
 //! via a lossless CST. The front-end mirror of the `.pmc` parser in the
 //! sibling PM-1 crate, using the same `parse = lower_cst ∘ parse_cst` seam:
-//! `parse_cst` builds the [`crate::cst::Cst`] (which the phase-7 fmt/LSP walk
-//! directly), and `lower_cst` copies it — infallibly — into the flat
-//! [`Program`] the rest of the front end consumes. Every fatal is raised by
-//! `parse_cst`; `lower_cst` never fails.
+//! `parse_cst` builds the [`crate::cst::Cst`] (which `fmt` walks directly —
+//! the language service instead reads the green tree's typed views), and
+//! `lower_cst` copies it — infallibly — into the flat [`Program`] the rest
+//! of the front end consumes. Every fatal is raised by `parse_cst`;
+//! `lower_cst` never fails.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
@@ -599,7 +600,7 @@ fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
 }
 
 /// tokens → lossless CST. Accepts a comment-free stream (the compiler's path)
-/// or a `WithComments` stream (fmt/LSP's path). Comment tokens are split off up
+/// or a `WithComments` stream (`fmt`'s path). Comment tokens are split off up
 /// front so the grammar walk over the significant tokens is unaffected; the
 /// dropped-in-lowering trivia (`blank_before`, comment nodes, `trailing`,
 /// `open_trailing`/`close_trailing`, doc runs) is attached by source position.

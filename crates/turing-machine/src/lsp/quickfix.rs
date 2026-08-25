@@ -8,6 +8,8 @@
 //! a state stub, the two alphabets for a binding map — so neither invents a
 //! shape the language would then reject.
 
+use std::rc::Rc;
+
 use mtc_core::diagnostics::{Edit, Pos, Span};
 use mtc_core::lsp::Action;
 use mtc_core::syntax::{AstNode, SyntaxNode, TextLineIndex};
@@ -54,34 +56,15 @@ struct BodyExtent {
 /// arity that stops. The arity matters — a stub with the wrong vector
 /// width would trade one error for another.
 ///
-/// Green-tier: reparses `state.tokens` rather than reading a tree retained
-/// on `DocState` — the same interim reparse `document_symbols`
-/// (`crate::lsp::document_symbols`) already does, for the same reason
-/// (`TmcStagedAnalysis` does not carry the green tree it built for
-/// `program` past its own return).
-///
-/// The availability guard reads differently from the pre-port code —
-/// which required `state.cst` to be `Some` before even trying a stub —
-/// and is kept as read rather than reverted, because the two conditions
-/// are the SAME one, not merely usually alike. `state.text`/`state.tokens`/
-/// `state.cst` are always a matched triple from one `analyze_staged` call
-/// (`did_update`, `crate::lsp`'s own module — no staleness exception
-/// touches them, unlike `roster`), and `analyze_staged` documents and
-/// `debug_assert`s that `parse_cst(&tokens)` succeeds exactly when
-/// `parse_green_from_tokens(source, &tokens)` already did, because both
-/// run the identical `Parser` walk over the identical tokens and the sink
-/// never gates acceptance (`crate::compiler::analyze_staged`,
-/// `crate::parser::parse_green_from_tokens`'s own doc comment). So
-/// reparsing `state.text`/`state.tokens` here reproduces, deterministically,
-/// the exact Ok/Err `analyze_staged` already got when it built `state.cst`
-/// — this guard and `state.cst.is_some()` are provably the same condition,
-/// not an accepted widening. Re-gating on `state.cst` instead would only
-/// add a redundant read of a field task 3 removes, answering nothing this
-/// parse doesn't already answer on its own.
+/// Green-tier: indexes `state.green` (docs/core.md (syntax trees))
+/// directly — the same tree `document_symbols`
+/// (`crate::lsp::document_symbols`) reads, an `Rc` clone of the one
+/// `analyze_staged` built rather than a reparse. Availability is
+/// `state.green.is_some()`, the parse-tier gate `analyze_staged` already
+/// applied.
 fn state_stub(state: &DocState, name: &str, at: Span) -> Option<Action> {
-    let tokens = state.tokens.as_deref()?;
-    let green = crate::parser::parse_green_from_tokens(&state.text, tokens).ok()?;
-    let root = RootView::cast(SyntaxNode::new_root(green))?;
+    let green = state.green.as_ref()?;
+    let root = RootView::cast(SyntaxNode::new_root(Rc::clone(green)))?;
     let index = TextLineIndex::new(&state.text);
     let extent = enclosing_body(&root, state.program.as_ref(), at, &index)?;
     let cells = vec!["*"; extent.arity.max(1)].join(", ");

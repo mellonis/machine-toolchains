@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use mtc_core::diagnostics::{Applicability, Diagnostic, Pos, Span};
@@ -37,11 +38,10 @@ use mtc_core::lsp::{
     Action, Candidate, DefTarget, HoverContent, LanguageService, SemToken, ServiceDiagnostic,
     ServiceSeverity, SymbolNode, SymbolNodeKind,
 };
-use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxNode, TextLineIndex, TextRange};
+use mtc_core::syntax::{AstNode, GreenNode, SyntaxElement, SyntaxNode, TextLineIndex, TextRange};
 
 use crate::compiler::{CompileError, Resolved, analyze_staged};
 use crate::config;
-use crate::cst::Cst;
 use crate::lexer::Token;
 use crate::lint::{LintContext, LintError, run_rules, validate_allow};
 use crate::parser::{Doc, Program, significant_tokens};
@@ -193,15 +193,14 @@ pub(crate) struct DocState {
     /// WithComments token stream of the current text; `None` only when
     /// lexing itself failed.
     pub(crate) tokens: Option<Vec<Token>>,
-    /// The lossless CST (`None` when lexing or parsing failed). No
-    /// production reader remains after this task's port — the quickfix
-    /// module's `enclosing_body` was the last one, following
-    /// `document_symbols` — but the field itself is out of this task's
-    /// scope: it stays until a later step removes the CST reader while
-    /// retaining the green tree. Read only by `tests.rs`'s own
-    /// staged-state assertions until then.
-    #[allow(dead_code)]
-    pub(crate) cst: Option<Cst>,
+    /// Green syntax tree of the current text (docs/core.md (syntax
+    /// trees)); `None` when lexing or parsing failed. `Rc`, not `Arc`:
+    /// the language server is single-threaded by construction, and this
+    /// field is what pins that — `Rc` is `!Send`, so `DocState` cannot
+    /// cross a thread boundary either. Read by `document_symbols` and by
+    /// `quickfix.rs`'s `state_stub`, both indexing into the SAME tree by
+    /// byte range rather than reparsing.
+    pub(crate) green: Option<Rc<GreenNode>>,
     /// The flat program — survives a resolve-stage fatal.
     pub(crate) program: Option<Program>,
     /// The resolved module (`None` when any stage up to resolve failed).
@@ -739,7 +738,7 @@ impl LanguageService for TmcLanguageService {
         let mut state = DocState {
             text: text.to_string(),
             tokens: staged.tokens,
-            cst: staged.cst,
+            green: staged.green,
             program: staged.program,
             resolved: staged.resolved,
             warnings: staged.diagnostics,
@@ -825,16 +824,12 @@ impl LanguageService for TmcLanguageService {
 
     fn document_symbols(&mut self, uri: &str) -> Option<Vec<SymbolNode>> {
         // Green-tier: answered as long as parsing succeeded, even if the
-        // resolve or expansion stage then fatals. INTERIM: reparses here
-        // rather than reading a tree retained on `DocState` —
-        // `TmcStagedAnalysis` (`crate::compiler`) does not carry the
-        // green tree it already built for `program` past its own return,
-        // so this is a second parse of the same tokens until a later
-        // step threads that tree through and removes it.
+        // resolve or expansion stage then fatals. Indexes `state.green`
+        // directly — the tree `analyze_staged` already built — rather
+        // than reparsing the token stream.
         let state = self.docs.get(uri)?;
-        let tokens = state.tokens.as_deref()?;
-        let green = crate::parser::parse_green_from_tokens(&state.text, tokens).ok()?;
-        let root = RootView::cast(SyntaxNode::new_root(green))?;
+        let green = state.green.as_ref()?;
+        let root = RootView::cast(SyntaxNode::new_root(Rc::clone(green)))?;
         let index = TextLineIndex::new(&state.text);
         Some(tree_symbols(root.items(), &index))
     }

@@ -1,8 +1,8 @@
 //! Semantic tokens (docs/lsp.md (semantic tokens)).
 //!
-//! Emitted from the significant token stream rather than the CST, for the
-//! same reason classification is: highlighting must not switch off the
-//! moment a brace is unbalanced. Each identifier takes its type from the
+//! Emitted from the significant token stream rather than the green tree,
+//! for the same reason classification is: highlighting must not switch off
+//! the moment a brace is unbalanced. Each identifier takes its type from the
 //! keyword or punctuation immediately around it, which is enough to
 //! separate the six legend types the service advertises without needing a
 //! parse to have succeeded.

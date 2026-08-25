@@ -185,7 +185,7 @@ fn a_lex_failure_reports_one_error_and_keeps_no_stage() {
     assert_eq!(diagnostics[0].severity, ServiceSeverity::Error);
     let state = &service.docs["untitled:x.tmc"];
     assert!(state.tokens.is_none());
-    assert!(state.cst.is_none());
+    assert!(state.green.is_none());
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn a_parse_failure_keeps_the_tokens_and_reports_one_error() {
     assert_eq!(diagnostics[0].severity, ServiceSeverity::Error);
     let state = &service.docs["untitled:x.tmc"];
     assert!(state.tokens.is_some());
-    assert!(state.cst.is_none());
+    assert!(state.green.is_none());
     assert!(state.program.is_none());
 }
 
@@ -214,7 +214,7 @@ machine {
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].code, Some("undefined-state"));
     let state = &service.docs["untitled:x.tmc"];
-    assert!(state.cst.is_some());
+    assert!(state.green.is_some());
     assert!(state.program.is_some());
     assert!(state.resolved.is_none());
     // The staged seam raises its non-fatal findings only after the whole

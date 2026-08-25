@@ -14,13 +14,13 @@
 //! `compile()`; each carries its own `dead_code` allow with the reason.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use mtc_core::diagnostics::{Diagnostic, Span};
 use mtc_core::formats::object::ObjectFile;
-use mtc_core::syntax::SyntaxNode;
+use mtc_core::syntax::{GreenNode, SyntaxNode};
 
 use crate::codegen::{CodegenOptions, emit_program};
-use crate::cst::Cst;
 use crate::footprint::SymSet;
 use crate::ir::{IrProgram, lower, validate_world};
 use crate::lexer::{LexMode, Token, lex_with};
@@ -28,7 +28,7 @@ use crate::optimizer::{OptLevel, OptOptions, OptReport, optimize};
 use crate::parser::{
     Alphabet, AlphabetElem, Bind, BindingArg, BindingValue, Continuation, ContractClause, Doc,
     Graft, Machine, PatternCellKind, Program, QualName, Rule, SigParamKind, State, SymLit,
-    Transition, parse_cst, parse_green_from_tokens,
+    Transition, parse_green_from_tokens,
 };
 
 /// Fatal compile error at a real source span (1-based, char-counted,
@@ -1255,22 +1255,10 @@ fn drop_unreachable_rules(resolved: &mut Resolved, diagnostics: &mut Vec<Diagnos
 pub(crate) struct TmcStagedAnalysis {
     /// WithComments token stream — `None` only if lexing itself failed.
     pub tokens: Option<Vec<Token>>,
-    /// The lossless CST — `None` if lexing or the green parse failed, and
-    /// (release builds only) also if `parse_cst` diverges from a green
-    /// parse that just succeeded, a combination the `debug_assert!` beside
-    /// its construction makes unreachable everywhere else. `cst: None`
-    /// alongside `program: Some` did not exist before `program` moved onto
-    /// the green tree, when both fields came from one infallible
-    /// `lower_cst(&cst)` step; both current consumers already degrade to
-    /// "no CST-backed answer" rather than panicking on it
-    /// (`lsp/mod.rs`'s `document_symbols` via `?`, `lsp/quickfix.rs`'s
-    /// `fatal_actions` via `.and_then`). INTERIM: the `.tmc` language
-    /// service still reads this tree (`lsp/mod.rs`, `lsp/quickfix.rs`), so
-    /// `parse_cst` runs here as a side artifact alongside the green parse
-    /// that produces `program`; that means this field, and the double parse
-    /// feeding it, are scaffolding, not a design choice — both go away once
-    /// the language service reads the green tree's typed views instead.
-    pub cst: Option<Cst>,
+    /// Green syntax tree of the current text (docs/core.md (syntax
+    /// trees)); `None` when lexing or parsing failed. The `.tmc` language
+    /// service's position walks index by byte range against this tree.
+    pub green: Option<Rc<GreenNode>>,
     /// The flat program, extracted from the green tree — present whenever
     /// the green parse succeeded, retained even when the resolve stage then
     /// fails.
@@ -1293,12 +1281,14 @@ pub(crate) struct TmcStagedAnalysis {
 /// each stage's outcome instead of stopping at the first failure. The green
 /// parse is the AUTHORITY: it produces both `program` (via
 /// `syntax::extract_program`, infallible once the tree exists) and any parse
-/// fatal. `cst` is a side artifact, built only after the green parse
-/// succeeded, for the not-yet-migrated language service — see the field's own
-/// doc. Past the parse, the resolve stage ([`resolve_program`]) is the only
-/// source of a fatal, and its non-fatal diagnostics ride alongside a clean
-/// resolve. Additive: [`analyze`] and [`compile`] are unchanged, so a partial
-/// fatal a document recovers from never leaks into the batch pipeline.
+/// fatal; `green` retains that same tree — one `Rc` clone, not a second
+/// parse — so the language service's tree-backed readers (`lsp/mod.rs`'s
+/// `document_symbols`, `lsp/quickfix.rs`'s `state_stub`) index into it
+/// directly instead of reparsing the token stream. Past the parse, the
+/// resolve stage ([`resolve_program`]) is the only source of a fatal, and
+/// its non-fatal diagnostics ride alongside a clean resolve. Additive:
+/// [`analyze`] and [`compile`] are unchanged, so a partial fatal a document
+/// recovers from never leaks into the batch pipeline.
 ///
 /// Consumed by the phase-7 `.tmc` language service, not by `compile()`.
 pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
@@ -1307,7 +1297,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         Err(fatal) => {
             return TmcStagedAnalysis {
                 tokens: None,
-                cst: None,
+                green: None,
                 program: None,
                 resolved: None,
                 diagnostics: Vec::new(),
@@ -1320,7 +1310,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         Err(fatal) => {
             return TmcStagedAnalysis {
                 tokens: Some(tokens),
-                cst: None,
+                green: None,
                 program: None,
                 resolved: None,
                 diagnostics: Vec::new(),
@@ -1328,26 +1318,12 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
             };
         }
     };
-    // `.ok()`, not `expect`: `parse_cst` and `parse_green_from_tokens`
-    // build the identical `Parser` value over the identical `tokens` slice
-    // and run the same `.file()` walk, differing only in a purely-recording
-    // green sink that never gates acceptance or an error (`parser.rs`) — so
-    // `parse_cst` succeeding here whenever the green parse just succeeded
-    // above is a structural invariant, not a tested coincidence. `.ok()`
-    // rather than `.unwrap()` is only the release-build fallback if that
-    // invariant is ever broken by a future edit: the language service
-    // should lose its CST-backed tier rather than take the whole staged
-    // pipeline down.
-    let cst = parse_cst(&tokens).ok();
-    debug_assert!(
-        cst.is_some(),
-        "acceptance parity: parse_cst must succeed wherever parse_green_from_tokens did"
-    );
+    let green_retained = Some(Rc::clone(&green));
     let program = crate::syntax::extract_program(&SyntaxNode::new_root(green), source);
     match resolve_program(&program) {
         Ok((resolved, diagnostics)) => TmcStagedAnalysis {
             tokens: Some(tokens),
-            cst,
+            green: green_retained,
             program: Some(program),
             resolved: Some(resolved),
             diagnostics,
@@ -1355,7 +1331,7 @@ pub(crate) fn analyze_staged(source: &str) -> TmcStagedAnalysis {
         },
         Err(fatal) => TmcStagedAnalysis {
             tokens: Some(tokens),
-            cst,
+            green: green_retained,
             program: Some(program),
             resolved: None,
             diagnostics: Vec::new(),
@@ -4407,8 +4383,9 @@ machine {
         // The lex/parse halves compare against `lex`/`parse` — the PRE-green
         // front end, which neither `analyze` nor `analyze_staged` calls any
         // more; both now build `program` the same way, off the green parse
-        // (`analyze_staged` additionally runs `parse_cst` as a side artifact
-        // for `cst`, not for `program` — see that field's own doc).
+        // (`analyze_staged` additionally retains that same tree as `green`,
+        // one `Rc` clone rather than a second parse — see that field's own
+        // doc).
         //
         // What the `program` comparison below is, precisely: `parse` IS
         // `lower_cst ∘ parse_cst`, which `tests/syntax_parity.rs` and
@@ -4417,14 +4394,14 @@ machine {
         // that struct-equality, not a shared-composition identity — it pins
         // that neither the lex mode nor the comment nodes the green parse
         // carries change the extracted AST or the significant tokens.
-        // `analyze` itself keeps neither the pre-green tokens nor a CST, so
-        // the resolved module and the diagnostics are what it has left to
-        // agree on.
+        // `analyze` itself keeps neither the pre-green tokens nor the green
+        // tree, so the resolved module and the diagnostics are what it has
+        // left to agree on.
         let src = format!("// leading comment\n{A1}");
         let staged = analyze_staged(&src);
         assert!(staged.fatal.is_none(), "{:?}", staged.fatal);
         let tokens = staged.tokens.as_ref().expect("lexing succeeded");
-        assert!(staged.cst.is_some(), "parsing succeeded");
+        assert!(staged.green.is_some(), "parsing succeeded");
         let program = staged.program.as_ref().expect("lowering succeeded");
         let resolved = staged.resolved.as_ref().expect("resolve succeeded");
 
@@ -4541,26 +4518,27 @@ machine {
         // lex-fail: nothing survives.
         let s = analyze_staged("/* never closed");
         assert!(s.tokens.is_none());
-        assert!(s.cst.is_none());
+        assert!(s.green.is_none());
         assert!(s.program.is_none());
         assert!(s.resolved.is_none());
         assert_eq!(s.fatal.unwrap().kind.code(), "lex-error");
 
-        // parse-fail: tokens survive, nothing past the CST.
+        // parse-fail: tokens survive, nothing past the green tree.
         let s = analyze_staged("}");
         assert!(s.tokens.is_some(), "lexing still succeeded");
-        assert!(s.cst.is_none());
+        assert!(s.green.is_none());
         assert!(s.program.is_none());
         assert!(s.resolved.is_none());
         assert!(s.fatal.is_some());
 
-        // resolve-fail: tokens + CST + the flat program survive; the resolved
-        // module does not, and no diagnostics leak out of a mid-resolve fatal.
+        // resolve-fail: tokens + the green tree + the flat program survive;
+        // the resolved module does not, and no diagnostics leak out of a
+        // mid-resolve fatal.
         let s = analyze_staged(
             "alphabet b { '_' }\nmachine { tape t: b; entry state s { [*] -> goto missing; } }",
         );
         assert!(s.tokens.is_some());
-        assert!(s.cst.is_some());
+        assert!(s.green.is_some());
         assert!(s.program.is_some(), "program survives a resolve fatal");
         assert!(s.resolved.is_none());
         assert!(s.diagnostics.is_empty());
@@ -4569,7 +4547,7 @@ machine {
         // success: every stage's product is present.
         let s = analyze_staged(A1);
         assert!(s.tokens.is_some());
-        assert!(s.cst.is_some());
+        assert!(s.green.is_some());
         assert!(s.program.is_some());
         assert!(s.resolved.is_some());
         assert!(s.fatal.is_none());
