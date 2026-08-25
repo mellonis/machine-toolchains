@@ -1610,9 +1610,14 @@ fn prepared_rules(view: &StateView, index: &TextLineIndex) -> Vec<PreparedRule> 
 ///
 /// **Stubbed to `false`** — "no rule carries one" — because this printer
 /// does not render a rule's interior comments at all yet: `render_rule`
-/// prints every list with an empty interior, so a source carrying such a
-/// comment already diverges on the dropped comment itself, and no
-/// differential source can exercise the TRUE answer.
+/// prints every list with an empty interior, so no differential source
+/// can exercise the TRUE answer. Such a source diverges TWICE over, and
+/// naming only the first half understates it: the comment itself is
+/// dropped, AND the state is inlined where the old printer blocks it —
+/// which next to a clean sibling forms a run the old printer never
+/// forms and pads the innocent neighbour to a shared column. Neither
+/// half is a regression (both predate this surface), and neither
+/// changes what has to happen next.
 ///
 /// The `false` answer is load-bearing and pinned: a constant `true`
 /// disqualifies every state from every run, which the run tests below
@@ -2060,7 +2065,10 @@ mod tests {
     ///   comment is dropped outright.
     /// - `machine // why\n{` — the comment's line sits ABOVE the brace's,
     ///   so the near edge moves BACKWARDS and the first real item gains a
-    ///   blank line nobody wrote (`constraints.md`'s mandated quirk 1).
+    ///   blank line nobody wrote — one of the inherited quirks this
+    ///   printer reproduces rather than fixes, the formatter being
+    ///   whitespace-only and pinned byte-for-byte against its
+    ///   predecessor (docs/tmt/fmt.md (comments)).
     ///   A fix that finds the comment but appends it to the item list
     ///   without moving the edge passes the first source and fails this
     ///   one.
@@ -2375,16 +2383,17 @@ mod tests {
 
     /// Runs of adjacent single-line states.
     ///
-    /// The first two sources are the RUN itself. The first is the plain
-    /// shape and pins nothing about sharing: both headers are 13 columns
-    /// and both patterns 5, so a per-state header width and a per-state
-    /// grid render it byte-identically. The second is the one that
-    /// separates them — the names differ in length AND the patterns do,
-    /// so the shorter header pads to the run's width and the narrower
-    /// pattern pads to the run's column. The wide pattern is written in
-    /// the SECOND member deliberately: with it in the first, a grid
-    /// computed over that member alone is the same grid, and the source
-    /// stops separating them.
+    /// The first two sources are the RUN itself. The first pins the
+    /// shared HEADER — `entry state a` is 13 columns and `state b` is 7,
+    /// so the second member pads — but nothing about the shared GRID:
+    /// both patterns are 5 columns, so a per-state grid renders it
+    /// byte-identically. The second source adds the grid half, with the
+    /// wide pattern in the SECOND member. Measured, that placement
+    /// matters for one mutation only: a genuine per-state grid diverges
+    /// whichever member is the wide one (the narrower one loses its
+    /// padding either way), while a grid taken from the run's FIRST
+    /// member alone is unobservable when that member already carries
+    /// every widest column.
     ///
     /// Then, one source per thing that ENDS or DISQUALIFIES a run:
     ///
@@ -2475,7 +2484,15 @@ mod tests {
     ///   `inline_candidate` is vacuously true over an empty rule list,
     ///   so C1 prints `state z { }`. Task 5's own zero-row source had to
     ///   carry a doc run to force block form, which is exactly what
-    ///   keeps it out of this path.
+    ///   keeps it out of this path. The THIRD source is the one that
+    ///   pins the run's header max over such a member: a zero-row state
+    ///   contributes no rule to the shared grid but its header still
+    ///   sizes the shared column, so `state zzzzzzzzzzzzzzzzzzzz { }`
+    ///   pads its sibling out to 26. Written with the zero-row member
+    ///   carrying the WIDEST header deliberately — with the widest on
+    ///   the other member the max is the same either way, and a header
+    ///   scan that skips rule-less members (the obvious "skip empty
+    ///   states when sizing" optimization) passes.
     /// - **A rule whose pending comment was RELOCATED gains a trailing
     ///   comment, and C1 prints its state in block form.** The comment
     ///   sits inside the rule as written, so a predicate asking "does
@@ -2492,6 +2509,10 @@ mod tests {
             "{head}  entry state s {{ [*] -> goto z; }}\n  state z {{ }}\n}}\n"
         ));
         agrees(&format!("{head}  entry state z {{ }}\n}}\n"));
+        agrees(&format!(
+            "{head}  entry state a {{ [*] -> stop; }}\n  \
+             state zzzzzzzzzzzzzzzzzzzz {{ }}\n}}\n"
+        ));
         agrees(&format!(
             "{head}  entry state a {{ [*] -> stop /* c */; }}\n}}\n"
         ));
