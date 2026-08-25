@@ -644,3 +644,44 @@ fn a_range_element_inside_a_clause_formats_canonically() {
     let twice = format(&out).expect("the formatted output re-formats");
     assert_eq!(out, twice, "formatting the output is not idempotent");
 }
+
+/// The adversarial sources — shapes the shipped corpus does not carry, one
+/// per derived field the pre-green CST stored. They are not required to be
+/// fmt-clean (several are not), so `corpus()`, whose dogfood lock demands
+/// exactly that, must never sweep them. This test asserts only that each
+/// parses and formats, which is the precondition every later differential
+/// check depends on.
+#[test]
+fn every_adversarial_source_formats() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fmt_adversarial");
+    let mut seen = 0;
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .expect("the adversarial directory exists")
+        .map(|e| e.expect("a readable entry").path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("tmc"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let src = std::fs::read_to_string(&path).expect("a readable fixture");
+        format(&src).unwrap_or_else(|e| panic!("{} does not format: {e:?}", path.display()));
+        seen += 1;
+    }
+    assert!(seen >= 6, "expected the whole adversarial set, saw {seen}");
+}
+
+/// `.tmc` fmt is idempotent with one exception, and this is it: a comment
+/// written between a declaration's keyword and its name relocates into the
+/// brace-delimited body (pass 1), where it re-parses as a comment on the
+/// opening brace — which forces the body multi-line (pass 2). Stable from
+/// pass 2 on. Pinned by value rather than by "settles eventually", so a
+/// printer that changed either intermediate form fails here
+/// (docs/tmt/fmt.md (idempotency)).
+#[test]
+fn a_comment_between_a_keyword_and_its_name_settles_on_the_second_pass() {
+    let pass1 = format("alphabet /* a */ ab { '_' }\n").expect("formats");
+    assert_eq!(pass1, "alphabet ab { /* a */ '_' }\n");
+    let pass2 = format(&pass1).expect("formats");
+    assert_eq!(pass2, "alphabet ab { /* a */\n  '_'\n}\n");
+    let pass3 = format(&pass2).expect("formats");
+    assert_eq!(pass3, pass2, "the settle must be stable from pass 2");
+}
