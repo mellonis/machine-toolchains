@@ -1407,6 +1407,10 @@ fn render_world_after_brace(
 /// [`super::trivia::units`] over the WORLD node rather than from
 /// `WorldView`'s per-kind accessors, which are filters and lose source
 /// order.
+///
+/// Runs of adjacent single-line states are found FIRST, so the run's
+/// shared header width and shared rule grid are known before any of its
+/// members is rendered.
 fn render_world_items(
     world: &SyntaxNode,
     indent: usize,
@@ -1415,16 +1419,27 @@ fn render_world_items(
 ) -> Vec<Rendered> {
     let units = trivia::units(world, index);
     let tape_names = tape_name_widths(&units);
+    let inline = inline_state_runs(&units, indent, index);
     units
         .iter()
         .enumerate()
-        .map(|(i, unit)| render_world_item(unit, tape_names[i], indent, source, index))
+        .map(|(i, unit)| {
+            render_world_item(
+                unit,
+                tape_names[i],
+                inline[i].as_ref(),
+                indent,
+                source,
+                index,
+            )
+        })
         .collect()
 }
 
 fn render_world_item(
     unit: &Unit,
     name_width: usize,
+    inline: Option<&InlineShape>,
     indent: usize,
     source: &str,
     index: &TextLineIndex,
@@ -1440,9 +1455,10 @@ fn render_world_item(
     } else if let Some(v) = BindView::cast(node.clone()) {
         render_bind(&v, unit, indent, source, index)
     } else if let Some(v) = StateView::cast(node.clone()) {
-        // Every state renders in block form here; the single-line run is
-        // its own surface.
-        render_block_state(&v, unit, indent, source, index)
+        match inline {
+            Some(shape) => render_inline_state(&v, unit, shape, indent, index),
+            None => render_block_state(&v, unit, indent, source, index),
+        }
     } else {
         unimplemented!("a world holds only tapes, grafts, binds and states")
     }
@@ -1570,6 +1586,194 @@ fn state_header_text(view: &StateView) -> String {
     )
 }
 
+/// The shared layout of the single-line-state run a state belongs to.
+struct InlineShape {
+    header: usize,
+    grid: Grid,
+}
+
+/// One state's rules, prepared in document order.
+///
+/// Read off `StateView::rules` rather than off the state's own unit
+/// stream, because the run scan asks for it about states it has not yet
+/// decided on — and the two agree wherever the answer is used: a state
+/// that reaches the inline path carries no comment between its rules, so
+/// its unit stream holds exactly these nodes in exactly this order.
+fn prepared_rules(view: &StateView, index: &TextLineIndex) -> Vec<PreparedRule> {
+    view.rules().map(|r| prepare_rule(&r, index)).collect()
+}
+
+/// Whether a rule's `call` binding list — or a `with map` nested inside
+/// one — carries an interior comment. Such a comment breaks its own list
+/// across physical lines, which a single-line state cannot absorb
+/// (docs/tmt/fmt.md (interior comments)).
+///
+/// **Stubbed to `false`** — "no rule carries one" — because this printer
+/// does not render a rule's interior comments at all yet: `render_rule`
+/// prints every list with an empty interior, so a source carrying such a
+/// comment already diverges on the dropped comment itself, and no
+/// differential source can exercise the TRUE answer.
+///
+/// The `false` answer is load-bearing and pinned: a constant `true`
+/// disqualifies every state from every run, which the run tests below
+/// catch at once (measured). What no source here can catch is the real
+/// predicate answering `false` for a rule that does carry such a
+/// comment — so its body and the inline path's own interior rendering
+/// have to land in the same change.
+fn rule_has_interior_comment(_rule: &RuleView) -> bool {
+    false
+}
+
+/// Whether a state can print on one line at all: every rule written on
+/// the header's own line, no comment between rules, no comment riding a
+/// rule's `;`, no interior comment in a rule's binding list or map, and
+/// no rule off the grid — an off-grid rule renders across several lines,
+/// which a single-line state cannot absorb.
+///
+/// Two readings this deliberately does NOT take:
+///
+/// - **"The header's line" is the NAME token's line**, not the node's
+///   first token's. The old printer records a state's line off its name
+///   span, so `entry` written alone on the line above still leaves the
+///   state a candidate.
+/// - **"A rule carries no trailing comment" is asked of the rule's UNIT,
+///   not of its node.** A comment written inside a rule is relocated
+///   onto its `;` ([`super::trivia`]'s `unclaimed_inside`), and it is
+///   the relocated result the old printer tests — so
+///   `[*] -> stop /* c */;` blocks its state. Asking whether the RULE
+///   node holds a comment is a different question, and answers `false`
+///   for the same rule read from a vector's interior list.
+fn inline_candidate(view: &StateView, index: &TextLineIndex) -> bool {
+    if !trivia::open_trailing(view.syntax(), index).is_empty() {
+        return false;
+    }
+    let state_line = index.line_col(view.name_token().text_range().start).0;
+    trivia::units(view.syntax(), index)
+        .iter()
+        .all(|unit| match &unit.kind {
+            UnitKind::Comment(_) => false,
+            UnitKind::Node(node) => {
+                let rule = RuleView::cast(node.clone()).expect("a state's item node is a RULE");
+                let prepared = prepare_rule(&rule, index);
+                prepared.rule.line == state_line
+                    && unit.trailing.is_none()
+                    && !rule_has_interior_comment(&rule)
+                    && !prepared.off_grid
+            }
+        })
+}
+
+/// Per world item, the inline shape to print a state with (`None` =
+/// block form). A run is maximal over adjacent inline-capable,
+/// UNDOCUMENTED states with no blank line between them; if any member
+/// would cross [`LINE_WIDTH`], the WHOLE run falls back to block form —
+/// a per-state width check would keep the short members inline and split
+/// the table.
+///
+/// Membership is computed over the same unit stream the block path
+/// walks, so a comment written between two states ends the run exactly
+/// as the old printer's own comment item did.
+fn inline_state_runs(
+    units: &[Unit],
+    indent: usize,
+    index: &TextLineIndex,
+) -> Vec<Option<InlineShape>> {
+    let mut out: Vec<Option<InlineShape>> = units.iter().map(|_| None).collect();
+    let member = |unit: &Unit| -> Option<StateView> {
+        match &unit.kind {
+            // A documented state is never a member: its run has to print
+            // on lines of its own above the header.
+            UnitKind::Node(node) => StateView::cast(node.clone())
+                .filter(|v| v.doc_run().is_none() && inline_candidate(v, index)),
+            UnitKind::Comment(_) => None,
+        }
+    };
+    let mut i = 0;
+    while i < units.len() {
+        if member(&units[i]).is_none() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut end = i + 1;
+        while end < units.len() && member(&units[end]).is_some() && !units[end].blank_before {
+            end += 1;
+        }
+        let states: Vec<StateView> = (start..end)
+            .map(|k| member(&units[k]).expect("run members are inline-capable states"))
+            .collect();
+        let header = states
+            .iter()
+            .map(|s| state_header_text(s).chars().count())
+            .max()
+            .expect("a run holds at least one state");
+        let bodies: Vec<Vec<PreparedRule>> =
+            states.iter().map(|s| prepared_rules(s, index)).collect();
+        let rules: Vec<&PreparedRule> = bodies.iter().flatten().collect();
+        let grid = grid_for(&rules);
+        let fits = states.iter().zip(&bodies).all(|(s, body)| {
+            inline_state_line(s, body, header, &grid, indent)
+                .chars()
+                .count()
+                <= LINE_WIDTH
+        });
+        if fits {
+            // The run's SHARED grid is what every member prints with —
+            // that is what makes a block of one-line states read as one
+            // table.
+            for slot in out.iter_mut().take(end).skip(start) {
+                *slot = Some(InlineShape {
+                    header,
+                    grid: grid_for(&rules),
+                });
+            }
+        }
+        i = end;
+    }
+    out
+}
+
+/// One state on a single line: the header padded to the run's shared
+/// width, then every rule rendered as a grid row at indent zero, then
+/// the closing `}`. A zero-row state prints `state z { }` — the `{` and
+/// the ` }` with no rule between them.
+fn inline_state_line(
+    view: &StateView,
+    rules: &[PreparedRule],
+    header_width: usize,
+    grid: &Grid,
+    indent: usize,
+) -> String {
+    let header = state_header_text(view);
+    let mut line = format!(
+        "{}{header}{} {{",
+        " ".repeat(indent),
+        " ".repeat(header_width.saturating_sub(header.chars().count()))
+    );
+    for prepared in rules {
+        line.push(' ');
+        line.push_str(&render_rule(prepared, grid, 0));
+    }
+    line.push_str(" }");
+    line
+}
+
+/// A state printed inline. The unit's own `blank_before` is what prints:
+/// a member carries no doc run, so the two questions
+/// [`render_block_state`] splits between `blank_before` and
+/// `blank_before_decl` collapse to the outer one.
+fn render_inline_state(
+    view: &StateView,
+    unit: &Unit,
+    shape: &InlineShape,
+    indent: usize,
+    index: &TextLineIndex,
+) -> Rendered {
+    let rules = prepared_rules(view, index);
+    let code = inline_state_line(view, &rules, shape.header, &shape.grid, indent);
+    Rendered::new(unit.blank_before, code).with_trailing(unit.trailing.as_ref())
+}
+
 /// A state in block form: the header, the brace's own comment run, the
 /// rule table at one more indent level, and the closing `}`.
 ///
@@ -1580,7 +1784,10 @@ fn state_header_text(view: &StateView) -> String {
 /// units back in at their own positions.
 ///
 /// A zero-row state is valid — it traps on entry (docs/tmt/language.md
-/// (rules)) — and renders as an empty body, never as an error.
+/// (rules)) — and renders as an empty body, never as an error. A BARE
+/// one never arrives here: [`inline_candidate`] is vacuously true over
+/// an empty rule list, so only a documented (or otherwise disqualified)
+/// zero-row state takes this path.
 fn render_block_state(
     view: &StateView,
     unit: &Unit,
@@ -1914,11 +2121,20 @@ mod tests {
         );
         // The STATE twin, on printed BYTES. Task 4 fixed the rule that
         // governs it but had no state surface, so it could pin the shape
-        // only on `trivia`'s unit stream — this is the first source that
-        // compares output. The second one puts the pre-brace comment on
-        // an EARLIER line than the `{`, which is where the suppression
-        // additionally moves the near edge backwards and C1 emits a
-        // blank line nobody wrote.
+        // only on `trivia`'s unit stream — these are the first sources
+        // that compare output. The second and third put the pre-brace
+        // comment on an EARLIER line than the `{`; only the THIRD, whose
+        // `{` carries no comment of its own, actually shows the near
+        // edge moving backwards — measured, C1 prints
+        //
+        //     entry state s {        entry state s {
+        //       // why                 // why
+        //       // open       vs
+        //       [*] -> stop;           [*] -> stop;
+        //     }                      }
+        //
+        // so the `// open` of the second source occupies the gap and
+        // suppresses the blank line the third one gains.
         agrees(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry state s /* x */ { // open\n    [*] -> stop;\n  }\n}\n",
@@ -1926,6 +2142,10 @@ mod tests {
         agrees(
             "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
              entry // why\n  state s { // open\n    [*] -> stop;\n  }\n}\n",
+        );
+        agrees(
+            "alphabet ab { '_' }\nmachine {\n  tape main: ab;\n  \
+             entry // why\n  state s {\n    [*] -> stop;\n  }\n}\n",
         );
     }
 
@@ -2151,6 +2371,176 @@ mod tests {
         agrees(&format!(
             "{head}  ? doc\n\n  entry state s {{\n    [*] -> stop;\n  }}\n}}\n"
         ));
+    }
+
+    /// Runs of adjacent single-line states.
+    ///
+    /// The first two sources are the RUN itself. The first is the plain
+    /// shape and pins nothing about sharing: both headers are 13 columns
+    /// and both patterns 5, so a per-state header width and a per-state
+    /// grid render it byte-identically. The second is the one that
+    /// separates them — the names differ in length AND the patterns do,
+    /// so the shorter header pads to the run's width and the narrower
+    /// pattern pads to the run's column. The wide pattern is written in
+    /// the SECOND member deliberately: with it in the first, a grid
+    /// computed over that member alone is the same grid, and the source
+    /// stops separating them.
+    ///
+    /// Then, one source per thing that ENDS or DISQUALIFIES a run:
+    ///
+    /// - a blank line between two members;
+    /// - a doc run on the second (a documented state prints its run on
+    ///   lines of its own, so it can never be a member);
+    /// - an own-line comment BETWEEN two states — the unit that ends a
+    ///   run the way C1's own comment item did;
+    /// - an own-line comment INSIDE a state's body, which is
+    ///   `inline_candidate`'s comment arm rather than the run scan's;
+    /// - a comment on the `{`. Written so the rule STAYS on the header's
+    ///   line: with the rule on a line of its own the line test already
+    ///   excludes the state and the `open_trailing` clause decides
+    ///   nothing;
+    /// - a rule written on a line of its own, which is that line test;
+    /// - a member that would cross the line limit, which drops the WHOLE
+    ///   run to block form. Measured: the long member's inline line is
+    ///   94 columns and the short one's 61, so a per-state check would
+    ///   keep the second inline and split the table.
+    ///
+    /// `entry` alone on the line above its `state` keyword is the
+    /// boundary of the line test itself: C1 records a state's line off
+    /// its NAME span, so that state is still a candidate. Under the
+    /// obvious alternative — the node's first token — it would not be,
+    /// and every other source here would stay green.
+    ///
+    /// The last two sources are the inline path's own trailing comment:
+    /// a `}`'s comment rides the state's line, and two ADJACENT inline
+    /// states carrying one reach `trailing_spacing`'s alignment run,
+    /// which a single-line state could not reach before this surface
+    /// existed (a block state's code holds a newline, and the run
+    /// requires every member to be one line).
+    #[test]
+    fn single_line_state_runs_agree() {
+        let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> goto b; }}\n  \
+             state b {{ ['_'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state aa {{ [*] -> goto b; }}\n  \
+             state b {{ ['_'..'a'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> goto b; }}\n\n  \
+             state b {{ ['_'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> goto b; }}\n  ? doc\n  \
+             state b {{ ['_'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> goto b; }}\n  // c\n  \
+             state b {{ ['_'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> goto b;\n    // c\n  }}\n  \
+             state b {{ ['_'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ /* c */ ['a'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ // c\n    ['a'] -> stop;\n  }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+             {{ ['a'] -> goto bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; }}\n  \
+             state bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb {{ ['_'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry\n  state a {{ ['a'] -> goto b; }}\n  \
+             state b {{ ['_'] -> stop; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> stop; }} // c\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> goto b; }} // one\n  \
+             state bb {{ ['_'] -> stop; }} // two\n}}\n"
+        ));
+    }
+
+    /// The two shapes Task 5 measured and could not cover, each silent
+    /// if missed.
+    ///
+    /// - **A BARE zero-row state is always a single-line candidate** —
+    ///   `inline_candidate` is vacuously true over an empty rule list,
+    ///   so C1 prints `state z { }`. Task 5's own zero-row source had to
+    ///   carry a doc run to force block form, which is exactly what
+    ///   keeps it out of this path.
+    /// - **A rule whose pending comment was RELOCATED gains a trailing
+    ///   comment, and C1 prints its state in block form.** The comment
+    ///   sits inside the rule as written, so a predicate asking "does
+    ///   the RULE node carry a comment?" answers a different question
+    ///   and inlines the state — dropping the comment outright, since
+    ///   the inline path prints no rule trailing at all. The second
+    ///   source pairs the rule with a sibling that IS inline-capable, so
+    ///   a wrong answer shows up as a mixed run rather than only as a
+    ///   lost comment.
+    #[test]
+    fn a_bare_zero_row_state_inlines_and_a_relocated_trailing_blocks() {
+        let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
+        agrees(&format!(
+            "{head}  entry state s {{ [*] -> goto z; }}\n  state z {{ }}\n}}\n"
+        ));
+        agrees(&format!("{head}  entry state z {{ }}\n}}\n"));
+        agrees(&format!(
+            "{head}  entry state a {{ [*] -> stop /* c */; }}\n}}\n"
+        ));
+        agrees(&format!(
+            "{head}  entry state a {{ ['a'] -> stop /* c */; }}\n  \
+             state b {{ ['_'] -> stop; }}\n}}\n"
+        ));
+    }
+
+    /// [`inline_candidate`]'s off-grid clause, asserted DIRECTLY — for
+    /// the same reason [`breaks_the_grid`] is: the only thing that sends
+    /// a rule off the grid is a LINE or own-line comment inside a glyph
+    /// vector, and this printer does not render a vector's interior
+    /// comments yet, so such a source diverges whichever way the clause
+    /// answers and a differential case would prove nothing about it.
+    ///
+    /// The clause is not implied by the line test: a rule may START on
+    /// the header's own line and still run off the grid, because its
+    /// broken vector spans the lines BELOW. Measured against C1, which
+    /// prints the first source's state in block form and the second's —
+    /// a same-line block comment, the one interior comment a vector
+    /// keeps inline — on one line.
+    #[test]
+    fn an_off_grid_rule_keeps_its_state_out_of_a_run() {
+        let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n";
+        for (body, expect) in [
+            (
+                "[*] -> write [\n      /* c */\n      'a'\n    ] stop;",
+                false,
+            ),
+            ("[*] -> write [/* c */ 'a'] stop;", true),
+        ] {
+            let src = format!("{head}  entry state a {{ {body} }}\n}}\n");
+            let tokens = lex_with(&src, LexMode::WithComments).expect("lexes");
+            let green = parse_green_from_tokens(&src, &tokens).expect("parses");
+            let root = SyntaxNode::new_root(green);
+            let index = TextLineIndex::new(&src);
+            let mut stack: Vec<SyntaxNode> = root.children().collect();
+            let mut state = None;
+            while let Some(n) = stack.pop() {
+                if let Some(v) = StateView::cast(n.clone()) {
+                    state = Some(v);
+                    break;
+                }
+                stack.extend(n.children());
+            }
+            let state = state.expect("a STATE");
+            assert_eq!(inline_candidate(&state, &index), expect, "for:\n{src}");
+        }
     }
 
     /// **Hazard 2, on a RULE.** A rule is `;`-terminated like a `tape`
