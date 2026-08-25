@@ -1896,6 +1896,38 @@ fn document_symbols_survive_a_resolve_stage_fatal() {
     assert!(service.document_symbols(&uri).is_some());
 }
 
+/// One parse per language-service request, MEASURED rather than
+/// asserted from reading the code: `did_update` parses the green tree
+/// exactly once (through `analyze_staged`'s single
+/// `parse_green_from_tokens` call), and a tree-backed request —
+/// `document_symbols` — must cost nothing further, since it reads
+/// `DocState.green` rather than reparsing. A regression reintroducing a
+/// reparse at either call site is invisible to every other test in this
+/// suite; this is the one written to catch it.
+#[test]
+fn one_parse_per_language_service_request_is_measured_not_assumed() {
+    use crate::parser::PARSE_GREEN_FROM_TOKENS_CALLS;
+
+    PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.set(0));
+
+    let mut service = TmcLanguageService::new();
+    let uri = "untitled:doc.tmc".to_string();
+    service.did_update(&uri, CROSS_WORLD);
+    let after_update = PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.get());
+    assert_eq!(
+        after_update, 1,
+        "did_update must parse the green tree exactly once"
+    );
+
+    let symbols = service.document_symbols(&uri);
+    assert!(symbols.is_some(), "sanity: the document does parse");
+    let after_symbols = PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.get());
+    assert_eq!(
+        after_symbols, after_update,
+        "document_symbols must read DocState.green rather than reparsing"
+    );
+}
+
 /// A documented declaration's green node opens at its doc run, so the
 /// raw node extent is NOT the symbol's range: a client revealing it
 /// would scroll to the comment above the declaration. Every symbol
@@ -2005,6 +2037,146 @@ machine {
         span_of(src, "machine"),
         "the `machine` keyword's own span, not a synthesized one-column point"
     );
+}
+
+/// The other three top-level kinds' selection spans, pinned by value.
+/// `machine_symbols_selection_span_is_the_machine_keyword` above covers
+/// MACHINE alone; NAMESPACE, ALPHABET, and REUSE each read a real name
+/// token off the tree, and nothing asserted that VALUE anywhere — a
+/// wrong implementation that reported the symbol's own `span` (its
+/// whole extent) as `selection_span` too would still pass every other
+/// document-symbols test, since none of them compares the two fields.
+/// Each fixture's declared name is a string found nowhere else in its
+/// source, so `span_of` cannot pick up a same-spelled substring inside
+/// a keyword or a doc line by accident.
+#[test]
+fn top_level_selection_spans_are_the_declared_name_not_the_whole_extent() {
+    // namespace
+    let src = "namespace zzns {
+  alphabet a { '_' }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let ns = symbols
+        .iter()
+        .find(|s| s.name == "zzns")
+        .expect("namespace symbol");
+    assert_eq!(ns.selection_span, span_of(src, "zzns"));
+    assert_ne!(
+        ns.selection_span, ns.span,
+        "selection span is the name alone, not the whole declaration"
+    );
+
+    // alphabet
+    let src = "alphabet zzab { '_' }
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let ab = symbols
+        .iter()
+        .find(|s| s.name == "zzab")
+        .expect("alphabet symbol");
+    assert_eq!(ab.selection_span, span_of(src, "zzab"));
+    assert_ne!(ab.selection_span, ab.span);
+
+    // reuse
+    let src = "alphabet bits { '_' }
+
+routine zzru(tape t: bits) {
+  entry state s { [*] -> return; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let r = symbols
+        .iter()
+        .find(|s| s.name == "zzru")
+        .expect("reuse symbol");
+    assert_eq!(r.selection_span, span_of(src, "zzru"));
+    assert_ne!(r.selection_span, r.span);
+}
+
+/// The three world-level kinds' selection spans, pinned by value — the
+/// same gap as the top-level test above, one level down: STATE reads
+/// its own name token, GRAFT and BIND read their `as NAME` token, and
+/// nothing asserted any of the three anywhere.
+#[test]
+fn world_level_selection_spans_are_the_declared_name_not_the_whole_extent() {
+    // state
+    let src = "alphabet bits { '_' }
+
+machine {
+  tape t: bits;
+  entry state zzst { [*] -> stop; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let st = machine
+        .children
+        .iter()
+        .find(|s| s.name == "zzst")
+        .expect("state symbol");
+    assert_eq!(st.selection_span, span_of(src, "zzst"));
+    assert_ne!(st.selection_span, st.span);
+
+    // graft
+    let src = "alphabet bits { '_' }
+
+graph g(tape t: bits) {
+  entry state gs { [*] -> stop; }
+}
+
+machine {
+  tape t: bits;
+  entry graft g(t = t) as zzgr;
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let gr = machine
+        .children
+        .iter()
+        .find(|s| s.name == "zzgr")
+        .expect("graft symbol");
+    assert_eq!(gr.selection_span, span_of(src, "zzgr"));
+    assert_ne!(gr.selection_span, gr.span);
+
+    // bind
+    let src = "alphabet bits { '_' }
+
+routine r(tape t: bits) {
+  entry state rs { [*] -> return; }
+}
+
+machine {
+  tape t: bits;
+  bind r(t = t) as zzbd;
+  entry state main { [*] -> call zzbd() then main; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let symbols = service.document_symbols(&uri).expect("parses");
+    let machine = symbols
+        .iter()
+        .find(|s| s.name == "machine")
+        .expect("machine symbol");
+    let bd = machine
+        .children
+        .iter()
+        .find(|s| s.name == "zzbd")
+        .expect("bind symbol");
+    assert_eq!(bd.selection_span, span_of(src, "zzbd"));
+    assert_ne!(bd.selection_span, bd.span);
 }
 
 /// What a world body's children include is a rule, not a byproduct of

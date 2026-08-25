@@ -1,11 +1,15 @@
-//! `.tmc` recursive-descent parser (spec's language chapter): tokens → AST,
-//! via a lossless CST. The front-end mirror of the `.pmc` parser in the
-//! sibling PM-1 crate, using the same `parse = lower_cst ∘ parse_cst` seam:
-//! `parse_cst` builds the [`crate::cst::Cst`] (which `fmt` walks directly —
-//! the language service instead reads the green tree's typed views), and
-//! `lower_cst` copies it — infallibly — into the flat [`Program`] the rest
-//! of the front end consumes. Every fatal is raised by `parse_cst`;
-//! `lower_cst` never fails.
+//! `.tmc` recursive-descent parser (spec's language chapter): tokens →
+//! the green syntax tree via [`parse_green`]/[`parse_green_from_tokens`]
+//! — the path the compiler front end and the language service both run.
+//! The file also carries the C1 CST seam, `parse = lower_cst ∘
+//! parse_cst`, mirroring the sibling `.pmc` parser in the PM-1 crate:
+//! `parse_cst` builds the [`crate::cst::Cst`], and `lower_cst` copies it
+//! — infallibly — into a flat [`Program`]. That `Program` is not the one
+//! production runs on ([`crate::syntax::extract_program`] builds the
+//! live one straight off the green tree); the CST seam survives past the
+//! front only as `fmt`'s own input and as half of the differential
+//! oracle `extract_program`'s output is checked against. Every fatal on
+//! the CST seam is raised by `parse_cst`; `lower_cst` never fails.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
@@ -599,8 +603,10 @@ fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
     (sig, comments)
 }
 
-/// tokens → lossless CST. Accepts a comment-free stream (the compiler's path)
-/// or a `WithComments` stream (`fmt`'s path). Comment tokens are split off up
+/// tokens → lossless CST. Accepts a comment-free stream (the differential
+/// oracle's and other CST-focused tests' path — `parse` and its callers
+/// are all `#[cfg(test)]` now) or a `WithComments` stream (`fmt`'s path,
+/// the only production caller left). Comment tokens are split off up
 /// front so the grammar walk over the significant tokens is unaffected; the
 /// dropped-in-lowering trivia (`blank_before`, comment nodes, `trailing`,
 /// `open_trailing`/`close_trailing`, doc runs) is attached by source position.
@@ -626,6 +632,21 @@ pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
     parse_green_from_tokens(source, &tokens)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only call counter for [`parse_green_from_tokens`]
+    /// (docs/core.md (syntax trees)), read by `lsp::tests` to MEASURE —
+    /// rather than assume — that a tree-backed language-service request
+    /// costs zero additional parses once `DocState.green` is populated.
+    /// Thread-local, not a shared global: `cargo test`'s default harness
+    /// runs each test on its own thread, and this crate has hundreds of
+    /// tests calling this function, so a process-wide counter would be
+    /// corrupted by unrelated concurrent tests — a thread-local one
+    /// isolates each test's own calls from every other thread's.
+    pub(crate) static PARSE_GREEN_FROM_TOKENS_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Already-lexed tokens → green syntax tree, for callers that keep the
 /// token stream alongside the tree. `tokens` MUST be a
 /// `LexMode::WithComments` lex of `source`: [`crate::syntax::layout`]
@@ -642,6 +663,8 @@ pub fn parse_green_from_tokens(
     source: &str,
     tokens: &[Token],
 ) -> Result<Rc<GreenNode>, CompileError> {
+    #[cfg(test)]
+    PARSE_GREEN_FROM_TOKENS_CALLS.with(|c| c.set(c.get() + 1));
     let entries = syntax::layout(source, tokens);
     let (sig, comments) = split_comments(tokens);
     let eof_pos = sig.len() - 1;
