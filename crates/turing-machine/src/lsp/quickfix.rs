@@ -59,6 +59,25 @@ struct BodyExtent {
 /// (`crate::lsp::document_symbols`) already does, for the same reason
 /// (`TmcStagedAnalysis` does not carry the green tree it built for
 /// `program` past its own return).
+///
+/// The availability guard reads differently from the pre-port code —
+/// which required `state.cst` to be `Some` before even trying a stub —
+/// and is kept as read rather than reverted, because the two conditions
+/// are the SAME one, not merely usually alike. `state.text`/`state.tokens`/
+/// `state.cst` are always a matched triple from one `analyze_staged` call
+/// (`did_update`, `crate::lsp`'s own module — no staleness exception
+/// touches them, unlike `roster`), and `analyze_staged` documents and
+/// `debug_assert`s that `parse_cst(&tokens)` succeeds exactly when
+/// `parse_green_from_tokens(source, &tokens)` already did, because both
+/// run the identical `Parser` walk over the identical tokens and the sink
+/// never gates acceptance (`crate::compiler::analyze_staged`,
+/// `crate::parser::parse_green_from_tokens`'s own doc comment). So
+/// reparsing `state.text`/`state.tokens` here reproduces, deterministically,
+/// the exact Ok/Err `analyze_staged` already got when it built `state.cst`
+/// — this guard and `state.cst.is_some()` are provably the same condition,
+/// not an accepted widening. Re-gating on `state.cst` instead would only
+/// add a redundant read of a field task 3 removes, answering nothing this
+/// parse doesn't already answer on its own.
 fn state_stub(state: &DocState, name: &str, at: Span) -> Option<Action> {
     let tokens = state.tokens.as_deref()?;
     let green = crate::parser::parse_green_from_tokens(&state.text, tokens).ok()?;

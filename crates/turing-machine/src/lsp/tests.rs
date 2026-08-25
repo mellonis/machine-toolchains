@@ -1733,6 +1733,33 @@ machine {
 }
 
 #[test]
+fn a_two_tape_reuses_state_stub_gets_the_reuses_own_arity_not_the_fallback() {
+    // The arity lookup's failure path (`enclosing_body`'s `.map_or(1, ...)`)
+    // returns 1 on a lookup miss, which is indistinguishable from a REUSE
+    // whose own arity genuinely is 1 — the shape every other REUSE fixture
+    // in this file has. An `export routine` with TWO tape parameters makes
+    // a broken `r.name_token()` read (falling through to the miss branch)
+    // produce `[*]` instead of the `[*, *]` asserted below, so this pins
+    // both `name_token()` under `export` and the arity-by-name lookup at
+    // once, on a value the fallback cannot coincidentally reproduce.
+    let src = "\
+alphabet bits { '_', '1' }
+
+export routine work2(tape a: bits, tape b: bits) {
+  entry state s { [*, *] -> goto nowhere; }
+}
+";
+    let (mut service, uri) = opened(src);
+    let at = span_of(src, "nowhere");
+    let actions = service.code_actions(&uri, at);
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        actions[0].edits[0].replacement,
+        "  state nowhere { [*, *] -> stop; }\n"
+    );
+}
+
+#[test]
 fn an_omitted_binding_map_offers_the_pairs_it_needs() {
     let src = "\
 alphabet marks { '_', 'x', 'y' }
