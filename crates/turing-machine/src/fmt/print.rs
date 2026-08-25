@@ -703,15 +703,73 @@ mod tests {
     }
 
     /// The container walk starts its pre-brace scan at the declaring
-    /// keyword, and this is the source that shows why it cannot start at
-    /// the node: `/* a */` belongs to the doc run, and letting it move
-    /// the walk's near edge puts a blank line before `/* b */` and drops
-    /// the one before `alphabet` — both inverted, in one file. Written
-    /// with three newlines after `/* a */` and the keyword alone on its
-    /// own line, because a shorter gap cannot separate the two answers.
+    /// keyword, and these are the two sources that show why it cannot
+    /// start at the node. `/* a */` belongs to the doc run; a scan from
+    /// the node claims it a SECOND time, so both sources fail first on
+    /// the plainest symptom there is — the comment is printed TWICE,
+    /// once above `namespace` and once as the body's first item.
+    ///
+    /// Past the duplicate, the same scan drags the walk's near edge up
+    /// onto `/* a */`'s own line, and that inverts exactly ONE gap per
+    /// source — which is why one source cannot carry the claim:
+    ///
+    /// - **With a body comment** (the first source): `/* b */` gains a
+    ///   blank line nobody wrote. The gap before `alphabet` is `true`
+    ///   either way, so this source says nothing about it.
+    /// - **Without one** (the second): there is no body comment to
+    ///   absorb the moved edge, so the first real declaration gains the
+    ///   invented blank instead — C1 prints `alphabet` tight against the
+    ///   `{`.
+    ///
+    /// Both are written with three newlines after `/* a */`, because a
+    /// shorter gap cannot separate the two candidate near edges at all.
     #[test]
     fn a_doc_runs_comment_does_not_move_the_body_walks_near_edge() {
         agrees("? doc\n/* a */\n\n\nnamespace\n/* b */\nn {\n  alphabet b { '0' }\n}\n");
+        agrees("? doc\n/* a */\n\n\nnamespace n {\n  alphabet b { '0' }\n}\n");
+    }
+
+    /// The four copied layout rules no other source in this module can
+    /// reach — verified by neutralizing each one and watching the whole
+    /// suite stay green. Every function in this file is a verbatim copy
+    /// of the C1 printer's, so these were coverage gaps rather than
+    /// latent bugs; a copy nothing exercises is still a copy nothing
+    /// would catch drifting.
+    ///
+    /// One source per rule, and each one is the minimum that reaches it:
+    ///
+    /// - **`trailing_spacing`'s alignment run** — two ADJACENT
+    ///   single-line items that BOTH carry a trailing comment, which is
+    ///   the whole precondition (`end - start >= 2`). `a` and `bb`
+    ///   differ in width so the padding is actually computed rather than
+    ///   uniform.
+    /// - **`render_alphabet`'s width decision** — the one-line form of
+    ///   the first is exactly 80 columns and stays inline; the second is
+    ///   its one-character-longer twin at 81 and breaks. The pair pins
+    ///   the boundary from both sides, which a single under-the-limit
+    ///   source cannot do. One limit, measured rather than assumed: the
+    ///   80-column source only bites when BOTH width tests move together.
+    ///   Loosening the first alone is unobservable, because a
+    ///   comment-free list falls through to the second branch, which
+    ///   renders a bare `head { a, b }` byte-identically to the one-line
+    ///   form it just declined. That is inherited from the C1 printer's
+    ///   own shape, not a weakness of the fixture.
+    /// - **`glyph_text`'s escape branch** — the only two characters the
+    ///   lexer requires a backslash for, `'` and `\`.
+    /// - **`normalize_comment_text`** — trailing spaces INSIDE a line
+    ///   comment's text, which the printer strips and nothing else in
+    ///   this module writes.
+    #[test]
+    fn the_copied_layout_rules_agree() {
+        agrees("use a; // one\nuse bb; // two\n");
+        agrees(
+            "alphabet aaaaaaaaaaaaaaaaaaaaaaa { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i' }\n",
+        );
+        agrees(
+            "alphabet aaaaaaaaaaaaaaaaaaaaaaaa { 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i' }\n",
+        );
+        agrees("alphabet a { '\\'', '\\\\' }\n");
+        agrees("use a; // one   \nuse bb; // two\n");
     }
 
     /// The whole adversarial set, over the surfaces this printer covers.
