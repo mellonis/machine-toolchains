@@ -1445,6 +1445,15 @@ Expected: FAIL.
 
 - [ ] **Step 3: Write the implementation**
 
+**The interior-comment predicate body and the inline path's interior rendering
+must land in the SAME change.** Measured by Task 6: C1's `inline_candidate`
+checks only `call_args`/`map_pairs`, so a rule carrying a SAME-LINE BLOCK comment
+in a pattern or glyph vector is still a C1 inline candidate — and C1 splices that
+comment into the single-line form. If you implement the predicate without also
+rendering interiors on the inline path (or the reverse), the corpus diverges on
+inline states. Ship them together and add a differential case for exactly that
+shape.
+
 **Two more surfaces become armable for the first time here.** Task 5 reports that
 the `call` transition's binding-list boundary and the whole
 `render_rule_off_grid` / `glyph_vec_multiline` / `col_after` branch are
