@@ -157,11 +157,23 @@ else.** `turing-machine/src/syntax/extract.rs`'s test module holds seven
 all comparing a shim against `lower_cst`. This is the largest single body of
 coverage the deletion removes, and Task 4 is mostly about it.
 
-**8. Call sites to migrate: 31.** PM 26 (`ir.rs` ×4, `codegen.rs` ×1,
-`compiler.rs` ×1, `cli/driver.rs` ×1, `parser.rs` ×1, `optimizer/*` ×18),
-TM 5 (`compiler.rs`, `expand.rs`, `parser/tests.rs` ×2, `syntax/extract.rs`).
-Every one of them holds `src` within two lines; the uniform shape is
-`lower(&parse(&lex(src).unwrap()).unwrap())`.
+**8. Call sites to migrate: 33, and the count was wrong once already.** PM 26
+(`ir.rs` ×4, `codegen.rs` ×1, `compiler.rs` ×1, `cli/driver.rs` ×1, `parser.rs`
+×1, `optimizer/*` ×18) — all in `src/`, none in `tests/`. TM 7: five in `src/`
+(`compiler.rs`, `expand.rs`, `parser/tests.rs` ×2, `syntax/extract.rs`) **plus
+two in `tests/`** — `tests/syntax_green.rs` and `tests/tmc_green_analyze.rs`.
+The uniform shape is `lower(&parse(&lex(src).unwrap()).unwrap())`.
+
+**The trap that hid the last two, worth more than the count:** TM's
+`tests/syntax_green.rs` imported the function as
+`use mtc_turing_machine::parser::parse as parse_ast;` and called it
+`parse_ast(...)`. An inventory grep for `parser::parse(` or `::parse(&` matches
+neither. **Grep for aliased imports (`parse as `) before trusting any call-site
+census in this repo.** Both sites were C1-path ORACLES — they compare the CST
+path against the green path — so redefining `parse` would have made them
+compare the green path with itself: still passing, proving nothing, silently.
+They were rewritten to compose `parse_cst`/`lower_cst` directly, which keeps
+the oracle alive until Task 5 retires it deliberately.
 
 ---
 
@@ -194,6 +206,7 @@ Every one of them holds `src` within two lines; the uniform shape is
 | `crates/turing-machine/src/fmt/print.rs` | import moves from `crate::cst` to `crate::parser` |
 | `crates/post-machine/tests/syntax_green.rs` | four C1 tests removed/converted |
 | `crates/turing-machine/tests/syntax_parity.rs` | **deleted** |
+| `crates/turing-machine/tests/syntax_green.rs` | two C1-oracle tests retired (Task 5) |
 | `crates/turing-machine/tests/tmc_property.rs` | `both_paths` loses its C1 half; `REQUIRED_CONSTRUCTS` re-derived from generator branches |
 | `crates/turing-machine/tests/syntax_views.rs`, `tmc_green_analyze.rs` | single C1 call sites converted |
 | `crates/post-machine/src/{compiler,cli/driver}.rs`, `crates/turing-machine/src/compiler.rs` | the three oracle tests re-based per fact 6 |
@@ -711,6 +724,12 @@ git commit -m "test: pin what only the C1 differential was covering"
 
 **Files:**
 - Delete: `crates/turing-machine/tests/syntax_parity.rs`
+- Modify: **`crates/turing-machine/tests/syntax_green.rs`** — added after Task 2
+  discovered it (see measured fact 8): `errors_agree_with_the_cst_path` and its
+  acceptance sibling are C1 oracles that Task 2 rewrote onto explicit
+  `parse_cst`/`lower_cst`. They are C1 oracles, so retiring them is THIS task's
+  job. Convert each to assert its expected error/acceptance by value, captured
+  from the C1 path before it is deleted — same protocol as the rest of Step 4.
 - Modify: `crates/post-machine/tests/syntax_green.rs` (four tests),
   `crates/turing-machine/tests/tmc_property.rs` (`both_paths`, the
   `extraction_parity` proptest, `REQUIRED_CONSTRUCTS`, `stamp_*`),
