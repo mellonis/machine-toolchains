@@ -518,6 +518,14 @@ control-flow path reaches), branch/call targets resolved to
 not reassembleable — it exists to inspect what a `.pmx` actually contains,
 byte for byte, not to round-trip it.
 
+**Mnemonic width follows from who picks it.** A symbol site the linker
+narrowed prints in the canonical view under its **far** mnemonic —
+`call`, never `call.s` — because far is the only form the assembler
+accepts, and re-linking that text re-derives the same narrowing
+(`docs/core.md (relaxation)`). An intra-function jump keeps its own
+spelling, short form included, because the assembler owns that width.
+`--listing` shows the encoding either way.
+
 The renderer wraps a row that will not fit — bytes after five per line,
 the operand within its own column — but no PM-1 instruction is wide
 enough to reach either limit: the widest encoding is five bytes, and a
@@ -688,10 +696,14 @@ instruction just produced, in the Delphi step-view tradition;
 subcommands but currently has no additional effect: `run`'s outcome and
 stats print unconditionally regardless of `-v`.
 
-**Exit codes:** `0` the program stopped normally (`stp`); `2` the program
-halted abnormally (`hlt`); `3` the program trapped; `1` a tool-level error
-(bad arguments, unreadable file, malformed container — never a program
-outcome).
+### Exit codes
+
+| Code | Outcome | What it means |
+|---|---|---|
+| `0` | `Stopped` | The program reached `stp` — a normal, successful end. |
+| `2` | `Halted` | The program reached `hlt` — an abnormal end the program chose. |
+| `3` | `Trapped` | The machine faulted, or a budget ran out. |
+| `1` | tool error | Bad arguments, unreadable file, malformed container — never a program outcome. |
 
 ## `pmt ir`
 

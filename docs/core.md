@@ -710,6 +710,22 @@ sections are emitted alongside code, with per-function table bases and
 dispatch entries rebased through the same offset map, so a relaxation
 that moves code keeps table references correct.
 
+**Call width is not spellable in source.** Because this pass owns it,
+a short call mnemonic is a syntax error (`width is linker-selected`),
+and an object carries only far call holes — one relocation per call
+site, each a four-byte placeholder (`docs/formats.md (object file)`).
+Disassembly closes the same circle in the other direction: a symbol
+site this pass narrowed prints under its **far** mnemonic, because
+far is the only form the assembler accepts, and re-linking the
+recovered text re-derives the same narrowing. That is what keeps
+`dis` → `asm` → `link` byte-exact, and it is why canonical `dis`
+output shows a plain call where the image holds a short one. An
+intra-function jump is sized by the assembler instead, so a dialect
+that spells a short jump form accepts it in source, where it pins the
+width, and disassembly prints that site as encoded. The address view
+(`--listing` on both CLIs) prints the encoding as it stands, opcode
+bytes and all.
+
 ### The link report
 
 Every link returns a structured account of what it did, which the CLIs

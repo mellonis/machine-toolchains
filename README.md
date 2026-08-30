@@ -125,6 +125,21 @@ consume `.pmt` snapshots; `dis` shows the linked `.pmx` with real function
 names resolved from the `.pmx.map` sidecar that `link` wrote alongside it.
 Full flag reference: `docs/pmt/cli.md`.
 
+That `dis` output is canonical assembly — valid `asm` input that re-links
+to this same image — so it prints the form the assembler accepts rather
+than the one the linker picked: every `call` above is a *short* call in
+the image, because a symbol site's width belongs to the linker
+(`docs/core.md (relaxation)`). `--listing` is the byte-exact view, one
+row per instruction with its address and raw bytes:
+
+```
+$ target/release/pmt dis --listing sum.pmx | head -4
+main:
+  0000:  0D              ent
+  0001:  1B 14           call.s  0x0017 <std::goToEnd>
+  0003:  05              rgt
+```
+
 The five commands above are what `pmt build` collapses into one step once
 a project has more than a one-off source file. A `pmt.json` at the
 repository root (alongside the `sum.pmt`/`sum.pmx` the walkthrough above
@@ -222,6 +237,20 @@ link-time composition engine selected by `--call-mech`. Both CLIs share
 their exit codes (`0` stopped, `2` halted, `3` trapped). Full flag
 reference: `docs/tmt/cli.md`.
 
+`--listing` is the byte-exact view here too — one row per instruction,
+its address and raw bytes, with the canonical view's table labels shown
+as the raw addresses they encode:
+
+```
+$ target/release/tmt dis --listing replace.tmx | head -6
+main:
+  0000:  0D              ent
+  0001:  04              rd
+  0002:  05 00 00 00 00  mtc     0x0000
+  0007:  06 06 00 00 00  djmp    0x0006
+  000c:  12 81 82        wrmv    [1], [>]
+```
+
 `tmt build` is the same compile-link driver `pmt build` is, over its own
 `tmt.json`. A manifest declaring one target — its sources, its `.tmt`
 tape, and optionally the `call-mech` it commits to — turns the sequence
@@ -267,8 +296,7 @@ that cover what they hold in common.
 - `docs/tmt/asm.md` — the `.tma` assembly dialect: the sample shape, the
   `tmt dis` round trip, how the twenty mnemonics are spelled, what the
   `.tmc` compiler emits, and the dialect-version history.
-- `docs/tmt/cli.md` — every `tmt` subcommand and flag, and the `tmt.json`
-  file's `lint` section.
+- `docs/tmt/cli.md` — every `tmt` subcommand and flag.
 - `docs/tmt/optimizer.md` — the `-O1` pipeline: the eight passes, the
   contracts binding them, and a worked before/after graph example per
   pass.

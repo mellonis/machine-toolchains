@@ -69,20 +69,95 @@ instruction in `.tma`), so allowing it suppresses both.
 
 A repository can carry its allow-list in a `tmt.json` file, so the
 suppressions a team agreed on travel with the source rather than living
-in shell aliases and CI flags. Its `lint.allow` entries draw from the
-same shared namespace `--allow` does, and the two are combined as a
-union.
+in shell aliases and CI flags. `tmt.json` is a close twin of PM-1's
+`pmt.json` (`docs/pmt/lint.md`): the same discovery rule and the same
+merge semantics. A repository holding both `.pmc` and `.tmc` sources
+keeps two separate project files rather than one shared file with
+per-language sections — `tmt` never reads `pmt.json`, and `pmt` never
+reads `tmt.json`.
 
-`tmt.json` — the schema, nearest-ancestor discovery, the union with
-editor settings, and which surfaces read it — is documented in full at
-`docs/tmt/cli.md`; it is not restated here.
+The file carries up to two independent top-level sections. This section
+documents `lint`, the allow-list; the same file may also carry a
+`project` section — the declared project model `tmt build` reads
+(sources, libraries, profiles, the bound-call lowering, named targets),
+documented in full at `docs/tmt/project.md`. Its presence does not change
+lint discovery in any way: the two sections are found by independent
+ancestor walks, and a `tmt.json` carrying only `lint` is still the
+nearest config for lint purposes. The one connection is that a bare
+`tmt lint` — no PATH arguments at all — lints exactly that section's
+declared source set (`docs/tmt/project.md (the declared source set)`).
 
-The same `tmt.json` may also carry a `project` section, the declared
-project model documented at `docs/tmt/project.md`. Its presence does not
-change lint discovery: the two sections are found by independent ancestor
-walks, and a `tmt.json` carrying only `lint` is still the nearest config
-for lint purposes. The one connection is that a bare `tmt lint` — no PATH
-arguments at all — lints exactly that section's declared source set.
+The `lint` section is one key:
+
+```json
+{
+  "lint": {
+    "allow": ["state-may-trap"]
+  }
+}
+```
+
+An empty object `{}` is valid — a `tmt.json` need not set anything to be
+worth having, since its mere presence marks a subtree root. Any key outside
+this schema is rejected by name (`unknown key `lnt``), as is an
+`allow` entry naming no rule in the shared namespace. Validation is a manual
+walk rather than a blanket deserialize, so a typo in a hand-authored file
+points at the offending key instead of failing the whole document
+generically. One loader validates the **whole file**, both sections, no
+matter which one the calling tool wants: a typo under `project` fails a
+lint-only load of the same file too.
+
+Note what is **not** in the schema: there is no `warn` key. A `tmt.json`
+can suppress a rule but cannot turn an opt-in rule on; that is the `--warn`
+flag's job on the command line, and the editor-settings channel's in an IDE.
+
+### Discovery: nearest ancestor, never a cascade
+
+For each input file, discovery walks up from that file's directory to the
+filesystem root and takes the **first** `tmt.json` it finds. A `tmt.json`
+further up the tree is then not read at all — configuration does not
+cascade, and settings do not accumulate down a path. Two files under
+different nearest configs in one run may end up with entirely different
+allow-lists, by design: a subtree opts into its own configuration by having
+its own file. Relative paths are absolutized before the walk, so a run
+started from a subdirectory still discovers a `tmt.json` above the working
+directory.
+
+### Union with editor settings
+
+An editor supplies a second configuration channel of its own. The two are
+combined as a **union**, project file first, and again never as a cascade:
+codes from the discovered `tmt.json` and codes from editor settings both
+take effect, and neither channel replaces or overrides the other. On the
+command line the same rule applies between `tmt.json` and `--allow` — the
+effective allow-list is the union of both.
+
+The practical consequence is that removing a code from one channel does not
+necessarily re-enable the rule; it stays suppressed if the other channel
+still names it.
+
+### Which surfaces read it
+
+| Surface | Reads `tmt.json` |
+|---|---|
+| `tmt lint` | Yes — per input file, unioned with `--allow`; `--no-config` opts out. |
+| `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. |
+| `tmt fmt` | No. |
+| every other subcommand | No. |
+
+A `tmt.json` that fails to parse or validate is a **per-file fatal**, exactly
+like a source file that fails to parse: it is reported on stderr with its own
+path, the file it would have configured is skipped, and the batch continues.
+
+```
+$ tmt lint proj/sub/prog.tmc
+/tmp/proj/tmt.json: error: unknown lint rule `nope` in lint.allow
+```
+
+That differs from an unknown code named directly by `--allow`, which is a
+whole-tool error — that flag applies to the entire run, so there is no single
+file to skip. In the language server the same failure surfaces as an
+invalid-configuration diagnostic rather than stopping the session.
 
 ## The `.tmc` rules
 

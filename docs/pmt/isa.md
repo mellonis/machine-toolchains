@@ -137,7 +137,11 @@ table rows — they decode to "invalid" or "reserved").
   width is decided by **linker relaxation**: lay out with far calls, then
   iteratively shrink calls whose targets fit a signed byte (-128..127) to
   `call.s`, re-patching until stable (`pmt link --no-relax` disables
-  this; `docs/core.md (relaxation)`).
+  this; `docs/core.md (relaxation)`). `call.s` therefore exists for
+  disassembly and link-time relaxation only — the assembler rejects
+  `call.s <target>` in source, and canonical `dis` prints a narrowed
+  site as plain `call`. The short jump forms are the opposite case:
+  ordinary source syntax, where writing `jm.s` pins the width.
 
 ## Timing model (tacts)
 

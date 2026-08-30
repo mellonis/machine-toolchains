@@ -444,8 +444,8 @@ the `release` base; omitting both `--release` and `--debug` selects
 `debug`. The individual compile-side flags above then layer on top of
 that base's keys for this invocation only — an individual flag always
 wins over whatever the resolved profile declares (see
-[`tmt.json`](#tmtjson) below and `docs/tmt/project.md` for the profile
-schema itself).
+`docs/tmt/lint.md (project file)` and `docs/tmt/project.md` for the
+profile schema itself).
 
 **`--run [TARGET]`:** builds first, then runs the target's declared run
 block, reached only after a successful build; naming more than one
@@ -514,6 +514,13 @@ path reaches, and branch/call targets resolved to `function` /
 `function.label` names when a map is available. That view is not
 reassembleable; it exists to inspect what a `.tmx` actually contains, byte
 for byte. `--listing` applies to executables only.
+
+**Mnemonic width follows from who picks it.** TM-1's one short form is
+the call, and a call the linker narrowed prints in the canonical view
+as plain `call` — far is the only form the assembler accepts, and
+re-linking that text re-derives the same narrowing
+(`docs/core.md (relaxation)`). `--listing` is where the `call.s`
+encoding shows.
 
 **Wide instructions wrap in two columns.** A per-tape `wr`/`mov` vector
 grows with the tape count, so a listing row is not always one line. The
@@ -984,7 +991,7 @@ prog.tmc:4:15: lint: state `s` may trap — its rules do not cover every input a
 For each input file, `tmt lint` discovers a `tmt.json` by walking up from
 that file's directory and unions its `lint.allow` with any `--allow` flags.
 `--no-config` skips that discovery for every file, leaving the run governed
-by the flags alone. See [`tmt.json`](#tmtjson) below.
+by the flags alone. See `docs/tmt/lint.md (project file)`.
 
 `--no-config` is rejected outright on a *bare* `tmt lint` — one with no PATH
 arguments — because there the manifest's declared source set is the input
@@ -1148,92 +1155,3 @@ subcommand actually reads — with directories offered alongside for `lint`
 and `fmt`, which walk them. `bash` and `fish` are recognized shell names, so
 naming one gives a message that says so rather than rejecting it as unknown;
 neither renders a script.
-
-## `tmt.json`
-
-`tmt.json` is the TM toolchain's project file, and a close twin of PM-1's
-`pmt.json` (`docs/pmt/lint.md`): the same discovery rule and the same
-merge semantics. A repository holding both `.pmc` and `.tmc` sources keeps
-two separate project files rather than one shared file with per-language
-sections — `tmt` never reads `pmt.json`, and `pmt` never reads `tmt.json`.
-
-The file carries up to two independent top-level sections. This section
-documents `lint`, the allow-list; the same file may also carry a
-`project` section — the declared project model `tmt build` reads (sources,
-libraries, profiles, the bound-call lowering, named targets), documented
-in full at `docs/tmt/project.md`. Its presence does not change lint
-discovery in any way, and the two walks are independent: a bare
-`tmt lint` with no PATH arguments uses that section's declared source set
-(`docs/tmt/project.md (the declared source set)`).
-
-The `lint` section is one key:
-
-```json
-{
-  "lint": {
-    "allow": ["state-may-trap"]
-  }
-}
-```
-
-An empty object `{}` is valid — a `tmt.json` need not set anything to be
-worth having, since its mere presence marks a subtree root. Any key outside
-this schema is rejected by name (`unknown key `lnt``), as is an
-`allow` entry naming no rule in the shared namespace. Validation is a manual
-walk rather than a blanket deserialize, so a typo in a hand-authored file
-points at the offending key instead of failing the whole document
-generically. One loader validates the **whole file**, both sections, no
-matter which one the calling tool wants: a typo under `project` fails a
-lint-only load of the same file too.
-
-Note what is **not** in the schema: there is no `warn` key. A `tmt.json`
-can suppress a rule but cannot turn an opt-in rule on; that is the `--warn`
-flag's job on the command line, and the editor-settings channel's in an IDE.
-
-### Discovery: nearest ancestor, never a cascade
-
-For each input file, discovery walks up from that file's directory to the
-filesystem root and takes the **first** `tmt.json` it finds. A `tmt.json`
-further up the tree is then not read at all — configuration does not
-cascade, and settings do not accumulate down a path. Two files under
-different nearest configs in one run may end up with entirely different
-allow-lists, by design: a subtree opts into its own configuration by having
-its own file. Relative paths are absolutized before the walk, so a run
-started from a subdirectory still discovers a `tmt.json` above the working
-directory.
-
-### Union with editor settings
-
-An editor supplies a second configuration channel of its own. The two are
-combined as a **union**, project file first, and again never as a cascade:
-codes from the discovered `tmt.json` and codes from editor settings both
-take effect, and neither channel replaces or overrides the other. On the
-command line the same rule applies between `tmt.json` and `--allow` — the
-effective allow-list is the union of both.
-
-The practical consequence is that removing a code from one channel does not
-necessarily re-enable the rule; it stays suppressed if the other channel
-still names it.
-
-### Which surfaces read it
-
-| Surface | Reads `tmt.json` |
-|---|---|
-| `tmt lint` | Yes — per input file, unioned with `--allow`; `--no-config` opts out. |
-| `tmt lsp` (both `.tmc` and `.tma` services) | Yes — per document, mtime-cached, unioned with editor settings; both services watch `**/tmt.json` so an edit re-resolves. |
-| `tmt fmt` | No. |
-| every other subcommand | No. |
-
-A `tmt.json` that fails to parse or validate is a **per-file fatal**, exactly
-like a source file that fails to parse: it is reported on stderr with its own
-path, the file it would have configured is skipped, and the batch continues.
-
-```
-$ tmt lint proj/sub/prog.tmc
-/tmp/proj/tmt.json: error: unknown lint rule `nope` in lint.allow
-```
-
-That differs from an unknown code named directly by `--allow`, which is a
-whole-tool error — that flag applies to the entire run, so there is no single
-file to skip. In the language server the same failure surfaces as an
-invalid-configuration diagnostic rather than stopping the session.
