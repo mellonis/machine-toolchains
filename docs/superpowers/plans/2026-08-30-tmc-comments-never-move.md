@@ -18,6 +18,10 @@ multi-line?) — but they stop deciding *placement*.
 `crates/turing-machine/src/fmt/{print,trivia}.rs`, `mtc-core`'s `syntax`
 framework.
 
+**Tracker:** https://github.com/mellonis/machine-toolchains/issues/98 — carries
+the rule, the audit's numbers, the decided grid behaviour and the measured blast
+radius. Closes the TM half of #97, which is the problem statement this resolves.
+
 **Spec:** none. This plan's evidence base is the measured audit in
 `docs/superpowers/specs/2026-08-30-tmc-comment-audit.md` (Task 0 writes it from
 the scratchpad harness). The target rule was chosen by the maintainer from three
