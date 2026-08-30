@@ -18,7 +18,7 @@ A Rust toolchain family for tape machines. Two architectures share one arch-agno
 | `pmt.json` / `tmt.json` `project` schema | 0.2 / 0.2 |
 | editor plugins (all four) | 0.2.0, `MIN_TESTED_PMT`/`MIN_TESTED_TMT` floors at 0.4.0 |
 
-**Both toolchain arcs are complete.** PM-1/`pmt` and TM-1/`tmt` each ship the whole chain — compiler, assembler, disassembler, linker, VM, lint, fmt, LSP, DAP, a project manifest with a `build` driver, an embedded stdlib, and a two-plugin editor pair. The TM-1 flagship `docs/examples/brainfuck-utm.tma` — a hand-written universal Turing machine interpreting brainfuck — assembles, links and runs, proven by derivation-first goldens.
+**Both toolchain arcs are complete.** PM-1/`pmt` and TM-1/`tmt` each ship the whole chain — compiler, assembler, disassembler, linker, VM, lint, fmt, LSP, DAP, a project manifest with a `build` driver, an embedded stdlib, and a two-plugin editor pair. The TM-1 flagship `docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma` — a hand-written universal Turing machine interpreting brainfuck — assembles, links and runs, proven by derivation-first goldens.
 
 **Open work.** #14 zero-copy typed-view CST AST (the "C2" migration — in flight on `feat/c2-green-tree`); #6 a wasm32 build of `mtc-core` plus browser-demo integration, fed by #55 (a brainfuck-runner example); #87 a hardware PM-1 RTL core against the bus contract; #30 a tape-machine testing library (`pmt test`/`tmt test`); #9 a post-machine-js dialect front end; #94 letting a tapeblock buffer a step's per-tape commands and run them in parallel, instead of the bus serializing one device at a time.
 

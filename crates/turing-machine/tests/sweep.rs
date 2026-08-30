@@ -33,10 +33,12 @@ use mtc_turing_machine::stdlib;
 use mtc_turing_machine::tm1_syntax;
 
 fn tmc_example_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tmc")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/examples/brainfuck-utm/brainfuck-utm.tmc")
 }
 
-/// The UTM's per-tape alphabet cardinalities (docs/examples/brainfuck-utm.tma
+/// The UTM's per-tape alphabet cardinalities
+/// (docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma
 /// (routine)): prog 9 symbols, data/out 127 each, cnt 2.
 const WIDTHS: [u32; 4] = [9, 127, 127, 2];
 
@@ -45,7 +47,7 @@ const WIDTHS: [u32; 4] = [9, 127, 127, 2];
 const PROGRAM: &str = "++[>+++<-]>.";
 
 /// bf source → prog-tape symbol indices, plus the `'H'` sentinel (index 8)
-/// the UTM halts on (docs/examples/brainfuck-utm.tma alphabet:
+/// the UTM halts on (docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma alphabet:
 /// 0=' ' 1='+' 2='-' 3='<' 4='>' 5='.' 6='[' 7=']' 8='H').
 fn encode(program: &str) -> Vec<u8> {
     let mut prog: Vec<u8> = program

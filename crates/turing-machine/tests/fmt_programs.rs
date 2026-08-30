@@ -94,8 +94,8 @@ fn brainfuck_fixture_fmt_is_idempotent_and_lossless() {
     // The flagship UTM: sections, an 8-row match table, `.rept` macros with
     // `{v}` substitution, dispatch tables. Read-only — never written back
     // (it is golden-backed).
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma");
     let src = fs::read_to_string(&path).expect("read brainfuck-utm.tma");
     assert_idempotent_and_lossless(&src, "brainfuck");
 }
@@ -107,8 +107,8 @@ fn brainfuck_fixture_fmt_is_idempotent_and_lossless() {
 /// reformat a shipped source fails here first.
 #[test]
 fn every_tma_source_is_already_fmt_clean() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma");
     let src = fs::read_to_string(&path).expect("read brainfuck-utm.tma");
     assert_eq!(fmt_tma(&src), src, "brainfuck-utm.tma is not fmt-clean");
 }

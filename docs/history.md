@@ -130,7 +130,7 @@ The standard library carries the same descent: `std::binaryNumbers` and
 libraries, keeping the delimited and bare representations side by side so
 the trade-off between them stays visible (`docs/tmt/stdlib.md`).
 
-**The program that came before the machine.** `docs/examples/brainfuck-utm.tma`
+**The program that came before the machine.** `docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma`
 is a four-tape universal Turing machine that interprets brainfuck from its
 program tape. It was written against a *speculative* TM-1 — hand-authored
 assembly for an architecture that did not exist yet — as a stress test of

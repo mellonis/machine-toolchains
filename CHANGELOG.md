@@ -237,7 +237,7 @@ asynchronous execution surface for driving real hardware.
   for it. `-O0` output stays bit-identical to plain codegen, a `brk`
   remains a barrier no pass crosses, and the equivalence matrix covers
   `-O0`/`-O1` against all three call mechanisms.
-- **A worked example ships, twice.** `docs/examples/brainfuck-utm.tma`
+- **A worked example ships, twice.** `docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma`
   is a hand-written universal Turing machine that interprets brainfuck;
   `brainfuck-utm.tmc` is the same machine in the source language. Both
   build and run, and they are held equivalent by one set of golden tape

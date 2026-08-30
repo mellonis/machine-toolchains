@@ -730,7 +730,7 @@ fn the_flagship_brainfuck_utm_lints_free_of_false_unused_labels() {
     // shipped example reports no unused-label finding at all: none is a false
     // positive, and none names genuinely dead code.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/examples/brainfuck-utm.tma");
+        .join("../../docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma");
     let src = fs::read_to_string(&path).expect("read the flagship .tma");
     let report = lint_tma(&src, &[]).expect("the flagship assembles");
     let unused: Vec<&Diagnostic> = report.iter().filter(|d| d.code == "unused-label").collect();

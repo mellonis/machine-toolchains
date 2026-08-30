@@ -41,10 +41,10 @@ fn corpus() -> Vec<(String, String)> {
             .expect("the embedded stdlib source is readable"),
     ));
     out.push((
-        "docs/examples/brainfuck-utm.tmc".to_string(),
+        "docs/examples/brainfuck-utm/brainfuck-utm.tmc".to_string(),
         std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/examples/brainfuck-utm.tmc"
+            "/../../docs/examples/brainfuck-utm/brainfuck-utm.tmc"
         ))
         .expect("the flagship UTM doc example is readable"),
     ));

@@ -1,6 +1,7 @@
 //! Derivation-first goldens for the brainfuck UTM
-//! (docs/examples/brainfuck-utm.tma). A tiny independent brainfuck reference
-//! interpreter derives the final four-tape state; the UTM's run must
+//! (docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma). A tiny
+//! independent brainfuck reference interpreter derives the final four-tape
+//! state; the UTM's run must
 //! reproduce it, and the committed `.tmt` goldens are byte-identical to the
 //! derived snapshots. Mirrors the PM-1 `golden_programs.rs` discipline: the
 //! goldens are regenerated FROM the derivation, never from run output.
@@ -24,13 +25,15 @@ use mtc_turing_machine::compiler::{CompileOptions, compile};
 use mtc_turing_machine::optimizer::OptLevel;
 
 fn example_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tma")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma")
 }
 
 /// The `.tmc` port of the same UTM — the high-level source for the identical
-/// algorithm (docs/examples/brainfuck-utm.tmc).
+/// algorithm (docs/examples/brainfuck-utm/brainfuck-utm.tmc).
 fn tmc_example_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/examples/brainfuck-utm.tmc")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/examples/brainfuck-utm/brainfuck-utm.tmc")
 }
 
 fn golden_dir() -> PathBuf {
@@ -42,7 +45,7 @@ fn golden_dir() -> PathBuf {
 const WIDTHS: [u32; 4] = [9, 127, 127, 2];
 
 /// bf source → prog-tape symbol indices, plus the `'H'` sentinel (index 8)
-/// the UTM halts on (docs/examples/brainfuck-utm.tma alphabet:
+/// the UTM halts on (docs/examples/brainfuck-utm/brainfuck-utm-handwritten.tma alphabet:
 /// 0=' ' 1='+' 2='-' 3='<' 4='>' 5='.' 6='[' 7=']' 8='H').
 fn encode(program: &str) -> Vec<u8> {
     let mut prog: Vec<u8> = program
