@@ -1,12 +1,14 @@
 //! Lossless concrete syntax tree (CST) node types for `.tmc` — the front-end
 //! mirror of the `.pmc` CST in the sibling PM-1 crate.
 //!
-//! `parse_cst` builds a [`Cst`] from a token stream (a `WithComments` stream
-//! for the formatter/language server that phase 7 adds, or the compiler's
-//! comment-free stream); `lower_cst` copies it into the flat
-//! [`crate::parser::Program`] AST that the rest of the front end consumes. The
-//! pretty-printer/LSP (phase 7) walk the [`Cst`] directly and must attach
-//! without reworking it — hence the lossless obligation below.
+//! `crate::parser::Parser::file` and its per-production helpers still build
+//! a [`Cst`] tree of these types as they walk (the same grammar walk
+//! [`crate::parser::parse_green_from_tokens`] runs, with a green sink
+//! attached alongside it) — but nothing in production reads the built tree
+//! any more: the compiler front end, the `.tmc` language service, and `fmt`
+//! all read the green tree instead, via
+//! [`crate::parser::parse_green`]/[`crate::parser::parse_green_from_tokens`]
+//! and [`crate::syntax::extract_program`] (docs/core.md (syntax trees)).
 //!
 //! # The lossless contract
 //!
@@ -19,11 +21,10 @@
 //!   [`TopKind::Namespace`] nodes, never merged.
 //! - **World-body items interleave in source order.** A [`MachineCst`]'s
 //!   `items` is one `Vec<WorldItem>` with tape declarations, states, grafts,
-//!   binds, and own-line comments interleaved exactly as written; `lower_cst`
-//!   splits them into the AST's separate lists.
+//!   binds, and own-line comments interleaved exactly as written; the AST
+//!   splits them into separate lists instead.
 //! - **Rule internals are reused, not redefined.** [`RuleCst`] embeds the
-//!   parser's [`crate::parser::Rule`] verbatim, so `lower_cst` hands it
-//!   straight to the AST with no rebuilding.
+//!   parser's [`crate::parser::Rule`] verbatim, with no rebuilding.
 //! - **Comments are trivia at their real source position** (module-level
 //!   own-line comments as [`TopKind::Comment`] items, same-line trailing
 //!   comments riding the node they follow, brace-line comments on
@@ -35,9 +36,8 @@
 //! - **Interior list comments are index-keyed** (`interior`): a comment
 //!   inside a comma-separated list is stored against the index of the entry
 //!   it precedes, with the entry count meaning "before the closer". The
-//!   entry types stay trivia-free, so `lower_cst` hands them to the AST
-//!   unchanged. Several lists sit inside an AST type handed to the AST
-//!   verbatim rather than directly on a CST node: a rule's pattern,
+//!   entry types stay trivia-free. Several lists sit inside an AST type
+//!   embedded verbatim rather than directly on a CST node: a rule's pattern,
 //!   `write`, and `move` vectors and a `call` transition's binding list
 //!   (all inside [`RuleCst`]'s embedded [`Rule`]), and any `with map` pair
 //!   list (inside a [`BindingArg`], which [`RuleCst`], [`GraftCst`], and
@@ -47,14 +47,16 @@
 //!   [`GraftCst::map_pairs`], [`BindCst::map_pairs`]) instead.
 //!
 //! Container nodes deliberately do NOT carry the AST's computed fields (no
-//! `ns` tag, no reduced `doc`, no tapes/behavior split) — a future `lower_cst`
-//! computes those from the block structure; duplicating them would let the two
-//! trees disagree.
+//! `ns` tag, no reduced `doc`, no tapes/behavior split) — those are derived
+//! from the tree's block/interleaving structure by whatever builds the AST
+//! (`crate::syntax::extract`, over the green tree — the CST's own shape
+//! mirrors the same nesting); duplicating them here would only risk the two
+//! disagreeing.
 
 use mtc_core::diagnostics::Span;
 
 use crate::lexer::Comment;
-use crate::parser::{AlphabetElem, BindingArg, QualName, Rule, Signature};
+use crate::parser::{AlphabetElem, BindingArg, DocRunItem, QualName, Rule, Signature};
 
 /// A whole `.tmc` file: top-level items in source order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,9 +145,9 @@ pub struct AlphabetCst {
     pub span: Span,
     /// The `?`/`!` run bound to this declaration, in source order; empty when
     /// undocumented. Unlike every other trivia field, this IS an attachment
-    /// pass — `parse_cst` binds a run to the NEXT doc-accepting declaration at
+    /// pass — the parser binds a run to the NEXT doc-accepting declaration at
     /// its scope (a run with anything else next is a `DanglingDocRun` error).
-    /// `lower_cst` reduces it to [`crate::parser::Doc`].
+    /// [`crate::parser::reduce_doc_run`] reduces it to [`crate::parser::Doc`].
     pub doc_run: Vec<DocRunItem>,
     /// Comment(s) on the same physical line as the opening `{`.
     pub open_trailing: Vec<Comment>,
@@ -378,149 +380,4 @@ pub struct BindCst {
     pub span: Span,
     pub doc_run: Vec<DocRunItem>,
     pub trailing: Option<Comment>,
-}
-
-/// One line of a doc/attention run, plus whether a blank line precedes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DocRunItem {
-    pub blank_before: bool,
-    pub kind: DocRunKind,
-}
-
-/// A doc/attention run's line shapes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DocRunKind {
-    /// A `?` line. `text` is the lexer's payload verbatim.
-    Doc { text: String, span: Span },
-    /// A `!` line. `attr` is `Some` when the payload opens with a valid
-    /// `[ident]` attribute (v1: only `[deprecated]`). `text` is the FULL raw
-    /// payload verbatim, attribute prefix included.
-    Attention {
-        attr: Option<AttrCst>,
-        text: String,
-        span: Span,
-    },
-    /// An ordinary comment inside the run.
-    Comment(Comment),
-}
-
-/// An attention line's leading `[ident]` attribute; `span` covers the
-/// identifier alone, not the brackets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttrCst {
-    pub name: String,
-    pub span: Span,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::lexer::CommentKind;
-    use crate::parser::{
-        MoveCell, MoveDir, MoveVec, Pattern, PatternCell, PatternCellKind, Transition,
-    };
-
-    /// Hand-builds a machine with one state and one rule, plus a leading
-    /// comment and a trailing comment, and asserts the lossless round-trip
-    /// contract: `clone() == self` over the whole derived tree.
-    #[test]
-    fn hand_built_cst_round_trips_through_clone_and_eq() {
-        let sp = Span::new(1, 1, 1, 1);
-        let rule = Rule {
-            pattern: Pattern {
-                cells: vec![PatternCell {
-                    kind: PatternCellKind::Wildcard,
-                    binding: None,
-                    span: sp,
-                }],
-                span: sp,
-            },
-            debugger: false,
-            write: None,
-            mov: Some(MoveVec {
-                cells: vec![MoveCell {
-                    dir: MoveDir::Right,
-                    span: sp,
-                }],
-                span: sp,
-            }),
-            transition: Transition::Goto {
-                name: "scan".into(),
-                explicit: true,
-                span: sp,
-            },
-            line: 4,
-            span: sp,
-        };
-        let state = StateCst {
-            entry: true,
-            name: "scan".into(),
-            name_span: sp,
-            line: 3,
-            col: 3,
-            rules: vec![
-                RuleItem {
-                    blank_before: false,
-                    kind: RuleKind::Comment(Comment {
-                        text: "// leading".into(),
-                        kind: CommentKind::Line,
-                        own_line: true,
-                    }),
-                },
-                RuleItem {
-                    blank_before: false,
-                    kind: RuleKind::Rule(Box::new(RuleCst {
-                        rule,
-                        trailing: Some(Comment {
-                            text: "// trailing".into(),
-                            kind: CommentKind::Line,
-                            own_line: false,
-                        }),
-                        call_args: vec![],
-                        map_pairs: vec![],
-                        pattern_cells: vec![],
-                        write_cells: vec![],
-                        move_cells: vec![],
-                    })),
-                },
-            ],
-            span: sp,
-            doc_run: vec![],
-            open_trailing: vec![],
-            close_trailing: None,
-        };
-        let machine = MachineCst {
-            line: 2,
-            col: 1,
-            items: vec![WorldItem {
-                blank_before: false,
-                kind: WorldKind::State(state),
-            }],
-            span: sp,
-            doc_run: vec![],
-            open_trailing: vec![],
-            close_trailing: None,
-        };
-        let cst = Cst {
-            items: vec![TopItem {
-                blank_before: false,
-                kind: TopKind::Machine(machine),
-            }],
-        };
-
-        let TopKind::Machine(m) = &cst.items[0].kind else {
-            panic!("expected a machine item");
-        };
-        let WorldKind::State(s) = &m.items[0].kind else {
-            panic!("expected a state item");
-        };
-        assert!(s.entry);
-        assert_eq!(s.name, "scan");
-        assert_eq!(s.rules.len(), 2);
-        assert!(matches!(s.rules[0].kind, RuleKind::Comment(_)));
-        assert!(matches!(s.rules[1].kind, RuleKind::Rule(_)));
-
-        // The lossless round-trip contract: cloning reproduces an equal tree.
-        assert_eq!(cst.clone(), cst);
-    }
 }

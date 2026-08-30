@@ -177,7 +177,7 @@ use mtc_core::syntax::{AstNode, SyntaxElement, SyntaxKind, SyntaxNode, TextLineI
 
 use super::trivia::{self, Unit, UnitKind};
 use crate::compiler::CompileError;
-use crate::cst::{DocRunItem, DocRunKind};
+use crate::parser::{DocRunItem, DocRunKind};
 use mtc_core::diagnostics::Span;
 
 use crate::lexer::{Comment, CommentKind, LexMode, Token, TokenKind, lex_with};

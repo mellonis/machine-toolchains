@@ -5,7 +5,7 @@
 //! dropped; `clone() == self`).
 
 use super::*;
-use crate::cst::{DocRunKind, ReuseCarrier, RuleKind, TopKind, WorldKind};
+use crate::cst::{ReuseCarrier, RuleKind, TopKind, WorldKind};
 use crate::lexer::{LexMode, lex, lex_with};
 
 fn parse_src(src: &str) -> Result<Program, CompileError> {

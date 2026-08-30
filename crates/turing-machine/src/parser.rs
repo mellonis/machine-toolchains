@@ -25,9 +25,8 @@ use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
-    AlphabetCst, AttrCst, BindCst, Cst, DocRunItem, DocRunKind, GraftCst, MachineCst, NamespaceCst,
-    ReuseCarrier, ReuseCst, RuleCst, RuleItem, RuleKind, StateCst, TapeCst, TopItem, TopKind,
-    UseCst, UsePath, WorldItem, WorldKind,
+    AlphabetCst, BindCst, Cst, GraftCst, MachineCst, NamespaceCst, ReuseCarrier, ReuseCst, RuleCst,
+    RuleItem, RuleKind, StateCst, TapeCst, TopItem, TopKind, UseCst, UsePath, WorldItem, WorldKind,
 };
 use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, TmcKind};
@@ -884,6 +883,38 @@ fn lower_machine(m: &MachineCst) -> Machine {
         binds,
         doc: reduce_doc_run(&m.doc_run),
     }
+}
+
+/// One line of a doc/attention run, plus whether a blank line precedes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRunItem {
+    pub blank_before: bool,
+    pub kind: DocRunKind,
+}
+
+/// A doc/attention run's line shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocRunKind {
+    /// A `?` line. `text` is the lexer's payload verbatim.
+    Doc { text: String, span: Span },
+    /// A `!` line. `attr` is `Some` when the payload opens with a valid
+    /// `[ident]` attribute (v1: only `[deprecated]`). `text` is the FULL raw
+    /// payload verbatim, attribute prefix included.
+    Attention {
+        attr: Option<AttrCst>,
+        text: String,
+        span: Span,
+    },
+    /// An ordinary comment inside the run.
+    Comment(Comment),
+}
+
+/// An attention line's leading `[ident]` attribute; `span` covers the
+/// identifier alone, not the brackets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrCst {
+    pub name: String,
+    pub span: Span,
 }
 
 /// Reduce a doc/attention run into a [`Doc`] — `None` for an empty run.

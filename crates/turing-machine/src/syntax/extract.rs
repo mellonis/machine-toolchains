@@ -64,7 +64,6 @@ use super::views::{
     AlphabetView, BindView, DocRunView, GraftView, MachineView, ReuseKind, ReuseView, RootView,
     RuleView, StateView, TapeView, TopView, UsePathView, WorldView,
 };
-use crate::cst::{DocRunItem, DocRunKind};
 use crate::lexer::{Comment, CommentKind, GLYPH_ESCAPES, Token, TokenKind, normalize_doc_payload};
 use crate::parser::{
     Alphabet, Bind, Doc, Graft, Graph, Ident, Import, Machine, Program, Routine, Rule, Signature,
@@ -72,6 +71,7 @@ use crate::parser::{
     reparse_doc_items, reparse_move_vec, reparse_pattern, reparse_qual_name, reparse_sig_param,
     reparse_transition, reparse_write_vec,
 };
+use crate::parser::{DocRunItem, DocRunKind};
 
 /// The three trivia kinds `sig_tokens` filters out before mapping —
 /// whitespace and both comment kinds. Every significant token kind, and
@@ -1098,7 +1098,6 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::cst::DocRunKind;
     use crate::lexer::{CommentKind, LexMode, lex, lex_with};
     use crate::parser::{
         BindingValue, Program, SigParamKind, SymLit, Transition, parse_green, reparse_binding_arg,
@@ -1633,7 +1632,7 @@ mod tests {
         DocRunItem {
             blank_before,
             kind: DocRunKind::Attention {
-                attr: attr.map(|(name, span)| crate::cst::AttrCst {
+                attr: attr.map(|(name, span)| crate::parser::AttrCst {
                     name: name.to_string(),
                     span,
                 }),
