@@ -2883,11 +2883,19 @@ main() {
     }
 
     #[test]
-    fn doc_run_tolerates_blanks_and_comments_within_and_after() {
+    fn doc_run_records_a_blank_between_run_lines_across_a_comment() {
         // Comments interleaved in/after a run are dropped by
         // `reparse_doc_items` (its own doc: "dropped, not reproduced"),
-        // so only the two `Doc` lines survive `doc_run_items` — the
-        // blank-line-across-a-comment tolerance is what's under test.
+        // so only the two `Doc` lines survive `doc_run_items` here —
+        // this pins `blank_before` tracking a source gap correctly even
+        // when a comment sits inside it, NOT comment handling itself (no
+        // mutation to comment-inertness logic can fail this test, since
+        // the comments never reach `reparse_doc_items` in the first
+        // place). Comment inertness — a comment inside a run
+        // contributing nothing to the reduced `FnDoc` — is what
+        // `fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph`
+        // pins, through `parse()`, where the comment is still present
+        // when `reduce_doc_run` runs.
         let src = "\
 ? first
 // mid comment
