@@ -3,12 +3,17 @@
 //! (`mtc_core::asm::format_asm_with` under `tm1_syntax()`'s caps, so
 //! sections / table directives / `.rept` blocks / frame descriptors /
 //! vector operands all normalize); the `.tmc` side wires the crate's own
-//! green-tree printer ([`crate::fmt::format`]). Both are whitespace-only and
-//! idempotent, so `--check` is a safe CI gate for either language. Batch
-//! model (`PATH...`) is IDENTICAL to `tmt lint`'s, so it shares
-//! [`super::lint::collect_sources`] rather than duplicating the walk, and
-//! the per-file parse fatal reuses [`super::lint::render_fatal`]. Mirrors
-//! the PM-1 `pmt fmt` shape (`crates/post-machine/src/cli/fmt.rs`).
+//! green-tree printer ([`crate::fmt::format`]). Both are whitespace-only,
+//! and idempotent bar one `.tmc` shape — a comment written between a
+//! declaration keyword and its name settles only on the second pass when
+//! the declaration is an `alphabet` (`docs/tmt/fmt.md (comments the
+//! printer moves)`) — so `--check` is a safe CI gate for either language,
+//! reporting one change on a file carrying that shape until it is
+//! formatted twice. Batch model (`PATH...`) is IDENTICAL to `tmt lint`'s,
+//! so it shares [`super::lint::collect_sources`] rather than duplicating
+//! the walk, and the per-file parse fatal reuses
+//! [`super::lint::render_fatal`]. Mirrors the PM-1 `pmt fmt` shape
+//! (`crates/post-machine/src/cli/fmt.rs`).
 
 use std::fmt::Write as _;
 use std::fs;

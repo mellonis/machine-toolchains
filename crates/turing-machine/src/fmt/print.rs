@@ -5,18 +5,23 @@
 //! The printer walks the lossless green syntax tree ([`crate::syntax`],
 //! built by [`crate::parser::parse_green_from_tokens`]) rather than the
 //! flattened AST. The tree keeps every token the author wrote, comments
-//! and whitespace included, so the four properties the fmt battery
-//! (`tests/fmt_tmc.rs`) proves on every fixture in the repository are
-//! properties of the walk itself rather than of a side-car the parser had
-//! to remember to fill:
+//! and whitespace included, so the properties below — proved by the fmt
+//! battery (`tests/fmt_tmc.rs`) against every fixture in the repository,
+//! and, for the one documented idempotency exception, against a shape
+//! written into the battery directly — are properties of the walk itself
+//! rather than of a side-car the parser had to remember to fill:
 //!
 //! - **Canonical** — the output depends on the token stream and on the few
 //!   layout choices the author's own line breaks record (blank-line
 //!   presence, whether a state was written on one line), never on the
 //!   author's spacing.
-//! - **Idempotent** — `format(format(s)) == format(s)`. Every layout
-//!   decision is either derived from the token content (widths, the line
-//!   limit) or from a property the printer's own output preserves.
+//! - **Idempotent, with one exception** — `format(format(s)) == format(s)`
+//!   for every shape but one: a comment written between a declaration
+//!   keyword and its name settles on the second pass when the declaration
+//!   is an `alphabet` (`docs/tmt/fmt.md (comments the printer moves)`);
+//!   every other layout decision is derived from the token content
+//!   (widths, the line limit) or from a property the printer's own
+//!   output preserves.
 //! - **Whitespace-only** — no token is added, dropped, or rewritten. A
 //!   number reprints from its WRITTEN spelling (leading zeros survive), a
 //!   glyph reprints with only the two escapes the lexer accepts, and the
