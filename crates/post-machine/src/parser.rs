@@ -2882,20 +2882,26 @@ main() {
         assert_eq!(doc.paragraphs, vec!["step one"]);
     }
 
+    /// `reparse_doc_items`'s `blank_before` is computed purely from the
+    /// line-number GAP between the doc run's own SURVIVING tokens
+    /// (`DocLine`/`AttentionLine` — comments are stripped before this
+    /// ever runs, per `reparse_doc_items`'s own doc: "dropped, not
+    /// reproduced"). Originally named as though it distinguished "a real
+    /// blank line" from "a comment sitting in the gap"; renamed after
+    /// measuring that it CANNOT — a probe fixture with a comment-only
+    /// gap and no literal blank line (`"? first\n// mid comment\n?
+    /// second\n..."`) read `blank_before: true` on the second `Doc`
+    /// line, identically to the real-blank case below, because both
+    /// leave the same >1 line-number gap between the two surviving
+    /// `DocLine` tokens once the comment is stripped out. Matches
+    /// `reparse_doc_items`'s own doc ("cosmetic fidelity, not
+    /// load-bearing" — nothing downstream reads `blank_before` off a
+    /// reduced `FnDoc`). Comment inertness in the REDUCED `FnDoc` —
+    /// a comment contributing nothing and never splitting a paragraph —
+    /// is pinned separately, directly against `reduce_doc_run`, by
+    /// `fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph`.
     #[test]
-    fn doc_run_records_a_blank_between_run_lines_across_a_comment() {
-        // Comments interleaved in/after a run are dropped by
-        // `reparse_doc_items` (its own doc: "dropped, not reproduced"),
-        // so only the two `Doc` lines survive `doc_run_items` here —
-        // this pins `blank_before` tracking a source gap correctly even
-        // when a comment sits inside it, NOT comment handling itself (no
-        // mutation to comment-inertness logic can fail this test, since
-        // the comments never reach `reparse_doc_items` in the first
-        // place). Comment inertness — a comment inside a run
-        // contributing nothing to the reduced `FnDoc` — is what
-        // `fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph`
-        // pins, through `parse()`, where the comment is still present
-        // when `reduce_doc_run` runs.
+    fn doc_run_items_blank_before_tracks_a_token_line_gap_not_a_real_blank_line() {
         let src = "\
 ? first
 // mid comment
@@ -2917,6 +2923,17 @@ main() { right; }
         };
         assert_eq!(text, "second");
         assert!(doc_run[1].blank_before, "a blank line precedes it");
+
+        // Same shape, but the gap is a lone comment with NO literal
+        // blank line — reads `true` too, the same as the real-blank
+        // case above: the mechanism cannot tell them apart.
+        let src_no_blank = "? first\n// mid comment\n? second\nmain() { right; }\n";
+        let doc_run = doc_run_items(src_no_blank);
+        assert_eq!(doc_run.len(), 2);
+        assert!(
+            doc_run[1].blank_before,
+            "a comment-only gap reads as blank too, with no literal blank line present"
+        );
     }
 
     #[test]
@@ -3175,12 +3192,53 @@ main() { right; }
         assert_eq!(doc.deprecated, Some("use bar instead".to_string()));
     }
 
+    /// Builds the `Vec<DocRunItem>` by hand — `parse(src)` cannot pin
+    /// this: the production path into `reduce_doc_run` is
+    /// `extract_function`'s `reduce_doc_run(&reparse_doc_items(&tokens))`
+    /// (`crate::syntax::extract`), where `tokens` comes from
+    /// `sig_tokens`, which strips comment tokens unconditionally — by the
+    /// time `reduce_doc_run` runs on that path, no `DocRunKind::Comment`
+    /// item has ever existed to feed it, so a `parse(src)` round trip
+    /// through a comment-bearing source proves nothing about the
+    /// `DocRunKind::Comment(_) => {}` arm below. Only a hand-built run
+    /// can exercise that arm directly.
+    ///
+    /// Proven to discriminate: changed `DocRunKind::Comment(_) => {}` to
+    /// `DocRunKind::Comment(_) => paragraphs.push("BOGUS".to_string())`
+    /// and confirmed this test — and only this one among the doc-run/
+    /// fn-doc suite — failed
+    /// (`paragraphs: ["first", "BOGUS", "second"]` vs. the expected
+    /// `["first second"]`); reverted, confirmed green again.
     #[test]
     fn fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph() {
-        let src =
-            "? first\n// mid comment\n? second\n// trailing comment before fn\nmain() { right; }";
-        let prog = parse(src).unwrap();
-        let doc = prog.functions[0].doc.as_ref().expect("documented");
+        use crate::lexer::CommentKind;
+
+        let dummy_span = Span::new(1, 1, 1, 1);
+        let doc_run = vec![
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Doc {
+                    text: "first".to_string(),
+                    span: dummy_span,
+                },
+            },
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Comment(Comment {
+                    text: "// mid comment".to_string(),
+                    kind: CommentKind::Line,
+                    own_line: true,
+                }),
+            },
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Doc {
+                    text: "second".to_string(),
+                    span: dummy_span,
+                },
+            },
+        ];
+        let doc = reduce_doc_run(&doc_run).expect("documented");
         assert_eq!(doc.paragraphs, vec!["first second"]);
     }
 
