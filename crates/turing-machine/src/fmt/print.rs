@@ -3381,25 +3381,36 @@ mod tests {
     /// fell on, never where the line lies. The six sources below walk
     /// that line one step at a time.
     ///
-    /// The predicate is a disjunction — `kind == Line || own_line` — and
-    /// a source arms an arm only by satisfying it ALONE:
+    /// The predicate is a DISJUNCTION — `kind == Line || own_line` — so
+    /// a source pins an arm only by satisfying that arm ALONE. Read off
+    /// the fixtures' own `rule_interior`, in the order they appear
+    /// below:
     ///
-    /// - a same-line BLOCK comment satisfies neither and stays on the
-    ///   grid (the one interior comment a glyph vector can hold inline);
-    /// - an OWN-LINE BLOCK comment arms `own_line` by itself, because
-    ///   inlining it would flip that very flag on the next parse;
-    /// - a SAME-LINE `//` arms `kind == Line` by itself, because nothing
-    ///   can follow `//` on its physical line. **This is the source that
-    ///   was missing.** The three own-line `//` sources below all satisfy
-    ///   BOTH arms, so deleting the `Line` arm left them passing: measured,
-    ///   the mutation was caught only by `tests/fmt_interior.rs`'s
-    ///   `pattern_line_comment_breaks_the_rule_off_the_grid` and
-    ///   `a_line_commented_rule_does_not_widen_the_grid`, never here.
+    /// | source | `own_line` | `Line` | pins |
+    /// |---|---|---|---|
+    /// | same-line block, in the brackets | no | no | the on-grid side |
+    /// | own-line `//`, in the brackets | yes | yes | neither, alone |
+    /// | own-line block, in the brackets | yes | no | `own_line` |
+    /// | same-line block, in the header | no | no | the on-grid side |
+    /// | own-line `//`, in the header | yes | yes | neither, alone |
+    /// | same-line `//`, in the brackets | no | yes | `kind == Line` |
     ///
-    /// Two further sources are about WHERE the predicate looks rather
-    /// than what it tests: a comment in the vector's HEADER — `write
-    /// /* c */ [` — counts as the vector's too, which is the old parser's
-    /// reading and not the bracket's, and its `//` twin one line up.
+    /// That is a complete disjunction table: each arm satisfied alone
+    /// once, both satisfied together twice, and the negative case
+    /// covered twice.
+    ///
+    /// The LAST row is the one that was missing, and its absence was not
+    /// cosmetic. Both of the rows that satisfy `Line` also satisfy
+    /// `own_line`, so deleting the `Line` arm left this test green:
+    /// measured, that mutation was then caught only by
+    /// `tests/fmt_interior.rs`'s
+    /// `pattern_line_comment_breaks_the_rule_off_the_grid` and
+    /// `a_line_commented_rule_does_not_widen_the_grid`, never here.
+    ///
+    /// Rows 4 and 5 carry a second axis on top of the arms: a comment
+    /// written in the vector's HEADER — `write /* c */ [` — is that
+    /// vector's too, which is the old parser's reading of "in a glyph
+    /// vector" rather than the bracket's.
     #[test]
     fn a_line_or_own_line_comment_in_a_glyph_vector_takes_the_rule_off_the_grid() {
         let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ";
