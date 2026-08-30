@@ -652,6 +652,30 @@ git commit -m "docs(plan): measure what the C1 oracles were the only cover for"
   here; every row marked `covered` gets NOTHING, and the table is the record of
   why.
 
+### MEASURED RESULT — this task is now one test and one decision
+
+Task 3 measured 19 rows. **All three "nothing catches it" predictions in its
+table FAILED**: rows 4, 5 and 8 are each caught by an independent non-oracle
+test. Seventeen of nineteen rows are `covered`, with content mutations reddening
+between 3 and 170 tests apiece. Do not write tests for those.
+
+**The one genuine hole — write this test:** `Transition`'s own `span` field is
+asserted NOWHERE in the crate. A uniform +1 on every variant's
+`span.start.col` inside `reparse_transition`
+(`turing-machine/src/parser.rs:3067`) produces zero failures, `--lib` and full
+single-crate alike, while the CONTENT dimension of the same shim is covered by
+18 tests. Close it with a test asserting a `Transition`'s exact span for at
+least one variant, following the proven pattern of
+`extraction_agrees_when_a_declarations_header_spans_lines` — a hard-coded
+`assert_eq!` on the position triple, which is exactly the shape that already
+covers `State`, `Alphabet` and `Tape`.
+
+**The one decision, and it is NOT a test:** `reparse_sym_map`
+(`parser.rs:3182`) is dead code — its only caller is `extract.rs:1480` inside
+an oracle test Task 5 deletes, and it already carries `#[allow(dead_code)]`.
+Ruled: it is DELETED in Task 7, not tested here. Writing a test to keep
+unreachable code alive inverts the arc's purpose.
+
 - [ ] **Step 1: For each HOLE row, write the test while C1 still exists**
 
 This ordering is the point. C1 is still callable, so each new test's expected
@@ -819,6 +843,26 @@ Expected: RED, naming the missing label. Revert the mutation; expected GREEN.
 explains the corpus/generator division of the oracle, and that sentence dies
 with the oracle.
 
+- [ ] **Step 3b: Retire the FIVE oracle sites the plan never named**
+
+Task 3 found these empirically — 12 test functions the plan's file-level list
+missed. My inventory was by FILE and by unaliased grep; these needed a
+test-function-by-test-function read. All are live C1-vs-green comparisons and
+all must go with the rest:
+
+| site | shape |
+|---|---|
+| `turing-machine/src/parser/tests.rs::parse_equals_lower_cst_after_parse_cst` | direct `assert_eq!(lower_cst(&parse_cst(…)), parse(A5))` — live because `parse` now runs the green path |
+| `turing-machine/tests/syntax_views.rs::each_new_nodes_extent_equals_the_ast_span_it_carries` | green `text_range()` extents vs the C1 lowering's AST spans |
+| `post-machine/src/stdlib/mod.rs::roster_matches_the_c1_cst_walk` | green roster vs an inline C1 CST walk |
+| **`post-machine/src/syntax/extract.rs` — SIX tests in its own `mod tests`**: `reparsed_item_equals_the_c1_item`, `reparsed_doc_items_equal_the_c1_doc_run`, `reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave`, `extracted_function_equals_lowered`, `extracted_program_equals_lowered`, `extracted_program_pins_namespace_scoped_import_and_nested_function_ns` | PM's exact equivalent of TM's seven `reparsed_X_equals_the_c1_X` + `agrees` family; the plan named TM's and never PM's |
+| `turing-machine/tests/tmc_property.rs::the_generator_reaches_every_construct_extraction_rebuilds` | piggy-backs the same `both_paths()`-derived `assert_eq!` as the proptest — Step 1 rebuilds this one rather than deleting it |
+
+Two functions Task 3 confirmed are NOT oracles, checked rather than inherited
+from `CLAUDE.md`: `expand.rs`'s `machine_rules` helper and `extract.rs`'s
+fixture smoke check. Both read fields off a fixture with no green comparison.
+Leave them.
+
 - [ ] **Step 4: Delete the remaining oracle sites**
 
 ```bash
@@ -838,6 +882,19 @@ In `crates/turing-machine/tests/syntax_views.rs:795-813` and
 `reparsed_X_equals_the_c1_X` tests: convert each expected value to a literal
 validated against C1 before removal (same protocol as Task 4 Step 1). **Do not
 delete these tests** — fact 7 says they are the shims' only fidelity pin.
+
+**The `agrees()` trap — measured, and it would silently undo Task 3's work.**
+This task owns the `agrees()` helper (`extract.rs:1696`, 38 sources). Two of
+its callers —
+`extraction_agrees_when_a_declarations_header_spans_lines` and
+`extraction_anchors_positions_on_header_tokens_not_on_node_starts` — carry
+their OWN hard-coded `assert_eq!` after the `agrees()` call, and Task 3
+measured that those hard-coded assertions are **the only cover** for a
+declaration's `line`/`col`/`name_span` (its rows 4 and 5). Delete the
+`agrees()` CALL inside each and keep everything after it. A mechanical pass
+that deletes every test function touching `agrees()` recreates exactly the two
+holes Task 3 proved were closed. Check every other `agrees()` caller the same
+way — the list runs from `extract.rs:1901` onward.
 
 In `crates/turing-machine/tests/tmc_green_analyze.rs`: doc-comment references
 only, lines 4 and 88. Rewrite them to name the invariant, not C1.
