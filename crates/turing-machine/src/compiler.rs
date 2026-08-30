@@ -2906,9 +2906,11 @@ pub(crate) fn refine_undeclared(diags: &mut Vec<Diagnostic>, defined: &HashSet<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The pre-green front end's two calls. `analyze` no longer makes either;
-    // they survive here as the differential oracle the green path is checked
-    // against (`crate::parser::parse` = `lower_cst ∘ parse_cst`).
+    // `analyze` no longer calls either directly: `lex` derives the
+    // comment-free token stream a few tests compare `analyze`'s filtered
+    // `WithComments` stream against, and `parser::parse` — itself now a
+    // source-in green-tree convenience wrapper — is the plain entry point
+    // checked for agreement with the tiered `analyze_staged` path.
     use crate::lexer::lex;
     use crate::parser::parse;
     use proptest::prelude::*;
@@ -4389,13 +4391,18 @@ machine {
         // one `Rc` clone rather than a second parse — see that field's own
         // doc).
         //
-        // What the `program` comparison below is, precisely: `parse` IS
-        // `lower_cst ∘ parse_cst`, which `tests/syntax_parity.rs` and
-        // `tests/tmc_property.rs` hold struct-equal to `extract_program` over
-        // the green tree. So this is a cross-front ORACLE check resting on
-        // that struct-equality, not a shared-composition identity — it pins
-        // that neither the lex mode nor the comment nodes the green parse
-        // carries change the extracted AST or the significant tokens.
+        // What the `program` comparison below is, precisely: `parse` now
+        // runs the same three-stage route `analyze_staged` builds `program`
+        // by — `lex_with(WithComments)` → `parse_green_from_tokens` →
+        // `syntax::extract_program`. So this checks that `analyze_staged`'s
+        // staged construction — the tiering, the intermediate early
+        // returns, the `Rc::clone` that retains `green` — reproduces the
+        // same extracted `Program` a plain, unstaged `parse` of the same
+        // source would. It does NOT prove the two would diverge if
+        // `parse`'s underlying recipe changed: `tests/syntax_parity.rs` and
+        // `tests/tmc_property.rs` hold the green extraction struct-equal to
+        // `lower_cst(parse_cst(...))`, so a reversion of `parse` to the C1
+        // path would still satisfy this assertion unchanged.
         // `analyze` itself keeps neither the pre-green tokens nor the green
         // tree, so the resolved module and the diagnostics are what it has
         // left to agree on.
@@ -4431,7 +4438,7 @@ machine {
         let expected: Vec<_> = batch_tokens.iter().map(|t| t.kind.clone()).collect();
         assert_eq!(significant, expected);
 
-        assert_eq!(program, &parse(&batch_tokens).unwrap());
+        assert_eq!(program, &parse(&src).unwrap());
         assert_eq!(resolved, &a.resolved);
         assert_eq!(staged.diagnostics, a.diagnostics);
         // The remaining field, compared directly rather than each side

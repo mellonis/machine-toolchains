@@ -2536,7 +2536,7 @@ mod tests {
     fn fixture_smoke_check_parses_to_a_program() {
         let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \
                    entry state a {\n    [*] -> stop;\n  }\n}\n";
-        let program: Program = crate::parser::parse(&lex(src).unwrap()).unwrap();
+        let program: Program = crate::parser::parse(src).unwrap();
         assert_eq!(program.routines.len(), 1);
         let r = &program.routines[0];
         assert_eq!(r.sig.params.len(), 2, "both sig params must survive");

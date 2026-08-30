@@ -7,8 +7,7 @@
 use mtc_core::syntax::{SyntaxNode, debug_dump};
 use mtc_turing_machine::compiler::CompileError;
 use mtc_turing_machine::lexer::lex;
-use mtc_turing_machine::parser::parse as parse_ast;
-use mtc_turing_machine::parser::parse_green;
+use mtc_turing_machine::parser::{lower_cst, parse_cst, parse_green};
 use mtc_turing_machine::syntax::kind_name;
 
 fn dump(source: &str) -> String {
@@ -258,7 +257,7 @@ fn a_use_path_with_an_alias() {
 /// above cannot stand in for: every one of them parses `WithComments`
 /// through `parse_green` alone, so a divergence that only shows up on a
 /// REJECTING source, or only under `WithoutComments` lexing (the CST
-/// path via `parse`), is invisible to them.
+/// path via `parse_cst`/`lower_cst`), is invisible to them.
 ///
 /// Two failure modes this specifically guards against: `GreenSink`'s own
 /// `debug_assert!`s (`flush`'s out-of-order guard, `token`'s
@@ -271,8 +270,9 @@ fn a_use_path_with_an_alias() {
 /// None of the fixtures below contain a comment, so `WithComments` vs
 /// `WithoutComments` lexing produces the same token positions either
 /// way (only `Comment` itself is mode-gated — `DocLine`/`AttentionLine`
-/// are emitted in both), making `parse` (comment-free) and `parse_green`
-/// (`WithComments`) a fair apples-to-apples comparison on these sources.
+/// are emitted in both), making the CST path (comment-free) and
+/// `parse_green` (`WithComments`) a fair apples-to-apples comparison on
+/// these sources.
 ///
 /// Task 5 opens far more nodes on a mid-production error path than Task
 /// 4 did — every one of STATE/GRAFT/BIND/TAPE/REUSE/DOC_RUN/ATTR can be
@@ -305,7 +305,9 @@ fn errors_agree_with_the_cst_path() {
         "machine {",                                // Eof inside a world body
     ];
     for src in rejecting {
-        let cst_err = parse_ast(&lex(src).expect("lexes")).expect_err("rejected on the CST path");
+        let cst_err = parse_cst(&lex(src).expect("lexes"))
+            .map(|cst| lower_cst(&cst))
+            .expect_err("rejected on the CST path");
         let green_err: CompileError = parse_green(src).expect_err("rejected on the green path");
         assert_eq!(
             cst_err, green_err,
@@ -325,7 +327,12 @@ fn errors_agree_with_the_cst_path() {
         "machine {\n  ? doc\n  entry state s { [*] -> stop; }\n}\n",
     ];
     for src in accepting {
-        assert!(parse_ast(&lex(src).expect("lexes")).is_ok(), "{src}");
+        assert!(
+            parse_cst(&lex(src).expect("lexes"))
+                .map(|cst| lower_cst(&cst))
+                .is_ok(),
+            "{src}"
+        );
         assert!(parse_green(src).is_ok(), "{src}");
     }
 }

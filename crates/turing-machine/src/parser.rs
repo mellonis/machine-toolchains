@@ -21,7 +21,7 @@
 use std::rc::Rc;
 
 use mtc_core::diagnostics::{Pos, Span};
-use mtc_core::syntax::{Checkpoint, GreenNode};
+use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
@@ -550,9 +550,22 @@ pub struct Doc {
 // parse / parse_cst / lower_cst
 // ---------------------------------------------------------------------------
 
-/// tokens → AST, via the lossless CST.
-pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
-    parse_cst(tokens).map(|cst| lower_cst(&cst))
+/// Source → AST, through the one parse path this crate has: a
+/// `WithComments` lex, the green syntax tree, then extraction
+/// (docs/core.md (syntax trees)).
+///
+/// The convenience wrapper for callers that want only the `Program` —
+/// it keeps nothing else, and it is the only parse function here that
+/// yields one. A caller needing the token stream alongside it uses
+/// `compiler::analyze`; a caller needing the green tree uses
+/// `compiler::analyze_staged`, which is the one that retains it.
+pub fn parse(source: &str) -> Result<Program, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    let green = parse_green_from_tokens(source, &tokens)?;
+    Ok(crate::syntax::extract_program(
+        &SyntaxNode::new_root(green),
+        source,
+    ))
 }
 
 /// A `WithComments` token stream minus its comment trivia. `Comment` is the

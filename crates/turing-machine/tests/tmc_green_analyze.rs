@@ -29,8 +29,10 @@
 //! integration test's reach anyway — so it pins that the two RECIPES agree,
 //! not that `analyze` is wired to the new one. Every test here passes
 //! unchanged against the pre-migration tree, and stays green if `analyze`'s
-//! body is reverted to `lex` + `parse` (measured, by doing exactly that).
-//! The wiring itself is pinned one level down, by
+//! body is reverted to the pre-migration recipe — a comment-free `lex`
+//! then `lower_cst(parse_cst(...))`, exactly what `old_front` below
+//! computes directly rather than through `parser::parse` (measured, by
+//! doing exactly that). The wiring itself is pinned one level down, by
 //! `compiler::tests::analyze_keeps_comment_trivia_in_its_token_stream`.
 //!
 //! What this file does NOT re-check: that the extracted `Program` equals the
@@ -43,7 +45,7 @@
 use mtc_core::syntax::SyntaxNode;
 use mtc_turing_machine::CompileError;
 use mtc_turing_machine::lexer::{LexMode, lex, lex_with};
-use mtc_turing_machine::parser::{Program, parse, parse_green_from_tokens};
+use mtc_turing_machine::parser::{Program, lower_cst, parse_cst, parse_green_from_tokens};
 use mtc_turing_machine::syntax::extract_program;
 
 /// Every directory in this repo that ships a `.tmc` file — the same three
@@ -85,10 +87,12 @@ fn corpus() -> Vec<(std::path::PathBuf, String)> {
 }
 
 /// The front end `analyze` ran before the green-tree switch: a comment-free
-/// lex, then `parse` (`lower_cst ∘ parse_cst` over the C1 CST).
+/// lex, then `lower_cst ∘ parse_cst` over the C1 CST — composed here
+/// directly, since `parser::parse` itself now runs the green front this
+/// file calls `new_front` below and can no longer stand in for the old one.
 fn old_front(source: &str) -> Result<Program, CompileError> {
     let tokens = lex(source)?;
-    parse(&tokens)
+    parse_cst(&tokens).map(|cst| lower_cst(&cst))
 }
 
 /// The front end `analyze` runs now: a `WithComments` lex, the green parse

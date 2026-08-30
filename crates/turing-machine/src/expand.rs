@@ -1684,13 +1684,11 @@ mod map_tests {
 #[cfg(test)]
 mod range_tests {
     use super::*;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     /// Parse a program and return the machine's `state_idx`-th state's rules.
     fn machine_rules(src: &str, state_idx: usize) -> Vec<Rule> {
-        let toks = lex(src).expect("lex");
-        let prog = parse(&toks).expect("parse");
+        let prog = parse(src).expect("parse");
         prog.machine.expect("machine").states[state_idx]
             .rules
             .clone()

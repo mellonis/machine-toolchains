@@ -9,7 +9,7 @@ use crate::cst::{DocRunKind, ReuseCarrier, RuleKind, TopKind, WorldKind};
 use crate::lexer::{LexMode, lex, lex_with};
 
 fn parse_src(src: &str) -> Result<Program, CompileError> {
-    parse(&lex(src).unwrap())
+    parse(src)
 }
 
 fn err_code(src: &str) -> &'static str {
@@ -18,6 +18,22 @@ fn err_code(src: &str) -> &'static str {
 
 fn machine(p: &Program) -> &Machine {
     p.machine.as_ref().expect("program has a machine block")
+}
+
+/// The crate's one parse entry point: source in, `Program` out, with the
+/// `WithComments` lex it needs done internally.
+#[test]
+fn parse_takes_source_and_lexes_with_comments_itself() {
+    let src = "alphabet ab { '0', '1' }\nmachine {\n  tape t: ab;\n  entry state s {\n    ['0'] -> stop;\n  }\n}\n";
+    let commented = "alphabet ab { '0', '1' }\n// lead\nmachine {\n  tape t: ab;\n  entry state s {\n    ['0'] -> stop;\n  }\n}\n";
+    let bare = parse(src).expect("parses");
+    let with_comment = parse(commented).expect("parses");
+    // The comment sits on line 2, AFTER the alphabet, so the alphabet's
+    // spans are unmoved and the two must compare equal. Anything the
+    // comment precedes would shift by a line — this is why the
+    // comparison is scoped to `alphabets` and not to the whole program.
+    assert_eq!(bare.alphabets, with_comment.alphabets);
+    assert!(bare.machine.is_some());
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,7 +1085,7 @@ fn parse_equals_lower_cst_after_parse_cst() {
     // The seam contract, exercised on a real program.
     let tokens = lex(A5).unwrap();
     let via_seam = lower_cst(&parse_cst(&tokens).unwrap());
-    let via_parse = parse(&tokens).unwrap();
+    let via_parse = parse(A5).unwrap();
     assert_eq!(via_seam, via_parse);
 }
 
