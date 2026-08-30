@@ -1697,6 +1697,27 @@ While editing these files, migrate the `docs/tmt/fmt.md (interior comments)`
 citations that no longer resolve **in the files this plan touches only** — the
 opportunistic rule, not a sweep. Do not let this gate the task.
 
+- [ ] **Step 3b: Correct the compiled-stdlib gate's framing, and document one
+      undocumented relocation**
+
+Two corrections that live outside the four stale claims already listed.
+
+**The compiled-stdlib byte-identity gate is a NEGATIVE CONTROL for a formatter
+change, not the byte-identity proof.** `stdlib_object` calls `compile(...)`; the
+formatter appears nowhere in that path, and the embedded stdlib source is not
+touched by a formatter change — so the gate passes with a broken printer. It is
+still worth running (it proves the change did not leak into the compiler), but any
+sentence presenting it as evidence that fmt's output is unchanged is false. The
+real evidence is the pinned literals, the fmt-clean dogfood lock, and the
+adversarial sidecars. Fix this wherever it is stated as proof — `CLAUDE.md`'s fmt
+paragraph is the likely site.
+
+**`docs/tmt/fmt.md` names the keyword/name and brace relocations but not this
+one:** a comment written INSIDE a `write`-vector substitution moves out to the
+cell's trailing slot — `write [{ v /* c */ + 1 }]` prints as `write [{v+1} /* c */]`.
+Measured, byte-identical to the pre-cutover printer, idempotent, nothing lost. Add
+it to the relocation list.
+
 - [ ] **Step 4: Verify every claim you wrote**
 
 For each sentence you added or changed, name the file and line that makes it
