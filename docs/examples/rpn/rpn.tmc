@@ -1,0 +1,456 @@
+? An RPN calculator over binary natural numbers, written in .tmc.
+?
+? The expression is read left to right off the `expr` tape; values live on the
+? `stack` tape in the delimited representation the standard library defines,
+? and the four operators are built out of the library's own increment and
+? decrement. On success the machine stops with exactly one number left on the
+? stack; every error case halts instead, so the exit code says which happened
+? (docs/tmt/cli.md (exit codes)).
+?
+? Where the flagship brainfuck machine is one flat state graph over four
+? tapes, this one is about REUSE: what a `routine` buys over a `graph`, how a
+? multi-tape world reaches a single-tape library routine across a link
+? boundary, and why the same behaviour graph gets grafted at several sites
+? with different continuations. The arithmetic itself is deliberately naive —
+? addition counts, multiplication adds, division subtracts — because the point
+? is the composition, not the algorithm.
+?
+? Head conventions, which are the whole contract between these routines and
+? the part most easily got wrong. Every `bin` tape holds exactly one number at
+? all times and rests with its head on that number's '$' — that is true on
+? entry to and on exit from every routine below, with no exceptions. The stack
+? is the same rule plus one: its entries are separated by EXACTLY one blank,
+? and both `hasTwoGraph` and `popNum` navigate by counting on that spacing.
+? Widening it silently breaks the depth test.
+?
+? Input format. Tokens on `expr`, separated by blanks, terminated by '#':
+? a binary literal is a run of '0'/'1' most significant digit first, and an
+? operator is one of '+', '-', '*', '/'. So `101 11 + 10 *` is (5+3)*2. The
+? sentinel is not optional: without it the scanner walks right over blank tape
+? forever and the run ends on the step budget, as a trap rather than a halt.
+?
+? Cost. Every operation is spelled as repeated ±1, so addition is linear in
+? its right operand and multiplication runs the product of the two. Measured
+? on this machine: 1111 * 1111 takes 29,705 steps, 111111 * 111111 takes
+? 543,093, and 11111111 * 11111111 takes 9,972,385 — just inside tmt's
+? default budget of ten million. One digit more on each side needs
+? --no-step-limit (docs/tmt/cli.md (limits)).
+
+// ---------------------------------------------------------------------------
+// Alphabets
+//
+// `bin` must list the same glyphs in the same order as
+// std::binaryNumbers::symbols: a transparent call binds tapes by index, so
+// the ORDER is the part that has to match, and an exported alphabet is
+// source-level and cannot be named across a link boundary
+// (docs/tmt/stdlib.md (calling a library routine)).
+// ---------------------------------------------------------------------------
+
+? The delimited binary representation: blank, the start marker '^', the end
+? marker '$', and the two digits. A number is the run '^' digits… '$', and a
+? tape may carry several of them separated by blanks. Zero is '^$'.
+alphabet bin { '_', '^', '$', '0', '1' }
+
+? Expression tokens: binary digits, the four operators, and the '#' sentinel
+? that ends the expression.
+alphabet tok { '_', '0', '1', '+', '-', '*', '/', '#' }
+
+// ---------------------------------------------------------------------------
+// Reaching the standard library
+//
+// Every library routine takes ONE tape. A call that crosses a link boundary
+// must not bind tapes — it has no signature to bind against — so the only
+// legal form is the transparent call, which binds the caller's tapes by
+// index (docs/tmt/language.md (call)). That is fine for a one-tape caller and
+// useless for a six-tape one, whose tape 0 is rarely the tape it means.
+//
+// These three adapters are the bridge. Each is a one-tape routine, so its
+// tape 0 IS its parameter, and a multi-tape world reaches the library by
+// binding a parameter it names rather than a position it does not control.
+// ---------------------------------------------------------------------------
+
+? Add one to the number under the head. Head on the number on entry, on its
+? '$' on exit; on overflow the number grows one cell to the LEFT.
+routine incr(tape n: bin) {
+  entry state call1 { [*] -> call std::binaryNumbers::plusOne() then return; }
+}
+
+? Subtract one from the number under the head, saturating: zero stays zero.
+? Head on the number on entry, on its '$' on exit.
+routine decr(tape n: bin) {
+  entry state call1 {
+    [*] -> call std::binaryNumbers::minusOneFast() then return;
+  }
+}
+
+? Move the head from anywhere on a number to that number's '^'. The tape is
+? unchanged.
+routine seekStart(tape n: bin) {
+  entry state call1 {
+    [*] -> call std::binaryNumbers::goToNumbersStart() then return;
+  }
+}
+
+? Strip a number's leading zeros, so that every value on the stack is in the
+? one canonical form its zero test expects. Head on the number on entry, on
+? its '$' on exit.
+routine normalize(tape n: bin) {
+  entry state call1 {
+    [*] -> call std::binaryNumbers::normalizeNumber() then return;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour graphs
+//
+// Both graphs below are grafted at several sites, each site choosing its own
+// continuations. That is the whole difference from a routine: a routine
+// returns to whoever called it, a graph leaves through named exits the SITE
+// wires up (docs/tmt/language.md (choosing between them)). A two-answer test
+// has no single place to return to, which is why `isZeroGraph` cannot be a
+// routine at all.
+// ---------------------------------------------------------------------------
+
+? Blank whatever follows the number's end marker, then put the head back on
+? that marker. Entry head on the '$'. This is what makes overwriting a
+? scratch tape safe when the new number is shorter than the old one.
+graph clearTailGraph(tape n: bin, state done) {
+  entry state step { [*] -> move [>] goto scan; }
+  state scan {
+    ['_'] -> goto back;
+    [*]   -> write ['_'] move [>] goto scan;
+  }
+  state back {
+    ['$'] -> done;
+    [*]   -> move [<] goto back;
+  }
+}
+
+? Leave through `zero` when the number under the head is '^$' and through
+? `nonzero` otherwise. Entry head on the '$'; both exits restore it.
+graph isZeroGraph(tape n: bin, state zero, state nonzero) {
+  entry state look { [*] -> move [<] goto peek; }
+  state peek {
+    ['^'] -> move [>] zero;
+    [*]   -> move [>] nonzero;
+  }
+}
+
+? Leave through `two` when the stack holds at least two numbers and through
+? `fewer` otherwise. Entry head on the top number's '$', or on the home cell
+? when the stack is empty; both exits restore it.
+graph hasTwoGraph(tape n: bin, state two, state fewer) {
+  entry state top {
+    ['$'] -> goto toMark;
+    [*]   -> fewer;
+  }
+  state toMark {
+    ['^'] -> move [<] goto gap;
+    [*]   -> move [<] goto toMark;
+  }
+  // One cell left of the '^' is the separating blank; the cell left of THAT
+  // is the previous number's '$' when there is one.
+  state gap { [*] -> move [<] goto probe; }
+  state probe {
+    ['$'] -> move [>] goto rewindTwo;
+    [*]   -> move [>] goto rewindFewer;
+  }
+  // The answer is already decided, so the two rewinds differ only in which
+  // exit they take. Walking right from the separating blank, the first '$'
+  // reached is the top number's.
+  state rewindTwo {
+    ['$'] -> two;
+    [*]   -> move [>] goto rewindTwo;
+  }
+  state rewindFewer {
+    ['$'] -> fewer;
+    [*]   -> move [>] goto rewindFewer;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Scratch-tape helpers
+//
+// Every scratch tape holds exactly one number at all times, with its head on
+// that number's '$'. The machine seeds them with '^$' before anything else
+// runs, so no helper has to cope with a blank tape.
+// ---------------------------------------------------------------------------
+
+? Set the number to zero, leaving the head on its '$'.
+routine setZero(tape n: bin) {
+  entry state start { [*] -> call seekStart(n = n) then mark; }
+  state mark        { [*] ->             move [>] goto put; }
+  state put         { [*] -> write ['$'] goto tidy; }
+  graft clearTailGraph(n = n, done = return) as tidy;
+}
+
+? Copy `src` over `dst`. Both heads sit on their own '$' on entry and on exit,
+? and `src` is unchanged.
+routine copyNum(tape src: bin, tape dst: bin) {
+  entry state startSrc { [*, *] -> call seekStart(n = src) then startDst; }
+  state startDst       { [*, *] -> call seekStart(n = dst) then open; }
+  // Both heads are on their '^'; step onto the first digit of `src` and the
+  // first cell `dst` is going to write.
+  state open { [*, *] -> move [>, >] goto take; }
+  state take {
+    ['0'..'1' as d, *] -> write [-, {d}] move [>, >] goto take;
+    ['$', *]           -> write [-, '$'] goto tidy;
+  }
+  graft clearTailGraph(n = dst, done = return) as tidy;
+}
+
+// ---------------------------------------------------------------------------
+// Arithmetic
+//
+// All four operations are built from `incr` and `decr` and a zero test. Only
+// subtraction can fail, and it halts from inside the routine rather than
+// reporting back: the failure is not recoverable and a routine has one return
+// to offer. Making the two outcomes exits of a graph instead is not open —
+// 0.1 rejects a graft whose graph body contains a call
+// (docs/tmt/language.md (graft)), and every one of these bodies is calls.
+// ---------------------------------------------------------------------------
+
+? acc := acc + cnt. Leaves cnt at zero.
+routine addInto(tape acc: bin, tape cnt: bin) {
+  entry graft isZeroGraph(n = cnt, zero = fin, nonzero = step) as test;
+  state step     { [*, *] -> call incr(n = acc) then stepDown; }
+  state stepDown { [*, *] -> call decr(n = cnt) then test; }
+  state fin      { [*, *] -> return; }
+}
+
+? acc := acc - cnt over the naturals. Leaves cnt at zero. Halts on underflow —
+? there is no negative number in this representation to produce.
+routine subInto(tape acc: bin, tape cnt: bin) {
+  entry graft isZeroGraph(n = cnt, zero = fin, nonzero = guard) as test;
+  graft isZeroGraph(n = acc, zero = under, nonzero = step) as guard;
+  state step     { [*, *] -> call decr(n = acc) then stepDown; }
+  state stepDown { [*, *] -> call decr(n = cnt) then test; }
+  state under    { [*, *] -> halt; }
+  state fin      { [*, *] -> return; }
+}
+
+? prod := x * y, by adding a fresh copy of x into prod y times. Leaves y at
+? zero and tmp holding a copy of x; x is unchanged.
+routine mulInto(tape prod: bin, tape x: bin, tape y: bin, tape tmp: bin) {
+  entry state clear { [*, *, *, *] -> call setZero(n = prod) then test; }
+  graft isZeroGraph(n = y, zero = fin, nonzero = round) as test;
+  state round { [*, *, *, *] -> call copyNum(src = x, dst = tmp) then accum; }
+  state accum { [*, *, *, *] -> call addInto(acc = prod, cnt = tmp) then next; }
+  state next  { [*, *, *, *] -> call decr(n = y) then test; }
+  state fin   { [*, *, *, *] -> return; }
+}
+
+? quot := num / den, truncating. `den` must be non-zero — the caller checks,
+? because a zero divisor here would spin forever rather than fail.
+?
+? Each round copies `den` into `tmp` and then counts `num` and `tmp` down
+? together. `tmp` reaching zero first means a whole `den` came out of `num`,
+? so the quotient goes up and another round starts; `num` reaching zero first
+? means what is left is smaller than `den` and the answer is complete. No
+? comparison is needed anywhere, which is the point of doing it this way.
+? `num` is consumed and the remainder is not kept.
+routine divInto(tape quot: bin, tape num: bin, tape den: bin, tape tmp: bin) {
+  entry state clear {
+    [*, *, *, *] -> call setZero(n = quot) then round;
+  }
+  state round {
+    [*, *, *, *] -> call copyNum(src = den, dst = tmp) then inner;
+  }
+  graft isZeroGraph(n = tmp, zero = bump, nonzero = testNum) as inner;
+  graft isZeroGraph(n = num, zero = fin, nonzero = step) as testNum;
+  state bump     { [*, *, *, *] -> call incr(n = quot) then round; }
+  state step     { [*, *, *, *] -> call decr(n = num) then stepDown; }
+  state stepDown { [*, *, *, *] -> call decr(n = tmp) then inner; }
+  state fin      { [*, *, *, *] -> return; }
+}
+
+// ---------------------------------------------------------------------------
+// The stack
+//
+// Numbers sit on the `stack` tape left to right, separated by one blank, in
+// the library's own delimited form. The head rests on the top number's '$',
+// or — when the stack is empty — on the home cell, which is where the bottom
+// '^' goes. That convention is what makes the stack self-describing: reading
+// the head is the emptiness test, and no separate depth counter is needed.
+//
+// Arithmetic never happens on this tape. `incr` grows a number leftward on
+// overflow, which on a packed stack would eat the neighbour below it, and
+// `normalize` relocates a '^' rightward, which would widen the one-blank
+// spacing the navigation counts on. Both are why every operand is popped onto
+// a scratch tape first and only finished numbers are pushed back.
+// ---------------------------------------------------------------------------
+
+? Read the binary literal `src`'s head is sitting on into `dst`, normalized.
+? On exit `src`'s head is on the first cell that is not a digit — which is
+? where the scanner wants it — and `dst`'s head is on its own '$'.
+?
+? Normalizing HERE rather than after the push is deliberate. A literal may
+? carry leading zeros, and '^0$' is not the zero the zero test recognizes; but
+? `normalizeNumber` strips them by relocating the '^' rightward, which on the
+? stack would widen the blank between two numbers and break the one-cell
+? spacing `hasTwoGraph` and `popNum` both count on. On a scratch tape holding
+? a single number the relocation costs nothing.
+routine readToken(tape src: tok, tape dst: bin) {
+  entry state start { [*, *] -> call seekStart(n = dst) then open; }
+  // `dst`'s head is on its '^'; step onto the first cell it will write.
+  state open { [*, *] -> move [., >] goto take; }
+  // The binding is read on `src` and written on `dst`: a passthrough
+  // substitution names a glyph, and both alphabets carry '0' and '1'
+  // (docs/tmt/language.md (substitution)).
+  state take {
+    ['0'..'1' as d, *] -> write [-, {d}] move [>, >] goto take;
+    [*, *]             -> write [-, '$'] goto tidy;
+  }
+  graft clearTailGraph(n = dst, done = norm) as tidy;
+  state norm { [*, *] -> call normalize(n = dst) then return; }
+}
+
+? Push a copy of the number on `src`. On exit the stack head is on the new
+? number's '$' and `src` is unchanged, its head back on its own '$'.
+routine pushNum(tape stack: bin, tape src: bin) {
+  entry state open {
+    ['_', *] -> goto mark;
+    ['$', *] -> move [>, .] goto gap;
+  }
+  state gap      { [*, *] ->                move [>, .] goto mark; }
+  state mark     { [*, *] -> write ['^', -] move [>, .] goto startSrc; }
+  state startSrc { [*, *] -> call seekStart(n = src) then open2; }
+  state open2    { [*, *] ->                move [., >] goto take; }
+  state take {
+    [*, '0'..'1' as d] -> write [{d}, -] move [>, >] goto take;
+    [*, *]             -> write ['$', -] return;
+  }
+}
+
+? Move the top number off the stack and into `dst`, whatever `dst` held
+? before. The stack must not be empty. On exit the stack head is on the new
+? top's '$', or on the home cell if that was the last number, and `dst`'s head
+? is on its own '$'.
+routine popNum(tape stack: bin, tape dst: bin) {
+  entry state startSrc { [*, *] -> call seekStart(n = stack) then startDst; }
+  state startDst       { [*, *] -> call seekStart(n = dst) then open; }
+  state open           { [*, *] -> move [>, >] goto take; }
+  state take {
+    ['0'..'1' as d, *] -> write [-, {d}] move [>, >] goto take;
+    ['$', *]           -> write [-, '$'] goto tidy;
+  }
+  graft clearTailGraph(n = dst, done = erase) as tidy;
+  // Blank the number right to left. The head finishes on the cell that held
+  // its '^', which for the bottom number is the stack's home cell.
+  state erase {
+    ['^', *] -> write ['_', -] goto back1;
+    [*, *]   -> write ['_', -] move [<, .] goto erase;
+  }
+  state back1 { [*, *] -> move [<, .] goto back2; }
+  state back2 { [*, *] -> move [<, .] goto settle; }
+  state settle {
+    ['$', *] -> return;                 // the number below is the new top
+    [*, *]   -> move [>, .] goto home1; // nothing below: return to home
+  }
+  state home1 { [*, *] -> move [>, .] return; }
+}
+
+// ---------------------------------------------------------------------------
+// The machine
+// ---------------------------------------------------------------------------
+
+machine {
+  tape expr:  tok; // the expression, read once left to right
+  tape stack: bin; // the value stack
+  tape a:     bin; // left operand
+  tape b:     bin; // right operand
+  tape t:     bin; // scratch copy for multiply and divide
+  tape r:     bin; // result of the current operation, and literal staging
+
+  // Seed every scratch tape with '^$'. One vector write per cell of the
+  // number, which is what a write vector is for.
+  entry state init {
+    [*, *, *, *, *, *] -> write [-, -, '^', '^', '^', '^'] move [., ., >, >, >, >] goto init2;
+  }
+  state init2 {
+    [*, *, *, *, *, *] -> write [-, -, '$', '$', '$', '$'] goto scan;
+  }
+
+  ? The token scanner. Blanks separate tokens and are skipped; an operator is
+  ? not consumed here, because the operands have to be popped before the
+  ? machine can know which operation to run.
+  state scan {
+    ['0'..'1', *, *, *, *, *] -> call readToken(src = expr, dst = r) then push;
+    ['_', *, *, *, *, *]      -> move [>, ., ., ., ., .] goto scan;
+    ['+', *, *, *, *, *]      -> goto needTwo;
+    ['-', *, *, *, *, *]      -> goto needTwo;
+    ['*', *, *, *, *, *]      -> goto needTwo;
+    ['/', *, *, *, *, *]      -> goto needTwo;
+    ['#', *, *, *, *, *]      -> goto atEnd;
+  }
+
+  // One graft site serves all four operators, which is why the operator is
+  // still under the head at this point.
+  graft hasTwoGraph(n = stack, two = popRight, fewer = underflow) as needTwo;
+
+  state popRight {
+    [*, *, *, *, *, *] -> call popNum(stack = stack, dst = b) then popLeft;
+  }
+  state popLeft {
+    [*, *, *, *, *, *] -> call popNum(stack = stack, dst = a) then apply;
+  }
+
+  ? Both operands are off the stack now; consume the operator and run it.
+  state apply {
+    ['+', *, *, *, *, *] -> move [>, ., ., ., ., .] goto addCopy;
+    ['-', *, *, *, *, *] -> move [>, ., ., ., ., .] goto subCopy;
+    ['*', *, *, *, *, *] -> move [>, ., ., ., ., .] goto mul;
+    ['/', *, *, *, *, *] -> move [>, ., ., ., ., .] goto divGuard;
+  }
+
+  state addCopy {
+    [*, *, *, *, *, *] -> call copyNum(src = a, dst = r) then addRun;
+  }
+  state addRun {
+    [*, *, *, *, *, *] -> call addInto(acc = r, cnt = b) then push;
+  }
+
+  state subCopy {
+    [*, *, *, *, *, *] -> call copyNum(src = a, dst = r) then subRun;
+  }
+  state subRun {
+    [*, *, *, *, *, *] -> call subInto(acc = r, cnt = b) then push;
+  }
+
+  state mul {
+    [*, *, *, *, *, *] -> call mulInto(
+                            prod = r,
+                            x = a,
+                            y = b,
+                            tmp = t
+                          ) then push;
+  }
+
+  // Dividing by zero would not fail on its own — it would count up forever —
+  // so it is checked here rather than inside the routine.
+  graft isZeroGraph(n = b, zero = divByZero, nonzero = div) as divGuard;
+  state div {
+    [*, *, *, *, *, *] -> call divInto(
+                            quot = r,
+                            num = a,
+                            den = b,
+                            tmp = t
+                          ) then push;
+  }
+
+  state push {
+    [*, *, *, *, *, *] -> call pushNum(stack = stack, src = r) then scan;
+  }
+
+  // A well-formed expression leaves exactly one value. Two or more means the
+  // input was several expressions; none means it was empty.
+  graft hasTwoGraph(n = stack, two = tooMany, fewer = maybeOne) as atEnd;
+  state maybeOne {
+    [*, '$', *, *, *, *] -> stop;
+    [*, *, *, *, *, *]   -> halt;
+  }
+
+  state underflow { [*, *, *, *, *, *] -> halt; }
+  state divByZero { [*, *, *, *, *, *] -> halt; }
+  state tooMany   { [*, *, *, *, *, *] -> halt; }
+}

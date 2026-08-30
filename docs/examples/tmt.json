@@ -1,0 +1,36 @@
+{
+  "project": {
+    "targets": {
+      "rpn": {
+        "sources": [
+          "rpn/rpn.tmc"
+        ]
+      },
+      "rpnhex": {
+        "sources": [
+          "rpnhex/rpnhex.tmc"
+        ]
+      },
+      "rpnreg": {
+        "sources": [
+          "rpnreg/rpnreg.tmc"
+        ]
+      },
+      "rpnwide": {
+        "sources": [
+          "rpnwide/rpnwide.tmc"
+        ]
+      },
+      "pow2": {
+        "sources": [
+          "pow2/pow2.tmc"
+        ]
+      },
+      "brainfuck-utm": {
+        "sources": [
+          "brainfuck-utm/brainfuck-utm.tmc"
+        ]
+      }
+    }
+  }
+}

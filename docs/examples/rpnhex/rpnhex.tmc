@@ -1,0 +1,442 @@
+? An RPN calculator over 16-bit numbers, written in .tmc.
+?
+? This is the fixed-width companion to rpn.tmc. That one stores a value as a
+? variable-length binary number in the standard library's delimited form and
+? spells every operation as repeated ±1. This one stores a value as EXACTLY
+? four hexadecimal digits — sixteen bits, one digit per cell, most significant
+? first — and gets its digit arithmetic out of a single rule.
+?
+? What the fixed width buys:
+?
+?   Digit arithmetic is a fold, not a loop. One rule adds a whole digit
+?   column and produces the carry, because a bound cell can be folded
+?   arithmetically at compile time and the expansion writes out the table
+?   (docs/tmt/language.md (substitution)). Cost stops depending on the
+?   operands' VALUES: `0005 0003 +` is 281 steps, `1234 0FFE +` is 279 and
+?   `FFFF 0001 -` is 275 — the same work whatever the magnitudes. rpn.tmc
+?   counts its right operand down one at a time, so the same sums cost it
+?   six figures. rpnreg.tmc's header carries the four-way comparison.
+?
+?   Navigation is counting. There are no '^'/'$' markers to scan for and no
+?   blank between stack entries: an entry is four cells, so the entry below
+?   the top starts exactly four cells left. Every walk in this file is a fixed
+?   number of steps.
+?
+?   Nothing links. The standard library is written against variable-length
+?   numbers, so none of it applies — which is the honest cost of the choice,
+?   not a saving.
+?
+? What it does not buy: multiplication and division are still counting loops
+? over the adder, exactly as in rpn.tmc, so their cost does still scale with a
+? value. Schoolbook digit-product multiply is expressible with the same fold —
+? the high digit of x*y is {((x*y) - ((x*y)%16)) % 15}, which recovers the
+? division by 16 the fold grammar cannot spell because 16h mod 15 is h for
+? every h a digit product can reach, 15*15 giving the largest at 14 — but
+? assembling the partial products is not what this file does.
+?
+? Head conventions, the contract every routine below shares. A number is four
+? cells with blanks on both sides, and its tape's head rests on the LEAST
+? significant digit — rightmost — on entry to and on exit from every routine.
+? The stack is the same rule: entries are packed four cells apart with no
+? separator, and the head rests on the top entry's least significant digit, or
+? on the home cell when the stack is empty. `flag` is a single cell holding 0
+? or 1 that never moves.
+?
+? Errors. `flag` carries the carry or borrow out of the top digit, and the
+? CALLER decides what it means: an operator treats it as 16-bit overflow or
+? underflow and halts, while the multiply and divide loops treat it as their
+? loop condition. That is why no routine here halts on its own. Input faults
+? halt too; an internal invariant violated by a bug in this file traps
+? instead, and the difference in the exit code is deliberate
+? (docs/tmt/cli.md (exit codes)).
+?
+? Input format. Tokens on `expr`, separated by blanks, terminated by '#'. A
+? literal is exactly four hex digits — no more, no fewer — and an operator is
+? one of '+', '-', '*', '/'. So `0005 0003 + 0002 *` is (5+3)*2. The sentinel
+? is not optional: without it the scanner walks right over blank tape forever
+? and the run ends on the step budget, as a trap rather than a halt.
+?
+? Cost. Addition and subtraction are flat — 16 digit steps whatever the
+? operands, so `1234 0FFE +` is 279 steps and `FFFF 0001 -` is 275. Multiply
+? and divide are not: multiply runs one addition per unit of its RIGHT
+? operand and divide one subtraction per unit of quotient, so `00FF 0010 *`
+? is 1,500 steps while `0000 1234 *` is 354,448 — the zero is the left
+? operand, and the loop counts the right one down regardless. Ordering the
+? operands by size would need a comparison this file does not have.
+?
+? Two lint findings are expected and correct: the two ripple rules each expand
+? to 512 match rows, over the 256-row `binding-product-threshold` cutoff
+? (docs/tmt/lint.md). Sixteen digit pairs by sixteen by two carry-in values is
+? what a hex adder IS; the report is telling the truth about the image size.
+
+// ---------------------------------------------------------------------------
+// Alphabets
+//
+// The digits are NUMERIC literals, not glyphs, and that is load-bearing: a
+// fold is numeric-only, and an operator applied to a glyph binding is the
+// `char-arithmetic` error (docs/tmt/language.md (substitution)). Writing the
+// digits as 'A'..'F' would read better on the tape and make every rule below
+// impossible.
+// ---------------------------------------------------------------------------
+
+? Blank plus the sixteen hex digits. A digit's glyph label is its value, which
+? is what lets a fold's result name a symbol.
+alphabet hex { '_', 0..15 }
+
+? Expression tokens: hex digits, the four operators, and the '#' sentinel that
+? ends the expression.
+alphabet tok { '_', 0..15, '+', '-', '*', '/', '#' }
+
+// ---------------------------------------------------------------------------
+// Fixed-distance walks
+//
+// Both graphs are pure movement, and both are grafted at several sites with
+// different continuations — which is the whole reason they are graphs and not
+// routines (docs/tmt/language.md (choosing between them)).
+// ---------------------------------------------------------------------------
+
+? Move four cells right. A ripple loop stops one cell past the most
+? significant digit, so this is what puts the head back on the least
+? significant one.
+graph rewind4Graph(tape n: hex, state done) {
+  entry state r1 { [*] -> move [>] goto r2; }
+  state r2       { [*] -> move [>] goto r3; }
+  state r3       { [*] -> move [>] goto r4; }
+  state r4       { [*] -> move [>] done; }
+}
+
+? Move three cells left: from a number's least significant digit to its most
+? significant one.
+graph back3Graph(tape n: hex, state done) {
+  entry state b1 { [*] -> move [<] goto b2; }
+  state b2       { [*] -> move [<] goto b3; }
+  state b3       { [*] -> move [<] done; }
+}
+
+? Leave through `two` when the stack holds at least two entries and through
+? `fewer` otherwise. Entry head on the top entry's least significant digit, or
+? on the home cell when the stack is empty; both exits restore it. With
+? entries packed four cells apart the test is a fixed walk — no scanning, and
+? no separate depth counter.
+graph hasTwoGraph(tape n: hex, state two, state fewer) {
+  entry state top {
+    [0..15] -> goto step1;
+    [*]     -> fewer; // blank: the stack is empty
+  }
+  state step1 { [*] -> move [<] goto step2; }
+  state step2 { [*] -> move [<] goto step3; }
+  state step3 { [*] -> move [<] goto step4; }
+  state step4 { [*] -> move [<] goto look; }
+  state look {
+    [0..15] -> goto rwTwo; // the entry below the top
+    [*]     -> goto rwFewer;
+  }
+  graft rewind4Graph(n = n, done = two) as rwTwo;
+  graft rewind4Graph(n = n, done = fewer) as rwFewer;
+}
+
+// ---------------------------------------------------------------------------
+// Digit arithmetic
+//
+// Each ripple is one rule. The pattern binds both digits and the carry-in,
+// the expansion writes out every combination, and the folds compute the
+// result digit and the carry-out per row at compile time — no runtime
+// arithmetic exists on this machine, only a table.
+//
+// The carry-out fold is the part worth reading twice. The fold grammar has
+// `+ - * %` and no division (docs/tmt/language.md (substitution)), so a sum s
+// in 0..31 cannot be shifted right by four the obvious way. But `s - s % 16`
+// is 0 below sixteen and exactly 16 at or above it, and `16 % 15` is 1, so
+// `(s - s % 16) % 15` IS the carry. Subtraction runs the same trick upside
+// down: `1 - (…)` turns "no borrow" into "borrow".
+// ---------------------------------------------------------------------------
+
+? n := n + 1. Leaves the carry out of the top digit in `flag`.
+routine incr(tape n: hex, tape flag: hex) {
+  entry state seed { [*, *] -> write [-, 1] goto ripple; }
+  state ripple {
+    ['_', *]                -> goto rw; // walked off the most significant digit
+    [0..15 as x, 0..1 as k] -> write [{(x+k)%16}, {((x+k)-((x+k)%16))%15}] move [<, .] goto ripple;
+  }
+  graft rewind4Graph(n = n, done = return) as rw;
+}
+
+? n := n - 1. Leaves the borrow out of the top digit in `flag`, which is also
+? how a caller learns that `n` was zero.
+routine decr(tape n: hex, tape flag: hex) {
+  entry state seed { [*, *] -> write [-, 1] goto ripple; }
+  state ripple {
+    ['_', *]                -> goto rw;
+    [0..15 as x, 0..1 as k] -> write [{(x-k+16)%16}, {1-(((x-k+16)-((x-k+16)%16))%15)}] move [<, .] goto ripple;
+  }
+  graft rewind4Graph(n = n, done = return) as rw;
+}
+
+? acc := acc + add. `add` is unchanged; the carry out of the top digit is left
+? in `flag`.
+routine addInto(tape acc: hex, tape add: hex, tape flag: hex) {
+  entry state seed { [*, *, *] -> write [-, -, 0] goto ripple; }
+  state ripple {
+    ['_', *, *]                         -> goto rwAcc;
+    [0..15 as x, 0..15 as y, 0..1 as k] -> write [{(x+y+k)%16}, -, {((x+y+k)-((x+y+k)%16))%15}] move [<, <, .] goto ripple;
+  }
+  graft rewind4Graph(n = acc, done = rwAdd) as rwAcc;
+  graft rewind4Graph(n = add, done = return) as rwAdd;
+}
+
+? acc := acc - sub. `sub` is unchanged; the borrow out of the top digit is
+? left in `flag`, and on borrow `acc` holds the result modulo 65536.
+routine subInto(tape acc: hex, tape sub: hex, tape flag: hex) {
+  entry state seed { [*, *, *] -> write [-, -, 0] goto ripple; }
+  state ripple {
+    ['_', *, *]                         -> goto rwAcc;
+    [0..15 as x, 0..15 as y, 0..1 as k] -> write [{(x-y-k+16)%16}, -, {1-(((x-y-k+16)-((x-y-k+16)%16))%15)}] move [<, <, .] goto ripple;
+  }
+  graft rewind4Graph(n = acc, done = rwSub) as rwAcc;
+  graft rewind4Graph(n = sub, done = return) as rwSub;
+}
+
+? n := 0.
+routine setZero(tape n: hex) {
+  entry state z1 { [*] -> write [0] move [<] goto z2; }
+  state z2       { [*] -> write [0] move [<] goto z3; }
+  state z3       { [*] -> write [0] move [<] goto z4; }
+  state z4       { [*] -> write [0] move [<] goto rw; }
+  graft rewind4Graph(n = n, done = return) as rw;
+}
+
+// ---------------------------------------------------------------------------
+// The stack
+//
+// Entries are four cells, packed with no separator, growing rightward. The
+// head rests on the top entry's least significant digit; when the stack is
+// empty it rests on the home cell, which is where the first entry's LEAST
+// significant digit goes — so the first entry is the one that reaches to the
+// left of home, and every later one to the right of its predecessor.
+//
+// `pushToken` reads the expression and validates it, so a malformed literal
+// halts. `pushNum` and `popNum` move numbers this file itself produced; their
+// sweeps carry no catch-all, so a violated head convention traps rather than
+// being reported as an input fault.
+// ---------------------------------------------------------------------------
+
+? Push the four-digit literal `src`'s head is sitting on. Halts if the literal
+? is not exactly four digits long. On exit the stack head is on the new
+? entry's least significant digit and `src`'s head is on the cell after the
+? literal — which is where the scanner wants it.
+routine pushToken(tape stack: hex, tape src: tok) {
+  entry state open {
+    ['_', *] -> goto back1;             // empty: the entry ends on the home cell
+    [*, *]   -> move [>, .] goto take1; // otherwise it starts after the top
+  }
+  state back1 { [*, *] -> move [<, .] goto back2; }
+  state back2 { [*, *] -> move [<, .] goto back3; }
+  state back3 { [*, *] -> move [<, .] goto take1; }
+  // The binding is read on `src` and written on `stack`: a passthrough
+  // substitution names a glyph, and both alphabets carry the sixteen digits.
+  state take1 {
+    [*, 0..15 as d] -> write [{d}, -] move [>, >] goto take2;
+    [*, *]          -> halt;
+  }
+  state take2 {
+    [*, 0..15 as d] -> write [{d}, -] move [>, >] goto take3;
+    [*, *]          -> halt;
+  }
+  state take3 {
+    [*, 0..15 as d] -> write [{d}, -] move [>, >] goto take4;
+    [*, *]          -> halt;
+  }
+  state take4 {
+    [*, 0..15 as d] -> write [{d}, -] move [., >] goto tail;
+    [*, *]          -> halt;
+  }
+  state tail {
+    [*, 0..15] -> halt; // a fifth digit: the literal is too long
+    [*, *]     -> return;
+  }
+}
+
+? Push a copy of the number on `src`, which is unchanged.
+routine pushNum(tape stack: hex, tape src: hex) {
+  entry graft back3Graph(n = src, done = open);
+  state open {
+    ['_', *] -> goto back1;
+    [*, *]   -> move [>, .] goto take1;
+  }
+  state back1 { [*, *]          ->                move [<, .] goto back2; }
+  state back2 { [*, *]          ->                move [<, .] goto back3; }
+  state back3 { [*, *]          ->                move [<, .] goto take1; }
+  state take1 { [*, 0..15 as d] -> write [{d}, -] move [>, >] goto take2; }
+  state take2 { [*, 0..15 as d] -> write [{d}, -] move [>, >] goto take3; }
+  state take3 { [*, 0..15 as d] -> write [{d}, -] move [>, >] goto take4; }
+  state take4 { [*, 0..15 as d] -> write [{d}, -] return; }
+}
+
+? Move the top entry off the stack and into `dst`, whatever `dst` held before.
+? The stack must not be empty. On exit the stack head is on the new top's
+? least significant digit, or on the home cell if that was the last entry.
+routine popNum(tape stack: hex, tape dst: hex) {
+  entry state p1 { [0..15 as d, *] -> write ['_', {d}] move [<, <] goto p2; }
+  state p2       { [0..15 as d, *] -> write ['_', {d}] move [<, <] goto p3; }
+  state p3       { [0..15 as d, *] -> write ['_', {d}] move [<, <] goto p4; }
+  state p4       { [0..15 as d, *] -> write ['_', {d}] move [<, <] goto rwDst; }
+  graft rewind4Graph(n = dst, done = settle) as rwDst;
+  state settle {
+    [0..15, *] -> return;      // the entry below is the new top
+    [*, *]     -> goto rwHome; // nothing below: return to the home cell
+  }
+  graft rewind4Graph(n = stack, done = return) as rwHome;
+}
+
+// ---------------------------------------------------------------------------
+// The machine
+// ---------------------------------------------------------------------------
+
+machine {
+  tape expr:  tok; // the expression, read once left to right
+  tape stack: hex; // the value stack, four cells per entry
+  tape a:     hex; // left operand
+  tape b:     hex; // right operand
+  tape r:     hex; // product or quotient
+  tape flag:  hex; // carry / borrow out of the top digit
+
+  // The flag cell is read by every ripple, so it has to hold a digit before
+  // the first one runs; a blank there would match no row and trap.
+  entry state init {
+    [*, *, *, *, *, *] -> write [-, -, -, -, -, 0] goto scan;
+  }
+
+  ? The token scanner. Blanks separate tokens and are skipped; an operator is
+  ? not consumed here, because the operands have to be popped before the
+  ? machine can know which operation to run.
+  state scan {
+    [0..15, *, *, *, *, *] -> call pushToken(
+                                stack = stack,
+                                src = expr
+                              ) then scan;
+    ['_', *, *, *, *, *]   -> move [>, ., ., ., ., .] goto scan;
+    ['+', *, *, *, *, *]   -> goto needTwo;
+    ['-', *, *, *, *, *]   -> goto needTwo;
+    ['*', *, *, *, *, *]   -> goto needTwo;
+    ['/', *, *, *, *, *]   -> goto needTwo;
+    ['#', *, *, *, *, *]   -> goto atEnd;
+  }
+
+  // One graft site serves all four operators, which is why the operator is
+  // still under the head at this point.
+  graft hasTwoGraph(n = stack, two = popRight, fewer = underflow) as needTwo;
+
+  state popRight {
+    [*, *, *, *, *, *] -> call popNum(stack = stack, dst = b) then popLeft;
+  }
+  state popLeft {
+    [*, *, *, *, *, *] -> call popNum(stack = stack, dst = a) then apply;
+  }
+
+  ? Both operands are off the stack now; consume the operator and run it.
+  state apply {
+    ['+', *, *, *, *, *] -> move [>, ., ., ., ., .] goto opAdd;
+    ['-', *, *, *, *, *] -> move [>, ., ., ., ., .] goto opSub;
+    ['*', *, *, *, *, *] -> move [>, ., ., ., ., .] goto mulInit;
+    ['/', *, *, *, *, *] -> move [>, ., ., ., ., .] goto divGuard;
+  }
+
+  state opAdd {
+    [*, *, *, *, *, *] -> call addInto(
+                            acc = a,
+                            add = b,
+                            flag = flag
+                          ) then addTest;
+  }
+  state addTest {
+    [*, *, *, *, *, 0] -> goto pushA;
+    [*, *, *, *, *, *] -> halt; // carry out of the top digit: over 16 bits
+  }
+
+  state opSub {
+    [*, *, *, *, *, *] -> call subInto(
+                            acc = a,
+                            sub = b,
+                            flag = flag
+                          ) then subTest;
+  }
+  state subTest {
+    [*, *, *, *, *, 0] -> goto pushA;
+    [*, *, *, *, *, *] -> halt; // borrow out of the top digit: below zero
+  }
+
+  // Multiply by counting `b` down and adding `a` into `r` once per unit. The
+  // borrow out of `decr` is the loop's only termination test — no zero test
+  // on `b` is needed, or written.
+  state mulInit {
+    [*, *, *, *, *, *] -> call setZero(n = r) then mulStep;
+  }
+  state mulStep {
+    [*, *, *, *, *, *] -> call decr(n = b, flag = flag) then mulTest;
+  }
+  state mulTest {
+    [*, *, *, *, *, 0] -> goto mulAdd; // `b` had something left
+    [*, *, *, *, *, *] -> goto pushR;  // `b` ran out
+  }
+  state mulAdd {
+    [*, *, *, *, *, *] -> call addInto(
+                            acc = r,
+                            add = a,
+                            flag = flag
+                          ) then mulTestCarry;
+  }
+  state mulTestCarry {
+    [*, *, *, *, *, 0] -> goto mulStep;
+    [*, *, *, *, *, *] -> halt; // the product does not fit in 16 bits
+  }
+
+  // Divide by subtracting `b` out of `a` and counting the successes. A zero
+  // divisor would never borrow and the loop would never end, so it is ruled
+  // out first — by decrementing `b` and reading the borrow, which is the same
+  // trick the multiply loop uses and costs no zero test either.
+  state divGuard {
+    [*, *, *, *, *, *] -> call decr(n = b, flag = flag) then divTestZero;
+  }
+  state divTestZero {
+    [*, *, *, *, *, 0] -> goto divRestore;
+    [*, *, *, *, *, *] -> halt; // division by zero
+  }
+  state divRestore {
+    [*, *, *, *, *, *] -> call incr(n = b, flag = flag) then divInit;
+  }
+  state divInit {
+    [*, *, *, *, *, *] -> call setZero(n = r) then divStep;
+  }
+  state divStep {
+    [*, *, *, *, *, *] -> call subInto(
+                            acc = a,
+                            sub = b,
+                            flag = flag
+                          ) then divTest;
+  }
+  state divTest {
+    [*, *, *, *, *, 0] -> goto divBump; // `b` came out whole again
+    [*, *, *, *, *, *] -> goto pushR;   // it did not: the quotient is complete
+  }
+  state divBump {
+    [*, *, *, *, *, *] -> call incr(n = r, flag = flag) then divStep;
+  }
+
+  state pushA {
+    [*, *, *, *, *, *] -> call pushNum(stack = stack, src = a) then scan;
+  }
+  state pushR {
+    [*, *, *, *, *, *] -> call pushNum(stack = stack, src = r) then scan;
+  }
+
+  // A well-formed expression leaves exactly one value. Two or more means the
+  // input was several expressions; none means it was empty.
+  graft hasTwoGraph(n = stack, two = tooMany, fewer = maybeOne) as atEnd;
+  state maybeOne {
+    [*, 0..15, *, *, *, *] -> stop;
+    [*, *, *, *, *, *]     -> halt;
+  }
+
+  state underflow { [*, *, *, *, *, *] -> halt; }
+  state tooMany   { [*, *, *, *, *, *] -> halt; }
+}

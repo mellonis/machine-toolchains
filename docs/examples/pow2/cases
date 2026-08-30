@@ -1,0 +1,15 @@
+# label;expected[;tags]   -- the label is the exponent N, the value `sb<2^N>k`
+#
+# Cost is 25*2^N steps and 2^N cells, so this is a feasibility ladder, not a
+# budget: N=24 is 419 million steps and several minutes, and runs only under
+# --slow.
+1;sb2k
+2;sb4k
+3;sb8k
+4;sb16k
+5;sb32k
+6;sb64k
+7;sb128k
+8;sb256k
+10;sb1024k
+24;sb16777216k;slow --no-step-limit

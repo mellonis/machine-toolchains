@@ -1,0 +1,59 @@
+? Corrected 2^n (unary)
+
+alphabet mainAlpha { ' ', 's', 'b', 'k', '1' }
+alphabet workAlpha { ' ', '1' }
+
+machine {
+  tape main: mainAlpha;
+  tape cnt:  workAlpha;
+  tape tmp:  workAlpha;
+
+  entry state main {
+    ['b', *, *] -> move [>, ., .] goto copyExp;
+  }
+
+  state copyExp {
+    ['1', *, *] -> write [' ', '1', -] move [>, >, .] goto copyExp;
+    ['k', *, *] -> write [' ', -, -]   move [<, <, .] goto findB;
+  }
+
+  state findB {
+    [' ', *, *] -> move [<, ., .] goto findB;
+    ['b', *, *] -> move [>, ., .] goto seed;
+  }
+
+  state seed {
+    [' ', *, *] -> write ['1', -, -] move [<, ., .] goto loop_head;
+  }
+
+  state loop_head {
+    ['b', '1', *] -> goto dec_cnt;
+    ['b', ' ', *] -> goto place_k;
+  }
+
+  state dec_cnt {
+    ['b', '1', *] -> write [-, ' ', -] move [., <, .] goto copy_block;
+  }
+
+  state copy_block {
+    ['b', *, *] ->                   move [>, ., .] goto copy_block;
+    ['1', *, *] -> write [-, -, '1'] move [>, ., >] goto copy_block;
+    [' ', *, *] ->                   move [., ., <] goto append_from_tmp;
+  }
+
+  state append_from_tmp {
+    [' ', *, '1'] -> write ['1', -, ' '] move [>, ., <] goto append_from_tmp;
+    [' ', *, ' '] ->                     move [<, ., .] goto rewind_main;
+  }
+
+  state rewind_main {
+    ['1', *, *] -> move [<, ., .] goto rewind_main;
+    ['b', *, *] -> goto loop_head;
+  }
+
+  state place_k {
+    ['b', *, *] ->                   move [>, ., .] goto place_k;
+    ['1', *, *] ->                   move [>, ., .] goto place_k;
+    [' ', *, *] -> write ['k', -, -] stop;
+  }
+}

@@ -1,0 +1,33 @@
+# label;expected[;tags]
+#
+# The label is brainfuck source; the value is the bytes '.' emitted, comma
+# separated. A `bytes` tape's index 0 IS its blank, so a genuine zero byte in
+# the middle of the output would be dropped here — none of these emit one.
+#
+# The first three are the programs the repo's own derivation-first goldens
+# use; the rest are the classics.
+
+# three increments, printed
++++.;3
+# the goldens' loop and skip cases
+++[>+++<-]>.;6
+[[+]+]++.;2
+# 3 x 5 by repeated addition
++++[>+++++<-]>.;15
+# 2 x 2 x 2 through nested loops
+++[>++[>++<-]<-]>>.;8
+# 8 x 8 + 1 = 65, which is 'A'
+++++++++[>++++++++<-]>+.;65
+# the canonical Hello World! — 72 101 108 108 111 32 87 111 114 108 100 33 10
+++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.;72,101,108,108,111,32,87,111,114,108,100,33,10
+# a space is a real symbol of the `ops` alphabet with no dispatch rule, so the
+# interpreter gets an invalid-opcode fault for free — it traps, it does not halt
+++ +.;trap
+# Cristofani's Sierpinski triangle — heavy bracket matching and pointer motion,
+# 4.7 million steps, 1552 bytes of '*', space and newline
+++++++++[>+>++++<<-]>++>>+<[-[>>+<<-]+>>]>+[-<<<[->[+[-]+>++>>>-<<]<[<]>>++++++[<<+++++>>-]+<<++.[-]<<]>.>+[>>]>+];1552 bytes sha256:9273f229ded9
+# A well-known GOLFED Hello World. It does not print Hello World here, and that
+# is correct: it manufactures its ASCII by wrapping cells at 256, and this
+# machine's cells are a 0..126 ring. Pinned as it stands, so that changing the
+# ring size breaks this case loudly.
+--<-<<+[+[<+>--->->->-<<<]>]<<--.<++++++.<<-..<<.<+.>>.>>.<<<.+++.>>.>>-.<<<+.;71,10,108,108,39,60,84,50,39,42,108,9,85
