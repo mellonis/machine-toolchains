@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 
 use mtc_core::diagnostics::{Pos, Span};
-use mtc_core::syntax::{Checkpoint, GreenNode};
+use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
@@ -294,14 +294,22 @@ fn describe(kind: &TokenKind) -> String {
     }
 }
 
-/// tokens → AST, via the one unified lossless CST. No longer the
-/// compiler's path — `compiler::analyze` extracts from the green tree
-/// (docs/core.md (syntax trees)) — this survives as the differential
-/// oracle that extraction is held equal to, and as the parse behind the
-/// optimizer's and IR's own unit tests. The signature is unchanged from
-/// the pre-C1 parser.
-pub fn parse(tokens: &[Token]) -> Result<Program, CompileError> {
-    parse_cst(tokens).map(|cst| lower_cst(&cst))
+/// Source → AST, through the one parse path this crate has: a
+/// `WithComments` lex, the green syntax tree, then extraction
+/// (docs/core.md (syntax trees)).
+///
+/// Not the compiler's entry point — `compiler::analyze` runs the same
+/// three steps and KEEPS the token stream and the tree, which the
+/// language service needs. This is the convenience wrapper for callers
+/// that want only the `Program`, and it is the only parse function the
+/// crate exposes.
+pub fn parse(source: &str) -> Result<Program, CompileError> {
+    let tokens = lex_with(source, LexMode::WithComments)?;
+    let green = parse_green_from_tokens(source, &tokens)?;
+    Ok(crate::syntax::extract_program(
+        &SyntaxNode::new_root(green),
+        source,
+    ))
 }
 
 /// Split a token stream into its significant tokens and its comment
@@ -2205,8 +2213,35 @@ mod tests {
     use crate::compiler::CompileErrorKind;
     use crate::lexer::lex;
 
-    fn parse_src(src: &str) -> Result<Program, CompileError> {
-        parse(&lex(src).unwrap())
+    /// The crate's one parse entry point: source in, `Program` out, with
+    /// the `WithComments` lex it needs done internally. Pinned here
+    /// because every other test module in the crate calls it and none of
+    /// them assert its contract.
+    #[test]
+    fn parse_takes_source_and_lexes_with_comments_itself() {
+        // The comment sits BETWEEN two significant tokens and on a line
+        // it does not lengthen, so every span below it is unmoved: the
+        // two programs must be equal field for field. A comment on its
+        // own line would shift every following line and the comparison
+        // would fail for a reason that has nothing to do with trivia —
+        // measured, not assumed.
+        let src = "main() { /* c */\n    right;\n}\n";
+        let bare = "main() {\n    right;\n}\n";
+        let p = parse(src).expect("parses");
+        assert_eq!(p.functions.len(), 1);
+        assert_eq!(p.functions[0].name, "main");
+        assert_eq!(p.functions, parse(bare).expect("parses").functions);
+    }
+
+    /// A lex failure surfaces as the lexer's own error, unchanged by the
+    /// mode `parse` picks internally.
+    #[test]
+    fn parse_reports_the_lexers_own_error() {
+        let src = "/* never closed\nmain() { right; }\n";
+        assert_eq!(
+            parse(src).map(|_| ()).unwrap_err(),
+            crate::lexer::lex(src).map(|_| ()).unwrap_err()
+        );
     }
 
     /// `parse_cst` on a `WithComments` stream must retain every comment as
@@ -2350,7 +2385,7 @@ main() {
 4:  mark;
 }
 "#;
-        let p = parse_src(src).unwrap();
+        let p = parse(src).unwrap();
         assert_eq!(
             p.functions
                 .iter()
@@ -2405,22 +2440,22 @@ main() {
 
     #[test]
     fn comma_groups_parse_and_enforce_positions() {
-        let p = parse_src("f() { 1: right, right, mark(5); 5: left, check(1, !); }").unwrap();
+        let p = parse("f() { 1: right, right, mark(5); 5: left, check(1, !); }").unwrap();
         assert_eq!(p.functions[0].body[0].items.len(), 3);
         assert_eq!(p.functions[0].body[1].items.len(), 2);
 
-        let e = parse_src("f() { left(1), left(2); 1: mark; 2: mark; }").unwrap_err();
+        let e = parse("f() { left(1), left(2); 1: mark; 2: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("successor")));
 
-        let e = parse_src("f() { check(1, 2), left; 1: mark; 2: mark; }").unwrap_err();
+        let e = parse("f() { check(1, 2), left; 1: mark; 2: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("check")));
 
-        let e = parse_src("f() { halt, left; }").unwrap_err();
+        let e = parse("f() { halt, left; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("halt")));
 
-        let e = parse_src("f() { goto 1, left; 1: mark; }").unwrap_err();
+        let e = parse("f() { goto 1, left; 1: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("goto")));
-        let e = parse_src("f() { left, goto 1; 1: mark; }").unwrap_err();
+        let e = parse("f() { left, goto 1; 1: mark; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GroupPosition(m) if m.contains("goto")));
     }
 
@@ -2429,25 +2464,25 @@ main() {
         // At top level a reserved-word ident is now a `TopLevelStatement`
         // (docs/pmt/language.md) — the naming check runs only once a keyword
         // has consumed the leading token (e.g. `export <reserved>()`).
-        let e = parse_src("check() { }").unwrap_err();
+        let e = parse("check() { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::TopLevelStatement(ref n) if n.contains("check"))
         );
         // `export` isn't reserved, so it slips past the top-level guard;
         // `function()` itself then sees the reserved name.
-        let e = parse_src("export check() { }").unwrap_err();
+        let e = parse("export check() { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "check" && what == "function")
         );
 
-        let e = parse_src("f() { @left(); }").unwrap_err();
+        let e = parse("f() { @left(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::BuiltinCalled(n) if n == "left"));
 
-        let e = parse_src("f() { flip; }").unwrap_err();
+        let e = parse("f() { flip; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "flip"));
 
         // A user function called without `@` is the same error (docs/pmt/language.md).
-        let e = parse_src("f() { goToEnd(); }").unwrap_err();
+        let e = parse("f() { goToEnd(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownCommand(n) if n == "goToEnd"));
     }
 
@@ -2456,7 +2491,7 @@ main() {
         // docs/pmt/language.md: `()` on a tape builtin, if written, must carry
         // a successor — empty parens are no longer fall-through sugar.
         for name in ["left", "right", "mark", "unmark"] {
-            let e = parse_src(&format!("f() {{ {name}(); }}")).unwrap_err();
+            let e = parse(&format!("f() {{ {name}(); }}")).unwrap_err();
             assert!(
                 matches!(e.kind, CompileErrorKind::EmptyBuiltinParens { name: ref n } if n == name),
                 "{name}(): got {:?}",
@@ -2465,40 +2500,40 @@ main() {
         }
 
         // Bare, and both successor forms, stay legal.
-        assert!(parse_src("f() { left; }").is_ok());
-        assert!(parse_src("f() { left(5); }").is_ok());
-        assert!(parse_src("f() { left(!); }").is_ok());
+        assert!(parse("f() { left; }").is_ok());
+        assert!(parse("f() { left(5); }").is_ok());
+        assert!(parse("f() { left(!); }").is_ok());
 
         // Scope limit: user calls keep mandatory-but-emptyable parens.
-        assert!(parse_src("f() { @f(); }").is_ok());
+        assert!(parse("f() { @f(); }").is_ok());
     }
 
     #[test]
     fn goto_bang_is_a_dedicated_error() {
-        let e = parse_src("f() { goto !; }").unwrap_err();
+        let e = parse("f() { goto !; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::GotoReturn));
     }
 
     #[test]
     fn duplicate_and_dangling_diagnostics() {
-        let e = parse_src("f() { } f() { }").unwrap_err();
+        let e = parse("f() { } f() { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
         );
 
-        let e = parse_src("f() { 1: left; 1: right; }").unwrap_err();
+        let e = parse("f() { 1: left; 1: right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DuplicateLabel(1)));
 
-        let e = parse_src("f() { left; 2: }").unwrap_err();
+        let e = parse("f() { left; 2: }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DanglingLabel(2)));
     }
 
     #[test]
     fn empty_function_and_stacked_labels() {
-        let p = parse_src("f() { }").unwrap();
+        let p = parse("f() { }").unwrap();
         assert!(p.functions[0].body.is_empty());
 
-        let p = parse_src("f() { 1: 2: left; }").unwrap();
+        let p = parse("f() { 1: 2: left; }").unwrap();
         assert_eq!(
             p.functions[0].body[0]
                 .labels
@@ -2511,7 +2546,7 @@ main() {
 
     #[test]
     fn unicode_function_names_and_calls() {
-        let p = parse_src("идиВКонец() { right(!); } main() { @идиВКонец(); }").unwrap();
+        let p = parse("идиВКонец() { right(!); } main() { @идиВКонец(); }").unwrap();
         assert_eq!(p.functions[0].name, "идиВКонец");
         match &p.functions[1].body[0].items[0] {
             Item::Call { name, .. } => assert_eq!(name, "идиВКонец"),
@@ -2521,17 +2556,17 @@ main() {
 
     #[test]
     fn export_is_contextual_and_main_auto_exports() {
-        let p = parse_src("export api() { left; } helper() { right; } main() { mark; }").unwrap();
+        let p = parse("export api() { left; } helper() { right; } main() { mark; }").unwrap();
         assert!(p.functions[0].exported);
         assert!(!p.functions[1].exported);
         assert!(p.functions[2].exported); // main
-        let p = parse_src("export() { left; } main() { @export(); }").unwrap();
+        let p = parse("export() { left; } main() { @export(); }").unwrap();
         assert_eq!(p.functions[0].name, "export"); // a function NAMED export
     }
 
     #[test]
     fn nested_definitions_parse_recursively() {
-        let p = parse_src("main() { walk() { step() { right; } @step(); } @walk(); }").unwrap();
+        let p = parse("main() { walk() { step() { right; } @step(); } @walk(); }").unwrap();
         let main = &p.functions[0];
         assert_eq!(main.nested.len(), 1);
         assert_eq!(main.nested[0].name, "walk");
@@ -2540,9 +2575,8 @@ main() {
 
     #[test]
     fn namespace_blocks_stamp_paths_and_nest() {
-        let p =
-            parse_src("namespace a { f() { left; } namespace b { g() { right; } } } h() { mark; }")
-                .unwrap();
+        let p = parse("namespace a { f() { left; } namespace b { g() { right; } } } h() { mark; }")
+            .unwrap();
         let tagged: Vec<(&str, Vec<&str>)> = p
             .functions
             .iter()
@@ -2553,13 +2587,13 @@ main() {
             vec![("f", vec!["a"]), ("g", vec!["a", "b"]), ("h", vec![])]
         );
         // `namespace` + `(` stays a function NAMED namespace.
-        let p = parse_src("namespace() { left; } main() { @namespace(); }").unwrap();
+        let p = parse("namespace() { left; } main() { @namespace(); }").unwrap();
         assert_eq!(p.functions[0].name, "namespace");
     }
 
     #[test]
     fn import_paths_aliases_and_scopes_parse() {
-        let p = parse_src("use a, std::b as c; namespace ns { use d::e; }").unwrap();
+        let p = parse("use a, std::b as c; namespace ns { use d::e; }").unwrap();
         assert_eq!(p.imports.len(), 3);
         assert_eq!(p.imports[0].path, vec!["a"]);
         assert_eq!(p.imports[0].alias, None);
@@ -2575,52 +2609,51 @@ main() {
 
     #[test]
     fn qualified_calls_parse_to_joined_names() {
-        let p = parse_src("main() { @std::api::run(); }").unwrap();
+        let p = parse("main() { @std::api::run(); }").unwrap();
         match &p.functions[0].body[0].items[0] {
             Item::Call { name, .. } => assert_eq!(name, "std::api::run"),
             other => panic!("unexpected {other:?}"),
         }
-        let e = parse_src("main() { @std::(); }").unwrap_err();
+        let e = parse("main() { @std::(); }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::Expected { what, .. } if what.contains("::")));
     }
 
     #[test]
     fn namespace_name_pool_and_reopening_rules() {
         // Reopening the same namespace is legal (scopes merge by path).
-        assert!(parse_src("namespace a { f() { left; } } namespace a { g() { right; } }").is_ok());
+        assert!(parse("namespace a { f() { left; } } namespace a { g() { right; } }").is_ok());
         // Same (path, name) across reopened blocks is a duplicate.
-        let e =
-            parse_src("namespace a { f() { left; } } namespace a { f() { right; } }").unwrap_err();
+        let e = parse("namespace a { f() { left; } } namespace a { f() { right; } }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
         );
         // The same bare name in different namespaces is legal.
-        assert!(parse_src("namespace a { f() { left; } } namespace b { f() { right; } }").is_ok());
+        assert!(parse("namespace a { f() { left; } } namespace b { f() { right; } }").is_ok());
         // Namespace and function names share one pool per scope.
-        let e = parse_src("namespace a { } a() { left; }").unwrap_err();
+        let e = parse("namespace a { } a() { left; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "a" && what == "namespace")
         );
-        let e = parse_src("a() { left; } namespace a { }").unwrap_err();
+        let e = parse("a() { left; } namespace a { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "a" && what == "function")
         );
         // An unclosed block is an error, not silent Eof acceptance.
-        let e = parse_src("namespace a { f() { left; }").unwrap_err();
+        let e = parse("namespace a { f() { left; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::Expected { .. }));
     }
 
     #[test]
     fn use_stays_illegal_inside_function_bodies() {
-        let e = parse_src("main() { use go; }").unwrap_err();
+        let e = parse("main() { use go; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::KeywordInBody(kw) if kw == "use"));
     }
 
     #[test]
     fn nested_export_and_same_scope_duplicates_error() {
-        let e = parse_src("main() { export inner() { left; } }").unwrap_err();
+        let e = parse("main() { export inner() { left; } }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::NestedExport));
-        let e = parse_src("main() { f() { left; } f() { right; } }").unwrap_err();
+        let e = parse("main() { f() { left; } f() { right; } }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::DuplicateName { ref name, what } if name == "f" && what == "function")
         );
@@ -2628,7 +2661,7 @@ main() {
 
     #[test]
     fn spans_are_retained_for_labels_names_and_items() {
-        let p = parse_src("f() {\n  5 : right(7);\n7:  left;\n}").unwrap();
+        let p = parse("f() {\n  5 : right(7);\n7:  left;\n}").unwrap();
         let f = &p.functions[0];
         assert_eq!(
             (f.name_span.start.col, f.name_span.end.col),
@@ -2651,7 +2684,7 @@ main() {
 
     #[test]
     fn call_and_check_spans() {
-        let p = parse_src("f() { @a::b(); check(1, !); 1: left; }").unwrap();
+        let p = parse("f() { @a::b(); check(1, !); 1: left; }").unwrap();
         let f = &p.functions[0];
         let Item::Call {
             name,
@@ -2676,7 +2709,7 @@ main() {
     /// `f() { 1: right(2); check(1, !); goto 1; left, mark(3); }`.
     #[test]
     fn reference_spans_on_goto_check_and_builtin_successors() {
-        let p = parse_src("f() { 1: right(2); check(1, !); goto 1; left, mark(3); }").unwrap();
+        let p = parse("f() { 1: right(2); check(1, !); goto 1; left, mark(3); }").unwrap();
         let f = &p.functions[0];
 
         // `1: right(2);` — the successor's number token alone, inside the
@@ -2729,7 +2762,7 @@ main() {
     #[test]
     fn succ_label_span_is_none_without_a_label_successor() {
         // Bare, no parens at all.
-        let p = parse_src("f() { right; }").unwrap();
+        let p = parse("f() { right; }").unwrap();
         let Item::Builtin {
             succ_label_span, ..
         } = &p.functions[0].body[0].items[0]
@@ -2739,7 +2772,7 @@ main() {
         assert!(succ_label_span.is_none());
 
         // Parenthesised but a `!` (return) successor, not a label.
-        let p = parse_src("f() { right(!); }").unwrap();
+        let p = parse("f() { right(!); }").unwrap();
         let Item::Builtin {
             succ_label_span, ..
         } = &p.functions[0].body[0].items[0]
@@ -2751,7 +2784,7 @@ main() {
 
     #[test]
     fn call_succ_label_span_covers_the_number() {
-        let p = parse_src("main() { @g(7); }").unwrap();
+        let p = parse("main() { @g(7); }").unwrap();
         let Item::Call {
             succ_label_span, ..
         } = &p.functions[0].body[0].items[0]
@@ -2835,13 +2868,13 @@ main() {
 
     #[test]
     fn import_spans_exclude_the_alias() {
-        let p = parse_src("use std::go as g;\nmain() { @g(); }").unwrap();
+        let p = parse("use std::go as g;\nmain() { @g(); }").unwrap();
         let imp = &p.imports[0];
         assert_eq!((imp.span.start.col, imp.span.end.col), (5, 12)); // "std::go"
     }
 
     fn err_msg(src: &str) -> String {
-        parse_src(src).unwrap_err().to_string()
+        parse(src).unwrap_err().to_string()
     }
 
     #[test]
@@ -2908,9 +2941,9 @@ main() {
 
     #[test]
     fn spaced_label_colons_and_paths_stay_legal() {
-        assert!(parse_src("main() { 1 : right; }").is_ok());
-        assert!(parse_src("main() { 1: 2: right; }").is_ok());
-        assert!(parse_src("use std :: goToEnd;\nmain() { @goToEnd(); }").is_ok());
+        assert!(parse("main() { 1 : right; }").is_ok());
+        assert!(parse("main() { 1: 2: right; }").is_ok());
+        assert!(parse("use std :: goToEnd;\nmain() { @goToEnd(); }").is_ok());
     }
 
     #[test]
@@ -2919,7 +2952,7 @@ main() {
         assert!(m.contains("`mark`"), "got: {m}");
         assert!(m.contains("successor"), "got: {m}");
         // Calls are unaffected: `@f()` stays legal, no error at all.
-        assert!(parse_src("f() { } main() { @f(); }").is_ok());
+        assert!(parse("f() { } main() { @f(); }").is_ok());
     }
 
     // -- Doc/attention runs (docs/pmt/language.md (doc lines)) ----------------
@@ -3089,8 +3122,8 @@ main() { right; }
     /// too).
     #[test]
     fn documented_function_lowers_to_its_undocumented_twin_plus_a_doc() {
-        let doc = parse_src("? doc\n! [deprecated] msg\nmain() { right; }").unwrap();
-        let bare = parse_src("\n\nmain() { right; }").unwrap();
+        let doc = parse("? doc\n! [deprecated] msg\nmain() { right; }").unwrap();
+        let bare = parse("\n\nmain() { right; }").unwrap();
         assert_eq!(bare.functions[0].doc, None);
         assert_eq!(
             doc.functions[0].doc,
@@ -3135,12 +3168,12 @@ main() { right; }
 
     #[test]
     fn doc_line_order_rejects_interleave_and_wrong_order() {
-        let e = parse_src("? doc\n! attn\n? doc2\nmain() { right; }").unwrap_err();
+        let e = parse("? doc\n! attn\n? doc2\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DocLineOrder));
         assert_eq!(e.kind.code(), "doc-line-order");
         assert_eq!((e.span.start.line, e.span.start.col), (3, 1));
 
-        let e = parse_src("! attn only\n? doc after\nmain() { right; }").unwrap_err();
+        let e = parse("! attn only\n? doc after\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DocLineOrder));
         assert_eq!(e.kind.code(), "doc-line-order");
         assert_eq!((e.span.start.line, e.span.start.col), (2, 1));
@@ -3157,7 +3190,7 @@ main() { right; }
             "? orphan doc\n",
         ];
         for src in top_level {
-            let e = parse_src(src).unwrap_err();
+            let e = parse(src).unwrap_err();
             assert!(
                 matches!(e.kind, CompileErrorKind::DanglingDocRun),
                 "{src:?} got {:?}",
@@ -3172,7 +3205,7 @@ main() { right; }
             ("main() {\nright;\n? orphan\n}", 3), // dangling before the close brace
         ];
         for (src, want_line) in in_body {
-            let e = parse_src(src).unwrap_err();
+            let e = parse(src).unwrap_err();
             assert!(
                 matches!(e.kind, CompileErrorKind::DanglingDocRun),
                 "{src:?} got {:?}",
@@ -3189,7 +3222,7 @@ main() { right; }
 
     #[test]
     fn unknown_attribute_is_rejected_with_the_attr_span() {
-        let e = parse_src("! [depercated] old api\nmain() { right; }").unwrap_err();
+        let e = parse("! [depercated] old api\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownAttribute(ref n) if n == "depercated"));
         assert_eq!(e.kind.code(), "unknown-attribute");
         assert_eq!((e.span.start.line, e.span.start.col), (1, 4));
@@ -3203,7 +3236,7 @@ main() { right; }
     /// `[xx]`'s position depends on what follows it.
     #[test]
     fn unknown_attribute_span_is_char_counted_past_a_non_ascii_payload() {
-        let e = parse_src("! [xx] café\nmain() { right; }").unwrap_err();
+        let e = parse("! [xx] café\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::UnknownAttribute(ref n) if n == "xx"));
         assert_eq!(e.kind.code(), "unknown-attribute");
         assert_eq!(
@@ -3219,8 +3252,8 @@ main() { right; }
 
     #[test]
     fn duplicate_deprecated_attribute_is_rejected_at_the_second_occurrence() {
-        let e = parse_src("! [deprecated] first\n! [deprecated] second\nmain() { right; }")
-            .unwrap_err();
+        let e =
+            parse("! [deprecated] first\n! [deprecated] second\nmain() { right; }").unwrap_err();
         assert!(matches!(e.kind, CompileErrorKind::DuplicateAttribute));
         assert_eq!(e.kind.code(), "duplicate-attribute");
         assert_eq!((e.span.start.line, e.span.start.col), (2, 4));
@@ -3233,8 +3266,7 @@ main() { right; }
 
     #[test]
     fn fn_doc_paragraphs_join_with_a_single_space_and_split_on_an_empty_doc_line() {
-        let prog =
-            parse_src("? line one\n? line two\n?\n? second para\nmain() { right; }").unwrap();
+        let prog = parse("? line one\n? line two\n?\n? second para\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["line one line two", "second para"]);
         assert!(doc.attention.is_empty());
@@ -3243,7 +3275,7 @@ main() { right; }
 
     #[test]
     fn fn_doc_leading_and_trailing_empty_doc_lines_produce_no_empty_paragraphs() {
-        let prog = parse_src("?\n?\n? doc\n?\n?\nmain() { right; }").unwrap();
+        let prog = parse("?\n?\n? doc\n?\n?\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["doc"]);
     }
@@ -3258,7 +3290,7 @@ main() { right; }
         // paragraphs, no attention, no deprecation) rather than an
         // `attention: [""]` entry that would otherwise render as a
         // note-only hover popup with nothing in it.
-        let prog = parse_src("?\n!\nmain() { right; }").unwrap();
+        let prog = parse("?\n!\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("run is non-empty");
         assert!(doc.paragraphs.is_empty());
         assert!(doc.attention.is_empty());
@@ -3267,7 +3299,7 @@ main() { right; }
 
     #[test]
     fn fn_doc_attention_prose_is_captured_verbatim_in_order() {
-        let prog = parse_src("! first note\n! second note\nmain() { right; }").unwrap();
+        let prog = parse("! first note\n! second note\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert!(doc.paragraphs.is_empty());
         assert_eq!(doc.attention, vec!["first note", "second note"]);
@@ -3298,12 +3330,12 @@ main() { right; }
 
     #[test]
     fn fn_doc_deprecated_message_captured_with_and_without_a_message() {
-        let prog = parse_src("! [deprecated] use goToStart instead\nmain() { right; }").unwrap();
+        let prog = parse("! [deprecated] use goToStart instead\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.deprecated, Some("use goToStart instead".to_string()));
         assert!(doc.attention.is_empty());
 
-        let prog = parse_src("! [deprecated]\nmain() { right; }").unwrap();
+        let prog = parse("! [deprecated]\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.deprecated, Some(String::new()));
     }
@@ -3311,7 +3343,7 @@ main() { right; }
     #[test]
     fn fn_doc_deprecated_line_is_excluded_from_attention_while_bare_prose_survives() {
         let prog =
-            parse_src("! note one\n! [deprecated] use bar instead\n! note two\nmain() { right; }")
+            parse("! note one\n! [deprecated] use bar instead\n! note two\nmain() { right; }")
                 .unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.attention, vec!["note one", "note two"]);
@@ -3332,7 +3364,7 @@ main() { right; }
 
     #[test]
     fn undocumented_function_has_no_doc() {
-        let prog = parse_src("main() { right; }").unwrap();
+        let prog = parse("main() { right; }").unwrap();
         assert_eq!(prog.functions[0].doc, None);
     }
 
@@ -3345,7 +3377,7 @@ main() { right; }
     /// line only ever closes a paragraph, never starts one.
     #[test]
     fn fn_doc_a_run_of_only_empty_doc_lines_is_some_with_every_field_empty() {
-        let prog = parse_src("?\n?\nmain() { right; }").unwrap();
+        let prog = parse("?\n?\nmain() { right; }").unwrap();
         assert_eq!(
             prog.functions[0].doc,
             Some(FnDoc {
@@ -3363,7 +3395,7 @@ main() { right; }
     /// "b".
     #[test]
     fn fn_doc_a_double_empty_separator_still_yields_exactly_two_paragraphs() {
-        let prog = parse_src("? a\n?\n?\n? b\nmain() { right; }").unwrap();
+        let prog = parse("? a\n?\n?\n? b\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["a", "b"]);
     }
@@ -3374,7 +3406,7 @@ main() { right; }
     /// away just like a single one would.
     #[test]
     fn fn_doc_deprecated_message_trims_whitespace_after_the_attribute() {
-        let prog = parse_src("! [deprecated]  two spaces\nmain() { right; }").unwrap();
+        let prog = parse("! [deprecated]  two spaces\nmain() { right; }").unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.deprecated, Some("two spaces".to_string()));
     }
@@ -3386,14 +3418,14 @@ main() { right; }
 
     #[test]
     fn volatile_main_parses_and_sets_the_flag() {
-        let p = parse_src("volatile main() { mark; }").unwrap();
+        let p = parse("volatile main() { mark; }").unwrap();
         assert!(p.functions[0].volatile);
         assert!(p.functions[0].exported);
     }
 
     #[test]
     fn volatile_export_main_parses_with_fixed_order() {
-        let p = parse_src("volatile export main() { mark; }").unwrap();
+        let p = parse("volatile export main() { mark; }").unwrap();
         assert!(p.functions[0].volatile);
         assert!(p.functions[0].exported);
 
@@ -3402,7 +3434,7 @@ main() { right; }
         // modifier (it's followed by an identifier), leaving `function()`
         // to parse "volatile" itself as the name — which the reserved-name
         // check rejects.
-        let e = parse_src("export volatile main() { mark; }").unwrap_err();
+        let e = parse("export volatile main() { mark; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "function"),
             "got: {:?}",
@@ -3412,7 +3444,7 @@ main() { right; }
 
     #[test]
     fn volatile_on_a_non_main_function_errors() {
-        let e = parse_src("volatile foo() { mark; }").unwrap_err();
+        let e = parse("volatile foo() { mark; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::VolatileNotOnMain(ref name) if name == "foo"),
             "got: {:?}",
@@ -3428,7 +3460,7 @@ main() { right; }
         // A nested `main` is not top-level `main` — the flag never
         // survives nesting, so this fails the same way a nested
         // non-`main` name would.
-        let e = parse_src("main() { volatile inner() { mark; } }").unwrap_err();
+        let e = parse("main() { volatile inner() { mark; } }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::VolatileNotOnMain(ref name) if name == "inner"),
             "got: {:?}",
@@ -3438,13 +3470,13 @@ main() { right; }
 
     #[test]
     fn volatile_as_a_definition_name_is_reserved() {
-        let e = parse_src("volatile() { mark; }").unwrap_err();
+        let e = parse("volatile() { mark; }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "function"),
             "got: {:?}",
             e.kind
         );
-        let e = parse_src("namespace volatile { }").unwrap_err();
+        let e = parse("namespace volatile { }").unwrap_err();
         assert!(
             matches!(e.kind, CompileErrorKind::ReservedName { ref name, what } if name == "volatile" && what == "namespace"),
             "got: {:?}",

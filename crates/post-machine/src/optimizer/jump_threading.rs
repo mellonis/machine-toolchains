@@ -61,11 +61,10 @@ pub fn run(f: &mut IrFunction) -> u32 {
 mod tests {
     use super::*;
     use crate::ir::lower;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     fn ir_of(src: &str) -> crate::ir::IrProgram {
-        lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0
+        lower(&parse(src).unwrap()).unwrap().0
     }
 
     #[test]

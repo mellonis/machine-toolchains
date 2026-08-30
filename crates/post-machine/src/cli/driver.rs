@@ -1241,16 +1241,14 @@ mod tests {
         assert!(err.contains("app"), "{err}");
     }
 
-    /// The driver's pre-pass scan agrees with the C1 front end on both
-    /// of the facts it reports, and still degrades to an empty scan on
-    /// a source that does not parse.
+    /// The driver's pre-pass scan agrees with `parser::parse` — two
+    /// independent readers of the same source — on both of the facts it
+    /// reports, and still degrades to an empty scan on a source that
+    /// does not parse.
     #[test]
-    fn scan_source_matches_the_c1_front_end() {
+    fn scan_source_agrees_with_the_parse_entry_point() {
         let src = "use std::goToEnd as end;\nnamespace ns { export inner() { right; } }\nvolatile main() {\n    helper() { left; }\n    @helper();\n}\n";
-        let expected = {
-            let tokens = crate::lexer::lex(src).expect("lexes");
-            crate::parser::parse(&tokens).expect("parses")
-        };
+        let expected = crate::parser::parse(src).expect("parses");
         let scan = scan_source(src);
         assert_eq!(scan.volatile, expected.functions.iter().any(|f| f.volatile));
         assert!(scan.exports.iter().any(|e| e == "main"));

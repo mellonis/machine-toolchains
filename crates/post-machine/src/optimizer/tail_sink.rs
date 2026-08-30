@@ -181,11 +181,10 @@ pub fn run(f: &mut IrFunction) -> u32 {
 mod tests {
     use super::*;
     use crate::ir::lower;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     fn sunk(src: &str) -> crate::ir::IrFunction {
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         run(&mut ir.functions[0]);
         crate::ir::validate_function(&ir.functions[0]).unwrap();
         ir.functions.remove(0)
@@ -205,7 +204,7 @@ mod tests {
         // B [Lft], J.ops starts [Rgt, Rgt].
         let src =
             "f() { check(1, 2); 1: mark; right; right; goto 3; 2: left; right; right; 3: unmark; }";
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         let n = run(&mut ir.functions[0]);
         crate::ir::validate_function(&ir.functions[0]).unwrap();
         let f = &ir.functions[0];
@@ -247,7 +246,7 @@ mod tests {
     fn a_brk_stops_the_upward_scan() {
         // Suffix [Brk, Rgt, Rgt] on both arms: only [Rgt, Rgt] sinks.
         let src = "f() { check(1, 2); 1: debugger; right; right; goto 3; 2: debugger; right; right; 3: unmark; }";
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         let n = run(&mut ir.functions[0]);
         crate::ir::validate_function(&ir.functions[0]).unwrap();
         let f = &ir.functions[0];
@@ -297,7 +296,7 @@ mod tests {
         // qualifying join (two distinct jump preds, matching suffix).
         let src =
             "f() { 1: check(2, 3); 2: mark; right; right; goto 1; 3: left; right; right; goto 1; }";
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         let n = run(&mut ir.functions[0]);
         crate::ir::validate_function(&ir.functions[0]).unwrap();
         let f = &ir.functions[0];
@@ -326,7 +325,7 @@ mod tests {
         // A == J: block 2's own self-loop counts as a jump pred of itself,
         // disqualifying it even though the other pred's suffix matches.
         let src = "f() { check(1, 3); 1: mark; right; right; goto 2; 2: left; right; right; goto 2; 3: unmark; }";
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         let n = run(&mut ir.functions[0]);
         crate::ir::validate_function(&ir.functions[0]).unwrap();
         let f = &ir.functions[0];

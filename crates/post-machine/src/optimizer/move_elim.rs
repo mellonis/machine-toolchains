@@ -162,11 +162,10 @@ pub fn run(f: &mut IrFunction) -> u32 {
 mod tests {
     use super::*;
     use crate::ir::lower;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     fn opt_fn(src: &str) -> IrFunction {
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         run(&mut ir.functions[0]);
         crate::ir::validate_function(&ir.functions[0]).unwrap();
         ir.functions.remove(0)
@@ -266,7 +265,7 @@ mod tests {
             src.push_str("    mark; right; left;\n");
         }
         src.push_str("}\n");
-        let mut ir = lower(&parse(&lex(&src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(&src).unwrap()).unwrap().0;
         let f = &mut ir.functions[0];
         assert_eq!(run(f), 12, "one call eliminates all twelve pairs");
         crate::ir::validate_function(f).unwrap();
@@ -354,7 +353,7 @@ main() {
 3:  unmark;
 }
 ";
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         let f = &mut ir.functions[0];
         assert_eq!(
             run(f),

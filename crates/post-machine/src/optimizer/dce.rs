@@ -38,13 +38,11 @@ pub fn run(f: &mut IrFunction) -> u32 {
 mod tests {
     use super::*;
     use crate::ir::lower;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     #[test]
     fn unreachable_block_is_deleted_and_entry_survives() {
-        let (mut ir, warnings) =
-            lower(&parse(&lex("f() { goto 1; right; 1: left; }").unwrap()).unwrap()).unwrap();
+        let (mut ir, warnings) = lower(&parse("f() { goto 1; right; 1: left; }").unwrap()).unwrap();
         assert_eq!(warnings.len(), 1); // lowering still warns
         let f = &mut ir.functions[0];
         assert_eq!(f.blocks.len(), 3);

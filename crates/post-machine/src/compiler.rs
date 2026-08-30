@@ -2236,38 +2236,29 @@ main() { mark; }
         );
     }
 
-    /// `analyze` runs on the green tree, and the C1 path is the oracle:
-    /// the AST it produces, the diagnostics, the scope summary and the
-    /// token stream must all match what `lex + parse` produced. Written
-    /// against the C1 functions directly rather than a recorded
-    /// snapshot, so the oracle cannot drift.
+    /// `analyze`'s own contract, pinned by value rather than against a
+    /// second implementation of it. The C1 front end it used to be
+    /// compared against is gone; what survives is the part that was
+    /// never a tautology — token provenance, which is a claim about
+    /// `analyze`'s lex MODE, not about its parse: it lexes `WithComments`
+    /// internally (feeding the green parse) yet publishes the
+    /// `WithoutComments` stream on `AnalysisOutput.tokens`
+    /// (`significant_tokens`, `docs/core.md (syntax trees)`).
+    ///
+    /// The AST/diagnostics/scopes halves are covered by this module's
+    /// other tests and by `tests/compile_programs.rs`; re-asserting them
+    /// against `flatten(parse(src))` would now compare `analyze` with
+    /// itself.
     #[test]
-    fn analyze_matches_the_c1_front_end() {
+    fn analyze_keeps_token_provenance_against_a_plain_lex() {
         let src = "// lead\nuse std::goToEnd as end;\nnamespace ns { export inner() { right; } }\n? documented\nexport main() {\n    helper() { left; }\n    007: @helper();\n    @ns::inner();\n    @end();\n    goto 007;\n}\n";
-
-        let (expected_ast, expected_diagnostics, expected_scopes) = {
-            let tokens = crate::lexer::lex(src).expect("lexes");
-            let parsed = crate::parser::parse(&tokens).expect("parses");
-            let Flattened {
-                program,
-                scopes,
-                warnings: vis,
-                resolutions: _,
-                docs: _,
-            } = flatten(parsed);
-            let (_ir, diagnostics) = lower_and_merge(&program, vis).expect("lowers");
-            (program, diagnostics, scopes)
-        };
-        let expected_tokens = crate::lexer::lex(src).expect("lexes");
-
         let a = analyze(src).expect("analyzes");
-        assert_eq!(a.ast, expected_ast, "flattened AST parity");
-        assert_eq!(a.tokens, expected_tokens, "token provenance");
-        assert_eq!(a.diagnostics, expected_diagnostics, "diagnostics parity");
-        assert_eq!(a.scopes.defs, expected_scopes.defs, "scope defs parity");
-        assert_eq!(
-            a.scopes.bindings, expected_scopes.bindings,
-            "scope bindings parity"
+        let plain = crate::lexer::lex(src).expect("lexes");
+        assert_eq!(a.tokens, plain, "token provenance law");
+        let with_comments = crate::lexer::lex_with(src, LexMode::WithComments).expect("lexes");
+        assert!(
+            with_comments.len() > a.tokens.len(),
+            "fixture sanity: the source must carry a comment, or this proves nothing"
         );
     }
 

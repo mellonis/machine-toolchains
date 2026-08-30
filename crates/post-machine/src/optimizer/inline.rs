@@ -144,7 +144,6 @@ fn splice(f: &mut IrFunction, bi: usize, oi: usize, candidates: &HashMap<String,
 mod tests {
     use super::*;
     use crate::ir::lower;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     fn inlined(src: &str) -> IrProgram {
@@ -152,7 +151,7 @@ mod tests {
     }
 
     fn inlined_with(src: &str, options: &OptOptions) -> IrProgram {
-        let mut ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let mut ir = lower(&parse(src).unwrap()).unwrap().0;
         run(&mut ir, options);
         for f in &ir.functions {
             crate::ir::validate_function(f).unwrap();

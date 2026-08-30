@@ -125,11 +125,10 @@ pub fn block_entry_facts(f: &IrFunction) -> HashMap<u32, Fact> {
 mod tests {
     use super::*;
     use crate::ir::lower;
-    use crate::lexer::lex;
     use crate::parser::parse;
 
     fn facts_of(src: &str) -> (crate::ir::IrProgram, HashMap<u32, Fact>) {
-        let ir = lower(&parse(&lex(src).unwrap()).unwrap()).unwrap().0;
+        let ir = lower(&parse(src).unwrap()).unwrap().0;
         let facts = block_entry_facts(&ir.functions[0]);
         (ir, facts)
     }
