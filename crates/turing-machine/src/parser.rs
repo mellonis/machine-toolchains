@@ -4,10 +4,12 @@
 //! [`parse`] is the convenience wrapper: source in, [`Program`] out,
 //! going through that same green tree and
 //! [`crate::syntax::extract_program`] (docs/core.md (syntax trees)).
-//! `crate::parser::Parser::file` and its per-production helpers also
-//! still build a [`crate::cst::Cst`] tree of their own as they walk (the
-//! same walk, with a green sink attached alongside it), but nothing in
-//! production reads that tree any more.
+//! `Parser::file` and its per-production helpers also still build
+//! [`crate::cst`]'s own node types of their own as they walk (the same
+//! walk, with a green sink attached alongside it) — the outer
+//! [`crate::cst::Cst`] wrapper is no longer constructed anywhere, since
+//! its one constructor was the now-deleted `parse_cst`. Nothing in
+//! production reads that node tree any more.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
@@ -645,9 +647,9 @@ thread_local! {
 ///
 /// Runs `Parser::file`'s one grammar walk with a green sink attached: the
 /// sink only mirrors token consumption and node boundaries alongside the
-/// unchanged parser logic, so the same walk also builds a
-/// [`crate::cst::Cst`] tree of its own as a byproduct — nothing in
-/// production reads that tree any more (docs/core.md (syntax trees)).
+/// unchanged parser logic, so the same walk also builds
+/// [`crate::cst`]'s own node types of their own as a byproduct — nothing
+/// in production reads them any more (docs/core.md (syntax trees)).
 pub fn parse_green_from_tokens(
     source: &str,
     tokens: &[Token],
@@ -859,12 +861,13 @@ struct Parser<'a> {
     prev_end_line: u32,
     /// A `machine` block has already been seen (multiplicity guard).
     machine_seen: bool,
-    /// Green-tree emission, when this walk is [`parse_green`]'s rather
-    /// than a CST-only walk with no sink attached: `bump()` mirrors every
-    /// consumed token into it, and the `g_*` helpers below bracket node
-    /// boundaries. `None` on the sink-less path — those helpers are then
-    /// no-ops, so the CST walk is byte-identical whether or not a sink is
-    /// attached.
+    /// Green-tree emission, when this walk is [`parse_green`]'s: `bump()`
+    /// mirrors every consumed token into it, and the `g_*` helpers below
+    /// bracket node boundaries. `None` only for [`bare_parser`]'s partial
+    /// re-parse of an already-retokenized node's own tokens (the
+    /// `reparse_*` shims), which never re-emits a green tree, only a
+    /// value — those helpers are then no-ops, so the underlying grammar
+    /// walk is unaffected by whether a sink is attached.
     sink: Option<GreenSink>,
 }
 

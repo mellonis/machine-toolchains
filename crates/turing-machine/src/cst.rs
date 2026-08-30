@@ -2,10 +2,13 @@
 //! mirror of the `.pmc` CST in the sibling PM-1 crate.
 //!
 //! `crate::parser::Parser::file` and its per-production helpers still build
-//! a [`Cst`] tree of these types as they walk (the same grammar walk
+//! these node types — `TopItem`/`TopKind` and the per-declaration structs
+//! below — as they walk (the same grammar walk
 //! [`crate::parser::parse_green_from_tokens`] runs, with a green sink
-//! attached alongside it) — but nothing in production reads the built tree
-//! any more: the compiler front end, the `.tmc` language service, and `fmt`
+//! attached alongside it); the outer [`Cst`] wrapper itself is no longer
+//! constructed anywhere (its one constructor was the now-deleted
+//! `parse_cst`). Nothing in production reads the built node tree either
+//! way: the compiler front end, the `.tmc` language service, and `fmt`
 //! all read the green tree instead, via
 //! [`crate::parser::parse_green`]/[`crate::parser::parse_green_from_tokens`]
 //! and [`crate::syntax::extract_program`] (docs/core.md (syntax trees)).
