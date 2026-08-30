@@ -1,11 +1,10 @@
 //! `.tmc` parser battery: the six canonical example programs parse verbatim, every
 //! deliberately-absent construct is rejected with its frozen code, reserved
 //! keywords are barred wherever a name is expected, the binding grammar and
-//! doc/deprecated attachment work, and the CST is lossless (no comment
-//! dropped; `clone() == self`).
+//! doc/deprecated attachment work, and the green tree is lossless (no
+//! comment dropped; `text() == source`).
 
 use super::*;
-use crate::cst::{ReuseCarrier, RuleKind, TopKind, WorldKind};
 use crate::lexer::{LexMode, lex, lex_with};
 
 fn parse_src(src: &str) -> Result<Program, CompileError> {
@@ -470,22 +469,14 @@ fn tape_declaration_outside_a_machine_is_rejected() {
 
 #[test]
 fn volatile_tape_parses_in_a_machine_block() {
+    // AST facts, not CST facts: reads `Program`'s tapes through the one
+    // production parse path.
     let src = "machine { volatile tape sensor: bits; tape scratch: bits; }";
     let tokens = lex(src).unwrap();
-    let cst = parse_cst(&tokens).expect("parses");
-    let TopKind::Machine(m) = &cst.items[0].kind else {
-        panic!("expected a machine block");
-    };
-    let tapes: Vec<&TapeCst> = m
-        .items
-        .iter()
-        .filter_map(|item| match &item.kind {
-            WorldKind::Tape(t) => Some(t),
-            _ => None,
-        })
-        .collect();
+    let p = parse_src(src).expect("parses");
+    let tapes = &machine(&p).tapes;
     assert_eq!(tapes.len(), 2);
-    let (sensor, scratch) = (tapes[0], tapes[1]);
+    let (sensor, scratch) = (&tapes[0], &tapes[1]);
     assert!(sensor.volatile);
     assert_eq!(sensor.name, "sensor");
     assert!(!scratch.volatile);
@@ -894,108 +885,6 @@ fn doc_line_order_and_attribute_errors() {
 // CST losslessness.
 // ---------------------------------------------------------------------------
 
-/// Every comment text anywhere in the CST — the losslessness "nothing dropped"
-/// probe.
-fn collect_comments(cst: &Cst) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_top(&cst.items, &mut out);
-    out
-}
-
-fn push_doc_run(run: &[DocRunItem], out: &mut Vec<String>) {
-    for it in run {
-        if let DocRunKind::Comment(c) = &it.kind {
-            out.push(c.text.clone());
-        }
-    }
-}
-
-fn collect_top(items: &[TopItem], out: &mut Vec<String>) {
-    for item in items {
-        match &item.kind {
-            TopKind::Comment(c) => out.push(c.text.clone()),
-            TopKind::Import(u) => {
-                if let Some(c) = &u.trailing {
-                    out.push(c.text.clone());
-                }
-            }
-            TopKind::Alphabet(a) => {
-                push_doc_run(&a.doc_run, out);
-                out.extend(a.open_trailing.iter().map(|c| c.text.clone()));
-                if let Some(c) = &a.close_trailing {
-                    out.push(c.text.clone());
-                }
-            }
-            TopKind::Namespace(n) => {
-                push_doc_run(&n.doc_run, out);
-                out.extend(n.open_trailing.iter().map(|c| c.text.clone()));
-                collect_top(&n.items, out);
-                if let Some(c) = &n.close_trailing {
-                    out.push(c.text.clone());
-                }
-            }
-            TopKind::Reuse(r) => {
-                push_doc_run(&r.doc_run, out);
-                out.extend(r.open_trailing.iter().map(|c| c.text.clone()));
-                collect_world(&r.items, out);
-                if let Some(c) = &r.close_trailing {
-                    out.push(c.text.clone());
-                }
-            }
-            TopKind::Machine(m) => {
-                push_doc_run(&m.doc_run, out);
-                out.extend(m.open_trailing.iter().map(|c| c.text.clone()));
-                collect_world(&m.items, out);
-                if let Some(c) = &m.close_trailing {
-                    out.push(c.text.clone());
-                }
-            }
-        }
-    }
-}
-
-fn collect_world(items: &[WorldItem], out: &mut Vec<String>) {
-    for item in items {
-        match &item.kind {
-            WorldKind::Comment(c) => out.push(c.text.clone()),
-            WorldKind::Tape(t) => {
-                if let Some(c) = &t.trailing {
-                    out.push(c.text.clone());
-                }
-            }
-            WorldKind::State(s) => {
-                push_doc_run(&s.doc_run, out);
-                out.extend(s.open_trailing.iter().map(|c| c.text.clone()));
-                for ri in &s.rules {
-                    match &ri.kind {
-                        RuleKind::Comment(c) => out.push(c.text.clone()),
-                        RuleKind::Rule(rc) => {
-                            if let Some(c) = &rc.trailing {
-                                out.push(c.text.clone());
-                            }
-                        }
-                    }
-                }
-                if let Some(c) = &s.close_trailing {
-                    out.push(c.text.clone());
-                }
-            }
-            WorldKind::Graft(g) => {
-                push_doc_run(&g.doc_run, out);
-                if let Some(c) = &g.trailing {
-                    out.push(c.text.clone());
-                }
-            }
-            WorldKind::Bind(b) => {
-                push_doc_run(&b.doc_run, out);
-                if let Some(c) = &b.trailing {
-                    out.push(c.text.clone());
-                }
-            }
-        }
-    }
-}
-
 #[test]
 fn cst_significant_tokens_match_the_comment_free_stream() {
     // The significant-token walk (comments stripped) is identical to lexing the
@@ -1024,7 +913,7 @@ machine {
 }
 
 #[test]
-fn cst_retains_every_comment_and_clones_equal() {
+fn source_text_and_doc_payload_survive_the_green_tree_verbatim() {
     // Comments at each modelled position: a leading own-line comment, a
     // trailing comment after a `;`, a trailing after a rule, an open-brace
     // comment, a mid-run comment, and a dangling comment.
@@ -1042,42 +931,21 @@ machine { // on the open brace
 }
 // dangling end-of-file comment
 ";
-    let tokens = lex_with(src, LexMode::WithComments).unwrap();
-    let cst = parse_cst(&tokens).expect("parses with comments");
+    // Nothing dropped anywhere: the green tree's own text reconstructs the
+    // source byte for byte — a stronger, tree-level form of the old CST
+    // "every comment retained somewhere" probe (docs/core.md (syntax
+    // trees)).
+    let root = SyntaxNode::new_root(parse_green(src).unwrap());
+    assert_eq!(root.text(), src);
 
-    // Every comment token in the input is retained somewhere in the CST.
-    let mut in_src: Vec<String> = tokens
-        .iter()
-        .filter_map(|t| match &t.kind {
-            TokenKind::Comment(c) => Some(c.text.clone()),
-            _ => None,
-        })
-        .collect();
-    let mut got = collect_comments(&cst);
-    in_src.sort();
-    got.sort();
-    assert_eq!(got, in_src, "no comment may be dropped");
-
-    // The lossless round-trip contract on the whole tree.
-    assert_eq!(cst.clone(), cst);
-
-    // The `?` doc payload is verbatim (the block comment inside is NOT part of
-    // the doc text).
-    let TopKind::Alphabet(a) = &cst
-        .items
-        .iter()
-        .find_map(|i| match &i.kind {
-            TopKind::Alphabet(_) => Some(&i.kind),
-            _ => None,
-        })
-        .unwrap()
-    else {
-        unreachable!()
-    };
-    let DocRunKind::Doc { text, .. } = &a.doc_run[0].kind else {
-        panic!("expected a doc line first in the run");
-    };
-    assert_eq!(text, "doc /* not this — doc payload is verbatim */");
+    // The `?` doc payload is verbatim (the block comment inside is NOT part
+    // of the doc text — it is not parsed as a comment at all).
+    let p = parse_src(src).expect("parses");
+    let doc = p.alphabets[0].doc.as_ref().expect("documented");
+    assert_eq!(
+        doc.paragraphs,
+        vec!["doc /* not this — doc payload is verbatim */"]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1099,25 +967,14 @@ fn spans_are_retained_for_names_and_rules() {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-carrier: routine and graph share a CST shape but lower distinctly.
+// Cross-carrier: routine and graph share a grammar shape but land in
+// distinct AST lists.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn routine_and_graph_lower_to_distinct_ast_lists() {
     let src = "routine r() { } graph g() { }";
-    let cst = parse_cst(&lex(src).unwrap()).unwrap();
-    // In the CST both are `Reuse`, discriminated by carrier.
-    let carriers: Vec<ReuseCarrier> = cst
-        .items
-        .iter()
-        .filter_map(|i| match &i.kind {
-            TopKind::Reuse(r) => Some(r.carrier),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(carriers, vec![ReuseCarrier::Routine, ReuseCarrier::Graph]);
-    // In the AST they land in separate lists.
-    let p = lower_cst(&cst);
+    let p = parse_src(src).expect("parses");
     assert_eq!(p.routines.len(), 1);
     assert_eq!(p.graphs.len(), 1);
     assert_eq!(p.routines[0].name, "r");
@@ -1250,61 +1107,15 @@ fn fold_expr_parenthesized_lone_glyph_binding_stays_passthrough() {
 
 // ---------------------------------------------------------------------------
 // Interior list comments: a comment inside a comma-separated list is
-// captured on the enclosing CST node, keyed by the index of the entry it
-// precedes.
+// captured keyed by the index of the entry it precedes. Deleted from here
+// (they read the CST's `interior` field directly) in favor of the
+// production-path, per-position coverage in
+// `tests/fmt_interior.rs`, which formats the exact same three shapes and
+// asserts the comment lands next to the right entry:
+// `alphabet_between_entries` (mid-list, index 1 — the entry-index fact),
+// `alphabet_tail_slot_same_line` (the tail-slot "keyed by the entry count"
+// fact), and `alphabet_slot0_own_line` (leading own-line, index 0).
 // ---------------------------------------------------------------------------
-
-/// A comment inside a comma-separated list is captured on the enclosing
-/// CST node, keyed by the index of the entry it precedes. An index equal
-/// to the entry count means "after the last entry, before the closer"
-/// (docs/tmt/fmt.md (interior comments)).
-#[test]
-fn interior_comments_are_captured_with_their_entry_index() {
-    let src = "alphabet bits { '_', // the blank\n  '0', '1' }\n\n\
-               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
-    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-    let cst = parse_cst(&tokens).expect("parses");
-    let TopKind::Alphabet(a) = &cst.items[0].kind else {
-        panic!("expected an alphabet item");
-    };
-    assert_eq!(a.elems.len(), 3, "the three glyphs still parse");
-    assert_eq!(a.interior.len(), 1, "the comment is captured");
-    let (index, comment) = &a.interior[0];
-    assert_eq!(*index, 1, "it precedes entry 1 (`'0'`)");
-    assert_eq!(comment.text.trim_end(), "// the blank");
-    assert!(!comment.own_line, "it trails `'_',` on the same line");
-}
-
-/// The tail slot: a comment after the last entry has no following entry,
-/// so it is keyed by the entry count itself.
-#[test]
-fn a_comment_after_the_last_entry_is_keyed_by_the_entry_count() {
-    let src = "alphabet bits { '_', '0', '1' // the last\n}\n\n\
-               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
-    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-    let cst = parse_cst(&tokens).expect("parses");
-    let TopKind::Alphabet(a) = &cst.items[0].kind else {
-        panic!("expected an alphabet item");
-    };
-    assert_eq!(a.interior.len(), 1);
-    assert_eq!(a.interior[0].0, 3, "keyed by the entry count, not an index");
-}
-
-/// An own-line comment before the first entry keys to index 0, and keeps
-/// `own_line` so the printer can put it back on its own line.
-#[test]
-fn a_comment_before_the_first_entry_keys_to_zero() {
-    let src = "alphabet bits {\n  // leading note\n  '_', '0', '1' }\n\n\
-               machine { tape t: bits; entry state s { [*] -> stop; } }\n";
-    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-    let cst = parse_cst(&tokens).expect("parses");
-    let TopKind::Alphabet(a) = &cst.items[0].kind else {
-        panic!("expected an alphabet item");
-    };
-    assert_eq!(a.interior.len(), 1);
-    assert_eq!(a.interior[0].0, 0);
-    assert!(a.interior[0].1.own_line, "it sits on its own line");
-}
 
 /// `significant_tokens` — the filter `compiler::analyze` puts between the
 /// `WithComments` stream the green parse needs and the adjacency-walking lint
