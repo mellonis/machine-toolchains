@@ -377,35 +377,69 @@ FILE@0..36
     assert_eq!(dump(src), expected);
 }
 
-/// Error parity between `parse_cst` and `parse_green` over a few invalid
-/// inputs: both walk the same grammar with the same sink-optional
-/// `Parser`, so a divergence here would mean a green-only early return
-/// slipped in somewhere. `CompileError` already derives `PartialEq`, so
-/// the errors are compared directly (no derive added by this plan).
+/// Every `.pmc` the crate ships survives extraction, not merely the
+/// parse the lossless law above runs.
+///
+/// This is reach, not correctness: nothing here reads the `Program`
+/// back. It exists so a corpus file that made extraction panic surfaces
+/// here rather than only wherever that file happens to be compiled.
 #[test]
-fn error_parity_with_parse_cst() {
-    use mtc_post_machine::lexer::{LexMode, lex_with};
-    use mtc_post_machine::parser::parse_cst;
-    // Parse-level: unterminated function body; a bare `use` with no
-    // path; a missing `;` after a command; a doc run with nothing bound
-    // to it. Lex-level: an unterminated block comment, and a stray `/`.
-    // The lex cases matter because `parse_green` lexes internally while
-    // the C1 side lexes first — both must surface the same error.
-    for src in [
-        "main() {",
-        "use ;",
-        "main() { right }",
-        "? dangling\n",
-        "/* never closed\nmain() { right; }\n",
-        "left(!) / right(!);",
-    ] {
-        let old = lex_with(src, LexMode::WithComments)
-            .and_then(|t| parse_cst(&t).map(|_| ()))
-            .expect_err("sample must be invalid .pmc");
-        let new = parse_green(src)
+fn every_corpus_file_parses_and_extracts() {
+    use mtc_post_machine::syntax::extract_program;
+    for (path, source) in corpus() {
+        let root = SyntaxNode::new_root(
+            parse_green(&source).unwrap_or_else(|e| panic!("{}: {e:?}", path.display())),
+        );
+        let program = extract_program(&root, &source);
+        assert!(
+            !program.functions.is_empty()
+                || !program.imports.is_empty()
+                || source.trim().is_empty(),
+            "{}: extraction produced nothing from a non-empty file",
+            path.display()
+        );
+    }
+}
+
+/// Invalid inputs fail with a fixed kind at a fixed span. Four
+/// parse-level (an unterminated function body, a bare `use` with no
+/// path, a missing `;` after a command, a doc run with nothing bound to
+/// it) and two lex-level (an unterminated block comment, a stray `/`) —
+/// the lex cases matter because `parse_green` lexes internally, so a
+/// lexical failure has to surface through it unchanged.
+///
+/// Every code and span below is a literal, captured from the C1 path
+/// while it was still callable, so this table is what says the errors
+/// did not move when the green parser became the only one.
+#[test]
+fn invalid_sources_fail_with_a_fixed_kind_and_span() {
+    use mtc_core::diagnostics::Span;
+
+    let cases: &[(&str, &str, Span)] = &[
+        ("main() {", "unexpected-token", Span::new(1, 9, 1, 9)),
+        ("use ;", "unexpected-token", Span::new(1, 5, 1, 6)),
+        (
+            "main() { right }",
+            "unexpected-token",
+            Span::new(1, 16, 1, 17),
+        ),
+        ("? dangling\n", "dangling-doc-run", Span::new(1, 1, 1, 11)),
+        (
+            "/* never closed\nmain() { right; }\n",
+            "lex-error",
+            Span::new(1, 1, 1, 2),
+        ),
+        ("left(!) / right(!);", "lex-error", Span::new(1, 9, 1, 10)),
+    ];
+    for (src, code, span) in cases {
+        let err = parse_green(src)
             .map(|_| ())
             .expect_err("sample must be invalid .pmc");
-        assert_eq!(old, new, "error parity for {src:?}");
+        assert_eq!(
+            (err.kind.code(), err.span),
+            (*code, *span),
+            "{src:?}: kind and span must not move"
+        );
     }
 }
 
@@ -461,83 +495,31 @@ fn corpus_lossless_law() {
     }
 }
 
-/// Acceptance parity between `parse_cst` and `parse_green` over the same
-/// corpus: every file the C1 pipeline accepts, the green parser accepts
-/// too, and vice versa. All corpus files are valid `.pmc`, so this is
-/// expected to be `old_ok == new_ok == true` throughout — the assertion
-/// still holds the general shape so a future invalid fixture is caught
-/// the same way.
-#[test]
-fn corpus_acceptance_parity() {
-    use mtc_post_machine::lexer::{LexMode, lex_with};
-    use mtc_post_machine::parser::parse_cst;
-    for (path, source) in corpus() {
-        let old_ok = lex_with(&source, LexMode::WithComments)
-            .and_then(|t| parse_cst(&t).map(|_| ()))
-            .is_ok();
-        let new_ok = parse_green(&source).is_ok();
-        assert_eq!(old_ok, new_ok, "{}: acceptance parity", path.display());
-    }
-}
-
-/// Struct-equality oracle between extraction and `lower_cst`, over the
-/// whole corpus — the standing gate the PM consumer migration runs
-/// against. Every real `.pmc` file the crate ships must extract to
-/// EXACTLY the `Program` `lower_cst` builds from the same source,
-/// function by function, import by import, span by span. A parity
-/// failure here is an extraction bug: fix
-/// `crates/post-machine/src/syntax/extract.rs`, never this oracle.
-#[test]
-fn corpus_extraction_parity() {
-    use mtc_post_machine::lexer::{LexMode, lex_with};
-    use mtc_post_machine::parser::parse_cst;
-    use mtc_post_machine::syntax::extract_program;
-    for (path, source) in corpus() {
-        let expected = mtc_post_machine::parser::lower_cst(
-            &parse_cst(&lex_with(&source, LexMode::WithComments).expect("lexes")).expect("parses"),
-        );
-        let root = SyntaxNode::new_root(
-            parse_green(&source).unwrap_or_else(|e| panic!("{}: {e:?}", path.display())),
-        );
-        assert_eq!(
-            extract_program(&root, &source),
-            expected,
-            "{}: extraction parity",
-            path.display()
-        );
-    }
-}
-
-/// Controller addition (Task-4 review follow-up): a nested function
-/// literally named `main` never picks up the un-namespaced top-level
-/// `main` auto-export — `extract.rs`'s `is_nested` check runs BEFORE
-/// the `name == "main"` auto-export test, so `exported` is forced
-/// `false` for any nested function regardless of its name. Same oracle
-/// pattern as `corpus_extraction_parity`, in miniature: one hand-picked
-/// snippet, `extract_program` checked against `lower_cst` directly.
+/// A nested function literally named `main` never picks up the
+/// un-namespaced top-level `main` auto-export: `extract.rs`'s `is_nested`
+/// check runs BEFORE the `name == "main"` auto-export test, so `exported`
+/// is forced `false` for any nested function regardless of its name.
+///
+/// Asserted directly on the extracted `Program` — the claim is about one
+/// boolean on one function, and nothing else in the corpus writes a
+/// nested `main`.
 #[test]
 fn nested_main_stays_unexported() {
-    use mtc_post_machine::lexer::{LexMode, lex_with};
-    use mtc_post_machine::parser::parse_cst;
     use mtc_post_machine::syntax::extract_program;
     let src = "outer() {\nmain() { right; }\n}\n";
 
-    let expected = mtc_post_machine::parser::lower_cst(
-        &parse_cst(&lex_with(src, LexMode::WithComments).expect("lexes")).expect("parses"),
-    );
-    let outer = &expected.functions[0];
+    let root = SyntaxNode::new_root(parse_green(src).unwrap());
+    let program = extract_program(&root, src);
+
+    let outer = &program.functions[0];
     assert_eq!(outer.name, "outer");
     assert!(!outer.exported, "outer() is not main, never auto-exported");
     let nested_main = &outer.nested[0];
     assert_eq!(nested_main.name, "main");
     assert!(
         !nested_main.exported,
-        "fixture sanity: a nested `main` must NOT auto-export on the oracle side either, \
-         or this test proves nothing"
+        "a nested `main` must not auto-export"
     );
-
-    let root = SyntaxNode::new_root(parse_green(src).unwrap());
-    assert_eq!(extract_program(&root, src), expected);
 }
 
 /// The token-provenance law: a `WithComments` stream filtered of its

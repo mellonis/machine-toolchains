@@ -783,18 +783,21 @@ fn binding_arguments_split_around_an_interior_symbol_map() {
 /// Worth a test rather than prose because extraction leans on it
 /// directly: a bracket placed one token off still round-trips (the
 /// lossless law sees the same bytes) and still casts (the kind is
-/// right), so nothing else in this file would notice — it would surface
-/// only as a span mismatch deep in a later parity oracle. `TRANSITION`
-/// is checked on three variants, since each carries its own span field.
+/// right), so nothing else in this file would notice.
+///
+/// Every span below is a LITERAL, captured from the C1 lowering of this
+/// fixture while that path was still callable. That is what makes the
+/// check independent: reading the expected span back off the extracted
+/// `Program` instead would move both sides together, since extraction
+/// derives a node's span by reparsing that node's own tokens — a node
+/// opening one token early would shift the span with it and pass.
+/// `TRANSITION` is checked on three variants, since each carries its own
+/// span field.
 #[test]
 fn each_new_nodes_extent_equals_the_ast_span_it_carries() {
     use mtc_core::diagnostics::Span;
     use mtc_core::syntax::TextLineIndex;
-    use mtc_turing_machine::lexer::{LexMode, lex_with};
-    use mtc_turing_machine::parser::{
-        BindingValue, SigParamKind as AstSigParamKind, Transition, lower_cst, parse_cst,
-        parse_green_from_tokens,
-    };
+    use mtc_turing_machine::parser::parse_green;
 
     let src = "alphabet x { '0', '1' }\n\
                routine r(volatile tape a: x writes { '0' } preserves { '1' }, state done) {\n\
@@ -809,9 +812,7 @@ fn each_new_nodes_extent_equals_the_ast_span_it_carries() {
                \x20 }\n\
                }\n";
     let index = TextLineIndex::new(src);
-    let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-    let ast = lower_cst(&parse_cst(&tokens).expect("parses"));
-    let root = SyntaxNode::new_root(parse_green_from_tokens(src, &tokens).expect("parses"));
+    let root = SyntaxNode::new_root(parse_green(src).expect("parses"));
 
     // The green node's extent, expressed the way an AST `Span` is.
     let extent = |n: &SyntaxNode| {
@@ -821,83 +822,69 @@ fn each_new_nodes_extent_equals_the_ast_span_it_carries() {
         Span::new(sl, sc, el, ec)
     };
 
-    let routine = &ast.routines[0];
-    let params = all_of(&root, TmcKind::SigParam);
-    assert_eq!(params.len(), routine.sig.params.len());
-    for (node, p) in params.iter().zip(&routine.sig.params) {
-        assert_eq!(extent(node), p.span, "SIG_PARAM extent != SigParam::span");
+    #[track_caller]
+    fn check(
+        nodes: &[SyntaxNode],
+        expected: &[Span],
+        extent: &dyn Fn(&SyntaxNode) -> Span,
+        what: &str,
+    ) {
+        assert_eq!(nodes.len(), expected.len(), "{what}: node count");
+        for (i, (node, span)) in nodes.iter().zip(expected).enumerate() {
+            assert_eq!(extent(node), *span, "{what}[{i}] extent != its AST span");
+        }
     }
 
-    let clauses = all_of(&root, TmcKind::ContractClause);
-    let AstSigParamKind::Tape {
-        writes, preserves, ..
-    } = &routine.sig.params[0].kind
-    else {
-        panic!("the first parameter is a tape parameter");
-    };
-    assert_eq!(clauses.len(), 2);
-    for (node, clause) in clauses.iter().zip([writes, preserves]) {
-        let clause = clause.as_ref().expect("both clauses are written");
-        assert_eq!(
-            extent(node),
-            clause.span,
-            "CONTRACT_CLAUSE extent != ContractClause::span"
-        );
-    }
-
-    let machine = ast.machine.as_ref().expect("a machine");
-    let rule = &machine.states[0].rules[0];
-    assert_eq!(
-        extent(&all_of(&root, TmcKind::WriteVec)[0]),
-        rule.write.as_ref().expect("a write vector").span,
-        "WRITE_VEC extent != WriteVec::span — the `write` keyword must stay outside"
+    check(
+        &all_of(&root, TmcKind::SigParam),
+        &[Span::new(2, 11, 2, 62), Span::new(2, 64, 2, 74)],
+        &extent,
+        "SIG_PARAM",
     );
-    assert_eq!(
-        extent(&all_of(&root, TmcKind::MoveVec)[0]),
-        rule.mov.as_ref().expect("a move vector").span,
-        "MOVE_VEC extent != MoveVec::span"
+    check(
+        &all_of(&root, TmcKind::ContractClause),
+        &[Span::new(2, 30, 2, 44), Span::new(2, 45, 2, 62)],
+        &extent,
+        "CONTRACT_CLAUSE — `writes` then `preserves`",
     );
-
-    let span_of = |t: &Transition| match t {
-        Transition::Goto { span, .. }
-        | Transition::Call { span, .. }
-        | Transition::Return { span }
-        | Transition::Stop { span }
-        | Transition::Halt { span }
-        | Transition::Stay { span } => *span,
-    };
-    let transitions = all_of(&root, TmcKind::Transition);
-    let written = [
-        &routine.states[0].rules[0].transition, // `return`
-        &rule.transition,                       // `goto s`
-        &machine.states[0].rules[1].transition, // `stop`
-    ];
-    assert_eq!(transitions.len(), written.len());
-    for (node, t) in transitions.iter().zip(written) {
-        assert_eq!(
-            extent(node),
-            span_of(t),
-            "TRANSITION extent != the variant's own span"
-        );
-    }
-
-    let bind = &machine.binds[0];
-    let args = all_of(&root, TmcKind::BindingArg);
-    assert_eq!(args.len(), bind.args.len());
-    for (node, a) in args.iter().zip(&bind.args) {
-        assert_eq!(
-            extent(node),
-            a.span,
-            "BINDING_ARG extent != BindingArg::span"
-        );
-    }
-    let BindingValue::Named { map: Some(map), .. } = &bind.args[0].value else {
-        panic!("the first argument carries a map");
-    };
-    assert_eq!(
-        extent(&all_of(&root, TmcKind::SymMap)[0]),
-        map.span,
-        "SYM_MAP extent != SymMap::span — the `with` keyword must stay outside"
+    // The `write`/`move` keywords stay OUTSIDE their vectors; the spans
+    // open at the `[`.
+    check(
+        &all_of(&root, TmcKind::WriteVec),
+        &[Span::new(9, 20, 9, 25)],
+        &extent,
+        "WRITE_VEC",
+    );
+    check(
+        &all_of(&root, TmcKind::MoveVec),
+        &[Span::new(9, 31, 9, 34)],
+        &extent,
+        "MOVE_VEC",
+    );
+    // Three variants: the routine's `return`, the machine's `goto s`,
+    // and its `stop`.
+    check(
+        &all_of(&root, TmcKind::Transition),
+        &[
+            Span::new(3, 26, 3, 32),
+            Span::new(9, 35, 9, 41),
+            Span::new(10, 12, 10, 16),
+        ],
+        &extent,
+        "TRANSITION",
+    );
+    check(
+        &all_of(&root, TmcKind::BindingArg),
+        &[Span::new(7, 10, 7, 51), Span::new(7, 53, 7, 64)],
+        &extent,
+        "BINDING_ARG",
+    );
+    // `with` stays outside the map, so the span opens at `map`.
+    check(
+        &all_of(&root, TmcKind::SymMap),
+        &[Span::new(7, 21, 7, 51)],
+        &extent,
+        "SYM_MAP",
     );
 }
 

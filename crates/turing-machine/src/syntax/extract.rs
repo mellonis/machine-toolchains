@@ -17,25 +17,29 @@
 //! The four shims the retokenization bridge shipped with each carry a
 //! direct fidelity test in this module (`reparsed_transition_…`,
 //! `reparsed_binding_arg_…`, `reparsed_sym_map_…`,
-//! `reparsed_sig_param_…`), built when there was no assembly to reach
-//! them through. The five added for assembly — `reparse_alphabet_elems`,
-//! `reparse_pattern`, `reparse_write_vec`, `reparse_move_vec`,
-//! `reparse_qual_name` — deliberately have none, and are pinned
-//! TRANSITIVELY by the `agrees` comparisons instead: `agrees` checks
-//! against `lower_cst`'s own output over the same source, which is a
-//! stronger oracle than a hand-built expected value, and every one of
-//! the five sits on its path. Named, so the asymmetry is a decision and
-//! not a gap:
+//! `reparsed_sig_param_…`), each asserting a written-out expected value
+//! rather than comparing two computations against each other. The five
+//! added for assembly — `reparse_alphabet_elems`, `reparse_pattern`,
+//! `reparse_write_vec`, `reparse_move_vec`, `reparse_qual_name` —
+//! deliberately have none of their own, and are pinned TRANSITIVELY by
+//! the crate's own consumers, since extraction is the front end
+//! everything downstream reads. Measured, one shim at a time, by
+//! corrupting its returned value and counting what turns red:
 //!
-//! - `reparse_alphabet_elems`, `reparse_pattern`, `reparse_write_vec`,
-//!   `reparse_move_vec` — `extraction_agrees_across_every_rule_shape`
-//!   (glyph and numeric ranges, keep cells, folds, both vectors present
-//!   and absent). Verified to bite: making the alphabet shim skip to the
-//!   SECOND `{` fails five tests; swapping the WRITE_VEC and MOVE_VEC
-//!   nodes at the call site fails that one.
-//! - `reparse_qual_name` — `extraction_agrees_on_prefixes_aliases_and_qualified_targets`.
-//!   Verified to bite: feeding it a run starting one token early fails
-//!   three tests.
+//! - `reparse_alphabet_elems` — reversing its element list reds 51
+//!   tests, across `codegen`, `compiler`, `expand`, `fmt`, `footprint`,
+//!   `ir`, `lint` and `lsp`.
+//! - `reparse_pattern` — reversing its cells reds 11, `codegen`,
+//!   `expand`, `fmt`, `lint`, `optimizer::dead_rows` and `parser`.
+//! - `reparse_write_vec` — reversing its cells reds 10; `reparse_move_vec`
+//!   reds 3 (`codegen`, `fmt`, `lint::rules::unused_tape`), the narrowest
+//!   of the family and still real.
+//! - `reparse_qual_name` — dropping a segment reds 111, the widest.
+//!
+//! What no consumer reads is a `Transition`'s own SPAN — a diagnostic
+//! points at a declaration or a pattern, never at a bare transition — so
+//! that one dimension has a test of its own here,
+//! `transition_spans_are_pinned_by_value`.
 //!
 //! # Anchor every position on a TOKEN, never on the node
 //!
@@ -1094,12 +1098,11 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::cst::{DocRunKind, TopKind, WorldKind};
-    use crate::lexer::{LexMode, lex, lex_with};
+    use crate::cst::DocRunKind;
+    use crate::lexer::{CommentKind, LexMode, lex, lex_with};
     use crate::parser::{
-        BindingValue, Program, SigParamKind, Transition, lower_cst, parse_cst, parse_green,
-        reparse_binding_arg, reparse_doc_items, reparse_sig_param, reparse_sym_map,
-        reparse_transition,
+        BindingValue, Program, SigParamKind, SymLit, Transition, parse_green, reparse_binding_arg,
+        reparse_doc_items, reparse_sig_param, reparse_sym_map, reparse_transition,
     };
     use crate::syntax::{RootView, TopView};
 
@@ -1329,8 +1332,8 @@ mod tests {
     }
 
     /// Retokenizing a RULE's own TRANSITION node and reparsing it
-    /// through `Parser::transition` reproduces the exact C1
-    /// `Transition`, across every shape the production itself branches
+    /// through `Parser::transition` reproduces the exact `Transition`
+    /// written below, across every shape the production itself branches
     /// on: both `Goto` spellings (explicit `goto NAME` and the
     /// bare-name sugar), `Call` (with a real binding list and a
     /// `Terminator` continuation — the shape most likely to disagree,
@@ -1341,6 +1344,14 @@ mod tests {
     /// NOT among these: see `reparse_transition`'s own doc comment for
     /// why no fixture could ever exercise it (it is the absence of a
     /// TRANSITION node, never a shape this shim is called for).
+    ///
+    /// Every expected value below is a literal, captured from the C1
+    /// lowering of this same fixture while that path was still callable
+    /// and written down before it went away. The literals are what makes
+    /// this a fidelity pin rather than a comparison of two sides that
+    /// could drift together: a `goto` that stopped being
+    /// `explicit: true`, or a span that moved by a column, fails here
+    /// against a fixed value.
     #[test]
     fn reparsed_transition_equals_the_c1_transition_across_every_reachable_shape() {
         let src = "routine r() {\n  entry state a {\n    \
@@ -1348,48 +1359,47 @@ mod tests {
                    ['3'] -> stop;\n    ['4'] -> halt;\n    \
                    ['5'] -> call sub(t = a) then halt;\n  }\n}\n";
 
-        let cst = parse_cst(&lex(src).unwrap()).unwrap();
-        let TopKind::Reuse(reuse) = &cst.items[0].kind else {
-            panic!("expected a routine");
-        };
-        let WorldKind::State(state) = &reuse.items[0].kind else {
-            panic!("expected a state");
-        };
-        let c1_transitions: Vec<Transition> = state
-            .rules
-            .iter()
-            .map(|ri| {
-                let crate::cst::RuleKind::Rule(rule_cst) = &ri.kind else {
-                    panic!("expected a rule");
-                };
-                rule_cst.rule.transition.clone()
-            })
-            .collect();
-        assert_eq!(
-            c1_transitions.len(),
-            6,
-            "fixture must carry exactly six rules, one per reachable shape"
-        );
-        // Pin the SHAPE each fixture rule actually produced, independent
-        // of the green-side comparison below — a fixture that silently
-        // drifted (e.g. a `goto` that stopped being `explicit: true`)
-        // would otherwise still "pass" by comparing two equally-wrong
-        // sides against each other.
-        assert!(matches!(
-            c1_transitions[0],
-            Transition::Goto { explicit: true, .. }
-        ));
-        assert!(matches!(
-            c1_transitions[1],
+        let expected_transitions: Vec<Transition> = vec![
             Transition::Goto {
+                name: "a".to_string(),
+                explicit: true,
+                span: Span::new(3, 14, 3, 20),
+            },
+            Transition::Goto {
+                name: "a".to_string(),
                 explicit: false,
-                ..
-            }
-        ));
-        assert!(matches!(c1_transitions[2], Transition::Return { .. }));
-        assert!(matches!(c1_transitions[3], Transition::Stop { .. }));
-        assert!(matches!(c1_transitions[4], Transition::Halt { .. }));
-        assert!(matches!(c1_transitions[5], Transition::Call { .. }));
+                span: Span::new(4, 14, 4, 15),
+            },
+            Transition::Return {
+                span: Span::new(5, 14, 5, 20),
+            },
+            Transition::Stop {
+                span: Span::new(6, 14, 6, 18),
+            },
+            Transition::Halt {
+                span: Span::new(7, 14, 7, 18),
+            },
+            Transition::Call {
+                target: crate::parser::QualName {
+                    segments: vec!["sub".to_string()],
+                    span: Span::new(8, 19, 8, 22),
+                },
+                args: vec![crate::parser::BindingArg {
+                    name: "t".to_string(),
+                    name_span: Span::new(8, 23, 8, 24),
+                    value: BindingValue::Named {
+                        target: "a".to_string(),
+                        target_span: Span::new(8, 27, 8, 28),
+                        map: None,
+                    },
+                    span: Span::new(8, 23, 8, 28),
+                }],
+                then: crate::parser::Continuation::Halt {
+                    span: Span::new(8, 35, 8, 39),
+                },
+                span: Span::new(8, 14, 8, 39),
+            },
+        ];
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1413,21 +1423,45 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(green_transitions, c1_transitions);
+        assert_eq!(green_transitions, expected_transitions);
     }
 
     /// Retokenizing a GRAFT's own BINDING_ARG node and reparsing it
-    /// through `Parser::binding_arg` reproduces the exact C1
-    /// `BindingArg`, `with map { … }` included — the unit
+    /// through `Parser::binding_arg` reproduces the exact `BindingArg`
+    /// written below, `with map { … }` included — the unit
     /// `crate::syntax::kinds`'s own module doc names as what a caller
-    /// "retokenizes and hands back to `Parser::binding_arg`".
+    /// "retokenizes and hands back to `Parser::binding_arg`". The
+    /// expected value is a literal captured from the C1 lowering of this
+    /// fixture while that path was still callable.
     #[test]
     fn reparsed_binding_arg_equals_the_c1_binding_arg() {
         let src = "routine r() {\n  entry state a {\n    [*] -> stop;\n  }\n  \
                    graft a(x = y with map { '0'->'1' }) as inst;\n}\n";
 
-        let program = lower_cst(&parse_cst(&lex(src).unwrap()).unwrap());
-        let c1_arg = program.routines[0].grafts[0].args[0].clone();
+        let expected_arg = crate::parser::BindingArg {
+            name: "x".to_string(),
+            name_span: Span::new(5, 11, 5, 12),
+            value: BindingValue::Named {
+                target: "y".to_string(),
+                target_span: Span::new(5, 15, 5, 16),
+                map: Some(crate::parser::SymMap {
+                    pairs: vec![crate::parser::MapPair {
+                        src: SymLit::Glyph {
+                            value: "0".to_string(),
+                            span: Span::new(5, 28, 5, 31),
+                        },
+                        dst: SymLit::Glyph {
+                            value: "1".to_string(),
+                            span: Span::new(5, 33, 5, 36),
+                        },
+                        arrow: crate::parser::MapArrow::Bidirectional,
+                        span: Span::new(5, 28, 5, 36),
+                    }],
+                    span: Span::new(5, 22, 5, 38),
+                }),
+            },
+            span: Span::new(5, 11, 5, 38),
+        };
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1444,22 +1478,54 @@ mod tests {
         let arg_view = graft_view.bindings().next().expect("one binding arg");
         let green_arg = reparse_binding_arg(&sig_tokens(arg_view.syntax(), &index));
 
-        assert_eq!(green_arg, c1_arg);
+        assert_eq!(green_arg, expected_arg);
     }
 
     /// Retokenizing a BINDING_ARG's own SYM_MAP node and reparsing it
-    /// through `Parser::sym_map` reproduces the exact C1 `SymMap`, both
-    /// arrow flavors included.
+    /// through `Parser::sym_map` reproduces the exact `SymMap` written
+    /// below, both arrow flavors included. The expected value is a
+    /// literal captured from the C1 lowering of this fixture while that
+    /// path was still callable.
+    ///
+    /// This is also `reparse_sym_map`'s ONLY caller anywhere in the
+    /// crate — the shim exists for a language-server use case nothing
+    /// has reached yet and carries `#[allow(dead_code)]` for it — so
+    /// this test is what keeps `Parser::sym_map` reachable from a green
+    /// node at all. Deleting it silently retires the shim.
     #[test]
     fn reparsed_sym_map_equals_the_c1_sym_map() {
         let src = "routine r() {\n  entry state a {\n    [*] -> stop;\n  }\n  \
                    graft a(x = y with map { '0'->'1', '2'=>'3' }) as inst;\n}\n";
 
-        let program = lower_cst(&parse_cst(&lex(src).unwrap()).unwrap());
-        let BindingValue::Named { map, .. } = &program.routines[0].grafts[0].args[0].value else {
-            panic!("expected a Named binding value");
+        let expected_map = crate::parser::SymMap {
+            pairs: vec![
+                crate::parser::MapPair {
+                    src: SymLit::Glyph {
+                        value: "0".to_string(),
+                        span: Span::new(5, 28, 5, 31),
+                    },
+                    dst: SymLit::Glyph {
+                        value: "1".to_string(),
+                        span: Span::new(5, 33, 5, 36),
+                    },
+                    arrow: crate::parser::MapArrow::Bidirectional,
+                    span: Span::new(5, 28, 5, 36),
+                },
+                crate::parser::MapPair {
+                    src: SymLit::Glyph {
+                        value: "2".to_string(),
+                        span: Span::new(5, 38, 5, 41),
+                    },
+                    dst: SymLit::Glyph {
+                        value: "3".to_string(),
+                        span: Span::new(5, 43, 5, 46),
+                    },
+                    arrow: crate::parser::MapArrow::ReadOnly,
+                    span: Span::new(5, 38, 5, 46),
+                },
+            ],
+            span: Span::new(5, 22, 5, 48),
         };
-        let c1_map = map.clone().expect("binding arg carries a map");
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1477,25 +1543,56 @@ mod tests {
         let map_view = arg_view.sym_map().expect("binding arg carries a map");
         let green_map = reparse_sym_map(&sig_tokens(map_view.syntax(), &index));
 
-        assert_eq!(green_map, c1_map);
+        assert_eq!(green_map, expected_map);
     }
 
     /// Retokenizing a REUSE's own SIG_PARAM node and reparsing it
-    /// through `Parser::sig_param` reproduces the exact C1 `SigParam`,
-    /// across BOTH shapes the production itself branches on: `Tape`
-    /// (`writes`/`preserves` clauses included) and the plain `State`
-    /// parameter — a fixture with only the `Tape` shape would leave
-    /// the `State` arm of `Parser::sig_param` entirely unpinned.
+    /// through `Parser::sig_param` reproduces the exact `SigParam`s
+    /// written below, across BOTH shapes the production itself branches
+    /// on: `Tape` (`writes`/`preserves` clauses included) and the plain
+    /// `State` parameter — a fixture with only the `Tape` shape would
+    /// leave the `State` arm of `Parser::sig_param` entirely unpinned.
+    /// The expected values are literals captured from the C1 lowering of
+    /// this fixture while that path was still callable.
     #[test]
     fn reparsed_sig_param_equals_the_c1_sig_param_for_both_shapes() {
         let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \
                    entry state a {\n    [*] -> stop;\n  }\n}\n";
 
-        let program = lower_cst(&parse_cst(&lex(src).unwrap()).unwrap());
-        let c1_params = program.routines[0].sig.params.clone();
-        assert_eq!(c1_params.len(), 2, "fixture must carry both shapes");
-        assert!(matches!(c1_params[0].kind, SigParamKind::Tape { .. }));
-        assert!(matches!(c1_params[1].kind, SigParamKind::State));
+        let expected_params = vec![
+            crate::parser::SigParam {
+                kind: SigParamKind::Tape {
+                    alphabet: "ab".to_string(),
+                    alphabet_span: Span::new(1, 19, 1, 21),
+                    volatile: false,
+                    writes: Some(crate::parser::ContractClause {
+                        elems: vec![crate::parser::AlphabetElem::Single(SymLit::Glyph {
+                            value: "0".to_string(),
+                            span: Span::new(1, 31, 1, 34),
+                        })],
+                        kw_span: Span::new(1, 22, 1, 28),
+                        span: Span::new(1, 22, 1, 36),
+                    }),
+                    preserves: Some(crate::parser::ContractClause {
+                        elems: vec![crate::parser::AlphabetElem::Single(SymLit::Glyph {
+                            value: "1".to_string(),
+                            span: Span::new(1, 49, 1, 52),
+                        })],
+                        kw_span: Span::new(1, 37, 1, 46),
+                        span: Span::new(1, 37, 1, 54),
+                    }),
+                },
+                name: "t".to_string(),
+                name_span: Span::new(1, 16, 1, 17),
+                span: Span::new(1, 11, 1, 54),
+            },
+            crate::parser::SigParam {
+                kind: SigParamKind::State,
+                name: "s".to_string(),
+                name_span: Span::new(1, 62, 1, 63),
+                span: Span::new(1, 56, 1, 63),
+            },
+        ];
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1508,11 +1605,65 @@ mod tests {
             .map(|param_view| reparse_sig_param(&sig_tokens(param_view.syntax(), &index)))
             .collect();
 
-        assert_eq!(green_params, c1_params);
+        assert_eq!(green_params, expected_params);
+    }
+
+    /// A `?` line item, spelled compactly so the expected doc runs below
+    /// read as tables.
+    fn doc_item(blank_before: bool, text: &str, span: Span) -> DocRunItem {
+        DocRunItem {
+            blank_before,
+            kind: DocRunKind::Doc {
+                text: text.to_string(),
+                span,
+            },
+        }
+    }
+
+    /// A `!` line item. `attr` is the `[name]` prefix and its own span
+    /// when the line carries one — `Parser::parse_attr` computes that
+    /// span from the token's `len`, which is the arithmetic these
+    /// fixtures exist to hold.
+    fn attention_item(
+        blank_before: bool,
+        attr: Option<(&str, Span)>,
+        text: &str,
+        span: Span,
+    ) -> DocRunItem {
+        DocRunItem {
+            blank_before,
+            kind: DocRunKind::Attention {
+                attr: attr.map(|(name, span)| crate::cst::AttrCst {
+                    name: name.to_string(),
+                    span,
+                }),
+                text: text.to_string(),
+                span,
+            },
+        }
+    }
+
+    /// A comment item inside a run. A comment carries no span of its
+    /// own in the CST — its `own_line` flag and verbatim text are what
+    /// the printer reads back.
+    fn comment_item(
+        blank_before: bool,
+        text: &str,
+        kind: CommentKind,
+        own_line: bool,
+    ) -> DocRunItem {
+        DocRunItem {
+            blank_before,
+            kind: DocRunKind::Comment(crate::lexer::Comment {
+                text: text.to_string(),
+                kind,
+                own_line,
+            }),
+        }
     }
 
     /// Retokenizing an ALPHABET's own bound DOC_RUN and reparsing it
-    /// through `Parser::doc_run` reproduces the exact C1 `Vec<DocRunItem>`
+    /// through `Parser::doc_run` reproduces the exact `Vec<DocRunItem>`
     /// — this run is comment-free and the file's very first construct,
     /// so both sides' `blank_before` gap-tracking starts from the same
     /// fresh line-0, and raw item equality holds (not merely
@@ -1525,41 +1676,25 @@ mod tests {
     /// discriminate a wrong `sig_tokens`-derived `len` —
     /// `Parser::parse_attr` locates the attribute's own `[` column as
     /// `token.len - 1 - text.chars().count()`, so only the `Some` arm
-    /// exercises that arithmetic at all. Its result, `AttrCst.span`,
-    /// carries no assertion of its own — coverage comes transitively
-    /// from the whole-value `assert_eq!(green_doc_run, c1_doc_run)`
-    /// below, which compares every field, span included.
+    /// exercises that arithmetic at all. Its result, `AttrCst.span`, is
+    /// written out in the expected value below, which compares every
+    /// field, span included.
+    ///
+    /// The expected run is a literal captured from the C1 lowering of
+    /// this fixture while that path was still callable.
     #[test]
     fn reparsed_doc_items_equal_the_c1_doc_run() {
         let src = "? doc line\n! [deprecated] gone\nalphabet ab { '0' }\n";
 
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let TopKind::Alphabet(alphabet) = &cst.items[0].kind else {
-            panic!("expected an alphabet");
-        };
-        let c1_doc_run = alphabet.doc_run.clone();
-        assert!(
-            !c1_doc_run.is_empty(),
-            "fixture must actually bind a doc run, or this test proves nothing"
-        );
-        assert!(
-            !c1_doc_run
-                .iter()
-                .any(|i| matches!(i.kind, DocRunKind::Comment(_))),
-            "this fixture must stay comment-free — a comment-interleaved run is a \
-             different case, covered separately below"
-        );
-        assert!(
-            c1_doc_run.iter().any(|i| matches!(
-                &i.kind,
-                DocRunKind::Attention {
-                    attr: Some(a),
-                    ..
-                } if a.name == "deprecated"
-            )),
-            "fixture must actually carry a [deprecated] attribute, or the `len` \
-             arithmetic `parse_attr` depends on is never exercised"
-        );
+        let expected_doc_run = vec![
+            doc_item(false, "doc line", Span::new(1, 1, 1, 11)),
+            attention_item(
+                false,
+                Some(("deprecated", Span::new(2, 4, 2, 14))),
+                "[deprecated] gone",
+                Span::new(2, 1, 2, 20),
+            ),
+        ];
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1570,12 +1705,12 @@ mod tests {
         let doc_run_view = alphabet_view.doc_run().expect("alphabet carries a doc run");
         // `0`: this run is the file's very first construct, so the real
         // parse's own `prev_end_line` was still its initial `0` too —
-        // see `reparsed_doc_items_agree_with_lower_cst_when_the_run_abuts_a_preceding_declaration`
+        // see `reparsed_doc_items_pin_blank_before_when_the_run_abuts_a_preceding_declaration`
         // below for the case where that is NOT `0` and the caller must
         // supply the real value.
         let green_doc_run = reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index), 0);
 
-        assert_eq!(green_doc_run, c1_doc_run);
+        assert_eq!(green_doc_run, expected_doc_run);
     }
 
     /// A comment interleaved inside a `DOC_RUN` (`(Doc, Comment,
@@ -1597,23 +1732,21 @@ mod tests {
     /// inertness is also what makes the segmented walk above safe to add
     /// to a path the compiler front runs. Mirrors the PM sibling's own
     /// `reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave`.
+    ///
+    /// The three-item run this fixture writes, and the reduced [`Doc`]
+    /// it folds to, are literals captured from the C1 lowering of this
+    /// fixture while that path was still callable.
     #[test]
     fn reparsed_doc_items_reduce_to_the_same_doc_when_comments_interleave() {
         let src = "? doc line\n// interleaved comment\n? more doc\nalphabet ab { '0' }\n";
 
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let TopKind::Alphabet(alphabet) = &cst.items[0].kind else {
-            panic!("expected an alphabet");
-        };
-        assert!(
-            alphabet
-                .doc_run
-                .iter()
-                .any(|i| matches!(i.kind, DocRunKind::Comment(_))),
-            "fixture must actually interleave a comment, or this test proves nothing: {:?}",
-            alphabet.doc_run
-        );
-        let c1_doc = crate::parser::reduce_doc_run(&alphabet.doc_run);
+        // Three items as WRITTEN — the comment is one of them.
+        let written_items = 3;
+        let expected_doc = Some(crate::parser::Doc {
+            paragraphs: vec!["doc line more doc".to_string()],
+            attention: Vec::new(),
+            deprecated: None,
+        });
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1626,44 +1759,43 @@ mod tests {
         // test above.
         let green_doc_run = reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index), 0);
         assert!(
-            green_doc_run.len() < alphabet.doc_run.len(),
-            "the comment must actually be dropped (strictly shorter, not merely \
-             different), or this test proves nothing"
+            green_doc_run.len() < written_items,
+            "the comment must actually be dropped (strictly shorter than the three \
+             items written, not merely different), or this test proves nothing"
         );
         let green_doc = crate::parser::reduce_doc_run(&green_doc_run);
 
-        assert_eq!(green_doc, c1_doc);
+        assert_eq!(green_doc, expected_doc);
     }
 
-    /// `reparse_doc_items`'s `prev_end_line` parameter agrees with
-    /// `lower_cst` on the FIRST item's `blank_before`, the one field
-    /// the two comment-free tests above cannot exercise: both sit at
-    /// the very start of the file, where "the real preceding-line
-    /// value" and "an isolated slice's own fresh start" both happen to
-    /// be `0`, hiding a real divergence when they are NOT the same
-    /// value. This fixture puts the doc run immediately after (no
-    /// blank line) a PRECEDING top-level declaration, so the two
-    /// values genuinely differ, and passes the real one — read off the
-    /// tree the same way a caller (extraction) would, from the
-    /// preceding sibling's own end line — proving full agreement, item
-    /// for item and field for field, including `blank_before` on the
-    /// first item.
+    /// `reparse_doc_items`'s `prev_end_line` parameter, on the FIRST
+    /// item's `blank_before` — the one field the two comment-free tests
+    /// above cannot exercise: both sit at the very start of the file,
+    /// where "the real preceding-line value" and "an isolated slice's
+    /// own fresh start" both happen to be `0`, hiding the divergence
+    /// when they are NOT the same value. This fixture puts the doc run
+    /// immediately after (no blank line) a PRECEDING top-level
+    /// declaration, so the two genuinely differ, and passes the real
+    /// one — read off the tree the same way a caller (extraction) would,
+    /// from the preceding sibling's own end line.
+    ///
+    /// `blank_before: false` on that first item is the load-bearing
+    /// literal: it is what a hardcoded `0` for `prev_end_line` gets
+    /// wrong on this fixture, and it was captured from the C1 lowering
+    /// of this source while that path was still callable.
     #[test]
-    fn reparsed_doc_items_agree_with_lower_cst_when_the_run_abuts_a_preceding_declaration() {
+    fn reparsed_doc_items_pin_blank_before_when_the_run_abuts_a_preceding_declaration() {
         let src = "alphabet a { '0' }\n? doc line\n! [deprecated] gone\nalphabet b { '0' }\n";
 
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let TopKind::Alphabet(second) = &cst.items[1].kind else {
-            panic!("expected the second item to be an alphabet");
-        };
-        let c1_doc_run = second.doc_run.clone();
-        assert!(
-            !c1_doc_run.is_empty() && !c1_doc_run[0].blank_before,
-            "fixture must actually abut the preceding declaration (no blank line \
-             before the run's first item), or this test proves nothing about the \
-             divergence it exists to catch: {:?}",
-            c1_doc_run
-        );
+        let expected_doc_run = vec![
+            doc_item(false, "doc line", Span::new(2, 1, 2, 11)),
+            attention_item(
+                false,
+                Some(("deprecated", Span::new(3, 4, 3, 14))),
+                "[deprecated] gone",
+                Span::new(3, 1, 3, 20),
+            ),
+        ];
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1686,41 +1818,20 @@ mod tests {
         let green_doc_run =
             reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index), prev_end_line);
 
-        assert_eq!(green_doc_run, c1_doc_run);
-    }
-
-    /// Extraction and the C1 lowering agree, on `src`, field for field.
-    /// The smallest honest check on assembly: a later task holds the
-    /// same equality over the whole shipped corpus and over generated
-    /// programs.
-    #[track_caller]
-    fn agrees(src: &str) {
-        let tokens = lex_with(src, LexMode::WithComments).expect("lexes");
-        let cst = parse_cst(&tokens).expect("parses");
-        let expected = lower_cst(&cst);
-        let green = crate::parser::parse_green_from_tokens(src, &tokens).expect("parses");
-        let actual = extract_program(&SyntaxNode::new_root(green), src);
-        assert_eq!(actual, expected, "extraction diverged for:\n{src}");
-    }
-
-    #[test]
-    fn extraction_agrees_with_the_cst_on_small_programs() {
-        agrees("use a::b;\n");
-        agrees("alphabet ab { '_', 'a' }\n");
-        agrees("machine {\n  tape main: ab;\n  entry state s { [*] -> stop; }\n}\n");
+        assert_eq!(green_doc_run, expected_doc_run);
     }
 
     /// The fixture every "anchor on a token, never on the node" claim
     /// rests on: one doc-run-carrying declaration of EVERY shape that
     /// accepts a run. A documented declaration's node starts at its doc
     /// run, so an extraction reading `SyntaxNode::text_range().start`
-    /// for a `line`/`col`/`span.start` disagrees with `lower_cst` here
-    /// and only here — the brief's three doc-free fixtures cannot see
-    /// that bug at all.
+    /// for a `line`/`col`/`span.start` lands on the run rather than on
+    /// the header — a bug a doc-free fixture cannot see at all.
     ///
-    /// The `assert_ne!`s below are not redundant with `agrees`: they
-    /// pin that the FIXTURE still exercises the divergence. Delete a
-    /// `?` line and `agrees` keeps passing while proving nothing.
+    /// Every assertion is an `assert_ne!` against exactly that wrong
+    /// answer, computed here from the node itself, plus two `assert_eq!`s
+    /// on the reduced docs — because every `assert_ne!` above would still
+    /// hold with `doc: None` stamped everywhere.
     #[test]
     fn extraction_anchors_positions_on_header_tokens_not_on_node_starts() {
         let src = "? alphabet doc\n\
@@ -1757,7 +1868,6 @@ mod tests {
                    \x20   [*] -> stop;\n\
                    \x20 }\n\
                    }\n";
-        agrees(src);
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -1899,7 +2009,6 @@ mod tests {
                    \n\
                    use lib\n\
                    \x20 ::a;\n";
-        agrees(src);
 
         let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
         // Each pair below is what the split buys: a value read off the
@@ -2055,7 +2164,6 @@ mod tests {
                    use top::d;\n\
                    \n\
                    alphabet last { '2' }\n";
-        agrees(src);
 
         let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
         let names: Vec<(&str, Vec<String>)> = program
@@ -2127,7 +2235,6 @@ mod tests {
                    \n\
                    ? last doc\n\
                    alphabet last { '1' }\n";
-        agrees(src);
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -2203,7 +2310,6 @@ mod tests {
                    \n\
                    \x20 bind four(t = second) as b2;\n\
                    }\n";
-        agrees(src);
 
         let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
         let machine = program
@@ -2269,10 +2375,10 @@ mod tests {
     /// keep cell, and a `{…}` substitution — passthrough on a glyph
     /// binding, and a real fold on a numeric one.
     ///
-    /// Two shapes are asserted directly rather than left to `agrees`,
-    /// because both are carried by an ABSENCE that a wrong extraction
-    /// could reproduce by accident: `Transition::Stay` (no TRANSITION
-    /// node) and `debugger: false` (no keyword token).
+    /// Two shapes get their own assertions because both are carried by
+    /// an ABSENCE that a wrong extraction could reproduce by accident:
+    /// `Transition::Stay` (no TRANSITION node) and `debugger: false` (no
+    /// keyword token).
     #[test]
     fn extraction_agrees_across_every_rule_shape() {
         let src = "alphabet ab { '0'..'9', '_' }\n\
@@ -2299,7 +2405,6 @@ mod tests {
                    \x20   [*] -> stop;\n\
                    \x20 }\n\
                    }\n";
-        agrees(src);
 
         let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
         let rules = &program.graphs[0].states[0].rules;
@@ -2340,7 +2445,6 @@ mod tests {
                    \n\
                    \x20 bind lib::sub::r(t = dev) as bd;\n\
                    }\n";
-        agrees(src);
 
         let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
         assert_eq!(program.imports.len(), 2);
@@ -2366,9 +2470,14 @@ mod tests {
     /// Comments live only as trivia in the green tree, so every one of
     /// them — between declarations, inside a world, inside a rule list,
     /// inside a bracketed list, riding a `;` — must vanish from the
-    /// extracted `Program` exactly as `lower_cst` drops them.
+    /// extracted `Program`, leaving the declarations at the positions
+    /// they would carry with the comments deleted.
+    ///
+    /// Every position below is a literal. A comment claimed as content —
+    /// folded into an alphabet's elements, counted as a rule, or read as
+    /// the token a `line`/`col` anchors on — moves one of them.
     #[test]
-    fn extraction_agrees_with_comments_scattered_through_the_file() {
+    fn extraction_keeps_no_trace_of_comments_scattered_through_the_file() {
         let src = "// leading\n\
                    alphabet ab { /* interior */ '0', '_' /* after */ }\n\
                    // between\n\
@@ -2382,18 +2491,51 @@ mod tests {
                    \x20 } // after the state\n\
                    } // after the machine\n\
                    // trailing\n";
-        agrees(src);
+
+        let program = extract_program(&SyntaxNode::new_root(parse_green(src).unwrap()), src);
+
+        assert_eq!(program.alphabets.len(), 1);
+        let ab = &program.alphabets[0];
+        assert_eq!((ab.name.as_str(), ab.line, ab.col), ("ab", 2, 1));
+        assert_eq!(
+            ab.elems.len(),
+            2,
+            "the two interior comments are trivia, not elements: {:?}",
+            ab.elems
+        );
+        assert!(ab.doc.is_none(), "a `//` comment is never a doc run");
+
+        let machine = program
+            .machine
+            .as_ref()
+            .expect("the fixture declares a machine");
+        assert_eq!(machine.line, 5, "the machine's own header line");
+        assert_eq!(machine.tapes.len(), 1);
+        assert_eq!(
+            (machine.tapes[0].name.as_str(), machine.tapes[0].line),
+            ("main", 7)
+        );
+        assert_eq!(machine.states.len(), 1);
+        let state = &machine.states[0];
+        assert_eq!((state.name.as_str(), state.line, state.col), ("s", 8, 3));
+        assert_eq!(
+            state.rules.len(),
+            1,
+            "the comments around the rule are not rules of their own"
+        );
+        assert_eq!(state.rules[0].span.start.line, 10);
     }
 
     /// `prev_end_line` at the level where it IS observable.
     ///
-    /// `extract_program` equality can NEVER discriminate this argument:
-    /// it feeds only `blank_before`, and `crate::parser::reduce_doc_run`
-    /// folds over `DocRunItem::kind` alone — so a `Program` built with a
-    /// hardcoded `0` is byte-identical to a correct one. This test
-    /// therefore compares extraction's own [`extract_doc_items`] against
-    /// the C1 `doc_run` directly, which is the only place the value
-    /// surfaces.
+    /// A `Program` can NEVER discriminate this argument: it feeds only
+    /// `blank_before`, and `crate::parser::reduce_doc_run` folds over
+    /// `DocRunItem::kind` alone — so a `Program` built with a hardcoded
+    /// `0` is byte-identical to a correct one. This test therefore
+    /// asserts extraction's own [`extract_doc_items`] output directly,
+    /// which is the only place the value surfaces. Each expected run is
+    /// a literal captured from the C1 lowering of its fixture while that
+    /// path was still callable.
     ///
     /// Three cases, because one alone under-determines the rule:
     /// abutting a preceding declaration (`0` fails), abutting a
@@ -2402,20 +2544,9 @@ mod tests {
     /// trivia, not a sibling), and a genuine blank line (a rule that
     /// always answered `false` fails).
     #[test]
-    fn extracted_doc_items_agree_with_lower_cst_on_the_runs_first_blank_before() {
+    fn extracted_doc_items_pin_the_runs_first_blank_before() {
         #[track_caller]
-        fn check(src: &str, expect_blank_before: bool) {
-            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-            let TopKind::Alphabet(second) = &cst.items[cst.items.len() - 1].kind else {
-                panic!("expected the last item to be an alphabet");
-            };
-            let c1 = second.doc_run.clone();
-            assert!(!c1.is_empty(), "fixture must bind a doc run");
-            assert_eq!(
-                c1[0].blank_before, expect_blank_before,
-                "fixture does not exercise the case it claims: {src}"
-            );
-
+        fn check(src: &str, expected: &[DocRunItem]) {
             let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
                 .expect("root is ROOT");
             let index = TextLineIndex::new(src);
@@ -2423,15 +2554,25 @@ mod tests {
                 panic!("expected the last item to be an ALPHABET");
             };
             let run = view.doc_run().expect("the alphabet carries a doc run");
-            assert_eq!(extract_doc_items(&run, src, &index), c1, "for:\n{src}");
+            assert_eq!(
+                extract_doc_items(&run, src, &index),
+                expected,
+                "for:\n{src}"
+            );
         }
 
-        check("alphabet a { '0' }\n? doc\nalphabet b { '0' }\n", false);
+        check(
+            "alphabet a { '0' }\n? doc\nalphabet b { '0' }\n",
+            &[doc_item(false, "doc", Span::new(2, 1, 2, 6))],
+        );
         check(
             "alphabet a { '0' }\n// note\n? doc\nalphabet b { '0' }\n",
-            false,
+            &[doc_item(false, "doc", Span::new(3, 1, 3, 6))],
         );
-        check("alphabet a { '0' }\n\n? doc\nalphabet b { '0' }\n", true);
+        check(
+            "alphabet a { '0' }\n\n? doc\nalphabet b { '0' }\n",
+            &[doc_item(true, "doc", Span::new(3, 1, 3, 6))],
+        );
     }
 
     /// A comment written INSIDE a doc run is one of the run's items, and
@@ -2446,58 +2587,107 @@ mod tests {
     /// handles the first and silently drops the second, so both are
     /// here, on ALPHABET and on NAMESPACE alike.
     ///
-    /// `agrees` runs on each because the other half of the claim is that
-    /// the COMPILER path does not move: `reduce_doc_run` folds over
-    /// `kind` and treats a comment item as inert, so the extracted
-    /// `Program` must be identical to `lower_cst`'s with these items
-    /// added — including the reduced [`Doc`] each declaration carries.
+    /// Each expected run below is a literal captured from the C1
+    /// lowering of its fixture while that path was still callable. The
+    /// COMPILER path is unaffected by these items either way:
+    /// `reduce_doc_run` folds over `kind` and treats a comment item as
+    /// inert, so a `Program` cannot discriminate them at all — this
+    /// level is the only one that can.
     #[test]
     fn extracted_doc_items_carry_the_comments_written_inside_the_run() {
         #[track_caller]
-        fn check(src: &str, c1: &[DocRunItem], run: Option<DocRunView>, source: &str) {
-            assert!(
-                c1.iter().any(|i| matches!(i.kind, DocRunKind::Comment(_))),
-                "fixture must actually write a comment inside the run: {src}"
-            );
-            let index = TextLineIndex::new(source);
-            let run = run.expect("the declaration carries a doc run");
-            assert_eq!(extract_doc_items(&run, source, &index), c1, "for:\n{src}");
-            agrees(src);
-        }
-
-        for src in [
-            "? doc\n// c\n? more\nalphabet b { '0' }\n",
-            "? doc\n/* c */\nalphabet b { '0' }\n",
-            "? doc\n/* multi\nline */\n? more\nalphabet b { '0' }\n",
-            "? doc\n\n/* c */\nalphabet b { '0' }\n",
-        ] {
-            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-            let TopKind::Alphabet(alphabet) = &cst.items[0].kind else {
-                panic!("expected an alphabet");
-            };
+        fn alphabet_run(src: &str, expected: &[DocRunItem]) {
             let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
                 .expect("root is ROOT");
             let TopView::Alphabet(view) = root.items().next().expect("one item") else {
                 panic!("expected an ALPHABET");
             };
-            check(src, &alphabet.doc_run, view.doc_run(), src);
+            let index = TextLineIndex::new(src);
+            let run = view.doc_run().expect("the declaration carries a doc run");
+            assert!(
+                expected
+                    .iter()
+                    .any(|i| matches!(i.kind, DocRunKind::Comment(_))),
+                "fixture must actually write a comment inside the run: {src}"
+            );
+            assert_eq!(
+                extract_doc_items(&run, src, &index),
+                expected,
+                "for:\n{src}"
+            );
         }
 
-        for src in [
-            "? doc\n// c\n? more\nnamespace n {\n  alphabet b { '0' }\n}\n",
-            "? doc\n/* c */\nnamespace n {\n  alphabet b { '0' }\n}\n",
-        ] {
-            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-            let TopKind::Namespace(ns) = &cst.items[0].kind else {
-                panic!("expected a namespace");
-            };
+        #[track_caller]
+        fn namespace_run(src: &str, expected: &[DocRunItem]) {
             let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
                 .expect("root is ROOT");
             let TopView::Namespace(view) = root.items().next().expect("one item") else {
                 panic!("expected a NAMESPACE");
             };
-            check(src, &ns.doc_run, view.doc_run(), src);
+            let index = TextLineIndex::new(src);
+            let run = view.doc_run().expect("the declaration carries a doc run");
+            assert!(
+                expected
+                    .iter()
+                    .any(|i| matches!(i.kind, DocRunKind::Comment(_))),
+                "fixture must actually write a comment inside the run: {src}"
+            );
+            assert_eq!(
+                extract_doc_items(&run, src, &index),
+                expected,
+                "for:\n{src}"
+            );
         }
+
+        alphabet_run(
+            "? doc\n// c\n? more\nalphabet b { '0' }\n",
+            &[
+                doc_item(false, "doc", Span::new(1, 1, 1, 6)),
+                comment_item(false, "// c", CommentKind::Line, true),
+                doc_item(false, "more", Span::new(3, 1, 3, 7)),
+            ],
+        );
+        alphabet_run(
+            "? doc\n/* c */\nalphabet b { '0' }\n",
+            &[
+                doc_item(false, "doc", Span::new(1, 1, 1, 6)),
+                comment_item(false, "/* c */", CommentKind::Block, true),
+            ],
+        );
+        alphabet_run(
+            "? doc\n/* multi\nline */\n? more\nalphabet b { '0' }\n",
+            &[
+                doc_item(false, "doc", Span::new(1, 1, 1, 6)),
+                comment_item(false, "/* multi\nline */", CommentKind::Block, true),
+                doc_item(false, "more", Span::new(4, 1, 4, 7)),
+            ],
+        );
+        // The one fixture whose comment sits BELOW a blank line, so the
+        // item carries `blank_before: true` — the field every later
+        // item's own gap is measured against.
+        alphabet_run(
+            "? doc\n\n/* c */\nalphabet b { '0' }\n",
+            &[
+                doc_item(false, "doc", Span::new(1, 1, 1, 6)),
+                comment_item(true, "/* c */", CommentKind::Block, true),
+            ],
+        );
+
+        namespace_run(
+            "? doc\n// c\n? more\nnamespace n {\n  alphabet b { '0' }\n}\n",
+            &[
+                doc_item(false, "doc", Span::new(1, 1, 1, 6)),
+                comment_item(false, "// c", CommentKind::Line, true),
+                doc_item(false, "more", Span::new(3, 1, 3, 7)),
+            ],
+        );
+        namespace_run(
+            "? doc\n/* c */\nnamespace n {\n  alphabet b { '0' }\n}\n",
+            &[
+                doc_item(false, "doc", Span::new(1, 1, 1, 6)),
+                comment_item(false, "/* c */", CommentKind::Block, true),
+            ],
+        );
     }
 
     /// A MULTI-LINE block comment riding a `;` is claimed by C1's
@@ -2526,11 +2716,10 @@ mod tests {
     fn a_block_comment_riding_a_semicolon_agrees_on_blank_before() {
         let src = "use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n";
 
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let TopKind::Alphabet(alphabet) = &cst.items[1].kind else {
-            panic!("expected the second item to be an alphabet");
-        };
-        let c1 = alphabet.doc_run.clone();
+        // `blank_before: true` is the whole point: `take_trailing`
+        // claims the comment and leaves `prev_end_line` back at the `;`,
+        // two lines above the run, so the run reads as blank-separated.
+        let expected = vec![doc_item(true, "doc", Span::new(3, 1, 3, 6))];
 
         let root =
             RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap())).expect("root is ROOT");
@@ -2540,11 +2729,7 @@ mod tests {
         };
         let green = extract_doc_items(&view.doc_run().expect("a doc run"), src, &index);
 
-        assert_eq!(green, c1, "the two paths must agree on the whole run");
-        assert!(
-            c1[0].blank_before,
-            "C1 keeps prev_end_line at the `;`, so the run reads as blank-separated"
-        );
+        assert_eq!(green, expected);
     }
 
     /// Both edges of [`prev_end_line`]'s `;` arm, so neither can be
@@ -2562,30 +2747,17 @@ mod tests {
     /// - **Alone after a `}`** — `capture_close_trailing`, not
     ///   `take_trailing`, so the field advances past it.
     ///
-    /// Measured, both directions: dropping the one-comment condition makes
-    /// the second fixture report `true` where `lower_cst` says `false`;
-    /// dropping the `;` key does the same to the third.
-    ///
-    /// `agrees` runs on each because it is what pins the OTHER half of the
-    /// old divergence record: the extracted `Program` is identical either
-    /// way, since `reduce_doc_run` folds over `kind` alone.
+    /// Measured, both directions: dropping the one-comment condition
+    /// makes the second fixture report `true` where the literal below
+    /// says `false`; dropping the `;` key does the same to the third.
+    /// Every literal was captured from the C1 lowering of its fixture
+    /// while that path was still callable. A `Program` cannot
+    /// discriminate any of them — `reduce_doc_run` folds over `kind`
+    /// alone — so this level is the only one that can.
     #[test]
     fn the_semicolon_arm_is_narrow_in_both_directions() {
         #[track_caller]
-        fn check(src: &str, expect_blank_before: bool) {
-            let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-            // NOT `items[1]`: in the two-comment fixture the second
-            // comment is a standalone `TopKind::Comment` item of its
-            // own, so the alphabet slides to index 2.
-            let TopKind::Alphabet(alphabet) = &cst.items.last().expect("a last item").kind else {
-                panic!("expected the last item to be an alphabet");
-            };
-            let c1 = alphabet.doc_run.clone();
-            assert_eq!(
-                c1[0].blank_before, expect_blank_before,
-                "fixture does not exercise the case it claims: {src}"
-            );
-
+        fn check(src: &str, expected: &[DocRunItem]) {
             let root = RootView::cast(SyntaxNode::new_root(parse_green(src).unwrap()))
                 .expect("root is ROOT");
             let index = TextLineIndex::new(src);
@@ -2594,29 +2766,32 @@ mod tests {
             };
             let green = extract_doc_items(&view.doc_run().expect("a doc run"), src, &index);
 
-            assert_eq!(green, c1, "for:\n{src}");
-            agrees(src);
+            assert_eq!(green, expected, "for:\n{src}");
         }
 
-        check("use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n", true);
+        check(
+            "use a; /* one\ntwo */\n? doc\nalphabet b { '0' }\n",
+            &[doc_item(true, "doc", Span::new(3, 1, 3, 6))],
+        );
         check(
             "use a; /* one */ /* two\nthree */\n? doc\nalphabet b { '0' }\n",
-            false,
+            &[doc_item(false, "doc", Span::new(3, 1, 3, 6))],
         );
         check(
             "alphabet a { '0' } /* one\ntwo */\n? doc\nalphabet b { '0' }\n",
-            false,
+            &[doc_item(false, "doc", Span::new(3, 1, 3, 6))],
         );
     }
 
-    /// Sanity check on the fixtures above: `lower_cst` and the green
-    /// reparse shims are exercised over CONSTRUCTS the parser actually
-    /// accepts, not hypothetical shapes — a smoke test that the whole
-    /// crate's own `Program` type still round-trips through `parse` on
-    /// one of them AND that the fixture's every declared feature actually
-    /// landed (a wrong implementation dropping, say, the `preserves`
-    /// clause or the second sig param would still leave `routines.len()
-    /// == 1`, so that alone proves nothing).
+    /// Sanity check on the fixtures above: the green reparse shims are
+    /// exercised over CONSTRUCTS the parser actually accepts, not
+    /// hypothetical shapes — a smoke test that the whole crate's own
+    /// `Program` type still round-trips through `parse` on one of them
+    /// AND that the fixture's every declared feature actually landed (a
+    /// wrong implementation dropping, say, the `preserves` clause or the
+    /// second sig param would still leave `routines.len() == 1`, so that
+    /// alone proves nothing).
+
     #[test]
     fn fixture_smoke_check_parses_to_a_program() {
         let src = "routine r(tape t: ab writes { '0' } preserves { '1' }, state s) {\n  \

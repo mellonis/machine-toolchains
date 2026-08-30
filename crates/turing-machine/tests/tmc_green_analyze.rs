@@ -1,51 +1,42 @@
-//! `analyze`'s front end changed shape: it lexes `LexMode::WithComments` and
-//! parses through the green tree (`parse_green_from_tokens` +
-//! `syntax::extract_program`) where it used to lex comment-free and run
-//! `parse` (`lower_cst ∘ parse_cst`). Everything downstream of the parse is
-//! untouched, so the whole risk of that switch lives in two claims, and this
-//! file is where both are pinned:
+//! `analyze`'s front end lexes `LexMode::WithComments` and parses through
+//! the green tree (`parse_green_from_tokens` + `syntax::extract_program`).
+//! Everything downstream of the parse is untouched by that shape, so the
+//! risk of it lives in two claims, and this file is where both are pinned:
 //!
-//! 1. **Acceptance and errors did not move.** For the same source, the two
-//!    fronts produce the same `Result<Program, CompileError>` — the same
-//!    program on success, and on failure the same error kind at the same
-//!    span. The BROKEN sources carry most of the weight here: the switch
-//!    changes which function produces the error, and only a source that
-//!    errors exercises that.
+//! 1. **Errors did not move when the front end changed under them.** Each
+//!    source in [`BROKEN`] fails with a fixed kind at a fixed span, both
+//!    written out in the table itself. The spans are literals captured from
+//!    the pre-green front — a comment-free lex then the C1 lowering — while
+//!    that path was still callable; the broken sources carry the weight
+//!    because a front-end switch changes which function raises the error,
+//!    and only a source that errors exercises that at all.
 //!
-//! 2. **The lint layer still sees the old stream.** `analyze` now keeps a
+//! 2. **The lint layer still sees the old stream.** `analyze` keeps a
 //!    comment-bearing `tokens`, and `lint()` filters it back through
 //!    `parser::significant_tokens` before the rules walk it. That filter is
 //!    only sound if the filtered stream equals a comment-free lex EXACTLY —
 //!    same kinds, same lines, same columns, same lengths — because several
 //!    quickfixes locate a declaration by token adjacency
 //!    (`tests/lint_quickfix_comments.rs` pins what breaks when they don't).
+//!    This one runs over every `.tmc` the repo ships, so a corpus file added
+//!    later is covered for free.
 //!
-//! Both run over every `.tmc` the repo ships, the same corpus the extraction
-//! oracles use (`tests/syntax_parity.rs`), so a corpus file added later is
-//! covered here for free.
-//!
-//! **What this file cannot see, by construction.** It computes both fronts
+//! **What this file cannot see, by construction.** It computes the front
 //! itself and never calls `analyze` — which is `pub(crate)` and out of an
-//! integration test's reach anyway — so it pins that the two RECIPES agree,
-//! not that `analyze` is wired to the new one. Every test here passes
-//! unchanged against the pre-migration tree, and stays green if `analyze`'s
-//! body is reverted to the pre-migration recipe — a comment-free `lex`
-//! then `lower_cst(parse_cst(...))`, exactly what `old_front` below
-//! computes directly rather than through `parser::parse` (measured, by
-//! doing exactly that). The wiring itself is pinned one level down, by
-//! `compiler::tests::analyze_keeps_comment_trivia_in_its_token_stream`.
+//! integration test's reach anyway — so it pins that the RECIPE behaves,
+//! not that `analyze` is wired to it. The wiring is pinned one level down,
+//! by `compiler::tests::analyze_keeps_comment_trivia_in_its_token_stream`.
 //!
-//! What this file does NOT re-check: that the extracted `Program` equals the
-//! CST lowering on the shipped corpus and on generated programs — that is
-//! `tests/syntax_parity.rs` and `tests/tmc_property.rs`. Claim 1 below
-//! compares the two fronts as whole `Result`s, so it happens to subsume the
-//! corpus half of that; the point of asserting it here anyway is the error
-//! side, which neither oracle looks at.
+//! What this file does NOT check: that the extracted `Program` is CORRECT
+//! on a source that parses. Nothing here reads a successful `Program` at
+//! all. Per-field extraction fidelity lives in `syntax::extract`'s own unit
+//! tests and in the goldens.
 
+use mtc_core::diagnostics::Span;
 use mtc_core::syntax::SyntaxNode;
 use mtc_turing_machine::CompileError;
 use mtc_turing_machine::lexer::{LexMode, lex, lex_with};
-use mtc_turing_machine::parser::{Program, lower_cst, parse_cst, parse_green_from_tokens};
+use mtc_turing_machine::parser::{Program, parse_green_from_tokens};
 use mtc_turing_machine::syntax::extract_program;
 
 /// Every directory in this repo that ships a `.tmc` file — the same three
@@ -86,15 +77,6 @@ fn corpus() -> Vec<(std::path::PathBuf, String)> {
     out
 }
 
-/// The front end `analyze` ran before the green-tree switch: a comment-free
-/// lex, then `lower_cst ∘ parse_cst` over the C1 CST — composed here
-/// directly, since `parser::parse` itself now runs the green front this
-/// file calls `new_front` below and can no longer stand in for the old one.
-fn old_front(source: &str) -> Result<Program, CompileError> {
-    let tokens = lex(source)?;
-    parse_cst(&tokens).map(|cst| lower_cst(&cst))
-}
-
 /// The front end `analyze` runs now: a `WithComments` lex, the green parse
 /// over the same grammar walk, then extraction.
 fn new_front(source: &str) -> Result<Program, CompileError> {
@@ -111,100 +93,160 @@ fn new_front(source: &str) -> Result<Program, CompileError> {
 /// failing construct. Those are the ones that discriminate: a comment-free
 /// broken source cannot tell a `WithComments` lex from a comment-free one at
 /// all, so a set without them would prove nothing about the switch.
-const BROKEN: &[(&str, &str)] = &[
+/// One broken-source row: a name for the failure position, the source,
+/// the error code it must fail with, and that error's span as
+/// `(start line, start col, end line, end col)` — spelled as numbers
+/// because `Span::new` is not `const`.
+type BrokenCase = (
+    &'static str,
+    &'static str,
+    &'static str,
+    (u32, u32, u32, u32),
+);
+
+const BROKEN: &[BrokenCase] = &[
     // -- lexical -----------------------------------------------------------
-    ("unterminated block comment", "/* never closed"),
+    (
+        "unterminated block comment",
+        "/* never closed",
+        "lex-error",
+        (1, 1, 1, 2),
+    ),
     (
         "unterminated block comment after a good declaration",
         "alphabet ab { '_', 'a' }\n/* never closed\n",
+        "lex-error",
+        (2, 1, 2, 2),
     ),
-    ("stray character", "alphabet ab { '_' }\n$\n"),
-    ("unterminated glyph literal", "alphabet ab { '_', 'a }\n"),
+    (
+        "stray character",
+        "alphabet ab { '_' }\n$\n",
+        "lex-error",
+        (2, 1, 2, 2),
+    ),
+    (
+        "unterminated glyph literal",
+        "alphabet ab { '_', 'a }\n",
+        "lex-error",
+        (1, 20, 1, 21),
+    ),
     // -- parse: truncation -------------------------------------------------
-    ("bare keyword, EOF", "alphabet"),
-    ("declaration cut off mid-body", "alphabet ab { '_',"),
+    (
+        "bare keyword, EOF",
+        "alphabet",
+        "unexpected-token",
+        (1, 9, 1, 9),
+    ),
+    (
+        "declaration cut off mid-body",
+        "alphabet ab { '_',",
+        "unexpected-token",
+        (1, 19, 1, 19),
+    ),
     (
         "comment where the name should be, then EOF",
         "alphabet /* c */",
+        "unexpected-token",
+        (1, 17, 1, 17),
     ),
     // -- parse: wrong token ------------------------------------------------
     (
         "reserved word as an alphabet name",
         "alphabet machine { '_' }\n",
+        "reserved-name",
+        (1, 10, 1, 17),
     ),
     (
         "reserved word as a name, behind a comment",
         "alphabet /* c */ machine { '_' }\n",
+        "reserved-name",
+        (1, 18, 1, 25),
     ),
     (
         "bracket-less rule pattern",
         "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s { * -> stop; }\n}\n",
+        "naked-pattern",
+        (4, 19, 4, 20),
     ),
     (
         "bracket-less rule pattern, comment before the pattern",
         "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s { /* c */ * -> stop; }\n}\n",
+        "naked-pattern",
+        (4, 27, 4, 28),
     ),
     // -- parse: language rules ---------------------------------------------
     (
         "two machine blocks",
         "alphabet ab { '_' }\nmachine {\n  tape t: ab;\n  entry state s { [*] -> move [>] stop; }\n}\nmachine {\n  tape u: ab;\n  entry state s { [*] -> move [>] stop; }\n}\n",
+        "multiple-machines",
+        (6, 1, 6, 8),
     ),
     (
         "tape declaration inside a routine",
         "alphabet ab { '_' }\nroutine r(tape t: ab) {\n  tape u: ab;\n  entry state s { [*] -> return; }\n}\n",
+        "tape-not-in-machine",
+        (3, 3, 3, 7),
     ),
     (
         "tape declaration inside a routine, doc-run and comment above it",
         "alphabet ab { '_' }\nroutine r(tape t: ab) {\n  ? a tape that may not live here\n  /* c */\n  tape u: ab;\n  entry state s { [*] -> return; }\n}\n",
+        "dangling-doc-run",
+        (3, 3, 3, 34),
     ),
     (
         "wildcard binding",
         "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s { [* as v] -> stop; }\n}\n",
+        "wildcard-binding",
+        (4, 20, 4, 21),
     ),
     (
         "mismatched range endpoints",
         "alphabet ab { '_', 'a' }\nmachine {\n  tape t: ab;\n  entry state s { ['a'..3] -> stop; }\n}\n",
+        "range-kind-mismatch",
+        (4, 20, 4, 26),
     ),
 ];
 
-/// Claim 1 over the shipped corpus: every real `.tmc` file must produce the
-/// same `Program` on both fronts. `Program` derives `PartialEq` over every
-/// field, spans included, so this compares names, order, namespace stamping
-/// and every anchored `line`/`col` — not merely that both sides succeeded.
+/// The front end, over the shipped corpus: every `.tmc` the repo ships
+/// must survive it — lex, green parse and extraction alike.
+///
+/// This is reach, not correctness: nothing here reads the `Program` back.
+/// It exists because the corpus sweep is the only thing that runs the
+/// front over `../../docs/examples` and over any `.tmc` a later plan adds
+/// to one of the roots, and a file that made extraction panic or the
+/// parse reject would otherwise surface only wherever that file happens
+/// to be compiled.
 #[test]
-fn corpus_analyze_fronts_agree() {
+fn every_shipped_tmc_parses_and_extracts() {
     for (path, src) in corpus() {
-        let old = old_front(&src);
-        let new = new_front(&src);
         assert!(
-            old.is_ok(),
-            "{}: the shipped corpus must parse on the old front: {:?}",
+            new_front(&src).is_ok(),
+            "{}: the shipped corpus must survive the front end: {:?}",
             path.display(),
-            old.err()
-        );
-        assert_eq!(
-            old,
-            new,
-            "{}: the two analyze fronts disagree",
-            path.display()
+            new_front(&src).err()
         );
     }
 }
 
-/// Claim 1 over the broken set — the half that carries the weight, since the
-/// switch changes which function produces the error. `CompileError` derives
-/// `PartialEq` over `kind` AND `span`, so `assert_eq!` on the whole `Result`
-/// pins both without spelling either out.
+/// The front end, over the broken set — the half that carries the
+/// weight, since the switch to the green tree changed which function
+/// produces the error. Each source must fail with a FIXED kind at a
+/// FIXED span, both written out below rather than compared against a
+/// second computation of the same thing: the spans are literals captured
+/// from the pre-switch front (a comment-free lex then the C1 lowering)
+/// while that path was still callable, so this table is what says the
+/// error positions did not move when the front end changed under them.
 #[test]
-fn broken_sources_fail_identically_on_both_fronts() {
-    for (name, src) in BROKEN {
-        let old = old_front(src);
-        let new = new_front(src);
-        assert!(
-            old.is_err(),
-            "`{name}` is supposed to be a broken source, but the old front accepted it"
+fn broken_sources_fail_with_a_fixed_kind_and_span() {
+    for (name, src, code, (sl, sc, el, ec)) in BROKEN {
+        let err = new_front(src)
+            .err()
+            .unwrap_or_else(|| panic!("`{name}` is supposed to be a broken source, but it parsed"));
+        assert_eq!(
+            (err.kind.code(), err.span),
+            (*code, Span::new(*sl, *sc, *el, *ec)),
+            "`{name}`: the error kind and span must not move"
         );
-        assert_eq!(old, new, "`{name}`: the two analyze fronts disagree");
     }
 }
 

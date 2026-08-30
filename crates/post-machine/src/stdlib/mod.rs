@@ -324,42 +324,39 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    /// The roster built from the green tree is the same roster the C1
-    /// CST walk built — same entries, same order, same spans. The C1
-    /// walk is reproduced inline as the oracle rather than recorded as
-    /// a snapshot, so it cannot drift from the real one.
+    /// The roster is the eleven `std::` routines, in source order, each
+    /// with the declaration line the walk read its name from.
+    ///
+    /// The order is the load-bearing part and nothing else pins it: the
+    /// sibling tests here check every entry INDIVIDUALLY (that a
+    /// `name_span` slices its own name out of `SOURCE`, that its line is
+    /// ASCII) and the compiled-object test compares an unordered set, so
+    /// a walk that visited the namespace body backwards would pass all
+    /// three. This table was captured from the C1 CST walk while that
+    /// path was still callable.
     #[test]
-    fn roster_matches_the_c1_cst_walk() {
-        use crate::cst::TopKind;
-        use crate::lexer::lex;
-        use crate::parser::parse_cst;
-
-        let cst = parse_cst(&lex(SOURCE).expect("lexes")).expect("parses");
-        let mut expected: Vec<(String, Span, u32)> = Vec::new();
-        for top in &cst.items {
-            let TopKind::Namespace(ns) = &top.kind else {
-                continue;
-            };
-            if ns.name != "std" {
-                continue;
-            }
-            for body in &ns.items {
-                let TopKind::Function(f) = &body.kind else {
-                    continue;
-                };
-                if !f.exported {
-                    continue;
-                }
-                expected.push((format!("std::{}", f.name), f.name_span, f.line));
-            }
-        }
-
-        let actual: Vec<(String, Span, u32)> = roster()
+    fn the_roster_is_the_eleven_std_routines_in_source_order() {
+        let actual: Vec<(String, u32)> = roster()
             .iter()
-            .map(|e| (e.full_path.clone(), e.name_span, e.decl_line))
+            .map(|e| (e.full_path.clone(), e.decl_line))
             .collect();
+        let expected: Vec<(String, u32)> = [
+            ("std::goToEnd", 13),
+            ("std::goToBegin", 21),
+            ("std::goToMarkRight", 29),
+            ("std::goToMarkLeft", 36),
+            ("std::goToBlankRight", 44),
+            ("std::goToBlankLeft", 51),
+            ("std::eraseSection", 59),
+            ("std::appendMark", 68),
+            ("std::prependMark", 76),
+            ("std::removeLastMark", 85),
+            ("std::removeFirstMark", 94),
+        ]
+        .into_iter()
+        .map(|(path, line)| (path.to_string(), line))
+        .collect();
 
         assert_eq!(actual, expected);
-        assert_eq!(actual.len(), 11, "the embedded stdlib exports 11 routines");
     }
 }

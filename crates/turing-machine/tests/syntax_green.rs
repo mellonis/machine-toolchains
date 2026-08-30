@@ -7,7 +7,7 @@
 use mtc_core::syntax::{SyntaxNode, debug_dump};
 use mtc_turing_machine::compiler::CompileError;
 use mtc_turing_machine::lexer::lex;
-use mtc_turing_machine::parser::{lower_cst, parse_cst, parse_green};
+use mtc_turing_machine::parser::parse_green;
 use mtc_turing_machine::syntax::kind_name;
 
 fn dump(source: &str) -> String {
@@ -249,69 +249,115 @@ fn a_use_path_with_an_alias() {
     assert_eq!(path.text(), "std::binaryNumbers as bn");
 }
 
-/// Acceptance parity is the whole point of the sink: it only mirrors an
-/// UNCHANGED grammar walk, so a rejecting source must fail identically
-/// through both parse paths — same error kind, same span, via
-/// `CompileError`'s derived `PartialEq` — and an accepting one must
-/// succeed on both. This is the one check in this file the six goldens
-/// above cannot stand in for: every one of them parses `WithComments`
-/// through `parse_green` alone, so a divergence that only shows up on a
-/// REJECTING source, or only under `WithoutComments` lexing (the CST
-/// path via `parse_cst`/`lower_cst`), is invisible to them.
+/// Rejection and acceptance are the whole point of the sink: it only
+/// mirrors an UNCHANGED grammar walk, so a source that must fail has to
+/// fail with a fixed error kind at a fixed span, and one that must parse
+/// has to parse. This is the one check in this file the six goldens
+/// above cannot stand in for: every one of them parses an ACCEPTING
+/// source, so a divergence that only shows up on a REJECTING one is
+/// invisible to them.
 ///
 /// Two failure modes this specifically guards against: `GreenSink`'s own
 /// `debug_assert!`s (`flush`'s out-of-order guard, `token`'s
-/// already-emitted guard) firing where the CST path returns a clean
-/// `Err` — a panic instead of an error IS an acceptance divergence — and
-/// a builder left with an unclosed node by an error raised mid-
-/// production, untested by the corpus test below since every shipped
-/// `.tmc` file parses cleanly.
+/// already-emitted guard) firing where a clean `Err` is owed — a panic
+/// instead of an error is a behaviour change — and a builder left with
+/// an unclosed node by an error raised mid-production, untested by the
+/// corpus test below since every shipped `.tmc` file parses cleanly.
 ///
-/// None of the fixtures below contain a comment, so `WithComments` vs
-/// `WithoutComments` lexing produces the same token positions either
-/// way (only `Comment` itself is mode-gated — `DocLine`/`AttentionLine`
-/// are emitted in both), making the CST path (comment-free) and
-/// `parse_green` (`WithComments`) a fair apples-to-apples comparison on
-/// these sources.
-///
-/// Task 5 opens far more nodes on a mid-production error path than Task
-/// 4 did — every one of STATE/GRAFT/BIND/TAPE/REUSE/DOC_RUN/ATTR can be
-/// left open (never `g_finish`ed) when its own production errors out
-/// partway through, a shape none of the original 7 rejecting sources
-/// reach (none of them get past `top_items`). The world-body-reaching
-/// entries below extend the same differential check onto those paths;
-/// each source and its expected code is taken from the existing
-/// `parser::tests` battery, so the code is independently pinned there
-/// too (`tape_declaration_outside_a_machine_is_rejected`,
+/// Every one of STATE/GRAFT/BIND/TAPE/REUSE/DOC_RUN/ATTR can be left
+/// open (never `g_finish`ed) when its own production errors out partway
+/// through, which is why the table reaches into world bodies and not
+/// just `top_items`. Each source and its expected code is taken from the
+/// existing `parser::tests` battery, so the code is independently pinned
+/// there too (`tape_declaration_outside_a_machine_is_rejected`,
 /// `state_redirect_form_is_rejected`, `bare_single_tape_pattern_is_rejected`,
-/// `non_entry_graft_needs_a_name`, `dangling_doc_run_is_rejected`).
+/// `non_entry_graft_needs_a_name`, `dangling_doc_run_is_rejected`); the
+/// SPANS are literals, captured from the C1 lowering of the same sources
+/// while that path was still callable.
 #[test]
-fn errors_agree_with_the_cst_path() {
-    let rejecting = [
-        "namespace n { machine { } }",              // unexpected-token
-        "alphabet state { '_' }",                   // reserved-name
-        "routine goto() { }",                       // reserved-name
-        "use mylib::graph;",                        // reserved-name
-        "machine { } machine { }",                  // multiple-machines
-        "? orphan\nuse mylib::x;",                  // dangling-doc-run
-        "? orphan\n",                               // dangling-doc-run (nothing follows)
-        "routine r() { tape x: bits; }",            // tape-not-in-machine
-        "machine { entry tape t: bits; }",          // "state" or "graft" after "entry"
-        "machine { state s; }",                     // state-redirect
-        "machine { entry state s { * -> stop; } }", // naked-pattern
-        "machine { graft findX(t = work); }",       // graft-needs-name
-        "machine {\n? orphan\ntape t: bits;\n}",    // dangling-doc-run, inside a world body
-        "machine { entry state s {",                // Eof inside a state body
-        "machine {",                                // Eof inside a world body
+fn rejecting_sources_fail_with_a_fixed_kind_and_span() {
+    use mtc_core::diagnostics::Span;
+
+    let rejecting: &[(&str, &str, Span)] = &[
+        (
+            "namespace n { machine { } }",
+            "unexpected-token",
+            Span::new(1, 15, 1, 22),
+        ),
+        (
+            "alphabet state { '_' }",
+            "reserved-name",
+            Span::new(1, 10, 1, 15),
+        ),
+        (
+            "routine goto() { }",
+            "reserved-name",
+            Span::new(1, 9, 1, 13),
+        ),
+        (
+            "use mylib::graph;",
+            "reserved-name",
+            Span::new(1, 12, 1, 17),
+        ),
+        (
+            "machine { } machine { }",
+            "multiple-machines",
+            Span::new(1, 13, 1, 20),
+        ),
+        (
+            "? orphan\nuse mylib::x;",
+            "dangling-doc-run",
+            Span::new(1, 1, 1, 9),
+        ),
+        // Nothing follows the run at all.
+        ("? orphan\n", "dangling-doc-run", Span::new(1, 1, 1, 9)),
+        (
+            "routine r() { tape x: bits; }",
+            "tape-not-in-machine",
+            Span::new(1, 15, 1, 19),
+        ),
+        // "state" or "graft" after "entry".
+        (
+            "machine { entry tape t: bits; }",
+            "unexpected-token",
+            Span::new(1, 17, 1, 21),
+        ),
+        (
+            "machine { state s; }",
+            "state-redirect",
+            Span::new(1, 18, 1, 19),
+        ),
+        (
+            "machine { entry state s { * -> stop; } }",
+            "naked-pattern",
+            Span::new(1, 27, 1, 28),
+        ),
+        (
+            "machine { graft findX(t = work); }",
+            "graft-needs-name",
+            Span::new(1, 11, 1, 16),
+        ),
+        // Dangling doc run, inside a world body.
+        (
+            "machine {\n? orphan\ntape t: bits;\n}",
+            "dangling-doc-run",
+            Span::new(2, 1, 2, 9),
+        ),
+        // Eof inside a state body, then inside a world body: both land
+        // on the empty span at the end of input.
+        (
+            "machine { entry state s {",
+            "unexpected-token",
+            Span::new(1, 26, 1, 26),
+        ),
+        ("machine {", "unexpected-token", Span::new(1, 10, 1, 10)),
     ];
-    for src in rejecting {
-        let cst_err = parse_cst(&lex(src).expect("lexes"))
-            .map(|cst| lower_cst(&cst))
-            .expect_err("rejected on the CST path");
-        let green_err: CompileError = parse_green(src).expect_err("rejected on the green path");
+    for (src, code, span) in rejecting {
+        let err: CompileError = parse_green(src).expect_err("must be rejected");
         assert_eq!(
-            cst_err, green_err,
-            "{src}: kind and span must agree exactly"
+            (err.kind.code(), err.span),
+            (*code, *span),
+            "{src}: kind and span must not move"
         );
     }
 
@@ -327,12 +373,6 @@ fn errors_agree_with_the_cst_path() {
         "machine {\n  ? doc\n  entry state s { [*] -> stop; }\n}\n",
     ];
     for src in accepting {
-        assert!(
-            parse_cst(&lex(src).expect("lexes"))
-                .map(|cst| lower_cst(&cst))
-                .is_ok(),
-            "{src}"
-        );
         assert!(parse_green(src).is_ok(), "{src}");
     }
 }
@@ -415,9 +455,9 @@ fn corpus_token_provenance_law() {
 /// The same law's error half: a source that fails to lex fails
 /// IDENTICALLY in both modes — a mode-dependent lex error would change
 /// which diagnostic a malformed program reports depending on which path
-/// reads it. `errors_agree_with_the_cst_path` above says plainly that
-/// none of its fixtures contain a comment, so it cannot exercise this;
-/// both fixtures here do.
+/// reads it. `rejecting_sources_fail_with_a_fixed_kind_and_span` above
+/// writes no comment into any of its fixtures, so it cannot exercise
+/// this; both fixtures here do.
 #[test]
 fn lex_modes_agree_on_errors() {
     use mtc_turing_machine::lexer::{LexMode, lex_with};
@@ -758,9 +798,9 @@ fn a_bind_declaration_is_its_own_node() {
 /// DOC_RUN wrap entirely, or moving ITS `cp` back below the doc-run
 /// block, would leave every other test in this file green (the tokens
 /// are still mirrored by `bump()`, the tree stays lossless, and
-/// `errors_agree_with_the_cst_path`'s one world-body-doc-run fixture
-/// only asserts that both parse paths ACCEPT the source, not what shape
-/// either tree takes). This test is the missing pin: STATE's own first
+/// `rejecting_sources_fail_with_a_fixed_kind_and_span`'s one
+/// world-body-doc-run fixture only asserts that the source is ACCEPTED,
+/// not what shape its tree takes). This test is the missing pin: STATE's own first
 /// child must be DOC_RUN, not a preceding sibling.
 #[test]
 fn a_doc_run_before_a_world_body_state_retro_wraps_into_it() {

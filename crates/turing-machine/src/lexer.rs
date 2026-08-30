@@ -254,8 +254,9 @@ fn err(line: u32, col: u32, message: String) -> CompileError {
 /// Lex with comments discarded — every production caller lexes
 /// `WithComments` instead (`compiler::analyze`/`analyze_staged`,
 /// `fmt::format`), so this convenience is test-only now: the CST-focused
-/// `#[cfg(test)]` modules and `tests/` files that call `parse_cst`/`parse`
-/// directly. Equivalent to `lex_with(source, LexMode::WithoutComments)`.
+/// `#[cfg(test)]` modules that drive `parse_cst` directly, and the tests
+/// that compare a filtered `WithComments` stream against it. Equivalent to
+/// `lex_with(source, LexMode::WithoutComments)`.
 pub fn lex(source: &str) -> Result<Vec<Token>, CompileError> {
     lex_with(source, LexMode::WithoutComments)
 }

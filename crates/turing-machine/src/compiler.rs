@@ -1039,10 +1039,10 @@ pub(crate) struct Analysis {
 ///
 /// The lex is `WithComments` because the green tree is built from the source
 /// text and its trivia together (docs/core.md (syntax trees)) — a
-/// comment-free stream could not reconstruct a comment's own text. The
-/// grammar walk underneath is the same one `parse_cst` runs, so acceptance
-/// and errors are unchanged; that is pinned over the shipped corpus and a
-/// deliberately-broken set by `tests/tmc_green_analyze.rs`.
+/// comment-free stream could not reconstruct a comment's own text. What this
+/// front accepts, and the exact kind and span of every error it rejects
+/// with, are pinned by `tests/tmc_green_analyze.rs` over a deliberately
+/// broken set.
 pub(crate) fn analyze(source: &str) -> Result<Analysis, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
@@ -4349,10 +4349,9 @@ machine {
     /// wiring carrying the hazard — a comment-bearing `tokens` is exactly why
     /// `lint()` must filter through `significant_tokens`
     /// (`tests/lint_quickfix_comments.rs`). The parse half is NOT observable
-    /// from `Analysis` and no assertion here could see it: `extract_program`
-    /// is held struct-equal to `lower_cst(parse_cst(…))`, spans included, by
-    /// `tests/syntax_parity.rs` and `tests/tmc_property.rs` — the two ASTs
-    /// are indistinguishable on purpose.
+    /// from `Analysis` at all — `analyze` keeps no tree — so no assertion
+    /// here could see it; what pins that half is the crate's own downstream
+    /// crossfire over `extract_program` (`syntax::extract`'s module doc).
     #[test]
     fn analyze_keeps_comment_trivia_in_its_token_stream() {
         let src = format!("// leading comment\n{A1}");
@@ -4398,14 +4397,11 @@ machine {
         // staged construction — the tiering, the intermediate early
         // returns, the `Rc::clone` that retains `green` — reproduces the
         // same extracted `Program` a plain, unstaged `parse` of the same
-        // source would. It does NOT prove the two would diverge if
-        // `parse`'s underlying recipe changed: `tests/syntax_parity.rs` and
-        // `tests/tmc_property.rs` hold the green extraction struct-equal to
-        // `lower_cst(parse_cst(...))`, so a reversion of `parse` to the C1
-        // path would still satisfy this assertion unchanged.
-        // `analyze` itself keeps neither the pre-green tokens nor the green
-        // tree, so the resolved module and the diagnostics are what it has
-        // left to agree on.
+        // source would. It does NOT pin which recipe `parse` runs: the two
+        // sides are computed the same way on purpose, so this stays green
+        // for whatever `parse` is defined as. `analyze` itself keeps
+        // neither the pre-green tokens nor the green tree, so the resolved
+        // module and the diagnostics are what it has left to agree on.
         let src = format!("// leading comment\n{A1}");
         let staged = analyze_staged(&src);
         assert!(staged.fatal.is_none(), "{:?}", staged.fatal);

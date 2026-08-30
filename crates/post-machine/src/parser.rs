@@ -3110,16 +3110,14 @@ main() { right; }
         assert!(matches!(main.body[3].kind, BodyKind::Statement(_)));
     }
 
-    /// The C1 parity guard (`parse == lower_cst ∘ parse_cst`) exercised on
-    /// an actual documented program, not just argued from `parse`'s own
-    /// definition. Task 3 lands the `doc_run` → `FnDoc` reduction, so a
-    /// documented function no longer lowers to the exact same `Program`
-    /// as its undocumented twin — `doc` is now the one field that
-    /// differs. Isolates the comparison to "does the reduction leak
-    /// anything ELSE into the rest of the AST": strip `doc` back off the
-    /// documented function and the two programs must match exactly (the
-    /// twin is padded with blank lines so `main`'s own line/col line up
-    /// too).
+    /// The `doc_run` → `FnDoc` reduction is the ONLY thing a doc run
+    /// changes about the lowered `Program`. Both sides here run `parse`,
+    /// so this is not a claim about which recipe `parse` uses; it
+    /// isolates one question — "does the reduction leak anything ELSE
+    /// into the rest of the AST?" — by stripping `doc` back off the
+    /// documented function and requiring the two programs to match
+    /// exactly (the twin is padded with blank lines so `main`'s own
+    /// line/col line up too).
     #[test]
     fn documented_function_lowers_to_its_undocumented_twin_plus_a_doc() {
         let doc = parse("? doc\n! [deprecated] msg\nmain() { right; }").unwrap();

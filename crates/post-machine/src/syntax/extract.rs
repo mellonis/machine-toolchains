@@ -383,10 +383,11 @@ pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cst::{BodyKind, DocRunKind, TopKind};
-    use crate::lexer::{LexMode, lex, lex_with};
-    use crate::parser::{Item, parse_cst, parse_green, reduce_doc_run};
+    use crate::cst::{DocRunItem, DocRunKind};
+    use crate::lexer::lex;
+    use crate::parser::{Builtin, Item, Successor, parse_green, reduce_doc_run};
     use crate::syntax::{FileView, ItemView, StatementView, TopView};
+    use mtc_core::diagnostics::Span;
     use mtc_core::syntax::AstNode;
 
     /// Retokenized items re-parse to the EXACT C1 Item — spans included.
@@ -408,24 +409,47 @@ mod tests {
     /// mirroring `Parser::statement`'s own rule (`item(false)` for a
     /// statement's first entry, `item(true)` for every entry after a
     /// comma).
+
     #[test]
     fn reparsed_item_equals_the_c1_item() {
         let src = "main() {\n1: right(2);\ngoto 1;\n2: right, mark;\n}\n";
 
-        // C1 side: every statement's items, straight from parse_cst.
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let TopKind::Function(func) = &cst.items[0].kind else {
-            panic!("expected a top-level function");
-        };
-        let c1_items: Vec<Item> = func
-            .body
-            .iter()
-            .filter_map(|bi| match &bi.kind {
-                BodyKind::Statement(s) => Some(s.items.iter().map(|ci| ci.item.clone())),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        // Every field below is a literal captured from the C1 lowering
+        // of this fixture while that path was still callable.
+        let expected_items: Vec<Item> = vec![
+            Item::Builtin {
+                which: Builtin::Right,
+                succ: Successor::Label(2),
+                succ_span: Some(Span::new(2, 9, 2, 12)),
+                succ_label_span: Some(Span::new(2, 10, 2, 11)),
+                succ_label_written: Some("2".to_string()),
+                line: 2,
+            },
+            Item::Goto {
+                label: 1,
+                label_span: Span::new(3, 6, 3, 7),
+                label_written: "1".to_string(),
+                line: 3,
+            },
+            Item::Builtin {
+                which: Builtin::Right,
+                succ: Successor::FallThrough,
+                succ_span: None,
+                succ_label_span: None,
+                succ_label_written: None,
+                line: 4,
+            },
+            // The group's SECOND entry — reparsed with `in_group: true`,
+            // which is the path neither statement above reaches.
+            Item::Builtin {
+                which: Builtin::Mark,
+                succ: Successor::FallThrough,
+                succ_span: None,
+                succ_label_span: None,
+                succ_label_written: None,
+                line: 4,
+            },
+        ];
 
         // Green side: retokenize each ITEM node and re-parse. `in_group`
         // is derived from the item's own position within its statement
@@ -481,7 +505,7 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(green_items, c1_items);
+        assert_eq!(green_items, expected_items);
     }
 
     /// Retokenized `DOC_RUN` tokens re-parse to the EXACT C1 doc-run
@@ -509,12 +533,36 @@ mod tests {
     fn reparsed_doc_items_equal_the_c1_doc_run() {
         let src = "? doc line\n! caution\n! [deprecated] use goToEnd\nmain() { right; }\n";
 
-        // C1 side: the bound doc run, straight from parse_cst.
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let TopKind::Function(func) = &cst.items[0].kind else {
-            panic!("expected a top-level function");
-        };
-        let c1_doc_run = func.doc_run.clone();
+        // A literal captured from the C1 lowering of this fixture while
+        // that path was still callable.
+        let expected_doc_run = vec![
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Doc {
+                    text: "doc line".to_string(),
+                    span: Span::new(1, 1, 1, 11),
+                },
+            },
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Attention {
+                    attr: None,
+                    text: "caution".to_string(),
+                    span: Span::new(2, 1, 2, 10),
+                },
+            },
+            DocRunItem {
+                blank_before: false,
+                kind: DocRunKind::Attention {
+                    attr: Some(crate::cst::AttrCst {
+                        name: "deprecated".to_string(),
+                        span: Span::new(3, 4, 3, 14),
+                    }),
+                    text: "[deprecated] use goToEnd".to_string(),
+                    span: Span::new(3, 1, 3, 27),
+                },
+            },
+        ];
 
         // Green side: retokenize the DOC_RUN node and re-parse.
         let root = SyntaxNode::new_root(parse_green(src).unwrap());
@@ -527,7 +575,7 @@ mod tests {
         let green_doc_run =
             crate::parser::reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index));
 
-        assert_eq!(green_doc_run, c1_doc_run);
+        assert_eq!(green_doc_run, expected_doc_run);
     }
 
     /// A comment interleaved inside a `DOC_RUN` (`(Doc, Comment, Doc)`
@@ -543,19 +591,16 @@ mod tests {
     fn reparsed_doc_items_reduce_to_the_same_fndoc_when_comments_interleave() {
         let src = "? doc line\n// interleaved comment\n? more doc\nmain() { right; }\n";
 
-        // C1 side: the bound doc run, comment item included, reduced.
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let TopKind::Function(func) = &cst.items[0].kind else {
-            panic!("expected a top-level function");
-        };
-        assert!(
-            func.doc_run
-                .iter()
-                .any(|i| matches!(i.kind, DocRunKind::Comment(_))),
-            "fixture must actually interleave a comment, or this test proves nothing: {:?}",
-            func.doc_run
-        );
-        let c1_doc = reduce_doc_run(&func.doc_run);
+        // Three items as WRITTEN — two `?` lines and the comment between
+        // them — folding to one paragraph. Both literals were captured
+        // from the C1 lowering of this fixture while that path was still
+        // callable.
+        let written_items = 3;
+        let expected_doc = Some(crate::parser::FnDoc {
+            paragraphs: vec!["doc line more doc".to_string()],
+            attention: Vec::new(),
+            deprecated: None,
+        });
 
         // Green side: retokenize (the comment is dropped as trivia) and
         // reduce.
@@ -568,14 +613,13 @@ mod tests {
         let doc_run_view = func_view.doc_run().expect("function carries a doc run");
         let green_doc_run =
             crate::parser::reparse_doc_items(&sig_tokens(doc_run_view.syntax(), &index));
-        assert_ne!(
-            green_doc_run.len(),
-            func.doc_run.len(),
+        assert!(
+            green_doc_run.len() < written_items,
             "the comment must actually be dropped, or this test proves nothing"
         );
         let green_doc = reduce_doc_run(&green_doc_run);
 
-        assert_eq!(green_doc, c1_doc);
+        assert_eq!(green_doc, expected_doc);
     }
 
     /// Drift guard: `token_from_syntax`'s `PmcKind -> TokenKind` mapping
@@ -642,22 +686,20 @@ mod tests {
         assert_eq!(retokenized, lexed);
     }
 
-    /// Green-extracted functions equal lower_cst's — the oracle at
-    /// function granularity, on a snippet with every function feature:
-    /// a bound doc run (a `?` paragraph plus a bare `!` attention line),
-    /// `export` on the un-namespaced top-level `main` (already
-    /// auto-exported, so this also pins that `has_export: true` and the
-    /// auto-export fold-in agree rather than double-applying), a
-    /// labeled statement, and a nested function definition.
+    /// Extraction rebuilds every feature a function declaration can
+    /// carry, on a snippet holding all of them: a bound doc run (a `?`
+    /// paragraph plus a bare `!` attention line), `export` on the
+    /// un-namespaced top-level `main` (already auto-exported, so this
+    /// also pins that a written `export` and the auto-export fold-in
+    /// agree rather than double-applying), a labeled statement, and a
+    /// nested function definition.
+    ///
+    /// Asserted field by field against literals captured from the C1
+    /// lowering of this fixture while that path was still callable.
     #[test]
-    fn extracted_function_equals_lowered() {
+    fn extracted_function_carries_every_declaration_feature() {
         let src = "? doc line\n! caution\nexport main() {\n1: right;\nh() { right; }\n}\n";
 
-        // C1 side: lower the whole CST, straight from parse_cst.
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let lowered = crate::parser::lower_cst(&cst);
-
-        // Green side: FileView over the root, first (only) top-level item.
         let root = SyntaxNode::new_root(parse_green(src).unwrap());
         let index = TextLineIndex::new(src);
         let file = FileView::cast(root).expect("root is FILE");
@@ -667,69 +709,141 @@ mod tests {
 
         let extracted = extract_function(&f, &index);
 
-        assert_eq!(extracted, lowered.functions[0]);
+        assert_eq!(
+            (
+                extracted.name.as_str(),
+                extracted.line,
+                extracted.col,
+                extracted.name_span
+            ),
+            ("main", 3, 8, Span::new(3, 8, 3, 12))
+        );
+        assert!(
+            extracted.exported && !extracted.local,
+            "a written `export` on `main` folds in once, not twice"
+        );
+        assert!(!extracted.volatile);
+        assert!(extracted.ns.is_empty());
+        assert_eq!(
+            extracted.doc,
+            Some(crate::parser::FnDoc {
+                paragraphs: vec!["doc line".to_string()],
+                attention: vec!["caution".to_string()],
+                deprecated: None,
+            })
+        );
+
+        assert_eq!(extracted.body.len(), 1);
+        let statement = &extracted.body[0];
+        assert_eq!(
+            statement
+                .labels
+                .iter()
+                .map(|l| (l.value, l.written.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "1")],
+            "the statement's own label survives extraction"
+        );
+        assert_eq!(
+            (statement.line, statement.span),
+            (4, Span::new(4, 1, 4, 10))
+        );
+
+        assert_eq!(extracted.nested.len(), 1);
+        let nested = &extracted.nested[0];
+        assert_eq!((nested.name.as_str(), nested.line), ("h", 5));
+        assert!(
+            !nested.exported,
+            "a nested definition is never auto-exported"
+        );
+        assert!(nested.ns.is_empty(), "nesting is not a namespace");
     }
 
-    /// Whole-program equality on a namespaced, aliased, nested snippet.
+    /// A namespaced, aliased snippet, asserted against literals captured
+    /// from the C1 lowering while that path was still callable: the
+    /// import's path, alias and (file-level) `ns`, the namespaced
+    /// function's own `ns`, and `main`'s auto-export.
     #[test]
-    fn extracted_program_equals_lowered() {
+    fn extracted_program_stamps_namespaces_aliases_and_the_main_export() {
         let src = "use std::goToEnd as ge;\nnamespace n {\nf() { right; }\n}\nmain() { right; }\n";
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let expected = crate::parser::lower_cst(&cst);
         let root = SyntaxNode::new_root(parse_green(src).unwrap());
-        assert_eq!(extract_program(&root, src), expected);
+        let program = extract_program(&root, src);
+
+        assert_eq!(program.imports.len(), 1);
+        let import = &program.imports[0];
+        assert_eq!(
+            (
+                import.path.clone(),
+                import.alias.clone(),
+                import.ns.clone(),
+                import.line,
+                import.span
+            ),
+            (
+                vec!["std".to_string(), "goToEnd".to_string()],
+                Some("ge".to_string()),
+                Vec::new(),
+                1,
+                Span::new(1, 5, 1, 17)
+            )
+        );
+
+        assert_eq!(
+            program
+                .functions
+                .iter()
+                .map(|f| (f.name.as_str(), f.ns.clone(), f.exported))
+                .collect::<Vec<_>>(),
+            vec![
+                ("f", vec!["n".to_string()], false),
+                ("main", Vec::new(), true),
+            ],
+            "namespace contents come first, and only `main` auto-exports"
+        );
     }
 
-    /// Strengthens `extracted_program_equals_lowered`: the first fixture's
-    /// only `use` lives at file level, so it can't tell an `Import`'s `ns`
-    /// stamp (`lower_items`, parser.rs:417) apart from an accidentally
-    /// dropped one — both read `[]`. This snippet adds a NAMESPACE-scoped
-    /// `use` (pinning `Import.ns == ["n"]` against the file-level one's
-    /// `[]`) and a function-nested-inside-a-namespaced-function (pinning
-    /// the parent's `ns == ["n"]` against the child's `ns == []`,
-    /// `lower_function`'s own `lower_function(g, &[])` for nested
-    /// definitions, parser.rs:453) — the one Task-5-specific interaction
-    /// Task 4's file-level-only nesting test never exercised. Still
-    /// oracle-driven: the whole-program `assert_eq!` against `lower_cst`
-    /// is the actual proof, these are just documentation of which bits it
-    /// pins.
+    /// Strengthens the test above: its only `use` lives at file level, so
+    /// it cannot tell an `Import`'s `ns` stamp apart from an accidentally
+    /// dropped one — both read `[]`. This snippet adds a
+    /// NAMESPACE-scoped `use` (pinning `Import.ns == ["n"]` against the
+    /// file-level one's `[]`) and a function nested inside a namespaced
+    /// function (pinning the parent's `ns == ["n"]` against the child's
+    /// `[]`, since `lower_function` lowers a nested definition with an
+    /// empty namespace of its own).
+    ///
+    /// Asserted against literals captured from the C1 lowering while that
+    /// path was still callable.
     #[test]
     fn extracted_program_pins_namespace_scoped_import_and_nested_function_ns() {
         let src = "use std::goToEnd as ge;\nnamespace n {\nuse std::goToStart as gs;\nf() {\nright;\ng() { left; }\n}\n}\nmain() { right; }\n";
-        let cst = parse_cst(&lex_with(src, LexMode::WithComments).unwrap()).unwrap();
-        let expected = crate::parser::lower_cst(&cst);
         let root = SyntaxNode::new_root(parse_green(src).unwrap());
         let extracted = extract_program(&root, src);
 
-        // Fixture sanity — the interactions this test claims to pin
-        // actually appear in the oracle's own output, not just in the
-        // extracted side.
         assert_eq!(
-            expected
+            extracted
                 .imports
                 .iter()
-                .find(|i| i.binding() == "gs")
-                .expect("namespace-scoped import present")
-                .ns,
-            vec!["n".to_string()]
+                .map(|i| (i.binding().to_string(), i.ns.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("ge".to_string(), Vec::new()),
+                ("gs".to_string(), vec!["n".to_string()]),
+            ],
+            "a file-level import stamps no namespace; a scoped one stamps its own"
         );
-        assert_eq!(
-            expected
-                .imports
-                .iter()
-                .find(|i| i.binding() == "ge")
-                .expect("file-level import present")
-                .ns,
-            Vec::<String>::new()
-        );
-        let f = expected
+
+        let f = extracted
             .functions
             .iter()
             .find(|f| f.name == "f")
             .expect("namespaced function present");
         assert_eq!(f.ns, vec!["n".to_string()]);
-        assert_eq!(f.nested[0].ns, Vec::<String>::new());
-
-        assert_eq!(extracted, expected);
+        assert_eq!(f.nested.len(), 1);
+        assert_eq!(f.nested[0].name, "g");
+        assert_eq!(
+            f.nested[0].ns,
+            Vec::<String>::new(),
+            "a nested definition carries no namespace of its own"
+        );
     }
 }

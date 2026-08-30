@@ -88,27 +88,28 @@
 //! because the green tree's node boundary and the "who owns this
 //! comment" answer are not the same question.
 //!
-//! # The parity oracle a later plan must keep green
+//! # How extraction itself is checked
 //!
 //! The lossless law above (`text() == source`) cannot catch an
 //! extraction bug — a tree can round-trip byte for byte and still be
-//! read wrongly. `extract_program` (`extract.rs`) is checked against
-//! that separately: `Program` is held struct-equal to
-//! `lower_cst(parse_cst(...))` over every `.tmc` file the repo ships
-//! (`tests/syntax_parity.rs::the_shipped_corpus_extracts_identically_on_both_paths`)
-//! and over 2000 generated programs per run
-//! (`tests/tmc_property.rs::generated_programs_extract_identically_on_both_paths`).
-//! `DocRunItem::blank_before` sits outside this equality by
-//! construction — `reduce_doc_run` folds a doc run over its `kind`
-//! alone, so no value of that field changes a `Program` — and it is
-//! pinned one level down in `extract.rs`'s own tests instead;
-//! `tests/syntax_parity.rs`'s module doc names the divergences.
-//! `extract_program` now has a production consumer: `compiler::analyze`
-//! and `compiler::analyze_staged`, the `.tmc` compiler front, both build
-//! their `Program` through it. Both halves of this oracle —
-//! `tests/syntax_parity.rs`'s corpus sweep and `tests/tmc_property.rs`'s
-//! generated-program sweep — are therefore regression gates under live
-//! code now, not plan artifacts a future consumer might someday need.
+//! read wrongly. `extract_program` (`extract.rs`) is a production path,
+//! not a plan artifact: `compiler::analyze` and
+//! `compiler::analyze_staged`, the `.tmc` compiler front, both build
+//! their `Program` through it, so every golden program, lint fixture,
+//! LSP test and formatter test in the crate runs on what it produces —
+//! measured, one extraction shim at a time, in `extract.rs`'s own module
+//! doc, where corrupting a single shim's return value reds between 3 and
+//! 170 of them.
+//!
+//! What that crossfire cannot see is a field nothing downstream reads,
+//! and those carry hand-written value tests in `extract.rs`'s own test
+//! module instead: a `Transition`'s own `span`, and
+//! `DocRunItem::blank_before` — the latter cannot reach a `Program` at
+//! all, since `reduce_doc_run` folds a doc run over its `kind` alone, so
+//! it is asserted directly on `extract_doc_items`' output.
+//! `tests/tmc_property.rs` adds a per-program construct-coverage check
+//! over generated programs: the set of constructs the generator WROTE
+//! must equal the set extraction reports back.
 //!
 //! # `syntax::views` also has consumers outside `extract_program`
 //!

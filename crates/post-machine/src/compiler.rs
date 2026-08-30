@@ -423,8 +423,9 @@ fn lower_and_merge(
 /// `significant_tokens` — the `tokens` field, which stays exactly the
 /// `WithoutComments` stream it has always been (pinned by
 /// `tests/syntax_green.rs::corpus_token_provenance_law`). `extract_program`
-/// rebuilds the same `Program` the C1 path built, held to it by
-/// `tests/syntax_green.rs::corpus_extraction_parity`.
+/// survives every `.pmc` the crate ships, held to that by
+/// `tests/syntax_green.rs::every_corpus_file_parses_and_extracts`; what it
+/// rebuilds is pinned field by field in `syntax::extract`'s own tests.
 pub(crate) fn analyze(source: &str) -> Result<AnalysisOutput, CompileError> {
     let lexed = crate::lexer::lex_with(source, LexMode::WithComments)?;
     let green = crate::parser::parse_green_from_tokens(source, &lexed)?;

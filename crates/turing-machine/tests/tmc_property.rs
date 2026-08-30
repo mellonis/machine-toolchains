@@ -133,13 +133,24 @@
 //! Comment-kind and node-extent correctness are a separate law needing a
 //! separate property; whoever adds one should know this file never
 //! covered it, rather than reading its green result as evidence.
+//!
+//! Nor does anything here assert that extraction reads a generated tree
+//! CORRECTLY. It once did — a struct-equality property against the C1
+//! lowering of the same source — and that comparison retired with the C1
+//! parse path it was one half of. What replaces it is weaker and
+//! deliberately so: the coverage oracle at the bottom of this file holds
+//! the set of constructs the generator WROTE equal to the set extraction
+//! reports, per program and in both directions, which catches a
+//! construct dropped or invented wholesale but not one rebuilt with the
+//! wrong contents. Extraction's per-field fidelity is pinned by the
+//! hand-written value tests in `syntax::extract`'s own module and by the
+//! goldens, not here.
 
 use mtc_core::syntax::SyntaxNode;
 use mtc_turing_machine::lexer::{LexMode, lex_with};
 use mtc_turing_machine::parser::{
     Continuation, FoldExprKind, FoldOp, MapArrow, MoveDir, PatternCellKind, Program, SigParamKind,
-    SymLit, TermKind, Transition, WriteCellKind, lower_cst, parse_cst, parse_green,
-    parse_green_from_tokens,
+    SymLit, TermKind, Transition, WriteCellKind, parse_green, parse_green_from_tokens,
 };
 use mtc_turing_machine::syntax::extract_program;
 use proptest::prelude::*;
@@ -180,6 +191,26 @@ impl<'a> Cursor<'a> {
     /// `true` with probability `num / den`.
     fn chance(&mut self, num: usize, den: usize) -> bool {
         self.choose(den) < num
+    }
+}
+
+/// What the generator DECIDED to emit, recorded at the point each branch
+/// is taken — the other side of the coverage oracle.
+///
+/// The invariant the floor test below enforces: for every generated
+/// program, the labels recorded here and the CHOSEN labels
+/// [`stamp_program`] reads back off the extracted `Program` are the SAME
+/// SET, in both directions — a construct the generator emits and
+/// extraction drops fails, and so does a label extraction invents.
+/// [`CHOSEN_CONSTRUCTS`] is the closed list of labels this type is
+/// allowed to carry, and its doc comment explains which labels are
+/// deliberately absent.
+#[derive(Default)]
+struct Emitted(BTreeSet<&'static str>);
+
+impl Emitted {
+    fn mark(&mut self, label: &'static str) {
+        self.0.insert(label);
     }
 }
 
@@ -241,15 +272,19 @@ fn push_comment_break(cur: &mut Cursor, n: &mut u32, out: &mut String) {
 /// One symbol literal, glyph or numeric, plus whether it's a glyph — the
 /// two literal forms a range's endpoints must agree on
 /// (docs/tmt/language.md (alphabets)).
-fn gen_sym(cur: &mut Cursor) -> (String, bool) {
+fn gen_sym(cur: &mut Cursor, em: &mut Emitted) -> (String, bool) {
     if cur.chance(1, 8) {
+        em.mark("sym.glyph");
+        em.mark("sym.glyph.escaped");
         (
             ESCAPED_GLYPHS[cur.choose(ESCAPED_GLYPHS.len())].to_string(),
             true,
         )
     } else if cur.chance(2, 3) {
+        em.mark("sym.glyph");
         (GLYPHS[cur.choose(GLYPHS.len())].to_string(), true)
     } else {
+        em.mark("sym.number");
         (NUMBERS[cur.choose(NUMBERS.len())].to_string(), false)
     }
 }
@@ -258,10 +293,12 @@ fn gen_sym(cur: &mut Cursor) -> (String, bool) {
 /// the parser rejects only a KIND mismatch (`RangeKindMismatch`), never an
 /// out-of-order or improbable-looking pair (that check is a later semantic
 /// one; see the module doc), so any same-kind `hi` is grammar-valid.
-fn gen_range_hi(cur: &mut Cursor, lo_is_glyph: bool) -> String {
+fn gen_range_hi(cur: &mut Cursor, em: &mut Emitted, lo_is_glyph: bool) -> String {
     if lo_is_glyph {
+        em.mark("sym.glyph");
         GLYPHS[cur.choose(GLYPHS.len())].to_string()
     } else {
+        em.mark("sym.number");
         NUMBERS[cur.choose(NUMBERS.len())].to_string()
     }
 }
@@ -269,36 +306,48 @@ fn gen_range_hi(cur: &mut Cursor, lo_is_glyph: bool) -> String {
 /// One alphabet-body element: a single symbol or a `lo..hi` range
 /// (docs/tmt/language.md (alphabets)) — the same element grammar an
 /// alphabet body and a contract clause body share.
-fn gen_alphabet_elem(cur: &mut Cursor) -> String {
-    let (lo, is_glyph) = gen_sym(cur);
+fn gen_alphabet_elem(cur: &mut Cursor, em: &mut Emitted) -> String {
+    let (lo, is_glyph) = gen_sym(cur, em);
     if cur.chance(1, 3) {
-        format!("{lo}..{}", gen_range_hi(cur, is_glyph))
+        em.mark("alphabet.elem.range");
+        format!("{lo}..{}", gen_range_hi(cur, em, is_glyph))
     } else {
+        em.mark("alphabet.elem.single");
         lo
     }
 }
 
 /// A comma-separated element list body (no brackets), used by both an
 /// `alphabet { … }` body and a `writes`/`preserves { … }` contract clause.
-/// `allow_empty` covers the clause body's `{}` (a real, meaningful shape —
-/// "written nowhere" — distinct from an absent clause; see
-/// docs/tmt/language.md (contract clauses)); a bare `alphabet` body stays
-/// non-empty here since an empty one is a later semantic error, not a
-/// parse one, and this generator otherwise keeps to realistic shapes
-/// (see the module doc's left-out list). `interior` gates one of this
-/// generator's four covered interior-comment list positions.
+/// `contract` says which: a clause body may be empty (`{}` is a real,
+/// meaningful shape — "written nowhere" — distinct from an absent clause;
+/// see docs/tmt/language.md (contract clauses)) and is the only one of
+/// the two whose emptiness extraction stamps a label for, while a bare
+/// `alphabet` body stays non-empty here since an empty one is a later
+/// semantic error, not a parse one, and this generator otherwise keeps to
+/// realistic shapes (see the module doc's left-out list). `interior`
+/// gates one of this generator's four covered interior-comment list
+/// positions.
 fn gen_elem_list(
     cur: &mut Cursor,
     n: &mut u32,
-    allow_empty: bool,
+    em: &mut Emitted,
+    contract: bool,
     interior: bool,
     out: &mut String,
 ) {
-    let count = if allow_empty && cur.chance(1, 5) {
+    let count = if contract && cur.chance(1, 5) {
         0
     } else {
         1 + cur.choose(4)
     };
+    if contract {
+        em.mark(if count == 0 {
+            "contract.empty"
+        } else {
+            "contract.non-empty"
+        });
+    }
     for i in 0..count {
         if i > 0 {
             out.push_str(", ");
@@ -306,7 +355,7 @@ fn gen_elem_list(
         if interior && cur.chance(1, 6) {
             push_comment_break(cur, n, out);
         }
-        out.push_str(&gen_alphabet_elem(cur));
+        out.push_str(&gen_alphabet_elem(cur, em));
     }
     if interior && cur.chance(1, 8) {
         if count > 0 {
@@ -328,7 +377,20 @@ fn gen_elem_list(
 /// comments interleaved between lines, and one trailing the run before the
 /// declaration, stay attached without breaking it
 /// (docs/tmt/language.md (doc lines and attention lines)).
-fn gen_doc_run(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
+///
+/// `record` is false for the one run whose content never reaches an
+/// extracted `Program`: a `namespace`'s own doc run. A namespace is not a
+/// declaration in `Program` — its path is stamped onto the declarations
+/// inside it — so nothing stamps a label off its doc, and recording one
+/// here would invent a label extraction can never produce.
+fn gen_doc_run(
+    cur: &mut Cursor,
+    n: &mut u32,
+    em: &mut Emitted,
+    record: bool,
+    pad: &str,
+    out: &mut String,
+) {
     // Up to THREE `?` lines, not two. At two, a blank break can only ever
     // land on the last line, and `crate::parser::reduce_doc_run` flushes
     // the pending paragraph only when it is non-empty — so a trailing
@@ -355,8 +417,14 @@ fn gen_doc_run(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
     for i in 0..attentions {
         out.push_str(pad);
         if i == 0 && cur.chance(1, 3) {
+            if record {
+                em.mark("doc.deprecated");
+            }
             out.push_str("! [deprecated] superseded\n");
         } else {
+            if record {
+                em.mark("doc.attention");
+            }
             out.push_str(&format!("! attention line {i}\n"));
         }
     }
@@ -380,7 +448,7 @@ fn gen_doc_run(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
 /// deliberately BEFORE bumping past `;`, with its own comment explaining
 /// why: draining after would wrongly claim a comment that documents the
 /// NEXT `use`, not this one.
-fn gen_use(cur: &mut Cursor, n: &mut u32, out: &mut String) {
+fn gen_use(cur: &mut Cursor, n: &mut u32, em: &mut Emitted, in_ns: bool, out: &mut String) {
     out.push_str("use ");
     let paths = 1 + cur.choose(3);
     for i in 0..paths {
@@ -390,9 +458,20 @@ fn gen_use(cur: &mut Cursor, n: &mut u32, out: &mut String) {
                 push_comment_break(cur, n, out);
             }
         }
+        // Always two segments, so every generated import is a
+        // multi-segment one.
+        em.mark("import.multi-segment");
+        em.mark(if in_ns {
+            "import.namespaced"
+        } else {
+            "import.file-level"
+        });
         out.push_str(&format!("ns{}::sym{}", cur.choose(3), cur.choose(4)));
         if cur.chance(1, 4) {
+            em.mark("import.alias");
             out.push_str(&format!(" as alias{}", uid(n)));
+        } else {
+            em.mark("import.bare");
         }
     }
     if cur.chance(1, 5) {
@@ -413,20 +492,30 @@ fn gen_use(cur: &mut Cursor, n: &mut u32, out: &mut String) {
 /// write vector needs to know which bound names are glyph-kind, since a
 /// non-passthrough substitution over a glyph binding is a parse-time
 /// `CharArithmetic` error (docs/tmt/language.md (substitution)).
-fn gen_pattern_cell(cur: &mut Cursor, n: &mut u32) -> (String, Option<(String, bool)>) {
+fn gen_pattern_cell(
+    cur: &mut Cursor,
+    n: &mut u32,
+    em: &mut Emitted,
+) -> (String, Option<(String, bool)>) {
     if cur.chance(1, 6) {
+        em.mark("pattern.wildcard");
+        em.mark("pattern.unbound");
         return ("*".to_string(), None);
     }
-    let (lo, is_glyph) = gen_sym(cur);
+    let (lo, is_glyph) = gen_sym(cur, em);
     let body = if cur.chance(1, 3) {
-        format!("{lo}..{}", gen_range_hi(cur, is_glyph))
+        em.mark("pattern.range");
+        format!("{lo}..{}", gen_range_hi(cur, em, is_glyph))
     } else {
+        em.mark("pattern.single");
         lo
     };
     if cur.chance(1, 2) {
+        em.mark("pattern.bound");
         let name = format!("v{}", uid(n));
         (format!("{body} as {name}"), Some((name, is_glyph)))
     } else {
+        em.mark("pattern.unbound");
         (body, None)
     }
 }
@@ -437,6 +526,7 @@ fn gen_pattern_cell(cur: &mut Cursor, n: &mut u32) -> (String, Option<(String, b
 fn gen_pattern(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     arity: usize,
     interior: bool,
 ) -> (String, Vec<(String, bool)>) {
@@ -449,7 +539,7 @@ fn gen_pattern(
         if interior && cur.chance(1, 6) {
             push_comment_break(cur, n, &mut out);
         }
-        let (cell, binding) = gen_pattern_cell(cur, n);
+        let (cell, binding) = gen_pattern_cell(cur, n, em);
         out.push_str(&cell);
         if let Some(b) = binding {
             bindings.push(b);
@@ -467,13 +557,17 @@ fn gen_pattern(
 /// (substitution)) — never a glyph-bound name outside a bare passthrough,
 /// which is enforced by never calling this for the passthrough case (see
 /// `gen_write_cell`). `depth` bounds recursion through `(expr)`.
-fn gen_fold_atom(cur: &mut Cursor, numeric: &[String], depth: u32) -> String {
+fn gen_fold_atom(cur: &mut Cursor, em: &mut Emitted, numeric: &[String], depth: u32) -> String {
     if depth > 0 && cur.chance(1, 5) {
-        return format!("({})", gen_fold_expr(cur, numeric, depth - 1));
+        return format!("({})", gen_fold_expr(cur, em, numeric, depth - 1));
     }
     if !numeric.is_empty() && cur.chance(1, 2) {
         numeric[cur.choose(numeric.len())].clone()
     } else {
+        // An integer literal atom, wherever it sits in the expression:
+        // `stamp_fold` walks the whole tree, so one anywhere stamps
+        // `write.subst.int`.
+        em.mark("write.subst.int");
         NUMBERS[cur.choose(NUMBERS.len())].to_string()
     }
 }
@@ -485,28 +579,32 @@ fn gen_fold_atom(cur: &mut Cursor, numeric: &[String], depth: u32) -> String {
 /// `proptest`'s shrinker tries exactly that — always does, since `0 % 3
 /// == 0` is forever inside the `1-in-3` chance) would otherwise loop
 /// forever rather than merely improbably long.
-fn gen_fold_mul(cur: &mut Cursor, numeric: &[String], depth: u32) -> String {
-    let mut s = gen_fold_atom(cur, numeric, depth);
+fn gen_fold_mul(cur: &mut Cursor, em: &mut Emitted, numeric: &[String], depth: u32) -> String {
+    let mut s = gen_fold_atom(cur, em, numeric, depth);
     for _ in 0..3 {
         if !cur.chance(1, 3) {
             break;
         }
         let op = if cur.chance(1, 2) { '*' } else { '%' };
-        s = format!("{s}{op}{}", gen_fold_atom(cur, numeric, depth));
+        em.mark("write.subst.fold");
+        em.mark(if op == '*' { "fold.mul" } else { "fold.rem" });
+        s = format!("{s}{op}{}", gen_fold_atom(cur, em, numeric, depth));
     }
     s
 }
 
 /// `expr := mul (('+' | '-') mul)*` (docs/tmt/language.md (substitution)) —
 /// capped the same way and for the same reason as [`gen_fold_mul`].
-fn gen_fold_expr(cur: &mut Cursor, numeric: &[String], depth: u32) -> String {
-    let mut s = gen_fold_mul(cur, numeric, depth);
+fn gen_fold_expr(cur: &mut Cursor, em: &mut Emitted, numeric: &[String], depth: u32) -> String {
+    let mut s = gen_fold_mul(cur, em, numeric, depth);
     for _ in 0..3 {
         if !cur.chance(1, 3) {
             break;
         }
         let op = if cur.chance(1, 2) { '+' } else { '-' };
-        s = format!("{s}{op}{}", gen_fold_mul(cur, numeric, depth));
+        em.mark("write.subst.fold");
+        em.mark(if op == '+' { "fold.add" } else { "fold.sub" });
+        s = format!("{s}{op}{}", gen_fold_mul(cur, em, numeric, depth));
     }
     s
 }
@@ -517,10 +615,16 @@ fn gen_fold_expr(cur: &mut Cursor, numeric: &[String], depth: u32) -> String {
 /// parse-safe, `check_char_arithmetic` exempts a bare `Var`) or an
 /// arithmetic fold restricted to `bindings`' NUMERIC names plus integer
 /// literals, since a fold over a glyph binding is `CharArithmetic`.
-fn gen_write_cell(cur: &mut Cursor, bindings: &[(String, bool)]) -> String {
+fn gen_write_cell(cur: &mut Cursor, em: &mut Emitted, bindings: &[(String, bool)]) -> String {
     match cur.choose(4) {
-        0 => "-".to_string(),
-        1 => gen_sym(cur).0,
+        0 => {
+            em.mark("write.keep");
+            "-".to_string()
+        }
+        1 => {
+            em.mark("write.lit");
+            gen_sym(cur, em).0
+        }
         2 if !bindings.is_empty() => {
             let (name, _) = &bindings[cur.choose(bindings.len())];
             format!("{{{name}}}")
@@ -531,7 +635,7 @@ fn gen_write_cell(cur: &mut Cursor, bindings: &[(String, bool)]) -> String {
                 .filter(|(_, is_glyph)| !is_glyph)
                 .map(|(name, _)| name.clone())
                 .collect();
-            format!("{{{}}}", gen_fold_expr(cur, &numeric, 1))
+            format!("{{{}}}", gen_fold_expr(cur, em, &numeric, 1))
         }
     }
 }
@@ -539,7 +643,12 @@ fn gen_write_cell(cur: &mut Cursor, bindings: &[(String, bool)]) -> String {
 /// A bracketed write vector of `arity` cells, or `None` (the whole vector
 /// omitted keeps every cell — docs/tmt/language.md (write and move
 /// vectors)).
-fn gen_write_vec(cur: &mut Cursor, arity: usize, bindings: &[(String, bool)]) -> Option<String> {
+fn gen_write_vec(
+    cur: &mut Cursor,
+    em: &mut Emitted,
+    arity: usize,
+    bindings: &[(String, bool)],
+) -> Option<String> {
     if cur.chance(1, 4) {
         return None;
     }
@@ -548,14 +657,14 @@ fn gen_write_vec(cur: &mut Cursor, arity: usize, bindings: &[(String, bool)]) ->
         if i > 0 {
             out.push_str(", ");
         }
-        out.push_str(&gen_write_cell(cur, bindings));
+        out.push_str(&gen_write_cell(cur, em, bindings));
     }
     out.push(']');
     Some(out)
 }
 
 /// A bracketed move vector of `arity` cells (`<`/`>`/`.`), or `None`.
-fn gen_move_vec(cur: &mut Cursor, arity: usize) -> Option<String> {
+fn gen_move_vec(cur: &mut Cursor, em: &mut Emitted, arity: usize) -> Option<String> {
     if cur.chance(1, 4) {
         return None;
     }
@@ -564,7 +673,9 @@ fn gen_move_vec(cur: &mut Cursor, arity: usize) -> Option<String> {
         if i > 0 {
             out.push_str(", ");
         }
-        out.push(["<", ">", "."][cur.choose(3)].chars().next().unwrap());
+        let dir = cur.choose(3);
+        em.mark(["move.left", "move.right", "move.stay"][dir]);
+        out.push(["<", ">", "."][dir].chars().next().unwrap());
     }
     out.push(']');
     Some(out)
@@ -584,9 +695,14 @@ fn gen_move_vec(cur: &mut Cursor, arity: usize) -> Option<String> {
 /// line break first, so this is the one place in the generator that
 /// deliberately keeps a block comment on the same line as what follows
 /// it; see the module doc for why the other four stay break-only).
-fn gen_qual_target(cur: &mut Cursor, n: &mut u32, prefix: &str) -> String {
+fn gen_qual_target(cur: &mut Cursor, n: &mut u32, em: &mut Emitted, prefix: &str) -> String {
     let mut out = format!("{prefix}{}", cur.choose(3));
     let extra_segments = cur.choose(3);
+    em.mark(if extra_segments == 0 {
+        "qualname.single-segment"
+    } else {
+        "qualname.multi-segment"
+    });
     for _ in 0..extra_segments {
         out.push_str("::");
         if cur.chance(1, 5) {
@@ -602,15 +718,25 @@ fn gen_qual_target(cur: &mut Cursor, n: &mut u32, prefix: &str) -> String {
 /// completion-injectivity rules are later semantic checks the parser never
 /// runs, so any same-kind-agnostic pair is grammar-valid here (symbol maps
 /// are not required to relate to any real alphabet at parse time).
-fn gen_sym_map(cur: &mut Cursor) -> String {
+fn gen_sym_map(cur: &mut Cursor, em: &mut Emitted) -> String {
     let mut out = String::from("with map { ");
     let n = 1 + cur.choose(3);
     for i in 0..n {
         if i > 0 {
             out.push_str(", ");
         }
-        let arrow = if cur.chance(1, 2) { "->" } else { "=>" };
-        out.push_str(&format!("{} {arrow} {}", gen_sym(cur).0, gen_sym(cur).0));
+        let bidirectional = cur.chance(1, 2);
+        let arrow = if bidirectional { "->" } else { "=>" };
+        em.mark(if bidirectional {
+            "map.bidirectional"
+        } else {
+            "map.read-only"
+        });
+        out.push_str(&format!(
+            "{} {arrow} {}",
+            gen_sym(cur, em).0,
+            gen_sym(cur, em).0
+        ));
     }
     out.push_str(" }");
     out
@@ -621,17 +747,28 @@ fn gen_sym_map(cur: &mut Cursor) -> String {
 /// terminator (`return`/`stop`/`halt`). Neither the parameter name nor the
 /// target need resolve to anything real at parse time (see the module
 /// doc), so both are drawn from small synthetic pools.
-fn gen_binding_arg(cur: &mut Cursor, n: &mut u32) -> String {
+fn gen_binding_arg(cur: &mut Cursor, n: &mut u32, em: &mut Emitted) -> String {
     let param = format!("p{}", cur.choose(4));
     match cur.choose(5) {
-        0 => format!("{param} = return"),
-        1 => format!("{param} = stop"),
-        2 => format!("{param} = halt"),
+        0 => {
+            em.mark("arg.terminator.return");
+            format!("{param} = return")
+        }
+        1 => {
+            em.mark("arg.terminator.stop");
+            format!("{param} = stop")
+        }
+        2 => {
+            em.mark("arg.terminator.halt");
+            format!("{param} = halt")
+        }
         _ => {
             let target = format!("tgt{}", uid(n));
             if cur.chance(1, 3) {
-                format!("{param} = {target} {}", gen_sym_map(cur))
+                em.mark("arg.named.mapped");
+                format!("{param} = {target} {}", gen_sym_map(cur, em))
             } else {
+                em.mark("arg.named.bare");
                 format!("{param} = {target}")
             }
         }
@@ -641,8 +778,17 @@ fn gen_binding_arg(cur: &mut Cursor, n: &mut u32) -> String {
 /// A `(args)` binding list, 0-3 arguments (docs/tmt/language.md (reuse) —
 /// every one of `call`/`graft`/`bind` shares this list shape). `interior`
 /// gates this generator's binding-argument-list interior-comment coverage
-/// (the fourth of its four covered list positions).
-fn gen_binding_args(cur: &mut Cursor, n: &mut u32, interior: bool) -> String {
+/// (the fourth of its four covered list positions). Returns the list text
+/// and how many arguments it holds: `graft` and `bind` each stamp their
+/// own emptiness label off that count, and the shape of those two labels
+/// differs (a graft stamps both sides, a bind only the non-empty one), so
+/// the caller decides rather than this shared helper.
+fn gen_binding_args(
+    cur: &mut Cursor,
+    n: &mut u32,
+    em: &mut Emitted,
+    interior: bool,
+) -> (String, usize) {
     let mut out = String::from("(");
     let count = cur.choose(4);
     for i in 0..count {
@@ -652,14 +798,14 @@ fn gen_binding_args(cur: &mut Cursor, n: &mut u32, interior: bool) -> String {
         if interior && cur.chance(1, 6) {
             push_comment_break(cur, n, &mut out);
         }
-        out.push_str(&gen_binding_arg(cur, n));
+        out.push_str(&gen_binding_arg(cur, n, em));
     }
     if interior && count > 0 && cur.chance(1, 8) {
         out.push(' ');
         push_comment_break(cur, n, &mut out);
     }
     out.push(')');
-    out
+    (out, count)
 }
 
 /// A `call TARGET(args) then CONT` continuation
@@ -667,13 +813,28 @@ fn gen_binding_args(cur: &mut Cursor, n: &mut u32, interior: bool) -> String {
 /// `return`/`stop`/`halt` — the same four shapes a binding-argument value
 /// takes, but never `with map` (a continuation is not a tape/state
 /// binding).
-fn gen_continuation(cur: &mut Cursor, states: &[String]) -> String {
+fn gen_continuation(cur: &mut Cursor, em: &mut Emitted, states: &[String]) -> String {
     match cur.choose(4) {
-        0 => "return".to_string(),
-        1 => "stop".to_string(),
-        2 => "halt".to_string(),
-        _ if !states.is_empty() => states[cur.choose(states.len())].clone(),
-        _ => "elsewhere".to_string(),
+        0 => {
+            em.mark("continuation.return");
+            "return".to_string()
+        }
+        1 => {
+            em.mark("continuation.stop");
+            "stop".to_string()
+        }
+        2 => {
+            em.mark("continuation.halt");
+            "halt".to_string()
+        }
+        _ if !states.is_empty() => {
+            em.mark("continuation.state");
+            states[cur.choose(states.len())].clone()
+        }
+        _ => {
+            em.mark("continuation.state");
+            "elsewhere".to_string()
+        }
     }
 }
 
@@ -689,6 +850,7 @@ fn gen_continuation(cur: &mut Cursor, states: &[String]) -> String {
 fn gen_transition(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     states: &[String],
     in_routine: bool,
     allow_call: bool,
@@ -712,21 +874,38 @@ fn gen_transition(
     };
     let choice = cur.choose(total);
     if has_action && choice == shapes.len() {
+        em.mark("transition.stay");
         return String::new(); // omitted — "stay in the current state"
     }
     match shapes[choice] {
-        0 => format!("goto {}", gen_target(cur, n, states)),
-        1 => gen_target(cur, n, states), // bare-name sugar
-        2 => "stop".to_string(),
-        3 => "halt".to_string(),
+        0 => {
+            em.mark("transition.goto.explicit");
+            format!("goto {}", gen_target(cur, n, states))
+        }
+        1 => {
+            em.mark("transition.goto.sugar");
+            gen_target(cur, n, states) // bare-name sugar
+        }
+        2 => {
+            em.mark("transition.stop");
+            "stop".to_string()
+        }
+        3 => {
+            em.mark("transition.halt");
+            "halt".to_string()
+        }
         4 => {
-            let callee = gen_qual_target(cur, n, "callee");
+            em.mark("transition.call");
+            let callee = gen_qual_target(cur, n, em, "callee");
             let interior = cur.chance(1, 4);
-            let args = gen_binding_args(cur, n, interior);
-            let then = gen_continuation(cur, states);
+            let (args, _) = gen_binding_args(cur, n, em, interior);
+            let then = gen_continuation(cur, em, states);
             format!("call {callee}{args} then {then}")
         }
-        _ => "return".to_string(),
+        _ => {
+            em.mark("transition.return");
+            "return".to_string()
+        }
     }
 }
 
@@ -754,6 +933,7 @@ fn gen_target(cur: &mut Cursor, n: &mut u32, states: &[String]) -> String {
 fn gen_rule(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     pad: &str,
     arity: usize,
     states: &[String],
@@ -768,25 +948,40 @@ fn gen_rule(
     }
     out.push_str(pad);
     let pattern_interior = cur.chance(1, 3);
-    let (pattern, bindings) = gen_pattern(cur, n, arity, pattern_interior);
+    let (pattern, bindings) = gen_pattern(cur, n, em, arity, pattern_interior);
     out.push_str(&pattern);
     out.push_str(" -> ");
     let debugger = cur.chance(1, 8);
+    em.mark(if debugger {
+        "rule.debugger"
+    } else {
+        "rule.no-debugger"
+    });
     if debugger {
         out.push_str("debugger ");
     }
-    let write = gen_write_vec(cur, arity, &bindings);
+    let write = gen_write_vec(cur, em, arity, &bindings);
+    em.mark(if write.is_some() {
+        "rule.write-vec"
+    } else {
+        "rule.no-write-vec"
+    });
     if let Some(w) = &write {
         out.push_str(w);
         out.push(' ');
     }
-    let mov = gen_move_vec(cur, arity);
+    let mov = gen_move_vec(cur, em, arity);
+    em.mark(if mov.is_some() {
+        "rule.move-vec"
+    } else {
+        "rule.no-move-vec"
+    });
     if let Some(m) = &mov {
         out.push_str(m);
         out.push(' ');
     }
     let has_action = debugger || write.is_some() || mov.is_some();
-    let transition = gen_transition(cur, n, states, in_routine, allow_call, has_action);
+    let transition = gen_transition(cur, n, em, states, in_routine, allow_call, has_action);
     out.push_str(&transition);
     out.push(';');
     if cur.chance(1, 5) {
@@ -810,6 +1005,7 @@ fn gen_rule(
 fn gen_state(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     pad: &str,
     name: &str,
     entry: bool,
@@ -820,9 +1016,11 @@ fn gen_state(
     out: &mut String,
 ) {
     if cur.chance(1, 3) {
-        gen_doc_run(cur, n, pad, out);
+        em.mark("state.documented");
+        gen_doc_run(cur, n, em, true, pad, out);
     }
     out.push_str(pad);
+    em.mark(if entry { "state.entry" } else { "state.plain" });
     if entry {
         out.push_str("entry ");
     }
@@ -838,12 +1036,15 @@ fn gen_state(
     } else {
         1 + cur.choose(4)
     };
+    if rules == 0 {
+        em.mark("state.ruleless");
+    }
     for i in 0..rules {
         if i > 0 && cur.chance(1, 5) {
             out.push('\n');
         }
         gen_rule(
-            cur, n, &inner_pad, arity, states, in_routine, allow_call, out,
+            cur, n, em, &inner_pad, arity, states, in_routine, allow_call, out,
         );
     }
     if cur.chance(1, 6) {
@@ -864,21 +1065,38 @@ fn gen_state(
 /// (`graft`)). A non-entry graft MUST carry `as NAME` — omitting it is a
 /// parse-time `GraftNeedsName` error — so `entry` and plain are the two
 /// shapes exercised, and only the entry form ever omits the name.
-fn gen_graft(cur: &mut Cursor, n: &mut u32, pad: &str, entry: bool, out: &mut String) {
+fn gen_graft(
+    cur: &mut Cursor,
+    n: &mut u32,
+    em: &mut Emitted,
+    pad: &str,
+    entry: bool,
+    out: &mut String,
+) {
     if cur.chance(1, 4) {
-        gen_doc_run(cur, n, pad, out);
+        em.mark("graft.documented");
+        gen_doc_run(cur, n, em, true, pad, out);
     }
     out.push_str(pad);
+    em.mark(if entry { "graft.entry" } else { "graft.plain" });
     if entry {
         out.push_str("entry ");
     }
-    let target = gen_qual_target(cur, n, "graph");
+    let target = gen_qual_target(cur, n, em, "graph");
     let interior = cur.chance(1, 4);
-    out.push_str(&format!(
-        "graft {target}{}",
-        gen_binding_args(cur, n, interior)
-    ));
+    let (args, arg_count) = gen_binding_args(cur, n, em, interior);
+    em.mark(if arg_count == 0 {
+        "graft.args.empty"
+    } else {
+        "graft.args.non-empty"
+    });
+    out.push_str(&format!("graft {target}{args}"));
     let needs_name = !entry || cur.chance(2, 3);
+    em.mark(if needs_name {
+        "graft.named"
+    } else {
+        "graft.anonymous"
+    });
     if needs_name {
         out.push_str(&format!(" as inst{}", uid(n)));
     }
@@ -892,18 +1110,20 @@ fn gen_graft(cur: &mut Cursor, n: &mut u32, pad: &str, entry: bool, out: &mut St
 
 /// A `bind TARGET(args) as NAME;` (docs/tmt/language.md (`bind`)) — the
 /// instance name is always mandatory, unlike a graft's.
-fn gen_bind(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
+fn gen_bind(cur: &mut Cursor, n: &mut u32, em: &mut Emitted, pad: &str, out: &mut String) {
+    em.mark("bind");
     if cur.chance(1, 4) {
-        gen_doc_run(cur, n, pad, out);
+        em.mark("bind.documented");
+        gen_doc_run(cur, n, em, true, pad, out);
     }
     out.push_str(pad);
-    let target = gen_qual_target(cur, n, "callee");
+    let target = gen_qual_target(cur, n, em, "callee");
     let interior = cur.chance(1, 4);
-    out.push_str(&format!(
-        "bind {target}{} as h{};",
-        gen_binding_args(cur, n, interior),
-        uid(n)
-    ));
+    let (args, arg_count) = gen_binding_args(cur, n, em, interior);
+    if arg_count > 0 {
+        em.mark("bind.args.non-empty");
+    }
+    out.push_str(&format!("bind {target}{args} as h{};", uid(n)));
     if cur.chance(1, 5) {
         out.push(' ');
         out.push_str(&gen_comment(cur, n));
@@ -916,9 +1136,15 @@ fn gen_bind(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
 /// a routine/graph takes tapes from its signature instead
 /// (`TapeNotInMachine` is a parse-time error this generator never
 /// triggers by construction, since it only calls this from `gen_machine`).
-fn gen_tape(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
+fn gen_tape(cur: &mut Cursor, n: &mut u32, em: &mut Emitted, pad: &str, out: &mut String) {
     out.push_str(pad);
-    if cur.chance(1, 3) {
+    let volatile = cur.chance(1, 3);
+    em.mark(if volatile {
+        "tape.volatile"
+    } else {
+        "tape.plain"
+    });
+    if volatile {
         out.push_str("volatile ");
     }
     let alphabet = ["ab", "bytes", "chars", "mixed"][cur.choose(4)];
@@ -944,6 +1170,7 @@ fn gen_tape(cur: &mut Cursor, n: &mut u32, pad: &str, out: &mut String) {
 fn gen_world_items(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     pad: &str,
     arity: usize,
     in_routine: bool,
@@ -966,7 +1193,7 @@ fn gen_world_items(
         let want_entry = !entry_placed && (i == item_count - 1 || cur.chance(1, 3));
         if want_entry && prefer_entry_graft {
             entry_placed = true;
-            gen_graft(cur, n, pad, true, out);
+            gen_graft(cur, n, em, pad, true, out);
             continue;
         }
         match cur.choose(4) {
@@ -975,12 +1202,12 @@ fn gen_world_items(
                 entry_placed |= entry;
                 let name = format!("s{}", uid(n));
                 gen_state(
-                    cur, n, pad, &name, entry, arity, &states, in_routine, allow_call, out,
+                    cur, n, em, pad, &name, entry, arity, &states, in_routine, allow_call, out,
                 );
                 states.push(name);
             }
-            1 => gen_graft(cur, n, pad, false, out),
-            _ => gen_bind(cur, n, pad, out),
+            1 => gen_graft(cur, n, em, pad, false, out),
+            _ => gen_bind(cur, n, em, pad, out),
         }
     }
     if !entry_placed {
@@ -991,7 +1218,7 @@ fn gen_world_items(
         let name = format!("s{}", uid(n));
         out.push('\n');
         gen_state(
-            cur, n, pad, &name, true, arity, &states, in_routine, allow_call, out,
+            cur, n, em, pad, &name, true, arity, &states, in_routine, allow_call, out,
         );
     }
 }
@@ -1022,6 +1249,7 @@ fn gen_world_items(
 fn gen_signature(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     is_graph: bool,
     out: &mut String,
 ) -> (usize, Vec<String>) {
@@ -1032,7 +1260,14 @@ fn gen_signature(
         if i > 0 {
             out.push_str(", ");
         }
-        if cur.chance(1, 4) {
+        em.mark("sig.param.tape");
+        let volatile = cur.chance(1, 4);
+        em.mark(if volatile {
+            "sig.tape.volatile"
+        } else {
+            "sig.tape.plain"
+        });
+        if volatile {
             out.push_str("volatile ");
         }
         let alphabet = ["ab", "bytes", "chars"][cur.choose(3)];
@@ -1044,20 +1279,27 @@ fn gen_signature(
         // in the one legal order, `writes` then `preserves`.
         let want_writes = cur.chance(1, 3);
         let want_preserves = cur.chance(1, 3);
+        em.mark(match (want_writes, want_preserves) {
+            (true, true) => "sig.tape.both-clauses",
+            (true, false) => "sig.tape.writes-only",
+            (false, true) => "sig.tape.preserves-only",
+            (false, false) => "sig.tape.no-clause",
+        });
         if want_writes {
             out.push_str(" writes { ");
-            gen_elem_list(cur, n, true, false, out);
+            gen_elem_list(cur, n, em, true, false, out);
             out.push_str(" }");
         }
         if want_preserves {
             out.push_str(" preserves { ");
-            gen_elem_list(cur, n, true, false, out);
+            gen_elem_list(cur, n, em, true, false, out);
             out.push_str(" }");
         }
     }
     if is_graph {
         let exit_count = 1 + cur.choose(2);
         for _ in 0..exit_count {
+            em.mark("sig.param.state");
             out.push_str(", ");
             let name = format!("exit{}", uid(n));
             out.push_str(&format!("state {name}"));
@@ -1070,18 +1312,47 @@ fn gen_signature(
 
 /// One `export? routine|graph NAME(sig) { … }` (docs/tmt/language.md
 /// (worlds)).
-fn gen_reuse(cur: &mut Cursor, n: &mut u32, pad: &str, is_graph: bool, out: &mut String) {
+fn gen_reuse(
+    cur: &mut Cursor,
+    n: &mut u32,
+    em: &mut Emitted,
+    pad: &str,
+    ns_depth: usize,
+    is_graph: bool,
+    out: &mut String,
+) {
+    em.mark(if is_graph { "graph" } else { "routine" });
+    if ns_depth > 0 {
+        em.mark(if is_graph {
+            "graph.namespaced"
+        } else {
+            "routine.namespaced"
+        });
+    }
+    if ns_depth > 1 {
+        em.mark("namespace.nested");
+    }
     if cur.chance(1, 3) {
-        gen_doc_run(cur, n, pad, out);
+        em.mark(if is_graph {
+            "graph.documented"
+        } else {
+            "routine.documented"
+        });
+        gen_doc_run(cur, n, em, true, pad, out);
     }
     out.push_str(pad);
     if cur.chance(1, 3) {
+        em.mark(if is_graph {
+            "graph.exported"
+        } else {
+            "routine.exported"
+        });
         out.push_str("export ");
     }
     let kw = if is_graph { "graph" } else { "routine" };
     let name = format!("{}{}", if is_graph { "g" } else { "r" }, uid(n));
     out.push_str(&format!("{kw} {name}"));
-    let (arity, _exits) = gen_signature(cur, n, is_graph, out);
+    let (arity, _exits) = gen_signature(cur, n, em, is_graph, out);
     out.push_str(" {");
     if cur.chance(1, 4) {
         out.push(' ');
@@ -1094,6 +1365,7 @@ fn gen_reuse(cur: &mut Cursor, n: &mut u32, pad: &str, is_graph: bool, out: &mut
     gen_world_items(
         cur,
         n,
+        em,
         &format!("{pad}  "),
         arity,
         !is_graph,
@@ -1115,9 +1387,11 @@ fn gen_reuse(cur: &mut Cursor, n: &mut u32, pad: &str, is_graph: bool, out: &mut
 /// program has at most one `machine` — a second is a parse-time
 /// `MultipleMachines` error — so `generate_program` calls this exactly
 /// once.
-fn gen_machine(cur: &mut Cursor, n: &mut u32, out: &mut String) {
+fn gen_machine(cur: &mut Cursor, n: &mut u32, em: &mut Emitted, out: &mut String) {
+    em.mark("machine");
     if cur.chance(1, 3) {
-        gen_doc_run(cur, n, "", out);
+        em.mark("machine.documented");
+        gen_doc_run(cur, n, em, true, "", out);
     }
     out.push_str("machine {");
     if cur.chance(1, 4) {
@@ -1127,14 +1401,24 @@ fn gen_machine(cur: &mut Cursor, n: &mut u32, out: &mut String) {
     out.push('\n');
     let arity = 1 + cur.choose(3);
     for _ in 0..arity {
-        gen_tape(cur, n, "  ", out);
+        gen_tape(cur, n, em, "  ", out);
     }
     out.push('\n');
     let prefer_entry_graft = cur.chance(1, 3);
     // `return` is a routine-only shape (see the module doc); `call` IS
     // legitimate directly in a machine body (docs/tmt/language.md
     // (worlds) shows exactly this: `call touch(t = main) then done;`).
-    gen_world_items(cur, n, "  ", arity, false, true, prefer_entry_graft, out);
+    gen_world_items(
+        cur,
+        n,
+        em,
+        "  ",
+        arity,
+        false,
+        true,
+        prefer_entry_graft,
+        out,
+    );
     out.push('}');
     if cur.chance(1, 6) {
         out.push(' ');
@@ -1157,16 +1441,21 @@ fn gen_machine(cur: &mut Cursor, n: &mut u32, out: &mut String) {
 /// (docs/tmt/language.md (namespaces, visibility, and imports)) — is a
 /// real, explicitly legal shape distinct from two differently-named
 /// siblings, so this generator occasionally spells one.
+#[allow(clippy::too_many_arguments)]
 fn gen_namespace(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     pad: &str,
     depth: u32,
+    ns_depth: usize,
     ns_names: &mut Vec<String>,
     out: &mut String,
 ) {
     if cur.chance(1, 3) {
-        gen_doc_run(cur, n, pad, out);
+        // `record: false` — a namespace's own doc run reaches no
+        // extracted declaration; see `gen_doc_run`.
+        gen_doc_run(cur, n, em, false, pad, out);
     }
     out.push_str(pad);
     let name = if !ns_names.is_empty() && cur.chance(1, 4) {
@@ -1188,7 +1477,7 @@ fn gen_namespace(
         if i > 0 && cur.chance(1, 3) {
             out.push('\n');
         }
-        gen_top_item(cur, n, &inner_pad, depth, ns_names, out);
+        gen_top_item(cur, n, em, &inner_pad, depth, ns_depth + 1, ns_names, out);
     }
     out.push_str(pad);
     out.push('}');
@@ -1203,11 +1492,19 @@ fn gen_namespace(
 /// `graph`, or (when `depth` allows) a nested `namespace`. Never a
 /// `machine` — see `gen_namespace`'s doc; `generate_program` is the only
 /// caller that ever places one, and only at `depth == 0`.
+///
+/// `depth` is the recursion budget for nested `namespace` blocks;
+/// `ns_depth` is how many namespaces this item is written INSIDE, which
+/// is what extraction stamps onto the declaration as its `ns` path. The
+/// two count in opposite directions and are not interchangeable.
+#[allow(clippy::too_many_arguments)]
 fn gen_top_item(
     cur: &mut Cursor,
     n: &mut u32,
+    em: &mut Emitted,
     pad: &str,
     depth: u32,
+    ns_depth: usize,
     ns_names: &mut Vec<String>,
     out: &mut String,
 ) {
@@ -1215,14 +1512,29 @@ fn gen_top_item(
     match cur.choose(choices) {
         0 => {
             out.push_str(pad);
-            gen_use(cur, n, out);
+            gen_use(cur, n, em, ns_depth > 0, out);
         }
         1 => {
+            if ns_depth > 0 {
+                em.mark("alphabet.namespaced");
+            }
+            if ns_depth > 1 {
+                em.mark("namespace.nested");
+            }
             if cur.chance(1, 3) {
-                gen_doc_run(cur, n, pad, out);
+                em.mark("alphabet.documented");
+                gen_doc_run(cur, n, em, true, pad, out);
+            } else {
+                em.mark("alphabet.undocumented");
             }
             out.push_str(pad);
-            if cur.chance(1, 3) {
+            let exported = cur.chance(1, 3);
+            em.mark(if exported {
+                "alphabet.exported"
+            } else {
+                "alphabet.private"
+            });
+            if exported {
                 out.push_str("export ");
             }
             let name = format!("ab{}", uid(n));
@@ -1239,7 +1551,7 @@ fn gen_top_item(
                 out.push(' ');
             }
             let elems_interior = cur.chance(1, 3);
-            gen_elem_list(cur, n, false, elems_interior, out);
+            gen_elem_list(cur, n, em, false, elems_interior, out);
             out.push_str(" }");
             if cur.chance(1, 6) {
                 out.push(' ');
@@ -1247,9 +1559,9 @@ fn gen_top_item(
             }
             out.push('\n');
         }
-        2 => gen_reuse(cur, n, pad, false, out),
-        3 => gen_reuse(cur, n, pad, true, out),
-        _ => gen_namespace(cur, n, pad, depth - 1, ns_names, out),
+        2 => gen_reuse(cur, n, em, pad, ns_depth, false, out),
+        3 => gen_reuse(cur, n, em, pad, ns_depth, true, out),
+        _ => gen_namespace(cur, n, em, pad, depth - 1, ns_depth, ns_names, out),
     }
 }
 
@@ -1257,9 +1569,13 @@ fn gen_top_item(
 /// then 2-5 top-level items with the program's one `machine` block
 /// spliced in at a random position among them, separated by the author's
 /// own blank lines.
-fn generate_program(seed: &[u8]) -> String {
+///
+/// Returns the source and the set of construct labels the generator
+/// CHOSE while writing it — see [`Emitted`].
+fn generate_program(seed: &[u8]) -> (String, Emitted) {
     let mut cur = Cursor::new(seed);
     let mut n = 0u32;
+    let mut em = Emitted::default();
     let mut out = String::new();
     let mut ns_names: Vec<String> = Vec::new();
 
@@ -1275,7 +1591,7 @@ fn generate_program(seed: &[u8]) -> String {
             out.push('\n');
         }
         if u == machine_at {
-            gen_machine(&mut cur, &mut n, &mut out);
+            gen_machine(&mut cur, &mut n, &mut em, &mut out);
         } else {
             // depth = 2: a top-level namespace (depth 2 -> 1) may itself
             // contain one nested namespace (depth 1 -> 0), matching
@@ -1284,30 +1600,21 @@ fn generate_program(seed: &[u8]) -> String {
             // arm at the top level, but that namespace's own body was
             // then generated at depth 0, where the arm is unreachable, so
             // a namespace could never actually contain another one.
-            gen_top_item(&mut cur, &mut n, "", 2, &mut ns_names, &mut out);
+            gen_top_item(&mut cur, &mut n, &mut em, "", 2, 0, &mut ns_names, &mut out);
         }
     }
-    out
+    (out, em)
 }
 
-/// Both halves of the extraction oracle over one source: what the C1
-/// path lowers, and what the green tree extracts. Shared by the property
-/// below and by the coverage floor, so the two can never drift into
-/// measuring different pipelines.
-static PROBE_CASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static PROBE_FIRST_FAIL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn both_paths(src: &str) -> (Program, Program) {
+/// The `Program` one generated source extracts to, through the same
+/// front end the compiler runs: a `WithComments` lex, the green parse,
+/// then extraction.
+fn extracted(src: &str) -> Program {
     let tokens = lex_with(src, LexMode::WithComments)
         .unwrap_or_else(|e| panic!("generator emitted an unlexable program: {e:?}\n{src}"));
-    let expected = lower_cst(
-        &parse_cst(&tokens)
-            .unwrap_or_else(|e| panic!("generator emitted an invalid program: {e:?}\n{src}")),
-    );
     let green = parse_green_from_tokens(src, &tokens)
         .unwrap_or_else(|e| panic!("generator emitted an invalid program: {e:?}\n{src}"));
-    let actual = extract_program(&SyntaxNode::new_root(green), src);
-    (actual, expected)
+    extract_program(&SyntaxNode::new_root(green), src)
 }
 
 proptest! {
@@ -1318,42 +1625,11 @@ proptest! {
     /// (docs/core.md (syntax trees)).
     #[test]
     fn generated_programs_round_trip(seed in prop::collection::vec(any::<u8>(), 1..512)) {
-        let src = generate_program(&seed);
+        let (src, _) = generate_program(&seed);
         let tree = parse_green(&src)
             .unwrap_or_else(|e| panic!("generator emitted an invalid program: {e:?}\n{src}"));
         let root = SyntaxNode::new_root(tree);
         prop_assert_eq!(root.text(), src);
-    }
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(2000))]
-
-    /// Extraction parity over generated programs. The lossless property
-    /// above pins the tree's TEXT; this pins what the tree MEANS, and it
-    /// is the first property in this file to look at structure at all.
-    /// The corpus half of the same oracle is `syntax_parity.rs`; what
-    /// this half adds is the shapes nobody wrote — reopened namespaces,
-    /// comments in every positional slot, header tokens split across
-    /// lines, arithmetic folds, omitted transitions.
-    ///
-    /// Two `Program` fields are outside any equality oracle by
-    /// construction and are pinned in `syntax::extract`'s unit tests
-    /// instead; `syntax_parity.rs`'s module doc names both.
-    #[test]
-    fn generated_programs_extract_identically_on_both_paths(
-        seed in prop::collection::vec(any::<u8>(), 1..512)
-    ) {
-        let src = generate_program(&seed);
-        let (actual, expected) = both_paths(&src);
-        let k = PROBE_CASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if actual != expected {
-            let _ = PROBE_FIRST_FAIL.compare_exchange(0, k,
-                std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed);
-            eprintln!("PROBE: divergence at case {k}, first at {}",
-                PROBE_FIRST_FAIL.load(std::sync::atomic::Ordering::Relaxed));
-        }
-        prop_assert_eq!(actual, expected, "extraction diverged on:\n{}", src);
     }
 }
 
@@ -1368,16 +1644,18 @@ proptest! {
 /// while `SigParamKind::Tape { writes: Some(_), .. }` measures what
 /// extraction actually had to rebuild.
 ///
-/// This set is compared against the tally in BOTH directions, matching
-/// this repo's other drift guards: a required label never stamped means
-/// the parity property above runs blind on that construct, and a label
-/// stamped but not required means the tally and this list disagree about
-/// a name.
+/// This is the SWEEP-WIDE floor: every label here must be observed at
+/// least once across the whole sweep, and no label outside it may ever
+/// be stamped. Both directions, matching this repo's other drift guards
+/// — a required label never stamped means the sweep runs blind on that
+/// construct, and a label stamped but not required means the tally and
+/// this list disagree about a name. The stricter PER-PROGRAM check lives
+/// in [`CHOSEN_CONSTRUCTS`].
 ///
 /// **Three axes are deliberately absent, each for a measured reason.**
 /// `machine: None` (a library `.tmc`) — `generate_program` always emits
-/// exactly one `machine` block, and the shape is covered by the corpus
-/// half of the oracle, where the embedded stdlib is exactly that.
+/// exactly one `machine` block, and the shape is covered by the shipped
+/// corpus, where the embedded stdlib is exactly that.
 /// `entry state` inside a `graph` and `entry graft` inside a `routine` —
 /// the generator ties the entry shape to the world kind on purpose (its
 /// own module doc says why), and extraction reads `entry` off the STATE
@@ -1502,6 +1780,132 @@ const REQUIRED_CONSTRUCTS: &[&str] = &[
     "doc.deprecated",
 ];
 
+/// The CHOSEN subset of [`REQUIRED_CONSTRUCTS`]: the labels the
+/// generator can record at the moment it takes the branch, so that for
+/// every single generated program the generator's recorded set and
+/// [`stamp_program`]'s set restricted to this list must be EQUAL. That
+/// per-program equality is the strong half of the coverage oracle; the
+/// sweep-wide floor above is the weak half.
+///
+/// **The five labels deliberately left out are DERIVED, not chosen.**
+/// Each is a consequence of a shape rather than of a decision, so the
+/// generator could only record it by re-deriving what extraction does —
+/// and a two-directional set-compare over a re-derivation fails on
+/// precisely the interesting cases. They stay covered by the
+/// sweep-wide floor, which is what they can honestly carry:
+///
+/// - `sym.number.leading-zero` — stamped from the WRITTEN spelling
+///   (`written.len() > 1 && written.starts_with('0')`), a property of
+///   which entry of `NUMBERS` a draw landed on, not of a branch.
+/// - `doc.paragraphs.one` / `doc.paragraphs.many` — the count comes out
+///   of `crate::parser::reduce_doc_run`'s fold over blank `?` lines, not
+///   out of how many `?` lines were written.
+/// - `write.subst.passthrough` — stamped when the substitution's WHOLE
+///   expression is a bare `Var`, which depends on how the fold's
+///   operators and parens nest, not on which `gen_write_cell` arm ran
+///   (the arithmetic arm can produce a bare `Var` too).
+/// - `fold.nested` — stamped when a `Bin` node holds another, i.e. on
+///   the total operator count of one cell's expression across its
+///   parenthesised sub-expressions.
+const CHOSEN_CONSTRUCTS: &[&str] = &[
+    "import.alias",
+    "import.bare",
+    "import.multi-segment",
+    "import.namespaced",
+    "import.file-level",
+    "alphabet.exported",
+    "alphabet.private",
+    "alphabet.documented",
+    "alphabet.undocumented",
+    "alphabet.namespaced",
+    "alphabet.elem.single",
+    "alphabet.elem.range",
+    "sym.glyph",
+    "sym.glyph.escaped",
+    "sym.number",
+    "routine",
+    "routine.exported",
+    "routine.documented",
+    "routine.namespaced",
+    "graph",
+    "graph.exported",
+    "graph.documented",
+    "graph.namespaced",
+    "namespace.nested",
+    "sig.param.state",
+    "sig.param.tape",
+    "sig.tape.volatile",
+    "sig.tape.plain",
+    "sig.tape.writes-only",
+    "sig.tape.preserves-only",
+    "sig.tape.both-clauses",
+    "sig.tape.no-clause",
+    "contract.empty",
+    "contract.non-empty",
+    "machine",
+    "machine.documented",
+    "tape.volatile",
+    "tape.plain",
+    "state.entry",
+    "state.plain",
+    "state.documented",
+    "state.ruleless",
+    "graft.entry",
+    "graft.plain",
+    "graft.named",
+    "graft.anonymous",
+    "graft.documented",
+    "graft.args.empty",
+    "graft.args.non-empty",
+    "bind",
+    "bind.documented",
+    "bind.args.non-empty",
+    "qualname.single-segment",
+    "qualname.multi-segment",
+    "rule.debugger",
+    "rule.no-debugger",
+    "rule.write-vec",
+    "rule.no-write-vec",
+    "rule.move-vec",
+    "rule.no-move-vec",
+    "pattern.wildcard",
+    "pattern.single",
+    "pattern.range",
+    "pattern.bound",
+    "pattern.unbound",
+    "write.keep",
+    "write.lit",
+    "write.subst.int",
+    "write.subst.fold",
+    "fold.add",
+    "fold.sub",
+    "fold.mul",
+    "fold.rem",
+    "move.left",
+    "move.right",
+    "move.stay",
+    "transition.goto.explicit",
+    "transition.goto.sugar",
+    "transition.call",
+    "transition.return",
+    "transition.stop",
+    "transition.halt",
+    "transition.stay",
+    "continuation.state",
+    "continuation.return",
+    "continuation.stop",
+    "continuation.halt",
+    "arg.named.mapped",
+    "arg.named.bare",
+    "arg.terminator.return",
+    "arg.terminator.stop",
+    "arg.terminator.halt",
+    "map.bidirectional",
+    "map.read-only",
+    "doc.attention",
+    "doc.deprecated",
+];
+
 /// A splitmix64 stream, turning one test-fixed root seed into the byte
 /// vectors the coverage sweep feeds [`generate_program`]. Deterministic
 /// on purpose: a coverage floor that drifts case to case reports a
@@ -1517,9 +1921,9 @@ impl SplitMix {
         z ^ (z >> 31)
     }
 
-    /// One seed shaped like the property's own `1..512` byte vector, so
-    /// the sweep measures the SAME distribution the parity property runs
-    /// over rather than a differently-shaped one.
+    /// One seed shaped like the lossless property's own `1..512` byte
+    /// vector, so the sweep measures the SAME distribution that property
+    /// runs over rather than a differently-shaped one.
     fn seed(&mut self) -> Vec<u8> {
         let len = 1 + (self.next_u64() % 511) as usize;
         (0..len).map(|_| self.next_u64() as u8).collect()
@@ -1937,38 +2341,71 @@ fn stamp_program(program: &Program, seen: &mut BTreeSet<&'static str>) {
     }
 }
 
-/// The coverage floor for the parity property above. A property is only
-/// as strong as the shapes it reaches, and this generator was built for a
-/// different job — its own module doc says it asserts `text() == src` and
-/// nothing about structure — so "how many cases ran" is not evidence that
-/// any given construct was ever extracted. This measures it: it sweeps
-/// the same generator over the same seed distribution, extracts each
-/// program through the same [`both_paths`] the property uses, and
-/// requires every construct in [`REQUIRED_CONSTRUCTS`] to have been
-/// observed at least once.
+/// The construct-coverage oracle, in two strengths.
 ///
-/// It is a floor, not a snapshot: narrowing the generator so a construct
-/// stops being emitted fails here rather than silently weakening the
-/// property.
+/// **Per program, the strong one**: the labels the generator RECORDED
+/// while writing the source and the CHOSEN labels [`stamp_program`] reads
+/// back off the extracted `Program` are the same set, compared in both
+/// directions. The generator is the independent side here — it decides
+/// in TEXT, extraction rebuilds from a tree — so a construct the
+/// generator wrote and extraction dropped fails, and so does a construct
+/// extraction reports that nobody wrote. [`CHOSEN_CONSTRUCTS`] names the
+/// labels this half covers, and its doc comment names the five it cannot
+/// and why.
+///
+/// **Across the sweep, the floor**: every label in
+/// [`REQUIRED_CONSTRUCTS`] — the CHOSEN ones and the five derived ones
+/// alike — is observed at least once, and nothing outside that list is
+/// ever stamped. A floor, not a snapshot: narrowing the generator so a
+/// construct stops being emitted fails here rather than silently
+/// weakening every property in this file.
 #[test]
 fn the_generator_reaches_every_construct_extraction_rebuilds() {
-    let mut rng = SplitMix(0x7A5C_0DE5_1234_5678);
-    let mut seen: BTreeSet<&'static str> = BTreeSet::new();
-    for _ in 0..600 {
-        let src = generate_program(&rng.seed());
-        let (actual, expected) = both_paths(&src);
-        // Sweeping is cheap; checking parity while here is cheaper than
-        // explaining why the sweep looked at a program and did not.
-        assert_eq!(actual, expected, "extraction diverged on:\n{src}");
-        stamp_program(&actual, &mut seen);
-    }
-
     let required: BTreeSet<&'static str> = REQUIRED_CONSTRUCTS.iter().copied().collect();
     assert_eq!(
         required.len(),
         REQUIRED_CONSTRUCTS.len(),
         "REQUIRED_CONSTRUCTS has a duplicate label"
     );
+    let chosen: BTreeSet<&'static str> = CHOSEN_CONSTRUCTS.iter().copied().collect();
+    assert_eq!(
+        chosen.len(),
+        CHOSEN_CONSTRUCTS.len(),
+        "CHOSEN_CONSTRUCTS has a duplicate label"
+    );
+    assert!(
+        chosen.is_subset(&required),
+        "CHOSEN_CONSTRUCTS names a label REQUIRED_CONSTRUCTS does not: {:?}",
+        chosen.difference(&required).collect::<Vec<_>>()
+    );
+
+    let mut rng = SplitMix(0x7A5C_0DE5_1234_5678);
+    let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    for case in 0..600 {
+        let (src, emitted) = generate_program(&rng.seed());
+        let program = extracted(&src);
+        let mut stamped: BTreeSet<&'static str> = BTreeSet::new();
+        stamp_program(&program, &mut stamped);
+
+        let unlisted: Vec<&&str> = emitted.0.difference(&chosen).collect();
+        assert!(
+            unlisted.is_empty(),
+            "case {case}: the generator recorded labels CHOSEN_CONSTRUCTS does not list: \
+             {unlisted:?}"
+        );
+        let stamped_chosen: BTreeSet<&'static str> =
+            stamped.intersection(&chosen).copied().collect();
+        let dropped: Vec<&&str> = emitted.0.difference(&stamped_chosen).collect();
+        let invented: Vec<&&str> = stamped_chosen.difference(&emitted.0).collect();
+        assert!(
+            dropped.is_empty() && invented.is_empty(),
+            "case {case}: the generator wrote {dropped:?} and extraction did not rebuild it; \
+             extraction reported {invented:?} and the generator never wrote it. On:\n{src}"
+        );
+
+        seen.extend(stamped);
+    }
+
     let unreached: Vec<&&str> = required.difference(&seen).collect();
     assert!(
         unreached.is_empty(),

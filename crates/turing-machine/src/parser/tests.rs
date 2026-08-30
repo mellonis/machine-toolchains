@@ -1080,15 +1080,6 @@ machine { // on the open brace
     assert_eq!(text, "doc /* not this — doc payload is verbatim */");
 }
 
-#[test]
-fn parse_equals_lower_cst_after_parse_cst() {
-    // The seam contract, exercised on a real program.
-    let tokens = lex(A5).unwrap();
-    let via_seam = lower_cst(&parse_cst(&tokens).unwrap());
-    let via_parse = parse(A5).unwrap();
-    assert_eq!(via_seam, via_parse);
-}
-
 // ---------------------------------------------------------------------------
 // Spans are retained on the things later phases will name.
 // ---------------------------------------------------------------------------
