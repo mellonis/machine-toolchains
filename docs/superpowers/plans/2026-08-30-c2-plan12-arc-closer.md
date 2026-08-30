@@ -694,8 +694,8 @@ The shape, for a span hole:
     /// of a declaration that never errors.
     ///
     /// Enforcement is this assertion. The values were validated against
-    /// the C1 lowering before it was deleted; they are literals now
-    /// because there is no second implementation left to ask.
+    /// the C1 lowering while it was still callable; once C1 is gone the
+    /// literal is unfalsifiable except by re-deriving the grammar by hand.
     #[test]
     fn declaration_spans_are_pinned_by_value() {
         let src = "alphabet ab { '0', '1' }\n";
@@ -703,7 +703,10 @@ The shape, for a span hole:
         let a = &p.alphabets[0];
         // `Alphabet` carries `name_span`, `line` and `col` — there is no
         // whole-declaration `span` field on it. Values measured against
-        // the C1 lowering of this exact source before C1 was deleted.
+        // the C1 lowering WHILE IT IS STILL CALLABLE — this task runs
+        // before the deletion, so write the claim in the present tense.
+        // A comment saying "before C1 was removed" is false on the day
+        // it is written and stays false until Task 7 lands.
         // `Pos` comes from `mtc_core::diagnostics` — `parser.rs:23`
         // already imports it as `use mtc_core::diagnostics::{Pos, Span};`,
         // so a test module with `use super::*;` needs no new import.
