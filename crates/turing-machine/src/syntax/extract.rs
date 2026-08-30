@@ -1089,6 +1089,7 @@ pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
 mod tests {
     use std::collections::HashSet;
 
+    use mtc_core::diagnostics::Pos;
     use mtc_core::syntax::AstNode;
     use proptest::prelude::*;
 
@@ -1938,6 +1939,89 @@ mod tests {
         assert_eq!(
             program.imports[0].line, 22,
             "an import's line is its FIRST path segment's, not its LAST's"
+        );
+    }
+
+    /// A `Rule`'s `transition` field carries its own `span`, and nothing
+    /// in the crate ever asserts it: a diagnostic points at a
+    /// declaration's or a pattern's span, never at a bare transition's,
+    /// so the position half of `reparse_transition`
+    /// (`crate::parser::reparse_transition`) had no pin at all once the
+    /// C1 differential oracle stopped running — only its CONTENT (the
+    /// `explicit` flag, `Call.args`, `Continuation`, …) is read anywhere
+    /// downstream.
+    ///
+    /// Proven to discriminate: a uniform `+1` on every `Transition`
+    /// variant's `span.start.col` inside `reparse_transition`'s returned
+    /// value (a match over all six variants, each arm bumping the
+    /// column before returning) turns this test red by name, while
+    /// every other test in the crate (`--lib` and the full single-crate
+    /// suite alike) stays green. Reverting the mutation turns it back
+    /// green.
+    ///
+    /// Covers three of the six variants (`Goto` in both its `explicit`
+    /// spellings, and `Stop`) in one fixture, since the mutation is
+    /// uniform across all six and a single variant already closes the
+    /// hole — the extra two are cheap insurance, not required breadth.
+    /// Every literal below was validated against the C1 lowering before
+    /// it was removed; they are literals now because there is no second
+    /// implementation left to ask.
+    #[test]
+    fn transition_spans_are_pinned_by_value() {
+        let src = "alphabet ab { '0', '1' }\n\
+                   \n\
+                   machine {\n\
+                   \x20 tape main: ab;\n\
+                   \x20 entry state a {\n\
+                   \x20   [*] -> goto b;\n\
+                   \x20 }\n\
+                   \x20 state b {\n\
+                   \x20   [*] -> c;\n\
+                   \x20 }\n\
+                   \x20 state c {\n\
+                   \x20   [*] -> stop;\n\
+                   \x20 }\n\
+                   }\n";
+        let program: Program = crate::parser::parse(src).expect("parses");
+        let states = &program
+            .machine
+            .as_ref()
+            .expect("fixture declares a machine")
+            .states;
+
+        assert_eq!(
+            states[0].rules[0].transition,
+            Transition::Goto {
+                name: "b".to_string(),
+                explicit: true,
+                span: Span {
+                    start: Pos { line: 6, col: 12 },
+                    end: Pos { line: 6, col: 18 },
+                },
+            },
+            "`goto b` — span runs from the `goto` keyword to the name's end"
+        );
+        assert_eq!(
+            states[1].rules[0].transition,
+            Transition::Goto {
+                name: "c".to_string(),
+                explicit: false,
+                span: Span {
+                    start: Pos { line: 9, col: 12 },
+                    end: Pos { line: 9, col: 13 },
+                },
+            },
+            "bare-name goto sugar — span is the name token alone"
+        );
+        assert_eq!(
+            states[2].rules[0].transition,
+            Transition::Stop {
+                span: Span {
+                    start: Pos { line: 12, col: 12 },
+                    end: Pos { line: 12, col: 16 },
+                },
+            },
+            "`stop` — span is the `stop` keyword token"
         );
     }
 
