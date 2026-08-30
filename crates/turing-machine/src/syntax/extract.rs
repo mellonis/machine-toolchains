@@ -1959,13 +1959,14 @@ mod tests {
     /// suite alike) stays green. Reverting the mutation turns it back
     /// green.
     ///
-    /// Covers three of the six variants (`Goto` in both its `explicit`
-    /// spellings, and `Stop`) in one fixture, since the mutation is
-    /// uniform across all six and a single variant already closes the
-    /// hole — the extra two are cheap insurance, not required breadth.
-    /// Every literal below was validated against the C1 lowering before
-    /// it was removed; they are literals now because there is no second
-    /// implementation left to ask.
+    /// Covers two of the six variants (`Goto`, in both its `explicit`
+    /// spellings, and `Stop`) across three assertions in one fixture,
+    /// since the mutation is uniform across all six and a single
+    /// variant already closes the hole — the extra assertions are
+    /// cheap insurance, not required breadth. Every literal below was
+    /// validated against the C1 lowering while it is still callable;
+    /// once C1 is deleted this literal is unfalsifiable except by
+    /// re-deriving the grammar by hand.
     #[test]
     fn transition_spans_are_pinned_by_value() {
         let src = "alphabet ab { '0', '1' }\n\
