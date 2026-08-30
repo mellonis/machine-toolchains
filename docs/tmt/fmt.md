@@ -353,8 +353,21 @@ dropped — the printer is still whitespace-only — but the comment does
 not reprint where it was written. Two are worth naming: one is the
 source of the idempotency exception above, the other is not.
 
-**Between a declaration's keyword and its name.** The comment moves into
-the declaration's body, ahead of the body's first item:
+**Between a declaration's keyword and its name.** The comment cannot
+stay there, and where it goes depends on what follows the name:
+
+- a block body whose items each take a line — a `state`, a `namespace` —
+  takes it as an own-line comment ahead of the body's first item;
+- a parenthesized list — a `routine`/`graph` signature, a `graft`'s
+  binding list — takes it riding the `(`, which breaks that list one
+  entry per line;
+- an `alphabet`'s brace body, whose elements are comma-separated and can
+  share a line, takes it riding the `{` — the one destination that costs
+  a second pass, below;
+- a declaration with none of those, such as a `tape`, takes it as a
+  trailing comment after the `;`.
+
+The block-body case:
 
 ```
 state /* mid */ s {
@@ -371,32 +384,45 @@ state s {
 }
 ```
 
+and the signature case:
+
+```
+routine /* r */ r(tape t: ab) {
+```
+
+prints as
+
+```
+routine r( /* r */
+  tape t: ab
+) {
+```
+
 If the author broke the line between the comment and the name, that
 break comes back as a blank line under the relocated comment — `entry
 // why` on its own line, with `state t {` beneath it, prints the `// why`
 inside the body followed by a blank.
 
-This is the exception to **Idempotent** above, and it bites only when the
-body would otherwise have printed on one line. The comment lands just
-inside the `{`, and on the next parse a comment riding an opening brace
-forces that body across several lines
-([Comments inside a list](#comments-inside-a-list), above — a same-line
-`/* … */` trailing an *entry* stays inline; one riding the brace does
-not). A body already written across several lines has nothing left to
-break, so it is a fixed point on the first pass. A body that would have
-printed inline takes two. The source:
+**Why the `alphabet` destination is the exception to
+[Idempotent](#the-four-properties).** It is the shape pass 1 leaves
+behind, not anything about the source. Pass 1 puts the comment on the
+brace line and leaves the elements on that line with it, so
 
 ```
 alphabet /* a */ ab { '_' }
 ```
 
-pass 1:
+becomes
 
 ```
 alphabet ab { /* a */ '_' }
 ```
 
-pass 2, and every pass after it:
+— and that is not a shape this printer produces from a source already
+written that way: a comment riding the `{` breaks the body one element
+per line ([Comments inside a list](#comments-inside-a-list), above, where
+a same-line `/* … */` trailing an *entry* stays inline and one riding the
+brace does not). So pass 2 breaks it, and every pass after it agrees:
 
 ```
 alphabet ab { /* a */
@@ -404,8 +430,14 @@ alphabet ab { /* a */
 }
 ```
 
-So `tmt fmt --check` reports one change on a file carrying that shape,
-and running `tmt fmt` twice settles it.
+The three other destinations are each already a shape the printer
+reprints unchanged, so they settle on the first pass. Nor do the author's
+own line breaks decide anything here: writing that same `alphabet` across
+three lines produces the identical one-line pass 1 and takes the same two
+passes.
+
+So `tmt fmt --check` reports one change on a file carrying an `alphabet`
+of that shape, and running `tmt fmt` twice settles it.
 
 **Inside a `{ … }` write-cell substitution.** The comment is lifted out
 of the substitution and re-attached to the vector's own interior comment
@@ -440,8 +472,10 @@ D0:     .targets hit, miss
 F0:     .frame  tapes=(1, 0)
 ```
 
-The grid is whitespace-only and idempotent on the same terms as the
-`.tmc` printer. Rewrapping an overlong line is not part of it for most
+The grid is whitespace-only and idempotent — it does not inherit the
+`.tmc` printer's relocated-comment exception; the flagship
+`docs/examples/brainfuck-utm.tma` reprints identically on the second
+pass. Rewrapping an overlong line is not part of it for most
 lines — an ordinary instruction, or an over-80 `.frame`/`.routine` line,
 stays that way after formatting. The three unbounded lists are the
 exception: `.targets`, `.exits`, and `.map`, whose single-line form

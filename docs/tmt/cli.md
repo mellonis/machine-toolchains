@@ -1035,9 +1035,13 @@ FLAGS:
 The batch model is identical to `tmt lint`'s — the same walk, the same
 sorted order, the same symlink and dot-entry rules, the same `--exclude`
 semantics, the same per-file fatal that keeps the batch going. Each file's
-extension picks its formatter. Both rewrites are whitespace-only and
-idempotent, which is what makes `--check` a safe CI gate for either
-language. The canonical styles themselves are `docs/tmt/fmt.md`.
+extension picks its formatter. Both rewrites are whitespace-only, which
+is what makes `--check` a safe CI gate for either language, and both are
+idempotent bar one `.tmc` shape — a comment written between a declaration
+keyword and its name settles only on the second pass when the declaration
+is an `alphabet`, so `--check` reports one change on a file carrying that
+shape until it is formatted twice. The canonical styles themselves, and
+that exception, are `docs/tmt/fmt.md`.
 
 By default `tmt fmt` rewrites each file in place, and only when its
 formatted text differs from what is already on disk — an already-canonical
