@@ -17,16 +17,18 @@ CI gate.
 
 ## The four properties
 
-The `.tmc` printer walks the lossless CST rather than the flattened
-program, which buys four properties the formatter's test battery
-exercises against every fixture in the repository.
+The `.tmc` printer walks the lossless green syntax tree rather than the
+flattened program. That tree keeps every token the author wrote,
+comments and whitespace included, which is what buys the four properties
+the formatter's test battery exercises against every fixture in the
+repository.
 
 **Canonical.** Output depends on the token stream and on the few layout
-choices the CST deliberately records — whether a blank line was present,
-whether a state was written on one line, and, for a comment written
-inside a comma-separated list, whether the author put it on its own line
-or trailing an entry. It never depends on the author's spacing. Two files
-differing only in horizontal whitespace format identically:
+choices the author's own line breaks record — whether a blank line was
+present, whether a state was written on one line, and, for a comment
+written inside a comma-separated list, whether the author put it on its
+own line or trailing an entry. It never depends on the author's spacing.
+Two files differing only in horizontal whitespace format identically:
 
 ```
 alphabet   bit{'_','0'}
@@ -48,9 +50,15 @@ The recorded choices are the exception, and they are vertical, not
 horizontal: a state the author wrote across several lines stays in block
 form even when it would fit on one.
 
-**Idempotent.** `format(format(s)) == format(s)`. Every layout decision
-is either derived from token content — widths, the line limit — or from
-a property the printer's own output preserves.
+**Idempotent, with one exception.** Almost every layout decision is
+derived from token content — widths, the line limit — or from a property
+the printer's own output preserves, and for those `format(format(s)) ==
+format(s)`. The exception comes from a comment the printer cannot
+reprint where it was written: moving it can leave it where the next
+parse reads it as a layout signal the author never wrote, and that pass
+lays the file out differently before settling. The one shape this
+happens to, and the second pass that settles it, are
+[Comments the printer moves](#comments-the-printer-moves), below.
 
 **Whitespace-only.** No token is added, dropped, or rewritten. A number
 reprints from its written spelling, a glyph reprints with only the two
@@ -64,7 +72,9 @@ fmt's.
 **Trivia-preserving.** Every comment reprints somewhere — see
 [Comments](#comments) below for the placement rules, including the one
 list kind (a rule's pattern/`write`/`move` vector) whose layout depends
-on the comment's kind rather than only on its position.
+on the comment's kind rather than only on its position, and
+[Comments the printer moves](#comments-the-printer-moves) for the
+positions where "somewhere" is not where the author wrote it.
 
 ## Indentation
 
@@ -334,6 +344,87 @@ pattern column's width, and the plain rule beside it pads to match. The
 third and fourth rules both left the grid — one for its `//` comment,
 the other for an own-line block comment with no `//` in sight — and
 neither one moved the first two rules' shared column.
+
+### Comments the printer moves
+
+A few comment positions have no place in the canonical layout, and a
+comment written in one of them comes out somewhere else. Nothing is
+dropped — the printer is still whitespace-only — but the comment does
+not reprint where it was written. Two are worth naming: one is the
+source of the idempotency exception above, the other is not.
+
+**Between a declaration's keyword and its name.** The comment moves into
+the declaration's body, ahead of the body's first item:
+
+```
+state /* mid */ s {
+  [*] -> stop;
+}
+```
+
+prints as
+
+```
+state s {
+  /* mid */
+  [*] -> stop;
+}
+```
+
+If the author broke the line between the comment and the name, that
+break comes back as a blank line under the relocated comment — `entry
+// why` on its own line, with `state t {` beneath it, prints the `// why`
+inside the body followed by a blank.
+
+This is the exception to **Idempotent** above, and it bites only when the
+body would otherwise have printed on one line. The comment lands just
+inside the `{`, and on the next parse a comment riding an opening brace
+forces that body across several lines
+([Comments inside a list](#comments-inside-a-list), above — a same-line
+`/* … */` trailing an *entry* stays inline; one riding the brace does
+not). A body already written across several lines has nothing left to
+break, so it is a fixed point on the first pass. A body that would have
+printed inline takes two. The source:
+
+```
+alphabet /* a */ ab { '_' }
+```
+
+pass 1:
+
+```
+alphabet ab { /* a */ '_' }
+```
+
+pass 2, and every pass after it:
+
+```
+alphabet ab { /* a */
+  '_'
+}
+```
+
+So `tmt fmt --check` reports one change on a file carrying that shape,
+and running `tmt fmt` twice settles it.
+
+**Inside a `{ … }` write-cell substitution.** The comment is lifted out
+of the substitution and re-attached to the vector's own interior comment
+stream at that point, following the ordinary rules above from there. In
+a single-cell vector that puts it after the last entry, before the
+closer:
+
+```
+[00 as v] -> write [{ v /* c */ + 1 }] move [<] return;
+```
+
+prints as
+
+```
+[00 as v] -> write [{v+1} /* c */] move [<] return;
+```
+
+That output is a fixed point: the comment's new position is one the
+printer reprints unchanged.
 
 ## `.tma` formatting
 
