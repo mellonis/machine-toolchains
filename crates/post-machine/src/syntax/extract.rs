@@ -819,15 +819,39 @@ mod tests {
         let root = SyntaxNode::new_root(parse_green(src).unwrap());
         let extracted = extract_program(&root, src);
 
+        // Whole-value, not just `binding()` and `ns`: nothing in the
+        // crate's downstream crossfire was ever measured against PM's
+        // `extract_import`, so `path`, `alias`, `line` and `span` have no
+        // demonstrated cover elsewhere and are asserted here.
         assert_eq!(
             extracted
                 .imports
                 .iter()
-                .map(|i| (i.binding().to_string(), i.ns.clone()))
+                .map(|i| {
+                    (
+                        i.path.clone(),
+                        i.alias.clone(),
+                        i.ns.clone(),
+                        i.line,
+                        i.span,
+                    )
+                })
                 .collect::<Vec<_>>(),
             vec![
-                ("ge".to_string(), Vec::new()),
-                ("gs".to_string(), vec!["n".to_string()]),
+                (
+                    vec!["std".to_string(), "goToEnd".to_string()],
+                    Some("ge".to_string()),
+                    Vec::new(),
+                    1,
+                    Span::new(1, 5, 1, 17),
+                ),
+                (
+                    vec!["std".to_string(), "goToStart".to_string()],
+                    Some("gs".to_string()),
+                    vec!["n".to_string()],
+                    3,
+                    Span::new(3, 5, 3, 19),
+                ),
             ],
             "a file-level import stamps no namespace; a scoped one stamps its own"
         );

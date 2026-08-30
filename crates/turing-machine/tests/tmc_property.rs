@@ -2359,6 +2359,16 @@ fn stamp_program(program: &Program, seen: &mut BTreeSet<&'static str>) {
 /// ever stamped. A floor, not a snapshot: narrowing the generator so a
 /// construct stops being emitted fails here rather than silently
 /// weakening every property in this file.
+///
+/// **The derived set is pinned BY VALUE, not by a subset check.** A
+/// subset check would let a label leave `CHOSEN_CONSTRUCTS`, or join
+/// `REQUIRED_CONSTRUCTS` without joining `CHOSEN_CONSTRUCTS`, and quietly
+/// demote it to floor-only: the per-program compare would stop covering
+/// it and every test here would stay green. That is the exact failure
+/// this whole check exists to prevent, one step removed. The five
+/// derived labels are therefore listed as a closed literal below — a new
+/// label belongs in `CHOSEN_CONSTRUCTS` unless it is genuinely derived,
+/// and making it derived means editing that literal on purpose.
 #[test]
 fn the_generator_reaches_every_construct_extraction_rebuilds() {
     let required: BTreeSet<&'static str> = REQUIRED_CONSTRUCTS.iter().copied().collect();
@@ -2377,6 +2387,19 @@ fn the_generator_reaches_every_construct_extraction_rebuilds() {
         chosen.is_subset(&required),
         "CHOSEN_CONSTRUCTS names a label REQUIRED_CONSTRUCTS does not: {:?}",
         chosen.difference(&required).collect::<Vec<_>>()
+    );
+    // Sorted, because both sides are `BTreeSet`s.
+    assert_eq!(
+        required.difference(&chosen).copied().collect::<Vec<_>>(),
+        vec![
+            "doc.paragraphs.many",
+            "doc.paragraphs.one",
+            "fold.nested",
+            "sym.number.leading-zero",
+            "write.subst.passthrough",
+        ],
+        "the derived set is closed — a new label belongs in CHOSEN_CONSTRUCTS \
+         unless it is derived, and CHOSEN_CONSTRUCTS's own doc says what that means"
     );
 
     let mut rng = SplitMix(0x7A5C_0DE5_1234_5678);
