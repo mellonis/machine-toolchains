@@ -1,13 +1,13 @@
-//! Lossless concrete syntax tree (CST) node types for `.pmc` — one lossless
-//! CST for the parser and the formatter.
+//! Lossless concrete syntax tree (CST) node types for `.pmc`.
 //!
-//! `parse_cst` produces a [`Cst`] from a `WithComments` token stream,
-//! and [`crate::parser::lower_cst`] copies it into the
-//! [`crate::parser::Program`] shape. That pair is the differential
-//! oracle the green-tree extraction is held equal to, plus fmt's
-//! remaining input (via `parse_cst`) — the compiler front end and the
-//! `.pmc` language service both read the green tree instead
-//! (docs/core.md (syntax trees)).
+//! `crate::parser::Parser::file` and its per-production helpers still
+//! build a [`Cst`] tree of these types as they walk (the grammar walk
+//! [`crate::parser::parse_green_from_tokens`] runs, with a green sink
+//! attached alongside it) — but nothing in production reads the built
+//! tree any more: the compiler front end, the `.pmc` language service,
+//! and `fmt` all read the green tree instead, via
+//! [`crate::parser::parse_green`]/[`crate::parser::parse_green_from_tokens`]
+//! and [`crate::syntax::extract_program`] (docs/core.md (syntax trees)).
 //!
 //! # The lossless contract
 //!
@@ -31,14 +31,10 @@
 //! - **Statement internals are reused, not redefined.** [`StatementCst`]
 //!   embeds [`crate::parser::Label`] and [`crate::parser::Item`]
 //!   (in turn built from [`crate::parser::Builtin`],
-//!   [`crate::parser::Successor`], [`crate::parser::CheckArm`]) verbatim,
-//!   so [`crate::parser::lower_cst`] hands them straight to
-//!   [`crate::parser::Statement`] with no rebuilding. Each comma-group
-//!   entry is a [`CommaItem`] pairing the parser's [`Item`] with any
-//!   comment trivia that precedes it INSIDE the group (`a, /* x */ b;`),
-//!   so a formatter never loses a mid-group comment; `lower_cst` maps
-//!   `items.iter().map(|ci| ci.item.clone())` to the AST's flat
-//!   `Vec<Item>` and drops the trivia.
+//!   [`crate::parser::Successor`], [`crate::parser::CheckArm`]) verbatim.
+//!   Each comma-group entry is a [`CommaItem`] pairing the parser's
+//!   [`Item`] with any comment trivia that precedes it INSIDE the group
+//!   (`a, /* x */ b;`), so a formatter never loses a mid-group comment.
 //! - **`label_break`** records whether the author put a newline after a
 //!   statement's final label `:` (`docs/pmt/language.md`'s own-line-label
 //!   shape; the design doc's Formatting rules section "Own-line labels")
@@ -54,10 +50,12 @@
 //!   needed.
 //!
 //! Container nodes ([`NamespaceCst`], [`FunctionCst`]) deliberately do
-//! NOT carry the AST's lower-copy-computed fields — no `ns` tag, no
-//! separate `nested` list, no `local` flag. Those are computed once, by
-//! `lower_cst`, from the CST's block/interleaving structure;
-//! duplicating them here would let the two trees disagree.
+//! NOT carry the AST's own computed fields — no `ns` tag, no separate
+//! `nested` list, no `local` flag. Those are derived from the tree's
+//! block/interleaving structure by whatever builds the AST
+//! (`crate::syntax::extract`, over the green tree — the CST's own
+//! shape mirrors the same nesting); duplicating them here would only
+//! risk the two disagreeing.
 //!
 //! # Comment placement (trivia)
 //!
@@ -123,9 +121,8 @@ pub enum TopKind {
 
 /// A same-line trailing comment plus its SOURCE column (`docs/pmt/fmt.md`,
 /// comments). The column is needed to detect whether the author aligned
-/// a RUN of trailing `//`s in source — it plays no role in the AST:
-/// `lower_cst` ignores this whole type, same as it ignores [`Comment`]
-/// itself.
+/// a RUN of trailing `//`s in source — it plays no role in the AST,
+/// which carries no comment trivia at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrailingComment {
     pub comment: Comment,
@@ -157,8 +154,8 @@ pub struct UsePath {
 /// `ImportCst`, which made `use a, b;` and `use a; use b;` indistinguishable
 /// and lost the list's grouping — see the design doc's "Imports" rule:
 /// fmt "neither reorders nor merges/splits `use` statements"). Each path
-/// keeps its own line/span so [`crate::parser::lower_cst`]'s per-path
-/// flattening is unaffected by the grouping.
+/// keeps its own line/span so a per-path flattening into
+/// [`crate::parser::Import`] is unaffected by the grouping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseCst {
     /// The list's paths, in source order.
@@ -174,9 +171,9 @@ pub struct UseCst {
     /// the index of the path it precedes. An index equal to the path count
     /// means "after the last path, before the `;`".
     ///
-    /// Sparse and index-keyed rather than a per-path wrapper, so [`UsePath`]
-    /// stays trivia-free and `lower_cst` hands it to the AST unchanged
-    /// (docs/pmt/fmt.md (comments inside a use list)).
+    /// Sparse and index-keyed rather than a per-path wrapper, so
+    /// [`UsePath`] itself stays trivia-free (docs/pmt/fmt.md (comments
+    /// inside a use list)).
     pub interior: Vec<(usize, Comment)>,
 }
 
@@ -210,8 +207,8 @@ pub struct NamespaceCst {
 
 /// One function definition (top-level or nested) exactly as written —
 /// no `ns` tag, no `nested` list, no `local` flag (module doc's
-/// container-node note; `lower_cst` computes all three from
-/// this node's position in the tree).
+/// container-node note: those are derived from this node's position in
+/// the tree, not carried here).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionCst {
     pub name: String,
@@ -238,11 +235,10 @@ pub struct FunctionCst {
     pub span: Span,
     /// Whether the literal `volatile` keyword was WRITTEN in source.
     /// Unlike `has_export`, nothing folds into a separate lowered flag —
-    /// [`crate::parser::lower_cst`] copies this straight onto the AST's
-    /// `Function::volatile`, since the modifier has no auto-applied
-    /// counterpart the way top-level `main` auto-exports. The printer
-    /// reads this to decide whether to emit the token, exactly as it
-    /// reads `has_export`.
+    /// the modifier has no auto-applied counterpart the way top-level
+    /// `main` auto-exports, so the AST's `Function::volatile` copies this
+    /// straight through. The printer reads this to decide whether to
+    /// emit the token, exactly as it reads `has_export`.
     pub has_volatile: bool,
     /// `export` (contextual keyword) or `main` at top level. A nested
     /// function is never exported.
@@ -252,9 +248,9 @@ pub struct FunctionCst {
     /// (`docs/pmt/language.md`: `main` is always the entry regardless of
     /// spelling). The printer reads this, never `exported`, to decide
     /// whether to emit the token: `export main() { … }` keeps `export`,
-    /// bare `main() { … }` stays bare, both compile identically.
-    /// [`crate::parser::lower_cst`] ignores this field — the AST's
-    /// `exported` is computed exactly as before.
+    /// bare `main() { … }` stays bare, both compile identically. The
+    /// AST's own `exported` is computed separately (see `exported`
+    /// above), not from this field.
     pub has_export: bool,
     /// Body items in source order — statements, own-line comments, and
     /// nested function definitions interleaved as written (module doc's
@@ -275,12 +271,12 @@ pub struct FunctionCst {
     /// The `?`/`!` run bound to this declaration (docs/pmt/language.md (doc
     /// lines)), in source order; empty when the function is
     /// undocumented. Unlike every other trivia field in this module,
-    /// this IS an attachment pass — `parse_cst` walks past blank lines,
+    /// this IS an attachment pass — the parser walks past blank lines,
     /// ordinary comments, and the run's own order/attribute rules to
     /// bind it to the NEXT `FunctionCst` at its scope (a run with
     /// anything else next is a `DanglingDocRun` compile error, not a
-    /// silently dropped item). `lower_cst` ignores this field for now;
-    /// a later reduction copies it onto the AST as `FnDoc`.
+    /// silently dropped item). [`crate::parser::reduce_doc_run`] reduces
+    /// this onto the AST as `FnDoc`.
     pub doc_run: Vec<DocRunItem>,
 }
 
@@ -307,8 +303,9 @@ pub enum BodyKind {
 /// One comma-group entry: the parser's [`Item`] plus any comment trivia
 /// that precedes it inside the group. The first entry's `leading` is
 /// normally empty; a mid-group comment (`a, /* x */ b;`) attaches as the
-/// following entry's `leading` so nothing is dropped. [`crate::parser::lower_cst`]
-/// drops `leading` when copying to the AST's flat `Vec<Item>`.
+/// following entry's `leading` so nothing is dropped — the AST's own
+/// [`crate::parser::Statement::items`] is a flat `Vec<Item>` with no
+/// `leading` field at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommaItem {
     pub item: Item,
@@ -317,15 +314,13 @@ pub struct CommaItem {
     /// comma group (`docs/pmt/fmt.md`, comma groups) — the first entry's is
     /// always `false`. Set
     /// from token line numbers (item K's first token on a later line than
-    /// item K-1's last token), not from comment positions.
-    /// [`crate::parser::lower_cst`] drops it too, like `leading`.
+    /// item K-1's last token), not from comment positions — the AST
+    /// carries no equivalent field either.
     pub newline_before: bool,
 }
 
 /// One `;`-terminated statement, reusing the parser's statement-internal
-/// types verbatim ([`Label`], [`Item`] via [`CommaItem`]) so
-/// [`crate::parser::lower_cst`] hands them straight to
-/// [`crate::parser::Statement`] with no rebuilding.
+/// types verbatim ([`Label`], [`Item`] via [`CommaItem`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementCst {
     pub labels: Vec<Label>,

@@ -8,7 +8,7 @@ use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
-    BodyItem, BodyKind, CommaItem, Cst, FunctionCst, NamespaceCst, StatementCst, TopItem, TopKind,
+    BodyItem, BodyKind, CommaItem, FunctionCst, NamespaceCst, StatementCst, TopItem, TopKind,
     TrailingComment, UseCst, UsePath,
 };
 use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
@@ -116,9 +116,9 @@ pub struct Function {
     pub ns: Vec<String>,
     /// The bound `?`/`!` run — `docs/pmt/language.md (doc lines and attention
     /// lines)` — reduced from
-    /// [`crate::cst::FunctionCst::doc_run`] by [`lower_cst`]. `None` for
-    /// an undocumented function (an empty `doc_run`); every compiler
-    /// pass past `lower_cst` ignores this field — `flatten` copies it
+    /// [`crate::cst::FunctionCst::doc_run`] by [`reduce_doc_run`]. `None`
+    /// for an undocumented function (an empty `doc_run`); every compiler
+    /// pass past extraction ignores this field — `flatten` copies it
     /// into `Analysis.docs`, keyed by the same fully-qualified name it
     /// already computes, and nothing downstream reads it off `Function`
     /// again.
@@ -351,35 +351,6 @@ pub fn significant_tokens(tokens: &[Token]) -> Vec<Token> {
     split_comments(tokens).0
 }
 
-/// tokens → lossless CST. Accepts either a `WithoutComments` stream (no
-/// trivia) or a `WithComments` stream (fmt's path and the staged
-/// pipeline's, comments interleaved). Not the compiler's path any more:
-/// `compiler::analyze` extracts from the green tree, and
-/// `compiler::analyze_staged` builds this alongside it only for the
-/// `.pmc` language service. Comment tokens are split off up front so the
-/// grammar walk over the significant tokens is identical to the pre-C1
-/// parser — spans, control flow, and the duplicate-name/-label checks all
-/// carry over verbatim. The dropped-in-lowering trivia (`blank_before`,
-/// `label_break`, comment nodes, `trailing`, `CommaItem::leading`) is
-/// attached from the split-off comments by source position;
-/// `CommaItem::newline_before` is attached instead from the significant
-/// tokens' own line numbers (it records a source newline, not a comment).
-pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
-    let (sig, comments) = split_comments(tokens);
-    let (items, _sink) = Parser {
-        tokens: &sig,
-        pos: 0,
-        namespaces: HashSet::new(),
-        declared_fns: HashSet::new(),
-        comments,
-        cpos: 0,
-        prev_end_line: 0,
-        sink: None,
-    }
-    .file()?;
-    Ok(Cst { items })
-}
-
 /// source → green syntax tree (docs/core.md (syntax trees)). Lexes
 /// `WithComments` and hands both halves to
 /// [`parse_green_from_tokens`].
@@ -398,10 +369,11 @@ pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
 /// comment's own text and break the `text() == source` law. An empty
 /// `tokens` slice panics — every real lex result is EOF-terminated.
 ///
-/// Runs the SAME grammar walk as [`parse_cst`] with a green sink
-/// attached: identical acceptance, identical errors — the sink only
-/// mirrors token consumption and node boundaries alongside the
-/// unchanged parser logic.
+/// Runs the same grammar walk `Parser::file` always has, with a green
+/// sink attached: the sink only mirrors token consumption and node
+/// boundaries alongside the unchanged parser logic — the CST it builds
+/// internally along the way is unaffected by whether a sink is present
+/// (see [`Parser::sink`]'s own doc).
 pub fn parse_green_from_tokens(
     source: &str,
     tokens: &[Token],
@@ -425,88 +397,6 @@ pub fn parse_green_from_tokens(
     Ok(sink
         .expect("parse_green_from_tokens always seeds a sink before calling file()")
         .into_tree(eof_pos))
-}
-
-/// Copy a CST into the flat `Program` the compiler consumes — exactly the
-/// namespace-flattening + nested-function hoisting the pre-C1 parser did
-/// inline. Stamps each definition's enclosing `ns` path, hoists nested
-/// functions out of body order into `Function::nested`, and drops all
-/// trivia. `local` is left `false` (flatten computes it), matching the
-/// pre-C1 parser. Spans/lines/cols are copied verbatim.
-pub fn lower_cst(cst: &Cst) -> Program {
-    let mut functions = Vec::new();
-    let mut imports = Vec::new();
-    lower_items(&cst.items, &[], &mut functions, &mut imports);
-    Program { functions, imports }
-}
-
-fn lower_items(
-    items: &[TopItem],
-    ns: &[String],
-    functions: &mut Vec<Function>,
-    imports: &mut Vec<Import>,
-) {
-    for item in items {
-        match &item.kind {
-            TopKind::Comment(_) => {}
-            TopKind::Import(use_cst) => {
-                for p in &use_cst.paths {
-                    imports.push(Import {
-                        path: p.path.clone(),
-                        alias: p.alias.clone(),
-                        line: p.line,
-                        ns: ns.to_vec(),
-                        span: p.span,
-                    });
-                }
-            }
-            TopKind::Namespace(nsc) => {
-                let mut child = ns.to_vec();
-                child.push(nsc.name.clone());
-                lower_items(&nsc.items, &child, functions, imports);
-            }
-            TopKind::Function(f) => functions.push(lower_function(f, ns)),
-        }
-    }
-}
-
-/// Lower one function. Nested functions are hoisted into `nested` (out of
-/// body order) and, like the pre-C1 parser, carry an EMPTY `ns` — flatten
-/// resolves nesting through the top-level ancestor. `exported` is copied
-/// from the CST (the caller stamped top-level `main`'s auto-export);
-/// nested functions are never exported. `volatile` is copied straight
-/// from `has_volatile` — by the time a `FunctionCst` reaches here the
-/// parser has already rejected every illegal carrier (`VolatileNotOnMain`),
-/// so a `true` here can only be the un-namespaced top-level `main`. `doc`
-/// is [`reduce_doc_run`] over the CST's bound `doc_run`.
-fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
-    let mut body = Vec::new();
-    let mut nested = Vec::new();
-    for bi in &f.body {
-        match &bi.kind {
-            BodyKind::Comment(_) => {}
-            BodyKind::Statement(s) => body.push(Statement {
-                labels: s.labels.clone(),
-                items: s.items.iter().map(|ci| ci.item.clone()).collect(),
-                line: s.line,
-                span: s.span,
-            }),
-            BodyKind::Nested(g) => nested.push(lower_function(g, &[])),
-        }
-    }
-    Function {
-        name: f.name.clone(),
-        line: f.line,
-        col: f.col,
-        name_span: f.name_span,
-        body,
-        exported: f.exported,
-        volatile: f.has_volatile,
-        local: false,
-        nested,
-        ns: ns.to_vec(),
-        doc: reduce_doc_run(&f.doc_run),
-    }
 }
 
 /// One line of a [`crate::cst::FunctionCst::doc_run`], plus whether a
@@ -560,10 +450,11 @@ pub struct AttrCst {
     pub span: Span,
 }
 
-/// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`]. Used by
-/// [`lower_function`]; also `pub(crate)` for cross-module use by
-/// `crate::syntax::extract`'s own fidelity tests, which lean on the
-/// `DocRunKind::Comment` inertness documented right below to prove two
+/// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`]. `pub(crate)` for
+/// cross-module use by `crate::syntax::extract::extract_function`, the
+/// green-tree extraction's own production caller, and by that module's
+/// fidelity tests, which lean on the `DocRunKind::Comment` inertness
+/// documented right below to prove two
 /// RAW `Vec<DocRunItem>`s that differ only by a dropped comment still
 /// reduce to the identical [`FnDoc`] (`reparse_doc_items`'s own doc
 /// comment explains why they can differ in the first place). `None` for
@@ -627,7 +518,7 @@ pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<FnDoc> {
     })
 }
 
-/// A comment token lifted out of the stream during [`parse_cst`]'s split,
+/// A comment token lifted out of the stream during [`split_comments`],
 /// remembering where it sat relative to the significant tokens.
 struct CommentAt {
     comment: Comment,
@@ -669,11 +560,13 @@ struct Parser<'a> {
     cpos: usize,
     /// End line of the last emitted CST element, for `blank_before`.
     prev_end_line: u32,
-    /// Green-tree emission, when this walk is [`parse_green`]'s rather
-    /// than [`parse_cst`]'s: `bump()` mirrors every consumed token into
-    /// it, and the `g_*` helpers below bracket node boundaries. `None`
-    /// on every other path — those helpers are then no-ops, so the CST
-    /// walk is byte-identical whether or not a sink is attached.
+    /// Green-tree emission: `bump()` mirrors every consumed token into
+    /// it, and the `g_*` helpers below bracket node boundaries. `Some`
+    /// on [`parse_green_from_tokens`]'s walk — [`Parser::file`]'s only
+    /// production caller; `None` on the isolated re-parses
+    /// ([`reparse_item`], `reparse_doc_items`), where the `g_*` helpers
+    /// are then no-ops, so the CST those productions still build
+    /// internally is unaffected by whether a sink is attached.
     sink: Option<GreenSink>,
 }
 
@@ -681,8 +574,8 @@ struct Parser<'a> {
 /// counterpart to `TokenKind`, since `PmcKind`'s token variants mirror
 /// it 1:1 (`crate::syntax::kinds` doc). Called only from `bump()`,
 /// which never bumps `Eof`, and only over the sig stream, which never
-/// carries `Comment` (`parse_cst`/`parse_green` split it out up front)
-/// — both are unreachable here.
+/// carries `Comment` (`split_comments` splits it out up front) — both
+/// are unreachable here.
 fn sig_kind(kind: &TokenKind) -> PmcKind {
     match kind {
         TokenKind::Ident(_) => PmcKind::Ident,
@@ -1867,9 +1760,9 @@ impl Parser<'_> {
             // A mid-group comment attaches to the following item's leading.
             let leading = self.drain_pending_comments();
             // The comments are a side channel (split off before the
-            // significant-token walk, see `parse_cst`), so `self.peek()`
-            // here already sits on this item's real first token, whatever
-            // comments were just drained.
+            // significant-token walk, see `split_comments`), so
+            // `self.peek()` here already sits on this item's real first
+            // token, whatever comments were just drained.
             let item_start_line = self.peek().line;
             let newline_before = item_start_line > last_item_end_line;
             // The comma just bumped above stays outside both ITEM nodes,

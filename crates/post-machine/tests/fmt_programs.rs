@@ -21,13 +21,15 @@
 //! comments-only-file / empty-function-body edge cases. `SIMPLE` is
 //! scoped to exactly that subset.
 //!
-//! Task 8b's own contribution needed no renderer changes: `parse_cst`
-//! never hands the printer the author's original spacing (a path's
-//! segments print tight regardless of source spacing), so the
-//! spaced-form entries below normalize for free — they widen the
+//! Task 8b's own contribution needed no renderer changes: the printer's
+//! own `render_use_path` joins a path's segment texts with a hardcoded
+//! `"::"`, never consulting the source's own interior spacing around
+//! it (a path's segments print tight regardless of source spacing), so
+//! the spaced-form entries below normalize for free — they widen the
 //! corpus to PIN that, not to fix a gap. (A number's own digits are a
-//! separate matter — the CST carries those as WRITTEN, leading zeros
-//! and all; see `zero_token_changes_over_every_fixture` below.)
+//! separate matter — a `Number` token carries its digits as WRITTEN,
+//! leading zeros and all; see `zero_token_changes_over_every_fixture`
+//! below.)
 //!
 //! **`comment_fidelity` was VACUOUS through Task 6** — `SIMPLE` carried
 //! no comments, so `comment_texts(src)` was always `[]` on both sides.

@@ -8,10 +8,10 @@
 //!   (`crate::parser::reparse_item`/`reparse_doc_items`) instead of
 //!   re-deriving their grammar decisions.
 //! - **Assembly** ([`extract_function`]): walking the views themselves
-//!   (headers, statements, labels, nesting) and mirroring
-//!   `crate::parser::lower_function`'s own container-building decisions
-//!   exactly — never re-deriving a rule the parser already encodes,
-//!   only naming the shape the green tree already carries.
+//!   (headers, statements, labels, nesting) to build the same
+//!   container shape the C1 parser's own (now-retired) lowering used
+//!   to — never re-deriving a rule the parser already encodes, only
+//!   naming the shape the green tree already carries.
 
 use mtc_core::syntax::{AstNode, SyntaxKind, SyntaxNode, SyntaxToken, TextLineIndex, TextRange};
 
@@ -220,44 +220,38 @@ pub(crate) fn extract_statement(view: &StatementView, index: &TextLineIndex) -> 
     }
 }
 
-/// Rebuild one C1 `parser::Function` from its green-tree view — mirrors
-/// `crate::parser::lower_function` (parser.rs:441) exactly.
+/// Rebuild one C1 `parser::Function` from its green-tree view — the
+/// sole implementation of this container-building logic now (the C1
+/// parser's own `lower_function`, which this used to mirror, is
+/// retired).
 ///
 /// `name`/`name_span`/`line`/`col` come from the header's name token
 /// (`FunctionView::header`'s own contextual-keyword decode already
-/// picked it out). `exported`/`volatile` mirror
-/// `Parser::top_items`'s stamping (parser.rs:1377-1381) — the ONLY call
-/// path that ever sets either flag to something other than the
-/// all-`false` defaults `Parser::function` itself initializes a
-/// `FunctionCst` with (parser.rs:1696-1698, `Ok(FunctionCst { ...
-/// has_volatile: false, exported: false, has_export: false, ... })`).
-/// That stamping never runs for a nested definition — `function`'s own
-/// nested-definition branch calls itself directly
-/// (`self.function(None, doc_run)`) and stores the result unstamped —
-/// so `exported`/`volatile` are unconditionally `false` whenever this
-/// FUNCTION's own parent is another FUNCTION, matching
-/// `lower_function`'s own recursive call for nested children
-/// (`lower_function(g, &[])`, parser.rs:453) exactly. For a top-level
-/// FUNCTION (file- or namespace-level parent), `exported` is the
-/// literal `export` keyword OR the un-namespaced top-level `main`
-/// auto-export (`ns.is_empty() && name == "main"`, decided here via
-/// `is_namespaced` rather than a threaded `ns` path — see that
-/// function's own doc); `volatile` is the literal `volatile` keyword
-/// (never auto-applied, unlike `exported` — parser.rs:236-243's own
-/// `FunctionCst::has_volatile` doc).
+/// picked it out). `exported`/`volatile` come from `is_nested`: a
+/// nested FUNCTION's own parent is always another FUNCTION, and the
+/// parser never stamps `export`/`volatile`/auto-export onto a nested
+/// definition (`Parser::function`'s nested-definition branch calls
+/// itself directly and stores the result unstamped, so the header's
+/// `has_export`/`has_volatile` are unconditionally `false` there
+/// anyway) — so `exported`/`volatile` are unconditionally `false`
+/// whenever `is_nested` holds. For a top-level FUNCTION (file- or
+/// namespace-level parent), `exported` is the literal `export` keyword
+/// OR the un-namespaced top-level `main` auto-export (`ns.is_empty()
+/// && name == "main"`, decided here via `is_namespaced` rather than a
+/// threaded `ns` path — see that function's own doc); `volatile` is the
+/// literal `volatile` keyword (never auto-applied, unlike `exported`).
 ///
 /// `nested` hoists nested definitions out of body order (recursing into
 /// this same function, so an arbitrarily deep nesting chain unwinds the
-/// same way `lower_function`'s own recursion does), each carrying an
-/// empty `ns` — both automatic here, since a nested view's own
-/// `is_nested`/`is_namespaced` checks and its statements/nested-of-its-
-/// own are all computed independently by its own `extract_function`
-/// call. `doc` is [`reduce_doc_run`] over the bound `DOC_RUN`'s own
-/// retokenized items (`None` when the function carries no doc run,
-/// matching `reduce_doc_run(&[])`'s own empty-run `None`). `ns` stays
-/// empty (Task 5's recursion stamps the real path on top-level
-/// definitions only, exactly as `lower_items`/`lower_function` do) and
-/// `local` stays `false` (flatten computes it).
+/// same way), each carrying an empty `ns` — both automatic here, since
+/// a nested view's own `is_nested`/`is_namespaced` checks and its
+/// statements/nested-of-its-own are all computed independently by its
+/// own `extract_function` call. `doc` is [`reduce_doc_run`] over the
+/// bound `DOC_RUN`'s own retokenized items (`None` when the function
+/// carries no doc run, matching `reduce_doc_run(&[])`'s own empty-run
+/// `None`). `ns` stays empty (the caller, [`extract_items`], stamps the
+/// real path on top-level definitions only) and `local` stays `false`
+/// (flatten computes it).
 fn extract_function(view: &FunctionView, index: &TextLineIndex) -> Function {
     let header = view.header();
     let name = header.name.text().to_string();
@@ -326,8 +320,7 @@ fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> I
     }
 }
 
-/// Walk one level of `FileView`/`NamespaceView::items` — mirrors
-/// `crate::parser::lower_items` (parser.rs:402) exactly: a `USE_DECL`
+/// Walk one level of `FileView`/`NamespaceView::items`: a `USE_DECL`
 /// contributes one [`Import`] per path (ns stamped as-is); a
 /// `NAMESPACE` recurses with its name pushed onto `ns`; a `FUNCTION` is
 /// extracted and stamped with the CURRENT `ns` — top-level only, since a
@@ -335,9 +328,9 @@ fn extract_import(view: &UsePathView, ns: &[String], index: &TextLineIndex) -> I
 /// hoists it out, and `extract_function`'s own recursion already leaves
 /// a nested `Function`'s `ns` empty). Top-level comments carry no green
 /// node at all (trivia, dropped before `FileView`/`NamespaceView::items`
-/// ever sees them), so — unlike `lower_items`'s explicit
-/// `TopKind::Comment(_) => {}` arm — there is no matching arm to skip
-/// here.
+/// ever sees them), so there is no comment arm to skip here — unlike
+/// the C1 CST's own `TopKind`, `TopView` has no `Comment` variant at
+/// all.
 fn extract_items(
     items: impl Iterator<Item = TopView>,
     ns: &[String],
@@ -367,10 +360,10 @@ fn extract_items(
 }
 
 /// Rebuild the whole C1 `parser::Program` from the green tree's root —
-/// mirrors `crate::parser::lower_cst` (parser.rs:395): one
-/// [`TextLineIndex`] built once and threaded through the whole walk,
-/// then [`extract_items`] over the file's own top-level items with an
-/// empty starting `ns`.
+/// the parser's own `Program`-building `lower_cst` is retired, so this
+/// is the sole builder now: one [`TextLineIndex`] built once and
+/// threaded through the whole walk, then [`extract_items`] over the
+/// file's own top-level items with an empty starting `ns`.
 pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
     let index = TextLineIndex::new(source);
     let file = FileView::cast(root.clone()).expect("root is FILE");
@@ -809,8 +802,8 @@ mod tests {
     /// NAMESPACE-scoped `use` (pinning `Import.ns == ["n"]` against the
     /// file-level one's `[]`) and a function nested inside a namespaced
     /// function (pinning the parent's `ns == ["n"]` against the child's
-    /// `[]`, since `lower_function` lowers a nested definition with an
-    /// empty namespace of its own).
+    /// `[]`, since `extract_function` gives a nested definition an empty
+    /// namespace of its own).
     ///
     /// Asserted against literals captured from the C1 lowering while that
     /// path was still callable.
