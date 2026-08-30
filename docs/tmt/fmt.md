@@ -347,25 +347,36 @@ neither one moved the first two rules' shared column.
 
 ### Comments the printer moves
 
-A few comment positions have no place in the canonical layout, and a
-comment written in one of them comes out somewhere else. Nothing is
-dropped — the printer is still whitespace-only — but the comment does
-not reprint where it was written. Two are worth naming: one is the
-source of the idempotency exception above, the other is not.
+Two comment positions have no place in the canonical layout, and a
+comment written in one of them generally comes out somewhere else.
+Nothing is ever dropped — the printer is still whitespace-only — but the
+comment does not reprint where it was written. One of the destinations
+below is the source of the idempotency exception above; none of the
+others is.
 
-**Between a declaration's keyword and its name.** The comment cannot
-stay there, and where it goes depends on what follows the name:
+**Between a declaration's keyword and its name.** Where the comment goes
+depends on which declaration it is. Every declaration keyword the
+language has was measured, and there are five outcomes — one of which is
+that nothing moves at all:
 
-- a block body whose items each take a line — a `state`, a `namespace` —
-  takes it as an own-line comment ahead of the body's first item;
-- a parenthesized list — a `routine`/`graph` signature, a `graft`'s
-  binding list — takes it riding the `(`, which breaks that list one
-  entry per line;
+- a block body whose items each take a line — a `state`, a `namespace`,
+  or a `machine`, which has no name and takes the comment between its
+  keyword and its `{` — puts it on its own line ahead of the body's
+  first item;
+- a parenthesized list — a `routine`/`graph` signature, a `graft`'s or
+  `bind`'s binding list — takes it riding the `(`, which breaks that
+  list one entry per line;
 - an `alphabet`'s brace body, whose elements are comma-separated and can
   share a line, takes it riding the `{` — the one destination that costs
   a second pass, below;
-- a declaration with none of those, such as a `tape`, takes it as a
-  trailing comment after the `;`.
+- a `tape`, which has neither a block body nor a list, takes it as a
+  trailing comment after the `;`;
+- a `use` does not move it at all — `use /* u */ a::b;` reprints exactly
+  as written. It is the one declaration where the comment stays put, so
+  do not read the four above as a rule that covers it.
+
+The `entry` and `export` modifiers add no case of their own: a comment
+written after either behaves as the declaration it prefixes does.
 
 The block-body case:
 
@@ -430,8 +441,8 @@ alphabet ab { /* a */
 }
 ```
 
-The three other destinations are each already a shape the printer
-reprints unchanged, so they settle on the first pass. Nor do the author's
+Every other destination is already a shape the printer reprints
+unchanged, so those settle on the first pass. Nor do the author's
 own line breaks decide anything here: writing that same `alphabet` across
 three lines produces the identical one-line pass 1 and takes the same two
 passes.
