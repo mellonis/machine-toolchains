@@ -459,19 +459,19 @@ alphabet wideEnoughToWrap {
 // -- blank lines, comments, doc runs ----------------------------------------
 
 // The next three fixtures lock the interior-comment placement described in
-// `print`'s module doc "Trivia-preserving" bullet: an
-// alphabet body, a signature parameter list, and a graft/bind binding list
-// each carry a comment slot, keyed by the index of the entry the comment
-// precedes, so a comment written inside one of these lists prints where its
-// author put it rather than being relocated below the enclosing item. A
-// `call` transition's own binding list and any `with map` pair list nested
-// inside one of these binding lists behave the same way, via a side-car on
-// the enclosing RuleCst/GraftCst/BindCst rather than a field on the CST node
-// itself — those two nest inside a type the AST takes verbatim, so their
-// comment slot can't live on the entry. The one remaining case — a comment
-// inside a pattern, write, or move vector — still relocates to its own line
-// after the enclosing rule; those vectors are positional and walked per row
-// by the compiler, so giving them per-entry trivia is tracked separately.
+// `print`'s module doc "Trivia-preserving" bullet: an alphabet body, a
+// signature parameter list, and a graft/bind binding list each key a
+// comment to the entry it precedes, so a comment written inside one of
+// these lists prints where its author put it rather than being relocated
+// below the enclosing item. A `call` transition's own binding list behaves
+// the same way, and a `with map` pair list nested inside any of them is
+// keyed two levels deep — by argument index and pair index both.
+//
+// A rule's pattern, `write` and `move` vectors are the same surface with
+// one extra consequence: they double as the state-block grid's columns, so
+// a `//` or an own-line comment there does not merely break its own vector,
+// it takes the whole enclosing rule OFF the grid. Only a same-line block
+// comment stays inline and leaves the rule a grid row.
 
 #[test]
 fn a_comment_inside_an_alphabet_body_prints_in_place() {

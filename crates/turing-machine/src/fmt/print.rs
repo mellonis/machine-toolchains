@@ -3378,17 +3378,28 @@ mod tests {
     /// off-grid branch but not this predicate's BOUNDARY: a source that
     /// crosses it renders in a wholly different shape, so a differential
     /// case says only that the two printers agree about which side it
-    /// fell on, never where the line lies. The four sources below walk
+    /// fell on, never where the line lies. The six sources below walk
     /// that line one step at a time.
     ///
-    /// The four sources are the predicate's whole surface, one boundary
-    /// each: a same-line BLOCK comment stays on the grid (the one
-    /// interior comment a glyph vector can hold inline); a LINE comment
-    /// does not, because nothing can follow `//` on its line; an
-    /// own-line BLOCK comment does not either, because inlining it would
-    /// flip its own `own_line` flag on the next parse; and a comment in
-    /// the vector's HEADER — `write /* c */ [` — counts as the vector's
-    /// too, which is the old parser's reading and not the bracket's.
+    /// The predicate is a disjunction — `kind == Line || own_line` — and
+    /// a source arms an arm only by satisfying it ALONE:
+    ///
+    /// - a same-line BLOCK comment satisfies neither and stays on the
+    ///   grid (the one interior comment a glyph vector can hold inline);
+    /// - an OWN-LINE BLOCK comment arms `own_line` by itself, because
+    ///   inlining it would flip that very flag on the next parse;
+    /// - a SAME-LINE `//` arms `kind == Line` by itself, because nothing
+    ///   can follow `//` on its physical line. **This is the source that
+    ///   was missing.** The three own-line `//` sources below all satisfy
+    ///   BOTH arms, so deleting the `Line` arm left them passing: measured,
+    ///   the mutation was caught only by `tests/fmt_interior.rs`'s
+    ///   `pattern_line_comment_breaks_the_rule_off_the_grid` and
+    ///   `a_line_commented_rule_does_not_widen_the_grid`, never here.
+    ///
+    /// Two further sources are about WHERE the predicate looks rather
+    /// than what it tests: a comment in the vector's HEADER — `write
+    /// /* c */ [` — counts as the vector's too, which is the old parser's
+    /// reading and not the bracket's, and its `//` twin one line up.
     #[test]
     fn a_line_or_own_line_comment_in_a_glyph_vector_takes_the_rule_off_the_grid() {
         let head = "alphabet ab { '_', 'a' }\nmachine {\n  tape main: ab;\n  entry state s {\n    ";
@@ -3401,6 +3412,10 @@ mod tests {
             ),
             ("[*] -> write /* c */ ['a'] stop;", false),
             ("[*] -> write\n      // c\n      ['a'] stop;", true),
+            // The `Line` arm, alone: a `//` with a cell ahead of it on
+            // its own physical line, so `own_line` is false and only the
+            // kind test can send this rule off the grid.
+            ("[*] -> write ['a' // c\n    ] stop;", true),
         ] {
             let src = format!("{head}{rule}\n  }}\n}}\n");
             let tokens = lex_with(&src, LexMode::WithComments).expect("lexes");

@@ -6,10 +6,12 @@
 //! `parse_cst` builds the [`crate::cst::Cst`], and `lower_cst` copies it
 //! — infallibly — into a flat [`Program`]. That `Program` is not the one
 //! production runs on ([`crate::syntax::extract_program`] builds the
-//! live one straight off the green tree); the CST seam survives past the
-//! front only as `fmt`'s own input and as half of the differential
-//! oracle `extract_program`'s output is checked against. Every fatal on
-//! the CST seam is raised by `parse_cst`; `lower_cst` never fails.
+//! live one straight off the green tree); the CST seam has NO production
+//! caller at all and survives for exactly one reason — it is the
+//! differential oracle `extract_program`'s output is checked against.
+//! (`fmt` was the last one; it prints from the green tree now.) Every
+//! fatal on the CST seam is raised by `parse_cst`; `lower_cst` never
+//! fails.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
@@ -603,11 +605,13 @@ fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
     (sig, comments)
 }
 
-/// tokens → lossless CST. Accepts a comment-free stream (the differential
-/// oracle's and other CST-focused tests' path — `parse` and its callers
-/// are all `#[cfg(test)]` now) or a `WithComments` stream (`fmt`'s path,
-/// the only production caller left). Comment tokens are split off up
-/// front so the grammar walk over the significant tokens is unaffected; the
+/// tokens → lossless CST. Every caller is a test: a comment-free stream
+/// is the path `parse` and the extraction oracle take, and a
+/// `WithComments` stream the path the trivia-carrying oracle fixtures
+/// take. There is no production caller of either shape — `fmt` was the
+/// last, and it prints from the green tree now. Comment tokens are split
+/// off up front so the grammar walk over the significant tokens is
+/// unaffected; the
 /// dropped-in-lowering trivia (`blank_before`, comment nodes, `trailing`,
 /// `open_trailing`/`close_trailing`, doc runs) is attached by source position.
 pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {

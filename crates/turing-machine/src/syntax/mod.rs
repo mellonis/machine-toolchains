@@ -82,10 +82,11 @@
 //! it lands INSIDE, matching the CST. This is already how the PM
 //! sibling's own printer reads a trailing comment — `trailing_comment`
 //! in `crates/post-machine/src/fmt/trivia.rs` looks at the node's
-//! `next_sibling_or_token()`, never its children. A later `.tmc` fmt
-//! port reading node extents directly needs the same asymmetry: the
-//! green tree's node boundary and the CST's "who owns this comment"
-//! answer are not the same question.
+//! `next_sibling_or_token()`, never its children. The `.tmc` printer
+//! does the same, for the same reason — `fmt::trivia` reads a trailing
+//! comment off the node's next sibling rather than off its extent,
+//! because the green tree's node boundary and the "who owns this
+//! comment" answer are not the same question.
 //!
 //! # The parity oracle a later plan must keep green
 //!
