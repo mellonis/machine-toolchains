@@ -139,6 +139,18 @@ each one proves:
   &parse(&batch_tokens).unwrap())`) — still crosses `analyze_staged`'s
   degradation tiers against a third party. Keep it; restate its doc.
 
+**6b. `analyze`'s result differs between the crates, and the difference is
+load-bearing.** Neither crate's batch `analyze` keeps the green tree — PM's
+`AnalysisOutput` (`compiler.rs:389-399`) and TM's `Analysis`
+(`compiler.rs:1016-1032`) both lack a tree field; the tree lives on
+`StagedAnalysis.green` / `TmcStagedAnalysis.green`, and BOTH language services
+call `analyze_staged`, never `analyze`. The `tokens` field diverges too:
+**PM's is comment-FREE** (`compiler.rs:432` runs `significant_tokens`), **TM's
+is comment-INCLUSIVE** (its own field doc says so, and lint filters at the
+`LintContext` boundary). A test written against one crate's shape is wrong
+about the other — measured after a first draft of Task 1 Step 6 asserted PM's
+tokens needed filtering, which is a no-op there.
+
 **7. The reparse shims' fidelity is pinned by the oracles and almost nothing
 else.** `turing-machine/src/syntax/extract.rs`'s test module holds seven
 `reparsed_X_equals_the_c1_X` tests plus an `agrees(src)` helper over 38 sources,
@@ -264,11 +276,11 @@ In `crates/post-machine/src/parser.rs`, replace the body and doc of `parse`
 /// `WithComments` lex, the green syntax tree, then extraction
 /// (docs/core.md (syntax trees)).
 ///
-/// Not the compiler's entry point — `compiler::analyze` runs the same
-/// three steps and KEEPS the token stream and the tree, which the
-/// language service needs. This is the convenience wrapper for callers
-/// that want only the `Program`, and it is the only parse function the
-/// crate exposes.
+/// The convenience wrapper for callers that want only the `Program` —
+/// it keeps nothing else, and it is the only parse function here that
+/// yields one. A caller needing the token stream alongside it uses
+/// `compiler::analyze`; a caller needing the green tree uses
+/// `compiler::analyze_staged`, which is the one that retains it.
 pub fn parse(source: &str) -> Result<Program, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
@@ -445,10 +457,11 @@ Same shape as Task 1 Step 3, in `crates/turing-machine/src/parser.rs`:
 /// `WithComments` lex, the green syntax tree, then extraction
 /// (docs/core.md (syntax trees)).
 ///
-/// Not the compiler's entry point — `compiler::analyze` runs the same
-/// three steps and KEEPS the token stream and the tree. This is the
-/// convenience wrapper for callers that want only the `Program`, and it
-/// is the only parse function the crate exposes.
+/// The convenience wrapper for callers that want only the `Program` —
+/// it keeps nothing else, and it is the only parse function here that
+/// yields one. A caller needing the token stream alongside it uses
+/// `compiler::analyze`; a caller needing the green tree uses
+/// `compiler::analyze_staged`, which is the one that retains it.
 pub fn parse(source: &str) -> Result<Program, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
