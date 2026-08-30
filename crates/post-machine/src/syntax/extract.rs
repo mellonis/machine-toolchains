@@ -383,9 +383,10 @@ pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cst::{DocRunItem, DocRunKind};
     use crate::lexer::lex;
-    use crate::parser::{Builtin, Item, Successor, parse_green, reduce_doc_run};
+    use crate::parser::{
+        Builtin, DocRunItem, DocRunKind, Item, Successor, parse_green, reduce_doc_run,
+    };
     use crate::syntax::{FileView, ItemView, StatementView, TopView};
     use mtc_core::diagnostics::Span;
     use mtc_core::syntax::AstNode;
@@ -554,7 +555,7 @@ mod tests {
             DocRunItem {
                 blank_before: false,
                 kind: DocRunKind::Attention {
-                    attr: Some(crate::cst::AttrCst {
+                    attr: Some(crate::parser::AttrCst {
                         name: "deprecated".to_string(),
                         span: Span::new(3, 4, 3, 14),
                     }),

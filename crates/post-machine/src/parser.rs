@@ -8,8 +8,8 @@ use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
-    AttrCst, BodyItem, BodyKind, CommaItem, Cst, DocRunItem, DocRunKind, FunctionCst, NamespaceCst,
-    StatementCst, TopItem, TopKind, TrailingComment, UseCst, UsePath,
+    BodyItem, BodyKind, CommaItem, Cst, FunctionCst, NamespaceCst, StatementCst, TopItem, TopKind,
+    TrailingComment, UseCst, UsePath,
 };
 use crate::lexer::{Comment, LexMode, Token, TokenKind, lex_with};
 use crate::syntax::{self, GreenSink, PmcKind};
@@ -507,6 +507,57 @@ fn lower_function(f: &FunctionCst, ns: &[String]) -> Function {
         ns: ns.to_vec(),
         doc: reduce_doc_run(&f.doc_run),
     }
+}
+
+/// One line of a [`crate::cst::FunctionCst::doc_run`], plus whether a
+/// blank line precedes it in source (same `blank_before` convention as
+/// every other CST item list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRunItem {
+    pub blank_before: bool,
+    pub kind: DocRunKind,
+}
+
+/// A doc/attention run's own line shapes (docs/pmt/language.md (doc lines)):
+/// a `?` doc line, a `!` attention line, or an ordinary comment
+/// interleaved within/after the run (`crate::cst`'s module doc's "Comment
+/// placement" applies here too — position is still the attachment for a
+/// comment INSIDE a run; only the run's own binding to its
+/// `crate::cst::FunctionCst` is a real attachment pass, per
+/// [`crate::cst::FunctionCst::doc_run`]'s doc).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocRunKind {
+    /// A `?` line. `text` is the lexer's payload verbatim (raw text
+    /// after the sigil, minus one canonical leading space if present) —
+    /// unprocessed, so a pretty-printer reprints it byte-for-byte.
+    Doc { text: String, span: Span },
+    /// A `!` line. `attr` is `Some` when the payload opens with a valid
+    /// `[ident]` attribute (v1: only `[deprecated]` is accepted —
+    /// anything else is a parse-time `UnknownAttribute` error, so by
+    /// the time a `FunctionCst` exists, every `Some` here already named
+    /// `"deprecated"`). `text` is the FULL raw payload verbatim,
+    /// attribute prefix included when present — mirrors `Doc::text`'s
+    /// unprocessed-token convention; a consumer that only wants the
+    /// free-form message recovers it from `text` using `attr`'s own
+    /// span.
+    Attention {
+        attr: Option<AttrCst>,
+        text: String,
+        span: Span,
+    },
+    /// An ordinary `//`/`/* */` comment inside the run (between run
+    /// lines, or between the run's last line and the bound
+    /// declaration).
+    Comment(Comment),
+}
+
+/// An attention line's leading `[ident]` attribute (docs/pmt/language.md
+/// (doc lines)): v1 accepts exactly `"deprecated"`. `span` covers the
+/// identifier alone, not the surrounding brackets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttrCst {
+    pub name: String,
+    pub span: Span,
 }
 
 /// Reduce a [`FunctionCst::doc_run`] into an [`FnDoc`]. Used by
