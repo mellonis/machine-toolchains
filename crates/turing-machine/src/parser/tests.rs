@@ -853,6 +853,68 @@ fn doc_run_attaches_and_reduces_onto_the_declaration() {
     assert!(p.alphabets[0].doc.is_none());
 }
 
+/// Builds the `Vec<DocRunItem>` by hand and calls `reduce_doc_run`
+/// directly — TM's production path DOES let a `DocRunKind::Comment` item
+/// reach `reduce_doc_run` (unlike the PM sibling, whose `sig_tokens`
+/// strips comments before `reduce_doc_run` ever runs):
+/// `crate::syntax::extract::extract_doc_items` constructs one for a
+/// comment written inside a bound doc run, and `extract_doc` folds the
+/// result straight through `reduce_doc_run`.
+///
+/// **Measured before this task touched anything**: mutating
+/// `DocRunKind::Comment(_) => {}` to
+/// `DocRunKind::Comment(_) => paragraphs.push("BOGUS".to_string())` and
+/// running the WHOLE crate as it stood at the base of this task (every
+/// `--lib` unit test — 852 of them — AND every integration suite,
+/// including the 2000-case `tests/tmc_property.rs` proptest) left
+/// everything green: the arm was completely unreachable crate-wide.
+///
+/// This task's own conversion of a CST-reading test —
+/// `source_text_and_doc_payload_survive_the_green_tree_verbatim`, whose
+/// fixture happens to write `// mid-run comment` inside the alphabet's
+/// bound doc run and then reads the reduced `Doc.paragraphs` back — turns
+/// out to ALSO exercise this arm as a side effect (re-running the same
+/// mutation catches it too: `["BOGUS", "doc /* not this — doc payload is
+/// verbatim */"]` against the expected single-element vec). That is
+/// incidental coverage from a fixture shaped for a different fact, not a
+/// deliberate pin, so this test still earns its place: re-running the
+/// mutation with THIS test present shows it fails too
+/// (`paragraphs: ["first", "BOGUS", "second"]` against the expected
+/// `["first second"]`), and unlike the other test's fixture, this one's
+/// shape is chosen specifically to exercise the arm and nothing else.
+#[test]
+fn doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph() {
+    use crate::lexer::CommentKind;
+
+    let dummy_span = Span::new(1, 1, 1, 1);
+    let doc_run = vec![
+        DocRunItem {
+            blank_before: false,
+            kind: DocRunKind::Doc {
+                text: "first".to_string(),
+                span: dummy_span,
+            },
+        },
+        DocRunItem {
+            blank_before: false,
+            kind: DocRunKind::Comment(Comment {
+                text: "// mid comment".to_string(),
+                kind: CommentKind::Line,
+                own_line: true,
+            }),
+        },
+        DocRunItem {
+            blank_before: false,
+            kind: DocRunKind::Doc {
+                text: "second".to_string(),
+                span: dummy_span,
+            },
+        },
+    ];
+    let doc = reduce_doc_run(&doc_run).expect("documented");
+    assert_eq!(doc.paragraphs, vec!["first second"]);
+}
+
 #[test]
 fn dangling_doc_run_is_rejected() {
     // A run before a non-doc-accepting item (an import), at EOF, and before a

@@ -1,17 +1,13 @@
 //! `.tmc` recursive-descent parser (spec's language chapter): tokens →
 //! the green syntax tree via [`parse_green`]/[`parse_green_from_tokens`]
 //! — the path the compiler front end and the language service both run.
-//! The file also carries the C1 CST seam, `parse = lower_cst ∘
-//! parse_cst`, mirroring the sibling `.pmc` parser in the PM-1 crate:
-//! `parse_cst` builds the [`crate::cst::Cst`], and `lower_cst` copies it
-//! — infallibly — into a flat [`Program`]. That `Program` is not the one
-//! production runs on ([`crate::syntax::extract_program`] builds the
-//! live one straight off the green tree); the CST seam has NO production
-//! caller at all and survives for exactly one reason — it is the
-//! differential oracle `extract_program`'s output is checked against.
-//! (`fmt` was the last one; it prints from the green tree now.) Every
-//! fatal on the CST seam is raised by `parse_cst`; `lower_cst` never
-//! fails.
+//! [`parse`] is the convenience wrapper: source in, [`Program`] out,
+//! going through that same green tree and
+//! [`crate::syntax::extract_program`] (docs/core.md (syntax trees)).
+//! `crate::parser::Parser::file` and its per-production helpers also
+//! still build a [`crate::cst::Cst`] tree of their own as they walk (the
+//! same walk, with a green sink attached alongside it), but nothing in
+//! production reads that tree any more.
 //!
 //! The 27 reserved keywords live in one place, [`crate::lexer::RESERVED`]; the
 //! parser is the sole enforcer — it rejects a keyword wherever a name is
@@ -25,7 +21,7 @@ use mtc_core::syntax::{Checkpoint, GreenNode, SyntaxNode};
 
 use crate::compiler::{CompileError, CompileErrorKind};
 use crate::cst::{
-    AlphabetCst, BindCst, Cst, GraftCst, MachineCst, NamespaceCst, ReuseCarrier, ReuseCst, RuleCst,
+    AlphabetCst, BindCst, GraftCst, MachineCst, NamespaceCst, ReuseCarrier, ReuseCst, RuleCst,
     RuleItem, RuleKind, StateCst, TapeCst, TopItem, TopKind, UseCst, UsePath, WorldItem, WorldKind,
 };
 use crate::lexer::{Comment, LexMode, RESERVED, Token, TokenKind, lex_with};
@@ -546,7 +542,7 @@ pub struct Doc {
 }
 
 // ---------------------------------------------------------------------------
-// parse / parse_cst / lower_cst
+// parse / parse_green / parse_green_from_tokens
 // ---------------------------------------------------------------------------
 
 /// Source → AST, through the one parse path this crate has: a
@@ -617,30 +613,6 @@ fn split_comments(tokens: &[Token]) -> (Vec<Token>, Vec<CommentAt>) {
     (sig, comments)
 }
 
-/// tokens → lossless CST. Every caller is a test: a comment-free stream
-/// is the path `parse` and the extraction oracle take, and a
-/// `WithComments` stream the path the trivia-carrying oracle fixtures
-/// take. There is no production caller of either shape — `fmt` was the
-/// last, and it prints from the green tree now. Comment tokens are split
-/// off up front so the grammar walk over the significant tokens is
-/// unaffected; the
-/// dropped-in-lowering trivia (`blank_before`, comment nodes, `trailing`,
-/// `open_trailing`/`close_trailing`, doc runs) is attached by source position.
-pub fn parse_cst(tokens: &[Token]) -> Result<Cst, CompileError> {
-    let (sig, comments) = split_comments(tokens);
-    let (items, _sink) = Parser {
-        tokens: &sig,
-        pos: 0,
-        comments,
-        cpos: 0,
-        prev_end_line: 0,
-        machine_seen: false,
-        sink: None,
-    }
-    .file()?;
-    Ok(Cst { items })
-}
-
 /// source → green syntax tree (docs/core.md (syntax trees)). Lexes
 /// `WithComments` and hands both halves to [`parse_green_from_tokens`].
 pub fn parse_green(source: &str) -> Result<Rc<GreenNode>, CompileError> {
@@ -671,10 +643,11 @@ thread_local! {
 /// the `text() == source` law. An empty `tokens` slice panics — every
 /// real lex result is EOF-terminated.
 ///
-/// Runs the SAME grammar walk as [`parse_cst`] with a green sink
-/// attached: identical acceptance, identical errors — the sink only
-/// mirrors token consumption and node boundaries alongside the
-/// unchanged parser logic (docs/core.md (syntax trees)).
+/// Runs `Parser::file`'s one grammar walk with a green sink attached: the
+/// sink only mirrors token consumption and node boundaries alongside the
+/// unchanged parser logic, so the same walk also builds a
+/// [`crate::cst::Cst`] tree of its own as a byproduct — nothing in
+/// production reads that tree any more (docs/core.md (syntax trees)).
 pub fn parse_green_from_tokens(
     source: &str,
     tokens: &[Token],
@@ -699,190 +672,6 @@ pub fn parse_green_from_tokens(
     Ok(sink
         .expect("parse_green_from_tokens always seeds a sink before calling file()")
         .finish_tree(eof_pos))
-}
-
-/// Copy a CST into the flat [`Program`] — infallibly. Stamps each declaration's
-/// enclosing `ns` path, splits the machine body into tapes + behavior, reduces
-/// each doc run to a [`Doc`], and drops all trivia.
-pub fn lower_cst(cst: &Cst) -> Program {
-    let mut p = Program {
-        imports: Vec::new(),
-        alphabets: Vec::new(),
-        routines: Vec::new(),
-        graphs: Vec::new(),
-        machine: None,
-    };
-    lower_items(&cst.items, &[], &mut p);
-    p
-}
-
-fn lower_items(items: &[TopItem], ns: &[String], p: &mut Program) {
-    for item in items {
-        match &item.kind {
-            TopKind::Comment(_) => {}
-            TopKind::Import(u) => {
-                for path in &u.paths {
-                    p.imports.push(Import {
-                        path: path.path.clone(),
-                        alias: path.alias.clone(),
-                        line: path.line,
-                        ns: ns.to_vec(),
-                        span: path.span,
-                    });
-                }
-            }
-            TopKind::Alphabet(a) => p.alphabets.push(lower_alphabet(a, ns)),
-            TopKind::Namespace(n) => {
-                let mut child = ns.to_vec();
-                child.push(n.name.clone());
-                lower_items(&n.items, &child, p);
-            }
-            TopKind::Reuse(r) => match r.carrier {
-                ReuseCarrier::Routine => p.routines.push(lower_routine(r, ns)),
-                ReuseCarrier::Graph => p.graphs.push(lower_graph(r, ns)),
-            },
-            TopKind::Machine(m) => p.machine = Some(lower_machine(m)),
-        }
-    }
-}
-
-fn lower_alphabet(a: &AlphabetCst, ns: &[String]) -> Alphabet {
-    Alphabet {
-        name: a.name.clone(),
-        name_span: a.name_span,
-        line: a.line,
-        col: a.col,
-        exported: a.exported,
-        ns: ns.to_vec(),
-        elems: a.elems.clone(),
-        doc: reduce_doc_run(&a.doc_run),
-    }
-}
-
-/// Split a world body's items into (tapes, states, grafts, binds), dropping
-/// comments. Routine/graph bodies carry no tapes (parsing rejects a `tape`
-/// there), so their tape vec is always empty.
-fn lower_world_body(items: &[WorldItem]) -> (Vec<TapeDecl>, Vec<State>, Vec<Graft>, Vec<Bind>) {
-    let mut tapes = Vec::new();
-    let mut states = Vec::new();
-    let mut grafts = Vec::new();
-    let mut binds = Vec::new();
-    for item in items {
-        match &item.kind {
-            WorldKind::Comment(_) => {}
-            WorldKind::Tape(t) => tapes.push(TapeDecl {
-                name: t.name.clone(),
-                name_span: t.name_span,
-                alphabet: t.alphabet.clone(),
-                alphabet_span: t.alphabet_span,
-                volatile: t.volatile,
-                line: t.line,
-                span: t.span,
-            }),
-            WorldKind::State(s) => states.push(lower_state(s)),
-            WorldKind::Graft(g) => grafts.push(lower_graft(g)),
-            WorldKind::Bind(b) => binds.push(lower_bind(b)),
-        }
-    }
-    (tapes, states, grafts, binds)
-}
-
-fn lower_state(s: &StateCst) -> State {
-    let rules = s
-        .rules
-        .iter()
-        .filter_map(|ri| match &ri.kind {
-            RuleKind::Rule(rc) => Some(rc.rule.clone()),
-            RuleKind::Comment(_) => None,
-        })
-        .collect();
-    State {
-        entry: s.entry,
-        name: s.name.clone(),
-        name_span: s.name_span,
-        line: s.line,
-        col: s.col,
-        rules,
-        span: s.span,
-        doc: reduce_doc_run(&s.doc_run),
-    }
-}
-
-fn lower_graft(g: &GraftCst) -> Graft {
-    Graft {
-        entry: g.entry,
-        target: g.target.clone(),
-        args: g.args.clone(),
-        as_name: g.as_name.as_ref().map(|(n, sp)| Ident {
-            name: n.clone(),
-            span: *sp,
-        }),
-        line: g.line,
-        span: g.span,
-        doc: reduce_doc_run(&g.doc_run),
-    }
-}
-
-fn lower_bind(b: &BindCst) -> Bind {
-    Bind {
-        target: b.target.clone(),
-        args: b.args.clone(),
-        as_name: Ident {
-            name: b.as_name.0.clone(),
-            span: b.as_name.1,
-        },
-        line: b.line,
-        span: b.span,
-        doc: reduce_doc_run(&b.doc_run),
-    }
-}
-
-fn lower_routine(r: &ReuseCst, ns: &[String]) -> Routine {
-    let (_tapes, states, grafts, binds) = lower_world_body(&r.items);
-    Routine {
-        name: r.name.clone(),
-        name_span: r.name_span,
-        line: r.line,
-        col: r.col,
-        exported: r.exported,
-        ns: ns.to_vec(),
-        sig: r.sig.clone(),
-        states,
-        grafts,
-        binds,
-        doc: reduce_doc_run(&r.doc_run),
-    }
-}
-
-fn lower_graph(r: &ReuseCst, ns: &[String]) -> Graph {
-    let (_tapes, states, grafts, binds) = lower_world_body(&r.items);
-    Graph {
-        name: r.name.clone(),
-        name_span: r.name_span,
-        line: r.line,
-        col: r.col,
-        exported: r.exported,
-        ns: ns.to_vec(),
-        sig: r.sig.clone(),
-        states,
-        grafts,
-        binds,
-        doc: reduce_doc_run(&r.doc_run),
-    }
-}
-
-fn lower_machine(m: &MachineCst) -> Machine {
-    let (tapes, states, grafts, binds) = lower_world_body(&m.items);
-    Machine {
-        line: m.line,
-        col: m.col,
-        span: m.span,
-        tapes,
-        states,
-        grafts,
-        binds,
-        doc: reduce_doc_run(&m.doc_run),
-    }
 }
 
 /// One line of a doc/attention run, plus whether a blank line precedes it.
@@ -922,10 +711,12 @@ pub struct AttrCst {
 /// blanks produce no empty paragraph); a `[deprecated]` attention line becomes
 /// `deprecated`; bare-prose `!` lines become `attention`; comments and empty
 /// lines contribute nothing. Mirrors PM-1's `reduce_doc_run`. `pub(crate)`
-/// rather than private: `crate::syntax::extract`'s own tests reduce a
-/// green-side reparsed run the same way this module's callers above do, to
-/// check equality where a comment-interleaved run makes raw item equality
-/// impossible (a green reparse drops interleaved comments as trivia).
+/// rather than private: [`crate::syntax::extract::extract_doc`] is the
+/// production caller, folding the green tree's own retokenized run the
+/// same way; its own tests also reduce a green-side reparsed run
+/// directly, to check equality where a comment-interleaved run makes raw
+/// item equality impossible (a one-pass reparse drops interleaved
+/// comments as trivia).
 pub(crate) fn reduce_doc_run(doc_run: &[DocRunItem]) -> Option<Doc> {
     if doc_run.is_empty() {
         return None;
@@ -1069,10 +860,11 @@ struct Parser<'a> {
     /// A `machine` block has already been seen (multiplicity guard).
     machine_seen: bool,
     /// Green-tree emission, when this walk is [`parse_green`]'s rather
-    /// than [`parse_cst`]'s: `bump()` mirrors every consumed token into
-    /// it, and the `g_*` helpers below bracket node boundaries. `None`
-    /// on every other path — those helpers are then no-ops, so the CST
-    /// walk is byte-identical whether or not a sink is attached.
+    /// than a CST-only walk with no sink attached: `bump()` mirrors every
+    /// consumed token into it, and the `g_*` helpers below bracket node
+    /// boundaries. `None` on the sink-less path — those helpers are then
+    /// no-ops, so the CST walk is byte-identical whether or not a sink is
+    /// attached.
     sink: Option<GreenSink>,
 }
 
@@ -3250,8 +3042,9 @@ pub(crate) fn reparse_sig_param(tokens: &[Token]) -> SigParam {
 /// node's own tokens can never carry. Every item AFTER the first computes
 /// its own gap from the item before it, entirely inside `tokens`, so
 /// only the first item's `blank_before` is at stake here; passing the
-/// wrong value disagrees with `lower_cst` on exactly that one field of
-/// exactly that one item. Mirrors the sibling crate's own
+/// wrong value disagrees with the original, in-context parse's own run
+/// on exactly that one field of exactly that one item. Mirrors the
+/// sibling crate's own
 /// `reparse_item(tokens, in_group)`, whose `in_group` flag is the same
 /// shape of caller-supplied context an isolated retokenized node
 /// cannot recover on its own.

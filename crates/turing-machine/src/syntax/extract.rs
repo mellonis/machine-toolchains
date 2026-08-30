@@ -8,9 +8,9 @@
 //!   (`crate::parser`'s `reparse_*` shims) instead of re-deriving their
 //!   grammar decisions from the tree shape.
 //! - **Assembly** ([`extract_program`]): walking the views themselves —
-//!   items, headers, worlds, rules — and mirroring
-//!   `crate::parser::lower_cst`'s own decisions exactly, never
-//!   re-deriving a rule the parser already encodes.
+//!   items, headers, worlds, rules — and mirroring the parser's own
+//!   grammar decisions exactly, never re-deriving a rule the parser
+//!   already encodes.
 //!
 //! # How the shims are pinned
 //!
@@ -347,9 +347,10 @@ fn tokens_from(toks: &[SyntaxToken], index: &TextLineIndex) -> Vec<Token> {
 /// `;`-terminated productions: `use`, `tape`, `graft`, `bind`, and a
 /// rule), where `capture_close_trailing`, the `}` twin, DOES advance.
 /// So when a `;`'s trailing comment is the last thing before the run,
-/// `lower_cst` keeps the `;`'s line where the scan-back would report
-/// the comment's end line — a difference only a MULTI-LINE comment can
-/// show, since a single-line one ends where it starts.
+/// the original, in-context parse keeps the `;`'s line where the
+/// scan-back would report the comment's end line — a difference only a
+/// MULTI-LINE comment can show, since a single-line one ends where it
+/// starts.
 ///
 /// The arm is narrow in both directions, and both edges are pinned by
 /// `the_semicolon_arm_is_narrow_in_both_directions`:
@@ -1071,10 +1072,10 @@ fn extract_items(
     }
 }
 
-/// Rebuild the whole C1 [`Program`] from the green tree's root —
-/// mirrors `crate::parser::lower_cst`: one [`TextLineIndex`] built once
-/// and threaded through the whole walk, then [`extract_items`] over the
-/// file's own top-level items with an empty starting `ns`.
+/// Rebuild the whole [`Program`] from the green tree's root: one
+/// [`TextLineIndex`] built once and threaded through the whole walk,
+/// then [`extract_items`] over the file's own top-level items with an
+/// empty starting `ns`.
 pub fn extract_program(root: &SyntaxNode, source: &str) -> Program {
     let index = TextLineIndex::new(source);
     let file = RootView::cast(root.clone()).expect("root is ROOT");
@@ -1963,7 +1964,7 @@ mod tests {
 
     /// A declaration's own header tokens may sit on DIFFERENT lines
     /// from each other — nothing in the grammar forces `alphabet` and
-    /// its name onto one line. `lower_cst` reads `Alphabet::line` and
+    /// its name onto one line. Extraction reads `Alphabet::line` and
     /// `Reuse::line` off the NAME token while reading `col` off the
     /// HEADER token, and `Graft::line` off the `graft` keyword while
     /// its span starts at an `entry` prefix; in canonically formatted
