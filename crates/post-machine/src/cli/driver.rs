@@ -1241,16 +1241,31 @@ mod tests {
         assert!(err.contains("app"), "{err}");
     }
 
-    /// The driver's pre-pass scan agrees with `parser::parse` — two
-    /// independent readers of the same source — on both of the facts it
-    /// reports, and still degrades to an empty scan on a source that
-    /// does not parse.
+    /// `scan_source`'s own reduction — the volatile flag and the
+    /// export names it derives from `parse_green` + `extract_program` —
+    /// agrees with reading those same two facts off a fully parsed
+    /// `Program` from `parser::parse`. A check on the REDUCTION, not on
+    /// the parse: both sides run the same `parse_green_from_tokens` +
+    /// `extract_program` chain underneath (`parser::parse` adds only its
+    /// own `lex_with`), so a parse bug would show up identically on
+    /// both, not just here. Also confirms `scan_source` still degrades
+    /// to an empty scan on a source that does not parse.
     #[test]
     fn scan_source_agrees_with_the_parse_entry_point() {
         let src = "use std::goToEnd as end;\nnamespace ns { export inner() { right; } }\nvolatile main() {\n    helper() { left; }\n    @helper();\n}\n";
         let expected = crate::parser::parse(src).expect("parses");
+        let mut expected_exports: Vec<String> = expected
+            .functions
+            .iter()
+            .filter(|f| f.exported)
+            .map(|f| crate::compiler::full_name(&f.ns, &f.name))
+            .collect();
+        expected_exports.sort();
         let scan = scan_source(src);
+        let mut scan_exports = scan.exports.clone();
+        scan_exports.sort();
         assert_eq!(scan.volatile, expected.functions.iter().any(|f| f.volatile));
+        assert_eq!(scan_exports, expected_exports);
         assert!(scan.exports.iter().any(|e| e == "main"));
         assert!(scan.exports.iter().any(|e| e == "ns::inner"));
     }

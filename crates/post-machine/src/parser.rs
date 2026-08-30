@@ -298,11 +298,11 @@ fn describe(kind: &TokenKind) -> String {
 /// `WithComments` lex, the green syntax tree, then extraction
 /// (docs/core.md (syntax trees)).
 ///
-/// Not the compiler's entry point — `compiler::analyze` runs the same
-/// three steps and KEEPS the token stream and the tree, which the
-/// language service needs. This is the convenience wrapper for callers
-/// that want only the `Program`, and it is the only parse function the
-/// crate exposes.
+/// The convenience wrapper for callers that want only the `Program` —
+/// it keeps nothing else, and it is the only parse function here that
+/// yields one. A caller needing the token stream alongside it uses
+/// `compiler::analyze`; a caller needing the green tree uses
+/// `compiler::analyze_staged`, which is the one that retains it.
 pub fn parse(source: &str) -> Result<Program, CompileError> {
     let tokens = lex_with(source, LexMode::WithComments)?;
     let green = parse_green_from_tokens(source, &tokens)?;
