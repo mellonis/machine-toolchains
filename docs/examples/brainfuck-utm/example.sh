@@ -7,10 +7,9 @@
 # tape followed by the 'H' sentinel the interpreter stops on, with the data,
 # output and bracket-counter tapes blank.
 #
-# The value is the bytes emitted by '.', comma-separated — or, once the output
-# passes forty bytes, a count and a digest of exactly that list, because a
-# Sierpinski triangle does not belong in a cases table. The digest still pins
-# every byte.
+# The value is the bytes emitted by '.', comma-separated. A Sierpinski triangle
+# does not belong in a cases table, so a long expected value lives in a sidecar
+# file the table names as `@file`.
 #
 # Either way this is a WEAKER check than the repo's own goldens, which derive
 # all four final tapes from an independent reference interpreter and compare
@@ -26,11 +25,9 @@ read_result() {
   local b f out= IFS='|'
   b=$(band_of "$1" 2)
   [[ -z $b ]] && { printf '<none>'; return; }
-  local n=0
   for f in $b; do
     [[ $f == 0 ]] && continue          # index 0 is the blank on a `bytes` tape
-    out+="${out:+,}$f"; n=$(( n + 1 ))
+    out+="${out:+,}$f"
   done
-  [[ -z $out ]] && { printf '<empty>'; return; }
-  if (( n > 40 )); then digest_of "$n" "$out"; else printf '%s' "$out"; fi
+  printf '%s' "${out:-<empty>}"
 }

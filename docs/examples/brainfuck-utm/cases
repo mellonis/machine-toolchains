@@ -25,7 +25,7 @@
 ++ +.;trap
 # Cristofani's Sierpinski triangle — heavy bracket matching and pointer motion,
 # 4.7 million steps, 1552 bytes of '*', space and newline
-++++++++[>+>++++<<-]>++>>+<[-[>>+<<-]+>>]>+[-<<<[->[+[-]+>++>>>-<<]<[<]>>++++++[<<+++++>>-]+<<++.[-]<<]>.>+[>>]>+];1552 bytes sha256:9273f229ded9
+++++++++[>+>++++<<-]>++>>+<[-[>>+<<-]+>>]>+[-<<<[->[+[-]+>++>>>-<<]<[<]>>++++++[<<+++++>>-]+<<++.[-]<<]>.>+[>>]>+];@sierpinski.expected
 # A well-known GOLFED Hello World. It does not print Hello World here, and that
 # is correct: it manufactures its ASCII by wrapping cells at 256, and this
 # machine's cells are a 0..126 ring. Pinned as it stands, so that changing the

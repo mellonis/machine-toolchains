@@ -65,6 +65,7 @@ for name in "${NAMES[@]}"; do
     # The outcome is asserted alongside the exit code, and the three endings
     # are kept distinct: stopping is success, halting is the program reporting
     # a fault it detected, trapping is a state entered with no matching rule.
+    want=$(resolve_expected "$name" "$want")
     case $want in
       halt) [[ $rc == 2 && $outcome == Halted ]]   && verdict=ok || verdict=FAIL ;;
       trap) [[ $rc == 3 && $outcome == Trapped* ]] && verdict=ok || verdict=FAIL ;;
@@ -74,7 +75,7 @@ for name in "${NAMES[@]}"; do
 
     if [[ $verdict == ok ]]; then (( pass++ )); else (( fail++ )); fi
     printf '  %-28s %-18s steps %-9s %-5s %s\n' \
-      "${label:-<empty>}" "${outcome:-<none>}" "${steps:-?}" "$verdict" "$got"
+      "${label:0:28}" "${outcome:-<none>}" "${steps:-?}" "$verdict" "${got:0:56}"
     [[ $verdict == ok ]] || printf '  %-28s expected %s\n' '' "$want"
   done < <(read_cases "$name")
 

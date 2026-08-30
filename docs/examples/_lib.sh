@@ -75,14 +75,13 @@ cells_hex() {
   printf '%s' "${out%,}"
 }
 
-# A short, stable stand-in for a value too long to write into a cases table.
-# Used where a program's output runs to hundreds of bytes: the digest is exact,
-# so it still pins every byte, and it stays one line.
-digest_of() {
-  local n=$1 h
-  if command -v shasum >/dev/null 2>&1; then h=$(printf '%s' "$2" | shasum -a 256)
-  else h=$(printf '%s' "$2" | sha256sum); fi
-  printf '%s bytes sha256:%s' "$n" "${h:0:12}"
+# An expected value too long for the cases table lives in a sidecar file, named
+# `@file` relative to the example's directory. Both this harness and the Rust
+# integration test read it and compare the real bytes; a digest would have been
+# shorter but only one of the two could reproduce it.
+resolve_expected() {
+  local name=$1 want=$2
+  if [[ $want == @* ]]; then cat "$name/${want#@}"; else printf '%s' "$want"; fi
 }
 
 # The band of tape N as the run report prints it, without the outer bars.
