@@ -2295,123 +2295,6 @@ mod tests {
         );
     }
 
-    /// `parse_cst` on a `WithComments` stream must retain every comment as
-    /// trivia and record the layout signals (`blank_before`,
-    /// `label_break`, per-item `leading`, `trailing`) that `lower_cst`
-    /// drops. Reads each of those fields, and confirms no comment is lost.
-    #[test]
-    fn parse_cst_captures_comment_trivia_and_layout() {
-        use crate::cst::{BodyKind, TopKind};
-        use crate::lexer::{LexMode, lex_with};
-
-        let src = "\
-// top comment
-use std::goToEnd; // import trailing
-
-f() {
-    1:
-        left; // trailing
-    right, /* mid */ mark;
-}
-";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-
-        // An own-line comment is lifted to its own top-level Comment item.
-        let TopKind::Comment(c0) = &cst.items[0].kind else {
-            panic!(
-                "expected a leading comment item, got {:?}",
-                cst.items[0].kind
-            );
-        };
-        assert_eq!(c0.text, "// top comment");
-        assert!(c0.own_line);
-
-        // The import keeps its same-line trailing comment.
-        let TopKind::Import(use_cst) = &cst.items[1].kind else {
-            panic!("expected an import item");
-        };
-        assert_eq!(use_cst.paths.len(), 1);
-        assert_eq!(use_cst.paths[0].path, vec!["std", "goToEnd"]);
-        assert_eq!(
-            use_cst.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
-            Some("// import trailing")
-        );
-
-        // A blank line precedes the function in source.
-        assert!(cst.items[2].blank_before, "blank line precedes f()");
-        let TopKind::Function(f) = &cst.items[2].kind else {
-            panic!("expected a function item");
-        };
-
-        // Own-line label => `label_break`; same-line `;` trailing comment.
-        let BodyKind::Statement(s0) = &f.body[0].kind else {
-            panic!("expected the first body statement");
-        };
-        assert!(s0.label_break, "the label sits on its own line");
-        assert_eq!(
-            s0.trailing.as_ref().map(|tc| tc.comment.text.as_str()),
-            Some("// trailing")
-        );
-        assert_eq!(s0.items.len(), 1);
-        assert!(s0.items[0].leading.is_empty());
-
-        // A mid-group comment rides the FOLLOWING comma item's `leading`.
-        // Both items sit on the same source line, so `newline_before` is
-        // false for both (the comment alone doesn't count as a break).
-        let BodyKind::Statement(s1) = &f.body[1].kind else {
-            panic!("expected the second body statement");
-        };
-        assert_eq!(s1.items.len(), 2);
-        assert!(s1.items[0].leading.is_empty());
-        assert!(!s1.items[0].newline_before);
-        assert!(!s1.items[1].newline_before);
-        assert_eq!(
-            s1.items[1]
-                .leading
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>(),
-            vec!["/* mid */"]
-        );
-
-        // Nothing dropped: every comment token is placed somewhere.
-        let comment_count = tokens
-            .iter()
-            .filter(|t| matches!(t.kind, TokenKind::Comment(_)))
-            .count();
-        assert_eq!(comment_count, 4);
-    }
-
-    /// `CommaItem::newline_before` (fmt design doc, "Comma-group
-    /// layout"): the first entry is always `false`; a later entry is
-    /// `true` iff the author put a newline before it, compared by token
-    /// line — not by whether a comment happens to sit between the items.
-    #[test]
-    fn parse_cst_records_comma_group_newline_before() {
-        use crate::cst::BodyKind;
-        use crate::lexer::{LexMode, lex_with};
-
-        let src = "f() {\n1: left, right,\nmark, unmark;\n}\n";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        let BodyKind::Statement(s) = &f.body[0].kind else {
-            panic!("expected the body statement");
-        };
-        assert_eq!(s.items.len(), 4);
-        // `left` (first item), never a break by contract.
-        assert!(!s.items[0].newline_before);
-        // `right` shares `left`'s source line.
-        assert!(!s.items[1].newline_before);
-        // `mark` sits on a new source line — the author's break.
-        assert!(s.items[2].newline_before);
-        // `unmark` shares `mark`'s source line.
-        assert!(!s.items[3].newline_before);
-    }
-
     #[test]
     fn parses_the_spec_sample() {
         let src = r#"
@@ -2848,73 +2731,84 @@ main() {
         );
     }
 
+    /// A green FUNCTION/NAMESPACE node's own `text_range()` — measured via
+    /// `TextLineIndex` against the C1 extent's `line`/`col` convention.
+    /// With no bound doc run, this matches the retired `FunctionCst::span`
+    /// exactly: `top_items`'s green checkpoint (`fn_cp`) is taken before
+    /// `volatile`/`export`/the name token, the same prefix the C1 extent
+    /// anchored to (docs/core.md (syntax trees)).
+    fn extent(src: &str) -> Span {
+        use mtc_core::syntax::{AstNode, TextLineIndex};
+
+        let index = TextLineIndex::new(src);
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let file = syntax::FileView::cast(root).expect("root is FILE");
+        match file.items().next().expect("one top-level item") {
+            syntax::TopView::Function(f) => index.span(f.syntax().text_range()),
+            syntax::TopView::Namespace(ns) => index.span(ns.syntax().text_range()),
+            syntax::TopView::Use(_) => panic!("expected a function or namespace item"),
+        }
+    }
+
     #[test]
     fn function_and_namespace_extent_spans() {
-        use crate::cst::TopKind;
-
         // Two-line function: name token start → closing `}` end.
-        let tokens = lex("f() {\n    left;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2));
+        assert_eq!(extent("f() {\n    left;\n}\n"), Span::new(1, 1, 3, 2));
 
         // Namespace block: `namespace` keyword start → closing `}` end.
-        let tokens = lex("namespace ns {\n    f() { left; }\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Namespace(ns) = &cst.items[0].kind else {
-            panic!("expected a namespace item");
-        };
-        assert_eq!(ns.span, Span::new(1, 1, 3, 2));
+        assert_eq!(
+            extent("namespace ns {\n    f() { left; }\n}\n"),
+            Span::new(1, 1, 3, 2)
+        );
 
-        // A leading `export` is consumed by `top_items` before
-        // `function()` ever sees it, but its span start is threaded
-        // through so `FunctionCst::span` still starts at `export` — the
-        // header's true first token (`f.name_span`/`.line`/`.col` stay
-        // name-token-anchored; only the extent `span` reaches back).
-        // Pinned explicitly since it's the one place the doc comment's
-        // "header first token" reading is load-bearing.
-        let tokens = lex("export f() {\n    left;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "export", not "f"
+        // A leading `export` is consumed before the green FUNCTION node's
+        // own checkpoint, but the checkpoint is taken ahead of it, so the
+        // node's extent still starts at `export` — the header's true
+        // first token (the name token's own line/col stay name-anchored;
+        // only the extent reaches back). Pinned explicitly since it's the
+        // one place the "header first token" reading is load-bearing.
+        assert_eq!(
+            extent("export f() {\n    left;\n}\n"),
+            Span::new(1, 1, 3, 2) // starts at "export", not "f"
+        );
         // The bare (non-exported) case above ("Two-line function") already
         // pins the name-token-anchored start for the un-exported path —
         // together the two assertions in this test cover both cases.
     }
 
-    /// The CST-level counterpart to the `volatile`/`export` parser tests
-    /// below: `FunctionCst::span` starts at `volatile` (not `export`, not
-    /// the name) when a leading `volatile` was written, mirroring how
+    /// The green-tree counterpart to the `volatile`/`export` parser tests
+    /// below: a FUNCTION node's extent starts at `volatile` (not `export`,
+    /// not the name) when a leading `volatile` was written, mirroring how
     /// `function_and_namespace_extent_spans` pins `export`'s own extent
-    /// start — and `has_volatile` records the token losslessly, the same
-    /// way `has_export` does, for the formatter to read.
+    /// start — and `FnHeader::has_volatile` records the token losslessly,
+    /// the same way `has_export` does, for the formatter to read.
     #[test]
     fn volatile_extent_and_has_volatile_are_recorded_on_the_cst() {
-        use crate::cst::TopKind;
+        use mtc_core::syntax::AstNode;
 
-        let tokens = lex("volatile main() {\n    mark;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
+        let src = "volatile main() {\n    mark;\n}\n";
+        assert_eq!(extent(src), Span::new(1, 1, 3, 2)); // starts at "volatile", not "main"
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let file = syntax::FileView::cast(root).expect("root is FILE");
+        let syntax::TopView::Function(f) = file.items().next().expect("one item") else {
             panic!("expected a function item");
         };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "volatile", not "main"
-        assert!(f.has_volatile);
-        assert!(!f.has_export);
+        let header = f.header();
+        assert!(header.has_volatile);
+        assert!(!header.has_export);
 
         // Fixed order: `volatile` still wins the extent start over
         // `export` when both are written.
-        let tokens = lex("volatile export main() {\n    mark;\n}\n").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
+        let src = "volatile export main() {\n    mark;\n}\n";
+        assert_eq!(extent(src), Span::new(1, 1, 3, 2)); // starts at "volatile", not "export"
+        let root = SyntaxNode::new_root(parse_green(src).unwrap());
+        let file = syntax::FileView::cast(root).expect("root is FILE");
+        let syntax::TopView::Function(f) = file.items().next().expect("one item") else {
             panic!("expected a function item");
         };
-        assert_eq!(f.span, Span::new(1, 1, 3, 2)); // starts at "volatile", not "export"
-        assert!(f.has_volatile);
-        assert!(f.has_export);
+        let header = f.header();
+        assert!(header.has_volatile);
+        assert!(header.has_export);
     }
 
     #[test]
@@ -3009,48 +2903,60 @@ main() {
     // -- Doc/attention runs (docs/pmt/language.md (doc lines)) ----------------
     //
     // Grammar-fixed run order (`?` block, then `!` block), attachment to
-    // the next `FunctionCst` at the run's own scope, and the two
-    // attention-line attribute checks. `lower_cst` still ignores
-    // `doc_run` entirely in this task (Task 3's job) — these tests read
-    // `parse_cst`'s `Cst` directly.
+    // the next declaration at the run's own scope, and the two
+    // attention-line attribute checks.
+
+    /// Retokenizes `src`'s `?`/`!` lines the way `syntax::extract::sig_tokens`
+    /// feeds a bound `DOC_RUN` into [`reparse_doc_items`] — every other
+    /// token (comments included) stripped, a synthetic `Eof` appended.
+    /// Comment mode makes no difference to `DocLine`/`AttentionLine`
+    /// tokens (only `TokenKind::Comment` is mode-gated), so plain `lex`
+    /// already strips `//`/`/* */` trivia the same `reparse_doc_items`
+    /// precondition requires — matching why its own doc calls an
+    /// interleaved comment "dropped, not reproduced" by this route.
+    fn doc_run_items(src: &str) -> Vec<DocRunItem> {
+        let mut tokens: Vec<Token> = lex(src)
+            .unwrap()
+            .into_iter()
+            .filter(|t| matches!(t.kind, TokenKind::DocLine(_) | TokenKind::AttentionLine(_)))
+            .collect();
+        tokens.push(Token {
+            kind: TokenKind::Eof,
+            line: 0,
+            col: 0,
+            len: 0,
+        });
+        reparse_doc_items(&tokens)
+    }
 
     #[test]
     fn doc_run_collects_a_docs_only_run() {
-        let tokens = lex("? line one\n? line two\nmain() { right; }").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert!(!cst.items[0].blank_before);
-        assert_eq!(f.doc_run.len(), 2);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[0].kind else {
+        let doc_run = doc_run_items("? line one\n? line two\nmain() { right; }");
+        assert_eq!(doc_run.len(), 2);
+        let DocRunKind::Doc { text, .. } = &doc_run[0].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "line one");
-        assert!(!f.doc_run[0].blank_before);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[1].kind else {
+        assert!(!doc_run[0].blank_before);
+        let DocRunKind::Doc { text, .. } = &doc_run[1].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "line two");
-        assert!(!f.doc_run[1].blank_before);
+        assert!(!doc_run[1].blank_before);
     }
 
     #[test]
     fn doc_run_collects_an_attention_only_run() {
-        let tokens =
-            lex("! bare prose line\n! [deprecated] use goToStart instead\nmain() { right; }")
-                .unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.doc_run.len(), 2);
-        let DocRunKind::Attention { attr, text, .. } = &f.doc_run[0].kind else {
+        let doc_run = doc_run_items(
+            "! bare prose line\n! [deprecated] use goToStart instead\nmain() { right; }",
+        );
+        assert_eq!(doc_run.len(), 2);
+        let DocRunKind::Attention { attr, text, .. } = &doc_run[0].kind else {
             panic!("expected an attention line");
         };
         assert!(attr.is_none());
         assert_eq!(text, "bare prose line");
-        let DocRunKind::Attention { attr, text, .. } = &f.doc_run[1].kind else {
+        let DocRunKind::Attention { attr, text, .. } = &doc_run[1].kind else {
             panic!("expected an attention line");
         };
         assert_eq!(attr.as_ref().expect("has an attribute").name, "deprecated");
@@ -3059,48 +2965,36 @@ main() {
 
     #[test]
     fn doc_run_collects_docs_then_attention_in_order() {
-        let tokens = lex("? doc line\n! [deprecated] msg\nexport helper() { right; }").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert!(f.exported, "export threads through unaffected by the run");
-        assert_eq!(f.doc_run.len(), 2);
-        assert!(matches!(f.doc_run[0].kind, DocRunKind::Doc { .. }));
-        assert!(matches!(f.doc_run[1].kind, DocRunKind::Attention { .. }));
+        let doc_run = doc_run_items("? doc line\n! [deprecated] msg\nexport helper() { right; }");
+        assert_eq!(doc_run.len(), 2);
+        assert!(matches!(doc_run[0].kind, DocRunKind::Doc { .. }));
+        assert!(matches!(doc_run[1].kind, DocRunKind::Attention { .. }));
     }
 
     #[test]
     fn doc_run_binds_to_a_nested_function_at_its_own_indent() {
         // Indentation before both the sigil and the nested function's
         // name — the run still lexes/attaches correctly (design doc:
-        // "runs sit at the bound declaration's own indent").
-        let tokens =
-            lex("main() {\n    ? step one\n    step() { right; }\n    @step();\n}").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(main) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert!(
-            main.doc_run.is_empty(),
-            "the run binds to `step`, not `main`"
-        );
-        let BodyKind::Nested(step) = &main.body[0].kind else {
-            panic!("expected the nested function first");
-        };
+        // "runs sit at the bound declaration's own indent"). Read through
+        // `parse` (the binding decision itself is the parser's, not
+        // `reparse_doc_items`'s — that helper only reduces an already-
+        // bound run's own items).
+        let prog =
+            parse("main() {\n    ? step one\n    step() { right; }\n    @step();\n}").unwrap();
+        let main = &prog.functions[0];
+        assert!(main.doc.is_none(), "the run binds to `step`, not `main`");
+        let step = &main.nested[0];
         assert_eq!(step.name, "step");
-        assert_eq!(step.doc_run.len(), 1);
-        let DocRunKind::Doc { text, .. } = &step.doc_run[0].kind else {
-            panic!("expected a doc line");
-        };
-        assert_eq!(text, "step one");
-        assert!(matches!(main.body[1].kind, BodyKind::Statement(_)));
+        let doc = step.doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["step one"]);
     }
 
     #[test]
     fn doc_run_tolerates_blanks_and_comments_within_and_after() {
-        use crate::lexer::{LexMode, lex_with};
-
+        // Comments interleaved in/after a run are dropped by
+        // `reparse_doc_items` (its own doc: "dropped, not reproduced"),
+        // so only the two `Doc` lines survive `doc_run_items` — the
+        // blank-line-across-a-comment tolerance is what's under test.
         let src = "\
 ? first
 // mid comment
@@ -3110,55 +3004,38 @@ main() {
 // trailing comment before fn
 main() { right; }
 ";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(f.doc_run.len(), 4);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[0].kind else {
+        let doc_run = doc_run_items(src);
+        assert_eq!(doc_run.len(), 2);
+        let DocRunKind::Doc { text, .. } = &doc_run[0].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "first");
-        assert!(!f.doc_run[0].blank_before);
-        let DocRunKind::Comment(c) = &f.doc_run[1].kind else {
-            panic!("expected the mid-run comment");
-        };
-        assert_eq!(c.text, "// mid comment");
-        assert!(!f.doc_run[1].blank_before);
-        let DocRunKind::Doc { text, .. } = &f.doc_run[2].kind else {
+        assert!(!doc_run[0].blank_before);
+        let DocRunKind::Doc { text, .. } = &doc_run[1].kind else {
             panic!("expected the second doc line");
         };
         assert_eq!(text, "second");
-        assert!(f.doc_run[2].blank_before, "a blank line precedes it");
-        let DocRunKind::Comment(c) = &f.doc_run[3].kind else {
-            panic!("expected the trailing comment");
-        };
-        assert_eq!(c.text, "// trailing comment before fn");
-        assert!(f.doc_run[3].blank_before, "a blank line precedes it");
-        // No blank between the run's last line and the bound function.
-        assert!(!cst.items[0].blank_before);
+        assert!(doc_run[1].blank_before, "a blank line precedes it");
     }
 
     #[test]
     fn doc_run_before_a_nested_function_amid_sibling_statements() {
-        let tokens = lex(
+        // Read through `parse`, same reasoning as
+        // `doc_run_binds_to_a_nested_function_at_its_own_indent`: the AST
+        // hoists `helper` out of body order, so `main.body` holds the
+        // THREE statements (`left; @helper(); left;`) and `main.nested`
+        // the one documented nested function, separately.
+        let prog = parse(
             "main() {\n    left;\n    ? helper doc\n    helper() { right; }\n    @helper();\n    left;\n}",
         )
         .unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(main) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        assert_eq!(main.body.len(), 4);
-        assert!(matches!(main.body[0].kind, BodyKind::Statement(_)));
-        let BodyKind::Nested(helper) = &main.body[1].kind else {
-            panic!("expected the nested function");
-        };
+        let main = &prog.functions[0];
+        assert_eq!(main.body.len(), 3);
+        assert_eq!(main.nested.len(), 1);
+        let helper = &main.nested[0];
         assert_eq!(helper.name, "helper");
-        assert_eq!(helper.doc_run.len(), 1);
-        assert!(matches!(main.body[2].kind, BodyKind::Statement(_)));
-        assert!(matches!(main.body[3].kind, BodyKind::Statement(_)));
+        let doc = helper.doc.as_ref().expect("documented");
+        assert_eq!(doc.paragraphs, vec!["helper doc"]);
     }
 
     /// The `doc_run` → `FnDoc` reduction is the ONLY thing a doc run
@@ -3190,25 +3067,26 @@ main() { right; }
     #[test]
     fn doc_run_round_trips_and_keeps_text_verbatim() {
         // Pins the WARM-UP lexer contract (minus-ONE-space rule) at the
-        // CST layer too, plus verbatim internal spacing in an attention
-        // line's full payload — no extra normalization happens here.
+        // doc-run-item layer too, plus verbatim internal spacing in an
+        // attention line's full payload — no extra normalization happens
+        // here.
         let src = "?text\n?  text\n! [deprecated] msg with  double  spaces\nmain() { right; }";
-        let tokens = lex(src).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        assert_eq!(cst.clone(), cst, "lossless round-trip: clone() == self");
+        let doc_run = doc_run_items(src);
+        assert_eq!(
+            doc_run.clone(),
+            doc_run,
+            "lossless round-trip: clone() == self"
+        );
 
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        let DocRunKind::Doc { text, .. } = &f.doc_run[0].kind else {
+        let DocRunKind::Doc { text, .. } = &doc_run[0].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, "text");
-        let DocRunKind::Doc { text, .. } = &f.doc_run[1].kind else {
+        let DocRunKind::Doc { text, .. } = &doc_run[1].kind else {
             panic!("expected a doc line");
         };
         assert_eq!(text, " text"); // one space consumed, one remains
-        let DocRunKind::Attention { attr, text, .. } = &f.doc_run[2].kind else {
+        let DocRunKind::Attention { attr, text, .. } = &doc_run[2].kind else {
             panic!("expected an attention line");
         };
         assert_eq!(attr.as_ref().expect("has an attribute").name, "deprecated");
@@ -3361,17 +3239,14 @@ main() { right; }
     // whole line is bare prose that lands verbatim in `attention`.
     #[test]
     fn fn_doc_attention_bracket_mid_prose_has_no_attr_and_lands_verbatim() {
-        let tokens = lex("! see [deprecated] docs\nmain() { right; }").unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let TopKind::Function(f) = &cst.items[0].kind else {
-            panic!("expected a function item");
-        };
-        let DocRunKind::Attention { attr, .. } = &f.doc_run[0].kind else {
+        let src = "! see [deprecated] docs\nmain() { right; }";
+        let doc_run = doc_run_items(src);
+        let DocRunKind::Attention { attr, .. } = &doc_run[0].kind else {
             panic!("expected an attention line");
         };
         assert!(attr.is_none(), "bracket mid-prose is not an attribute");
 
-        let prog = lower_cst(&cst);
+        let prog = parse(src).unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.attention, vec!["see [deprecated] docs"]);
         assert_eq!(doc.deprecated, None);
@@ -3401,12 +3276,9 @@ main() { right; }
 
     #[test]
     fn fn_doc_comment_items_in_the_run_contribute_nothing_and_never_split_a_paragraph() {
-        use crate::lexer::{LexMode, lex_with};
         let src =
             "? first\n// mid comment\n? second\n// trailing comment before fn\nmain() { right; }";
-        let tokens = lex_with(src, LexMode::WithComments).unwrap();
-        let cst = parse_cst(&tokens).unwrap();
-        let prog = lower_cst(&cst);
+        let prog = parse(src).unwrap();
         let doc = prog.functions[0].doc.as_ref().expect("documented");
         assert_eq!(doc.paragraphs, vec!["first second"]);
     }
